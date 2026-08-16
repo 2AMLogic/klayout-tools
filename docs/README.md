@@ -23,6 +23,7 @@ docs/
     deck.md
     draw.md
     drc.md
+    economy.md
     erc.md
     eval.md
     extract.md

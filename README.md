@@ -80,6 +80,7 @@ klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene che
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
+klt economy design.gds                   # utilization, whitespace map, bbox tightness, area-budget check
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
 klt render design.gds                    # per-layer PNGs, headless
 klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSON out

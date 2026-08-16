@@ -488,6 +488,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-16 — **`klt economy`** (issue #1012): quantitative layout-density
+  report — the numbers backend for judging silicon economy (agent-produced
+  layouts are correct-but-sprawling by default, and area is unit cost)
+  before a layout-economy review can gate anything. Reports utilization
+  (merged, non-overlap-double-counted drawn area over bbox area, both for
+  the whole design and per library cell), a whitespace map (a configurable
+  `--grid-cols`/`--grid-rows` coarse view plus the exact largest disjoint
+  empty regions via `kdb.Region` boolean subtraction), bounding-box
+  tightness (`tight_bbox` vs. `bbox`, aspect ratio) and grid-band-walked
+  dead margins per edge, best-effort std-cell-row utilization for
+  digital-looking blocks (inferred from instance placement geometry, no DEF
+  `ROW` records needed), and an optional `--budget-um2` PASS/FAIL /
+  `--reference-area-um2` ratio check. Builds on the `economy-review` skill's
+  placeholder script (issue #1013, PR #1024) for the core utilization/
+  margin math (already verified against the same two real canary GDS files
+  used here — `blocks/sky130-bandgap`, `blocks/sky130_fd_sc_hd__buf_4`) but
+  ships as a first-class, JSON-contracted `klt` verb under `src/`, with
+  exact (non-rasterized) empty-region geometry, per-cell/row utilization,
+  and the budget/reference blocks the placeholder didn't have. See
+  `docs/cli/economy.md`.
 - 2026-08-16 — `klt place-and-route`'s DEF→GDS merge now resolves a
   family-level KLayout LEF/DEF layer-map file (e.g. `gf180mcu.map`) when no
   exact `<variant>.map` exists, instead of silently proceeding without a
