@@ -193,7 +193,10 @@ load on demand:
 ## Design notes
 
 Spikes and engine surveys — proposals and findings, not commitments.
-Full index: [`docs/design/`](docs/design/).
+Full index: [`docs/design/`](docs/design/). What those surveys (and every
+other mined resource — papers, courses, upstream repos) actually changed
+here, one entry per resource with impact links, is indexed in the
+[resource library](docs/library/README.md).
 
 - [Staged agent design pipeline](docs/design/design-pipeline.md) — the
   spec-to-simulation-verified stage graph, per-stage input/output contracts,
