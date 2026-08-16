@@ -26,7 +26,6 @@ name = "klt_legalize_native"
 path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Lets the CLI and its tests read the checked-in `.def.gz`/`.lef.gz` corpus
 # fixtures (tests/corpus/legalize/) directly, without shelling out to `gzip`.
