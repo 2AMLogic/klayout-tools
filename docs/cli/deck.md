@@ -16,6 +16,15 @@ be turned back into "what do I install to reproduce this", without
 hand-bisecting this repo's own git history when more than one `klt` build is
 installed locally.
 
+**`klt --version` alone does not guarantee two installs run the same rule
+set** — the package version string identifies the *tool* build, not the
+DRC/LVS deck content it ships with a rebuild of that same version (e.g. a
+local editable install with an uncommitted deck edit). To confirm two runs
+actually used byte-identical rules, compare `provenance.deck.content_hash`
+from each run's `klt drc`/`klt extract` JSON output, then use `klt deck
+resolve --content-hash <hash>` on the differing hash to identify which
+release (if any) each install corresponds to.
+
 - `--content-hash sha256:<hex>` — resolve a deck content hash, e.g. as
   reported by `klt drc --deck sky130`'s `provenance.deck.content_hash`.
   Optionally narrow with `--deck` if the hash happens to collide across deck

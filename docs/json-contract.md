@@ -111,7 +111,10 @@ above): adopting it required no `schema_version` bump on any verb.
   tag/PyPI version that shipped it with `klt deck resolve --content-hash
   <hash>` (issue #623) — a resolve-only lookup against a generated
   hash/version history table, not an in-process fetch of the historical
-  deck; see `docs/cli/deck.md`.
+  deck; see `docs/cli/deck.md`. Note that `klt_version`/`klt --version`
+  alone is *not* sufficient to confirm two runs used the same rule set (a
+  rebuild of the same version can carry a different deck) — `content_hash`
+  is the field that actually pins the rule set.
 - `input` — the input layout stream the run was made against, as
   `{content_hash}` (same shape as `deck`). `content_hash` is a
   `sha256:`-prefixed hex digest of the file, so a stale committed report is a
