@@ -33,7 +33,7 @@ cleanly.
 
 ## Scope (phases 1–2)
 
-- **Placement** — two strategies:
+- **Placement** — three strategies:
   - `"row"` — a single horizontal row, left to right in caller-declared
     `placement.order`, at a uniform `placement.spacing_um` between adjacent
     blocks.
@@ -49,8 +49,21 @@ cleanly.
     pair of declared origins composes successfully; `klt drc` remains the
     rule-compliance authority on the composed output (see "Geometry is
     advisory" below).
+  - `"array"` (#1053) — the **one** `blocks[]` entry named in
+    `placement.order` is repeated on a regular `rows` x `cols` grid
+    (`placement.rows`/`cols`/`row_pitch_um`/`col_pitch_um`, plus an optional
+    `placement.origin_um` for the base — row 0, col 0 — tile, defaulting to
+    `{0, 0}`), emitted as a **single** hierarchical `kdb.CellInstArray`
+    instance rather than `rows * cols` individual placements — see "Array
+    placement (a repeated-block regular tiling, #1053)" below. Takes exactly
+    one `blocks[]` entry (an `"array"` request with more than one is an
+    application error) and, like `"explicit"`, supports no orientation
+    (translation only).
 
-  `"grid"` is spike-scoped for a later phase.
+  `"grid"` is a *different*, still-unimplemented feature reserved by the
+  accepted spike for a later phase (a row-wrap layout of *distinct* blocks
+  into `placement.cols` columns) — deliberately not the name used for
+  `"array"` above, to avoid colliding with that reservation.
 - **Routing** — two-pin, point-to-point Manhattan routing between the named
   ports listed in `connectivity[]`. Each 2-pin net is drawn as a native
   `pya.Path` (backbone → corner bends → straight fill) on the resolved
@@ -613,10 +626,13 @@ exit codes).
 | `blocks[]` | array\<object\> | Each already-generated primitive to place — see below. |
 | `blocks[].id` | string | Caller-chosen label used to address the block's ports elsewhere in this request (`placement.order`, `connectivity[].pins[].block`). Must be unique within `blocks[]`. |
 | `blocks[].generator_report` | object \| string | The block's own [`klt gen`](gen.md) JSON response — either an inline object, or a path to a file holding one (mirrors `klt gen --params`'s own path-or-inline duality). A relative path string resolves against **the request file's own directory** (not the process's current working directory), matching `klt lvs`'s request-relative path convention — an absolute path is unaffected. When `compose()` is called directly as a library (no request file at all), relative paths resolve against the process's current working directory instead. This command's only input about a block's geometry is its already-reported `bbox_um`/`ports[]`/`cell_name`/`gds_path` — never a second, private inspection of the GDS stream at request-parse time. |
-| `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`) or `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`). Any other value (e.g. `"grid"`) is an application error (exit 1). |
-| `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. Response `blocks[]` ordering follows `order` under both strategies. |
-| `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"`. |
+| `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
+| `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |
+| `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"` or `"array"`. |
 | `placement.origins_um` | object | **Required when `strategy: "explicit"`**, otherwise not read. Maps every `placement.order` block `id` to its own `{"x": number, "y": number}` origin — that block's `offset_um`, applied exactly like a `"row"` offset (added directly to the block's own reported `bbox_um`; see "`blocks[]` entries" below). The key set must equal `order` exactly — a missing, extra, or unknown `id` is an application error (exit 1), as is a non-numeric `x`/`y`. |
+| `placement.rows`/`placement.cols` | integer | **Required when `strategy: "array"`** (#1053), otherwise not read. The grid's row/column counts — each must be a positive integer (`>= 1`); a non-integer, zero, or negative value is an application error (exit 1). |
+| `placement.row_pitch_um`/`placement.col_pitch_um` | number | **Required when `strategy: "array"`**, otherwise not read. The fixed spacing between adjacent tile origins along each axis — each must be `> 0` (a zero or negative pitch is an application error, exit 1, even for a degenerate `rows: 1` or `cols: 1` array, where the corresponding pitch is otherwise unused geometrically). |
+| `placement.origin_um` | object | Optional, **`strategy: "array"` only** — the base (row 0, col 0) tile's own `{"x": number, "y": number}` origin, i.e. that block's `offset_um`. Defaults to `{"x": 0.0, "y": 0.0}` when omitted, mirroring `"row"` placement's own implicit first-block origin. A non-numeric `x`/`y` is an application error (exit 1). |
 | `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. A **2-pin** net is routed point-to-point (see "Scope"); a **>2-pin** (bundle) net is left unrouted this phase. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
 | `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1). Omitting it changes nothing (today's fixed one-jog/corner shape). |
 | `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
@@ -694,7 +710,7 @@ exit codes).
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed) — **`"row"` placement only**. `null` when no `connectivity[]` was supplied (nothing was routed, so no routing/placement spacing was exercised as a clearance), and always `null` under `"explicit"` placement (#321) — there is no single shared spacing value to report; per-pair separation is exactly what a caller-declared origin expresses. |
+| `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed) — **`"row"` placement only**. `null` when no `connectivity[]` was supplied (nothing was routed, so no routing/placement spacing was exercised as a clearance), and always `null` under `"explicit"` (#321) or `"array"` (#1053) placement — neither has a single shared spacing value to report (`"explicit"`'s per-pair separation is exactly what a caller-declared origin expresses; `"array"` has two independent pitches, `row_pitch_um`/`col_pitch_um`, not one). |
 | `matched_groups[]` | array\<object\> | One entry per distinct `matched_group_id` seen among the input blocks' own `generator_report.drc_hints.matched_group_id` (in first-seen order): `matched_group_id` (echoed), `blocks` (the request-level block `id`s carrying it), and `placement_symmetric` (always `null` this phase — symmetry *verification* against a declared symmetry axis is out of scope). Empty when no input block carries a `matched_group_id`. |
 | `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, or a bundle net deferred this phase). Always present, empty when there is nothing to report. |
 
@@ -704,8 +720,8 @@ exit codes).
 | ----- | ---- | ----------- |
 | `id` | string | Echo of the request's `blocks[].id`. |
 | `generator` | string | Echoed from that block's own `generator_report.generator`. |
-| `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). |
-| `bbox_um` | object | That block's own `generator_report.bbox_um`, translated by `offset_um`, in the composed cell's coordinate frame. |
+| `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). Under `"array"` (#1053), `offset_um` is exactly `placement.origin_um` (the base, row-0/col-0 tile) — every *other* tile's own position is implied by `rows`/`cols`/`row_pitch_um`/`col_pitch_um` rather than reported as a separate `blocks[]` entry (there is still exactly one `blocks[]` entry for an `"array"`-placed block, echoing this base tile). |
+| `bbox_um` | object | That block's own `generator_report.bbox_um`, translated by `offset_um`, in the composed cell's coordinate frame — **except under `"array"`** (#1053), where `bbox_um` is instead the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. |
 
 ### Semantics and guarantees
 
@@ -753,7 +769,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed, or a >2-pin bundle net was deferred this phase). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -847,6 +863,74 @@ as good as the input: a block whose `generator_report` doesn't report a
 `drc_hints.min_spacing_um` (or reports `0`) triggers nothing, so this is a
 courtesy for generators (like `guard_ring`) that do report one, not a
 general-purpose spacing check.
+
+## Array placement (a repeated-block regular tiling, #1053)
+
+`"row"` and `"explicit"` both place a distinct block once each. Neither
+expresses a **two-dimensional regular array of one repeated block** — the
+placement pattern behind any row/column-tiled structure (a matched-device
+array, a memory bitcell array, a pad ring, anything built from one cell
+repeated on a uniform X/Y pitch). Composing an `R` rows x `C` columns tiling
+of one block via `"explicit"` would mean emitting `R*C` individual placement
+entries, each carrying its own duplicated origin, even though the whole
+placement is fully described by four numbers (a base origin, a row pitch, a
+column pitch, and the row/column counts) plus the one block reference
+repeated at every position.
+
+`"array"` takes exactly that shape — mirroring `klayout.db.CellInstArray`'s
+own row-vector/column-vector/row-count/column-count parameterization — and
+composes it as a **single hierarchical instance** rather than `rows * cols`
+flattened placements:
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [
+    { "id": "bitcell", "generator_report": "bitcell.json" }
+  ],
+  "placement": {
+    "strategy": "array",
+    "order": ["bitcell"],
+    "rows": 16,
+    "cols": 8,
+    "row_pitch_um": 5.0,
+    "col_pitch_um": 3.0,
+    "origin_um": { "x": 0.0, "y": 0.0 }
+  },
+  "options": { "cell_name": "bitcell_array_0", "output": "bitcell_array_0.gds" }
+}
+```
+
+The response's `blocks[]` still has exactly one entry (echoing the single
+`blocks[]`/`order` id an `"array"` request takes): `offset_um` is the base
+(row 0, col 0) tile's own origin (`placement.origin_um`, verbatim), and
+`bbox_um` is the union bounding box of **every** placed tile — `cols` steps
+of `col_pitch_um` along `+x` and `rows` steps of `row_pitch_um` along `+y`
+from `origin_um`, not just the base tile's own bbox. The composed GDS's top
+cell gets exactly one `kdb.CellInstArray` instance for `bitcell` covering all
+128 (`16 * 8`) tiles, confirmed by inspecting `layout.cell(cell_name).each_inst()`'s
+own count (`== 1`) rather than only the rendered geometry — a flattened
+`rows * cols`-insert implementation could look visually identical while
+failing this requirement.
+
+Three things `"array"` deliberately does not do (see "Scope" above):
+- **Only one block.** `blocks[]`/`placement.order` must have exactly one
+  entry — a caller composing several distinct blocks alongside a repeated
+  array needs a separate `gen-compose` request per block (or a follow-on
+  request that reads this one's own `gds_path` as an input, once that
+  composition-of-compositions capability exists).
+- **No orientation.** Like `"row"`/`"explicit"`, every tile is a translation
+  only — no per-tile rotation or mirroring.
+- **No per-tile `connectivity[]`/`pins[]` shorthand.** `connectivity[]` and
+  `pins[]` still address the array-placed block by its one `blocks[].id`, so
+  they can only reach the **base** (row 0, col 0) tile's own ports — there is
+  no request-level way to wire a shared net (e.g. power, a shared control
+  signal) to every tile in the array. This is a deliberate, documented gap:
+  a first-class "route this net to every instance in the grid" shorthand is
+  a separate follow-on question `"array"` placement does not need to answer
+  to be useful on its own (a caller with a fully regular tiling still saves
+  the `O(rows * cols)` request-size cost `"explicit"` would otherwise impose,
+  even before grid-aware routing exists).
 
 ## Worked example
 

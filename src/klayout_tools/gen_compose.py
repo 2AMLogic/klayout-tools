@@ -21,13 +21,21 @@ Scope (phase 2, this module's current state):
   :func:`load_generator_report_arg`), then compute each block's ``offset_um``
   per ``placement.strategy`` -- either a single horizontal row placement from
   each block's own reported ``bbox_um`` plus ``placement.spacing_um``
-  (``"row"``, see :func:`compute_row_offsets`) or a caller-declared
+  (``"row"``, see :func:`compute_row_offsets`), a caller-declared
   ``placement.origins_um`` per block id (``"explicit"``, see
-  :func:`resolve_explicit_offsets`, #321) -- and write a composed GDS with
-  each block's own top cell instantiated as a translated sub-cell instance
-  under one new top cell. ``"explicit"`` placement supports no orientation
-  (rotation) and performs no overlap validation of its own -- see
-  :func:`resolve_explicit_offsets`'s docstring.
+  :func:`resolve_explicit_offsets`, #321), or a repeated single-block R rows x
+  C cols regular tiling (``"array"``, see :func:`_parse_array_placement`,
+  #1053) -- and write a composed GDS with each block's own top cell
+  instantiated as a translated sub-cell instance under one new top cell (an
+  ``"array"``-placed block instead gets one hierarchical
+  ``kdb.CellInstArray`` row/column-vector instance covering every tile, never
+  ``rows*cols`` separate inserts). ``"explicit"`` placement supports no
+  orientation (rotation) and performs no overlap validation of its own -- see
+  :func:`resolve_explicit_offsets`'s docstring. ``"array"`` placement also
+  supports no orientation, takes exactly one ``blocks[]`` entry (the block
+  repeated at every tile), and leaves per-tile ``connectivity[]``/``pins[]``
+  routing as a follow-on question this module does not answer -- see
+  :func:`_parse_array_placement`'s docstring.
 * **Routing** (new this phase): for every 2-pin ``connectivity[]`` net, draw
   a Manhattan metal path (backbone -> corner bends -> straight fill; see
   :func:`manhattan_backbone`) between the two named ports on the resolved
@@ -112,10 +120,16 @@ SCHEMA_VERSION = 1
 #: Placement strategies implemented at this phase. ``"row"`` computes a
 #: single horizontal row from each block's own ``bbox_um`` plus a shared
 #: ``spacing_um``; ``"explicit"`` instead takes a caller-declared per-block
-#: origin (``placement.origins_um``, #321) -- see :func:`resolve_explicit_offsets`.
-#: ``"grid"`` is spike-scoped for a later phase (see
-#: ``docs/design/gen-composition-spike.md`` section 5).
-SUPPORTED_PLACEMENT_STRATEGIES = {"row", "explicit"}
+#: origin (``placement.origins_um``, #321) -- see :func:`resolve_explicit_offsets`;
+#: ``"array"`` repeats one block on a regular R rows x C cols grid
+#: (``placement.rows``/``cols``/``row_pitch_um``/``col_pitch_um``/
+#: ``origin_um``, #1053) -- see :func:`_parse_array_placement`.
+#: ``"grid"`` is a *different*, still-unimplemented feature reserved by the
+#: accepted spike for a later phase (a row-wrap layout of *distinct* blocks,
+#: see ``docs/design/gen-composition-spike.md`` section 5) -- deliberately
+#: not the name used for this module's repeated-single-block array strategy,
+#: to avoid colliding with that reservation.
+SUPPORTED_PLACEMENT_STRATEGIES = {"row", "explicit", "array"}
 
 #: Unit outward vector (dx, dy) for each orthogonal ``direction_deg`` a
 #: ``klt gen`` port reports. Ports only ever face an axis (0/90/180/270 --
@@ -273,6 +287,41 @@ def resolve_explicit_offsets(
     rule-compliance authority on the composed output.
     """
     return {block_id: dict(origins_um[block_id]) for block_id in order}
+
+
+def array_placement_bbox_um(
+    bbox_um: dict[str, float], array_params: dict[str, Any]
+) -> dict[str, float]:
+    """Bounding box of the whole placed array for ``placement.strategy:
+    "array"`` (#1053) -- every one of ``rows * cols`` tile instances, not
+    just the base (first) tile.
+
+    Every tile shares the array-placed block's own (pre-translation)
+    ``bbox_um`` (translated only, no rotation -- exactly like ``"row"``/
+    ``"explicit"``), growing ``cols`` steps of ``col_pitch_um`` along ``+x``
+    and ``rows`` steps of ``row_pitch_um`` along ``+y`` from ``origin_um``
+    (the base tile's own ``offset_um`` -- row 0, col 0). This is the closed
+    form of unioning every tile's own translated bbox (mirrors
+    :func:`_union_bbox`, without materialising ``rows * cols`` intermediate
+    boxes): the array only ever grows in the ``+x``/``+y`` direction from
+    ``origin_um`` -- a caller wanting the array to grow the other way must
+    adjust ``origin_um`` itself, mirroring ``"row"``/``"explicit"``'s own
+    translation-only semantics (no auto-centering).
+
+    ``array_params`` is the dict :func:`_parse_array_placement` returns
+    (``rows``, ``cols``, ``row_pitch_um``, ``col_pitch_um``, ``origin_um``).
+    """
+    origin = array_params["origin_um"]
+    rows = array_params["rows"]
+    cols = array_params["cols"]
+    row_pitch_um = array_params["row_pitch_um"]
+    col_pitch_um = array_params["col_pitch_um"]
+    return {
+        "x0": bbox_um["x0"] + origin["x"],
+        "y0": bbox_um["y0"] + origin["y"],
+        "x1": bbox_um["x1"] + origin["x"] + (cols - 1) * col_pitch_um,
+        "y1": bbox_um["y1"] + origin["y"] + (rows - 1) * row_pitch_um,
+    }
 
 
 def _translate_bbox(
@@ -509,17 +558,97 @@ def _parse_explicit_origins(
     return origins
 
 
+def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
+    """Parse and validate the ``"array"``-only placement fields (#1053):
+    ``rows``, ``cols``, ``row_pitch_um``, ``col_pitch_um``, and an optional
+    ``origin_um``.
+
+    Mirrors :func:`klayout.db.CellInstArray`'s own row-vector/column-vector/
+    row-count/column-count parameterization -- this is what lets
+    :func:`compose` emit **one** hierarchical array instance for the whole
+    ``rows * cols`` tiling instead of expanding it into that many flattened
+    ``"explicit"``-style placements (see the module docstring).
+
+    ``rows``/``cols`` must be positive (``>= 1``) integers; ``row_pitch_um``/
+    ``col_pitch_um`` must be positive (``> 0``) numbers -- a zero or negative
+    pitch is rejected even for a degenerate single-row/single-column array
+    (``rows == 1`` or ``cols == 1``), where the corresponding pitch is
+    otherwise unused geometrically, so the request document always carries a
+    well-formed value regardless of which axis degenerates. ``origin_um``
+    (the base tile's own ``offset_um`` -- row 0, col 0) is optional, defaulting
+    to ``{"x": 0.0, "y": 0.0}``, mirroring ``"row"`` placement's own implicit
+    first-block origin.
+
+    Returns ``{"rows": int, "cols": int, "row_pitch_um": float,
+    "col_pitch_um": float, "origin_um": {"x": float, "y": float}}``.
+    """
+
+    def _positive_int(value: Any, field: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise GenComposeError(
+                f"request.placement.{field} must be a positive integer when "
+                "strategy is 'array'"
+            )
+        return value
+
+    def _positive_number(value: Any, field: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise GenComposeError(
+                f"request.placement.{field} must be a positive number when "
+                "strategy is 'array'"
+            )
+        return float(value)
+
+    rows = _positive_int(raw_placement.get("rows"), "rows")
+    cols = _positive_int(raw_placement.get("cols"), "cols")
+    row_pitch_um = _positive_number(raw_placement.get("row_pitch_um"), "row_pitch_um")
+    col_pitch_um = _positive_number(raw_placement.get("col_pitch_um"), "col_pitch_um")
+
+    raw_origin = raw_placement.get("origin_um", {"x": 0.0, "y": 0.0})
+    if not isinstance(raw_origin, dict):
+        raise GenComposeError(
+            "request.placement.origin_um must be a JSON object with numeric x/y fields"
+        )
+    x = raw_origin.get("x", 0.0)
+    y = raw_origin.get("y", 0.0)
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, (int, float))
+        or not isinstance(y, (int, float))
+    ):
+        raise GenComposeError(
+            "request.placement.origin_um must have numeric x/y fields"
+        )
+
+    return {
+        "rows": rows,
+        "cols": cols,
+        "row_pitch_um": row_pitch_um,
+        "col_pitch_um": col_pitch_um,
+        "origin_um": {"x": float(x), "y": float(y)},
+    }
+
+
 def _parse_placement(
     raw_placement: Any, block_ids: set[str]
-) -> tuple[str, list[str], float, dict[str, dict[str, float]] | None]:
+) -> tuple[
+    str,
+    list[str],
+    float,
+    dict[str, dict[str, float]] | None,
+    dict[str, Any] | None,
+]:
     """Parse and validate ``request.placement``.
 
-    Returns ``(strategy, order, spacing_um, origins_um)``. ``spacing_um`` is
-    ``0.0`` (unused) and ``origins_um`` is ``None`` for ``strategy: "row"``;
-    conversely ``origins_um`` is a parsed dict and ``spacing_um`` is not read
-    from the request at all for ``strategy: "explicit"`` (#321) --
-    ``placement.spacing_um`` alongside an ``"explicit"`` strategy is simply
-    ignored, not rejected.
+    Returns ``(strategy, order, spacing_um, origins_um, array_params)``.
+    ``spacing_um`` is ``0.0`` (unused) and ``origins_um``/``array_params`` are
+    ``None`` for ``strategy: "row"``; ``origins_um`` is a parsed dict (and
+    ``spacing_um``/``array_params`` unused) for ``strategy: "explicit"``
+    (#321) -- ``placement.spacing_um`` alongside an ``"explicit"`` strategy is
+    simply ignored, not rejected; ``array_params`` is a parsed dict (and
+    ``spacing_um``/``origins_um`` unused) for ``strategy: "array"`` (#1053,
+    see :func:`_parse_array_placement`).
     """
     if not isinstance(raw_placement, dict):
         raise GenComposeError("request.placement must be a JSON object")
@@ -530,6 +659,13 @@ def _parse_placement(
         raise GenComposeError(
             f"request.placement.strategy '{strategy}' is not supported at this "
             f"phase -- supported: {supported}"
+        )
+
+    if strategy == "array" and len(block_ids) != 1:
+        raise GenComposeError(
+            "request.placement.strategy 'array' takes exactly one blocks[] "
+            "entry -- the single block repeated at every tile -- but "
+            f"{len(block_ids)} were given"
         )
 
     order = raw_placement.get("order")
@@ -549,7 +685,11 @@ def _parse_placement(
 
     if strategy == "explicit":
         origins_um = _parse_explicit_origins(raw_placement.get("origins_um"), order)
-        return strategy, order, 0.0, origins_um
+        return strategy, order, 0.0, origins_um, None
+
+    if strategy == "array":
+        array_params = _parse_array_placement(raw_placement)
+        return strategy, order, 0.0, None, array_params
 
     spacing_um = raw_placement.get("spacing_um", 0.0)
     if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
@@ -558,7 +698,7 @@ def _parse_placement(
     if spacing_um < 0:
         raise GenComposeError("request.placement.spacing_um must be >= 0")
 
-    return strategy, order, spacing_um, None
+    return strategy, order, spacing_um, None, None
 
 
 def _validate_block_port(
@@ -2396,7 +2536,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError(str(exc)) from exc
 
     blocks = _parse_blocks(request.get("blocks"), request_dir or os.getcwd())
-    strategy, order, spacing_um, origins_um = _parse_placement(
+    strategy, order, spacing_um, origins_um, array_params = _parse_placement(
         request.get("placement"), set(blocks)
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
@@ -2419,14 +2559,27 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     bboxes_um = {block_id: block["bbox_um"] for block_id, block in blocks.items()}
     if strategy == "row":
         offsets_um = compute_row_offsets(order, bboxes_um, spacing_um)
+    elif strategy == "array":
+        assert array_params is not None  # guaranteed by _parse_placement for "array"
+        # The single blocks[] entry's own offset_um is the base (row 0, col 0)
+        # tile's origin -- every other tile is expressed only via the
+        # kdb.CellInstArray row/column vectors _write_composed_gds emits, not
+        # as a separate offsets_um entry (#1053; see the module docstring).
+        offsets_um = {order[0]: dict(array_params["origin_um"])}
     else:
         assert origins_um is not None  # guaranteed by _parse_placement for "explicit"
         offsets_um = resolve_explicit_offsets(order, origins_um)
 
-    placed_bboxes_um = {
-        block_id: _translate_bbox(bboxes_um[block_id], offsets_um[block_id])
-        for block_id in order
-    }
+    if strategy == "array":
+        assert array_params is not None
+        placed_bboxes_um = {
+            order[0]: array_placement_bbox_um(bboxes_um[order[0]], array_params)
+        }
+    else:
+        placed_bboxes_um = {
+            block_id: _translate_bbox(bboxes_um[block_id], offsets_um[block_id])
+            for block_id in order
+        }
     composed_bbox_um = _union_bbox([placed_bboxes_um[block_id] for block_id in order])
 
     warnings: list[str] = []
@@ -2611,6 +2764,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             }
         )
 
+    array_placement_gds = (
+        {
+            "block_id": order[0],
+            "rows": array_params["rows"],
+            "cols": array_params["cols"],
+            "row_pitch_um": array_params["row_pitch_um"],
+            "col_pitch_um": array_params["col_pitch_um"],
+        }
+        if strategy == "array"
+        else None
+    )
     _write_composed_gds(
         blocks,
         order,
@@ -2621,6 +2785,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         route_layer,
         label_layer,
         pin_placements,
+        array_placement=array_placement_gds,
     )
 
     # --- drc_hints: matched-group echo + tightest spacing used --------------
@@ -2632,9 +2797,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # routing adds no spacing tighter than that at this phase (routes run
         # through the placed channels), so the tightest spacing actually used
         # is the placement gap. Left null when nothing was routed (phase-1
-        # behaviour), and also left null for "explicit" placement (#321) --
-        # there is no single shared spacing value to report (per-pair
-        # separation is exactly what a caller-declared origin expresses).
+        # behaviour), and also left null for "explicit" (#321) and "array"
+        # (#1053) placement -- neither has a single shared spacing value to
+        # report ("explicit"'s per-pair separation is exactly what a
+        # caller-declared origin expresses; "array" has two independent
+        # pitches, row_pitch_um/col_pitch_um, not one).
         min_spacing_um = spacing_um
 
     response_blocks = [
@@ -2707,6 +2874,7 @@ def _write_composed_gds(
     route_layer: tuple[int, int] | None = None,
     label_layer: tuple[int, int] | None = None,
     pin_placements: list[dict[str, Any]] | None = None,
+    array_placement: dict[str, Any] | None = None,
 ) -> None:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -2719,6 +2887,20 @@ def _write_composed_gds(
     block's computed ``offset_um`` -- geometry is copied exactly once (never
     re-derived), and hierarchy is preserved (each block stays its own cell,
     not flattened into the composed top cell).
+
+    ``array_placement`` (``placement.strategy: "array"``, #1053), when given,
+    is ``{"block_id": str, "rows": int, "cols": int, "row_pitch_um": float,
+    "col_pitch_um": float}`` naming the one ``order`` entry to instantiate as
+    a **single** hierarchical :class:`kdb.CellInstArray` -- ``cols`` steps of
+    ``col_pitch_um`` along ``+x`` (the array's ``a`` vector/count) and
+    ``rows`` steps of ``row_pitch_um`` along ``+y`` (its ``b`` vector/count),
+    based at that block's own ``offset_um`` (the row-0/col-0 tile) -- instead
+    of the one-``kdb.Trans``-per-block insert every other block gets. This is
+    the mechanism that keeps a large regular tiling (e.g. an R rows x C cols
+    bitcell array) to **one** composed-layout instance rather than
+    ``rows * cols`` flattened inserts (see the module docstring); confirmed
+    by inspecting ``layout.cell(cell_name).each_inst()``'s count in the test
+    suite below.
 
     Routed nets (``routed_geometry``: a list of ``{net, points_um, width_um,
     via_drops, stub_widen}``) are drawn as native :class:`kdb.Path` shapes
@@ -2806,7 +2988,26 @@ def _write_composed_gds(
         offset = offsets_um[block_id]
         ox = int(round(offset["x"] / dbu))
         oy = int(round(offset["y"] / dbu))
-        top.insert(kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(ox, oy)))
+        if array_placement is not None and array_placement["block_id"] == block_id:
+            # "array" placement (#1053): one hierarchical instance covering
+            # every rows*cols tile, not one insert per tile -- the row-0/
+            # col-0 tile sits at this block's own offset_um (`ox`/`oy`
+            # above), and every other tile is expressed purely through the
+            # array's own a/b vectors and counts.
+            a_vector = kdb.Vector(int(round(array_placement["col_pitch_um"] / dbu)), 0)
+            b_vector = kdb.Vector(0, int(round(array_placement["row_pitch_um"] / dbu)))
+            top.insert(
+                kdb.CellInstArray(
+                    sub_cell.cell_index(),
+                    kdb.Trans(ox, oy),
+                    a_vector,
+                    b_vector,
+                    array_placement["cols"],
+                    array_placement["rows"],
+                )
+            )
+        else:
+            top.insert(kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(ox, oy)))
 
     if routed_geometry and route_layer is not None:
         if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)

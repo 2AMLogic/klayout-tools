@@ -613,6 +613,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-16 — `klt gen-compose` gains a third `placement.strategy`:
+  **`"array"`** (issue #1053), for composing a repeated-block regular R
+  rows x C columns tiling (a matched-device array, a memory bitcell array, a
+  pad ring — anything built from one cell on a uniform X/Y pitch) directly,
+  instead of emitting `rows * cols` individual `"explicit"` entries. Takes
+  exactly one `blocks[]` entry plus `placement.rows`/`cols`/
+  `row_pitch_um`/`col_pitch_um` and an optional `placement.origin_um`
+  (defaults to `{0, 0}`) — mirroring `klayout.db.CellInstArray`'s own
+  row-vector/column-vector/row-count/column-count parameterization — and
+  composes it as a **single hierarchical `kdb.CellInstArray` instance**
+  rather than flattening into `rows * cols` placements, keeping a
+  several-thousand-instance array's request document (and the composed
+  layout's own instance count) at O(1) instead of O(rows * cols). Per-tile
+  `connectivity[]`/`pins[]` routing (wiring a shared net to every instance in
+  the array) is out of scope — `connectivity[]`/`pins[]` still address only
+  the array's base (row 0, col 0) tile. See "Array placement (a
+  repeated-block regular tiling, #1053)" in `docs/cli/gen-compose.md`.
 - 2026-08-16 — **`klt economy`** (issue #1012): quantitative layout-density
   report — the numbers backend for judging silicon economy (agent-produced
   layouts are correct-but-sprawling by default, and area is unit cost)
