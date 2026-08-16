@@ -26,6 +26,7 @@ jobs:
     # which is exactly how a repo accumulates hundreds of unformatted files
     # behind a false-green check.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -58,6 +59,7 @@ jobs:
     # stable Rust, so `cargo` is already on PATH (matching how this repo
     # avoids third-party actions elsewhere).
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: native/mom
@@ -175,6 +177,7 @@ jobs:
     # failure here is attributable to this crate specifically, matching the
     # one-job-per-native-engine precedent that job's own comment sets.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: native/congestion
@@ -239,6 +242,7 @@ jobs:
     # specifically -- the one-job-per-native-engine precedent that job's
     # comment sets.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: native/yield
@@ -314,6 +318,7 @@ jobs:
     # same source -- `cargo test`/`clippy` below cover both targets
     # (`--all-targets`).
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: native/statime
@@ -408,6 +413,7 @@ jobs:
     # `--verify-equivalence` gate) happens in the `test` job below, which
     # already provisions a real `yosys`/`iverilog` `klt equiv` needs.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: native/techmap
@@ -440,6 +446,15 @@ jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Explicit bound (issue #1009) so a stuck runner or hung step fails
+    # outright instead of silently riding the platform default of 360
+    # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
+    # built from source on a cache miss, not the ~2-3 minute cache-hit path
+    # this job normally takes) measured 23m26s-24m28s across the matrix on
+    # run 31452136100 (2026-08-11, triggered by a cache-key change in #689):
+    # Yosys ~14.5min, Verilator ~6min, Icarus ~1m45s. 45 minutes leaves
+    # ~1.9x margin over that measurement for runner variance.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -674,6 +689,7 @@ jobs:
     # every push/PR, so a broken action fails this repo's CI before it
     # breaks a downstream block repo's workflow -- see docs/guides/github-action.md.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
