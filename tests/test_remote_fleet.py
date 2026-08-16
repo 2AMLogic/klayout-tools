@@ -17,6 +17,7 @@ import threading
 
 import pytest
 
+from helpers.fake_aws import FakeAws
 from klayout_tools import remote_fleet as rf
 from klayout_tools import remote_launcher as rl
 
@@ -48,37 +49,6 @@ def manifest_path(tmp_path):
     )
 
 
-class _FakeAws:
-    """Thread-safe fake AWS CLI runner: records every call, returns a
-    canned response (or raises) keyed by ``argv[:2]``. A queued list of
-    responses is consumed FIFO across *all* callers (matching
-    `test_remote_launcher.py`'s convention) -- guarded by a lock since
-    fleet operations dispatch across threads.
-    """
-
-    def __init__(self):
-        self.calls: list[list[str]] = []
-        self._responses: dict[tuple[str, str], object] = {}
-        self._lock = threading.Lock()
-
-    def respond(self, verb: str, subverb: str, value):
-        self._responses[(verb, subverb)] = value
-
-    def __call__(self, args: list[str]) -> str:
-        with self._lock:
-            self.calls.append(args)
-            key = tuple(args[:2])
-            value = self._responses.get(key, "")
-            if isinstance(value, Exception):
-                raise value
-            if isinstance(value, list):
-                item = value.pop(0)
-                if isinstance(item, Exception):
-                    raise item
-                return item
-            return value
-
-
 def _default_aws(manifest_path=None, *, instance_ids=None, quota_vcpu="10000"):
     """A fake AWS runner pre-loaded with enough canned responses to
     provision an arbitrary-size fleet: a fresh security group, a FIFO
@@ -87,7 +57,7 @@ def _default_aws(manifest_path=None, *, instance_ids=None, quota_vcpu="10000"):
     `service-quotas` response, and `terminate-instances`/
     `delete-security-group` no-ops.
     """
-    aws = _FakeAws()
+    aws = FakeAws()
     aws.respond("ec2", "create-security-group", "sg-fleet")
     aws.respond(
         "ec2", "run-instances", list(instance_ids or [f"i-{n}" for n in range(20)])
@@ -230,7 +200,7 @@ def test_fleet_cost_gate_rejects_non_positive_hosts():
 
 
 def test_check_vcpu_quota_passes_when_under_quota():
-    aws = _FakeAws()
+    aws = FakeAws()
     aws.respond("service-quotas", "get-service-quota", "1000")
     quota = rf.check_vcpu_quota(
         region="us-east-1",
@@ -247,7 +217,7 @@ def test_check_vcpu_quota_passes_when_under_quota():
 
 
 def test_check_vcpu_quota_uses_on_demand_code_when_not_spot():
-    aws = _FakeAws()
+    aws = FakeAws()
     aws.respond("service-quotas", "get-service-quota", "1000")
     rf.check_vcpu_quota(
         region="us-east-1",
@@ -263,7 +233,7 @@ def test_check_vcpu_quota_uses_on_demand_code_when_not_spot():
 
 
 def test_check_vcpu_quota_raises_named_error_over_quota():
-    aws = _FakeAws()
+    aws = FakeAws()
     # 4 x c7i.12xlarge (48 vCPU) == 192 vCPU needed; quota only allows 100.
     aws.respond("service-quotas", "get-service-quota", "100")
     with pytest.raises(rf.FleetQuotaError) as exc_info:
@@ -289,7 +259,7 @@ def test_check_vcpu_quota_error_is_a_fleet_launch_error():
 
 
 def test_check_vcpu_quota_rejects_unparseable_response():
-    aws = _FakeAws()
+    aws = FakeAws()
     aws.respond("service-quotas", "get-service-quota", "not-a-number")
     with pytest.raises(rf.FleetLaunchError, match="could not parse"):
         rf.check_vcpu_quota(

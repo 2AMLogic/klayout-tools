@@ -13,10 +13,10 @@ fake them.
 from __future__ import annotations
 
 import json
-import threading
 
 import pytest
 
+from helpers.fake_aws import FakeAws
 from klayout_tools import digital_fleet as df
 from klayout_tools import remote_fleet as rf
 from klayout_tools import remote_launcher as rl
@@ -723,30 +723,6 @@ def test_rank_candidates_empty_list():
 # --------------------------------------------------------------------------- #
 
 
-class _FakeAws:
-    def __init__(self):
-        self.calls: list[list[str]] = []
-        self._responses: dict[tuple[str, str], object] = {}
-        self._lock = threading.Lock()
-
-    def respond(self, verb, subverb, value):
-        self._responses[(verb, subverb)] = value
-
-    def __call__(self, args):
-        with self._lock:
-            self.calls.append(args)
-            key = tuple(args[:2])
-            value = self._responses.get(key, "")
-            if isinstance(value, Exception):
-                raise value
-            if isinstance(value, list):
-                item = value.pop(0)
-                if isinstance(item, Exception):
-                    raise item
-                return item
-            return value
-
-
 def _write_manifest(tmp_path, pdk="sky130A"):
     path = tmp_path / "manifest.json"
     path.write_text(
@@ -770,7 +746,7 @@ def _write_manifest(tmp_path, pdk="sky130A"):
 
 
 def _default_aws(instance_ids=None, quota_vcpu="10000"):
-    aws = _FakeAws()
+    aws = FakeAws()
     aws.respond("ec2", "create-security-group", "sg-fleet")
     aws.respond(
         "ec2", "run-instances", list(instance_ids or [f"i-{n}" for n in range(20)])
