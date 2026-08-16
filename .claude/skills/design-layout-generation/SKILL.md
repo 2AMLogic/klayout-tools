@@ -75,7 +75,15 @@ during #196's bring-up:
 1. **Run a single `klt gen` primitive generator.** `klt gen <generator>
    --pdk <variant> -o <path>` produces a DRC-clean single-cell block
    (`resistor_strip`, `mos_array`, `res_array`, `guard_ring`, `diff_pair`,
-   `bjt_array` — `docs/cli/gen.md`).
+   `bjt_array` — `docs/cli/gen.md`). For any of the matched-device
+   generators (`mos_array`/`res_array`/`bjt_array`/`diff_pair`) sized
+   against a stated matching/offset spec, convert that spec into a minimum
+   unit-device `W·L` (and hence `w_um`/`l_um`/multiplier-count parameters)
+   via Pelgrom's law **before** picking generator params — see
+   [`docs/design/matching-and-floorplanning.md`](../../../docs/design/matching-and-floorplanning.md)
+   for the law, where to source the process's real matching constants, and
+   the worked spec-to-parameter conversion (including the
+   `topology="common_centroid"` vs. plain-`"array"` choice).
 2. **Compose multiple generated blocks into one placed-and-routed
    circuit.** `klt gen-compose <request.json>` places a row of already-
    generated blocks and routes two-pin nets between their named ports
