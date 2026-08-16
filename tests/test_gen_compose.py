@@ -20,11 +20,13 @@ from klayout_tools.drc import run_drc
 from klayout_tools.gen_compose import (
     GenComposeError,
     _cleanup_points,
+    _parse_array_placement,
     _polyline_midpoint_um,
     _resolve_label_layer,
     _resolve_via_drop_layer,
     _translate_bbox,
     _union_bbox,
+    array_placement_bbox_um,
     compose,
     compute_row_offsets,
     load_generator_report_arg,
@@ -198,6 +200,161 @@ def test_resolve_explicit_offsets_reorders_by_order_not_dict_iteration():
     offsets_ba = resolve_explicit_offsets(["b", "a"], origins)
     assert offsets_ba["b"] == {"x": 3.0, "y": 4.0}
     assert offsets_ba["a"] == {"x": 1.0, "y": 2.0}
+
+
+# --------------------------------------------------------------------------- #
+# array_placement_bbox_um() -- pure placement math, no PDK/pya involvement
+# (#1053, mirrors the compute_row_offsets/resolve_explicit_offsets suites
+# above)
+# --------------------------------------------------------------------------- #
+
+
+def test_array_placement_bbox_um_single_tile_is_degenerate():
+    # rows=cols=1 degenerates to a plain translation by origin_um -- the
+    # pitches play no role when there is only one tile on each axis.
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0}
+    array_params = {
+        "rows": 1,
+        "cols": 1,
+        "row_pitch_um": 5.0,
+        "col_pitch_um": 5.0,
+        "origin_um": {"x": 10.0, "y": -3.0},
+    }
+    bbox_um = array_placement_bbox_um(bbox, array_params)
+    assert bbox_um == {"x0": 10.0, "y0": -3.0, "x1": 12.0, "y1": -2.0}
+
+
+def test_array_placement_bbox_um_grows_cols_along_x_rows_along_y():
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 9.26, "y1": 0.42}
+    array_params = {
+        "rows": 2,
+        "cols": 3,
+        "row_pitch_um": 5.0,
+        "col_pitch_um": 15.0,
+        "origin_um": {"x": 1.0, "y": 2.0},
+    }
+    bbox_um = array_placement_bbox_um(bbox, array_params)
+    assert bbox_um == pytest.approx({"x0": 1.0, "y0": 2.0, "x1": 40.26, "y1": 7.42})
+
+
+def test_array_placement_bbox_um_default_zero_origin():
+    bbox = {"x0": -1.0, "y0": -1.0, "x1": 1.0, "y1": 1.0}
+    array_params = {
+        "rows": 4,
+        "cols": 1,
+        "row_pitch_um": 2.0,
+        "col_pitch_um": 2.0,
+        "origin_um": {"x": 0.0, "y": 0.0},
+    }
+    bbox_um = array_placement_bbox_um(bbox, array_params)
+    # 4 rows, 1 col: grows along y only -- (rows - 1) * row_pitch_um = 6.0
+    assert bbox_um == {"x0": -1.0, "y0": -1.0, "x1": 1.0, "y1": 7.0}
+
+
+# --------------------------------------------------------------------------- #
+# _parse_array_placement() -- request-shape validation for "array" (#1053)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_array_placement_valid_full_request():
+    params = _parse_array_placement(
+        {
+            "strategy": "array",
+            "rows": 16,
+            "cols": 8,
+            "row_pitch_um": 5.0,
+            "col_pitch_um": 3.0,
+            "origin_um": {"x": 1.5, "y": -2.5},
+        }
+    )
+    assert params == {
+        "rows": 16,
+        "cols": 8,
+        "row_pitch_um": 5.0,
+        "col_pitch_um": 3.0,
+        "origin_um": {"x": 1.5, "y": -2.5},
+    }
+
+
+def test_parse_array_placement_default_origin_is_zero_zero():
+    params = _parse_array_placement(
+        {"rows": 1, "cols": 1, "row_pitch_um": 1.0, "col_pitch_um": 1.0}
+    )
+    assert params["origin_um"] == {"x": 0.0, "y": 0.0}
+
+
+def test_parse_array_placement_allows_degenerate_1x1():
+    params = _parse_array_placement(
+        {"rows": 1, "cols": 1, "row_pitch_um": 1.0, "col_pitch_um": 1.0}
+    )
+    assert params["rows"] == 1
+    assert params["cols"] == 1
+
+
+def test_parse_array_placement_allows_non_square_rows_cols():
+    params = _parse_array_placement(
+        {"rows": 7, "cols": 2, "row_pitch_um": 1.0, "col_pitch_um": 1.0}
+    )
+    assert params["rows"] == 7
+    assert params["cols"] == 2
+
+
+@pytest.mark.parametrize("bad_rows", [0, -1, 1.5, "3", True, None])
+def test_parse_array_placement_rejects_bad_rows(bad_rows):
+    with pytest.raises(GenComposeError, match="rows"):
+        _parse_array_placement(
+            {"rows": bad_rows, "cols": 2, "row_pitch_um": 1.0, "col_pitch_um": 1.0}
+        )
+
+
+@pytest.mark.parametrize("bad_cols", [0, -1, 1.5, "3", True, None])
+def test_parse_array_placement_rejects_bad_cols(bad_cols):
+    with pytest.raises(GenComposeError, match="cols"):
+        _parse_array_placement(
+            {"rows": 2, "cols": bad_cols, "row_pitch_um": 1.0, "col_pitch_um": 1.0}
+        )
+
+
+@pytest.mark.parametrize("bad_pitch", [0, 0.0, -1.0, "1.0", True, None])
+def test_parse_array_placement_rejects_zero_or_negative_row_pitch(bad_pitch):
+    with pytest.raises(GenComposeError, match="row_pitch_um"):
+        _parse_array_placement(
+            {"rows": 2, "cols": 2, "row_pitch_um": bad_pitch, "col_pitch_um": 1.0}
+        )
+
+
+@pytest.mark.parametrize("bad_pitch", [0, 0.0, -1.0, "1.0", True, None])
+def test_parse_array_placement_rejects_zero_or_negative_col_pitch(bad_pitch):
+    with pytest.raises(GenComposeError, match="col_pitch_um"):
+        _parse_array_placement(
+            {"rows": 2, "cols": 2, "row_pitch_um": 1.0, "col_pitch_um": bad_pitch}
+        )
+
+
+def test_parse_array_placement_rejects_non_numeric_origin_fields():
+    with pytest.raises(GenComposeError, match="origin_um"):
+        _parse_array_placement(
+            {
+                "rows": 2,
+                "cols": 2,
+                "row_pitch_um": 1.0,
+                "col_pitch_um": 1.0,
+                "origin_um": {"x": "0.0", "y": 0.0},
+            }
+        )
+
+
+def test_parse_array_placement_rejects_non_object_origin():
+    with pytest.raises(GenComposeError, match="origin_um"):
+        _parse_array_placement(
+            {
+                "rows": 2,
+                "cols": 2,
+                "row_pitch_um": 1.0,
+                "col_pitch_um": 1.0,
+                "origin_um": [0.0, 0.0],
+            }
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -882,6 +1039,247 @@ def test_compose_explicit_routes_net_with_vertical_jog(tmp_path, pdk_root):
         for p0, p1 in zip(points, points[1:], strict=False)
     )
     assert has_vertical_segment
+
+
+# --------------------------------------------------------------------------- #
+# compose() -- "array" placement.strategy request-shape validation (#1053)
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_array_rejects_more_than_one_block(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    with pytest.raises(GenComposeError, match="exactly one blocks\\[\\] entry"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": r1},
+                    {"id": "b2", "generator_report": r2},
+                ],
+                "placement": {
+                    "strategy": "array",
+                    "order": ["b1", "b2"],
+                    "rows": 2,
+                    "cols": 2,
+                    "row_pitch_um": 5.0,
+                    "col_pitch_um": 5.0,
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("rows", 0),
+        ("rows", -1),
+        ("cols", 0),
+        ("cols", -1),
+        ("row_pitch_um", 0.0),
+        ("row_pitch_um", -1.0),
+        ("col_pitch_um", 0.0),
+        ("col_pitch_um", -1.0),
+    ],
+)
+def test_compose_array_rejects_malformed_grid_fields(tmp_path, pdk_root, field, value):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    placement = {
+        "strategy": "array",
+        "order": ["b1"],
+        "rows": 2,
+        "cols": 2,
+        "row_pitch_um": 5.0,
+        "col_pitch_um": 5.0,
+    }
+    placement[field] = value
+    with pytest.raises(GenComposeError):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": placement,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_array_rejects_missing_required_grid_field(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="row_pitch_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {
+                    "strategy": "array",
+                    "order": ["b1"],
+                    "rows": 2,
+                    "cols": 2,
+                    "col_pitch_um": 5.0,
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# compose() -- "array" placement.strategy integration tests (#1053)
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_array_places_2x3_grid_as_single_hierarchical_instance(
+    tmp_path, pdk_root
+):
+    # Acceptance criteria: the composed GDS must emit exactly ONE
+    # kdb.CellInstArray hierarchical instance for a rows*cols tiling, not
+    # rows*cols separate inserts -- verified by inspecting the output GDS's
+    # own instance count (each_inst()), not just rendered geometry (a
+    # flattened rows*cols-insert implementation could look identical).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "array_2x3.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "cell", "generator_report": r1}],
+            "placement": {
+                "strategy": "array",
+                "order": ["cell"],
+                "rows": 2,
+                "cols": 3,
+                "row_pitch_um": 5.0,
+                "col_pitch_um": 15.0,
+                "origin_um": {"x": 1.0, "y": 2.0},
+            },
+            "options": {"cell_name": "array_top_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+
+    entry = report["blocks"][0]
+    assert entry["id"] == "cell"
+    assert entry["offset_um"] == {"x": 1.0, "y": 2.0}
+    expected_bbox = array_placement_bbox_um(
+        r1["bbox_um"],
+        {
+            "rows": 2,
+            "cols": 3,
+            "row_pitch_um": 5.0,
+            "col_pitch_um": 15.0,
+            "origin_um": {"x": 1.0, "y": 2.0},
+        },
+    )
+    assert entry["bbox_um"] == pytest.approx(expected_bbox)
+    assert report["bbox_um"] == pytest.approx(expected_bbox)
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("array_top_0")
+
+    instances = list(top.each_inst())
+    assert len(instances) == 1  # exactly one hierarchical array instance
+    inst = instances[0]
+    assert inst.is_regular_array()
+    # KLayout's GDS AREF read/write path can swap which of its internal
+    # a/b vectors (and na/nb counts) maps to which -- so assert on the tile
+    # *count* (rows * cols) rather than a specific na<->cols/nb<->rows
+    # binding; the bbox check below independently confirms the array grew
+    # along the correct axes (col_pitch_um/row_pitch_um are deliberately
+    # different values in this request).
+    assert inst.cell_inst.na * inst.cell_inst.nb == 2 * 3
+    assert {inst.cell_inst.na, inst.cell_inst.nb} == {2, 3}
+
+    # The underlying sub-cell only carries r1's own shapes once -- KLayout's
+    # bbox for a regular array instance already spans all 6 tiles.
+    inst_bbox_um = {
+        "x0": inst.bbox().left * layout.dbu,
+        "y0": inst.bbox().bottom * layout.dbu,
+        "x1": inst.bbox().right * layout.dbu,
+        "y1": inst.bbox().top * layout.dbu,
+    }
+    assert inst_bbox_um == pytest.approx(expected_bbox)
+
+
+def test_compose_array_1x1_degenerates_to_single_tile(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "array_1x1.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "cell", "generator_report": r1}],
+            "placement": {
+                "strategy": "array",
+                "order": ["cell"],
+                "rows": 1,
+                "cols": 1,
+                "row_pitch_um": 5.0,
+                "col_pitch_um": 5.0,
+            },
+            "options": {"cell_name": "array_1x1_0", "output": str(output)},
+        }
+    )
+    entry = report["blocks"][0]
+    assert entry["offset_um"] == {"x": 0.0, "y": 0.0}
+    assert entry["bbox_um"] == pytest.approx(r1["bbox_um"])
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("array_1x1_0")
+    instances = list(top.each_inst())
+    # A 1x1 "array" is a single tile either way -- KLayout collapses a
+    # na=1/nb=1 CellInstArray into a plain (non-array) instance, which is
+    # still exactly one instance, satisfying the "one instance, not
+    # rows*cols" requirement trivially (rows*cols == 1 here).
+    assert len(instances) == 1
+
+
+def test_compose_array_default_origin_is_zero_zero(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "array_default_origin.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "cell", "generator_report": r1}],
+            "placement": {
+                "strategy": "array",
+                "order": ["cell"],
+                "rows": 3,
+                "cols": 2,
+                "row_pitch_um": 5.0,
+                "col_pitch_um": 20.0,
+            },
+            "options": {"cell_name": "array_default_origin_0", "output": str(output)},
+        }
+    )
+    assert report["blocks"][0]["offset_um"] == {"x": 0.0, "y": 0.0}
+
+
+def test_compose_array_min_spacing_um_is_null(tmp_path, pdk_root):
+    # Neither "explicit" nor "array" reports a single shared min_spacing_um
+    # -- "array" has two independent pitches (row/col), not one.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "array_min_spacing.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "cell", "generator_report": r1}],
+            "placement": {
+                "strategy": "array",
+                "order": ["cell"],
+                "rows": 2,
+                "cols": 2,
+                "row_pitch_um": 5.0,
+                "col_pitch_um": 20.0,
+            },
+            "options": {"cell_name": "array_min_spacing_0", "output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["min_spacing_um"] is None
 
 
 def test_compose_rejects_connectivity_unknown_block(tmp_path, pdk_root):
@@ -3268,6 +3666,51 @@ def test_cli_gen_compose_explicit_placement_json(tmp_path, pdk_root, capsys):
     r2_block = next(b for b in data["blocks"] if b["id"] == "r2")
     assert r2_block["offset_um"] == {"x": 10.0, "y": 5.0}
     assert output.is_file()
+
+
+def test_cli_gen_compose_array_placement_json(tmp_path, pdk_root, capsys):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    request_path = tmp_path / "request.json"
+    output = tmp_path / "cli_array.gds"
+    request_path.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "cell", "generator_report": r1}],
+                "placement": {
+                    "strategy": "array",
+                    "order": ["cell"],
+                    "rows": 4,
+                    "cols": 2,
+                    "row_pitch_um": 5.0,
+                    "col_pitch_um": 20.0,
+                    "origin_um": {"x": 0.0, "y": 0.0},
+                },
+                "options": {"cell_name": "cli_array", "output": str(output)},
+            }
+        )
+    )
+
+    exit_code = main(["gen-compose", str(request_path), "--format", "json"])
+    assert exit_code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["schema_version"] == 1
+    assert data["cell_name"] == "cli_array"
+    cell_block = next(b for b in data["blocks"] if b["id"] == "cell")
+    assert cell_block["offset_um"] == {"x": 0.0, "y": 0.0}
+    assert output.is_file()
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("cli_array")
+    instances = list(top.each_inst())
+    assert len(instances) == 1  # exactly one hierarchical array instance
+    # See test_compose_array_places_2x3_grid_as_single_hierarchical_instance's
+    # comment: assert on tile count, not a specific na<->cols/nb<->rows
+    # binding (KLayout's GDS AREF read/write path can swap the two).
+    assert instances[0].cell_inst.na * instances[0].cell_inst.nb == 4 * 2
 
 
 def test_cli_gen_compose_text(tmp_path, pdk_root, capsys):

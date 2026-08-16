@@ -1621,8 +1621,10 @@ def create_parser() -> argparse.ArgumentParser:
             "blocks[]/placement/connectivity[]/routing/options shape -- see "
             "docs/design/gen-composition-spike.md section 2 for the contract "
             "and docs/cli/gen-compose.md for the CLI surface. Supports "
-            'placement.strategy: "row" (single left-to-right strip) and '
-            '"explicit" (each block at its own declared origin); '
+            'placement.strategy: "row" (single left-to-right strip), '
+            '"explicit" (each block at its own declared origin), and "array" '
+            "(one block repeated on a regular rows x cols grid, emitted as a "
+            "single hierarchical instance); "
             "connectivity[] is validated and routed. A distinct top-level "
             "verb (not a "
             "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
