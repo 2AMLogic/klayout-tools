@@ -166,6 +166,22 @@ frontier-reasoning per the rule above rather than continuing to spend passes.
   `examples/design-pipeline/ota_5t.spice`. Rule this out before treating a
   skewed-corner-only `gain_db` failure as a sizing deficiency.
 
+## Matching specs (Pelgrom's law)
+
+If the block spec includes a matching/offset requirement (e.g. a
+spec-review line like "σ(Vos) ≤ 2 mV"), the device parameter set this stage
+outputs (`W`/`L`/multiplier for a matched pair or array) has a **minimum
+area floor** set by Pelgrom's law, independent of the transconductance/
+overdrive sizing this stage otherwise drives. See
+[`docs/design/matching-and-floorplanning.md`](../../../docs/design/matching-and-floorplanning.md)
+for the law itself, where to get the process's real `A_VT`/`A_β` constants
+(never invent one), and the worked conversion from a stated spec through
+this stage's `W`/`L` output to S7's generator parameters. Check that floor
+against whatever `W`/`L` the transconductance/overdrive sizing already
+produced — most of the time it is already satisfied and changes nothing;
+only widen a device if the Pelgrom-derived floor exceeds what sizing alone
+would have chosen.
+
 ## Next stage
 
 Hand the sized device parameter set to **S6 schematic/netlist**
