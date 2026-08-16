@@ -7,12 +7,14 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 Exit codes (see ``docs/cli/pex.md`` for the full table):
     0 - every delta row passed
     1 - failed to run at all (bad layout/testbench, unresolvable deck/PDK,
-        missing `.include` DUT reference, disagreeing schematic references,
-        an extraction or simulation failure) -- returned by ``emit_error``
-        as ``output.ERROR_EXIT_CODE``
+        a missing or ambiguous `.include` DUT reference, disagreeing
+        schematic references, an extraction or simulation failure) --
+        returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - ran successfully, at least one delta row failed its measurement limit
     4 - at least one delta row errored (schematic or extracted side did not
-        produce a trustworthy value)
+        produce a trustworthy value) -- including a schematic/extracted
+        pin-list mismatch, which reports a named ``pin_count_mismatch``
+        block here rather than aborting with exit 1 (issue #1030)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. Exit codes 3/4 mirror `klt sim`'s own precedent -- see
 docs/cli/sim.md's "Exit codes" section.)
@@ -107,6 +109,24 @@ def _print_text(report: dict) -> None:
             f"c_ff={mom_rlc_override['capacitance_ff']}  "
             f"l_nh={mom_rlc_override['inductance_nh']}"
         )
+
+    # Additive (issue #1030): only printed when the extracted-side deck was
+    # rejected for a schematic/extracted top-level pin-list mismatch.
+    mismatch = report.get("pin_count_mismatch")
+    if mismatch is not None:
+        print()
+        print("pin_count_mismatch:")
+        for side in ("schematic", "extracted"):
+            entry = mismatch[side]
+            pins = entry["pins"]
+            print(
+                f"  {side}: {entry['netlist']}  "
+                f"subckt={entry['subcircuit']}  pins={entry['pin_count']}"
+                + (f"  ({', '.join(pins)})" if pins else "")
+            )
+        if mismatch["ngspice_message"]:
+            print(f"  ngspice: {mismatch['ngspice_message']}")
+        print(f"  {mismatch['detail']}")
 
     testbenches = report["testbenches"]
     if testbenches:

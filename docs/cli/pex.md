@@ -18,8 +18,10 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   design (e.g. an S5 sizing testbench). Re-run **completely unmodified** for
   the schematic-side leg of each delta row; re-pointed at the extracted
   netlist (see "The DUT `.include` swap" below) for the extracted-side leg.
-  Every testbench must `.include`/`.inc` the *same* schematic DUT file — `klt
-  pex` reports one `reference_netlist` for the whole run.
+  Every testbench body must carry **exactly one** `.include`/`.inc` directive
+  (none and more than one are both hard errors), and every testbench must
+  include the *same* schematic DUT file — `klt pex` reports one
+  `reference_netlist` for the whole run.
 - `--deck` — required, passed through to `klt extract --parasitics`.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Same default
   as `klt extract`: `<layout>` with its extension replaced by `.spice`, next
@@ -129,6 +131,111 @@ directive at all has no single swap point this command can use without also
 parsing/rewriting device cards, which is out of scope — it is refused up
 front with a clear error, not partially run.
 
+### Exactly one `.include`/`.inc` line is required
+
+A testbench body carrying **two or more** `.include`/`.inc` directives is
+likewise refused up front (exit `1`), with an error naming every matched
+line and its 1-based line number:
+
+```
+testbench netlist has 2 `.include`/`.inc` directives (line 2: `.include
+"design.ngspice"`; line 3: `.include "schematic_dut.spice"`) -- klt pex swaps
+exactly one of them for the extracted netlist and cannot tell which one is
+the DUT ...
+```
+
+Which of several included files is "the DUT" is not inferable from the
+directive alone. A testbench that also includes, say, a PDK's global
+switch-parameter file (gf180mcu's `design.ngspice`) ahead of its DUT is
+entirely legitimate ngspice — but before this was an error, `klt pex`
+swapped the **first** matching line, silently re-pointing that file at the
+extracted netlist, leaving the real schematic DUT in place on both sides,
+and reporting the wrong `reference_netlist` (issue #1030). Fold any other
+included file into the DUT netlist itself, or inline it into the testbench
+body, so exactly one `.include`/`.inc` line remains.
+
+### The pin lists must match: `pin_count_mismatch`
+
+Because the testbench's own `X...` instantiation line is reused
+byte-identically on both sides, the schematic DUT's `.SUBCKT <top>
+<pins...>` header and the extracted netlist's must declare the **same number
+of pins**. When they do not — the common case being a deck whose extraction
+promotes a device-body/substrate-tap net (or any other physical net a
+hand-written schematic subcircuit never models) to a top-level pin — ngspice
+refuses the extracted-side deck outright:
+
+```
+Too few parameters for subcircuit type "res" (instance: xxres)
+    Simulation interrupted due to error!
+```
+
+`klt pex` detects that specific failure mode and reports it **by name**
+rather than leaving it buried in a per-corner `ngspice.log` artifact (issue
+#1030). The run is not aborted: the JSON report is still emitted, with
+
+- one `delta[]` row per schematic-side `(corner, measurement)` carrying
+  `extracted_value: null`, `delta_pct: null`, `status: "error"` — so a
+  caller still gets a per-corner report of exactly which rows have no
+  trustworthy extracted value, and
+- a top-level `pin_count_mismatch` block naming both sides' netlists, their
+  `.SUBCKT` pin lists and counts, ngspice's own line (when the corner kept
+  its log artifact via `options.keep_artifacts`), and a `detail` sentence:
+
+```json
+"pin_count_mismatch": {
+  "subcircuit": "RES",
+  "schematic": {
+    "netlist": "/abs/path/schematic_dut.spice",
+    "subcircuit": "RES",
+    "pin_count": 2,
+    "pins": ["RA", "RB"]
+  },
+  "extracted": {
+    "netlist": "/abs/path/top.spice",
+    "subcircuit": "RES",
+    "pin_count": 3,
+    "pins": ["RA", "RB", "VSUBS"]
+  },
+  "ngspice_message": "Too few parameters for subcircuit type \"res\" (instance: xxres)",
+  "detail": "the extracted netlist declares `.SUBCKT RES` with 3 pins (RA, RB, VSUBS) but the schematic DUT declares 2 (RA, RB) -- ..."
+}
+```
+
+The exit code is `4` (a `delta[]` row errored), not `1` — the command ran,
+it just has no trustworthy extracted-side value to report. `--format text`
+prints the same block. On every run whose extracted side actually
+simulated, `pin_count_mismatch` is `null`; the detection only ever runs when
+the extracted side produced no measured value at all, so a passing (or
+merely limit-failing) run can never pick up a false-positive diagnostic.
+
+**Detection depends on your ngspice version.** Because the diagnostic is
+raised from ngspice's own refusal to elaborate the deck, `klt pex` can only
+name a mismatch that ngspice actually rejects — and older ngspice does not
+reject all of them. Measured directly on both versions:
+
+| Mismatch (relative to the testbench's `X...` node count) | ngspice 46 | ngspice 42 |
+| --- | --- | --- |
+| Extracted `.SUBCKT` declares **≥2 more** pins ("too few parameters") | rejected | rejected |
+| Extracted `.SUBCKT` declares **exactly 1 more** pin | rejected | **accepted silently** |
+| Extracted `.SUBCKT` declares **fewer** pins ("too many parameters") | rejected | **accepted silently** |
+
+Where ngspice 42 accepts the deck, it simulates to completion and the
+extra/missing terminals are simply left dangling — so the run reports
+`status: "pass"` with `pin_count_mismatch: null` and **silently wrong**
+extracted values, rather than an error. ngspice 42 is what Debian/Ubuntu
+`apt` currently ships (`42+ds-3build1`), including in this repo's CI. If you
+are on ngspice < 46 and an extracted-vs-schematic delta looks implausible,
+compare the two `.SUBCKT` headers by hand before trusting it. Tightening
+this into an unconditional, engine-independent pre-flight header check is
+tracked in issue #1041.
+
+**Fixing a real mismatch is the caller's job, for now.** Give the schematic
+subcircuit the same pin list as the extracted one, or extract with a
+`--top` cell whose interface matches. A general bridging mechanism (a
+caller-supplied `--pin-map`, or an explicitly-named wrapper subcircuit —
+compare `klt lvs`'s [`hints.equivalent_pins`](lvs.md)) is deliberately out
+of scope here: this reports the mismatch, it does not paper over it.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -196,6 +303,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
   "passed": 3,
   "failed": 0,
   "errored": 0,
+  "pin_count_mismatch": null,
   "provenance": {
     "klt_version": "0.4.2",
     "klayout_version": "0.30.10",
@@ -220,6 +328,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
 | `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
+| `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
 
 ### `delta[]` entries
@@ -238,9 +347,9 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | Exit code | Meaning                                                                                     |
 | --------- | -------------------------------------------------------------------------------------------- |
 | `0`       | Every `delta[]` row passed.                                                                   |
-| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference, testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
+| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one**, testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
-| `4`       | Ran successfully; at least one `delta[]` row's `status` is `"error"`.                          |
+| `4`       | Ran successfully; at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`. |
 
 (`2` is reserved for argparse usage errors, as with every other `klt`
 subcommand. Exit codes `3`/`4` mirror `klt sim`'s own precedent — see

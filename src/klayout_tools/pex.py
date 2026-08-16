@@ -49,8 +49,29 @@ extraction's own written netlist -- every source, load, and measurement
 card in the testbench is untouched. See :func:`_find_dut_include` /
 :func:`_rewrite_dut_include`. A testbench with no ``.include``/``.inc``
 directive at all cannot be re-pointed this way and is refused up front
-(:class:`PexError`) -- see those functions' docstrings for the extraction
-mechanics.
+(:class:`PexError`); so is a testbench with *more than one* such directive,
+since which of them is "the DUT" is not inferable and swapping the first
+one silently re-points the wrong file (issue #1030) -- see those functions'
+docstrings for the extraction mechanics.
+
+## The other half of that convention: one shared pin list
+
+Because the testbench's own ``X...`` instantiation line is reused
+byte-identically on both sides, the schematic DUT's
+``.SUBCKT <top> <pins...>`` interface and the extracted netlist's must
+declare the *same number of pins*. When they do not -- e.g. a deck whose
+extraction promotes a device-body/substrate-tap net to a top-level pin that
+a hand-written schematic subcircuit never declares -- ngspice refuses the
+extracted-side deck with ``Too few parameters for subcircuit type "<name>"``
+(or ``Too many ...``) and no measurement comes back. :func:`run_pex` detects
+that specific failure mode and reports it as a named, structured
+``pin_count_mismatch`` block in its own JSON report (both sides' pin lists
+and counts, plus ngspice's own line when a per-corner log was kept), rather
+than leaving the cause buried in a per-corner ``ngspice.log`` artifact --
+see :func:`_pin_count_mismatch` and ``docs/cli/pex.md``. Bridging a genuine
+interface mismatch (a caller-supplied pin map, a wrapper subcircuit) is
+deliberately *not* in scope here: this reports the mismatch, it does not
+paper over it.
 
 ## Envelope shape: matches the provisional shape #871 already wired into `klt signoff`
 
@@ -125,6 +146,23 @@ _INCLUDE_RE = re.compile(
     r"^(?P<prefix>\s*\.(?:include|inc)\s+)(?P<target>.+?)\s*$", re.IGNORECASE
 )
 
+#: ngspice's own text when a subcircuit is instantiated with the wrong number
+#: of terminals -- verified against ngspice 46:
+#: ``Too many parameters for subcircuit type "res" (instance: xxres)``,
+#: followed by ``Simulation interrupted due to error!``. This is exactly what
+#: a schematic/extracted top-level pin-list mismatch produces on the
+#: extracted-side run (issue #1030).
+_PIN_COUNT_MISMATCH_RE = re.compile(
+    r"too\s+(?P<direction>few|many)\s+parameters\s+for\s+subcircuit\s+type\s+"
+    r"[\"']?(?P<subckt>[^\"'\s]+)[\"']?",
+    re.IGNORECASE,
+)
+
+#: A ``.subckt`` header line -- ``group("body")`` is everything after the
+#: directive (the subcircuit name, then its pins, then optional
+#: ``name=value`` parameters). See :func:`_subckt_interfaces`.
+_SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
+
 
 class PexError(Exception):
     """Raised when a `klt pex` run cannot be completed: a bad testbench
@@ -146,7 +184,7 @@ def _strip_quotes(token: str) -> str:
 
 
 def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
-    """Locate the first `.include`/`.inc` directive in a testbench body
+    """Locate *the* `.include`/`.inc` directive in a testbench body
     (``body_text``, read from the file at ``body_dir``'s sibling) -- the
     "thin testbench `.include`s the DUT" convention this module's docstring
     documents.
@@ -162,12 +200,44 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
     single swap point this module can re-point at the extracted netlist
     without also parsing/rewriting device cards, which is out of scope (see
     this module's docstring).
+
+    Also raises :class:`PexError` if the body contains **more than one**
+    such directive (issue #1030). Which of several `.include`d files is
+    "the DUT" is not inferable from the directive alone -- a testbench that
+    also `.include`s, say, a PDK's global switch-parameter file ahead of its
+    DUT is entirely legitimate ngspice, and the earlier first-match-wins
+    behaviour silently re-pointed *that* file at the extracted netlist,
+    leaving the real DUT in place and reporting the wrong
+    ``reference_netlist``. A hard error naming every matched line is the
+    documented behaviour instead; the fix is to leave exactly one
+    `.include`/`.inc` line in the testbench body (fold the others into the
+    DUT file, or inline them).
     """
+    matches: list[tuple[int, str, str]] = []
     for index, line in enumerate(body_text.splitlines()):
         match = _INCLUDE_RE.match(line)
         if match:
             target = _strip_quotes(match.group("target").strip())
-            return index, _resolve_relative(target, body_dir)
+            matches.append((index, line.strip(), target))
+
+    if len(matches) > 1:
+        listed = "; ".join(f"line {index + 1}: `{text}`" for index, text, _ in matches)
+        raise PexError(
+            f"testbench netlist has {len(matches)} `.include`/`.inc` "
+            f"directives ({listed}) -- klt pex swaps exactly one of them for "
+            "the extracted netlist and cannot tell which one is the DUT "
+            "(before this was an error it silently swapped the first one, "
+            "which re-pointed the wrong file and reported the wrong "
+            "reference_netlist -- issue #1030). Leave exactly one "
+            "`.include`/`.inc` line in the testbench body: fold any other "
+            "included file (a PDK switch-parameter file, shared `.param` "
+            "cards) into the DUT netlist itself or inline it into the "
+            "testbench"
+        )
+    if matches:
+        index, _text, target = matches[0]
+        return index, _resolve_relative(target, body_dir)
+
     raise PexError(
         "testbench netlist has no `.include`/`.inc` directive -- klt pex "
         "requires the schematic-side testbench to `.include` its DUT "
@@ -192,6 +262,227 @@ def _rewrite_dut_include(body_text: str, line_index: int, new_dut_path: str) -> 
     newline = "\n" if line.endswith("\n") else ""
     lines[line_index] = f'{match.group("prefix")}"{new_dut_path}"{newline}'
     return "".join(lines)
+
+
+def _read_text(path: str) -> str | None:
+    """``path``'s text, or ``None`` if it cannot be read -- every caller here
+    is building a *diagnostic*, so an unreadable file degrades the diagnostic
+    rather than raising over it."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _logical_lines(netlist_text: str) -> list[str]:
+    """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
+    into the line they continue, and inline ``$``/``;`` comments stripped --
+    so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
+    lines: list[str] = []
+    for raw in netlist_text.splitlines():
+        line = re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
+        stripped = line.lstrip()
+        if stripped.startswith("+") and lines:
+            lines[-1] = f"{lines[-1]} {stripped[1:].strip()}"
+        else:
+            lines.append(line)
+    return lines
+
+
+def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
+    """``{lowercased subckt name: (name as written, [pin names])}`` for every
+    ``.subckt`` header in ``netlist_text``, in file order.
+
+    Pins stop at the first ``name=value`` token (or a ``params:`` keyword) --
+    a `.subckt` header's trailing default-parameter assignments are not part
+    of its terminal list. Lowercased keys because ngspice itself is
+    case-insensitive about subcircuit names, and `klt extract` writes an
+    upper-case ``.SUBCKT`` header where a hand-written schematic netlist
+    often does not.
+    """
+    interfaces: dict[str, tuple[str, list[str]]] = {}
+    for line in _logical_lines(netlist_text):
+        match = _SUBCKT_RE.match(line)
+        if not match:
+            continue
+        tokens = match.group("body").split()
+        name = tokens[0]
+        pins: list[str] = []
+        for token in tokens[1:]:
+            if "=" in token or token.lower() in ("params:", "param:"):
+                break
+            pins.append(token)
+        interfaces.setdefault(name.lower(), (name, pins))
+    return interfaces
+
+
+def _mismatch_side(
+    netlist_path: str, interface: tuple[str, list[str]] | None
+) -> dict[str, Any]:
+    return {
+        "netlist": netlist_path,
+        "subcircuit": interface[0] if interface is not None else None,
+        "pin_count": len(interface[1]) if interface is not None else None,
+        "pins": list(interface[1]) if interface is not None else None,
+    }
+
+
+def _pin_count_mismatch(
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+    subcircuit: str | None = None,
+    ngspice_message: str | None = None,
+) -> dict[str, Any] | None:
+    """The structured ``pin_count_mismatch`` diagnostic (issue #1030), or
+    ``None`` when no mismatch can be established.
+
+    Compares the ``.SUBCKT`` interfaces the schematic DUT
+    (``reference_netlist``) and the extraction (``extracted_netlist``)
+    declare for the same subcircuit name and reports the first one whose pin
+    *counts* differ -- the exact condition ngspice rejects with ``Too
+    few/many parameters for subcircuit type``, since `klt pex` reuses the
+    testbench's own unmodified ``X...`` instantiation line on both sides.
+
+    ``subcircuit`` (when ngspice itself named one) restricts the comparison
+    to that subcircuit. ``ngspice_message`` is ngspice's own line, carried
+    through verbatim; when it is present but the two netlists' headers
+    cannot be compared (unreadable file, a name only one side declares) the
+    diagnostic is still returned, with ``null`` pin data -- ngspice's own
+    verdict is authoritative on its own.
+    """
+    schematic_text = _read_text(reference_netlist)
+    extracted_text = _read_text(extracted_netlist)
+    schematic_interfaces = _subckt_interfaces(schematic_text or "")
+    extracted_interfaces = _subckt_interfaces(extracted_text or "")
+
+    candidates = (
+        [subcircuit.lower()] if subcircuit is not None else list(extracted_interfaces)
+    )
+    for key in candidates:
+        schematic_interface = schematic_interfaces.get(key)
+        extracted_interface = extracted_interfaces.get(key)
+        if schematic_interface is None or extracted_interface is None:
+            continue
+        if len(schematic_interface[1]) == len(extracted_interface[1]):
+            continue
+        return {
+            "subcircuit": extracted_interface[0],
+            "schematic": _mismatch_side(reference_netlist, schematic_interface),
+            "extracted": _mismatch_side(extracted_netlist, extracted_interface),
+            "ngspice_message": ngspice_message,
+            "detail": (
+                f"the extracted netlist declares `.SUBCKT "
+                f"{extracted_interface[0]}` with {len(extracted_interface[1])} "
+                f"pins ({', '.join(extracted_interface[1])}) but the schematic "
+                f"DUT declares {len(schematic_interface[1])} "
+                f"({', '.join(schematic_interface[1])}) -- klt pex re-runs the "
+                "testbench's own unmodified subcircuit instantiation line "
+                "against both, so ngspice refuses the extracted-side deck. "
+                "Give the schematic subcircuit the same pin list as the "
+                "extracted one (extraction promotes physical nets a schematic "
+                "often does not model, e.g. a device-body/substrate-tap net), "
+                "or extract with a `--top` cell whose interface matches"
+            ),
+        }
+
+    if ngspice_message is None:
+        return None
+    return {
+        "subcircuit": subcircuit,
+        "schematic": _mismatch_side(
+            reference_netlist,
+            schematic_interfaces.get(subcircuit.lower()) if subcircuit else None,
+        ),
+        "extracted": _mismatch_side(
+            extracted_netlist,
+            extracted_interfaces.get(subcircuit.lower()) if subcircuit else None,
+        ),
+        "ngspice_message": ngspice_message,
+        "detail": (
+            "ngspice refused the extracted-side deck because the testbench's "
+            "subcircuit instantiation line does not match the extracted "
+            "netlist's `.SUBCKT` pin list -- klt pex re-runs that line "
+            "unmodified against both the schematic DUT and the extracted "
+            "netlist, so the two must declare the same number of pins"
+        ),
+    }
+
+
+def _match_line(text: str, match: re.Match[str]) -> str:
+    """The whole (stripped) line of ``text`` containing ``match``."""
+    start = text.rfind("\n", 0, match.start()) + 1
+    end = text.find("\n", match.start())
+    return text[start : end if end != -1 else len(text)].strip()
+
+
+def _pin_count_mismatch_from_message(
+    message: str,
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+) -> dict[str, Any] | None:
+    """The ``pin_count_mismatch`` diagnostic for a chunk of engine output
+    (an ngspice log, or a :class:`~klayout_tools.sim.SimError`'s text) that
+    carries ngspice's own pin-count-mismatch line -- ``None`` when it does
+    not."""
+    match = _PIN_COUNT_MISMATCH_RE.search(message)
+    if match is None:
+        return None
+    return _pin_count_mismatch(
+        reference_netlist=reference_netlist,
+        extracted_netlist=extracted_netlist,
+        subcircuit=match.group("subckt"),
+        ngspice_message=_match_line(message, match),
+    )
+
+
+def _pin_count_mismatch_from_report(
+    sim_report: dict[str, Any],
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+) -> dict[str, Any] | None:
+    """The ``pin_count_mismatch`` diagnostic for an extracted-side `klt sim`
+    response that came back with *no* measured value anywhere -- ``None``
+    otherwise.
+
+    A pin-count mismatch does not raise: `klt sim` classifies engine failures
+    from the ngspice log and reports them as a corner-level ``status:
+    "error"`` (every measurement "produced no value"), which is exactly what
+    ngspice's ``Too few parameters for subcircuit type`` + ``Simulation
+    interrupted due to error!`` produces. So the detection runs here, on the
+    returned response: ngspice's own line when the corner kept its
+    ``ngspice.log`` artifact, falling back to a direct comparison of the two
+    netlists' ``.SUBCKT`` headers when it did not.
+
+    Deliberately gated on "nothing at all came back": a run that produced any
+    value cannot have been rejected for a pin-count mismatch, so a successful
+    (or merely limit-failing) run can never pick up a false-positive
+    diagnostic here.
+    """
+    corners = sim_report.get("corners") or []
+    measurements = [m for corner in corners for m in corner["measurements"]]
+    if not measurements or any(m["value"] is not None for m in measurements):
+        return None
+
+    for corner in corners:
+        log_path = (corner.get("artifacts") or {}).get("log")
+        if not log_path or not os.path.isfile(log_path):
+            continue
+        mismatch = _pin_count_mismatch_from_message(
+            _read_text(log_path) or "",
+            reference_netlist=reference_netlist,
+            extracted_netlist=extracted_netlist,
+        )
+        if mismatch is not None:
+            return mismatch
+
+    return _pin_count_mismatch(
+        reference_netlist=reference_netlist,
+        extracted_netlist=extracted_netlist,
+    )
 
 
 def _index_corner_measurements(
@@ -276,6 +567,41 @@ def _build_delta_rows(
                         extracted_measurement["value"],
                     ),
                     "status": _row_status(schematic_measurement, extracted_measurement),
+                }
+            )
+    return rows
+
+
+def _unextracted_delta_rows(
+    *,
+    spec_row_prefix: str | None,
+    schematic_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Delta rows for a testbench whose *extracted* side never produced a
+    response at all (issue #1030's pin-count mismatch, surfaced as a
+    :class:`~klayout_tools.sim.SimError`): one row per schematic-side
+    ``(corner, measurement)`` with a ``null`` extracted value and ``status:
+    "error"``.
+
+    Same row shape as :func:`_build_delta_rows` -- a caller still gets a
+    per-corner JSON report naming exactly which rows have no trustworthy
+    extracted value, instead of the whole run aborting with only a stderr
+    message.
+    """
+    rows: list[dict[str, Any]] = []
+    for corner in schematic_report["corners"]:
+        for measurement in corner["measurements"]:
+            name = measurement["name"]
+            rows.append(
+                {
+                    "spec_row": name
+                    if spec_row_prefix is None
+                    else f"{spec_row_prefix}.{name}",
+                    "corner_id": corner["corner_id"],
+                    "schematic_value": measurement["value"],
+                    "extracted_value": None,
+                    "delta_pct": None,
+                    "status": "error",
                 }
             )
     return rows
@@ -417,13 +743,28 @@ def run_pex(
     `.include` the same schematic netlist. Raises :class:`PexError` if they
     disagree.
 
+    Each testbench body must carry **exactly one** `.include`/`.inc`
+    directive -- none (nothing to swap) and more than one (no way to tell
+    which one is the DUT) are both refused up front with a
+    :class:`PexError`, before any simulation runs (issue #1030; see
+    :func:`_find_dut_include`).
+
+    A schematic/extracted top-level *pin-list* mismatch -- the extracted
+    netlist declaring a different number of `.SUBCKT` pins than the
+    schematic DUT, which ngspice rejects with `Too few/many parameters for
+    subcircuit type` because the testbench's own instantiation line is
+    re-run unmodified against both -- is **not** an abort: the report is
+    still emitted, with per-corner `delta[]` rows carrying a `null`
+    `extracted_value` and the named `pin_count_mismatch` block naming both
+    sides' pin lists (issue #1030; see :func:`_pin_count_mismatch`).
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pex.md``) -- notably a `delta[]` array plus a
     `reference_netlist` field, the shape issue #871 (Phase 2b of epic #706)
     already taught `klt signoff`'s `_classify()` to recognise as kind
     `"pex"` (see this module's docstring). Raises :class:`PexError` for
-    anything that prevents the run from completing at all (bad testbench,
-    unresolvable DUT reference, disagreeing schematic references, an
+    anything that prevents the run from completing at all (bad testbench, a
+    missing or ambiguous DUT reference, disagreeing schematic references, an
     extraction or simulation failure).
     """
     if not testbench_paths:
@@ -509,6 +850,13 @@ def run_pex(
 
     testbenches_summary: list[dict[str, Any]] = []
     delta: list[dict[str, Any]] = []
+    # Issue #1030: populated (once) when the extracted-side run is rejected
+    # for a schematic/extracted top-level pin-list mismatch -- reported as a
+    # named, structured field in this run's own JSON report rather than left
+    # buried in a per-corner ngspice.log. One field for the whole run: every
+    # testbench shares one reference_netlist and one extracted netlist, so
+    # the mismatch is a property of the pair, not of a testbench.
+    pin_count_mismatch: dict[str, Any] | None = None
 
     for index, testbench_path in enumerate(testbench_paths):
         label = labels[index]
@@ -525,6 +873,7 @@ def run_pex(
                 f"testbench '{testbench_path}': schematic-side simulation failed: {exc}"
             ) from exc
 
+        extracted_report: dict[str, Any] | None = None
         try:
             extracted_request_path = _prepare_extracted_request(
                 testbench_path=testbench_path,
@@ -538,15 +887,61 @@ def run_pex(
                 backend=backend,
             )
         except SimError as exc:
-            raise PexError(
-                f"testbench '{testbench_path}': extracted-side simulation failed: {exc}"
-            ) from exc
+            # Issue #1030: a pin-count mismatch reported through the engine's
+            # own text (a backend that raises rather than classifying, e.g.
+            # `remote`) is a *diagnosable* failure, not an unexplained one --
+            # report it as a named field plus per-corner error rows and keep
+            # going, instead of aborting the whole run with only a stderr
+            # message. Any other SimError still aborts, unchanged.
+            mismatch = _pin_count_mismatch_from_message(
+                str(exc),
+                reference_netlist=reference_netlist,
+                extracted_netlist=extracted_netlist_path,
+            )
+            if mismatch is None:
+                raise PexError(
+                    f"testbench '{testbench_path}': extracted-side simulation "
+                    f"failed: {exc}"
+                ) from exc
+            pin_count_mismatch = pin_count_mismatch or mismatch
 
         spec_row_prefix = (
             None
             if single_testbench
             else os.path.splitext(os.path.basename(testbench_path))[0]
         )
+        if extracted_report is None:
+            delta.extend(
+                _unextracted_delta_rows(
+                    spec_row_prefix=spec_row_prefix,
+                    schematic_report=schematic_report,
+                )
+            )
+            testbenches_summary.append(
+                {
+                    "request": testbench_path,
+                    "schematic_netlist": dut_path,
+                    "corner_count": schematic_report["corner_count"],
+                    "measurement_names": [
+                        m["name"] for m in schematic_report["measurements"]
+                    ],
+                }
+            )
+            continue
+
+        # Issue #1030: the usual path for a pin-count mismatch -- `klt sim`
+        # classifies ngspice's failure from its log rather than raising, so
+        # the response comes back with every measurement errored. Only ever
+        # consulted when nothing at all was measured (see
+        # `_pin_count_mismatch_from_report`), so a run that produced values
+        # cannot pick up a false-positive diagnostic.
+        if pin_count_mismatch is None:
+            pin_count_mismatch = _pin_count_mismatch_from_report(
+                extracted_report,
+                reference_netlist=reference_netlist,
+                extracted_netlist=extracted_netlist_path,
+            )
+
         rows = _build_delta_rows(
             spec_row_prefix=spec_row_prefix,
             schematic_report=schematic_report,
@@ -610,6 +1005,12 @@ def run_pex(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        # Additive field (issue #1030): `None` on every run whose extracted
+        # side actually simulated -- byte-identical to before this feature
+        # existed. Non-`None` names the schematic/extracted top-level pin-list
+        # mismatch that made the extracted-side deck unrunnable, with both
+        # sides' pin lists (see `_pin_count_mismatch`).
+        "pin_count_mismatch": pin_count_mismatch,
         "provenance": extract_report["provenance"],
     }
     return result
