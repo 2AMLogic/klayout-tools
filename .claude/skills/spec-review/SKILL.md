@@ -82,6 +82,8 @@ reference, not reproduction.
 | PLL / clock generation | [`references/pll.md`](references/pll.md) |
 | SAR ADC | [`references/sar-adc.md`](references/sar-adc.md) |
 | TRNG | [`references/trng.md`](references/trng.md) |
+| OTA / operational amplifier | [`references/ota-amplifier.md`](references/ota-amplifier.md) |
+| Comparator | [`references/comparator.md`](references/comparator.md) |
 
 For a block class with no reference file, apply the same review structure,
 ground achievability in `kb/entries/` and (if available) WebSearch, state
