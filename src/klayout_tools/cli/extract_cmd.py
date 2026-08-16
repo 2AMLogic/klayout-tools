@@ -65,6 +65,50 @@ def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
     return names
 
 
+def _parse_matched_groups(raw: list[str] | None) -> dict[str, tuple[str, ...]] | None:
+    """Parse the ``--matched-group`` flag's ``NAME=INST1,INST2[,...]``
+    entries (issue #1018, repeatable) into a ``dict``, or ``None`` when the
+    flag was never given.
+
+    Raises :class:`ExtractError` for a malformed entry (no ``=``, a blank
+    group name, or fewer than two non-empty instance names -- there is
+    nothing to compare with just one), or for a group name repeated across
+    two ``--matched-group`` flags -- a `dict` cannot represent that
+    ambiguity, so it is caught here rather than silently keeping only the
+    last occurrence (unlike ``--deck-option``'s intentional last-one-wins
+    convention for a single scalar value).
+    """
+    if raw is None:
+        return None
+    groups: dict[str, tuple[str, ...]] = {}
+    for entry in raw:
+        name, sep, instances_raw = entry.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ExtractError(
+                f"--matched-group entry {entry!r} is not NAME=INST1,INST2 -- "
+                "e.g. --matched-group mirror_leg=$1,$2"
+            )
+        if name in groups:
+            raise ExtractError(
+                f"--matched-group name {name!r} was given more than once -- "
+                "declare every member of a group in a single "
+                "--matched-group entry, e.g. "
+                f"--matched-group {name}=$1,$2,$3"
+            )
+        instances = tuple(
+            inst.strip() for inst in instances_raw.split(",") if inst.strip()
+        )
+        if len(instances) < 2:
+            raise ExtractError(
+                f"--matched-group {name!r} names {len(instances)} "
+                "instance(s) -- a matched group needs at least two, e.g. "
+                f"--matched-group {name}=$1,$2"
+            )
+        groups[name] = instances
+    return groups
+
+
 def _parse_def_net_connections(
     raw: str | None, *, spef_output: str | None
 ) -> dict[str, tuple[tuple[str, str], ...]] | None:
@@ -91,6 +135,7 @@ def run(args: argparse.Namespace) -> int:
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
         )
+        matched_device_groups = _parse_matched_groups(args.matched_groups)
         report = run_extract(
             args.file,
             args.deck,
@@ -156,6 +201,11 @@ def run(args: argparse.Namespace) -> int:
             mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,
             mom_rlc_inductance_nh=args.mom_rlc_inductance_nh,
+            # `--matched-group` (issue #1018): declares a set of device
+            # instances expected to stay geometrically matched; checked
+            # post-extraction for equal `params`. `None` when the flag was
+            # never given, unchanged from every call site that predates it.
+            matched_device_groups=matched_device_groups,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -266,6 +316,21 @@ def _print_text(report: dict) -> None:
         )
         for entry in device_recognition_only_layers:
             print(f"  {entry['layer']}/{entry['datatype']}: {entry['shapes']} shape(s)")
+
+    matched_device_groups = report.get("matched_device_groups", [])
+    if matched_device_groups:
+        print()
+        print("matched_device_groups (--matched-group):")
+        for group in matched_device_groups:
+            status = "OK" if not group["mismatched_fields"] else "MISMATCH"
+            print(f"  {group['name']}: {', '.join(group['instances'])} [{status}]")
+            for mismatch in group["mismatched_fields"]:
+                values_str = ", ".join(
+                    f"{name}={value}" for name, value in mismatch["values"].items()
+                )
+                print(f"    {mismatch['field']}: {values_str}")
+            if group["unresolved_instances"]:
+                print(f"    unresolved: {', '.join(group['unresolved_instances'])}")
 
     warnings = report["warnings"]
     if warnings:

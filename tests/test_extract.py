@@ -38,6 +38,7 @@ from klayout_tools.extract import (
     PARASITIC_MODEL_SCOPE,
     ExtractError,
     _describe_devices,
+    _describe_matched_device_groups,
     _detect_single_terminal_nets,
     _exclude_capacitor_top_via_overlap,
     _extract_netlist,
@@ -5217,6 +5218,58 @@ def _make_two_nmos_layout() -> kdb.Layout:
 
     build_nmos(0, "AG", "AD", "AS")
     build_nmos(6000, "BG", "BD", "BS")
+    return layout
+
+
+def _make_two_nmos_layout_with_gate_lengths(
+    length_a_nm: int = 400, length_b_nm: int = 400
+) -> kdb.Layout:
+    """Two independent NMOS devices, geometrically identical to
+    `_make_two_nmos_layout` except each device's gate (poly) width -- the
+    channel length, `l_um` -- is independently adjustable, for
+    `--matched-group` geometry-mismatch tests (issue #1018). Equal
+    `length_a_nm`/`length_b_nm` (the default, 400nm = 0.4um) reproduces
+    `_make_two_nmos_layout`'s own geometry exactly (same `w_um`/`l_um` for
+    both devices); a difference between the two produces a divergent
+    `l_um` (and, incidentally, `as_um2`/`ad_um2`/`ps_um`/`pd_um`, since the
+    diffusion pocket length also shifts with the gate) -- exactly the
+    "geometry that was supposed to match diverged" signature this feature
+    detects."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    def build_nmos(x0, gate_label, drain_label, source_label, gate_length_nm):
+        half = gate_length_nm // 2
+        gate_cx = x0 + 1000
+        draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing (active)
+        # Gate poly, centered on the active box, extended above active for
+        # an off-active strap contact -- only its x-width (channel length)
+        # varies with `gate_length_nm`.
+        draw(66, 20, kdb.Box(gate_cx - half, -200, gate_cx + half, 1300))
+        # Source (S) / drain (D) contacts + li1, both within active, well
+        # clear of the gate for any `gate_length_nm` in [300, 1600].
+        draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
+        draw(67, 20, kdb.Box(x0, 200, x0 + 400, 800))  # li1 (S)
+        draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D)
+        draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D)
+        # Gate strap contact, off active, centered on the (possibly shifted)
+        # gate -- inside the poly's x-range for any `gate_length_nm` >= 300.
+        draw(66, 44, kdb.Box(gate_cx - 100, 1000, gate_cx + 100, 1200))
+        draw(67, 20, kdb.Box(gate_cx - 150, 950, gate_cx + 150, 1250))
+        label(67, 5, source_label, x0 + 200, 500)
+        label(67, 5, drain_label, x0 + 1800, 500)
+        label(67, 5, gate_label, gate_cx, 1100)
+
+    build_nmos(0, "AG", "AD", "AS", length_a_nm)
+    build_nmos(6000, "BG", "BD", "BS", length_b_nm)
     return layout
 
 
@@ -10592,3 +10645,278 @@ def test_declared_pins_restricts_spef_ports_on_the_routed_corpus(tmp_path_factor
     # unrestricted extraction writes (measured on this same fixture), so the
     # demotion moves nets out of `*PORTS` without dropping any parasitics.
     assert len(re.findall(r"^\*D_NET ", spef_text, re.M)) == 1392
+
+
+# --------------------------------------------------------------------------- #
+# Matched-device geometry check -- `--matched-group`, issue #1018
+# --------------------------------------------------------------------------- #
+
+
+def test_matched_group_consistent_pair_reports_no_mismatch(tmp_path):
+    """A declared group whose members' extracted geometry actually agrees
+    (both NMOS devices built with the same gate length) reports an empty
+    `mismatched_fields` and no matched-group `warnings` entry -- no false
+    positive on a correctly matched layout (issue #1018's own acceptance
+    criterion)."""
+    layout = _make_two_nmos_layout_with_gate_lengths()
+    path = _write_gds(layout, tmp_path / "matched_ok.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "matched_ok.spice"),
+        matched_device_groups={"mirror_leg": ("$1", "$2")},
+    )
+
+    (group,) = report["matched_device_groups"]
+    assert group["name"] == "mirror_leg"
+    assert group["instances"] == ["$1", "$2"]
+    assert group["unresolved_instances"] == []
+    assert group["mismatched_fields"] == []
+    assert not any("matched-group" in w for w in report["warnings"])
+
+
+def test_matched_group_mismatched_gate_length_is_flagged(tmp_path):
+    """A declared pair whose extracted `l_um` diverges (device `$2`'s gate is
+    drawn twice as long as `$1`'s) is reported in `matched_device_groups[]`
+    and cited by name/field/instance values in `warnings` -- issue #1018's
+    other acceptance criterion (an intentionally mismatched declared pair
+    produces a warning citing the specific instances and field)."""
+    layout = _make_two_nmos_layout_with_gate_lengths(length_a_nm=400, length_b_nm=800)
+    path = _write_gds(layout, tmp_path / "matched_bad.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "matched_bad.spice"),
+        matched_device_groups={"mirror_leg": ("$1", "$2")},
+    )
+
+    (group,) = report["matched_device_groups"]
+    assert group["name"] == "mirror_leg"
+    assert group["unresolved_instances"] == []
+    mismatched_by_field = {
+        entry["field"]: entry["values"] for entry in group["mismatched_fields"]
+    }
+    assert "l_um" in mismatched_by_field
+    assert mismatched_by_field["l_um"] == {"$1": 0.4, "$2": 0.8}
+    # `w_um` was not touched by the fixture -- it must not be reported as a
+    # mismatch alongside the real `l_um` divergence.
+    assert "w_um" not in mismatched_by_field
+
+    matching_warnings = [w for w in report["warnings"] if "mirror_leg" in w]
+    assert len(matching_warnings) == 1
+    warning = matching_warnings[0]
+    assert "l_um" in warning
+    assert "$1" in warning and "$2" in warning
+    assert "0.4" in warning and "0.8" in warning
+
+
+def test_matched_group_unresolved_instance_is_a_warning_not_an_error(tmp_path):
+    """A declared group member naming no extracted device is reported in
+    `unresolved_instances` and `warnings`, not raised as an
+    :class:`ExtractError` -- mirrors `--critical-net`'s own tolerant
+    "declared but absent" convention, since a caller may reuse one group
+    declaration across several layout variants (issue #1018)."""
+    layout = _make_two_nmos_layout_with_gate_lengths()
+    path = _write_gds(layout, tmp_path / "matched_unresolved.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "matched_unresolved.spice"),
+        matched_device_groups={"mirror_leg": ("$1", "$99")},
+    )
+
+    (group,) = report["matched_device_groups"]
+    assert group["unresolved_instances"] == ["$99"]
+    # Only one resolved member -- nothing to compare.
+    assert group["mismatched_fields"] == []
+    assert any("$99" in w and "mirror_leg" in w for w in report["warnings"])
+
+
+def test_matched_group_requires_at_least_two_instances():
+    """A declared group with fewer than two instance names is an
+    :class:`ExtractError` -- there is nothing to compare with just one
+    (issue #1018)."""
+    with pytest.raises(ExtractError, match="at least two"):
+        run_extract(
+            "/nonexistent.gds",
+            "sky130",
+            matched_device_groups={"solo": ("$1",)},
+        )
+
+
+def test_matched_device_groups_empty_when_flag_not_given(tmp_path):
+    """`matched_device_groups` is always present and empty when
+    `--matched-group` was never given -- additive-field, off-by-default
+    contract (issue #1018)."""
+    layout = _make_two_nmos_layout_with_gate_lengths()
+    path = _write_gds(layout, tmp_path / "matched_absent.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "matched_absent.spice"))
+    assert report["matched_device_groups"] == []
+
+
+def test_describe_matched_device_groups_compares_common_params_only():
+    """Unit test for `_describe_matched_device_groups`: only parameters
+    present on *every* resolved member are compared -- a group mixing device
+    classes with disjoint `params` keys reports no mismatched fields, since
+    there is nothing shared to compare (issue #1018)."""
+    devices = [
+        {
+            "name": "$1",
+            "class": "nfet",
+            "nets": {},
+            "params": {"w_um": 1.0, "l_um": 0.4},
+        },
+        {"name": "$2", "class": "res", "nets": {}, "params": {"r_ohm": 500.0}},
+    ]
+    groups, warnings = _describe_matched_device_groups({"mixed": ("$1", "$2")}, devices)
+    (group,) = groups
+    assert group["mismatched_fields"] == []
+    assert warnings == []
+
+
+def test_describe_matched_device_groups_multiple_groups_independent():
+    """Two declared groups are evaluated independently: a mismatch in one
+    does not affect the other's report (issue #1018)."""
+    devices = [
+        {
+            "name": "$1",
+            "class": "nfet",
+            "nets": {},
+            "params": {"w_um": 1.0, "l_um": 0.4},
+        },
+        {
+            "name": "$2",
+            "class": "nfet",
+            "nets": {},
+            "params": {"w_um": 1.0, "l_um": 0.8},
+        },
+        {
+            "name": "$3",
+            "class": "nfet",
+            "nets": {},
+            "params": {"w_um": 2.0, "l_um": 0.4},
+        },
+        {
+            "name": "$4",
+            "class": "nfet",
+            "nets": {},
+            "params": {"w_um": 2.0, "l_um": 0.4},
+        },
+    ]
+    groups, warnings = _describe_matched_device_groups(
+        {"bad_pair": ("$1", "$2"), "good_pair": ("$3", "$4")}, devices
+    )
+    by_name = {g["name"]: g for g in groups}
+    assert by_name["bad_pair"]["mismatched_fields"]
+    assert by_name["good_pair"]["mismatched_fields"] == []
+    assert len(warnings) == 1
+    assert "bad_pair" in warnings[0]
+
+
+def test_cli_matched_group_end_to_end(tmp_path, capsys):
+    """`klt extract --matched-group mirror_leg=$1,$2` end-to-end: parsed by
+    the CLI, forwarded to `run_extract`, and reported in the JSON
+    `matched_device_groups` field plus `warnings` (issue #1018)."""
+    layout = _make_two_nmos_layout_with_gate_lengths(length_a_nm=400, length_b_nm=800)
+    path = _write_gds(layout, tmp_path / "matched_cli.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "matched_cli.spice"),
+            "--matched-group",
+            "mirror_leg=$1,$2",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    (group,) = out["matched_device_groups"]
+    assert group["name"] == "mirror_leg"
+    assert group["instances"] == ["$1", "$2"]
+    fields = {entry["field"] for entry in group["mismatched_fields"]}
+    assert "l_um" in fields
+    assert any("mirror_leg" in w for w in out["warnings"])
+
+
+def test_cli_matched_group_malformed_entry_is_a_clean_error(tmp_path, capsys):
+    """A `--matched-group` entry with no `=` exits 1 with a clean message,
+    not a traceback (issue #1018)."""
+    layout = _make_two_nmos_layout_with_gate_lengths()
+    path = _write_gds(layout, tmp_path / "matched_malformed.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "out.spice"),
+            "--matched-group",
+            "mirror_leg",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "NAME=INST1,INST2" in err["error"]["message"]
+
+
+def test_cli_matched_group_duplicate_name_is_a_clean_error(tmp_path, capsys):
+    """Two `--matched-group` flags declaring the same group name exit 1 with
+    a clean message -- a `dict` cannot represent that ambiguity, so it is
+    caught rather than silently keeping only the last occurrence (issue
+    #1018)."""
+    layout = _make_two_nmos_layout_with_gate_lengths()
+    path = _write_gds(layout, tmp_path / "matched_dup.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "out.spice"),
+            "--matched-group",
+            "mirror_leg=$1,$2",
+            "--matched-group",
+            "mirror_leg=$1,$2",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "mirror_leg" in err["error"]["message"]
+    assert "more than once" in err["error"]["message"]
+
+
+def test_cli_matched_group_single_instance_is_a_clean_error(tmp_path, capsys):
+    """A `--matched-group` entry naming only one instance exits 1 with a
+    clean message -- there is nothing to compare with just one (issue
+    #1018)."""
+    layout = _make_two_nmos_layout_with_gate_lengths()
+    path = _write_gds(layout, tmp_path / "matched_solo.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "out.spice"),
+            "--matched-group",
+            "mirror_leg=$1",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "at least two" in err["error"]["message"]

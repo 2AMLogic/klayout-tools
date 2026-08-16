@@ -1465,6 +1465,112 @@ before this flag existed. `klt lvs` exposes the same control as the
 `layout.declared_pins` request field (a JSON array of net name strings —
 see [`docs/cli/lvs.md`](lvs.md)).
 
+## Matched-device geometry check (`--matched-group`, issue #1018)
+
+Standard analog-layout review practice treats a matched pair's post-layout
+geometry as something that must be **verified, not assumed**: a differential
+pair or current-mirror leg that ends up with unequal `W`/`L` after layout —
+a hand-edit slip, or a mis-parameterized generator call — silently breaks
+the matching assumption the sizing exercise was based on. `--matched-group
+NAME=INST1,INST2[,...]` (repeatable, one group per flag) declares a set of
+device instances (`devices[].name`, e.g. `"$1"`) expected to stay
+geometrically matched, and checks — after extraction — that every parameter
+every resolved member reports in common (`devices[].params`, e.g.
+`w_um`/`l_um` for a MOS pair, `r_ohm` for a matched resistor pair) is
+identical across the whole group:
+
+```
+klt extract mirror.gds --deck sky130 --matched-group mirror_leg=$1,$2 --format json
+```
+
+This is a **self-consistency check within one extracted netlist** — it does
+not require a reference netlist. Comparing extracted geometry *against* a
+golden schematic netlist is `klt lvs`'s job (`options.parameter_tolerance`,
+see [`docs/cli/lvs.md`](lvs.md)); this flag catches the layout
+contradicting *itself*.
+
+- **Instance names, not net names.** A group member names a device
+  (`devices[].name`, KLayout's synthesized `"$<n>"` instance name unless the
+  extraction writer names it otherwise), not a net — run `klt extract`
+  once without `--matched-group` first to read off the instance names to
+  declare.
+- **Only fields present on every resolved member are compared.** The
+  comparison is the intersection of `params` keys across the group's
+  resolved members — a group whose members share a device class compares
+  every parameter that class reports (e.g. both `w_um` and `l_um` for a MOS
+  pair); a group mixing incompatible device classes with no shared `params`
+  key compares nothing and reports no mismatch.
+- **Post-rounding equality, no numeric tolerance.** `devices[].params`
+  values are already rounded to extraction's own precision
+  (`_PARAM_PRECISION_UM` / `_PARAM_PRECISION_OHM`), which already clears
+  floating-point noise — this feature does not introduce a separate
+  tolerance concept.
+- **An unresolved instance name is a warning, not an error.** A declared
+  name matching no extracted device in this layout is reported in
+  `matched_device_groups[].unresolved_instances` and `warnings`, mirroring
+  `--critical-net`'s own tolerant "declared but absent" convention — a
+  caller may legitimately reuse one group declaration across several
+  layout variants.
+- **A mismatch is a warning, not a hard failure.** Some intentional
+  near-matches exist (e.g. a deliberately skewed mirror leg) — a divergent
+  group does not fail the extraction, it is reported in
+  `matched_device_groups[].mismatched_fields` and `warnings`, citing the
+  group name, the mismatched field(s), and every resolved member's value.
+- **A malformed declaration is an error.** A group name given fewer than
+  two instance names, or repeated across two `--matched-group` flags,
+  exits `1` with a clean message rather than silently keeping only the
+  last occurrence or comparing a group of one.
+
+Output, additive:
+
+| Field | Meaning |
+|---|---|
+| `matched_device_groups[].name` | The declared group name. |
+| `matched_device_groups[].instances` | The declared member list, echoed back verbatim (as given, not sorted/deduplicated — matches `parasitics.critical_nets`'s own echo convention). |
+| `matched_device_groups[].unresolved_instances` | The subset of `instances` matching no extracted device, sorted. |
+| `matched_device_groups[].mismatched_fields` | `[{"field": "<param name>", "values": {"<instance name>": <float>, ...}}, ...]` — one entry per parameter that diverges across the group's *resolved* members. Empty when every compared field agrees (which includes fewer than two resolved members — nothing to compare). |
+
+`matched_device_groups` is always present, `[]` when `--matched-group` was
+never given — byte-identical to extraction before this flag existed.
+
+### Worked example
+
+Given a layout with two NMOS devices `$1` and `$2` intended as a
+current-mirror pair, but `$2`'s gate was drawn with twice `$1`'s channel
+length:
+
+```
+$ klt extract mirror.gds --deck sky130 --matched-group mirror_leg=\$1,\$2 --format json
+```
+
+```json
+{
+  "matched_device_groups": [
+    {
+      "name": "mirror_leg",
+      "instances": ["$1", "$2"],
+      "unresolved_instances": [],
+      "mismatched_fields": [
+        {"field": "ad_um2", "values": {"$1": 0.8, "$2": 0.6}},
+        {"field": "as_um2", "values": {"$1": 0.8, "$2": 0.6}},
+        {"field": "l_um", "values": {"$1": 0.4, "$2": 0.8}},
+        {"field": "pd_um", "values": {"$1": 3.6, "$2": 3.2}},
+        {"field": "ps_um", "values": {"$1": 3.6, "$2": 3.2}}
+      ]
+    }
+  ],
+  "warnings": [
+    "matched-group 'mirror_leg' declares $1, $2 as intentionally matched, but their extracted geometry diverges -- ad_um2: $1=0.8, $2=0.6; as_um2: $1=0.8, $2=0.6; l_um: $1=0.4, $2=0.8; pd_um: $1=3.6, $2=3.2; ps_um: $1=3.6, $2=3.2 -- this likely breaks the layout's matching assumption (a hand-edit slip or a mis-parameterized generator call). See docs/cli/extract.md's 'Matched-device geometry check' section."
+  ]
+}
+```
+
+(`l_um` diverges directly from the gate-length difference; `ad_um2`/`as_um2`/`pd_um`/`ps_um` diverge incidentally, since the drain/source diffusion pocket's own area/perimeter shift with the gate — a mismatched-field list is not limited to the one dimension a caller intentionally changed.)
+
+A correctly matched pair (equal `l_um`/`w_um` on both instances) reports the
+same `matched_device_groups[0]` shape with `"mismatched_fields": []` and no
+matching `warnings` entry.
+
 ## PDK resolution
 
 `--pdk`/`--pdk-root` are **optional** and resolved through
@@ -3057,6 +3163,7 @@ exit codes).
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
+| `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `spef_path`        | string \| `null`           | Additive field (issue #948). Resolved path of the written SPEF file when `--spef` was given; `null` otherwise. See "SPEF export".                       |

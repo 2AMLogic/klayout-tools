@@ -1272,6 +1272,7 @@ def run_extract(
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
     mom_rlc_inductance_nh: float | None = None,
+    matched_device_groups: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1527,6 +1528,36 @@ def run_extract(
     ``docs/cli/extract.md``'s ``--mom-rlc-net`` section for the full field
     list.
 
+    ``matched_device_groups`` (``klt extract --matched-group
+    NAME=INST1,INST2[,...]``, repeatable, issue #1018) declares a set of
+    device instances (``devices[].name``, e.g. ``"$1"``) that are expected to
+    stay geometrically matched -- a differential pair, or a current-mirror
+    leg -- and checks, after extraction, that every parameter every member
+    reports in common (``devices[].params``, e.g. ``w_um``/``l_um`` for a MOS
+    pair, ``r_ohm`` for a matched resistor pair) is identical across the
+    whole group. This is a **self-consistency check within one extracted
+    netlist**, not a comparison against a reference netlist (that is ``klt
+    lvs``'s job, via ``options.parameter_tolerance``) -- it catches a
+    hand-edit slip or a mis-parameterized generator call that silently broke
+    a matching assumption the sizing exercise was based on. Values are
+    compared post-rounding (``_PARAM_PRECISION_UM``/``_PARAM_PRECISION_OHM``
+    already clear floating-point noise, so no separate numeric-tolerance
+    concept is needed here). A group name repeated across two
+    ``--matched-group`` flags, or fewer than two instance names in one
+    ``NAME=...`` entry, is an :class:`ExtractError` -- a likely typo, not a
+    meaningful "declare a group of one" request, matching
+    ``--deck-option``'s own "a flag naming something malformed is an error"
+    convention. An instance name that matches no extracted device in this
+    layout is *not* an error -- it is reported per-group in
+    ``matched_device_groups[].unresolved_instances`` and a matching
+    ``warnings`` entry, mirroring ``--critical-net``'s tolerant "declared but
+    absent" convention, since a caller may legitimately reuse a group
+    declaration across several layout variants. ``None``/empty (the default)
+    skips this entirely -- byte-identical to before this feature existed. See
+    :func:`_describe_matched_device_groups` for the exact comparison and
+    ``docs/cli/extract.md``'s "Matched-device geometry check" section for a
+    worked example.
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
     section 2a)::
@@ -1616,6 +1647,17 @@ def run_extract(
                         "right": float, "top": float,
                     },
                     "shapes": int, "area_um2": float,
+                },
+                ...
+            ],
+            "matched_device_groups": [
+                {
+                    "name": str, "instances": [str, ...],
+                    "unresolved_instances": [str, ...],
+                    "mismatched_fields": [
+                        {"field": str, "values": {<instance name>: float, ...}},
+                        ...
+                    ],
                 },
                 ...
             ],
@@ -1877,6 +1919,23 @@ def run_extract(
     ``docs/cli/extract.md``'s "Dead metal" section. Always a list, empty when
     every metal/via shape joins a net.
 
+    ``matched_device_groups`` (issue #1018) is one entry per ``--matched-
+    group`` declaration, in the order given -- see ``matched_device_groups``
+    above ``run_extract``'s own parameter docstring for the full contract.
+    Each entry is ``{"name": <group name>, "instances": [<instance name>,
+    ...], "unresolved_instances": [<instance name>, ...],
+    "mismatched_fields": [{"field": <param name>, "values": {<instance
+    name>: <float>, ...}}, ...]}`` -- ``instances`` echoes the declared
+    member list verbatim (as given, not sorted/deduplicated, matching
+    ``parasitics.critical_nets``'s own echo convention);
+    ``unresolved_instances`` (sorted) is the subset that matched no extracted
+    device; ``mismatched_fields`` is empty when every parameter every
+    *resolved* member reports in common agrees across the whole group (which
+    includes the case of fewer than two resolved members -- nothing to
+    compare). See :func:`_describe_matched_device_groups` for the exact
+    comparison. Always a list, empty when ``matched_device_groups`` (the
+    ``--matched-group`` flag) was never given.
+
     ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
     stack level the deck's ``ExtractionDeck.metals`` declares that has no
     matching entry in the deck's ``ParasiticsDeck.metals`` -- the
@@ -2028,6 +2087,21 @@ def run_extract(
             "net's parasitics at once"
         )
 
+    # `--matched-group` (issue #1018): a declared group needs at least two
+    # instance names -- there is nothing to compare with just one, so this is
+    # a likely typo rather than a meaningful "declare a group of one"
+    # request, matching this module's existing "a flag naming something
+    # malformed is an error, not a silent no-op" convention (e.g.
+    # `--deck-option`'s own KEY=VALUE validation).
+    if matched_device_groups:
+        for group_name, instance_names in matched_device_groups.items():
+            if len(instance_names) < 2:
+                raise ExtractError(
+                    f"--matched-group {group_name!r} names "
+                    f"{len(instance_names)} instance(s) -- a matched group "
+                    "needs at least two instances to compare"
+                )
+
     (
         netlist,
         top_cell_name,
@@ -2113,6 +2187,18 @@ def run_extract(
         nets = _describe_nets(circuit)
     else:
         devices, device_counts, nets = [], {}, []
+
+    # `--matched-group` (issue #1018): a caller-declared set of device
+    # instances expected to stay geometrically matched (a differential pair,
+    # a current-mirror leg) -- see `run_extract`'s own `matched_device_groups`
+    # docstring paragraph and `_describe_matched_device_groups`'s docstring
+    # for the exact comparison. Computed from the already-built `devices[]`
+    # (so it reuses the same rounded `params` values every other consumer of
+    # this response reads), independent of `--parasitics`/`--pdk`.
+    matched_device_groups_report, matched_group_warnings = (
+        _describe_matched_device_groups(matched_device_groups, devices)
+    )
+    warnings.extend(matched_group_warnings)
 
     # Nets whose KLayout-assigned name is a multi-label merge (issue #470):
     # `Net.expanded_name()` joins every distinct label found on one
@@ -2666,6 +2752,11 @@ def run_extract(
         # `LayoutToNetlist` shape database), which also appends its aggregate
         # `warnings[]` entry.
         "dead_metal": dead_metal,
+        # Additive field (issue #1018): always a list, empty unless
+        # `matched_device_groups` (--matched-group) was given -- see
+        # run_extract's docstring and `_describe_matched_device_groups` for
+        # the field's full meaning.
+        "matched_device_groups": matched_device_groups_report,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -7579,6 +7670,115 @@ def _describe_devices(
 
     devices.sort(key=lambda entry: entry["name"])
     return devices, device_counts
+
+
+def _describe_matched_device_groups(
+    matched_device_groups: Mapping[str, Sequence[str]] | None,
+    devices: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build the response's ``matched_device_groups[]`` array and its
+    aggregate ``warnings[]`` entries (issue #1018).
+
+    ``matched_device_groups`` is ``{<group name>: (<instance name>, ...),
+    ...}`` -- ``run_extract``'s own parsed form of ``--matched-group
+    NAME=INST1,INST2[,...]``. ``devices`` is the already-built ``devices[]``
+    array (see :func:`_describe_devices`), so every comparison reads the
+    exact same rounded ``params`` values every other consumer of the response
+    sees -- this is a report on the extracted netlist, not a second,
+    independent measurement.
+
+    For each declared group, every member name is resolved against
+    ``devices[].name`` (a KLayout-synthesized ``"$<n>"`` instance name unless
+    the deck's writer names it otherwise); a name matching no extracted
+    device is collected into that group's ``unresolved_instances`` rather
+    than raising -- a caller may legitimately reuse one group declaration
+    across several layout variants, the same tolerant convention
+    ``--critical-net`` already follows for an unmatched net name. With two or
+    more *resolved* members, every parameter name present in **every**
+    resolved member's ``params`` (the intersection, so a group mixing device
+    classes only compares the fields they actually share) is compared for
+    exact equality across the group -- already-rounded values
+    (``_PARAM_PRECISION_UM``/``_PARAM_PRECISION_OHM``), so no separate
+    numeric-tolerance concept is needed. Fewer than two resolved members
+    (nothing to compare) always reports an empty ``mismatched_fields``.
+
+    Returns ``(matched_device_groups_report, warnings)``: the former is one
+    entry per declared group, in the order given, each ``{"name": <group
+    name>, "instances": [<instance name>, ...], "unresolved_instances":
+    [<instance name>, ...], "mismatched_fields": [{"field": <param name>,
+    "values": {<instance name>: <float>, ...}}, ...]}`` (``instances`` echoes
+    the declaration verbatim, ``unresolved_instances`` sorted); the latter is
+    one aggregate prose ``warnings[]`` entry per group with unresolved
+    members and one per group with mismatched fields (both empty, `[]`
+    overall, when ``matched_device_groups`` is empty/``None``).
+    """
+    if not matched_device_groups:
+        return [], []
+
+    devices_by_name = {device["name"]: device for device in devices}
+    groups: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    for group_name, instance_names in matched_device_groups.items():
+        resolved: list[dict[str, Any]] = []
+        unresolved: list[str] = []
+        for instance_name in instance_names:
+            device = devices_by_name.get(instance_name)
+            if device is None:
+                unresolved.append(instance_name)
+            else:
+                resolved.append(device)
+
+        mismatched_fields: list[dict[str, Any]] = []
+        if len(resolved) >= 2:
+            common_fields = set(resolved[0]["params"])
+            for device in resolved[1:]:
+                common_fields &= set(device["params"])
+            for field in sorted(common_fields):
+                values = {
+                    device["name"]: device["params"][field] for device in resolved
+                }
+                if len(set(values.values())) > 1:
+                    mismatched_fields.append({"field": field, "values": values})
+
+        groups.append(
+            {
+                "name": group_name,
+                "instances": list(instance_names),
+                "unresolved_instances": sorted(unresolved),
+                "mismatched_fields": mismatched_fields,
+            }
+        )
+
+        if unresolved:
+            names_str = ", ".join(repr(name) for name in sorted(unresolved))
+            warnings.append(
+                f"matched-group {group_name!r} names instance(s) {names_str} "
+                "that match no extracted device in this layout -- geometry "
+                "consistency was not checked for them. See "
+                "docs/cli/extract.md's 'Matched-device geometry check' "
+                "section."
+            )
+        if mismatched_fields:
+            fields_str = "; ".join(
+                f"{entry['field']}: "
+                + ", ".join(
+                    f"{name}={value}" for name, value in entry["values"].items()
+                )
+                for entry in mismatched_fields
+            )
+            instances_str = ", ".join(instance_names)
+            warnings.append(
+                f"matched-group {group_name!r} declares {instances_str} as "
+                "intentionally matched, but their extracted geometry "
+                f"diverges -- {fields_str} -- this likely breaks the "
+                "layout's matching assumption (a hand-edit slip or a "
+                "mis-parameterized generator call). See "
+                "docs/cli/extract.md's 'Matched-device geometry check' "
+                "section."
+            )
+
+    return groups, warnings
 
 
 def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:

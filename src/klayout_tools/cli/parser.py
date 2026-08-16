@@ -1127,6 +1127,33 @@ def create_parser() -> argparse.ArgumentParser:
             "abstraction' section."
         ),
     )
+    extract_parser.add_argument(
+        "--matched-group",
+        dest="matched_groups",
+        action="append",
+        default=None,
+        metavar="NAME=INST1,INST2[,...]",
+        help=(
+            "declare a set of device instances (devices[].name, e.g. '$1') "
+            "expected to stay geometrically matched -- a differential pair, "
+            "a current-mirror leg (issue #1018); repeatable, one group per "
+            "flag. After extraction, every parameter every resolved member "
+            "reports in common (e.g. w_um/l_um for a MOS pair, r_ohm for a "
+            "matched resistor pair) is compared for exact equality "
+            "(post-rounding) across the group; a divergence is reported in "
+            "the new matched_device_groups[] field and in warnings, citing "
+            "the group name, the mismatched field, and each member's value. "
+            "This is a self-consistency check within one extraction, not a "
+            "comparison against a reference netlist (that is `klt lvs`'s "
+            "job). An instance name matching no extracted device is not an "
+            "error -- it is reported in matched_device_groups[]."
+            "unresolved_instances and in warnings instead. A group name "
+            "repeated across two --matched-group flags, or fewer than two "
+            "instance names in one entry, is an error. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'Matched-device geometry check' section."
+        ),
+    )
     _add_format_arg(extract_parser)
     extract_parser.set_defaults(func=extract_cmd.run)
 
