@@ -16,6 +16,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-16 — `klt pex` no longer silently swaps the wrong `.include` line,
+  and now names a schematic/extracted pin-list mismatch instead of burying it
+  in a per-corner log (issue #1030). Two fixes to the DUT `.include` swap
+  (`docs/cli/pex.md`'s "The DUT `.include` swap"): (1) a testbench body with
+  **more than one** `.include`/`.inc` directive is now a hard `PexError`
+  naming every matched line and its 1-based line number, raised in the same
+  up-front pass that already rejects a testbench with none — previously
+  `_find_dut_include` returned the *first* match, so a testbench that also
+  includes a PDK's global switch-parameter file (gf180mcu's
+  `design.ngspice`) ahead of its DUT had that file re-pointed at the
+  extracted netlist, left the real schematic DUT in place on both sides, and
+  reported the wrong `reference_netlist`, with no error or warning. (2) When
+  the extracted-side deck is refused by ngspice for a top-level pin-count
+  mismatch (`Too few/many parameters for subcircuit type "<name>"` — the
+  routine outcome whenever a deck's extraction promotes a
+  device-body/substrate-tap net the hand-written schematic subcircuit does
+  not declare), `klt pex` now reports it as a new **additive** top-level
+  `pin_count_mismatch` field (both sides' `.SUBCKT` pin lists and counts,
+  ngspice's own line when a per-corner log was kept, and a `detail`
+  sentence) alongside per-corner `delta[]` rows with a `null`
+  `extracted_value` — exit `4`, a full JSON report — rather than only a
+  generic `status: "error"` whose real cause lived in the per-corner
+  `ngspice.log` artifact. `pin_count_mismatch` is `null` on every run whose
+  extracted side simulated, and the detection only runs when the extracted
+  side produced no measured value at all, so a passing run cannot pick up a
+  false positive. Bridging a genuine interface mismatch (a caller-supplied
+  pin map, a wrapper subcircuit) remains deliberately out of scope. No
+  response-shape break; `schema_version` unaffected.
+
 - 2026-08-14 — `klt drc` no longer reports false-positive `"enclosing"` /
   `"enclosed"` violations when a checked layer is drawn as several abutting
   (touching, non-overlapping) shapes rather than one merged polygon (issue

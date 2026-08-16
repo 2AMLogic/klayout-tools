@@ -33,8 +33,11 @@ from klayout_tools.pex import (
     _build_delta_rows,
     _delta_pct,
     _find_dut_include,
+    _pin_count_mismatch,
+    _pin_count_mismatch_from_report,
     _rewrite_dut_include,
     _row_status,
+    _subckt_interfaces,
     run_pex,
 )
 
@@ -75,6 +78,35 @@ def test_find_dut_include_not_first_line():
     index, path = _find_dut_include(body, "/work")
     assert index == 2
     assert path == "/work/dut.spice"
+
+
+def test_find_dut_include_two_directives_raises(tmp_path):
+    """Issue #1030: a testbench that also `.include`s a PDK switch-parameter
+    file ahead of its DUT used to have that *first* file silently swapped
+    for the extracted netlist (leaving the real DUT in place, and reporting
+    the wrong `reference_netlist`). It is now a hard error naming every
+    matched line."""
+    body = (
+        "* two includes -- which one is the DUT?\n"
+        '.include "design.ngspice"\n'
+        '.include "dut.spice"\n'
+        "Vdd RA 0 DC 1.8\n"
+    )
+    with pytest.raises(PexError) as excinfo:
+        _find_dut_include(body, "/work")
+
+    message = str(excinfo.value)
+    assert "2 `.include`/`.inc` directives" in message
+    # Both matched lines are named, with 1-based line numbers, so a caller
+    # can see exactly which directives were ambiguous.
+    assert 'line 2: `.include "design.ngspice"`' in message
+    assert 'line 3: `.include "dut.spice"`' in message
+
+
+def test_find_dut_include_two_directives_mixed_spellings_raises():
+    body = ".INC params.spice\n.include dut.spice\n"
+    with pytest.raises(PexError, match="2 `.include`/`.inc` directives"):
+        _find_dut_include(body, "/work")
 
 
 def test_find_dut_include_absolute_path_unchanged():
@@ -241,6 +273,161 @@ def test_build_delta_rows_iterates_extracted_corner_order():
 
 
 # --------------------------------------------------------------------------- #
+# Pin-count-mismatch diagnostic (issue #1030)
+# --------------------------------------------------------------------------- #
+
+
+def test_subckt_interfaces_parses_pins_and_ignores_parameters():
+    text = (
+        "* header\n"
+        ".SUBCKT RES RA RB VSUBS w=1 l=2\n"
+        "R1 RA RB 289.2\n"
+        ".ENDS RES\n"
+        ".subckt inv a y params: wn=1\n"
+        ".ends\n"
+    )
+    interfaces = _subckt_interfaces(text)
+    assert interfaces["res"] == ("RES", ["RA", "RB", "VSUBS"])
+    assert interfaces["inv"] == ("inv", ["a", "y"])
+
+
+def test_subckt_interfaces_folds_continuation_lines():
+    text = ".subckt amp inp inn\n+ out vdd vss\nM1 out inp vss vss nfet\n.ends\n"
+    assert _subckt_interfaces(text)["amp"] == (
+        "amp",
+        ["inp", "inn", "out", "vdd", "vss"],
+    )
+
+
+def _write_pair(tmp_path, schematic_pins, extracted_pins):
+    schematic = tmp_path / "schematic_dut.spice"
+    schematic.write_text(
+        f".SUBCKT RES {' '.join(schematic_pins)}\nR1 RA RB 289.2\n.ENDS RES\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        f".SUBCKT RES {' '.join(extracted_pins)}\nR1 RA RB 291.0\n.ENDS RES\n"
+    )
+    return str(schematic), str(extracted)
+
+
+def test_pin_count_mismatch_reports_both_sides(tmp_path):
+    """The real-world shape: extraction promotes a substrate/body-tap net the
+    hand-written schematic subcircuit never declares."""
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["RA", "RB", "VSUBS"])
+
+    mismatch = _pin_count_mismatch(
+        reference_netlist=schematic, extracted_netlist=extracted
+    )
+
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pin_count"] == 2
+    assert mismatch["schematic"]["pins"] == ["RA", "RB"]
+    assert mismatch["schematic"]["netlist"] == schematic
+    assert mismatch["extracted"]["pin_count"] == 3
+    assert mismatch["extracted"]["pins"] == ["RA", "RB", "VSUBS"]
+    assert mismatch["ngspice_message"] is None
+    assert "VSUBS" in mismatch["detail"]
+
+
+def test_pin_count_mismatch_none_when_interfaces_agree(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["RA", "RB"])
+    assert (
+        _pin_count_mismatch(reference_netlist=schematic, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_pin_count_mismatch_case_insensitive_subckt_names(tmp_path):
+    """`klt extract` writes an upper-case `.SUBCKT` header where a
+    hand-written schematic netlist often does not -- ngspice does not care,
+    and neither does this comparison."""
+    schematic = tmp_path / "schematic_dut.spice"
+    schematic.write_text(".subckt res ra rb\nR1 ra rb 289.2\n.ends res\n")
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB VSUBS\nR1 RA RB 291.0\n.ENDS RES\n")
+
+    mismatch = _pin_count_mismatch(
+        reference_netlist=str(schematic), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    assert mismatch["schematic"]["pin_count"] == 2
+    assert mismatch["extracted"]["pin_count"] == 3
+
+
+def _errored_sim_report(log_path=None):
+    return {
+        "corners": [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [_measurement(None, "error")],
+                "artifacts": {"log": log_path},
+            }
+        ]
+    }
+
+
+def test_pin_count_mismatch_from_report_uses_ngspice_log_line(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["RA", "RB", "VSUBS"])
+    log = tmp_path / "ngspice.log"
+    log.write_text(
+        "\nCircuit: * testbench\n\n"
+        'Too few parameters for subcircuit type "res" (instance: xxres)\n'
+        "    Simulation interrupted due to error!\n"
+    )
+
+    mismatch = _pin_count_mismatch_from_report(
+        _errored_sim_report(str(log)),
+        reference_netlist=schematic,
+        extracted_netlist=extracted,
+    )
+
+    assert mismatch is not None
+    assert mismatch["ngspice_message"] == (
+        'Too few parameters for subcircuit type "res" (instance: xxres)'
+    )
+    assert mismatch["extracted"]["pin_count"] == 3
+
+
+def test_pin_count_mismatch_from_report_falls_back_to_headers_without_log(tmp_path):
+    """`options.keep_artifacts` is off by default, so the per-corner log is
+    usually gone by the time the response comes back -- the `.SUBCKT` header
+    comparison still names the mismatch."""
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["RA", "RB", "VSUBS"])
+
+    mismatch = _pin_count_mismatch_from_report(
+        _errored_sim_report(),
+        reference_netlist=schematic,
+        extracted_netlist=extracted,
+    )
+    assert mismatch is not None
+    assert mismatch["ngspice_message"] is None
+
+
+def test_pin_count_mismatch_from_report_none_when_any_value_came_back(tmp_path):
+    """No false positives: a run that measured anything at all cannot have
+    been rejected for a pin-count mismatch, whatever the headers say."""
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["RA", "RB", "VSUBS"])
+    report = {
+        "corners": [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [_measurement(1.0), _measurement(None, "error")],
+                "artifacts": {"log": None},
+            }
+        ]
+    }
+
+    assert (
+        _pin_count_mismatch_from_report(
+            report, reference_netlist=schematic, extracted_netlist=extracted
+        )
+        is None
+    )
+
+
+# --------------------------------------------------------------------------- #
 # `run_pex` error paths that are cheap (no `ngspice`, extraction only)
 # --------------------------------------------------------------------------- #
 
@@ -347,6 +534,148 @@ def test_run_pex_testbench_missing_include_raises(tmp_path, resistor_layout):
         run_pex(resistor_layout, [str(request)], "sky130")
 
 
+def test_run_pex_testbench_two_includes_raises_before_simulating(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #1030: the ambiguity is caught in the same up-front pass that
+    rejects a testbench with no `.include` at all -- before any `klt sim`
+    call, confirmed by making `run_sim` unreachable."""
+    import klayout_tools.pex as pex_module
+
+    def _unreachable_run_sim(*_args, **_kwargs):
+        raise AssertionError("run_sim must not be called for an ambiguous testbench")
+
+    monkeypatch.setattr(pex_module, "run_sim", _unreachable_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    params = tmp_path / "design.ngspice"
+    params.write_text(".param sw_stat_mismatch=0\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{params}"\n'
+        f'.include "{dut}"\n'
+        ".model res_generic_po r\n"
+        "Vdd RA 0 DC 1.8\n"
+        "Xres RA RB RES\n"
+        "Rload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError) as excinfo:
+        run_pex(resistor_layout, [str(request)], "sky130")
+
+    message = str(excinfo.value)
+    assert "2 `.include`/`.inc` directives" in message
+    assert str(params) in message
+    assert str(dut) in message
+
+
+def test_run_pex_pin_count_mismatch_reports_instead_of_aborting(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #1030: an extracted-side failure whose engine output carries
+    ngspice's own pin-count-mismatch text is reported as a named,
+    structured `pin_count_mismatch` block plus per-corner error rows -- not
+    a bare `PexError` wrapping the raw engine string.
+
+    `run_sim` is monkeypatched here (schematic side succeeds, extracted side
+    raises) so the diagnostic path is covered everywhere, including machines
+    without `ngspice`; `test_integration_run_pex_pin_count_mismatch` below
+    proves the same report against a real ngspice run.
+    """
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    schematic_report = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+            {"corner_id": "ss/1.620V/-40C", "measurements": [_measurement(1.3)]},
+        ],
+        "corner_count": 2,
+        "measurements": [{"name": "vout"}],
+    }
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return schematic_report
+        raise SimError(
+            "remote backend failed: ngspice reported:\n"
+            'Too few parameters for subcircuit type "res" (instance: xxres)\n'
+            "    Simulation interrupted due to error!"
+        )
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n'
+        ".model res_generic_po r\n"
+        "Vdd RA 0 DC 1.8\n"
+        "Xres RA RB 0 RES\n"
+        "Rload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    # The whole run still produces a JSON report, per corner.
+    assert report["status"] == "error"
+    assert [row["corner_id"] for row in report["delta"]] == [
+        "tt/1.800V/27C",
+        "ss/1.620V/-40C",
+    ]
+    assert all(row["extracted_value"] is None for row in report["delta"])
+    assert all(row["status"] == "error" for row in report["delta"])
+    assert report["errored"] == 2
+
+    mismatch = report["pin_count_mismatch"]
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pins"] == ["RA", "RB", "VSUB"]
+    assert mismatch["schematic"]["pin_count"] == 3
+    assert mismatch["extracted"]["pin_count"] == 2
+    assert mismatch["ngspice_message"] == (
+        'Too few parameters for subcircuit type "res" (instance: xxres)'
+    )
+
+
+def test_run_pex_unrelated_sim_error_still_aborts(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The new diagnostic is scoped to the pin-count-mismatch text only --
+    every other extracted-side `SimError` aborts with a `PexError`, exactly
+    as before."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "corners": [
+                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+                ],
+                "corner_count": 1,
+                "measurements": [{"name": "vout"}],
+            }
+        raise SimError("model library not found: /nope/sky130.lib.spice")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="extracted-side simulation failed"):
+        run_pex(resistor_layout, [str(request)], "sky130")
+
+
 def test_run_pex_testbench_netlist_not_found_raises(tmp_path, resistor_layout):
     request = tmp_path / "request.json"
     request.write_text(
@@ -446,6 +775,98 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
 
     assert report["provenance"]["deck"]["name"] == "sky130"
     assert report["provenance"]["input"]["content_hash"] is not None
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_pin_count_mismatch(tmp_path, resistor_layout):
+    """Issue #1030, end to end against real `ngspice`: a schematic DUT whose
+    `.SUBCKT` declares one more pin than the extraction's own header (here an
+    unused `VSUB` terminal, standing in for the body/substrate-tap net a
+    real deck's extraction promotes). The schematic side runs fine; the
+    extracted side is refused by ngspice with `Too many parameters for
+    subcircuit type` -- and the report says so by name instead of leaving it
+    in a per-corner `ngspice.log`."""
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n'
+        ".model res_generic_po r\n"
+        "Vdd RA 0 DC 1.8\n"
+        "Xres RA RB 0 RES\n"
+        "Rload RB 0 1000.0\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "error"
+    assert report["errored"] == 1
+    # A per-corner report is still emitted -- the schematic side measured
+    # fine, only the extracted side has no trustworthy value.
+    (row,) = report["delta"]
+    assert row["schematic_value"] == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-3)
+    assert row["extracted_value"] is None
+    assert row["status"] == "error"
+
+    mismatch = report["pin_count_mismatch"]
+    assert mismatch is not None
+    assert mismatch["subcircuit"].upper() == "RES"
+    assert mismatch["schematic"]["pin_count"] == 3
+    assert mismatch["schematic"]["pins"] == ["RA", "RB", "VSUB"]
+    assert mismatch["extracted"]["pin_count"] == 2
+    assert mismatch["extracted"]["netlist"] == report["netlist"]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_pin_count_mismatch_cli(tmp_path, resistor_layout, capsys):
+    """The same run through the CLI: exit code 4 (a delta row errored, not a
+    hard exit-1 abort) and the named diagnostic present in both output
+    formats."""
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n'
+        ".model res_generic_po r\n"
+        "Vdd RA 0 DC 1.8\n"
+        "Xres RA RB 0 RES\n"
+        "Rload RB 0 1000.0\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+    argv = ["pex", str(resistor_layout), str(request), "--deck", "sky130"]
+
+    exit_code = main([*argv, "--format", "json"])
+    assert exit_code == 4
+    payload = json.loads(capsys.readouterr().out)
+    mismatch = payload["pin_count_mismatch"]
+    assert mismatch["schematic"]["pin_count"] == 3
+    assert mismatch["extracted"]["pin_count"] == 2
+
+    exit_code = main(argv)
+    assert exit_code == 4
+    out = capsys.readouterr().out
+    assert "pin_count_mismatch:" in out
+    assert "schematic:" in out
+    assert "pins=3" in out
+    assert "pins=2" in out
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_pin_identical_interfaces_no_mismatch(
+    tmp_path, resistor_layout
+):
+    """Regression guard for the false-positive edge case: a pin-identical
+    schematic/extracted pair still runs to `pass` with `pin_count_mismatch:
+    null`."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "pass"
+    assert report["pin_count_mismatch"] is None
 
 
 @_SKIP_NO_NGSPICE
