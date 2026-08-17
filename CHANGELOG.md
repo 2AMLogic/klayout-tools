@@ -16,6 +16,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-17 — `klt yield` no longer reports a conditional yield as if it were
+  unconditional (issue #1082). An errored sample never entered the yield
+  denominator, so a campaign whose failure mode is *"no measurement"* — an
+  extraction only defined in-regime, a search that reports "no operating point
+  in range", a `.meas` that does not trigger — could report a perfect yield
+  with a high `errored` count sitting next to it, unremarked. Any non-zero
+  `errored` (no threshold to cross) now adds a per-measurement warning naming
+  the errored fraction, stating the estimate is conditional on the `n` samples
+  that produced a value, and giving the whole-draw yield that counting every
+  errored sample as a failure would produce; a matching run-level warning
+  points a reader at it. A measurement where *every* sample errored still
+  fails the `min_samples` floor, but the error now names the errored count
+  instead of reporting the draw as merely small. Additive to the existing
+  `warnings` arrays — **no `schema_version` bump** (still `1`). See
+  `docs/cli/yield.md`'s "Errored samples and conditional yield"; counting
+  errored samples as failures (an `errored_policy`, or a second yield block
+  over the whole draw) remains out of scope and separately tracked.
 - 2026-08-16 — `klt functional-verification`'s `options.sdf` no longer fails
   with `SDF ERROR: ... Could not find intermodpath!`/`Could not find net` on
   a post-route SDF whose `INTERCONNECT` entries touch a bare top-level port
