@@ -153,11 +153,16 @@ guessing. This reference data is never a runtime dependency; nothing in this
 module shells out to, reads, or requires an ORFS checkout.
 
 Deliberately out of scope for this v1 (a core-only block, matching the
-contract's own IO-ring/footprint exclusion): tapcell insertion, power-grid
-generation (PDN), metal fill, and a ``DONT_USE_CELLS``-style cell exclusion
-list -- none of these are part of the request/response contract this phase
-implements, and can be added later as additive request fields without a
-contract-shape change.
+contract's own IO-ring/footprint exclusion): metal fill (density fill, not
+gap-filler cells -- see "Power delivery" below for those) and a
+``DONT_USE_CELLS``-style cell exclusion list -- neither is part of the
+request/response contract this phase implements, and each can be added later
+as an additive request field without a contract-shape change. Tapcell
+insertion and power-grid generation (PDN) were also originally scoped out
+here; see "Power delivery" below for the additive field that closes that gap
+(issue #1091), exactly per this same note's own precedent (the "Hard-macro
+placement" section above closed the identical kind of v1 exclusion for
+macros).
 
 Hard-macro placement (issue #438, Epic #393 Phase 2 Capability A)
 --------------------------------------------------------------------
@@ -366,6 +371,80 @@ than from a synthetic or uniform delay model. The written file is reported as
 own ``options.sdf`` block consumes (see
 ``docs/design/sdf-annotate-feasibility-spike.md`` for the Icarus half's own
 verified invocation recipe).
+
+Power delivery (``request.power``, issue #1091)
+--------------------------------------------------
+
+Before this field existed, this module's generated Tcl never called
+``global_connect``/``pdngen`` and never inserted tapcells or filler cells --
+the routed DEF it wrote had no ``SPECIALNETS`` section at all, every standard
+cell's ``VDD``/``VSS`` LEF pin belonged to no net, and cell rows were
+discontinuous wherever placement left a gap. That is a "signals route"
+result, not a "block is implemented" one -- DRC (well/substrate ties, rail
+continuity), LVS (power nets in the reference netlist), and any real handoff
+all need power delivery first. The optional ``request.power`` block closes
+this gap: net names for the power/ground rails, plus the PDN strap
+layers/pitch/width, drive ``tapcell``/``add_global_connection``/
+``global_connect``/``pdngen`` at the end of the ``"floorplan"`` stage (right
+after ``place_macro``/``make_tracks``, before that stage's own ``write_db``)
+and ``filler_placement``/``global_connect`` at the end of the ``"route"``
+stage (right after the antenna-repair loop, before ``write_def``).
+
+This insertion ordering is not invented -- it mirrors OpenROAD-flow-scripts'
+own stage sequence exactly, confirmed live against real ORFS flow scripts
+fetched 2026-08-17 from ``The-OpenROAD-Project/OpenROAD-flow-scripts``@
+``master``: ``flow/scripts/tapcell.tcl`` runs immediately after
+``macro_place.tcl`` and checkpoints before ``flow/scripts/pdn.tcl``, which
+itself checkpoints right before that flow's own global-placement stage
+begins -- exactly this module's own ``"floorplan"``->``"place"`` checkpoint
+boundary. ``flow/scripts/fillcell.tcl`` likewise runs after
+``detail_route.tcl`` (post antenna-repair), before the flow's own
+``final_connect.tcl`` -- which itself re-runs a plain ``global_connect`` with
+no new ``add_global_connection`` rules, specifically because
+``filler_placement``/``repair_antennas`` can add instances whose PG pins
+still need wiring to the connection rules already registered; this module's
+own ``"route"``-stage ``global_connect`` call after ``filler_placement``
+mirrors that same need.
+
+``tapcell``/``add_global_connection``/``global_connect``/``pdngen``/
+``filler_placement`` are all real, top-level OpenROAD Tcl commands --
+verified live (``openroad -no_init``, ``help <command>``, this repo's own
+sandboxed OpenROAD 26Q3-1278-g4421880472 install, 2026-08-17), not guessed
+from documentation. The per-library masters/pin-patterns/distances/fill-cell
+lists themselves live in :data:`_TAPCELL_CELLS`/:data:`_POWER_PIN_PATTERNS`/
+:data:`_FILLER_CELLS` -- the same "not derivable from the resolved PDK
+install itself" table convention :data:`_CTS_BUFFER_CELLS`/
+:data:`_ROUTING_LAYER_RANGE`/:data:`_ANTENNA_DIODE_CELLS` already established
+(see each table's own docstring for its exact ORFS source citation). A
+``cell_library`` with no entry in any of the three new tables fails with a
+clear error as soon as a ``request.power``-bearing run reaches the stage
+that needs it, exactly like the existing CTS/routing-layer/antenna-diode
+checks.
+
+**Scope deliberately excluded from this v1 of ``request.power``:**
+macro-specific PDN grids (``define_pdn_grid -macro``, with their own
+halo/orientation config) -- a design with hard macros needs a caller-supplied
+macro halo/grid spec this field does not yet expose, so ``pdngen`` here
+builds only the flat standard-cell grid (:func:`_power_delivery_lines`).
+Real per-instance tapcell/filler *placement counts* are also not reported in
+the additive ``power`` response field below (only which cell masters/net
+names this run was configured with) -- OpenROAD reports these only via
+``report_design_area``'s free-text summary or a custom
+``get_cells -filter``/``utl::metric_integer`` combination, neither of which
+this module currently threads through its existing per-stage ``-metrics
+<file>.json`` mechanism; both are natural, separable follow-ups (each would
+need the same "verified live" rigor the rest of this response contract
+carries, not a guess). Neither exclusion changes any existing field's
+behaviour, and both can be added later as additive request/response fields
+without a contract-shape change -- the same precedent every other v1
+exclusion in this module's docstring already follows.
+
+``request.power`` omitted (the default) is byte-for-byte today's exact prior
+behavior: no ``tapcell``/``add_global_connection``/``global_connect``/
+``pdngen``/``filler_placement`` line is emitted anywhere, and the response's
+additive ``power`` field reports that nothing ran -- see
+``docs/cli/place-and-route.md``'s "Power delivery" section for the full
+request/response contract.
 """
 
 from __future__ import annotations
@@ -536,6 +615,108 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
 _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__diode_2", "DIODE"),
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__antenna", "I"),
+}
+
+#: Per-cell-library ``add_global_connection`` pin-pattern rules for the
+#: optional ``request.power`` PDN stage (issue #1091) -- same not-derivable-
+#: from-the-install, verified-not-guessed posture as
+#: :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE`/
+#: :data:`_ANTENNA_DIODE_CELLS` above, but sourced from each platform's own
+#: PDN grid config rather than `config.mk`: `add_global_connection`'s own
+#: `-pin_pattern` alias list (`VDDPE`/`VDDCE`/etc.) is a *platform*
+#: convention describing how real macro/IO-ring instances name their PG
+#: pins, not something derivable from a standard cell's own LEF `PIN ...
+#: USE POWER/GROUND` entries.
+#:
+#: Each tuple is `(net_role, pin_pattern, is_primary)`. `net_role` selects
+#: which of `request.power.power_net`/`.ground_net` the generated
+#: `add_global_connection -net {...}` call names; exactly one entry per role
+#: carries `is_primary=True`, emitting that call's `-power`/`-ground` flag --
+#: the pin `pdngen` treats as that net's primary, connectivity-defining
+#: port, mirroring `add_global_connection`'s own flag semantics (confirmed
+#: live, `openroad -no_init`, `help add_global_connection`, this repo's own
+#: sandboxed OpenROAD 26Q3-1278-g4421880472 install, 2026-08-17). The
+#: pattern list itself is copied verbatim from each platform's own PDN
+#: config, fetched 2026-08-17 from
+#: `The-OpenROAD-Project/OpenROAD-flow-scripts` @ `master`:
+#: - `sky130_fd_sc_hd` -> `platforms/sky130hd/pdn.tcl`
+#: - `gf180mcu_fd_sc_mcu9t5v0` ->
+#:   `platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg`
+_POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
+    "sky130_fd_sc_hd": (
+        ("power", "^VDD$", True),
+        ("power", "^VDDPE$", False),
+        ("power", "^VDDCE$", False),
+        ("power", "VPWR", False),
+        ("power", "VPB", False),
+        ("ground", "^VSS$", True),
+        ("ground", "^VSSE$", False),
+        ("ground", "VGND", False),
+        ("ground", "VNB", False),
+    ),
+    "gf180mcu_fd_sc_mcu9t5v0": (
+        ("power", "^VDD$", True),
+        ("power", "^VDDPE$", False),
+        ("power", "^VDDCE$", False),
+        ("power", "^VDDP$", False),
+        ("power", "^VDDC$", False),
+        ("power", "^VNW$", False),
+        ("ground", "^VSS$", True),
+        ("ground", "^VSSE$", False),
+        ("ground", "^VSSC$", False),
+        ("ground", "^VPW$", False),
+    ),
+}
+
+#: Per-cell-library `tapcell` call arguments for the optional
+#: `request.power` PDN stage (issue #1091). Same posture as the tables
+#: above. Tuple shape: `(tapcell_master, endcap_master_or_None,
+#: distance_um)`. Sourced 2026-08-17 from each platform's own
+#: `tapcell.tcl`, `The-OpenROAD-Project/OpenROAD-flow-scripts` @ `master`:
+#: - `sky130_fd_sc_hd` -> `platforms/sky130hd/tapcell.tcl`: `tapcell
+#:   -distance 14 -tapcell_master $::env(TAP_CELL_NAME)`, where
+#:   `platforms/sky130hd/config.mk` names `TAP_CELL_NAME =
+#:   sky130_fd_sc_hd__tapvpwrvgnd_1`. That platform's own `tapcell.tcl`
+#:   passes no `-endcap_master` at all.
+#: - `gf180mcu_fd_sc_mcu9t5v0` -> `platforms/gf180/openROAD/tapcell.tcl`:
+#:   `tapcell -distance 100 -tapcell_master $::env(TIE_CELL) -endcap_master
+#:   $::env(ENDCAP_CELL)`, where `platforms/gf180/config.mk` names
+#:   `TIE_CELL = gf180mcu_fd_sc_mcu9t5v0__filltie` and `ENDCAP_CELL =
+#:   gf180mcu_fd_sc_mcu9t5v0__endcap` (`TRACK_OPTION ?= 9t`, `POWER_OPTION ?=
+#:   5v0` are that platform's own defaults, matching this supported
+#:   `cell_library` name).
+_TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
+    "sky130_fd_sc_hd": ("sky130_fd_sc_hd__tapvpwrvgnd_1", None, 14),
+    "gf180mcu_fd_sc_mcu9t5v0": (
+        "gf180mcu_fd_sc_mcu9t5v0__filltie",
+        "gf180mcu_fd_sc_mcu9t5v0__endcap",
+        100,
+    ),
+}
+
+#: Per-cell-library filler-cell masters for the optional `request.power`
+#: PDN stage's post-route `filler_placement` call (issue #1091). Same
+#: posture as the tables above; sourced 2026-08-17 from each platform's own
+#: `config.mk` `FILL_CELLS` variable
+#: (`platforms/sky130hd/config.mk`/`platforms/gf180/config.mk`,
+#: `The-OpenROAD-Project/OpenROAD-flow-scripts` @ `master`), in the same
+#: order each platform's own list names.
+_FILLER_CELLS: dict[str, tuple[str, ...]] = {
+    "sky130_fd_sc_hd": (
+        "sky130_fd_sc_hd__fill_1",
+        "sky130_fd_sc_hd__fill_2",
+        "sky130_fd_sc_hd__fill_4",
+        "sky130_fd_sc_hd__fill_8",
+    ),
+    "gf180mcu_fd_sc_mcu9t5v0": (
+        "gf180mcu_fd_sc_mcu9t5v0__fill_64",
+        "gf180mcu_fd_sc_mcu9t5v0__fill_32",
+        "gf180mcu_fd_sc_mcu9t5v0__fill_16",
+        "gf180mcu_fd_sc_mcu9t5v0__fill_8",
+        "gf180mcu_fd_sc_mcu9t5v0__fill_4",
+        "gf180mcu_fd_sc_mcu9t5v0__fill_2",
+        "gf180mcu_fd_sc_mcu9t5v0__fill_1",
+    ),
 }
 
 #: Per-cell-library ``klt extract --deck`` name (issue #948, Epic #700
@@ -746,6 +927,7 @@ def run_place_and_route(
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
+    power = _validate_power(request.get("power"))
     clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
@@ -811,6 +993,33 @@ def run_place_and_route(
             f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
             f"-- cannot reach target_stage '{target_stage}'"
         )
+    # `request.power` (issue #1091): its own PDN/tapcell Tcl always runs at
+    # the end of the "floorplan" stage (the first stage every run reaches),
+    # so these table lookups are unconditional on `stage_index` -- unlike
+    # the CTS/routing-layer/antenna-diode checks above, which only apply
+    # once a run actually reaches the stage that needs them.
+    if power is not None and cell_library not in _POWER_PIN_PATTERNS:
+        raise PlaceAndRouteError(
+            f"no power pin-pattern table known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
+            "-- cannot honor request.power"
+        )
+    if power is not None and cell_library not in _TAPCELL_CELLS:
+        raise PlaceAndRouteError(
+            f"no tapcell master known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}) "
+            "-- cannot honor request.power"
+        )
+    if (
+        power is not None
+        and stage_index >= STAGE_ORDER.index("route")
+        and cell_library not in _FILLER_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no filler-cell masters known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
+            f"-- cannot honor request.power at target_stage '{target_stage}'"
+        )
 
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
     try:
@@ -840,6 +1049,7 @@ def run_place_and_route(
             floorplan=floorplan,
             io_spec=io_spec,
             macros=macros,
+            power=power,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
             cell_library=cell_library,
@@ -963,6 +1173,47 @@ def run_place_and_route(
     else:
         def_path = None
 
+    # Additive field (issue #1091): reports what `request.power` actually
+    # drove, so a caller can tell a signal-only "route" result from a
+    # power-complete one without parsing the DEF for a missing
+    # `SPECIALNETS` section -- see this module's own docstring "Power
+    # delivery" section. `pdn`/`global_connect` are `True` once
+    # `request.power` is present (both run unconditionally together, at the
+    # end of the `"floorplan"` stage -- every run reaches at least that
+    # stage). `tapcell_master`/`endcap_master`/`filler_masters` name the
+    # per-library masters :func:`_power_delivery_lines`/the `"route"` stage's
+    # own `filler_placement` call actually used -- **not** a live placed-
+    # instance count (OpenROAD reports that only via a
+    # `report_design_area`/`get_cells`-style query this module does not yet
+    # thread through its per-stage `-metrics` mechanism; see the module
+    # docstring's own "Scope deliberately excluded" note). `filler_masters`
+    # is `[]` unless this run actually reached the `"route"` stage (the
+    # `"floorplan"`-stage `tapcell`/PDN Tcl always runs first, but
+    # `filler_placement` is a `"route"`-stage-only call).
+    if power is None:
+        power_info: dict[str, Any] = {
+            "pdn": False,
+            "global_connect": False,
+            "power_net": None,
+            "ground_net": None,
+            "tapcell_master": None,
+            "endcap_master": None,
+            "filler_masters": [],
+        }
+    else:
+        tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
+        power_info = {
+            "pdn": True,
+            "global_connect": True,
+            "power_net": power["power_net"],
+            "ground_net": power["ground_net"],
+            "tapcell_master": tap_master,
+            "endcap_master": endcap_master,
+            "filler_masters": (
+                list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
+            ),
+        }
+
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
 
@@ -1029,6 +1280,8 @@ def run_place_and_route(
         # `sdf_path` member (issue #1002) is `null` in turn unless
         # `request.post_route_sdf` was also `true`.
         "spef_sta": spef_sta,
+        # Additive field (issue #1091) -- see the construction comment above.
+        "power": power_info,
         "provenance": provenance,
     }
 
@@ -1119,6 +1372,103 @@ def _validate_io(io_spec: Any) -> dict[str, str] | None:
             "request.io.layer_h/layer_v must both be non-empty strings"
         )
     return {"layer_h": layer_h, "layer_v": layer_v}
+
+
+def _validate_power(power: Any) -> dict[str, Any] | None:
+    """Validate the optional ``request.power`` block (issue #1091) -- power
+    delivery net names and PDN strap geometry, driving ``tapcell``/
+    ``add_global_connection``/``global_connect``/``pdngen``/
+    ``filler_placement`` -- see this module's own docstring "Power delivery"
+    section. ``None`` (the default, field omitted) preserves this module's
+    original v1 behavior byte-for-byte: no power-delivery Tcl is ever
+    emitted, unchanged from before this field existed."""
+    if power is None:
+        return None
+    if not isinstance(power, dict):
+        raise PlaceAndRouteError("request.power must be a JSON object")
+
+    power_net = power.get("power_net", "VDD")
+    if not isinstance(power_net, str) or not power_net:
+        raise PlaceAndRouteError(
+            "request.power.power_net must be a non-empty string when given"
+        )
+    ground_net = power.get("ground_net", "VSS")
+    if not isinstance(ground_net, str) or not ground_net:
+        raise PlaceAndRouteError(
+            "request.power.ground_net must be a non-empty string when given"
+        )
+    if power_net == ground_net:
+        raise PlaceAndRouteError(
+            "request.power.power_net and request.power.ground_net must differ"
+        )
+
+    straps = power.get("straps")
+    if not isinstance(straps, list) or not straps:
+        raise PlaceAndRouteError(
+            "request.power.straps is required and must be a non-empty list"
+        )
+
+    validated_straps: list[dict[str, Any]] = []
+    for i, strap in enumerate(straps):
+        if not isinstance(strap, dict):
+            raise PlaceAndRouteError(f"request.power.straps[{i}] must be an object")
+
+        layer = strap.get("layer")
+        if not isinstance(layer, str) or not layer:
+            raise PlaceAndRouteError(
+                f"request.power.straps[{i}].layer is required and must be a "
+                "non-empty string"
+            )
+
+        width_um = strap.get("width_um")
+        if (
+            not isinstance(width_um, (int, float))
+            or isinstance(width_um, bool)
+            or width_um <= 0
+        ):
+            raise PlaceAndRouteError(
+                f"request.power.straps[{i}].width_um is required and must be a "
+                "positive number"
+            )
+
+        pitch_um = strap.get("pitch_um")
+        if (
+            not isinstance(pitch_um, (int, float))
+            or isinstance(pitch_um, bool)
+            or pitch_um <= 0
+        ):
+            raise PlaceAndRouteError(
+                f"request.power.straps[{i}].pitch_um is required and must be a "
+                "positive number"
+            )
+
+        offset_um = strap.get("offset_um", 0.0)
+        if not isinstance(offset_um, (int, float)) or isinstance(offset_um, bool):
+            raise PlaceAndRouteError(
+                f"request.power.straps[{i}].offset_um must be a number when given"
+            )
+
+        followpins = strap.get("followpins", False)
+        if not isinstance(followpins, bool):
+            raise PlaceAndRouteError(
+                f"request.power.straps[{i}].followpins must be a boolean when given"
+            )
+
+        validated_straps.append(
+            {
+                "layer": layer,
+                "width_um": float(width_um),
+                "pitch_um": float(pitch_um),
+                "offset_um": float(offset_um),
+                "followpins": followpins,
+            }
+        )
+
+    return {
+        "power_net": power_net,
+        "ground_net": ground_net,
+        "straps": validated_straps,
+    }
 
 
 def _validate_macros(
@@ -1738,6 +2088,77 @@ def _antenna_check_lines() -> list[str]:
     ]
 
 
+def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]:
+    """Tcl for the optional ``request.power`` PDN stage (issue #1091):
+    ``tapcell`` well/substrate ties, ``add_global_connection``/
+    ``global_connect`` power-pin wiring, and ``pdngen``'s strap grid -- all
+    real, verified OpenROAD Tcl commands (see this module's own docstring
+    "Power delivery" section, and :data:`_TAPCELL_CELLS`/
+    :data:`_POWER_PIN_PATTERNS`'s own docstrings for the exact source
+    citations). Called once, at the end of the ``"floorplan"`` stage
+    (immediately after ``place_macro``/``make_tracks``, before that stage's
+    own ``write_db``) -- see :func:`_stage_script_lines`'s own ``"floorplan"``
+    branch.
+
+    Builds a single flat standard-cell PDN grid from ``power["straps"]``
+    (already validated/normalized by :func:`_validate_power`): one
+    ``add_pdn_stripe`` per strap, ``add_pdn_connect`` between each
+    consecutive pair (in the order the request lists them -- matching every
+    real ORFS platform's own pdn config, whose stripes are always listed
+    bottom-to-top with each pair connected to its immediate neighbor only),
+    and a ``define_pdn_grid -pins`` naming the *last* (topmost) strap's own
+    layer -- the layer a block-level caller's own P/G pins land on.
+    Macro-specific PDN grids (``define_pdn_grid -macro``) are deliberately
+    out of scope for this v1 -- see the module docstring.
+    """
+    power_net = power["power_net"]
+    ground_net = power["ground_net"]
+
+    tap_master, endcap_master, distance_um = _TAPCELL_CELLS[cell_library]
+    tapcell_call = f"tapcell -distance {distance_um} -tapcell_master {tap_master}"
+    if endcap_master is not None:
+        tapcell_call += f" -endcap_master {endcap_master}"
+    lines = [tapcell_call]
+
+    for net_role, pin_pattern, is_primary in _POWER_PIN_PATTERNS[cell_library]:
+        net = power_net if net_role == "power" else ground_net
+        flag = ""
+        if is_primary:
+            flag = " -power" if net_role == "power" else " -ground"
+        lines.append(
+            f"add_global_connection -net {{{net}}} -inst_pattern {{.*}} "
+            f"-pin_pattern {{{pin_pattern}}}{flag}"
+        )
+    lines.append("global_connect")
+    lines.append(
+        f"set_voltage_domain -name {{CORE}} -power {{{power_net}}} "
+        f"-ground {{{ground_net}}}"
+    )
+
+    straps = power["straps"]
+    top_layer = straps[-1]["layer"]
+    lines.append(
+        f"define_pdn_grid -name {{grid}} -voltage_domains {{CORE}} "
+        f"-pins {{{top_layer}}}"
+    )
+    for strap in straps:
+        stripe_call = (
+            f"add_pdn_stripe -grid {{grid}} -layer {{{strap['layer']}}} "
+            f"-width {{{strap['width_um']}}} -pitch {{{strap['pitch_um']}}} "
+            f"-offset {{{strap['offset_um']}}}"
+        )
+        if strap["followpins"]:
+            stripe_call += " -followpins"
+        lines.append(stripe_call)
+    for lower, upper in zip(straps, straps[1:], strict=False):
+        lines.append(
+            f"add_pdn_connect -grid {{grid}} "
+            f"-layers {{{lower['layer']} {upper['layer']}}}"
+        )
+    lines.append("pdngen")
+    return lines
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -1751,6 +2172,7 @@ def _stage_script_lines(
     floorplan: dict[str, Any],
     io_spec: dict[str, str] | None,
     macros: list[dict[str, Any]],
+    power: dict[str, Any] | None,
     clock_port: str | None,
     clock_period_ns: float | None,
     cell_library: str,
@@ -1793,6 +2215,13 @@ def _stage_script_lines(
             for macro in macros
         ]
         lines += ["make_tracks"]
+        # `request.power` (issue #1091): tapcell + PDN Tcl, right after
+        # `place_macro`/`make_tracks` and before this stage's own
+        # `write_db` -- the same insertion point OpenROAD-flow-scripts
+        # itself uses (see this module's own docstring "Power delivery"
+        # section for the live-verified citation).
+        if power is not None:
+            lines += _power_delivery_lines(power, cell_library)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {checkpoint_out}"]
         return lines
@@ -1904,6 +2333,24 @@ def _stage_script_lines(
                 detailed_route_call,
             ]
         lines += _antenna_check_lines()
+        # `request.power` (issue #1091): gap-filler cell insertion, right
+        # after the antenna-repair loop above (mirroring ORFS's own
+        # `flow/scripts/fillcell.tcl`, which likewise runs immediately
+        # after detailed routing/antenna repair) and before this stage's
+        # own final `write_def` -- closing every row gap `repair_antennas`'s
+        # own diode insertions (or ordinary placement) may have left. The
+        # `global_connect` re-run right after it wires the new filler
+        # instances' own PG pins to the connection rules
+        # `_power_delivery_lines` already registered during the
+        # `"floorplan"` stage -- mirroring ORFS's own
+        # `flow/scripts/final_connect.tcl`, whose own comment states
+        # exactly why: "Ensure all OR created (rsz/cts) instances are
+        # connected". Fillers carry no signal nets, so this insertion point
+        # (before the parasitics re-estimate below) does not affect any
+        # signal-net RC.
+        if power is not None:
+            filler_masters = " ".join(_FILLER_CELLS[cell_library])
+            lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
     lines += _metrics_report_lines(
@@ -1950,12 +2397,24 @@ def _stage_script_lines(
         #   synthesize`'s netlist (which likewise carries no VPWR/VGND
         #   connections -- power comes from the LEF/DEF grid, not the
         #   netlist). That diff is the issue's own motivating workflow.
-        # - `-remove_cells [find_physical_only_masters]`: ORFS strips
-        #   fill/tap/endcap cells there, but this flow never inserts any
-        #   (no `filler_placement`, no `tapcell` -- see the stage branches
-        #   above), so the flag would be a no-op that only risks dropping a
-        #   real cell. Antenna diodes (`repair_antennas`) are genuine
-        #   instances present in the routed GDS and are kept.
+        # - `-remove_cells <cells>`: `null` (omitted) unless `request.power`
+        #   is set -- this flow never inserts tap/endcap/filler cells
+        #   otherwise, so the flag would be a no-op that only risks dropping
+        #   a real cell. When `request.power` *is* set, this stage's own
+        #   `tapcell`/`filler_placement` calls above insert real physical-
+        #   only instances that would otherwise widen the divergence from
+        #   `klt synthesize`'s own netlist (which never contains them) --
+        #   ORFS's own `flow/scripts/final_outputs.tcl` strips the
+        #   equivalent set via `-remove_cells [find_physical_only_masters]`,
+        #   but that proc is defined only inside ORFS's own utility scripts,
+        #   never sourced by this module (see this module's own docstring:
+        #   "nothing in this module shells out to, reads, or requires an
+        #   ORFS checkout"). This module instead passes the same master
+        #   names its own `_TAPCELL_CELLS`/`_FILLER_CELLS` tables already
+        #   name explicitly -- a literal, deterministic list rather than a
+        #   dependency on an external proc. Antenna diodes
+        #   (`repair_antennas`) are genuine logical instances (not
+        #   physical-only) and are always kept, `request.power` or not.
         # - `-sort`: OpenROAD warns it is ignored (`utl::warn STA 2065`).
         #
         # Written only at `"route"`, not at `"cts"` (issue #996's own open
@@ -1968,7 +2427,16 @@ def _stage_script_lines(
         # physical artifact to pair with. `verilog_path` therefore follows
         # `def_path`/`gds_path` exactly: populated at `"route"`, `null`
         # before it.
-        lines += [f"write_def {def_path}", f"write_verilog {verilog_path}"]
+        write_verilog_call = f"write_verilog {verilog_path}"
+        if power is not None:
+            tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
+            physical_only_masters = [tap_master]
+            if endcap_master is not None:
+                physical_only_masters.append(endcap_master)
+            physical_only_masters += list(_FILLER_CELLS[cell_library])
+            removed = " ".join(physical_only_masters)
+            write_verilog_call += f" -remove_cells {{{removed}}}"
+        lines += [f"write_def {def_path}", write_verilog_call]
     elif stage == "place":
         # A placement-only DEF, written as a side artifact (never referenced
         # by `run_place_and_route`'s own return value) alongside the

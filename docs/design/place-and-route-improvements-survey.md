@@ -80,10 +80,10 @@ real in-process logic this command owns, ported from ORFS's
 
 | Stage | OpenROAD calls this command issues | Notably *not* issued |
 | --- | --- | --- |
-| `floorplan` | `read_liberty`, `read_lef` (tech+cell+macro), `read_verilog`, `link_design`, `create_clock`, `initialize_floorplan`, `place_macro -exact` per hard macro, `make_tracks` | tapcell insertion, PDN generation (documented out of scope, `docs/cli/place-and-route.md` "Out of scope") |
+| `floorplan` | `read_liberty`, `read_lef` (tech+cell+macro), `read_verilog`, `link_design`, `create_clock`, `initialize_floorplan`, `place_macro -exact` per hard macro, `make_tracks`, and — **only when `request.power` is given** (issue #1091) — `tapcell`, `add_global_connection`/`global_connect`, `pdngen` | tapcell insertion/PDN generation are `request.power`-gated, not unconditional; macro-specific PDN grids remain out of scope (`docs/cli/place-and-route.md` "Power delivery"/"Out of scope") |
 | `place` | `place_pins`, `set_wire_rc`, **`global_placement -density 0.6 -random_seed <seed>`** (`_GLOBAL_PLACEMENT_DENSITY`, `place_and_route.py:319-323`, a fixed constant — not a request field), `estimate_parasitics -placement`, `repair_design`, `repair_timing`, `detailed_placement` | `global_placement -timing_driven`, `global_placement -routability_driven` — neither flag is passed (`place_and_route.py:1216-1228`) |
 | `cts` | `set_wire_rc`, `estimate_parasitics`, `clock_tree_synthesis -root_buf <buf> -buf_list <buf>`, `estimate_parasitics`, `detailed_placement` | **no `repair_timing -hold`** anywhere in the `cts` stage or afterward — the only post-CTS optimization is a repeated `detailed_placement` (`place_and_route.py:1229-1238`) |
-| `route` | `set_routing_layers -signal <range>`, `global_route`, `detailed_route -output_drc ... -output_maze ... -or_seed <seed>`, `estimate_parasitics -global_routing`, `write_def` | **no `repair_antenna`** after `detailed_route` (`place_and_route.py:1239-1258`); no `-repair_pdn`/fill/`DONT_USE_CELLS`, all documented out of scope |
+| `route` | `set_routing_layers -signal <range>`, `global_route`, `detailed_route -output_drc ... -output_maze ... -or_seed <seed>`, `estimate_parasitics -global_routing`, `write_def`, and — **only when `request.power` is given** (issue #1091) — `filler_placement`/`global_connect` right after the antenna-repair loop | **no `repair_antenna`** after `detailed_route` (`place_and_route.py:1239-1258`); metal density fill and `DONT_USE_CELLS` remain documented out of scope; filler-cell (gap) insertion is `request.power`-gated, not unconditional |
 
 Metrics are pulled from OpenROAD's own `-metrics <file>.json` channel plus a
 documented stdout-scrape fallback for violation *counts*
@@ -92,12 +92,16 @@ recommendation the #397 survey's §6 flagged as worth confirming
 (**[REPO-RUN]**, since verified true and shipped).
 
 **Where it deliberately stops** (`docs/cli/place-and-route.md` "Out of
-scope", confirmed unchanged): tapcell insertion, power-grid generation
-(PDN), metal fill, `DONT_USE_CELLS`-style cell exclusion, IO-ring/footprint
-floorplanning, and a second P&R engine. Hard-macro placement is explicitly
-**caller-fixed** (`place_macro ... -exact`, never OpenROAD's automatic
-`rtl_macro_placer`) — a deliberate design decision (issue #438), not a gap;
-this survey does not propose touching it.
+scope", updated for issue #1091): metal fill, `DONT_USE_CELLS`-style cell
+exclusion, macro-specific PDN grids, IO-ring/footprint floorplanning, and a
+second P&R engine. Tapcell insertion and power-grid generation (PDN) were
+in this list too when this survey was written; issue #1091 closed that gap
+via the optional `request.power` field (see `docs/cli/place-and-route.md`
+"Power delivery") — omitted, the prior unconditional-exclusion behavior is
+unchanged. Hard-macro placement is explicitly **caller-fixed** (`place_macro
+... -exact`, never OpenROAD's automatic `rtl_macro_placer`) — a deliberate
+design decision (issue #438), not a gap; this survey does not propose
+touching it.
 
 **The net baseline characterization:** every metric this command reports
 today (`wirelength_um`, `worst_slack_ns`, `setup_violation_count`,

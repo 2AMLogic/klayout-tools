@@ -604,6 +604,85 @@ def test_run_unknown_cell_library_rejects_route_stage_missing_antenna_diode_cell
         run_place_and_route(request_path)
 
 
+def test_run_power_requested_for_unknown_cell_library_rejects_at_floorplan(
+    tmp_path, monkeypatch
+):
+    """`request.power` on a `cell_library` with no `_POWER_PIN_PATTERNS`
+    entry fails clearly -- and, unlike the CTS/routing-layer/antenna-diode
+    checks above, unconditionally (issue #1091's own PDN Tcl always runs at
+    the end of the `"floorplan"` stage, the first stage every run reaches),
+    never a silent guess."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_fd_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": "acme_fd_sc_hd", "corner": "tt_025C_1v80"},
+            target_stage="floorplan",
+            constraints=None,
+            io=None,
+            power={"straps": _BASE_STRAPS},
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match="no power pin-pattern table known for standard-cell library "
+        "'acme_fd_sc_hd'",
+    ):
+        run_place_and_route(request_path)
+
+
+def test_run_power_requested_at_route_stage_for_unknown_filler_cell_library(
+    tmp_path, monkeypatch
+):
+    """A `cell_library` with power pin-pattern and tapcell entries but no
+    `_FILLER_CELLS` entry still fails clearly once a `request.power` run
+    reaches the `"route"` stage (never a silent guess) -- `target_stage:
+    "place"` on the same fake library is unaffected, since
+    `filler_placement` is a `"route"`-stage-only call."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    monkeypatch.setitem(
+        place_and_route._CTS_BUFFER_CELLS, "acme_fd_sc_hd", "acme_fd_sc_hd__buf_4"
+    )
+    monkeypatch.setitem(
+        place_and_route._ROUTING_LAYER_RANGE, "acme_fd_sc_hd", "met1-met5"
+    )
+    monkeypatch.setitem(
+        place_and_route._ANTENNA_DIODE_CELLS,
+        "acme_fd_sc_hd",
+        ("acme_fd_sc_hd__diode_1", "DIODE"),
+    )
+    monkeypatch.setitem(
+        place_and_route._POWER_PIN_PATTERNS,
+        "acme_fd_sc_hd",
+        place_and_route._POWER_PIN_PATTERNS["sky130_fd_sc_hd"],
+    )
+    monkeypatch.setitem(
+        place_and_route._TAPCELL_CELLS,
+        "acme_fd_sc_hd",
+        ("acme_fd_sc_hd__tap_1", None, 14),
+    )
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_fd_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": "acme_fd_sc_hd", "corner": "tt_025C_1v80"},
+            power={"straps": _BASE_STRAPS},
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match="no filler-cell masters known for standard-cell library 'acme_fd_sc_hd'",
+    ):
+        run_place_and_route(request_path)
+
+
 # --------------------------------------------------------------------------- #
 # `request.macros` validation (issue #438, Epic #393 Phase 2 Capability A)
 # --------------------------------------------------------------------------- #
@@ -729,6 +808,135 @@ def test_duplicate_macro_instance_names_rejected(tmp_path):
             ],
             str(tmp_path),
         )
+
+
+# --------------------------------------------------------------------------- #
+# `request.power` validation (issue #1091) -- see `_validate_power`.
+# --------------------------------------------------------------------------- #
+
+_BASE_STRAPS = [
+    {"layer": "met1", "width_um": 0.48, "pitch_um": 5.44, "followpins": True},
+    {"layer": "met4", "width_um": 1.6, "pitch_um": 27.14, "offset_um": 13.57},
+    {"layer": "met5", "width_um": 1.6, "pitch_um": 27.2, "offset_um": 13.6},
+]
+
+
+def test_power_field_absent_validates_to_none():
+    assert place_and_route._validate_power(None) is None
+
+
+def test_power_must_be_an_object():
+    with pytest.raises(PlaceAndRouteError, match="request.power must be a JSON object"):
+        place_and_route._validate_power("not an object")
+
+
+def test_power_straps_required():
+    with pytest.raises(PlaceAndRouteError, match="request.power.straps is required"):
+        place_and_route._validate_power({})
+
+
+def test_power_straps_must_be_a_non_empty_list():
+    with pytest.raises(PlaceAndRouteError, match="request.power.straps is required"):
+        place_and_route._validate_power({"straps": []})
+
+
+def test_power_strap_entry_must_be_an_object():
+    with pytest.raises(
+        PlaceAndRouteError, match=r"request\.power\.straps\[0\] must be an object"
+    ):
+        place_and_route._validate_power({"straps": ["not an object"]})
+
+
+def test_power_strap_layer_required():
+    with pytest.raises(PlaceAndRouteError, match="layer is required"):
+        place_and_route._validate_power(
+            {"straps": [{"width_um": 1.0, "pitch_um": 5.0}]}
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1.0, "1.0", None, True])
+def test_power_strap_width_um_must_be_a_positive_number(value):
+    with pytest.raises(PlaceAndRouteError, match="width_um is required"):
+        place_and_route._validate_power(
+            {"straps": [{"layer": "met1", "width_um": value, "pitch_um": 5.0}]}
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1.0, "5.0", None, True])
+def test_power_strap_pitch_um_must_be_a_positive_number(value):
+    with pytest.raises(PlaceAndRouteError, match="pitch_um is required"):
+        place_and_route._validate_power(
+            {"straps": [{"layer": "met1", "width_um": 1.0, "pitch_um": value}]}
+        )
+
+
+def test_power_strap_offset_um_must_be_a_number_when_given():
+    with pytest.raises(PlaceAndRouteError, match="offset_um must be a number"):
+        place_and_route._validate_power(
+            {
+                "straps": [
+                    {
+                        "layer": "met1",
+                        "width_um": 1.0,
+                        "pitch_um": 5.0,
+                        "offset_um": "0",
+                    }
+                ]
+            }
+        )
+
+
+def test_power_strap_followpins_must_be_a_boolean_when_given():
+    with pytest.raises(PlaceAndRouteError, match="followpins must be a boolean"):
+        place_and_route._validate_power(
+            {
+                "straps": [
+                    {
+                        "layer": "met1",
+                        "width_um": 1.0,
+                        "pitch_um": 5.0,
+                        "followpins": "yes",
+                    }
+                ]
+            }
+        )
+
+
+def test_power_net_and_ground_net_must_differ():
+    with pytest.raises(PlaceAndRouteError, match="must differ"):
+        place_and_route._validate_power(
+            {
+                "power_net": "VDD",
+                "ground_net": "VDD",
+                "straps": _BASE_STRAPS,
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["power_net", "ground_net"])
+def test_power_net_fields_must_be_non_empty_strings_when_given(field):
+    with pytest.raises(PlaceAndRouteError, match=f"{field} must be a non-empty string"):
+        place_and_route._validate_power({field: "", "straps": _BASE_STRAPS})
+
+
+def test_power_net_fields_default_to_vdd_vss():
+    validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
+    assert validated["power_net"] == "VDD"
+    assert validated["ground_net"] == "VSS"
+
+
+def test_power_normalizes_strap_numbers_and_defaults():
+    validated = place_and_route._validate_power(
+        {"straps": [{"layer": "met1", "width_um": 1, "pitch_um": 5}]}
+    )
+    strap = validated["straps"][0]
+    assert strap == {
+        "layer": "met1",
+        "width_um": 1.0,
+        "pitch_um": 5.0,
+        "offset_um": 0.0,
+        "followpins": False,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1291,6 +1499,158 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["klt_version"]
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+
+    # Issue #1091: `request.power` omitted (the default here) preserves
+    # today's exact prior behavior -- no PDN/global-connect/tapcell/filler
+    # Tcl ever emitted, and the additive `power` field says so plainly.
+    assert report["power"] == {
+        "pdn": False,
+        "global_connect": False,
+        "power_net": None,
+        "ground_net": None,
+        "tapcell_master": None,
+        "endcap_master": None,
+        "filler_masters": [],
+    }
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    floorplan_lines = _script_lines(floorplan_script)
+    assert not any(
+        line.startswith(("tapcell", "add_global_connection", "pdngen"))
+        for line in floorplan_lines
+    )
+    route_script = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_route.tcl"
+    )
+    route_lines = _script_lines(route_script)
+    assert not any(line.startswith("filler_placement") for line in route_lines)
+
+
+def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
+    tmp_path, monkeypatch
+):
+    """Issue #1091: `request.power` drives real `tapcell`/
+    `add_global_connection`/`global_connect`/`pdngen` Tcl at the end of the
+    `"floorplan"` stage (right after `place_macro`/`make_tracks`, before
+    that stage's own `write_db`), and `filler_placement`/`global_connect`
+    at the end of the `"route"` stage (right after the antenna-repair loop,
+    before `write_def`) -- see `_power_delivery_lines`/the module docstring
+    "Power delivery" section for the exact insertion points."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={
+            "power_net": "VDD",
+            "ground_net": "VSS",
+            "straps": _BASE_STRAPS,
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["power"] == {
+        "pdn": True,
+        "global_connect": True,
+        "power_net": "VDD",
+        "ground_net": "VSS",
+        "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "endcap_master": None,
+        "filler_masters": [
+            "sky130_fd_sc_hd__fill_1",
+            "sky130_fd_sc_hd__fill_2",
+            "sky130_fd_sc_hd__fill_4",
+            "sky130_fd_sc_hd__fill_8",
+        ],
+    }
+
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    floorplan_lines = _script_lines(floorplan_script)
+    # `tapcell` -- well/substrate ties, before the PDN grid Tcl.
+    assert (
+        "tapcell -distance 14 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+        in floorplan_lines
+    )
+    # `add_global_connection` -- one call per `_POWER_PIN_PATTERNS` entry,
+    # with the primary VDD/VSS pair carrying the `-power`/`-ground` flag.
+    assert (
+        "add_global_connection -net {VDD} -inst_pattern {.*} "
+        "-pin_pattern {^VDD$} -power" in floorplan_lines
+    )
+    assert (
+        "add_global_connection -net {VDD} -inst_pattern {.*} "
+        "-pin_pattern {VPB}" in floorplan_lines
+    )
+    assert (
+        "add_global_connection -net {VSS} -inst_pattern {.*} "
+        "-pin_pattern {^VSS$} -ground" in floorplan_lines
+    )
+    assert floorplan_lines.count("global_connect") == 1
+    assert (
+        "set_voltage_domain -name {CORE} -power {VDD} -ground {VSS}" in floorplan_lines
+    )
+    assert (
+        "define_pdn_grid -name {grid} -voltage_domains {CORE} -pins {met5}"
+        in floorplan_lines
+    )
+    assert (
+        "add_pdn_stripe -grid {grid} -layer {met1} -width {0.48} "
+        "-pitch {5.44} -offset {0.0} -followpins" in floorplan_lines
+    )
+    assert (
+        "add_pdn_stripe -grid {grid} -layer {met4} -width {1.6} "
+        "-pitch {27.14} -offset {13.57}" in floorplan_lines
+    )
+    assert "add_pdn_connect -grid {grid} -layers {met1 met4}" in floorplan_lines
+    assert "add_pdn_connect -grid {grid} -layers {met4 met5}" in floorplan_lines
+    assert "pdngen" in floorplan_lines
+    # PDN Tcl must come after `make_tracks` and before `write_db` -- the
+    # same "end of floorplan stage" insertion point OpenROAD-flow-scripts
+    # itself uses.
+    assert floorplan_lines.index("make_tracks") < floorplan_lines.index(
+        "tapcell -distance 14 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    )
+    floorplan_write_db_index = next(
+        i for i, line in enumerate(floorplan_lines) if line.startswith("write_db ")
+    )
+    assert floorplan_lines.index("pdngen") < floorplan_write_db_index
+
+    route_script = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_route.tcl"
+    )
+    route_lines = _script_lines(route_script)
+    assert (
+        "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
+        "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}" in route_lines
+    )
+    assert route_lines.count("global_connect") == 1
+    filler_index = route_lines.index(
+        "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
+        "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
+    )
+    write_def_index = next(
+        i for i, line in enumerate(route_lines) if line.startswith("write_def ")
+    )
+    assert filler_index < write_def_index
+    # `write_verilog` strips the same physical-only masters via
+    # `-remove_cells`, keeping the as-built netlist diffable against `klt
+    # synthesize`'s own netlist (which never contains tap/fill cells).
+    write_verilog_line = next(
+        line for line in route_lines if line.startswith("write_verilog ")
+    )
+    assert "-remove_cells {sky130_fd_sc_hd__tapvpwrvgnd_1" in write_verilog_line
+    assert "sky130_fd_sc_hd__fill_1" in write_verilog_line
 
 
 def test_stubbed_full_route_reports_nonzero_antenna_violation_count(
