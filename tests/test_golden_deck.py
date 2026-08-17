@@ -1,7 +1,8 @@
 """Golden-pair manifest tests (issue #747), piloting
 `docs/design/deck-compiler-proposal.md` §5/§6 on `sky130.py`'s/`gf180mcu.py`'s
 width/space `DrcRule` entries. Issue #904 (Epic #711 Phase 3a) widens
-gf180mcu's own coverage to its full 42-rule DRC deck (also `enclosing`/
+gf180mcu's own coverage to its full DRC deck (44 rules as of issue #1110;
+42 when #904 landed) (also `enclosing`/
 `separation`) -- see `generate_golden_deck.py`'s `ALLOWED_CHECKS` and its own
 module docstring for why sky130's scope is deliberately left at width/space.
 

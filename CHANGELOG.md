@@ -16,6 +16,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-17 — `klt drc --deck gf180mcu` now enforces the **5V/6V (`_MV`)
+  thresholds** on `Comp` geometry drawn inside `Dualgate` (55/0) instead of
+  checking every `Comp` shape against the 3.3V (`_LV`) column (issue #1110,
+  closing the DRC half of #552). `DF.1a` and `DF.3a` ship as rule *pairs*:
+  `comp.width.1` (0.22 um) / `comp.width.mv.1` (0.30 um) and
+  `comp.space.1` (0.28 um) / `comp.space.mv.1` (0.36 um), each half scoped
+  to whole `Comp` polygons that do/do not touch `Dualgate` — the PDK's own
+  `comp_3p3v`/`comp_56v` derivation, transcribed from
+  `rule_decks/comp.drc`. #552's reproducer (a 0.25 um `Comp` stripe fully
+  inside `Dualgate`) now reports a `comp.width.mv.1` violation instead of
+  `status: "clean"`. Geometry outside `Dualgate`, and every layout that
+  draws no `Dualgate` at all, is checked exactly as before. **New JSON
+  values, not new fields**: two new `rule_counts`/`violations[].rule` ids
+  (`comp.width.mv.1`, `comp.space.mv.1`), `55/0` now appears in
+  `coverage.deck_layers`/`layers_checked` (and no longer in
+  `layers_in_stream_without_rules`) for gf180mcu, and
+  `coverage.voltage_domain_warnings`'s gate is now per rule — it no longer
+  fires for geometry the two split pairs checked, still fires for every
+  rule that ignores the marker, and its `Dualgate` description was rewritten
+  to name what remains unmodelled. Deck-internal: `DerivedLayer` gains a
+  `mode` field (`"sized_intersection"`, the previous and default behavior,
+  plus `"overlapping"`/`"not_interacting"`).
+
 - 2026-08-17 — `klt lvs` can now compare a `klt extract`-derived (always
   flat) layout netlist against a **hierarchical** reference netlist — one
   leaf `.subckt` plus N instance calls of it, the shape a macro built by

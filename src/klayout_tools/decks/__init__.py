@@ -37,7 +37,9 @@ class DerivedLayer:
     "``Metal4`` must enclose every ``Via4`` by the MiM margin" check has
     nothing to do with routing vias at all.
 
-    The derived region is
+    ``mode`` selects *which* derivation is applied (see the three values
+    below). The default, ``"sized_intersection"``, is the original
+    (issue #345) one:
     ``intersect_with_region.interacting(base_region) & base_region.sized(sized_by_um)``
     -- i.e. only shapes of ``intersect_with`` that already touch the *unsized*
     ``base`` region somewhere, clipped to ``base``'s oversized outline. This
@@ -63,11 +65,58 @@ class DerivedLayer:
     ``mim.enclosing.fusetop.1`` both report ``"Metal4"``, so
     ``mim.enclosing.via4.1``'s ``DrcRule.layer`` does too, even though its
     ``base`` is ``FuseTop``).
+
+    **Marker-scoped modes (issue #1110).** A second, different need the
+    ``"sized_intersection"`` derivation above cannot express: a DRM rule
+    whose threshold *depends on whether the geometry is marked*, published
+    as a pair of columns rather than one number -- gf180mcu's ``DF.1a_LV``
+    (0.22 um min COMP width) vs. ``DF.1a_MV`` (0.30 um), selected by whether
+    the ``Comp`` shape is drawn inside ``Dualgate`` (55/0), its 5V/6V
+    thick-oxide marker. Modelling that pair needs *both* halves of a
+    whole-polygon partition of one drawn layer against a marker layer, which
+    the two remaining modes provide:
+
+    - ``"overlapping"``: ``base_region.overlapping(intersect_with_region)``
+      -- the whole ``base`` polygons that share **area** with
+      ``intersect_with`` (the marked half, e.g. ``comp_56v``).
+    - ``"not_interacting"``:
+      ``base_region.not_interacting(intersect_with_region)`` -- the whole
+      ``base`` polygons that do not touch ``intersect_with`` at all (the
+      unmarked half, e.g. ``comp_3p3v``).
+
+    Both are **whole-polygon selections**, not boolean clips: a ``Comp``
+    polygon partly inside ``Dualgate`` is selected (or rejected) in its
+    entirety, never cut at the marker's edge. This is deliberate and
+    matches the PDK's own executable deck verbatim -- gf180mcu's
+    ``rule_decks/comp.drc`` derives ``comp_56v = comp.overlapping(dualgate)``
+    and ``comp_3p3v = comp.not_interacting(v5_xtor).not_interacting(dualgate)``
+    -- and it is what keeps the derivation artefact-free: an ``and``/``not``
+    boolean clip would leave a cut edge at the marker boundary that a
+    ``width``/``space`` check would then measure as a narrow sliver that
+    exists nowhere in the drawn layout.
+
+    ``sized_by_um`` still applies in these two modes, but to
+    ``intersect_with`` (the marker) rather than to ``base``: the selection
+    is made against ``intersect_with_region.sized(sized_by_um)``, i.e. a
+    guard band around the marker. ``0.0`` (the value both gf180mcu
+    ``_LV``/``_MV`` pairs use, matching the PDK deck's own unsized marker)
+    makes it a plain, unsized selection.
+
+    In ``"not_interacting"`` mode -- and only that mode --
+    :func:`~klayout_tools.drc.run_drc` treats an ``intersect_with`` layer
+    that is **absent** from the stream as an empty region rather than
+    skipping the rule: "``base`` polygons not touching a marker nobody
+    drew" is every ``base`` polygon, so a layout with no marker geometry at
+    all must still be fully checked against the unmarked column (this is the
+    overwhelmingly common case -- a thin-oxide-only design draws no
+    ``Dualgate`` at all). The other two modes derive an empty region from an
+    absent input layer, so they skip as any other missing-layer rule does.
     """
 
     base: tuple[int, int]
     sized_by_um: float
     intersect_with: tuple[int, int]
+    mode: str = "sized_intersection"
 
 
 @dataclass(frozen=True)
@@ -193,7 +242,12 @@ class DrcRule:
     independent of ``derived_layer.base``/``intersect_with``, which name the
     two real drawn layers actually read to compute the checked region.
     ``None`` (the default) means ``layer``'s own raw shapes are checked
-    directly, exactly as before this field existed.
+    directly, exactly as before this field existed. Which derivation is
+    applied is :attr:`DerivedLayer.mode`'s job -- including the
+    ``"overlapping"``/``"not_interacting"`` marker-scoped modes (issue
+    #1110) that let a ``_LV``/``_MV``-style rule *pair* split one drawn
+    layer's polygons by a voltage-domain marker instead of applying one
+    column's threshold to all of them.
 
     ``threshold_dbu`` is **not** used directly against a layout's shapes:
     ``run_drc()`` scales it by the ratio of the deck's ``NOMINAL_DBU_UM`` to
@@ -1434,10 +1488,24 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     extracted geometry, rather than leave a silent false ``clean`` /
     unflagged wrong-model result. This is deliberately only a diagnostic
     signal ("fail loudly" -- see this issue's "Suggested shape" option (3)):
-    it does not change any rule threshold or extracted model itself, which
-    would require the larger, separately-tracked option (1)/(2) work (a
-    subtraction-capable :class:`DerivedLayer` and a per-flavour MOS marker
-    field, respectively).
+    registering a marker here does not itself change any rule threshold or
+    extracted model.
+
+    **Registration is per marker, but the DRC warning is now gated per rule
+    (issue #1110).** A marker registered here can be partially modelled: as
+    of #1110 gf180mcu's ``Dualgate`` *is* read by the ``DF.1a``/``DF.3a``
+    ``_LV``/``_MV`` rule pairs (via :class:`DerivedLayer`'s
+    ``"overlapping"``/``"not_interacting"`` modes), while the rest of that
+    deck -- other DRM rules with a 5V/6V column, and ``EXTRACTION_DECK``'s
+    MOS model binding -- still ignores it. ``drc.py`` therefore excludes any
+    rule that actually reads the marker layer from the warning's
+    "interacting with checked geometry" gate, so a layout whose only
+    marker-touching geometry is already correctly scoped produces **no**
+    warning, while the same marker keeps warning as soon as an unscoped rule
+    checks geometry it touches. Keep a marker registered here for as long as
+    *any* consumer of that deck still ignores it; the registry entry's
+    description should name what remains unmodelled, not what has since been
+    modelled.
 
     Mirrors :func:`get_layer_names`'s shape and unrecognised-deck fallback:
     an unregistered deck name returns an empty map rather than raising.

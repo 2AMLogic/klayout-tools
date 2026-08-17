@@ -1146,7 +1146,12 @@ things are produced:
   (see "JSON schema" above): `{ "marker": "55/0", "description": str }` —
   the same registry entry (and description text) `klt drc`'s
   `coverage.voltage_domain_warnings` surfaces for the same deck, so the
-  wording matches across both commands for the same layout.
+  wording matches across both commands for the same layout. Because the
+  description is shared, it also names what the *DRC* side of the same deck
+  does and does not model (as of issue #1110 gf180mcu's `DF.1a`/`DF.3a`
+  `Comp` width/space rules are `Dualgate`-scoped, see
+  [`klt drc`](drc.md#voltage-domain-rule-pairs-_lv_mv-issue-1110)); none of
+  that changes extraction, which still ignores the marker entirely.
 - A matching prose entry in `warnings[]`.
 
 **What this field does and does not guarantee**: it flags that the bound

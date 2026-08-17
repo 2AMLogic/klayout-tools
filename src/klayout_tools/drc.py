@@ -84,6 +84,12 @@ _DENSITY_CHECKS = {"density"}
 # antenna check.
 _ANTENNA_CHECKS = {"antenna"}
 
+# Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
+# see that class's docstring for each one's derivation. Validated per rule
+# (rather than assumed) so a deck typo fails loudly with the rule id instead
+# of silently falling through to the default derivation.
+_DERIVED_LAYER_MODES = {"sized_intersection", "overlapping", "not_interacting"}
+
 
 class DrcError(Exception):
     """Raised when a layout cannot be checked: bad file, unknown deck, or a
@@ -193,16 +199,24 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
     column and reported as an ordinary ``layers_checked`` pass, not an
     unchecked layer. Whenever such a marker (see
     :func:`~klayout_tools.decks.get_unmodeled_voltage_markers`) is present
-    in ``path`` *and* its geometry interacts with at least one layer this
-    run actually checked (a member of ``coverage.layers_checked``, not
-    merely present-but-unchecked), one entry is added --
+    in ``path`` *and* its geometry interacts with at least one layer an
+    **unscoped rule actually checked on this run**, one entry is added --
     ``{"marker": "<layer>/<datatype>", "description": str}`` -- naming the
     marker and the concrete consequence (the deck's own registered
-    description). A ``Dualgate`` shape that never overlaps any checked
-    geometry produces no entry, avoiding a warning with nothing behind it.
-    Always a list, empty for a deck that registers no such marker or a
-    layout that draws none of it overlapping checked geometry -- purely
-    additive, no existing rule threshold changes because of this field.
+    description). A ``Dualgate`` shape that never overlaps any such geometry
+    produces no entry, avoiding a warning with nothing behind it.
+
+    "Unscoped" is evaluated per rule (issue #1110), because a marker can be
+    *partially* modelled: a rule whose ``derived_layer`` reads the marker
+    itself -- gf180mcu's ``DF.1a``/``DF.3a`` ``_LV``/``_MV`` pairs, which
+    split ``Comp`` on ``Dualgate`` via
+    :attr:`~klayout_tools.decks.DerivedLayer.mode` -- applied the *right*
+    column and is excluded from the gate, as is any rule skipped this run
+    (it applied no threshold at all). The warning therefore keeps firing for
+    the parts of a deck that still ignore the marker, and stops firing once
+    every rule that touched the marked geometry reads it. Always a list,
+    empty for a deck that registers no such marker or a layout that draws
+    none of it overlapping unscoped checked geometry.
 
     ``coverage.deck_scope`` (issue #566) is a third, coarser-grained
     "what was not looked at" answer, additive alongside the layer-level
@@ -309,12 +323,24 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
         layer_index: int | None = None
 
         if rule.derived_layer is not None:
+            _validate_derived_layer(rule)
             base_index = layout.find_layer(*rule.derived_layer.base)
             intersect_index = layout.find_layer(*rule.derived_layer.intersect_with)
-            if base_index is None or intersect_index is None:
-                # Either input layer of the derived region is absent from
-                # this stream -> no violations possible, skip like any other
-                # missing-layer rule.
+            if base_index is None:
+                # The derived region's own source shapes are absent from this
+                # stream -> no violations possible in any mode, skip like any
+                # other missing-layer rule.
+                rules_skipped.append(rule.id)
+                continue
+            if intersect_index is None and rule.derived_layer.mode != "not_interacting":
+                # The second input layer is absent -> both the
+                # "sized_intersection" and "overlapping" derivations yield an
+                # empty region, so there is nothing to check. "not_interacting"
+                # is the exception: "base polygons that touch no marker" is
+                # every base polygon when the marker layer was never drawn, so
+                # that rule must still run against the full base region (see
+                # `DerivedLayer`'s docstring) -- the ordinary thin-oxide-only
+                # layout, which must stay checked against the unmarked column.
                 rules_skipped.append(rule.id)
                 continue
         else:
@@ -337,21 +363,45 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
 
         for cell in top_cells:
             if rule.derived_layer is not None:
-                # Virtual/derived region (#345): shapes of `intersect_with`
-                # that already touch the *unsized* `base` region somewhere,
-                # clipped to `base`'s outline oversized by `sized_by_um` --
-                # see `DerivedLayer`'s docstring for the full derivation and
-                # why an unscoped check against either raw input layer would
-                # be wrong, not just conservative. `sized_by_um` is a real
-                # micrometre distance, rescaled against this layout's own
-                # `dbu` directly (unlike `rule.threshold_dbu`, which is
-                # rescaled via `dbu_scale` against the deck's nominal dbu).
+                # Virtual/derived region (#345, marker-scoped modes #1110) --
+                # see `DerivedLayer`'s docstring for each mode's full
+                # derivation and why an unscoped check against either raw
+                # input layer would be wrong, not just conservative.
+                # `sized_by_um` is a real micrometre distance, rescaled
+                # against this layout's own `dbu` directly (unlike
+                # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
+                # against the deck's nominal dbu).
                 base_region = kdb.Region(cell.begin_shapes_rec(base_index))
-                intersect_region = kdb.Region(cell.begin_shapes_rec(intersect_index))
-                size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
-                region = intersect_region.interacting(base_region) & (
-                    base_region.sized(size_dbu)
+                intersect_region = (
+                    kdb.Region(cell.begin_shapes_rec(intersect_index))
+                    if intersect_index is not None
+                    else kdb.Region()
                 )
+                size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
+                if rule.derived_layer.mode in ("overlapping", "not_interacting"):
+                    # Marker-scoped whole-polygon selection (#1110): here
+                    # `sized_by_um` is a guard band around the *marker*
+                    # (`intersect_with`), not around `base`.
+                    marker_region = (
+                        intersect_region.sized(size_dbu)
+                        if size_dbu
+                        else intersect_region
+                    )
+                    if rule.derived_layer.mode == "overlapping":
+                        # Whole `base` polygons sharing area with the marker
+                        # -- the marked ("_MV") half of a rule pair.
+                        region = base_region.overlapping(marker_region)
+                    else:
+                        # Whole `base` polygons touching no marker geometry
+                        # at all -- the unmarked ("_LV") half of the pair.
+                        region = base_region.not_interacting(marker_region)
+                else:  # "sized_intersection" (the default, issue #345)
+                    # Shapes of `intersect_with` that already touch the
+                    # *unsized* `base` region somewhere, clipped to `base`'s
+                    # outline oversized by `sized_by_um`.
+                    region = intersect_region.interacting(base_region) & (
+                        base_region.sized(size_dbu)
+                    )
             else:
                 region = kdb.Region(cell.begin_shapes_rec(layer_index))
             other_region = (
@@ -626,25 +676,50 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
     # DRC thresholds this deck's rules do not encode -- geometry inside it is
     # checked against the wrong (default) column and would otherwise report
     # an unqualified `layers_checked` pass. Gated on the marker's geometry
-    # actually *interacting* with at least one layer this run checked (not
-    # merely present in the stream), so a marker shape that never overlaps
-    # any checked geometry produces no warning with nothing behind it.
+    # actually *interacting* with at least one layer an **unscoped** rule
+    # checked on this run (not merely present in the stream), so a marker
+    # shape that never overlaps any such geometry produces no warning with
+    # nothing behind it.
+    #
+    # "Unscoped" is per rule, not per deck (issue #1110): a marker can be
+    # partly modelled. gf180mcu's `DF.1a`/`DF.3a` now ship as `_LV`/`_MV`
+    # rule pairs that read `Dualgate` themselves via `DerivedLayer`'s
+    # `"overlapping"`/`"not_interacting"` modes, so geometry those rules
+    # checked was *not* checked against the wrong column and must not
+    # produce a warning -- while every rule that ran without reading the
+    # marker still can. Rules skipped this run (their layers absent from
+    # this stream) are excluded too: a rule that never ran applied no
+    # threshold, right or wrong.
     voltage_domain_warnings: list[dict[str, str]] = []
     unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
+    skipped_rule_ids = set(rules_skipped)
     for marker, description in sorted(unmodeled_markers.items()):
         if marker not in stream_layer_tuples:
             continue
         marker_index = layout.find_layer(*marker)
         if marker_index is None:
             continue
+        unscoped_layers: set[tuple[int, int]] = set()
+        for rule in deck:
+            if rule.id in skipped_rule_ids:
+                continue
+            if rule.derived_layer is not None and marker in (
+                rule.derived_layer.base,
+                rule.derived_layer.intersect_with,
+            ):
+                # This rule reads the marker itself -- its checked region is
+                # already scoped by the marker, so it is not part of the gap
+                # this warning is about.
+                continue
+            unscoped_layers |= _rule_input_layers(rule)
+        unscoped_layers &= stream_layer_tuples
+        unscoped_layers.discard(marker)
         interacts = False
         for cell in top_cells:
             marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
             if marker_region.is_empty():
                 continue
-            for checked_layer in sorted(layers_checked):
-                if checked_layer == marker:
-                    continue
+            for checked_layer in sorted(unscoped_layers):
                 checked_index = layout.find_layer(*checked_layer)
                 if checked_index is None:
                     continue
@@ -853,6 +928,48 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
+    """The ``(layer, datatype)`` pairs whose *shapes* ``rule`` actually reads.
+
+    Distinct from ``run_drc``'s own ``deck_layer_tuples`` (which also carries
+    every rule's ``layer`` unconditionally, since that is the rule's
+    reporting identity in ``violations[].layer``/``coverage`` even when the
+    checked region is derived from two other drawn layers): a
+    ``derived_layer`` rule reads ``derived_layer.base``/``intersect_with``,
+    *not* ``layer``. Used by the ``coverage.voltage_domain_warnings`` gate
+    (issue #1110), which must reason about which geometry a rule really
+    applied a threshold to.
+    """
+    layers = set()
+    if rule.derived_layer is not None:
+        layers.add(rule.derived_layer.base)
+        layers.add(rule.derived_layer.intersect_with)
+    else:
+        layers.add(rule.layer)
+    if rule.other_layer is not None:
+        layers.add(rule.other_layer)
+    return layers
+
+
+def _validate_derived_layer(rule: DrcRule) -> None:
+    """Reject a :class:`~klayout_tools.decks.DrcRule` whose
+    ``derived_layer.mode`` names a derivation this engine has no branch for
+    (issue #1110).
+
+    Mirrors ``_run_area_check``'s own "a deck-authoring mistake fails loudly
+    with the rule id, never silently returns nothing" contract: an unknown
+    mode would otherwise fall through to the default ``"sized_intersection"``
+    derivation and quietly check a completely different region than the deck
+    author asked for.
+    """
+    derived = rule.derived_layer
+    if derived is not None and derived.mode not in _DERIVED_LAYER_MODES:
+        raise DrcError(
+            f"rule '{rule.id}': unknown derived_layer mode "
+            f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
+        )
 
 
 def _run_area_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any:

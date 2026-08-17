@@ -866,8 +866,9 @@ def test_run_drc_gf180mcu_json_contract(tmp_path, capsys):
 
 def _make_gf180mcu_dualgate_layout(*, overlap: bool) -> kdb.Layout:
     """Issue #552's own DRC reproducer: a 0.25um-wide `Comp` stripe (illegal
-    at 5V/6V -- `DF.1a_MV` requires 0.30um -- but legal at this deck's only
-    modelled 3.3V column) with an `Nplus` shape, both inside `Dualgate`.
+    at 5V/6V -- `DF.1a_MV` requires 0.30um -- but legal against the 3.3V
+    column, `DF.1a_LV`'s 0.22um) with an `Nplus` shape, both inside
+    `Dualgate`.
 
     ``overlap=False`` moves the `Dualgate` shape far away from the `Comp`/
     `Nplus` geometry instead -- present in the stream, but touching no
@@ -889,41 +890,204 @@ def _make_gf180mcu_dualgate_layout(*, overlap: bool) -> kdb.Layout:
     return layout
 
 
-def test_run_drc_gf180mcu_dualgate_marker_warns_when_overlapping_checked_layer(
-    tmp_path,
-):
-    """Issue #552's own reproducer: geometry drawn inside `Dualgate` (the
-    5V/6V thick-oxide marker) is checked against this deck's only modelled
-    (3.3V) thresholds and reports `status: clean` -- exactly as before this
-    fix -- but `coverage.voltage_domain_warnings` is the new loud signal
-    that the checked column may not be the right one for this geometry."""
+def test_run_drc_gf180mcu_dualgate_comp_width_enforces_mv_threshold(tmp_path):
+    """Issue #552's own reproducer, now *enforced* rather than merely warned
+    about (issue #1110): a 0.25um `Comp` stripe drawn entirely inside
+    `Dualgate` reports a `comp.width.mv.1` (`DF.1a_MV`, 0.30um) violation
+    instead of `status: clean`.
+
+    The `_LV` half must stay silent on the same geometry: 0.25um clears
+    `comp.width.1`'s 0.22um, and -- more to the point -- that rule's checked
+    region no longer contains `Dualgate`-touching polygons at all."""
     path = tmp_path / "mv_bad.gds"
     _make_gf180mcu_dualgate_layout(overlap=True).write(str(path))
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] == "clean"
-    expected_description = get_unmodeled_voltage_markers("gf180mcu")[(55, 0)]
-    assert report["coverage"]["voltage_domain_warnings"] == [
-        {"marker": "55/0", "description": expected_description}
-    ]
-    # `Dualgate` itself carries no rules of its own -- it remains an
-    # unrecognised layer alongside the new, more specific warning above.
-    assert "55/0" in report["coverage"]["layers_in_stream_without_rules"]
+    assert report["status"] == "violations"
+    assert report["rule_counts"].get("comp.width.mv.1", 0) >= 1
+    assert "comp.width.1" not in report["rule_counts"]
+    # The marked geometry was checked against the right column, so the
+    # "you may be reading the wrong column" warning no longer fires for it.
+    assert report["coverage"]["voltage_domain_warnings"] == []
+    # `Dualgate` is now read by real rules, so it is no longer an
+    # unrecognised layer either.
+    assert "55/0" not in report["coverage"]["layers_in_stream_without_rules"]
+    assert "55/0" in report["coverage"]["layers_checked"]
 
 
 def test_run_drc_gf180mcu_dualgate_marker_no_warning_without_overlap(tmp_path):
     """Counterfactual: `Dualgate` present in the stream but never interacting
-    with any layer this run actually checked produces no warning -- the gate
-    is "interacts with a checked layer", not bare presence, so a marker shape
-    with nothing behind it never produces a false-positive warning."""
+    with any geometry an unscoped rule checked produces no warning -- the
+    gate is "interacts with geometry checked against the wrong column", not
+    bare presence, so a marker shape with nothing behind it never produces a
+    false-positive warning.
+
+    The far-away `Dualgate` also puts the 0.25um `Comp` stripe back in
+    `comp.width.1`'s (`_LV`, 0.22um) region, where it is legal -- so this
+    layout is still `clean`, as it was before #1110."""
     path = tmp_path / "mv_no_overlap.gds"
     _make_gf180mcu_dualgate_layout(overlap=False).write(str(path))
 
     report = run_drc(str(path), "gf180mcu")
 
+    assert report["status"] == "clean"
     assert report["coverage"]["voltage_domain_warnings"] == []
-    assert "55/0" in report["coverage"]["layers_in_stream_without_rules"]
+
+
+def _make_gf180mcu_comp_layout(
+    *, width_dbu: int, gap_dbu: int | None = None, dualgate: bool
+) -> kdb.Layout:
+    """One (or two) `Comp` bars, optionally covered by a `Dualgate` box.
+
+    ``gap_dbu=None`` draws a single ``width_dbu``-wide bar (the `DF.1a`
+    width-pair fixture); a value draws a second bar of the same width that
+    far away (the `DF.3a` space-pair fixture). ``dualgate=True`` covers all
+    of it with a comfortably-oversized `Dualgate` (55/0) box, which is what
+    moves the geometry from the `_LV` rules' region into the `_MV` rules'.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        layout.set_info(li, kdb.LayerInfo(layer, datatype))
+        top.shapes(li).insert(box)
+
+    right = width_dbu
+    draw(22, 0, kdb.Box(0, 0, width_dbu, 4000))
+    if gap_dbu is not None:
+        right = 2 * width_dbu + gap_dbu
+        draw(22, 0, kdb.Box(width_dbu + gap_dbu, 0, right, 4000))
+    if dualgate:
+        draw(55, 0, kdb.Box(-1000, -1000, right + 1000, 5000))
+    return layout
+
+
+@pytest.mark.parametrize(
+    "width_dbu,dualgate,expected_rule",
+    [
+        # 0.25um: below DF.1a_MV's 0.30um, above DF.1a_LV's 0.22um -- the
+        # exact geometry issue #552 reported as a false `clean`.
+        (250, True, "comp.width.mv.1"),
+        (250, False, None),
+        # 0.20um: below both columns -- each rule catches it in its own
+        # domain, so neither half of the split can be silently inert.
+        (200, True, "comp.width.mv.1"),
+        (200, False, "comp.width.1"),
+        # 0.35um: above both columns -- clean either side of the marker.
+        (350, True, None),
+        (350, False, None),
+    ],
+)
+def test_run_drc_gf180mcu_comp_width_lv_mv_split(
+    tmp_path, width_dbu, dualgate, expected_rule
+):
+    """`DF.1a`'s `_LV`/`_MV` split (issue #1110): the same `Comp` bar is
+    checked against 0.30um inside `Dualgate` and 0.22um outside it, and
+    exactly one of the two rules owns any given violation."""
+    path = tmp_path / f"comp_w{width_dbu}_{'dg' if dualgate else 'nodg'}.gds"
+    _make_gf180mcu_comp_layout(width_dbu=width_dbu, dualgate=dualgate).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    if expected_rule is None:
+        assert report["status"] == "clean", report["rule_counts"]
+    else:
+        assert report["rule_counts"].get(expected_rule, 0) >= 1, report["rule_counts"]
+        other = (
+            "comp.width.1" if expected_rule == "comp.width.mv.1" else "comp.width.mv.1"
+        )
+        assert other not in report["rule_counts"]
+
+
+@pytest.mark.parametrize(
+    "gap_dbu,dualgate,expected_rule",
+    [
+        # 0.30um: below DF.3a_MV's 0.36um, above DF.3a_LV's 0.28um.
+        (300, True, "comp.space.mv.1"),
+        (300, False, None),
+        # 0.25um: below both columns.
+        (250, True, "comp.space.mv.1"),
+        (250, False, "comp.space.1"),
+        # 0.40um: above both columns.
+        (400, True, None),
+        (400, False, None),
+    ],
+)
+def test_run_drc_gf180mcu_comp_space_lv_mv_split(
+    tmp_path, gap_dbu, dualgate, expected_rule
+):
+    """`DF.3a`'s `_LV`/`_MV` split (issue #1110), the spacing counterpart of
+    the width test above: 0.36um between `Comp` shapes inside `Dualgate`,
+    0.28um outside it."""
+    path = tmp_path / f"comp_s{gap_dbu}_{'dg' if dualgate else 'nodg'}.gds"
+    _make_gf180mcu_comp_layout(
+        width_dbu=2000, gap_dbu=gap_dbu, dualgate=dualgate
+    ).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    if expected_rule is None:
+        assert report["status"] == "clean", report["rule_counts"]
+    else:
+        assert report["rule_counts"].get(expected_rule, 0) >= 1, report["rule_counts"]
+        other = (
+            "comp.space.1" if expected_rule == "comp.space.mv.1" else "comp.space.mv.1"
+        )
+        assert other not in report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_comp_lv_rules_run_without_any_dualgate(tmp_path):
+    """A stream with no `Dualgate` layer at all -- the overwhelmingly common
+    thin-oxide-only case -- must still be fully checked against the `_LV`
+    column: `"not_interacting"` treats an absent marker as an empty region
+    (never a skipped rule), while the `"overlapping"` `_MV` halves skip.
+
+    Regression guard for the obvious way to get this wrong (#1110): treating
+    a missing `derived_layer.intersect_with` as "skip this rule" would
+    silently drop `DF.1a_LV`/`DF.3a_LV` from every ordinary layout."""
+    path = tmp_path / "no_dualgate.gds"
+    _make_gf180mcu_comp_layout(width_dbu=200, dualgate=False).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["rule_counts"].get("comp.width.1", 0) >= 1
+    assert "comp.width.1" not in report["coverage"]["rules_skipped"]
+    assert "comp.space.1" not in report["coverage"]["rules_skipped"]
+    assert "comp.width.mv.1" in report["coverage"]["rules_skipped"]
+    assert "comp.space.mv.1" in report["coverage"]["rules_skipped"]
+
+
+def test_run_drc_gf180mcu_dualgate_still_warns_for_unsplit_rules(tmp_path):
+    """The marker registry is still live for the rules #1110 did *not*
+    split: a `Comp`/`Contact` stack inside `Dualgate` is checked by
+    `comp.enclosing.contact.1` (`CO.4`), which reads no marker at all, so
+    `coverage.voltage_domain_warnings` fires again.
+
+    Together with the `voltage_domain_warnings == []` assertion in the
+    width-split test above, this pins the gate as *per rule*, not per deck
+    or per marker."""
+    path = tmp_path / "dualgate_contact.gds"
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        layout.set_info(li, kdb.LayerInfo(layer, datatype))
+        top.shapes(li).insert(box)
+
+    draw(22, 0, kdb.Box(0, 0, 2000, 2000))  # Comp, clears both width columns
+    draw(33, 0, kdb.Box(500, 500, 720, 720))  # Contact, 0.22um square
+    draw(55, 0, kdb.Box(-1000, -1000, 3000, 3000))  # Dualgate over all of it
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    expected_description = get_unmodeled_voltage_markers("gf180mcu")[(55, 0)]
+    assert report["coverage"]["voltage_domain_warnings"] == [
+        {"marker": "55/0", "description": expected_description}
+    ]
 
 
 @pytest.mark.skipif(
@@ -4269,6 +4433,43 @@ def test_run_drc_area_check_requires_min_or_max(tmp_path, monkeypatch):
     layout.write(str(path))
 
     with pytest.raises(DrcError, match="area_min_dbu2"):
+        run_drc(str(path), "synthetic")
+
+
+def test_run_drc_derived_layer_rejects_unknown_mode(tmp_path, monkeypatch):
+    """A `DerivedLayer` whose `mode` names no known derivation (a deck typo)
+    raises `DrcError` naming the rule id, rather than silently falling
+    through to the default `"sized_intersection"` derivation and checking a
+    completely different region than the deck author asked for (#1110)."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.width.1",
+                description="synthetic: misconfigured derived layer",
+                layer=(30, 0),
+                check="width",
+                threshold_dbu=100,
+                derived_layer=DerivedLayer(
+                    base=(30, 0),
+                    sized_by_um=0.0,
+                    intersect_with=(31, 0),
+                    mode="inside",  # not a known mode
+                ),
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(0, 0, 50, 4000))
+    top.shapes(layout.layer(31, 0)).insert(kdb.Box(-10, -10, 60, 4010))
+    path = tmp_path / "derived_bad_mode.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="unknown derived_layer mode 'inside'"):
         run_drc(str(path), "synthetic")
 
 
