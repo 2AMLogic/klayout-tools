@@ -145,15 +145,24 @@ All zero if the layout has no cells.
 - **Bounding box is hierarchy-inclusive.** `bbox_um` covers the top cell and
   everything instantiated beneath it, not just shapes drawn directly in the
   top cell.
-- **Area/vertex counts are per-cell-definition**, exactly like `klt layers`'
-  shape counts: each shape is counted once where it is *defined* — **not**
-  multiplied by how many times its cell is instantiated. Without `--top`,
-  this is summed over every cell in the stream (today's default,
-  unchanged). With `--top <cell>`, it is summed only over `<cell>`'s own
-  hierarchy — itself plus every cell it calls, directly or indirectly — so
-  the count stays consistent with `bbox_um`'s own scope rather than a bbox
-  scoped to one cell sitting next to totals still summed across the whole
-  library.
+- **`area_um2` is weighted by instance multiplicity (issue #1105).** A leaf
+  cell's shapes are counted once for every time it is reached by walking
+  instances from the reporting scope's own root — once for a plain
+  placement, N times for an N-copy `CellInstArray` (`na * nb`), and
+  compounding through nested arrays — so `density` reflects the layout's
+  actual drawn occupancy rather than undercounting an array-instanced
+  macro's contribution. Without `--top`, this is summed over every cell in
+  the stream (today's default, unchanged). With `--top <cell>`, it is
+  summed only over `<cell>`'s own hierarchy — itself plus every cell it
+  calls, directly or indirectly — so the total stays consistent with
+  `bbox_um`'s own scope rather than a bbox scoped to one cell sitting next
+  to totals still summed across the whole library.
+- **`polygon_count`/`vertex_count` stay per-cell-definition**, exactly like
+  `klt layers`' shape counts: each shape is counted once where it is
+  *defined* — **not** multiplied by how many times its cell is instantiated.
+  This is deliberately different from `area_um2` above: instance-weighting
+  shape *counts* is out of scope for #1105, which targets the
+  area/density numerator specifically.
 - **Overlapping shapes are not merged.** `area_um2` is the sum of individual
   shape areas; overlapping geometry is double-counted. This keeps the
   computation cheap and exactly reproducible (no polygon-merge dependency on
