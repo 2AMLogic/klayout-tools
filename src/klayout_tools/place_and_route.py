@@ -136,6 +136,12 @@ falling back to ``find_pdk()``'s own default search order. The tech +
 merged-cell LEF pair resolves via the new :func:`klayout_tools.pdk.lef_files`
 resolver (issue #397/#425 -- ``_ASSET_LAYOUT`` never carried a ``lef`` key),
 pinned to whatever variant/root :func:`_resolve_liberty` already resolved.
+The optional ``pdk.interconnect_corner`` (issue #1100, one of ``"min"``/
+``"nom"``/``"max"``, default ``"nom"``) independently selects which tech-LEF
+*parasitic* corner ``lef_files`` resolves -- a wire-model choice orthogonal
+to the liberty (device) corner ``pdk.corner`` names, echoed back as its own
+top-level ``interconnect_corner`` response field (distinct from ``deck_name``,
+which encodes only the liberty corner).
 
 Neither resolver is restricted to a single PDK family -- any standard-cell
 library the resolved install ships ``libs_ref``/LEF assets for resolves the
@@ -486,6 +492,15 @@ STAGE_ORDER = ("floorplan", "place", "cts", "route")
 _MACRO_ORIENTATIONS = frozenset(
     {"R0", "R90", "R180", "R270", "MX", "MY", "MXR90", "MYR90"}
 )
+
+#: Valid ``request.pdk.interconnect_corner`` values (issue #1100) -- the
+#: fixed three-value open_pdks tech-LEF parasitic-corner convention
+#: :func:`klayout_tools.pdk.lef_files`'s own docstring documents
+#: (``min``/``nom``/``max``), not a dynamic per-installed-file set the way
+#: liberty corners are, so this is a plain enum rather than something
+#: :func:`_resolve_liberty`-style file-existence resolution needs to
+#: enumerate.
+_TECH_LEF_CORNERS = frozenset({"min", "nom", "max"})
 
 #: Fields the floorplan spec's three mutually-exclusive methods each need,
 #: used both to select the ``initialize_floorplan``/``read_def`` Tcl branch
@@ -923,6 +938,21 @@ def run_place_and_route(
         raise PlaceAndRouteError(
             "request.pdk.corner must be a non-empty string when given"
         )
+    # `request.pdk.interconnect_corner` (issue #1100): the tech LEF's own
+    # parasitic-extraction corner -- open_pdks stages exactly three
+    # (`"min"`/`"nom"`/`"max"`, `lef_files`'s own docstring in `pdk.py`), a
+    # fixed convention unlike the dynamic, per-installed-file liberty
+    # corner set `_resolve_liberty` resolves below, so this is a plain
+    # enum-check rather than file-existence-driven resolution. `None`
+    # (the default, field omitted) preserves this module's original
+    # behaviour byte-for-byte: `_resolve_lef` resolves the same `"nom"`
+    # tech LEF it always has.
+    interconnect_corner = pdk_spec.get("interconnect_corner", "nom")
+    if interconnect_corner not in _TECH_LEF_CORNERS:
+        raise PlaceAndRouteError(
+            "request.pdk.interconnect_corner must be one of: "
+            + ", ".join(sorted(_TECH_LEF_CORNERS))
+        )
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
@@ -945,7 +975,7 @@ def run_place_and_route(
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
-    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
+    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
 
     stage_index = STAGE_ORDER.index(target_stage)
     stages_to_run = STAGE_ORDER[: stage_index + 1]
@@ -1220,11 +1250,15 @@ def run_place_and_route(
     engine_version = _openroad_version()
     # `deck` names the resolved LEF/liberty/GDS-view platform set (contract
     # spike section 5's own "e.g. sky130hd" example) -- `<cell_library>__
-    # <corner>` matching the STA/timing corner actually requested, the same
-    # naming `klt synthesize`'s own `deck.name` uses, since that is the
-    # decision-relevant corner (the tech LEF's own "nom"/"min"/"max"
-    # parasitic-corner selection is an internal implementation detail, not
-    # a request field).
+    # <corner>` matching the STA/timing (liberty/device) corner actually
+    # requested, the same naming `klt synthesize`'s own `deck.name` uses.
+    # The tech LEF's own "nom"/"min"/"max" parasitic (interconnect) corner
+    # *is* independently caller-selectable (issue #1100,
+    # `request.pdk.interconnect_corner`) -- it is deliberately kept out of
+    # `deck_name` (an artifact-naming convention other stages/tests key off
+    # of) and reported instead as the sibling top-level `interconnect_corner`
+    # response field below, the same additive-sibling-field shape
+    # `spef_sta` (issue #948) used rather than folding into existing naming.
     deck_name = f"{cell_library}__{corner}"
     provenance = build_provenance(
         deck_name=deck_name,
@@ -1241,6 +1275,15 @@ def run_place_and_route(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #1100): the tech-LEF parasitic-extraction
+        # corner actually resolved (`"min"`/`"nom"`/`"max"`,
+        # `request.pdk.interconnect_corner`, default `"nom"`) -- distinct
+        # from the *liberty* (device) corner, which `deck_name` above
+        # already encodes (e.g. `sky130_fd_sc_hd__ss_125C_3v00`). A caller
+        # requesting `corner: "ss_125C_3v00"` and `interconnect_corner:
+        # "max"` in the same request sees both values independently here,
+        # never conflated.
+        "interconnect_corner": interconnect_corner,
         **top_metrics,
         "stages": stages,
         "macros": [
@@ -1909,12 +1952,28 @@ def _resolve_liberty(
     return liberty_path, corner, info
 
 
-def _resolve_lef(cell_library: str, pdk_info: dict[str, Any]) -> tuple[str, str]:
+def _resolve_lef(
+    cell_library: str,
+    pdk_info: dict[str, Any],
+    interconnect_corner: str = "nom",
+) -> tuple[str, str]:
     """Resolve the tech + merged-cell LEF pair for ``cell_library``, pinned
     to the *same* PDK install/variant :func:`_resolve_liberty` already
-    resolved (never re-searches). Raises :class:`PlaceAndRouteError` when
-    either file is missing."""
-    lefs = lef_files(cell_library, variant=pdk_info["variant"], root=pdk_info["root"])
+    resolved (never re-searches). ``interconnect_corner`` (issue #1100,
+    ``request.pdk.interconnect_corner``, one of ``"min"``/``"nom"``/
+    ``"max"``) selects which tech-LEF parasitic corner
+    :func:`klayout_tools.pdk.lef_files` resolves; the default ``"nom"``
+    preserves this function's original byte-identical behaviour. Raises
+    :class:`PlaceAndRouteError` when either file is missing -- including
+    when a caller-selected corner is not staged by the resolved PDK install
+    (``lef_files``'s own ``None``-means-absent convention), never a silent
+    fallback to nominal."""
+    lefs = lef_files(
+        cell_library,
+        variant=pdk_info["variant"],
+        root=pdk_info["root"],
+        corner=interconnect_corner,
+    )
     tech_lef = lefs["tech_lef"]
     cell_lef = lefs["cell_lef"]
     if tech_lef is None or cell_lef is None:
@@ -1923,10 +1982,15 @@ def _resolve_lef(cell_library: str, pdk_info: dict[str, Any]) -> tuple[str, str]
             for name, path in (("tech_lef", tech_lef), ("cell_lef", cell_lef))
             if path is None
         ]
+        detail = (
+            f" (requested interconnect_corner '{interconnect_corner}')"
+            if tech_lef is None
+            else ""
+        )
         raise PlaceAndRouteError(
             f"LEF not found for deck: standard-cell library '{cell_library}' "
             f"under resolved PDK install '{pdk_info['variant']}' at "
-            f"'{pdk_info['root']}' is missing: {', '.join(missing)}"
+            f"'{pdk_info['root']}' is missing: {', '.join(missing)}{detail}"
         )
     return tech_lef, cell_lef
 
