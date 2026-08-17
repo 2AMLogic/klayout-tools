@@ -38,7 +38,12 @@ docker pull --platform linux/amd64 openroad/orfs:latest
 
 This pulled and ran successfully — Docker Desktop's `linux/amd64` emulation
 on Apple Silicon (QEMU-based) executed real x86_64 OpenROAD/Yosys/KLayout
-binaries, not a paraphrase of their docs. Versions confirmed live **[RUN]**:
+binaries, not a paraphrase of their docs. (For a copy-pasteable recipe that
+turns this same image into a plain `openroad` on `$PATH` — the thing this
+survey pulls the image for, but does not itself document as a reusable
+recipe — see
+[`klt place-and-route`'s "Installing OpenROAD"](../cli/place-and-route.md#installing-openroad).)
+Versions confirmed live **[RUN]**:
 
 | Tool | Version | How confirmed |
 | --- | --- | --- |

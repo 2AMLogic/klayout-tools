@@ -48,6 +48,93 @@ stage — there is no Python binding for OpenROAD. Requires an `openroad`
 binary on `$PATH`; a missing binary is a clear, actionable error (exit 1),
 never a traceback.
 
+## Installing OpenROAD
+
+There is no `apt`/`brew`/`pip` package for `openroad` — the only broadly
+available, reproducible distribution today is the official `openroad/orfs`
+Docker image (it bundles the full OpenROAD-flow-scripts (ORFS) tree, not a
+documented standalone CLI install target). This section names one concrete,
+copy-pasteable path to get a plain `openroad` binary onto `$PATH`.
+
+### Docker: extract the binary onto `$PATH`
+
+```
+docker pull --platform linux/amd64 openroad/orfs:latest
+```
+
+This is the same image
+[`docs/design/openroad-invocation-survey.md`](../design/openroad-invocation-survey.md)'s
+own "Environment limitation" section already pulls for exactly this reason,
+and the container every "verified live against a real `openroad/orfs`
+container" provenance note elsewhere in this file cites. The binary is not
+on the image's own `$PATH` under the short name `openroad` — as of this
+image's `latest` tag digest
+`sha256:0586b21f8cd1ef743f94ed85b48e4985cde7a4c90087cb5c9a7b78c8dde19903`
+(OpenROAD `26Q3-1278-g4421880472`, checked live 2026-08-17), it lives at
+`/OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad`. Both the
+digest and that path are a snapshot, not a stable API — they can drift when
+upstream restructures the image, so re-locate the binary yourself if the
+recipe below stops working:
+
+```
+docker run --rm --platform linux/amd64 openroad/orfs:latest \
+  bash -lc "find / -iname openroad -type f"
+```
+
+The simplest way to get a plain `openroad` on the **host's** `$PATH` is a
+one-line wrapper script that runs the container per invocation:
+
+```bash
+cat > /usr/local/bin/openroad <<'WRAPPER'
+#!/usr/bin/env bash
+exec docker run --rm -i \
+  --platform linux/amd64 \
+  -v "$PWD":"$PWD" -w "$PWD" \
+  openroad/orfs:latest \
+  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@"
+WRAPPER
+chmod +x /usr/local/bin/openroad
+```
+
+`-v "$PWD":"$PWD" -w "$PWD"` mounts and enters the caller's current
+directory inside the container **at the identical path** — `klt
+place-and-route` generates a Tcl script and writes every stage's `-metrics
+<file>.json`/ODB checkpoint/DEF/GDS artifact to an absolute host path, so
+the container must resolve that same absolute path, not a relocated mount
+point.
+
+Verified live (2026-08-17): with this wrapper first on `$PATH`, `openroad
+-version` reports `26Q3-1278-g4421880472` — the exact version cited above,
+confirming the wrapper actually reaches the in-container binary rather than
+silently no-oping.
+
+Depending on your Docker setup you may need to adjust the `docker run`
+invocation itself — e.g. `sudo docker run ...` if your user isn't in the
+`docker` group. Docker Desktop's `linux/amd64` emulation on a non-x86_64
+host (e.g. Apple Silicon) works but is slower, per the survey's own
+"Environment limitation" section, which hit the identical constraint.
+
+### From source
+
+No from-source build recipe is documented here yet. This is a real parity
+gap against [`klt synthesize`'s CI story](synthesize.md), which installs a
+pinned, checksum-verified Yosys via `scripts/install-yosys.sh` rather than
+depending on Docker at all — OpenROAD's own build (CMake plus a large
+C++ dependency tree: OpenSTA, OpenDB, TritonRoute, and more) has not been
+pinned and verified for this repo, so there is no equivalent
+`scripts/install-openroad.sh` today.
+
+### CI
+
+No CI job in this repo provisions `openroad` today — `.github/workflows/ci.yml`
+installs `ngspice`, a pinned Yosys, and pinned Icarus Verilog/Verilator by
+name, but has no step that installs OpenROAD, so `klt place-and-route` is
+not yet exercised end-to-end in CI (unlike `klt synthesize`, `klt equiv`,
+and `klt functional-verification`). The Docker recipe above is the
+straightforward way to close that gap — a `docker run` step per invocation,
+or the wrapper script above committed to the repo and put on `$PATH` before
+any `klt place-and-route` call — it just is not wired up yet.
+
 ## Stage granularity and invocation shape
 
 The contract names exactly four stages, in execution order:
