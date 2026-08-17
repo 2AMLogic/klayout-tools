@@ -1502,7 +1502,13 @@ def test_stubbed_sdf_generates_the_annotate_shim_with_an_absolute_path(
     `hdl_toplevel` *is* the DUT, so the `$sdf_annotate` call rides in a
     generated second elaboration root. The embedded path must be **absolute**
     -- `vvp` resolves a relative one against its own working directory, one
-    `SDF WARNING` away from a silent zero-delay run."""
+    `SDF WARNING` away from a silent zero-delay run.
+
+    The scope argument is the DUT nested under the generated pass-through
+    wrapper (`klt_sdf_dut_wrapper.klt_sdf_dut`), not `hdl_toplevel` directly
+    -- issue #1056's fix for a top-level-port-attached `INTERCONNECT` entry,
+    which Icarus cannot resolve against a module elaborated as its own `-s`
+    root."""
     request_path = _sdf_request(tmp_path)
     runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
 
@@ -1512,10 +1518,25 @@ def test_stubbed_sdf_generates_the_annotate_shim_with_an_absolute_path(
     assert shim.is_file()
     text = shim.read_text()
     assert "module klt_sdf_annotate();" in text
-    assert f'$sdf_annotate("{tmp_path / "route.sdf"}", gcd);' in text
-    # ...and the shim is elaborated alongside the design's own sources.
-    assert runner.build_kwargs["sources"][-1] == str(shim)
+    assert (
+        f'$sdf_annotate("{tmp_path / "route.sdf"}", '
+        "klt_sdf_dut_wrapper.klt_sdf_dut);" in text
+    )
+
+    wrapper = tmp_path / ".klt" / "functional-verification" / "klt_sdf_dut_wrapper.v"
+    assert wrapper.is_file()
+    wrapper_text = wrapper.read_text()
+    assert "module klt_sdf_dut_wrapper" in wrapper_text
+    assert "gcd klt_sdf_dut" in wrapper_text
+
+    # ...and both generated files are elaborated alongside the design's own
+    # sources, wrapper before shim.
+    assert runner.build_kwargs["sources"][-2:] == [str(wrapper), str(shim)]
     assert str(tmp_path / "gcd.v") in runner.build_kwargs["sources"]
+    # The wrapper -- not the real DUT -- is the Verilog toplevel actually
+    # elaborated (`-s`) and the one cocotb's own `dut.<port>` handle binds
+    # to; the real DUT keeps its own name for the response's own echo.
+    assert runner.build_kwargs["hdl_toplevel"] == "klt_sdf_dut_wrapper"
 
 
 def test_stubbed_sdf_appends_the_required_build_args(tmp_path, monkeypatch):
@@ -1673,6 +1694,141 @@ def test_sdf_diagnostics_are_only_scanned_on_annotated_runs(tmp_path, monkeypatc
     assert not (
         tmp_path / ".klt" / "functional-verification" / "klt_sdf_annotate.v"
     ).exists()
+
+
+# --------------------------------------------------------------------------- #
+# `_parse_toplevel_ports` / `_write_sdf_dut_wrapper` (issue #1056): the
+# top-level-port-attached `INTERCONNECT` fix's wrapper-generation machinery.
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_toplevel_ports_non_ansi_yosys_style(tmp_path):
+    """The convention both `klt synthesize`'s Yosys `write_verilog` and `klt
+    place-and-route`'s OpenROAD `write_verilog` emit (verified against
+    `tests/corpus/statime/gcd_netlist.v`): a bare-name port list, with
+    direction/width declared on a separate line per port."""
+    netlist = _write(
+        tmp_path / "gcd_netlist.v",
+        "module gcd(clk, rst_n, a_in, b_in, done, result);\n"
+        "  wire [15:0] a;\n"
+        "  input [15:0] a_in;\n"
+        "  input [15:0] b_in;\n"
+        "  input clk;\n"
+        "  output done;\n"
+        "  output [15:0] result;\n"
+        "  input rst_n;\n"
+        "endmodule\n",
+    )
+
+    ports = fv._parse_toplevel_ports([netlist], "gcd")
+
+    assert ports == [
+        ("input", "", "clk"),
+        ("input", "", "rst_n"),
+        ("input", "[15:0]", "a_in"),
+        ("input", "[15:0]", "b_in"),
+        ("output", "", "done"),
+        ("output", "[15:0]", "result"),
+    ]
+
+
+def test_parse_toplevel_ports_ansi_style(tmp_path):
+    """The convention this module's own hand-authored integration-test
+    fixtures use -- direction inline per port."""
+    netlist = _write(
+        tmp_path / "dly.v",
+        "module dly (input wire a, output wire [7:0] y, input clk);\nendmodule\n",
+    )
+
+    ports = fv._parse_toplevel_ports([netlist], "dly")
+
+    assert ports == [
+        ("input", "", "a"),
+        ("output", "[7:0]", "y"),
+        ("input", "", "clk"),
+    ]
+
+
+def test_parse_toplevel_ports_mixed_ansi_and_bare_is_a_request_error(tmp_path):
+    """Verilog's 'inherit the previous port's direction' rule for a
+    partially-ANSI header is not resolved -- fail loud rather than guess."""
+    netlist = _write(
+        tmp_path / "dut.v",
+        "module dut (input a, b, output y);\nendmodule\n",
+    )
+
+    with pytest.raises(FunctionalVerificationError, match="mixes ANSI-style ports"):
+        fv._parse_toplevel_ports([netlist], "dut")
+
+
+def test_parse_toplevel_ports_missing_module_is_a_request_error(tmp_path):
+    netlist = _write(tmp_path / "other.v", "module other(a, b); endmodule\n")
+
+    with pytest.raises(
+        FunctionalVerificationError, match="could not find a 'module gcd\\(...\\)'"
+    ):
+        fv._parse_toplevel_ports([netlist], "gcd")
+
+
+def test_parse_toplevel_ports_missing_direction_declaration_is_a_request_error(
+    tmp_path,
+):
+    netlist = _write(
+        tmp_path / "dut.v",
+        "module dut(a, b);\n  input a;\nendmodule\n",
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="could not find a direction declaration for port 'b'",
+    ):
+        fv._parse_toplevel_ports([netlist], "dut")
+
+
+def test_write_sdf_dut_wrapper_forwards_every_port(tmp_path):
+    wrapper_path = str(tmp_path / "klt_sdf_dut_wrapper.v")
+
+    fv._write_sdf_dut_wrapper(
+        wrapper_path,
+        hdl_toplevel="gcd",
+        ports=[
+            ("input", "", "clk"),
+            ("input", "[15:0]", "a_in"),
+            ("output", "[15:0]", "result"),
+        ],
+    )
+
+    text = Path(wrapper_path).read_text()
+    assert "module klt_sdf_dut_wrapper (" in text
+    assert "input clk" in text
+    assert "input [15:0] a_in" in text
+    assert "output [15:0] result" in text
+    assert "gcd klt_sdf_dut (" in text
+    assert ".clk(clk)" in text
+    assert ".a_in(a_in)" in text
+    assert ".result(result)" in text
+
+
+def test_stubbed_sdf_with_parameters_is_a_request_error(tmp_path, monkeypatch):
+    """cocotb's own Icarus parameter-override syntax is always
+    `-P<hdl_toplevel>.<name>=<value>` -- once `hdl_toplevel` becomes the
+    generated wrapper (issue #1056), that would silently target the wrapper
+    (which declares no parameters) instead of the real DUT, so the
+    combination is rejected up front rather than risking a parameter
+    override that looks applied but was not."""
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"sdf": {"file": "route.sdf"}}, parameters={"WIDTH": 8}),
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="request.parameters cannot currently be combined with options.sdf",
+    ):
+        run_functional_verification(request_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -2044,6 +2200,144 @@ def test_integration_real_icarus_broken_sdf_fails_loud_not_silently(tmp_path):
     # The evidence the scan overrode: cocotb's own artifact says "passed".
     results_xml = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
     assert "<failure" not in results_xml.read_text()
+
+
+# --------------------------------------------------------------------------- #
+# Integration: a top-level-port-attached `INTERCONNECT` entry (issue #1056).
+#
+# Before the fix, Icarus's `$sdf_annotate` could not resolve an `INTERCONNECT`
+# entry whose endpoint is a bare top-level port -- `INTERCONNECT a inst.pin`
+# (a primary input) or `INTERCONNECT inst.pin b` (a primary output) -- even
+# with `-ginterconnect` present, because the DUT was elaborated as its own
+# `-s` root. A purely internal `INTERCONNECT inst.pin inst.pin` entry always
+# resolved fine, which is exactly what made this a silent, design-shape-
+# dependent trap: any design with primary-port SDF delay hit it every time.
+# --------------------------------------------------------------------------- #
+
+_TOPLEVEL_PORT_SDF_DUT_V = """\
+module klt_inv (input wire in, output wire out);
+  assign out = ~in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_buf (input wire in, output wire out);
+  assign out = in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module toplevel_iconn (input wire a, output wire b);
+  wire w;
+  klt_inv u1 (.in(a), .out(w));
+  klt_buf u2 (.in(w), .out(b));
+endmodule
+"""
+
+_TOPLEVEL_PORT_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_output_settles_within_two_ns(dut):
+    """`b` inverts `a` through u1 (klt_inv) then passes through u2 (klt_buf)
+    unchanged: at zero delay `b` tracks `~a` immediately, so this passes;
+    once real INTERCONNECT delay on the top-level-port-attached entries is
+    annotated, `b` has not yet responded 2 ns after `a` rises and this
+    fails."""
+    dut.a.value = 0
+    await Timer(10, unit="ns")
+    dut.a.value = 1
+    await Timer(2, unit="ns")
+    assert dut.b.value == 0, f"b={dut.b.value} 2 ns after a rose (expected 0)"
+'''
+
+
+def _toplevel_port_sdf_text() -> str:
+    """A minimal IEEE-1497 SDF whose top design `CELL` mixes a purely
+    internal `INTERCONNECT u1.out u2.in` entry (already resolved before
+    issue #1056) with two top-level-port-attached ones -- `INTERCONNECT a
+    u1.in` (a primary input) and `INTERCONNECT u2.out b` (a primary output)
+    -- the exact entry shape issue #1056 reports, matching a real
+    `write_sdf -divider .` top design `CELL` block's own bare-port-name
+    convention (`docs/design/sdf-annotate-feasibility-spike.md`)."""
+    return """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "toplevel_iconn")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "toplevel_iconn")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a u1.in (1.000:5.000:9.000) (1.000:5.000:9.000))
+      (INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))
+      (INTERCONNECT u2.out b (0.000:0.000:0.000) (0.000:0.000:0.000))
+    ))
+  )
+)
+"""
+
+
+def _stage_toplevel_port_sdf_design(tmp_path: Path) -> None:
+    _write(tmp_path / "toplevel_iconn.v", _TOPLEVEL_PORT_SDF_DUT_V)
+    _write(tmp_path / "test_toplevel_iconn.py", _TOPLEVEL_PORT_TESTBENCH_PY)
+    _write(tmp_path / "route.sdf", _toplevel_port_sdf_text())
+
+
+def _toplevel_port_sdf_integration_request(
+    tmp_path: Path, name: str, sdf: dict | None
+) -> str:
+    request = {
+        "sources": ["toplevel_iconn.v"],
+        "hdl_toplevel": "toplevel_iconn",
+        "testbench": {"module": "test_toplevel_iconn"},
+    }
+    if sdf is not None:
+        request["options"] = {"sdf": sdf}
+    return _write_request(tmp_path / name, request)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_path):
+    """The load-bearing regression for issue #1056: a real post-route SDF's
+    top design `CELL` mixes purely internal `INTERCONNECT inst.pin inst.pin`
+    entries with entries touching a top-level port. Before the fix this
+    raised `FunctionalVerificationError` (`did not fully apply ... Could not
+    find intermodpath!`) for both port-touching entries even though
+    `-ginterconnect` was present. The generated pass-through wrapper
+    (`_write_sdf_dut_wrapper`) nests the DUT under a new root instead, which
+    Icarus resolves cleanly -- verified here by the *same* "does the
+    testbench's own verdict change" coverage metric the existing IOPATH
+    integration test above uses."""
+    _stage_toplevel_port_sdf_design(tmp_path)
+    zero_delay = _toplevel_port_sdf_integration_request(
+        tmp_path, "request-plain.json", None
+    )
+    annotated = _toplevel_port_sdf_integration_request(
+        tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
+    )
+
+    plain_report = run_functional_verification(zero_delay)
+    annotated_report = run_functional_verification(annotated)
+
+    assert plain_report["status"] == "pass"
+    assert plain_report["environment"]["sdf"] is None
+    # This is the assertion that would previously raise
+    # FunctionalVerificationError instead of returning a report at all.
+    assert annotated_report["status"] == "fail"
+    assert annotated_report["environment"]["sdf"] == {
+        "file": str(tmp_path / "route.sdf"),
+        "corner": "typ",
+        "annotated": True,
+    }
 
 
 # Sanity: `subprocess` really is the module this file's coverage stubs patch

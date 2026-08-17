@@ -16,6 +16,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-16 — `klt functional-verification`'s `options.sdf` no longer fails
+  with `SDF ERROR: ... Could not find intermodpath!`/`Could not find net` on
+  a post-route SDF whose `INTERCONNECT` entries touch a bare top-level port
+  (issue #1056) — the common case, since every primary input/output net
+  produces exactly this shape. Icarus cannot resolve a bare port identifier
+  against a module elaborated as its own `-s` root at all, only against one
+  nested as a child instance of another root; a generated transparent
+  pass-through wrapper now instantiates the DUT as that nested child (see
+  `docs/cli/functional-verification.md`'s "How the annotation is wired").
+  `request.parameters` combined with `options.sdf` is now rejected up front
+  (exit 1) rather than silently targeting the wrapper instead of the real
+  DUT, since cocotb's Icarus parameter-override syntax always addresses
+  `hdl_toplevel`, which the wrapper now is.
 - 2026-08-16 — `klt signoff --manifest`/`--fleet` now work from a packaged
   install (issue #1050). Both modes parse
   `docs/design-evidence-tiers.md` at runtime, but resolved it three
