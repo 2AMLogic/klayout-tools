@@ -146,6 +146,102 @@ def test_build_provenance_input_hash_null_for_unresolvable_path(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# _combined_content_hash
+# --------------------------------------------------------------------------- #
+#
+# Shared by `equiv.py` and `synthesize.py` for their multi-source
+# `provenance.input` case (issue #1112 -- the two previously carried
+# independently-copied implementations that silently diverged: one mixed
+# each path into its hash chunk, the other did not, so the same input files
+# produced two different `content_hash` values depending on which verb ran).
+
+
+def test_combined_content_hash_is_sha256_prefixed(tmp_path):
+    a = tmp_path / "a.v"
+    b = tmp_path / "b.v"
+    a.write_bytes(b"module a; endmodule\n")
+    b.write_bytes(b"module b; endmodule\n")
+
+    result = _provenance._combined_content_hash([str(a), str(b)])
+    assert result is not None
+    assert result.startswith("sha256:")
+
+
+def test_combined_content_hash_is_order_independent(tmp_path):
+    a = tmp_path / "a.v"
+    b = tmp_path / "b.v"
+    a.write_bytes(b"module a; endmodule\n")
+    b.write_bytes(b"module b; endmodule\n")
+
+    forward = _provenance._combined_content_hash([str(a), str(b)])
+    reverse = _provenance._combined_content_hash([str(b), str(a)])
+    assert forward == reverse
+
+
+def test_combined_content_hash_is_path_independent(tmp_path):
+    # Same file *contents*, different paths (e.g. a copy in another
+    # directory) hash identically -- the path-independent scheme this dedup
+    # standardized on (previously only true for synthesize.py's copy).
+    src_dir = tmp_path / "src"
+    other_dir = tmp_path / "other"
+    src_dir.mkdir()
+    other_dir.mkdir()
+    (src_dir / "top.v").write_bytes(b"module top; endmodule\n")
+    (other_dir / "top_copy.v").write_bytes(b"module top; endmodule\n")
+
+    original = _provenance._combined_content_hash([str(src_dir / "top.v")])
+    copy = _provenance._combined_content_hash([str(other_dir / "top_copy.v")])
+    assert original == copy
+
+
+def test_combined_content_hash_none_when_any_file_unresolvable(tmp_path):
+    existing = tmp_path / "a.v"
+    existing.write_bytes(b"module a; endmodule\n")
+    missing = tmp_path / "nope.v"
+
+    assert _provenance._combined_content_hash([str(existing), str(missing)]) is None
+
+
+# --------------------------------------------------------------------------- #
+# _yosys_version
+# --------------------------------------------------------------------------- #
+
+
+def test_yosys_version_returns_none_when_binary_missing(monkeypatch):
+    def _fake_run(*_args, **_kwargs):
+        raise FileNotFoundError("no such file: yosys")
+
+    monkeypatch.setattr(_provenance.subprocess, "run", _fake_run)
+    assert _provenance._yosys_version() is None
+
+
+def test_yosys_version_returns_none_on_timeout(monkeypatch):
+    def _fake_run(*_args, **_kwargs):
+        raise _provenance.subprocess.TimeoutExpired(cmd="yosys", timeout=10)
+
+    monkeypatch.setattr(_provenance.subprocess, "run", _fake_run)
+    assert _provenance._yosys_version() is None
+
+
+def test_yosys_version_returns_none_on_nonzero_returncode(monkeypatch):
+    class _FakeCompleted:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(_provenance.subprocess, "run", lambda *a, **k: _FakeCompleted())
+    assert _provenance._yosys_version() is None
+
+
+def test_yosys_version_parses_version_token(monkeypatch):
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "Yosys 0.68+48 (git sha1 abc123)\n"
+
+    monkeypatch.setattr(_provenance.subprocess, "run", lambda *a, **k: _FakeCompleted())
+    assert _provenance._yosys_version() == "0.68+48"
+
+
+# --------------------------------------------------------------------------- #
 # deck_source_path
 # --------------------------------------------------------------------------- #
 
