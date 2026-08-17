@@ -391,6 +391,116 @@ def test_reference_ratio(tmp_path):
     assert reference["ratio"] == pytest.approx(2.0)
 
 
+# --- AREA-EFF bounds check (issue #1086) ------------------------------------
+#
+# `_make_density_layout()`'s hand-computed numbers (see its own docstring):
+# bbox_area_um2=4.0, utilization=0.25, bbox_tightness=0.25,
+# dead_margins_um={left:0.0, bottom:0.0, right:1.0, top:1.0} (max=1.0),
+# one largest_empty_region with area_um2=3.0 -> fraction of bbox = 0.75.
+
+
+def test_area_eff_absent_by_default(tmp_path):
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    report = economy_report(str(path))
+    assert "area_eff" not in report
+
+
+def test_area_eff_dead_margins_pass_and_fail(tmp_path):
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    passing = economy_report(str(path), area_eff_max_dead_margin_um=1.0)
+    check = passing["area_eff"]["checks"]["dead_margins"]
+    assert check["actual_max_um"] == pytest.approx(1.0)
+    assert check["max_allowed_um"] == pytest.approx(1.0)
+    assert check["status"] == "pass"
+    assert passing["area_eff"]["status"] == "pass"
+
+    failing = economy_report(str(path), area_eff_max_dead_margin_um=0.5)
+    assert failing["area_eff"]["checks"]["dead_margins"]["status"] == "fail"
+    assert failing["area_eff"]["status"] == "fail"
+
+
+def test_area_eff_utilization_pass_and_fail(tmp_path):
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    passing = economy_report(str(path), area_eff_min_utilization=0.2)
+    check = passing["area_eff"]["checks"]["utilization"]
+    assert check["actual"] == pytest.approx(0.25)
+    assert check["floor"] == pytest.approx(0.2)
+    assert check["status"] == "pass"
+
+    failing = economy_report(str(path), area_eff_min_utilization=0.5)
+    assert failing["area_eff"]["checks"]["utilization"]["status"] == "fail"
+    assert failing["area_eff"]["status"] == "fail"
+
+
+def test_area_eff_largest_empty_region_fraction_pass_and_fail(tmp_path):
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    passing = economy_report(str(path), area_eff_max_empty_region_fraction=0.8)
+    check = passing["area_eff"]["checks"]["largest_empty_region_fraction"]
+    assert check["actual_fraction"] == pytest.approx(0.75)
+    assert check["status"] == "pass"
+
+    failing = economy_report(str(path), area_eff_max_empty_region_fraction=0.5)
+    assert (
+        failing["area_eff"]["checks"]["largest_empty_region_fraction"]["status"]
+        == "fail"
+    )
+
+
+def test_area_eff_bbox_tightness_fail(tmp_path):
+    """`_make_density_layout()`'s drawn square does not reach the bbox
+    edges (bbox_tightness=0.25, per `test_bbox_tightness`) -- a
+    `require_bbox_tightness` request must fail."""
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    report = economy_report(str(path), area_eff_require_bbox_tightness=True)
+    check = report["area_eff"]["checks"]["bbox_tightness"]
+    assert check["actual"] == pytest.approx(0.25)
+    assert check["required"] == pytest.approx(1.0)
+    assert check["status"] == "fail"
+    assert report["area_eff"]["status"] == "fail"
+
+
+def test_area_eff_bbox_tightness_pass(tmp_path):
+    """A layout whose only geometry exactly fills its own bbox has
+    bbox_tightness == 1.0 -- a `require_bbox_tightness` request must pass."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li = layout.layer(1, 0)
+    top.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "tight.gds"
+    layout.write(str(path))
+
+    report = economy_report(str(path), area_eff_require_bbox_tightness=True)
+    assert report["area_eff"]["checks"]["bbox_tightness"]["status"] == "pass"
+    assert report["area_eff"]["status"] == "pass"
+
+
+def test_area_eff_composite_one_failing_check_fails_overall(tmp_path):
+    """Requesting several checks at once: one failing check fails the
+    overall `area_eff.status`, even when the others individually pass."""
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    report = economy_report(
+        str(path),
+        area_eff_max_dead_margin_um=1.0,  # passes (actual max is exactly 1.0)
+        area_eff_min_utilization=0.9,  # fails (actual is 0.25)
+    )
+    checks = report["area_eff"]["checks"]
+    assert checks["dead_margins"]["status"] == "pass"
+    assert checks["utilization"]["status"] == "fail"
+    assert report["area_eff"]["status"] == "fail"
+
+
 # --- provenance / determinism ----------------------------------------------
 
 
@@ -525,6 +635,44 @@ def test_cli_budget_flag(tmp_path, capsys):
     assert payload["budget"]["status"] == "fail"
 
 
+def test_cli_area_eff_flags(tmp_path, capsys):
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    assert (
+        main(
+            [
+                "economy",
+                str(path),
+                "--area-eff-min-utilization",
+                "0.9",
+                "--area-eff-require-bbox-tightness",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["area_eff"]["status"] == "fail"
+    assert payload["area_eff"]["checks"]["utilization"]["status"] == "fail"
+    assert payload["area_eff"]["checks"]["bbox_tightness"]["status"] == "fail"
+    # Neither dead_margins nor largest_empty_region_fraction were requested.
+    assert "dead_margins" not in payload["area_eff"]["checks"]
+    assert "largest_empty_region_fraction" not in payload["area_eff"]["checks"]
+
+
+def test_cli_area_eff_absent_without_flags(tmp_path, capsys):
+    path = tmp_path / "density.gds"
+    _make_density_layout().write(str(path))
+
+    assert main(["economy", str(path), "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "area_eff" not in payload
+
+
 def test_cli_grid_and_max_empty_regions_flags(tmp_path, capsys):
     path = tmp_path / "density.gds"
     _make_density_layout().write(str(path))
@@ -607,6 +755,25 @@ class TestBandgapCanary:
         report = economy_report(str(BANDGAP_GDS))
         assert report["row_utilization"] is None
 
+    def test_area_eff_fails_isolation_heavy_floor_and_dead_margin_cap(self):
+        """Manual-verification test plan (issue #1086): a known-loose
+        analog block should fail an AREA-EFF bounds check -- both the
+        isolation-heavy floor (0.30 per the `economy-review` skill's rubric
+        table) and a dead-margin cap tight enough to catch this block's own
+        ~41 um left/right margins."""
+        report = economy_report(
+            str(BANDGAP_GDS),
+            area_eff_min_utilization=0.30,
+            area_eff_max_dead_margin_um=10.0,
+        )
+        area_eff = report["area_eff"]
+        # Utilization (0.3805) clears the 0.30 floor on its own...
+        assert area_eff["checks"]["utilization"]["status"] == "pass"
+        # ...but the ~41 um dead margins blow well past a 10 um cap --
+        # exactly the "unambiguous waste" a utilization floor alone misses.
+        assert area_eff["checks"]["dead_margins"]["status"] == "fail"
+        assert area_eff["status"] == "fail"
+
 
 @pytest.mark.skipif(not BUF4_GDS.is_file(), reason="canary GDS not present")
 class TestStdCellCanary:
@@ -642,3 +809,21 @@ class TestStdCellCanary:
         )
         assert report["reference"]["ratio"] == pytest.approx(1.0)
         assert report["budget"]["status"] == "fail"
+
+    def test_area_eff_passes_digital_std_cell_floor(self):
+        """Manual-verification test plan (issue #1086): a known-tight
+        digital standard cell should pass an AREA-EFF bounds check against
+        the digital floor (0.70, per the `economy-review` skill's rubric
+        table) and a strict (zero-tolerance) dead-margin cap, since this
+        cell has none."""
+        report = economy_report(
+            str(BUF4_GDS),
+            area_eff_min_utilization=0.70,
+            area_eff_max_dead_margin_um=0.01,
+            area_eff_require_bbox_tightness=True,
+        )
+        area_eff = report["area_eff"]
+        assert area_eff["checks"]["utilization"]["status"] == "pass"
+        assert area_eff["checks"]["dead_margins"]["status"] == "pass"
+        assert area_eff["checks"]["bbox_tightness"]["status"] == "pass"
+        assert area_eff["status"] == "pass"

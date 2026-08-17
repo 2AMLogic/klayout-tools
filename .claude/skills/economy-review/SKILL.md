@@ -214,6 +214,20 @@ the right direction:
   1.0 (drawn geometry touches every bbox edge) — see
   `evidence/economy-review/sky130_fd_sc_hd__buf_4/`.
 
+## Relationship to the AREA-EFF spec row (issue #1086)
+
+This skill's `pass`/`revise` verdict is the **judgment layer** of a block's
+`Area-Eff` spec row (`docs/design-evidence-tiers.md`'s "Area-efficiency
+spec convention" section) — the rubric table above is the source the
+convention doc's per-block-kind utilization floors are seeded from, and a
+`pass` verdict here is one of the row's own checks, alongside `klt
+economy`'s machine-checkable `--area-eff-*` bounds
+(`docs/cli/economy.md`'s "AREA-EFF bounds-check block"). Nothing about this
+skill's own workflow changes because of this — it still renders opinions,
+and still does not block a merge by itself; `Area-Eff` binds through a
+block's *ratified spec* (the design-evidence-tiers T1 checklist's item 5),
+not through this skill directly.
+
 ## Not built in this PR (documented, not scope creep)
 
 - **In-image scale bar / bbox overlay** on renders — `klt render` doesn't

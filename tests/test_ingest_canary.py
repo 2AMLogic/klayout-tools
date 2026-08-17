@@ -182,6 +182,32 @@ def test_parse_spec_summary_absent_returns_none():
     assert ic.parse_spec_summary("# no spec section here\n\nJust prose.\n") is None
 
 
+def test_parse_spec_summary_area_eff_row_parses_unmodified(tmp_path):
+    """Issue #1086's AREA-EFF spec-row convention adds a new `parameter`
+    value (`"Area-Eff"`), not a new column -- `parse_spec_summary()` reads
+    column headers verbatim and doesn't match `parameter` cell values
+    against a fixed enum, so this must parse with no code change. Confirms
+    the curator's casing note (`"Area"`/`"Area-Eff"`, not `"AREA"`/
+    `"AREA-EFF"`, to match the existing row-name convention)."""
+    readme = """\
+# some-block
+
+## Target specification (RATIFIED 2026-08-17, see issue #1086)
+
+| Parameter | Target |
+|---|---|
+| Area | < 0.10 mm^2 |
+| Area-Eff | utilization >= 0.30; dead margins <= 15 um per edge |
+"""
+    result = ic.parse_spec_summary(readme)
+    assert result is not None
+    rows = {row["parameter"]: row for row in result["rows"]}
+    assert rows["Area"]["target"] == "< 0.10 mm^2"
+    assert rows["Area-Eff"]["target"] == (
+        "utilization >= 0.30; dead margins <= 15 um per edge"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # `build_signals`: bullet-format record (sky130-bandgap style)
 # --------------------------------------------------------------------------- #

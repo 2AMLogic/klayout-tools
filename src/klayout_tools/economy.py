@@ -485,6 +485,96 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
+def _area_eff_block(
+    *,
+    dead_margins_um: dict[str, float],
+    utilization: float,
+    bbox_tightness: float,
+    largest_empty_regions: list[dict[str, Any]],
+    bbox_area_um2: float,
+    max_dead_margin_um: float | None,
+    min_utilization: float | None,
+    max_empty_region_fraction: float | None,
+    require_bbox_tightness: bool,
+) -> dict[str, Any] | None:
+    """Build the optional ``area_eff`` PASS/FAIL block -- the AREA-EFF spec
+    row's bounds check (issue #1086), mirroring ``budget``/``reference``'s
+    conditional-block-with-``status``-field shape but as a small composite
+    of independent checks rather than one scalar, since AREA-EFF itself is
+    a composite metric (see ``docs/design-evidence-tiers.md``'s "AREA-EFF"
+    section for the full convention this implements).
+
+    Each check is requested independently and only appears when its own
+    request parameter is given (``None``/``False`` skips it, exactly like
+    ``budget_um2``/``reference_area_um2`` today) -- returns ``None`` (no
+    ``area_eff`` block at all) when none of the four are requested, so a
+    block with no ratified AREA-EFF row sees no change to the report shape.
+
+    Two checks are **hard bounds on unambiguous waste** -- no
+    analog-legitimacy defense exists for a dead margin past a declared cap,
+    or a single empty region past a declared fraction of the bbox:
+
+    - ``dead_margins`` -- ``max_dead_margin_um`` caps every edge of
+      ``dead_margins_um`` uniformly; fails on the first (and reports the)
+      worst offending edge.
+    - ``largest_empty_region_fraction`` -- caps the single largest disjoint
+      empty region's own area as a fraction of ``bbox_area_um2``.
+
+    ``bbox_tightness`` is also a hard bound (``require_bbox_tightness``):
+    when requested, the value must be exactly ``1.0`` -- the bbox must not
+    extend past the drawn content at all.
+
+    ``utilization`` is the **calibrated** bound (``min_utilization``): a
+    per-block-kind floor sourced from evidence, not a hard rule -- see the
+    `economy-review` skill's rubric table (`.claude/skills/economy-review/
+    SKILL.md`) for the per-block-kind ranges this floor is meant to be set
+    from, and the design cautions in the doc section above for why this is
+    the only calibrated (rather than hard) check here.
+    """
+    checks: dict[str, Any] = {}
+
+    if max_dead_margin_um is not None:
+        actual_max_um = max(dead_margins_um.values())
+        checks["dead_margins"] = {
+            "max_allowed_um": max_dead_margin_um,
+            "actual_max_um": actual_max_um,
+            "status": "pass" if actual_max_um <= max_dead_margin_um else "fail",
+        }
+
+    if min_utilization is not None:
+        checks["utilization"] = {
+            "floor": min_utilization,
+            "actual": utilization,
+            "status": "pass" if utilization >= min_utilization else "fail",
+        }
+
+    if max_empty_region_fraction is not None:
+        largest_area_um2 = (
+            largest_empty_regions[0]["area_um2"] if largest_empty_regions else 0.0
+        )
+        actual_fraction = largest_area_um2 / bbox_area_um2 if bbox_area_um2 else 0.0
+        checks["largest_empty_region_fraction"] = {
+            "max_allowed_fraction": max_empty_region_fraction,
+            "actual_fraction": actual_fraction,
+            "status": (
+                "pass" if actual_fraction <= max_empty_region_fraction else "fail"
+            ),
+        }
+
+    if require_bbox_tightness:
+        checks["bbox_tightness"] = {
+            "required": 1.0,
+            "actual": bbox_tightness,
+            "status": "pass" if bbox_tightness == 1.0 else "fail",
+        }
+
+    if not checks:
+        return None
+
+    overall = "pass" if all(c["status"] == "pass" for c in checks.values()) else "fail"
+    return {"checks": checks, "status": overall}
+
+
 def economy_report(
     path: str,
     top: str | None = None,
@@ -493,6 +583,10 @@ def economy_report(
     max_empty_regions: int = DEFAULT_MAX_EMPTY_REGIONS,
     budget_um2: float | None = None,
     reference_area_um2: float | None = None,
+    area_eff_max_dead_margin_um: float | None = None,
+    area_eff_min_utilization: float | None = None,
+    area_eff_max_empty_region_fraction: float | None = None,
+    area_eff_require_bbox_tightness: bool = False,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -508,6 +602,16 @@ def economy_report(
     top cell has no geometry at all (an empty bounding box -- there is no
     meaningful density/whitespace report for a cell with nothing drawn).
     ``grid_cols``/``grid_rows``/``max_empty_regions`` must be positive.
+
+    ``area_eff_*`` parameters check a block's **AREA-EFF** spec row (issue
+    #1086) -- the layout-efficiency counterpart to an absolute area
+    (``budget_um2``) bound. Unlike ``budget_um2``/``reference_area_um2``
+    (a single scalar each), AREA-EFF is a small composite of independent
+    checks -- see :func:`_area_eff_block`'s docstring for the hard-vs-
+    calibrated rationale behind each one. Each parameter left ``None``/
+    ``False`` is simply not checked; the ``area_eff`` block is omitted
+    entirely when none of them are given (same optional-block convention as
+    ``budget``/``reference``).
     """
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
@@ -611,6 +715,20 @@ def economy_report(
                 bbox_area_um2 / reference_area_um2 if reference_area_um2 else None
             ),
         }
+
+    area_eff = _area_eff_block(
+        dead_margins_um=dead_margins_um,
+        utilization=utilization,
+        bbox_tightness=bbox_tightness,
+        largest_empty_regions=largest_empty_regions,
+        bbox_area_um2=bbox_area_um2,
+        max_dead_margin_um=area_eff_max_dead_margin_um,
+        min_utilization=area_eff_min_utilization,
+        max_empty_region_fraction=area_eff_max_empty_region_fraction,
+        require_bbox_tightness=area_eff_require_bbox_tightness,
+    )
+    if area_eff is not None:
+        report["area_eff"] = area_eff
 
     report["provenance"] = build_provenance(input_path=path)
 

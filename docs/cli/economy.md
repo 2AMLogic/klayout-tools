@@ -10,7 +10,12 @@ area is unit cost) before it gates anything.
 ```
 klt economy <file> [--top <cell>] [--grid-cols N] [--grid-rows N]
                     [--max-empty-regions N] [--budget-um2 <area>]
-                    [--reference-area-um2 <area>] [--format text|json]
+                    [--reference-area-um2 <area>]
+                    [--area-eff-max-dead-margin-um <um>]
+                    [--area-eff-min-utilization <fraction>]
+                    [--area-eff-max-empty-region-fraction <fraction>]
+                    [--area-eff-require-bbox-tightness]
+                    [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -31,6 +36,14 @@ klt economy <file> [--top <cell>] [--grid-cols N] [--grid-rows N]
   square micrometres (e.g. a PDK example cell, a published block). When
   given, adds a `reference` block reporting the ratio (`N.NNx the reference
   area`).
+- `--area-eff-max-dead-margin-um`/`--area-eff-min-utilization`/
+  `--area-eff-max-empty-region-fraction`/`--area-eff-require-bbox-tightness`
+  — an **AREA-EFF** spec row's bounds check (issue #1086 — see
+  [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md)'s
+  "Area-efficiency spec convention (AREA-EFF)" section for the convention
+  these flags check). Each is independently optional; any one given adds an
+  `area_eff` block with a `checks` sub-object holding only the checks that
+  were requested. See "AREA-EFF bounds-check block" below.
 - `--format` — `text` (default, a human-readable summary + per-cell table) or
   `json`.
 
@@ -137,6 +150,7 @@ additionally present (see "Budget and reference blocks" below).
 | `provenance`                    | object                   | The shared provenance block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`docs/json-contract.md`](../json-contract.md). `pdk`/`deck` are always `null` (this command resolves neither); `input.content_hash` is the input file's own SHA-256. |
 | `budget`                        | object (optional)        | Present only with `--budget-um2`. See below. |
 | `reference`                     | object (optional)        | Present only with `--reference-area-um2`. See below. |
+| `area_eff`                      | object (optional)        | Present only when at least one `--area-eff-*` flag is given. See "AREA-EFF bounds-check block" below. |
 
 ### `whitespace_grid`
 
@@ -244,6 +258,68 @@ the reference area". A crude comparison hook (issue #1012's item 5): the
 caller is responsible for sourcing a comparable reference area (a PDK
 example cell, a published block) — this command does not look one up.
 
+### AREA-EFF bounds-check block
+
+With any `--area-eff-*` flag given, `area_eff` is added — a small composite
+of independent PASS/FAIL checks (issue #1086), the layout-**efficiency**
+counterpart to `budget`'s absolute-area check. Each check is requested
+independently and appears in `checks` only when its own flag was given; a
+block with no ratified AREA-EFF row sees no `area_eff` key at all (same
+optional-block convention as `budget`/`reference`).
+
+```json
+"area_eff": {
+  "checks": {
+    "dead_margins": {
+      "max_allowed_um": 15.0,
+      "actual_max_um": 41.025,
+      "status": "fail"
+    },
+    "utilization": {
+      "floor": 0.3,
+      "actual": 0.3805,
+      "status": "pass"
+    },
+    "largest_empty_region_fraction": {
+      "max_allowed_fraction": 0.3,
+      "actual_fraction": 0.3634,
+      "status": "fail"
+    },
+    "bbox_tightness": {
+      "required": 1.0,
+      "actual": 1.0,
+      "status": "pass"
+    }
+  },
+  "status": "fail"
+}
+```
+
+| Flag | Check key | Fields | Pass condition |
+| --- | --- | --- | --- |
+| `--area-eff-max-dead-margin-um` | `dead_margins` | `max_allowed_um`, `actual_max_um` | `actual_max_um` (the largest of `dead_margins_um`'s four edges) `<= max_allowed_um`. |
+| `--area-eff-min-utilization` | `utilization` | `floor`, `actual` | `actual` (= the top-level `utilization` field) `>= floor`. |
+| `--area-eff-max-empty-region-fraction` | `largest_empty_region_fraction` | `max_allowed_fraction`, `actual_fraction` | `actual_fraction` (= the largest `largest_empty_regions[]` entry's `area_um2` divided by `bbox_area_um2`, `0.0` if there are no empty regions) `<= max_allowed_fraction`. |
+| `--area-eff-require-bbox-tightness` | `bbox_tightness` | `required` (always `1.0`), `actual` | `actual` (= the top-level `bbox_tightness` field) `== 1.0` exactly. |
+
+`area_eff.status` is `"pass"` only when every *requested* check passes —
+absent checks (their flag not given) do not count against it.
+
+**Hard bounds vs. a calibrated bound.** `dead_margins`,
+`largest_empty_region_fraction`, and `bbox_tightness` are **hard bounds on
+unambiguous waste** — no analog-legitimacy defense (guard ring, matching
+symmetry, isolation spacing) applies to a dead margin, an oversized single
+empty region, or a bbox that overshoots its own drawn content. `utilization`
+is a **calibrated bound** — a per-block-kind floor that must come from
+evidence (the `economy-review` skill's rubric table,
+`.claude/skills/economy-review/SKILL.md`), not one fixed value for every
+block kind; a floor pressuring cramming trades against matching/DRC margin,
+the opposite failure. See
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md)'s
+"Area-efficiency spec convention (AREA-EFF)" section for the full
+convention this block implements, including how it composes with a block's
+ratified spec (T1 checklist item 5).
+
 ## Bounding-box tightness vs. dead margins
 
 `bbox_tightness` (`tight_bbox_area_um2 / bbox_area_um2`) and
@@ -280,9 +356,9 @@ the input's own geometry; the same input always produces the same output
 ## Text format
 
 The default `text` format prints a summary, the largest empty regions,
-`row_utilization`/`budget`/`reference` (when present), and a per-cell
-utilization table. It is intended for human eyes and its exact layout is
-**not** part of the contract — parse the JSON instead.
+`row_utilization`/`budget`/`reference`/`area_eff` (when present), and a
+per-cell utilization table. It is intended for human eyes and its exact
+layout is **not** part of the contract — parse the JSON instead.
 
 ```
 $ klt economy blocks/sky130-bandgap/output/bandgap_core_routed.gds

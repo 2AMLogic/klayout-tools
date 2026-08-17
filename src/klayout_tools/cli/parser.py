@@ -182,9 +182,9 @@ def create_parser() -> argparse.ArgumentParser:
         description=(
             "Report utilization (per cell and for the top), a whitespace "
             "map (grid + largest exact empty regions), bounding-box "
-            "tightness/aspect-ratio/dead-margins, and an optional "
-            "area-budget/reference-area check for one top cell of a "
-            "GDSII or OASIS layout stream."
+            "tightness/aspect-ratio/dead-margins, and optional "
+            "area-budget/reference-area and AREA-EFF (issue #1086) bounds "
+            "checks for one top cell of a GDSII or OASIS layout stream."
         ),
     )
     economy_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
@@ -236,6 +236,51 @@ def create_parser() -> argparse.ArgumentParser:
             "a comparable hand-designed reference's area in square "
             "micrometres; when given, reports a 'reference' block with the "
             "ratio to the top cell's bbox area"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-max-dead-margin-um",
+        type=float,
+        default=None,
+        dest="area_eff_max_dead_margin_um",
+        help=(
+            "AREA-EFF hard bound (issue #1086): cap in micrometres on any "
+            "single edge of dead_margins_um; when given, adds an 'area_eff' "
+            "block with a 'dead_margins' PASS/FAIL check"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-min-utilization",
+        type=float,
+        default=None,
+        dest="area_eff_min_utilization",
+        help=(
+            "AREA-EFF calibrated bound (issue #1086): per-block-kind "
+            "utilization floor (see the economy-review skill's rubric "
+            "table); when given, adds an 'area_eff' block with a "
+            "'utilization' PASS/FAIL check"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-max-empty-region-fraction",
+        type=float,
+        default=None,
+        dest="area_eff_max_empty_region_fraction",
+        help=(
+            "AREA-EFF hard bound (issue #1086): cap on the largest single "
+            "empty region's area as a fraction of the top cell's bbox "
+            "area; when given, adds an 'area_eff' block with a "
+            "'largest_empty_region_fraction' PASS/FAIL check"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-require-bbox-tightness",
+        action="store_true",
+        dest="area_eff_require_bbox_tightness",
+        help=(
+            "AREA-EFF hard bound (issue #1086): require bbox_tightness == "
+            "1.0; when given, adds an 'area_eff' block with a "
+            "'bbox_tightness' PASS/FAIL check"
         ),
     )
     _add_format_arg(economy_parser)
