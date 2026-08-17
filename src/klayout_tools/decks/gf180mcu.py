@@ -43,6 +43,19 @@ checkout of that repo at any time. Unless noted otherwise, the **3.3V
 column** value is used (this deck does not model the 5V/6V high-voltage
 variants).
 
+The one exception, as of issue #1110, is the ``Comp`` width/space pair: the
+DRM's ``DF.1a``/``DF.3a`` each publish two materially different columns
+(0.22/0.30 um and 0.28/0.36 um) selected by whether the geometry is drawn
+inside ``Dualgate`` (55/0), gf180mcu's 5V/6V thick-oxide marker, and this
+deck now ships **both** halves of each as a rule pair -- ``comp.width.1``/
+``comp.space.1`` (the ``_LV`` halves, scoped to ``Comp`` polygons touching
+no ``Dualgate``) and ``comp.width.mv.1``/``comp.space.mv.1`` (the ``_MV``
+halves, scoped to ``Comp`` polygons overlapping it), via
+:attr:`~klayout_tools.decks.DerivedLayer.mode`. Every *other* rule below
+still encodes the 3.3V column only, and ``UNMODELED_VOLTAGE_MARKERS`` at the
+bottom of this module keeps ``Dualgate`` registered for exactly that
+residue.
+
 ``CO.*``/``Vn.*`` re-derivation note (issue #551): the nine
 conductor-over-cut enclosure rules below (``metal1.enclosing.contact.1``
 plus the eight ``metalN.enclosing.viaM.1`` rules) are the one family here
@@ -60,6 +73,18 @@ cut.not(conductor)`` -- exactly the pair of conditions our ``"enclosing"``
 check reports (marginal facing-edge enclosure plus ``_run_check``'s
 ``outside_region`` zero-overlap escape term, see ``drc.py``) -- so none of
 the nine is an approximation.
+
+The four ``Comp`` voltage-split rules (``comp.width.1``/``comp.width.mv.1``/
+``comp.space.1``/``comp.space.mv.1``, issue #1110) cite the same real
+fetched install, for the same reason: the DRM's numeric tables publish the
+two threshold columns, but only ``rule_decks/comp.drc`` states *how* the
+columns are selected -- ``comp_3p3v = comp.not_interacting(v5_xtor)
+.not_interacting(dualgate)`` and ``comp_56v = comp.overlapping(dualgate)``,
+which are precisely the ``"not_interacting"``/``"overlapping"``
+:class:`~klayout_tools.decks.DerivedLayer` modes those four rules use, and
+which is also where the ``_LV``/``_MV`` rule-id suffixes come from. Their
+``provenance`` therefore cites ``comp.drc`` rather than the DRM CSV the
+other ``DF.*``-family entries cite.
 
 Their **end-of-line** companions (``CO.6a``/``CO.6b``, ``Vn.3c``/``Vn.3d``,
 ``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed: each conditions a
@@ -148,13 +173,27 @@ LVS-extraction script's separately-rounded restatement of them -- keeps
 ``klt extract``'s reported ``c_f`` consistent with what the same drawn
 geometry simulates as.
 
-Sixteen rules below approximate the official DRM rule in some way (each is
+Nineteen rules below approximate the official DRM rule in some way (each is
 called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
 
-- ``comp.space.1``: the official ``DF.3a`` text scopes to a substrate-tap
-  butting context; approximated as a general COMP-to-COMP spacing check on
-  the whole ``comp`` drawn layer.
+- ``comp.space.1``/``comp.space.mv.1``: the official ``DF.3a_LV``/
+  ``DF.3a_MV`` text scopes to a substrate-tap butting context, and the PDK
+  deck further excludes the one-time-programmable marker ``otp_mk``
+  (173/5); approximated as a general COMP-to-COMP spacing check within each
+  rule's own voltage-scoped ``comp`` region.
+- ``comp.width.1``/``comp.space.1``: the PDK deck's own thin-oxide region is
+  ``comp_3p3v = comp.not_interacting(v5_xtor).not_interacting(dualgate)``;
+  these two model the ``dualgate`` half of that (issue #1110) but not the
+  ``v5_xtor`` (112/1) half, which this deck's curated layer set does not
+  draw -- so ``Comp`` marked only by ``v5_xtor`` is checked here against the
+  3.3V column, exactly as it was before the ``Dualgate`` split.
+- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` additionally excludes the
+  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39), which this
+  deck's curated layer set does not draw -- so a 5V LDMOS drift region is
+  checked here where the official rule would not check it (conservative: a
+  false positive on a device this deck cannot recognise, never a missed
+  violation).
 - ``poly2.space.1``: the official ``PL.3a`` splits into "space on COMP" vs.
   "space on field" sub-cases (context our engine can't distinguish without
   a boolean layer expression); both sub-cases share the same 3.3V value
@@ -351,9 +390,11 @@ from . import (
 # docstring's own top-of-file provenance note already cites for every rule
 # transcribed from the published DRM tables (as opposed to the nine
 # `CO.*`/`Vn.*` conductor-over-cut enclosure rules re-derived from a
-# *different* repo/commit, `globalfoundries-pdk-libs-gf180mcu_fd_pv`
-# `999a6ff` -- none of those are width/space checks, so none are piloted
-# here).
+# *different* repo/commit, `globalfoundries-pdk-libs-gf180mcu_fd_pv` -- as
+# of issue #1110 that set includes the four width/space `Comp` voltage-split
+# rules alongside the nine `CO.*`/`Vn.*` enclosure rules, so it is no longer
+# true that "none of those are width/space checks"; those four use
+# `_gf180mcu_klayout_deck_provenance` below instead of this constant pair).
 _GF180MCU_PDK_REPO = "google/gf180mcu-pdk"
 _GF180MCU_PDK_COMMIT = "de3240d"
 
@@ -390,7 +431,8 @@ def _gf180mcu_provenance(scope: str, rule_id: str) -> RuleProvenance:
     reuses it unchanged for the DRM-table-sourced subset of the deck's
     remaining enclosing/separation rules (the other subset -- the nine
     `CO.*`/`Vn.*` conductor-over-cut rules re-derived from *executable* rule
-    -deck code rather than a DRM table -- uses
+    -deck code rather than a DRM table, plus the four `Comp` voltage-split
+    rules issue #1110 re-derived the same way -- uses
     `_gf180mcu_klayout_deck_provenance` below instead)."""
     return RuleProvenance(
         source_repo=_GF180MCU_PDK_REPO,
@@ -418,11 +460,14 @@ _GF180MCU_KLAYOUT_DRC_DECK_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
 
 
 def _gf180mcu_klayout_deck_provenance(source_file: str, rule_id: str) -> RuleProvenance:
-    """Build a :class:`RuleProvenance` for one of the nine `CO.*`/`Vn.*`
-    conductor-over-cut enclosure rules re-derived from the real, executable
-    `libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`
-    (issue #551's re-derivation note) rather than a DRM table.
-    `source_file` is the bare file stem (e.g. `"contact"`, `"via1"`)."""
+    """Build a :class:`RuleProvenance` for a rule re-derived from the real,
+    executable `libs.tech/klayout/drc/rule_decks/*.drc` rather than a DRM
+    table: the nine `CO.*`/`Vn.*` conductor-over-cut enclosure rules
+    (issue #551's re-derivation note, `{contact,via1,via2,via3,via4}.drc`)
+    and the four `Comp` voltage-split rules (issue #1110, `comp.drc` -- the
+    only published statement of *how* the DRM's `_LV`/`_MV` threshold
+    columns are selected). `source_file` is the bare file stem (e.g.
+    `"contact"`, `"via1"`, `"comp"`)."""
     return RuleProvenance(
         source_repo=_GF180MCU_KLAYOUT_DRC_DECK_REPO,
         source_path=f"libs.tech/klayout/drc/rule_decks/{source_file}.drc",
@@ -480,30 +525,102 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="comp.width.1",
-        description="minimum COMP (diffusion/active) width (3.3V)",
+        description="minimum COMP (diffusion/active) width outside Dualgate (3.3V)",
         layer=(22, 0),  # Comp
         check="width",
         threshold_dbu=220,  # 0.22 um
-        # DRM 7.5 Comp, rule "DF.1a": "Min. COMP Width" -> 0.22 (3.3V column)
+        # DRM 7.5 Comp, rule "DF.1a_LV": "Min. COMP Width" -> 0.22 (3.3V
+        # column). Voltage-scoped as of issue #1110: the checked region is
+        # `Comp` polygons that touch no `Dualgate` (55/0) geometry at all,
+        # the PDK's own `comp_3p3v` derivation -- the 5V/6V half is
+        # `comp.width.mv.1` below. Before #1110 this checked the *whole*
+        # `Comp` layer at 0.22, i.e. thick-oxide geometry against the
+        # thin-oxide column (issue #552's reproducer).
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(55, 0),  # Dualgate
+            mode="not_interacting",
+        ),
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.5 Comp", "DF.1a"),
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1a_LV"),
+    ),
+    DrcRule(
+        id="comp.width.mv.1",
+        description="minimum COMP (diffusion/active) width inside Dualgate (5V/6V)",
+        layer=(22, 0),  # Comp
+        check="width",
+        threshold_dbu=300,  # 0.30 um
+        # DRM 7.5 Comp, rule "DF.1a_MV": "Min. COMP Width" -> 0.30 (5V/6V
+        # column), the `_MV` half of the pair `comp.width.1` above is the
+        # `_LV` half of (issue #1110, closing issue #552's DRC gap). The
+        # checked region is whole `Comp` polygons that overlap `Dualgate`
+        # (55/0) -- the PDK's own `comp_56v` derivation. Approximation: the
+        # PDK deck's `DF.1a_MV` additionally excludes polygons under the
+        # LDMOS drain markers `mvsd` (210/0) / `mvpsd` (11/39), neither of
+        # which is in this deck's curated layer set, so a 5V LDMOS drift
+        # region drawn on those markers is checked here where the official
+        # rule would not check it (the conservative direction -- a false
+        # positive on a device this deck cannot recognise, never a missed
+        # violation). Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(55, 0),  # Dualgate
+            mode="overlapping",
+        ),
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1a_MV"),
     ),
     DrcRule(
         id="comp.space.1",
-        description="minimum COMP (diffusion/active) spacing (3.3V)",
+        description="minimum COMP (diffusion/active) spacing outside Dualgate (3.3V)",
         layer=(22, 0),  # Comp
         check="space",
         threshold_dbu=280,  # 0.28 um
-        # DRM 7.5 Comp, rule "DF.3a": "Min. COMP Space. P-substrate tap
+        # DRM 7.5 Comp, rule "DF.3a_LV": "Min. COMP Space. P-substrate tap
         # (PCOMP outside NWELL and DNWELL) can be butted for different
-        # voltage devices..." -> 0.28 (3.3V column). Approximation: the DRM
-        # text scopes this to a substrate-tap butting context; approximated
-        # here as a general COMP-to-COMP spacing check on the whole drawn
-        # layer, since isolating that context needs a boolean layer
-        # expression (comp minus well/tap markers). Threshold value
-        # unmodified.
+        # voltage devices..." -> 0.28 (3.3V column). Voltage-scoped as of
+        # issue #1110 the same way `comp.width.1` above is: the checked
+        # region is `Comp` polygons touching no `Dualgate` (55/0) geometry
+        # (the PDK's own `comp_3p3v`); the 5V/6V half is `comp.space.mv.1`
+        # below. Approximation (unchanged by #1110): the DRM text scopes
+        # this to a substrate-tap butting context, and the PDK deck further
+        # excludes `otp_mk` (173/5); approximated here as a general
+        # COMP-to-COMP spacing check across the voltage-scoped region, since
+        # isolating that context needs well/tap marker layers this deck's
+        # curated layer set does not draw. Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(55, 0),  # Dualgate
+            mode="not_interacting",
+        ),
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
-        provenance=_gf180mcu_provenance("7.5 Comp", "DF.3a"),
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.3a_LV"),
+    ),
+    DrcRule(
+        id="comp.space.mv.1",
+        description="minimum COMP (diffusion/active) spacing inside Dualgate (5V/6V)",
+        layer=(22, 0),  # Comp
+        check="space",
+        threshold_dbu=360,  # 0.36 um
+        # DRM 7.5 Comp, rule "DF.3a_MV": same rule text as "DF.3a_LV" above
+        # -> 0.36 (5V/6V column), issue #1110. The checked region is whole
+        # `Comp` polygons overlapping `Dualgate` (55/0) -- the PDK's own
+        # `comp_56v`. Measures spacing *within* that marked set only, exactly
+        # as the PDK deck's own `comp_56v.not(otp_mk).space(0.36.um)` does
+        # (an `_LV`-to-`_MV` spacing pair is not this rule, and is not a
+        # published DRM rule either). Same `otp_mk` (173/5) approximation as
+        # `comp.space.1` above. Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(55, 0),  # Dualgate
+            mode="overlapping",
+        ),
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.3a_MV"),
     ),
     DrcRule(
         id="comp.enclosing.contact.1",
@@ -1073,38 +1190,51 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (125, 5): "plfuse",
 }
 
-# Voltage-domain marker layers this deck draws but does not model the DRC/
-# extraction *scoping* of (issue #552): `Dualgate` (55/0) selects gf180mcu's
-# 5V/6V thick-oxide domain. This deck's DRC rules above (`DF.1a`, `DF.3a`,
-# `DF.6`, `PL.5a`/`PL.5b`, ...) transcribe only the 3.3V/`_LV` column -- their
-# own descriptions say so explicitly ("minimum COMP (diffusion/active) width
-# (3.3V)") -- and never read `Dualgate`; `EXTRACTION_DECK` below likewise
-# derives `nfet`/`pfet` from `Nwell` alone (no `Dualgate` read at all), so a
-# transistor drawn entirely inside `Dualgate` is checked against the wrong
-# (3.3V) thresholds and extracted as the wrong (3.3V) model. Registered here
-# purely as a "fail loudly" diagnostic (`decks.get_unmodeled_voltage_markers`,
-# consumed by `drc.py`'s `coverage.voltage_domain_warnings` and `extract.py`'s
-# `voltage_domain_warnings`), not a corrected threshold or model binding --
-# see this issue's curator comment for why the full `_LV`/`_MV` rule-pair
-# split (option 1, blocked on a subtraction-capable `DerivedLayer`) and a
-# per-flavour MOS marker + `_06v0` model table entry (option 2) are each a
-# separate, larger follow-on rather than bundled here.
+# Voltage-domain marker layers this deck draws but does not *fully* model the
+# DRC/extraction scoping of (issue #552): `Dualgate` (55/0) selects gf180mcu's
+# 5V/6V thick-oxide domain, whose DRM publishes a second, 30-60% larger column
+# of thresholds and a distinct set of MOS models.
+#
+# What is modelled as of issue #1110: the `DF.1a`/`DF.3a` `Comp` width/space
+# rules ship as `_LV`/`_MV` rule *pairs* (`comp.width.1`/`comp.width.mv.1`,
+# `comp.space.1`/`comp.space.mv.1`), each half scoped to the right side of the
+# marker via `DerivedLayer`'s `"not_interacting"`/`"overlapping"` modes -- so
+# a `Comp` shape drawn inside `Dualgate` is now checked against 0.30/0.36 um,
+# not 0.22/0.28 um, and `drc.py` no longer counts geometry those four rules
+# checked toward this warning's gate.
+#
+# What is NOT modelled, and is what this entry now warns about: (a) every
+# other DRC rule above still encodes the 3.3V column only and never reads
+# `Dualgate` -- including DRM rules with an `_MV` column this deck has not
+# transcribed at all yet (`DF.6` COMP extend beyond gate 0.24 vs. 0.40,
+# `PL.5a`/`PL.5b` field poly to COMP 0.10 vs. 0.30) -- and (b)
+# `EXTRACTION_DECK` below derives `nfet`/`pfet` from `Nwell` alone (no
+# `Dualgate` read at all), so a transistor drawn entirely inside `Dualgate`
+# still extracts as the wrong (3.3V) model. Registered here as a "fail
+# loudly" diagnostic (`decks.get_unmodeled_voltage_markers`, consumed by
+# `drc.py`'s `coverage.voltage_domain_warnings` and `extract.py`'s
+# `voltage_domain_warnings`) for exactly that residue; per-flavour MOS marker
+# + `_06v0` model table entries (issue #552's option 2) remain a separate
+# follow-on.
 #
 # `Dualgate` is *also* read correctly today (not part of this gap) by the
 # `DiodeDevice` entries further below, each via its own
 # `requires=(..., Dualgate)` field (issue #542) -- this registry only
-# concerns the *unscoped* paths: the DRC width/space/enclosure rules above
-# and the plain `nfet`/`pfet` MOS recognition in `EXTRACTION_DECK`.
+# concerns the paths that remain unscoped: every DRC rule above other than
+# the four `Comp` voltage-split ones, and the plain `nfet`/`pfet` MOS
+# recognition in `EXTRACTION_DECK`.
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (55, 0): (
         "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
-        "This curated deck's DRC rules apply the 3.3V/_LV thresholds to "
-        "geometry regardless of Dualgate's presence (e.g. DF.1a min COMP "
-        "width 0.22 vs. the real 5V/6V DF.1a_MV 0.30, DF.3a min COMP space "
-        "0.28 vs. 0.36, DF.6 COMP extend beyond gate 0.24 vs. 0.40, "
-        "PL.5a/PL.5b field poly to COMP 0.10 vs. 0.30 -- all in um), and MOS "
-        "extraction always binds the 3.3V models (nfet_03v3/pfet_03v3) even "
-        "to a transistor drawn entirely inside Dualgate."
+        "This curated deck models it for the DF.1a/DF.3a COMP width/space "
+        "rules only, which ship as _LV/_MV pairs (0.22/0.30 and 0.28/0.36 um) "
+        "scoped to the marker; every other DRC rule still applies the "
+        "3.3V/_LV thresholds regardless of Dualgate's presence (e.g. DF.6 "
+        "COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field poly to "
+        "COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in this "
+        "deck yet), and MOS extraction always binds the 3.3V models "
+        "(nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside "
+        "Dualgate."
     ),
 }
 

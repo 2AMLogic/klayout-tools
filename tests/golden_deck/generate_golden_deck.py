@@ -19,7 +19,8 @@ not merely left unpopulated.
 
 `ALLOWED_CHECKS` is deliberately **per-deck**: issue #747 piloted `width`/
 `space` on *both* decks; issue #904 widens gf180mcu's own set to also cover
-`enclosing`/`separation` (completing gf180mcu's full 42-rule DRC deck, per
+`enclosing`/`separation` (completing gf180mcu's full DRC deck -- 42 rules at
+that issue, 44 as of issue #1110's `DF.1a`/`DF.3a` `_LV`/`_MV` split, per
 Epic #711 Phase 3a's "every rule ships a golden pair" acceptance criterion),
 but deliberately leaves sky130's set at its original `width`/`space` pilot
 scope -- extending sky130's own enclosure coverage is a separate, unscoped
@@ -27,16 +28,29 @@ follow-on (`docs/design/deck-compiler-proposal.md`'s own "narrow go"
 recommendation), not something issue #904 (a gf180mcu-focused phase) should
 fold in as a side effect of a shared generator.
 
-Two rules are a documented exception to the generic `enclosing`/`separation`-
-pair builders below: gf180mcu's `mim.enclosing.via4.1` and `mim.space.1`
-(issue #1033) both scope their checked region via a `DerivedLayer` (real
-drawn layers read outside the plain two-layer `layer`/`other_layer` shape
-every other rule uses -- `mim.enclosing.via4.1` reads three: FuseTop/Metal4/
-Via4; `mim.space.1` reads two, FuseTop/Metal4, but `other_layer` is *also*
-Metal4, so a naive `_separation_pair` fixture would draw two bare Metal4
-bars with no FuseTop at all and never trip the rule), so both fixtures are
-hand-authored in `_DERIVED_LAYER_FIXTURES` below rather than derived
-generically.
+Four rules are a documented exception to the generic `width`/`space`/
+`enclosing`/`separation`-pair builders below, all of them because they scope
+their checked region via a `DerivedLayer` (real drawn layers read outside the
+plain `layer`/`other_layer` shape every other rule uses), so all four
+fixtures are hand-authored in `_DERIVED_LAYER_FIXTURES` below rather than
+derived generically:
+
+- gf180mcu's `mim.enclosing.via4.1` and `mim.space.1` (issue #1033) --
+  `mim.enclosing.via4.1` reads three layers (FuseTop/Metal4/Via4);
+  `mim.space.1` reads two (FuseTop/Metal4) but its `other_layer` is *also*
+  Metal4, so a naive `_separation_pair` fixture would draw two bare Metal4
+  bars with no FuseTop at all and never trip the rule.
+- gf180mcu's `comp.width.mv.1` and `comp.space.mv.1` (issue #1110) -- the
+  `_MV` halves of the `DF.1a`/`DF.3a` voltage-domain rule pairs, whose
+  checked region is `Comp` polygons *overlapping* `Dualgate` (55/0). A
+  generic single-layer `_width_pair`/`_space_pair` fixture draws no
+  `Dualgate` at all, so the derived region would be empty and the
+  `"violate"` case would report clean.
+
+Their `_LV` counterparts (`comp.width.1`/`comp.space.1`) need no such
+exception: their `"not_interacting"` derivation over a fixture that draws no
+`Dualgate` is the full `Comp` layer, i.e. exactly the generic fixture's own
+geometry (and exactly what those two rules checked before #1110 split them).
 
 `"expected_disagreement"` is a deliberately **hand-authored** annotation (see
 `README.md`), never derived from geometry -- regeneration preserves each
@@ -339,6 +353,51 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [46, 0], "box": [0, 0, 2000, 4000]},  # bottom plate
                 {"layer": [75, 0], "box": [700, 700, 1300, 3300]},  # FuseTop
                 {"layer": [46, 0], "box": [3300, 0, 5300, 4000]},  # other Metal4
+            ]
+        },
+    ),
+    # `comp.width.mv.1` (DF.1a_MV, 300 dbu): the generic `_width_pair`
+    # geometry (a `threshold -/+ _margin_dbu(300)(100)` = 200/400 dbu wide
+    # Comp bar, `_WIDTH_BAR_LENGTH_DBU` long) plus a `Dualgate` box
+    # comfortably covering it, which is what moves the bar out of
+    # `comp.width.1`'s `"not_interacting"` region and into this rule's
+    # `"overlapping"` one. Note the 200 dbu violate bar is *also* below the
+    # 220 dbu `_LV` threshold: covering it with `Dualgate` is what proves
+    # the split works, since the `_LV` rule must NOT report it.
+    "comp.width.mv.1": (
+        {  # violate: 200 dbu wide (< 300), fully inside Dualgate
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 200, 4000]},  # Comp
+                {"layer": [55, 0], "box": [-1000, -1000, 1200, 5000]},  # Dualgate
+            ]
+        },
+        {  # clean: 400 dbu wide (> 300), fully inside Dualgate
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 400, 4000]},  # Comp
+                {"layer": [55, 0], "box": [-1000, -1000, 1400, 5000]},  # Dualgate
+            ]
+        },
+    ),
+    # `comp.space.mv.1` (DF.3a_MV, 360 dbu): the generic `_space_pair`
+    # geometry (two `_SPACE_BAR_WIDTH_DBU`-wide bars separated by
+    # `threshold -/+ _margin_dbu(360)(100)` = 260/460 dbu) plus a `Dualgate`
+    # box covering both bars. The 260 dbu violate gap is also below the
+    # 280 dbu `_LV` threshold, so -- as for the width pair above -- a clean
+    # `comp.space.1` verdict on this fixture is itself part of what the
+    # split is asserting.
+    "comp.space.mv.1": (
+        {  # violate: 260 dbu gap (< 360), both bars inside Dualgate
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 2000, 4000]},  # Comp
+                {"layer": [22, 0], "box": [2260, 0, 4260, 4000]},  # Comp
+                {"layer": [55, 0], "box": [-1000, -1000, 5260, 5000]},  # Dualgate
+            ]
+        },
+        {  # clean: 460 dbu gap (> 360), both bars inside Dualgate
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 2000, 4000]},  # Comp
+                {"layer": [22, 0], "box": [2460, 0, 4460, 4000]},  # Comp
+                {"layer": [55, 0], "box": [-1000, -1000, 5460, 5000]},  # Dualgate
             ]
         },
     ),

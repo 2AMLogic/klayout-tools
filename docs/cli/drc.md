@@ -205,14 +205,23 @@ drawn `(layer, datatype)` — e.g. gf180mcu's `MIMTM.2` scopes to the MiM
 stack's "virtual bottom plate": its purpose-drawn top-plate layer (`FuseTop`)
 oversized by a fixed margin, restricted to wherever the bottom-plate
 conductor (`Metal4`) already comes near it. `DrcRule`'s optional
-`derived_layer` field (a `DerivedLayer(base, sized_by_um, intersect_with)`,
-issue #345) expresses exactly this: the checked region becomes
-`intersect_with.interacting(base) & base.sized(sized_by_um)` — only shapes
-of `intersect_with` that already touch the *unsized* `base` region
-somewhere, clipped to `base`'s outline oversized by `sized_by_um` — instead
-of `layer`'s own raw drawn shapes. `layer` stays required and continues to
-name the rule's reporting identity (`violations[].layer`, `coverage`),
-independent of `derived_layer`'s two input layers.
+`derived_layer` field (a `DerivedLayer(base, sized_by_um, intersect_with,
+mode)`, issue #345) expresses exactly this: the checked region becomes a
+computed combination of two drawn layers instead of `layer`'s own raw drawn
+shapes. `layer` stays required and continues to name the rule's reporting
+identity (`violations[].layer`, `coverage`), independent of
+`derived_layer`'s two input layers.
+
+`mode` selects which combination:
+
+| `mode` | Checked region | Used by |
+| --- | --- | --- |
+| `"sized_intersection"` (default) | `intersect_with.interacting(base) & base.sized(sized_by_um)` — only shapes of `intersect_with` that already touch the *unsized* `base` region somewhere, clipped to `base`'s outline oversized by `sized_by_um` | gf180mcu `mim.enclosing.via4.1`, `mim.space.1` |
+| `"overlapping"` | `base.overlapping(intersect_with.sized(sized_by_um))` — whole `base` polygons that share **area** with the (optionally guard-banded) second layer | gf180mcu `comp.width.mv.1`, `comp.space.mv.1` |
+| `"not_interacting"` | `base.not_interacting(intersect_with.sized(sized_by_um))` — whole `base` polygons that do not touch it at all | gf180mcu `comp.width.1`, `comp.space.1` |
+
+An unknown `mode` is a `DrcError` naming the rule id, not a silent fallback
+to the default.
 
 This exists because an *unscoped* version of some rules would be actively
 wrong, not merely conservative: gf180mcu's `mim.enclosing.via4.1`
@@ -268,6 +277,51 @@ plate-bearing polygons rather than the sizing-clipped plates, so a shared
 bottom plate carrying two top plates further apart than `2 * sized_by_um`
 is still one polygon with no gap to measure; the residual conservatism that
 trades for is documented in `gf180mcu.py`'s `mim.space.1` note.
+
+### Voltage-domain rule pairs (`_LV`/`_MV`, issue #1110)
+
+The `"overlapping"`/`"not_interacting"` modes exist for a different problem:
+a DRM rule whose threshold *depends on whether the geometry is marked*,
+published as two columns rather than one number. gf180mcu's `Dualgate`
+(55/0) marks its 5 V/6 V thick-oxide domain, and the DRM's `Comp`
+width/space rules are 30 % larger inside it:
+
+| Official rule | `klt drc` rule id | Threshold | Checked region |
+| --- | --- | --- | --- |
+| `DF.1a_LV` | `comp.width.1` | 0.22 um | `Comp` polygons touching no `Dualgate` |
+| `DF.1a_MV` | `comp.width.mv.1` | 0.30 um | `Comp` polygons overlapping `Dualgate` |
+| `DF.3a_LV` | `comp.space.1` | 0.28 um | `Comp` polygons touching no `Dualgate` |
+| `DF.3a_MV` | `comp.space.mv.1` | 0.36 um | `Comp` polygons overlapping `Dualgate` |
+
+Before #1110 the two `_LV` rules checked the *whole* `Comp` layer, so a
+0.25 um stripe drawn entirely inside `Dualgate` — illegal at 5 V — reported
+`status: "clean"` against the 3.3 V column (issue #552's reproducer). It now
+reports a `comp.width.mv.1` violation, while the identical stripe drawn
+*outside* `Dualgate` stays clean, unchanged.
+
+Two properties of the selection are load-bearing, and both are transcribed
+verbatim from the PDK's own executable deck
+(`libs.tech/klayout/drc/rule_decks/comp.drc`: `comp_56v =
+comp.overlapping(dualgate)`, `comp_3p3v =
+comp.not_interacting(v5_xtor).not_interacting(dualgate)`):
+
+- **Whole polygons, never clipped.** A `Comp` shape only partly inside the
+  marker is assigned to one column in its entirety. A boolean
+  `and`/`not` clip would instead cut it at the marker's edge and a
+  `width`/`space` check would then measure that cut as a narrow sliver that
+  exists nowhere in the drawn layout.
+- **An absent marker layer never disables the unmarked rule.** A stream that
+  draws no `Dualgate` at all — the ordinary thin-oxide-only case — still
+  runs `comp.width.1`/`comp.space.1` against the full `Comp` layer:
+  `"not_interacting"` treats a missing second layer as an empty region
+  rather than skipping the rule (the `"overlapping"` halves do skip, and
+  appear in `coverage.rules_skipped`).
+
+Only these two rule pairs are voltage-scoped today. Every other gf180mcu
+rule still encodes the 3.3 V column, which is what
+[`coverage.voltage_domain_warnings`](#coveragevoltage_domain_warnings) now
+warns about — see that section for how the warning's gate distinguishes
+them.
 
 ### `"area"` / `"density"` / `"antenna"` check kinds (issue #812)
 
@@ -383,11 +437,13 @@ defect class the issue reports (a conductor missing part of its cut) with no
 false positives on correct geometry; the 0.08 um two-adjacent-edges half
 stays uncovered, like the end-of-line variants noted for gf180mcu below.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 42 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 44 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
 (diffusion/active), `Contact`, `Via1`-`Via4`, `Metal1`-`Metal5`, and
 `MetalTop`
-layers, plus a first increment of well/substrate-tap coverage (`Nwell`
+layers (two of them, `Comp` width and spacing, as `_LV`/`_MV` pairs scoped
+to the `Dualgate` voltage-domain marker — see "Voltage-domain rule pairs"
+above), plus a first increment of well/substrate-tap coverage (`Nwell`
 spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
 (`DRC_BJT` mark-layer separation), the MiM capacitor stack
 (`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap, plus the virtual
@@ -437,10 +493,14 @@ transcribed: each conditions a 0.06 um margin on a narrow-metal
 end-of-line predicate that `DrcRule`'s vocabulary cannot express, the same
 class of gap as sky130's `m2.6` above.
 
-Sixteen of the forty-two gf180mcu rules approximate an official DRM rule in
+Nineteen of the forty-four gf180mcu rules approximate an official DRM rule in
 some way — either a compound-layer context our single/two-layer check
-primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
-`nwell.enclosing.comp.1`), a bound our primitives don't support
+primitives can't isolate (`comp.space.1`/`comp.space.mv.1`, `poly2.space.1`,
+`poly2.width.1`, `nwell.enclosing.comp.1`), a marker layer this deck's
+curated layer set doesn't draw (`comp.width.1`/`comp.space.1` model the
+`Dualgate` half of the PDK's own thin-oxide region but not its `v5_xtor`
+half; `comp.width.mv.1` doesn't exclude the `mvsd`/`mvpsd` LDMOS drain
+markers the official `DF.1a_MV` does), a bound our primitives don't support
 (`contact.width.1`'s and `via1.width.1`-`via4.width.1`'s fixed-size squares,
 approximated as a minimum only), an array-density context our primitives
 have no notion of (`via1.space.1`-`via4.space.1`, which use the ordinary
@@ -501,7 +561,9 @@ Coverage does **not** yet include: `Pplus`/`Nplus` implant-specific rules
 `DNWELL`, the remaining `BJT.*` rules (`BJT.1`/`BJT.2`, which key off
 `DNWELL`), the MIM Option-A (`MIM.*`) rule set (a different, 3-metal-layer
 process variant this deck doesn't model — see `gf180mcu.py`'s docstring), or
-5V/6V high-voltage variants — left for follow-on issues.
+5V/6V high-voltage variants beyond the `DF.1a`/`DF.3a` `_LV`/`_MV` `Comp`
+pairs (issue #1110): `DF.6`, `PL.5a`/`PL.5b` and the rest of the DRM's
+`_MV` column are not transcribed at all yet — left for follow-on issues.
 
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
@@ -901,7 +963,7 @@ draws" — `coverage` closes that gap. `status`'s own two-value contract
 | `deck_layers`                      | array\<string\> | Every `"<layer>/<datatype>"` the selected deck's rules reference — a static property of the deck, independent of the input stream. Sorted ascending by `(layer, datatype)`. |
 | `layers_checked`                   | array\<string\> | The subset of `deck_layers` actually present in this stream (i.e. found via `Layout.find_layer(...)`), matching what the per-rule check loop actually ran against. Sorted ascending by `(layer, datatype)`. |
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
-| `rules_skipped`                    | array\<string\> | Rule ids silently skipped because their `layer`/`other_layer` was absent from this stream. Sorted alphabetically. |
+| `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 
@@ -918,8 +980,8 @@ A second, narrower trust gap `layers_in_stream_without_rules` alone does not
 surface: some PDKs draw two gate-oxide/voltage domains on the same wafer,
 selected by a marker layer — e.g. gf180mcu's `Dualgate` (55/0) selects its
 5V/6V thick-oxide domain, whose DRM publishes a second, materially different
-(30–60% larger) column of DRC thresholds. This curated deck's rules encode
-only the default (3.3V) column and never read the marker, so geometry drawn
+(30–60% larger) column of DRC thresholds. Where a curated deck encodes only
+the default (3.3V) column and never reads the marker, geometry drawn
 *inside* it is checked against the wrong thresholds — and, because that
 geometry sits on an ordinary checked layer (e.g. `Comp`), it shows up in
 `coverage.layers_checked`, not `layers_in_stream_without_rules`: a `"clean"`
@@ -927,32 +989,49 @@ status with no other signal that anything is off.
 
 Whenever a deck-registered marker (today, only gf180mcu's `Dualgate`) is
 present in the input stream *and* its geometry geometrically interacts with
-at least one layer this run actually checked — a member of
-`coverage.layers_checked`, not merely present-but-unchecked — one entry is
+geometry an **unscoped rule actually checked on this run**, one entry is
 added, naming the marker and the concrete consequence:
 
 ```json
 {
   "marker": "55/0",
-  "description": "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. This curated deck's DRC rules apply the 3.3V/_LV thresholds to geometry regardless of Dualgate's presence (e.g. DF.1a min COMP width 0.22 vs. the real 5V/6V DF.1a_MV 0.30, ...), and MOS extraction always binds the 3.3V models (nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside Dualgate."
+  "description": "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. This curated deck models it for the DF.1a/DF.3a COMP width/space rules only, which ship as _LV/_MV pairs (0.22/0.30 and 0.28/0.36 um) scoped to the marker; every other DRC rule still applies the 3.3V/_LV thresholds regardless of Dualgate's presence (e.g. DF.6 COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field poly to COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in this deck yet), and MOS extraction always binds the 3.3V models (nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside Dualgate."
 }
 ```
 
-A marker shape that never overlaps any checked geometry (e.g. one drawn only
-over a device this deck already scopes to it correctly, such as a
-`Dualgate`-narrowed ESD diode) produces no entry — avoiding a warning with
-nothing behind it. Always a list, empty for a deck that registers no such
-marker (sky130's curated deck registers none today — it does not yet name an
-`hvi`-equivalent layer at all) or a layout that draws none of it overlapping
-checked geometry.
+"Unscoped" is evaluated **per rule**, not per deck (issue #1110), because a
+marker can be partially modelled — as gf180mcu's `Dualgate` now is. Two
+classes of rule are excluded from the gate:
+
+- a rule whose `derived_layer` reads the marker itself (the
+  `comp.width.1`/`comp.width.mv.1` and `comp.space.1`/`comp.space.mv.1`
+  pairs — see "Voltage-domain rule pairs" above): it applied the *right*
+  column, so the geometry it checked is not evidence of a gap;
+- a rule skipped on this run (`coverage.rules_skipped`): it applied no
+  threshold at all, right or wrong.
+
+So the `Dualgate`-inside `Comp` stripe from issue #552 now produces a
+`comp.width.mv.1` violation and **no** warning, while the same stripe with a
+contact on it still warns — `comp.enclosing.contact.1` (`CO.4`) reads no
+marker. A marker shape that never overlaps any unscoped checked geometry
+(e.g. one drawn only over a device this deck already scopes to it correctly,
+such as a `Dualgate`-narrowed ESD diode) likewise produces no entry —
+avoiding a warning with nothing behind it. Always a list, empty for a deck
+that registers no such marker (sky130's curated deck registers none today —
+it does not yet name an `hvi`-equivalent layer at all) or a layout that
+draws none of it overlapping unscoped checked geometry.
 
 **What this field does and does not guarantee**: it flags that the checked
-thresholds may be the wrong column for this geometry. It does **not**
-correct `status`/`violations` against the real 5V/6V (`_MV`) thresholds —
-those are not modelled by this deck's rules at all yet (a separate, larger
-follow-on: a `_LV`/`_MV` rule-pair split). Treat a non-empty
-`voltage_domain_warnings` as "re-check this geometry against the PDK's own
-tooling for the marked domain," not as a corrected verdict.
+thresholds may be the wrong column for geometry the *remaining, unscoped*
+rules checked. It does **not** correct `status`/`violations` against the real
+5V/6V (`_MV`) thresholds for those rules — only the two `Comp` width/space
+pairs are voltage-scoped today (issue #1110); the rest of the DRM's `_MV`
+column is not transcribed. Treat a non-empty `voltage_domain_warnings` as
+"re-check this geometry against the PDK's own tooling for the marked
+domain," not as a corrected verdict. The converse also holds and is the
+point of the per-rule gate: an *empty* `voltage_domain_warnings` on a layout
+that draws the marker means every rule that touched marked geometry read the
+marker, not that the marker was ignored quietly.
 
 #### `coverage.deck_scope`
 
@@ -998,7 +1077,7 @@ geometry" (`coverage.layers_checked`).
 Issue #747 (piloting `docs/design/deck-compiler-proposal.md` §5/§6) adds two
 things, originally scoped to the 37 width/space `DrcRule` entries across
 `sky130.py` (11) and `gf180mcu.py` (26) as a pilot slice. **Issue #904 (Epic
-#711 Phase 3a) widens gf180mcu's own coverage to all 42 of its `DrcRule`
+#711 Phase 3a) widens gf180mcu's own coverage to all of its `DrcRule`
 entries** (adding `enclosing`/`separation`, its only two remaining check
 kinds) — sky130's own scope stays at its original 11-rule width/space pilot,
 a deliberate, unscoped-by-#904 decision (see `tests/golden_deck/README.md`'s
@@ -1032,8 +1111,8 @@ imports `klayout_tools.decks` directly (e.g. a coverage-audit script), the
 same way `scope` was before `coverage.deck_scope` aggregated it.
 
 As of issue #747, `provenance` was populated only for the 37 piloted
-width/space rules. As of issue #904, it is populated for **all 42** of
-gf180mcu's `DrcRule` entries — sky130's own remaining (non-width/space)
+width/space rules. As of issue #904, it is populated for **all** of
+gf180mcu's `DrcRule` entries (42 then, 44 as of issue #1110) — sky130's own remaining (non-width/space)
 rules still leave it `None` (the default), an unpopulated field, not a
 claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this
@@ -1055,8 +1134,8 @@ results this issue ran against a real `sky130A.lydrc`. gf180mcu's own
 `--engine klayout` cross-check remains deferred as of issue #904 (its
 native *DRC* deck still has no single runnable file — matching this
 section's existing "no single runnable native deck" limitation above), even
-though its golden-pair manifest now covers all 42 of its `DrcRule` entries
-(issue #904) — the manifest and coverage/curated-engine tiers are complete
+though its golden-pair manifest now covers all 44 of its `DrcRule` entries
+(issue #904, extended by #1110) — the manifest and coverage/curated-engine tiers are complete
 for gf180mcu, only the native-DRC-deck cross-check tier is sky130-only.
 gf180mcu's *LVS* device-extraction rules are cross-checked against a real,
 directly-runnable native deck instead — a DRC/LVS split, not a contradiction
