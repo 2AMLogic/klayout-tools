@@ -322,8 +322,36 @@ timing failure still surfaces here as a *functional* failure the testbench
 catches, which is the signal this feature is scoped around.
 
 An annotated run is identifiable from the JSON alone: `environment.sdf` is
-`null` on an ordinary run and `{"file", "corner", "annotated": true}` on an
-annotated one.
+`null` on an ordinary run and an object on an annotated one.
+
+**`annotated: true` alone does not mean "every class in the SDF applied"**
+(issue #1102). The exempted `TIMINGCHECK` class above is the normal case on
+Icarus — every real `write_sdf` output emits `TIMINGCHECK` sections, and
+Icarus drops every one of them, so `$setup`/`$hold`/`$width` checks that run
+during the regression use the cell library's own Verilog placeholder timing,
+not the characterised limits in the SDF, even though `annotated: true`.
+`environment.sdf.partial` and `environment.sdf.dropped` make that
+machine-readable instead of requiring a transcript hand-count:
+
+```json
+"sdf": {
+  "file": "gcd_route.sdf",
+  "corner": "typ",
+  "annotated": true,
+  "partial": true,
+  "dropped": {
+    "timingcheck": {
+      "count": 708,
+      "reason": "Icarus Verilog implements SDF delay annotation (IOPATH/INTERCONNECT) but not SDF TIMINGCHECK -- every TIMINGCHECK section in the SDF is dropped, so $setup/$hold/$width checks run against the cell library's own placeholder timing, not the characterised limits in the SDF"
+    }
+  }
+}
+```
+
+`partial` is `false` and `dropped` is `{}` on a run where no benign
+diagnostic class was filtered out of the transcript scan (delays *and* every
+timing check applied cleanly). Both keys are additive, alongside the existing
+`file`/`corner`/`annotated`.
 
 ## Request
 
@@ -411,7 +439,7 @@ annotated one.
 | `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure. `test_count` includes skipped tests, so `passed + failed + skipped == test_count`. |
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, `{file, corner, annotated: true}` on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when any benign diagnostic class (currently only `TIMINGCHECK`) was filtered out of the transcript scan, and `dropped` names each such class with `{count, reason}`; see "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`

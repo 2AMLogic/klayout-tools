@@ -89,3 +89,14 @@ def _print_text(report: dict) -> None:
     sdf = environment.get("sdf")
     if sdf is not None:
         print(f"sdf: {sdf['file']}  corner: {sdf['corner']}")
+        # Printed only when a benign diagnostic class was dropped (issue
+        # #1102): `annotated: true` alone cannot distinguish "every check in
+        # the SDF applied" from "every TIMINGCHECK section was dropped" --
+        # this line makes that distinction visible without opening a
+        # transcript.
+        dropped = sdf.get("dropped") or {}
+        if dropped:
+            classes = ", ".join(
+                f"{klass} (x{info['count']})" for klass, info in sorted(dropped.items())
+            )
+            print(f"sdf: partial annotation -- dropped: {classes}")

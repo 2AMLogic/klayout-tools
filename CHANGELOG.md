@@ -16,6 +16,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-17 — `klt functional-verification`'s `environment.sdf` (`options.sdf`
+  runs) gains `partial` and `dropped` fields alongside the existing
+  `file`/`corner`/`annotated` (issue #1102). Previously `annotated: true`
+  reported two materially different outcomes identically: "every delay and
+  every timing check in the SDF applied" and "every `IOPATH` applied and
+  every `TIMINGCHECK` section was dropped" — the normal case on Icarus,
+  which implements SDF delay annotation but no SDF `TIMINGCHECK` support at
+  all, so `$setup`/`$hold`/`$width` checks that ran during the regression
+  used the cell library's own placeholder timing, not the characterised
+  limits in the SDF. `_scan_sdf_diagnostics` already read both transcripts
+  and silently discarded the benign `TIMINGCHECK` lines it filtered out of
+  the hard-failure gate; it now also counts them per class. `partial` is
+  `true` whenever any benign diagnostic class was filtered, and `dropped`
+  names each such class with `{count, reason}` — `false`/`{}` on a run
+  where every class in the SDF applied cleanly. Additive; `annotated`'s own
+  meaning is unchanged.
 - 2026-08-17 — `klt equiv`'s multi-source `provenance.input.content_hash`
   (both `gold`/`gate` sides combined pass more than one file total) now uses
   the same path-independent digest scheme `klt synthesize` already used for

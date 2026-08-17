@@ -1571,6 +1571,8 @@ def test_stubbed_sdf_defaults_to_the_typ_corner(tmp_path, monkeypatch):
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
         "annotated": True,
+        "partial": False,
+        "dropped": {},
     }
 
 
@@ -1659,7 +1661,11 @@ def test_stubbed_sdf_tolerates_the_benign_timingcheck_warning(tmp_path, monkeypa
     """Icarus implements SDF delays but not SDF timing checks (spike section
     3.4), and a real `write_sdf` emits TIMINGCHECK sections -- so failing on
     this class would reject every real post-route SDF. The delays it *does*
-    apply are unaffected."""
+    apply are unaffected.
+
+    Issue #1102: `annotated: true` alone cannot tell "every check applied"
+    apart from "every TIMINGCHECK was dropped" -- both report it identically.
+    `partial`/`dropped` make that distinction machine-readable."""
     request_path = _sdf_request(tmp_path)
     _stub_runner(
         monkeypatch,
@@ -1672,7 +1678,37 @@ def test_stubbed_sdf_tolerates_the_benign_timingcheck_warning(tmp_path, monkeypa
     report = run_functional_verification(request_path)
 
     assert report["status"] == "pass"
-    assert report["environment"]["sdf"]["annotated"] is True
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is True
+    assert sdf["dropped"].keys() == {"timingcheck"}
+    assert sdf["dropped"]["timingcheck"]["count"] == 1
+    assert sdf["dropped"]["timingcheck"]["reason"]  # non-empty explanation
+
+
+def test_stubbed_sdf_counts_timingcheck_drops_across_both_transcripts(
+    tmp_path, monkeypatch
+):
+    """The dropped-diagnostic count is a sum across build and test
+    transcripts -- `TIMINGCHECK` lines can land in either, the same as the
+    actionable-diagnostic scan they sit alongside (issue #1102)."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_build_log="SDF WARNING: route.sdf:3: TIMINGCHECK not supported.\n",
+            extra_test_log=(
+                "SDF WARNING: route.sdf:7: TIMINGCHECK not supported.\n"
+                "SDF WARNING: route.sdf:11: TIMINGCHECK not supported.\n"
+            ),
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    dropped = report["environment"]["sdf"]["dropped"]
+    assert dropped["timingcheck"]["count"] == 3
 
 
 def test_sdf_diagnostics_are_only_scanned_on_annotated_runs(tmp_path, monkeypatch):
@@ -2145,6 +2181,8 @@ def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
         "annotated": True,
+        "partial": False,
+        "dropped": {},
     }
 
 
@@ -2337,6 +2375,8 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
         "annotated": True,
+        "partial": False,
+        "dropped": {},
     }
 
 
