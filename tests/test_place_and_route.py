@@ -166,6 +166,7 @@ def _make_pdk_install(
     with_lef: bool = True,
     with_gds: bool = True,
     prefixed_operating_conditions: bool = False,
+    tech_lef_corners: tuple[str, ...] = ("nom",),
 ) -> Path:
     """Fabricate a minimal open_pdks-layout variant with a standard-cell
     library's `lib/`/`techlef/`/`lef/`/`gds/` views -- enough for
@@ -176,7 +177,11 @@ def _make_pdk_install(
     ``prefixed_operating_conditions=True`` writes the `.lib` file's
     `default_operating_conditions` attribute as `f"{cell_library}__{corner}"`
     instead of the bare ``corner`` -- gf180mcu_fd_sc_mcu9t5v0's real shape
-    (issue #820); the on-disk filename is unaffected."""
+    (issue #820); the on-disk filename is unaffected.
+
+    ``tech_lef_corners`` (issue #1100) -- which ``__<corner>.tlef`` files to
+    stage under `techlef/`; the default ``("nom",)`` matches every existing
+    caller's prior fixture shape (a `"nom"`-only install) byte-for-byte."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     lib_dir = variant_dir / "libs.ref" / cell_library
@@ -200,7 +205,10 @@ def _make_pdk_install(
     if with_lef:
         techlef_dir = lib_dir / "techlef"
         techlef_dir.mkdir(parents=True, exist_ok=True)
-        (techlef_dir / f"{cell_library}__nom.tlef").write_text("# tech lef\n")
+        for tech_lef_corner in tech_lef_corners:
+            (techlef_dir / f"{cell_library}__{tech_lef_corner}.tlef").write_text(
+                "# tech lef\n"
+            )
         lef_dir = lib_dir / "lef"
         lef_dir.mkdir(parents=True, exist_ok=True)
         (lef_dir / f"{cell_library}.lef").write_text("# merged cell lef\n")
@@ -214,10 +222,12 @@ def _make_pdk_install(
     return variant_dir
 
 
-def _setup_success_env(tmp_path, monkeypatch, **request_overrides) -> str:
+def _setup_success_env(
+    tmp_path, monkeypatch, *, install_kwargs: dict | None = None, **request_overrides
+) -> str:
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"
-    _make_pdk_install(install_root, "sky130A")
+    _make_pdk_install(install_root, "sky130A", **(install_kwargs or {}))
     monkeypatch.setenv("PDK_ROOT", str(install_root))
     _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
     return _write_request(tmp_path / "request.json", _base_request(**request_overrides))
@@ -299,6 +309,28 @@ def test_run_cell_library_required(tmp_path):
         _base_request(pdk={"corner": "tt_025C_1v80"}),
     )
     with pytest.raises(PlaceAndRouteError, match="pdk.cell_library is required"):
+        run_place_and_route(request_path)
+
+
+def test_run_interconnect_corner_invalid_rejected(tmp_path):
+    """Issue #1100: an out-of-enum `request.pdk.interconnect_corner` raises
+    `PlaceAndRouteError` -- never a silent fallback or a traceback -- caught
+    by the plain enum-check alongside the existing `pdk.corner` validation,
+    before any PDK resolution is attempted."""
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={
+                "cell_library": "sky130_fd_sc_hd",
+                "corner": "tt_025C_1v80",
+                "interconnect_corner": "typ",
+            }
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match="pdk.interconnect_corner must be one of"
+    ):
         run_place_and_route(request_path)
 
 
@@ -1421,6 +1453,11 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert report["status"] == "ok"
     assert report["stage_reached"] == "route"
     assert report["seed"] == 1
+    # Issue #1100: `request.pdk.interconnect_corner` omitted (the default
+    # here) resolves to `"nom"` -- byte-identical to this module's original
+    # behaviour, independently visible from the liberty corner baked into
+    # `provenance.deck.name` below.
+    assert report["interconnect_corner"] == "nom"
 
     assert report["die_area_um2"] == 8487.94
     assert report["core_area_um2"] == 7607.3
@@ -1523,11 +1560,128 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         line.startswith(("tapcell", "add_global_connection", "pdngen"))
         for line in floorplan_lines
     )
+    # Issue #1100: the nominal tech LEF (the default `interconnect_corner`)
+    # is the one actually loaded, matching this module's original behaviour.
+    assert any(
+        line.startswith("read_lef") and line.endswith("sky130_fd_sc_hd__nom.tlef")
+        for line in floorplan_lines
+    )
     route_script = os.path.join(
         os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_route.tcl"
     )
     route_lines = _script_lines(route_script)
     assert not any(line.startswith("filler_placement") for line in route_lines)
+
+
+# --------------------------------------------------------------------------- #
+# `request.pdk.interconnect_corner` (issue #1100) -- tech-LEF parasitic
+# corner selection, independent of the liberty (device) corner
+# `request.pdk.corner` already selects.
+# --------------------------------------------------------------------------- #
+
+
+def test_stubbed_full_route_resolves_selected_interconnect_corner(
+    tmp_path, monkeypatch
+):
+    """`interconnect_corner: "max"` on an install that stages a `max` tech
+    LEF resolves and loads that file, not the nominal one -- and the
+    response records it distinctly from the liberty `corner` (encoded only
+    in `provenance.deck.name`)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        install_kwargs={"tech_lef_corners": ("min", "nom", "max")},
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "interconnect_corner": "max",
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["interconnect_corner"] == "max"
+    # The liberty (device) corner is still visible, independently, via
+    # `provenance.deck.name` -- distinct from `interconnect_corner` above,
+    # never conflated even though both name "a corner".
+    assert report["provenance"]["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    floorplan_lines = _script_lines(floorplan_script)
+    assert any(
+        line.startswith("read_lef") and line.endswith("sky130_fd_sc_hd__max.tlef")
+        for line in floorplan_lines
+    )
+    assert not any(
+        line.endswith("sky130_fd_sc_hd__nom.tlef") for line in floorplan_lines
+    )
+
+
+def test_stubbed_full_route_interconnect_corner_min_resolves_distinct_lef(
+    tmp_path, monkeypatch
+):
+    """`interconnect_corner: "min"` resolves a different, correct tech LEF
+    path than `"max"` above -- not just "any non-nominal corner works"."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        install_kwargs={"tech_lef_corners": ("min", "nom", "max")},
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "interconnect_corner": "min",
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["interconnect_corner"] == "min"
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    floorplan_lines = _script_lines(floorplan_script)
+    assert any(
+        line.startswith("read_lef") and line.endswith("sky130_fd_sc_hd__min.tlef")
+        for line in floorplan_lines
+    )
+
+
+def test_run_interconnect_corner_unstaged_on_nominal_only_install_raises(
+    tmp_path, monkeypatch
+):
+    """Issue #1100 edge case: a PDK install that only stages the `"nom"`
+    tech LEF (this suite's own default fixture shape) must raise
+    `PlaceAndRouteError` for `interconnect_corner: "max"` -- never silently
+    fall back to `"nom"`, per `lef_files`'s existing `None`-means-absent
+    convention."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "interconnect_corner": "max",
+        },
+    )
+
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=r"LEF not found for deck.*requested interconnect_corner 'max'",
+    ):
+        run_place_and_route(request_path)
 
 
 def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(

@@ -195,12 +195,28 @@ synthesize` already does, via `find_pdk()`/`libs_ref` discovery
 the new `klayout_tools.pdk.lef_files()` resolver (issue #397/#425 — the
 survey's own finding that `_ASSET_LAYOUT` never carried a `lef` key), which
 looks for open_pdks' own `<libs_ref>/<cell_library>/techlef/<cell_library>
-__<corner>.tlef` (a min/nom/max routing-parasitic corner, default `"nom"`)
-and `<libs_ref>/<cell_library>/lef/<cell_library>.lef`.
+__<corner>.tlef` and `<libs_ref>/<cell_library>/lef/<cell_library>.lef`.
+
+The tech LEF's own `<corner>` is a **parasitic-extraction corner**
+(`min`/`nom`/`max` routing-layer resistance/capacitance) — a wire-model
+choice independent of the liberty (device) corner `request.pdk.corner`
+names. It is caller-selectable via the optional `request.pdk.
+interconnect_corner` (issue #1100, one of `"min"`/`"nom"`/`"max"`, default
+`"nom"` — omitting it preserves this command's original behavior
+byte-for-byte). The response echoes back whichever value was actually
+resolved as its own top-level `interconnect_corner` field, distinct from
+the liberty corner baked into `provenance.deck.name` — so a caller sweeping
+both axes can always tell which (device, interconnect) corner pair produced
+a given result, even when they name different corners in the same request
+(e.g. `corner: "ss_125C_3v00"`, `interconnect_corner: "max"`).
 
 An unresolvable liberty or LEF is a clear **"liberty/LEF not found for
 deck"** application error (exit 1), matching `klt drc`'s existing "deck
-requires an asset the resolved install doesn't ship" posture.
+requires an asset the resolved install doesn't ship" posture — including a
+caller-selected `interconnect_corner` that the resolved PDK install doesn't
+stage (e.g. `interconnect_corner: "max"` against an install that only ships
+a `"nom"` tech LEF): this raises the same clear error rather than silently
+falling back to `"nom"`.
 
 Neither resolver is restricted to a single PDK family — any standard-cell
 library the resolved install ships `libs_ref`/LEF assets for resolves the
@@ -955,7 +971,8 @@ live re-measurement above.
   "hdl_toplevel": "gcd",
   "pdk": {
     "cell_library": "sky130_fd_sc_hd",
-    "corner": "tt_025C_1v80"
+    "corner": "tt_025C_1v80",
+    "interconnect_corner": "nom"
   },
   "floorplan": {
     "method": "utilization",
@@ -990,7 +1007,8 @@ live re-measurement above.
 | `netlist` | string | The gate-level netlist path — typically `klt synthesize`'s own `netlist_path` output. Required. Resolved relative to the request file's own directory. |
 | `hdl_toplevel` | string | The design's top module name. Required. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
-| `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
+| `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. |
+| `pdk.interconnect_corner` | string \| omitted | `"min"` \| `"nom"` \| `"max"` — tech-LEF *parasitic-extraction* corner selector, independent of `pdk.corner` (issue #1100). Default `"nom"`, byte-identical to this command's behavior before this field existed. An install that doesn't stage the requested corner's tech LEF is a clear application error (exit 1), never a silent fallback. Echoed back as the response's own `interconnect_corner` field — see "PDK / LEF / liberty resolution" above. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
@@ -1016,6 +1034,7 @@ live re-measurement above.
   "status": "ok",
   "stage_reached": "route",
   "seed": 1,
+  "interconnect_corner": "nom",
   "die_area_um2": 8487.94,
   "core_area_um2": 7607.3,
   "utilization_pct": 44.6546,
@@ -1093,6 +1112,7 @@ live re-measurement above.
 | `status` | string | Always `"ok"` — place-and-route has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `stage_reached` | string | The last stage this run actually completed. Always equal to or beyond the request's own `target_stage` in a successful response. |
 | `seed` | integer | Echo of the request. |
+| `interconnect_corner` | string | Additive field (issue #1100). The tech-LEF parasitic-extraction corner actually resolved (`"min"`/`"nom"`/`"max"`) — echo of `request.pdk.interconnect_corner`, or `"nom"` when omitted. Distinct from the liberty (device) corner, which `provenance.deck.name` encodes; the two can differ in the same response (e.g. `interconnect_corner: "max"` alongside a `deck.name` ending in `__ss_125C_3v00`). |
 | `die_area_um2` / `core_area_um2` / `utilization_pct` | number | From `initialize_floorplan`/`report_design_area_metrics`, at `stage_reached`. |
 | `wirelength_um` | number \| null | HPWL at `stage_reached`; `null` before placement. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. |
