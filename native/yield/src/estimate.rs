@@ -147,6 +147,18 @@ fn analyze_measurement(
             ));
         }
     }
+    if m.limits.exclusive_min && m.limits.min.is_none() {
+        return Err(format!(
+            "measurement '{name}' declares limits.exclusive_min but no limits.min: an \
+             exclusive flag with no bound to make exclusive is meaningless"
+        ));
+    }
+    if m.limits.exclusive_max && m.limits.max.is_none() {
+        return Err(format!(
+            "measurement '{name}' declares limits.exclusive_max but no limits.max: an \
+             exclusive flag with no bound to make exclusive is meaningless"
+        ));
+    }
     if let Some(t) = m.limits.target_yield {
         if !(t > 0.0 && t <= 1.0) {
             return Err(format!(
@@ -460,7 +472,27 @@ fn analyze_measurement(
 }
 
 fn within(x: f64, limits: &Limits) -> bool {
-    limits.min.map(|lo| x >= lo).unwrap_or(true) && limits.max.map(|hi| x <= hi).unwrap_or(true)
+    let lower_ok = limits
+        .min
+        .map(|lo| {
+            if limits.exclusive_min {
+                x > lo
+            } else {
+                x >= lo
+            }
+        })
+        .unwrap_or(true);
+    let upper_ok = limits
+        .max
+        .map(|hi| {
+            if limits.exclusive_max {
+                x < hi
+            } else {
+                x <= hi
+            }
+        })
+        .unwrap_or(true);
+    lower_ok && upper_ok
 }
 
 fn normality_verdict(
@@ -1317,6 +1349,7 @@ mod tests {
                 min: Some(-2.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1361,6 +1394,7 @@ mod tests {
                 min: None,
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1382,6 +1416,7 @@ mod tests {
                 min: Some(0.5),
                 max: Some(1.0),
                 target_yield: Some(0.99),
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1398,6 +1433,7 @@ mod tests {
                 min: Some(1.15),
                 max: Some(1.25),
                 target_yield: Some(0.99),
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1421,6 +1457,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1441,6 +1478,7 @@ mod tests {
                 min: Some(0.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let err = analyze(&req).unwrap_err();
@@ -1455,6 +1493,7 @@ mod tests {
                 min: Some(-1.0),
                 max: Some(1.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         req.confidence = 1.0;
@@ -1470,10 +1509,131 @@ mod tests {
                 min: None,
                 max: None,
                 target_yield: None,
+                ..Default::default()
             },
         );
         let err = analyze(&req).unwrap_err();
         assert!(err.contains("no spec limits"), "{err}");
+    }
+
+    /// Issue #1083: a sample exactly equal to a *non*-exclusive `min` passes
+    /// -- the pre-existing inclusive behavior, as a regression guard.
+    #[test]
+    fn a_sample_exactly_at_an_inclusive_min_passes() {
+        let mut samples = vec![2.0; 19];
+        samples.push(0.0); // exactly at min
+        let req = request(
+            samples,
+            Limits {
+                min: Some(0.0),
+                max: None,
+                target_yield: None,
+                ..Default::default()
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.yield_.empirical.estimate, 1.0);
+        assert!(!m.limits.exclusive_min);
+    }
+
+    /// Issue #1083: a sample exactly equal to an `exclusive_min` fails --
+    /// the strict comparison this issue adds.
+    #[test]
+    fn a_sample_exactly_at_an_exclusive_min_fails() {
+        let mut samples = vec![2.0; 19];
+        samples.push(0.0); // exactly at min, should now be excluded
+        let req = request(
+            samples,
+            Limits {
+                min: Some(0.0),
+                max: None,
+                target_yield: None,
+                exclusive_min: true,
+                ..Default::default()
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        close(m.yield_.empirical.estimate, 19.0 / 20.0, 1e-12);
+        assert!(m.limits.exclusive_min);
+    }
+
+    /// The `max`-side counterpart of the previous two tests.
+    #[test]
+    fn a_sample_exactly_at_an_exclusive_max_fails() {
+        let mut samples = vec![0.0; 19];
+        samples.push(2.0); // exactly at max, should be excluded
+        let req = request(
+            samples,
+            Limits {
+                min: None,
+                max: Some(2.0),
+                target_yield: None,
+                exclusive_max: true,
+                ..Default::default()
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        close(m.yield_.empirical.estimate, 19.0 / 20.0, 1e-12);
+        assert!(m.limits.exclusive_max);
+    }
+
+    /// A fully-open interval: both sides exclusive on the same measurement.
+    #[test]
+    fn both_min_and_max_exclusive_excludes_both_boundaries() {
+        let mut samples = vec![1.0; 18];
+        samples.push(0.0); // at min, excluded
+        samples.push(2.0); // at max, excluded
+        let req = request(
+            samples,
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                exclusive_min: true,
+                exclusive_max: true,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        close(m.yield_.empirical.estimate, 18.0 / 20.0, 1e-12);
+    }
+
+    /// Declaring `exclusive_min` with no `min` value is a validation error,
+    /// mirroring the "max <= min" and "no limits at all" checks above.
+    #[test]
+    fn exclusive_min_with_no_min_value_is_an_error() {
+        let req = request(
+            normal_grid(100, 0.0, 1.0),
+            Limits {
+                min: None,
+                max: Some(3.0),
+                target_yield: None,
+                exclusive_min: true,
+                ..Default::default()
+            },
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("exclusive_min"), "{err}");
+    }
+
+    /// The `max`-side counterpart of the previous test.
+    #[test]
+    fn exclusive_max_with_no_max_value_is_an_error() {
+        let req = request(
+            normal_grid(100, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: None,
+                target_yield: None,
+                exclusive_max: true,
+                ..Default::default()
+            },
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("exclusive_max"), "{err}");
     }
 
     #[test]
@@ -1485,6 +1645,7 @@ mod tests {
                 min: Some(-10.0),
                 max: Some(10.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1509,6 +1670,7 @@ mod tests {
                 min: Some(-10.0),
                 max: Some(10.0),
                 target_yield: Some(0.99),
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1529,6 +1691,7 @@ mod tests {
                 min: Some(-10.0),
                 max: Some(10.0),
                 target_yield: Some(0.99),
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1546,6 +1709,7 @@ mod tests {
                 min: Some(0.5),
                 max: Some(1.0),
                 target_yield: Some(0.99),
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1562,6 +1726,7 @@ mod tests {
                 min: Some(0.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1583,6 +1748,7 @@ mod tests {
                 min: Some(0.0),
                 max: Some(1.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1780,6 +1946,7 @@ mod tests {
                 min: Some(-0.5),
                 max: Some(0.5),
                 target_yield: None,
+                ..Default::default()
             },
             Some(NegativeControlRequest {
                 samples: bad,
@@ -1821,6 +1988,7 @@ mod tests {
                 min: Some(-0.5),
                 max: Some(0.5),
                 target_yield: None,
+                ..Default::default()
             },
             Some(NegativeControlRequest {
                 samples: not_actually_bad,
@@ -1852,6 +2020,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1870,6 +2039,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             Some(NegativeControlRequest {
                 samples: vec![9.0],
@@ -1900,6 +2070,7 @@ mod tests {
                 min: Some(-5.0 * sigma),
                 max: Some(5.0 * sigma),
                 target_yield: None,
+                ..Default::default()
             },
             None,
             Some(AnalyticCrossCheckRequest::KtcNoise {
@@ -1932,6 +2103,7 @@ mod tests {
                 min: Some(-0.05),
                 max: Some(0.05),
                 target_yield: None,
+                ..Default::default()
             },
             None,
             Some(AnalyticCrossCheckRequest::MismatchOffset {
@@ -1960,6 +2132,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             None,
             Some(AnalyticCrossCheckRequest::MismatchOffset {
@@ -1987,6 +2160,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -2006,6 +2180,7 @@ mod tests {
             min: Some(-3.0),
             max: Some(3.0),
             target_yield: None,
+            ..Default::default()
         };
         let implicit = analyze(&request(samples.clone(), limits)).unwrap();
         let explicit = analyze(&request_with_sampling(
@@ -2029,6 +2204,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             Some(SamplingRequest::LatinHypercube { replicates: 1 }),
         );
@@ -2044,6 +2220,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             Some(SamplingRequest::LatinHypercube { replicates: 4 }),
         );
@@ -2059,6 +2236,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             Some(SamplingRequest::Importance {
                 weights: vec![1.0; 10],
@@ -2079,6 +2257,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             Some(SamplingRequest::Importance { weights }),
         );
@@ -2098,6 +2277,7 @@ mod tests {
             min: Some(-2.0),
             max: Some(2.0),
             target_yield: None,
+            ..Default::default()
         };
         let req = request_with_sampling(
             samples,
@@ -2129,6 +2309,7 @@ mod tests {
                 min: Some(-3.0),
                 max: Some(3.0),
                 target_yield: None,
+                ..Default::default()
             },
             Some(SamplingRequest::Importance { weights }),
         );
@@ -2152,6 +2333,7 @@ mod tests {
             min: Some(-2.0),
             max: Some(2.0),
             target_yield: None,
+            ..Default::default()
         };
         let n = 600;
         let replicates = 6;
@@ -2219,6 +2401,7 @@ mod tests {
             min: None,
             max: Some(limit),
             target_yield: None,
+            ..Default::default()
         };
 
         let mut rng = SplitMix64(0x000B_ADC0_FFEE_2026);

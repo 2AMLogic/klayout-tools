@@ -242,6 +242,53 @@ def test_sim_report_with_a_non_numeric_value_is_an_error(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# exclusive_min / exclusive_max parsing (issue #1083, no native extension
+# needed -- these are input-reader-tier checks)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_exclusive_min_and_max_are_parsed_from_a_sample_set(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        [1.0, 2.0],
+        limits={"min": 0.0, "exclusive_min": True, "max": 5.0, "exclusive_max": True},
+    )
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["limits"]["exclusive_min"] is True
+    assert m["limits"]["exclusive_max"] is True
+
+
+@requires_native
+def test_exclusive_min_defaults_to_false_when_absent(tmp_path):
+    path = _sample_set(tmp_path, [1.0, 2.0], limits={"min": 0.0, "max": 5.0})
+    report = run_yield(path)
+    m = report["measurements"][0]
+    # Absent in the request -> the native side's default, echoed back as
+    # `False` (not present at all) since the field is only serialised when
+    # `true`.
+    assert not m["limits"].get("exclusive_min")
+    assert not m["limits"].get("exclusive_max")
+
+
+def test_a_non_boolean_exclusive_min_is_an_error(tmp_path):
+    path = _sample_set(
+        tmp_path, [1.0, 2.0], limits={"min": 0.0, "exclusive_min": "yes"}
+    )
+    with pytest.raises(YieldError, match="limits.exclusive_min must be a boolean"):
+        run_yield(path)
+
+
+def test_a_non_boolean_exclusive_max_is_an_error(tmp_path):
+    path = _sample_set(
+        tmp_path, [1.0, 2.0], limits={"max": 5.0, "exclusive_max": "yes"}
+    )
+    with pytest.raises(YieldError, match="limits.exclusive_max must be a boolean"):
+        run_yield(path)
+
+
+# --------------------------------------------------------------------------- #
 # negative_control / analytic_cross_check parsing (issue #817, no native
 # extension needed -- these are input-reader-tier checks)
 # --------------------------------------------------------------------------- #
@@ -588,6 +635,64 @@ def test_a_target_yield_below_the_observed_rate_passes(tmp_path):
     report = run_yield(path)
     assert report["status"] == "pass"
     assert report["measurements"][0]["status"] == "pass"
+
+
+@requires_native
+def test_an_exclusive_min_spec_row_excludes_a_boundary_sample(tmp_path):
+    """Issue #1083: a sample exactly at `min` fails an `exclusive_min` spec
+    row, dropping the empirical yield below what a `target_yield` of 1.0
+    would require -- the end-to-end version of the Rust `within()` unit
+    tests, exercised through the CLI's JSON report."""
+    samples = [2.0] * 19 + [0.0]  # the 20th sample sits exactly on `min`.
+    path = _sample_set(
+        tmp_path,
+        samples,
+        limits={"min": 0.0, "exclusive_min": True, "target_yield": 1.0},
+    )
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["limits"]["exclusive_min"] is True
+    assert m["yield"]["empirical"]["estimate"] == pytest.approx(19 / 20)
+    assert m["status"] == "fail"
+    assert report["status"] == "fail"
+
+    # The regression guard: the identical sample set with the default
+    # (inclusive) comparison passes every sample, including the boundary one.
+    inclusive_path = _sample_set(
+        tmp_path,
+        samples,
+        limits={"min": 0.0, "target_yield": 1.0},
+        name="m2",
+    )
+    inclusive_report = run_yield(inclusive_path)
+    m2 = inclusive_report["measurements"][0]
+    assert not m2["limits"].get("exclusive_min")
+    assert m2["yield"]["empirical"]["estimate"] == 1.0
+
+
+@requires_native
+def test_exclusive_min_with_no_min_value_raises_the_native_validation_error(tmp_path):
+    """Declaring `exclusive_min` on a side with no `min` value is a
+    validation error (mirrors the existing 'max <= min' check), not silently
+    ignored."""
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(50, 0.0, 1.0),
+        limits={"max": 3.0, "exclusive_min": True},
+    )
+    with pytest.raises(YieldError, match="exclusive_min"):
+        run_yield(path)
+
+
+@requires_native
+def test_exclusive_max_with_no_max_value_raises_the_native_validation_error(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(50, 0.0, 1.0),
+        limits={"min": -3.0, "exclusive_max": True},
+    )
+    with pytest.raises(YieldError, match="exclusive_max"):
+        run_yield(path)
 
 
 @requires_native
