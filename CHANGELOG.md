@@ -16,6 +16,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-17 — `klt equiv`'s multi-source `provenance.input.content_hash`
+  (both `gold`/`gate` sides combined pass more than one file total) now uses
+  the same path-independent digest scheme `klt synthesize` already used for
+  its own multi-source case, instead of an independently-copied
+  implementation that mixed each file's path into the hash (issue #1112).
+  The two had silently diverged: given identical file contents, `klt equiv`
+  and `klt synthesize` previously reported *different* `sha256:` values for
+  the same documented `provenance.input` field
+  (`docs/json-contract.md`'s "Reproducibility provenance" section) — a
+  committed report's hash was not comparable across the two commands. Both
+  now share one `_combined_content_hash` implementation in
+  `klayout_tools/_provenance.py`; the single-source case (`build_provenance`'s
+  `input_path`) is unaffected.
 - 2026-08-17 — `klt drc --deck gf180mcu` now enforces the **5V/6V (`_MV`)
   thresholds** on `Comp` geometry drawn inside `Dualgate` (55/0) instead of
   checking every `Comp` shape against the 3.3V (`_LV`) column (issue #1110,

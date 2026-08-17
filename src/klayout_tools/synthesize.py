@@ -126,7 +126,6 @@ hard failure, never a silent "trust me" (acceptance criterion 3).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -134,7 +133,7 @@ import subprocess
 from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
-from ._provenance import build_provenance, sha256_file
+from ._provenance import _combined_content_hash, _yosys_version, build_provenance
 from .equiv import EquivError, run_equiv
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
 from .restructure import RestructureError, restructure_for_timing
@@ -148,8 +147,6 @@ SCHEMA_VERSION = 1
 #: the request from day one (contract spike section 2) so a later backend is
 #: an additive enum value, never a contract-shape change.
 SUPPORTED_ENGINES = ("yosys",)
-
-_YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
 
 #: ABC's own ``stime -p`` summary line, as it reaches the Yosys log (and,
 #: via ``tee -q -o``, the captured ABC log this module parses):
@@ -1092,19 +1089,6 @@ def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     return f"yosys exited with code {completed.returncode}: {snippet}"
 
 
-def _yosys_version() -> str | None:
-    """The resolved Yosys build string (``yosys -V``'s own version token),
-    or ``None`` if unresolvable -- never raises."""
-    try:
-        completed = subprocess.run(["yosys", "-V"], capture_output=True, text=True)
-    except OSError:
-        return None
-    if completed.returncode != 0:
-        return None
-    match = _YOSYS_VERSION_RE.search(completed.stdout)
-    return match.group(1) if match else None
-
-
 def _submodule_key(
     modules: dict[str, Any], cell_type: str, seen: frozenset[str]
 ) -> str | None:
@@ -1382,20 +1366,3 @@ def _read_sta_timing(
         return compute_critical_path(netlist_path, liberty_path, hdl_toplevel)
     except StaError:
         return None
-
-
-def _combined_content_hash(paths: list[str]) -> str | None:
-    """A single ``sha256:``-prefixed digest covering every file in ``paths``
-    (order-independent -- sorted before hashing), for the multi-``sources``
-    case :func:`klayout_tools._provenance.build_provenance`'s single-path
-    ``input_path`` argument cannot express on its own. ``None`` if any file
-    cannot be hashed.
-    """
-    digests = []
-    for path in sorted(paths):
-        digest = sha256_file(path)
-        if digest is None:
-            return None
-        digests.append(digest)
-    combined = hashlib.sha256("".join(digests).encode("utf-8")).hexdigest()
-    return f"sha256:{combined}"

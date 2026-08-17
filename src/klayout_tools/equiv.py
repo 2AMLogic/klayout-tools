@@ -80,7 +80,7 @@ from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
-from ._provenance import build_provenance, sha256_file
+from ._provenance import _combined_content_hash, _yosys_version, build_provenance
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -112,7 +112,6 @@ _SEQUENTIAL_CELL_GLOBS = (
     "$fsm*",
 )
 
-_YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
 _ICARUS_VERSION_RE = re.compile(r"Icarus Verilog version (\S+)")
 
 _SAT_SUCCESS_RE = re.compile(r"SAT proof finished - no model found: SUCCESS!")
@@ -825,19 +824,6 @@ def _build_testbench(counterexample: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _yosys_version() -> str | None:
-    """``yosys -V``'s reported version string, or ``None`` if it can't be
-    determined -- mirrors ``synthesize.py``'s own ``_yosys_version``."""
-    try:
-        completed = subprocess.run(
-            ["yosys", "-V"], capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    match = _YOSYS_VERSION_RE.search(completed.stdout or "")
-    return match.group(1) if match else None
-
-
 def _icarus_version() -> str | None:
     """``iverilog -V``'s reported version string, or ``None`` -- mirrors
     ``functional_verification.py``'s own engine-version probe."""
@@ -894,18 +880,3 @@ def _build_report(
         },
         "provenance": provenance,
     }
-
-
-def _combined_content_hash(paths: list[str]) -> str | None:
-    """A single ``sha256:`` digest covering every source across both sides,
-    in a stable (sorted) order -- mirrors ``synthesize.py``'s
-    ``_combined_content_hash`` for a multi-file ``provenance.input``."""
-    import hashlib
-
-    digest = hashlib.sha256()
-    for path in sorted(paths):
-        file_digest = sha256_file(path)
-        if file_digest is None:
-            return None
-        digest.update(f"{path}:{file_digest}\n".encode())
-    return f"sha256:{digest.hexdigest()}"

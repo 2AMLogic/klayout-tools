@@ -22,15 +22,22 @@ needs no ``schema_version`` bump. Fields that can't be resolved (PDK not
 installed, no deck involved) are ``null`` -- never fabricated.
 
 This module also owns the single ``sha256_file`` implementation the verbs
-share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``).
+share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``),
+plus ``_yosys_version``/``_combined_content_hash`` (previously copy-pasted --
+and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
+#1112).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
+import subprocess
 from collections.abc import Mapping
 from typing import Any
+
+_YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
 
 
 def sha256_file(path: str | None) -> str | None:
@@ -48,6 +55,52 @@ def sha256_file(path: str | None) -> str | None:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _yosys_version() -> str | None:
+    """Yosys's own reported version token (``yosys -V``'s output), or
+    ``None`` if unresolvable -- never raises. Shared by ``equiv.py`` (SAT
+    equivalence checking) and ``synthesize.py`` (RTL synthesis), which both
+    invoke Yosys as an external engine and record its version as
+    ``engine_version``. Combines the safety checks the two call sites had
+    independently accumulated before this dedup (issue #1112): a ``timeout``
+    against a hung subprocess, and a non-zero-``returncode`` check against a
+    Yosys invocation that printed nothing useful to stdout.
+    """
+    try:
+        completed = subprocess.run(
+            ["yosys", "-V"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = _YOSYS_VERSION_RE.search(completed.stdout or "")
+    return match.group(1) if match else None
+
+
+def _combined_content_hash(paths: list[str]) -> str | None:
+    """A single ``sha256:``-prefixed digest covering every file in ``paths``
+    (order-independent -- sorted before hashing), for the multi-``sources``
+    case :func:`build_provenance`'s single-path ``input_path`` argument
+    cannot express on its own. ``None`` if any file cannot be hashed.
+
+    The digest is computed over file *contents* only, independent of the
+    paths themselves -- so the same set of file contents at different paths
+    (e.g. a copy in a different worktree) hashes identically. Shared by
+    ``equiv.py`` and ``synthesize.py`` (issue #1112 -- the two previously had
+    independently-copied implementations that produced different digests for
+    the same inputs, one mixing the path into the hash and one not; this is
+    the path-independent scheme both now use).
+    """
+    digests = []
+    for path in sorted(paths):
+        digest = sha256_file(path)
+        if digest is None:
+            return None
+        digests.append(digest)
+    combined = hashlib.sha256("".join(digests).encode("utf-8")).hexdigest()
+    return f"sha256:{combined}"
 
 
 def _content_hash(path: str | None) -> str | None:
