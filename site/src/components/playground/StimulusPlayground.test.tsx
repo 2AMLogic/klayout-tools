@@ -135,10 +135,10 @@ describe("StimulusPlayground", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Re-run" }));
 
-    await waitFor(() =>
-      expect(screen.getByLabelText("Toggle corner live (tt)")).toBeInTheDocument(),
-    );
-    expect(screen.getByLabelText("Toggle corner live (tt)")).toBeChecked();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Toggle corner live (tt)")).toBeInTheDocument();
+      expect(screen.getByLabelText("Toggle corner live (tt)")).toBeChecked();
+    });
 
     await waitFor(() => {
       const afterCount = screen.getByTestId("waveform-plot").querySelectorAll("path").length;
