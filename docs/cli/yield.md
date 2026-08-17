@@ -741,8 +741,9 @@ no Rust toolchain in sight.
 > `native/yield/` source tree or dependency group in scope. `klt yield`,
 > `klt yield-campaign`, and `klt yield-sensitivity` all share this
 > requirement (same crate). Getting the extension needs the **full repo
-> checkout** shown below, not just an installed `klt`. This is the only
-> `klt` verb with that constraint today.
+> checkout** shown below, not just an installed `klt`. `klt mom` and
+> `klt synthesize --restructure-timing` have the same from-source gap
+> for their own Rust extensions — see [`docs/cli/mom.md`](mom.md).
 
 To build it:
 

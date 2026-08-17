@@ -77,7 +77,9 @@ uv tool install git+https://github.com/2AMLogic/klayout-tools
 > in scope for a single-package install. It requires a full repo checkout
 > plus a Rust toolchain; see
 > [`docs/cli/yield.md#building-the-native-extension`](docs/cli/yield.md#building-the-native-extension).
-> Every other verb works from the commands above alone.
+> `klt mom` and `klt synthesize --restructure-timing` have the same
+> from-source gap for their own Rust extensions; every other verb works
+> from the commands above alone.
 
 ## Quick start
 
