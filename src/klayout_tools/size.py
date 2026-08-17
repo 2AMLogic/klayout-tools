@@ -278,6 +278,7 @@ from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
+from ._text import line_containing as _line_containing
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import SimError, _expand_corners, _resolve_models_lib
 
@@ -1886,14 +1887,6 @@ def _parse_sweep_log(
         }
         for i, p in enumerate(points)
     ]
-
-
-def _line_containing(text: str, offset: int) -> str:
-    start = text.rfind("\n", 0, offset) + 1
-    end = text.find("\n", offset)
-    if end == -1:
-        end = len(text)
-    return text[start:end].strip()
 
 
 def _cleanup_dir(path: str) -> None:

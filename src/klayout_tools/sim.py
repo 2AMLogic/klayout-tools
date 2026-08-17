@@ -66,6 +66,7 @@ from typing import Any
 from . import remote_fleet, remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
+from ._text import line_containing as _line_containing
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
 from .remote_launcher import RemoteLauncher, RemoteLaunchError
@@ -2983,14 +2984,6 @@ def _classify_diagnostics(log_text: str) -> list[dict[str, str]]:
             line = _line_containing(log_text, match.start())
             diagnostics.append({"severity": "error", "code": code, "message": line})
     return diagnostics
-
-
-def _line_containing(text: str, offset: int) -> str:
-    start = text.rfind("\n", 0, offset) + 1
-    end = text.find("\n", offset)
-    if end == -1:
-        end = len(text)
-    return text[start:end].strip()
 
 
 #: ngspice's own terminal trailer when an analysis never actually completed
