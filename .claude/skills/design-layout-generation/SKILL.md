@@ -1,6 +1,6 @@
 ---
 name: "Design Pipeline: Layout Generation (S7)"
-description: "klt gen ships single-cell primitive generators (mos_array, res_array, guard_ring, diff_pair, bjt_array); klt gen-compose places and wires multiple generated blocks into one circuit (row placement + two-pin routing), verified end to end against a real sky130 5T OTA. klt render and klt layout-metrics are usable today for inspecting a hand-edited or externally produced layout."
+description: "klt gen ships single-cell primitive generators (mos_array, res_array, guard_ring, diff_pair, bjt_array); klt gen-compose places and wires multiple generated blocks into one circuit (row placement + Manhattan routing, two-pin and >2-pin bundle nets), verified end to end against a real sky130 5T OTA. klt render and klt layout-metrics are usable today for inspecting a hand-edited or externally produced layout."
 domain: design-pipeline
 type: skill
 user-invocable: false
@@ -25,8 +25,9 @@ but is now stale. `klt gen` ships five single-cell primitive generators —
 structured report (`ports[]`, `bbox_um`, `drc_hints`) per the contract
 `docs/design/layout-generator-spike.md` (issue #104) settled. `klt
 gen-compose` (`docs/cli/gen-compose.md`) then places a set of already-
-generated blocks into one row and routes two-pin nets between their named
-ports, per `docs/design/gen-composition-spike.md` (issue #186)'s
+generated blocks into one row and routes the nets listed in
+`connectivity[]` between their named ports -- two-pin point to point, and
+(since #1073) a >2-pin bundle net as a spanning tree of two-pin legs, per `docs/design/gen-composition-spike.md` (issue #186)'s
 build-native-not-wrap decision. Phase 3 (#196) proved this against the real
 5T OTA case this stage's own design doc names as the motivating example (a
 differential pair, a current-mirror load, and a tail current source), taken
@@ -86,8 +87,8 @@ during #196's bring-up:
    `topology="common_centroid"` vs. plain-`"array"` choice).
 2. **Compose multiple generated blocks into one placed-and-routed
    circuit.** `klt gen-compose <request.json>` places a row of already-
-   generated blocks and routes two-pin nets between their named ports
-   (`docs/cli/gen-compose.md`) — read that document's "Known limitations"
+   generated blocks and routes two-pin *and* >2-pin (shared rail, fanout)
+   nets between their named ports (`docs/cli/gen-compose.md`) — read that document's "Known limitations"
    section and worked example before wiring a real circuit (the
    opposite-facing-ports / no-guard-ring caveats above).
 3. **Inspect an existing layout.** `klt render <file>` produces one PNG per
@@ -119,9 +120,9 @@ either.
 **Escalation rule:** escalate to frontier-reasoning when no generator
 primitive fits the block's topology (a floorplan-level decision, not a
 parameter tweak), **or** when a multi-block circuit's needed connectivity
-cannot be expressed as `klt gen-compose`'s two-pin, opposite-facing-port
-routing (e.g. a genuine >2-pin bundle net, or a topology requiring
-`"grid"` placement) — both are floorplan-level gaps this phase's tooling
+cannot be expressed as `klt gen-compose`'s opposite-facing-port routing
+(e.g. a topology requiring `"grid"` placement; a >2-pin bundle net is no
+longer such a case -- see #1073) — both are floorplan-level gaps this phase's tooling
 does not cover, not parameter tweaks.
 
 ## Failure modes (recap)

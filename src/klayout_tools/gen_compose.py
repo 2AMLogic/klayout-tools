@@ -42,16 +42,29 @@ Scope (phase 2, this module's current state):
   ``routing.layer_role`` layer at ``routing.width_um`` width, built natively
   as a ``pya.Path``. ``nets[]`` reports ``routed`` and ``route_length_um``
   per net; a net the router cannot connect -- a required jog through an
-  inter-block channel narrower than ``routing.width_um``; a route that would
-  cross a guard/collector ring's own tap loop or plow through a block's
-  interior (e.g. a same-facing port pair reaching a pin on a block's far
-  side, or an unrelated third block in a longer row -- :func:`route_two_pin`,
-  #199); or a >2-pin bundle net (bundle routing is out of scope this phase,
-  spike section 5 item 2) -- is reported in ``unrouted_nets[]`` rather than
-  failing the whole request or silently drawing a short. A non-empty
+  inter-block channel narrower than ``routing.width_um``, or a route that
+  would cross a guard/collector ring's own tap loop or plow through a
+  block's interior (e.g. a same-facing port pair reaching a pin on a block's
+  far side, or an unrelated third block in a longer row --
+  :func:`route_two_pin`, #199) -- is reported in ``unrouted_nets[]`` rather
+  than failing the whole request or silently drawing a short. A non-empty
   ``unrouted_nets[]`` with every block placed is a *partial success* (exit
   code 3; see ``cli/gen_compose_cmd.py`` and the spike's "Proposed exit
   codes").
+* **Bundle (>2-pin) routing** (issue #1073, the increment the spike's section
+  5 item 2 reserved for "once two-pin routing is proven against a real
+  block"): a ``connectivity[]`` net with three or more pins -- a shared
+  supply/ground rail, a bias line, a clock, any fanout node, i.e. the
+  majority of a real circuit's connectivity -- is routed as a spanning tree
+  of two-pin legs by :func:`route_bundle`, nearest pair first. Every leg goes
+  through :func:`route_two_pin` unchanged, so all of its routability checks
+  apply per leg; a leg one of them rejects is skipped in favour of the next
+  candidate that would join the same two parts of the net. ``nets[].legs[]``
+  reports every drawn leg (and, for a net that could not be connected, every
+  attempted one with its own rejection reason). Nothing is drawn for a net
+  whose pins cannot all be joined -- a half-wired net is worse than an
+  unwired one, since the caller has to build the rest of its interconnect
+  around whatever the router already drew (#1073's own framing).
 * **Via-drop routing** (issue #454, re-raising #433's Ask options 1/2): a
   family whose curated extraction deck declares a second routing-metal level
   (e.g. sky130's ``"metal2"``/met1) can be selected as ``routing.layer_role``
@@ -827,6 +840,19 @@ def _parse_connectivity(
         waypoints_um = _parse_waypoints_um(
             entry.get("waypoints_um"), net=net, index=index
         )
+        # A bundle net (>2 pins, #1073) is routed as a spanning tree of legs
+        # (see route_bundle) -- a single caller-supplied path has no
+        # unambiguous leg to belong to, so combining the two is an application
+        # error rather than a silently ignored field.
+        if waypoints_um is not None and len(parsed_pins) != 2:
+            raise GenComposeError(
+                f"request.connectivity[{index}] (net '{net}').waypoints_um is "
+                f"only supported for a 2-pin net -- this net has "
+                f"{len(parsed_pins)} pins, which routes as a spanning tree of "
+                "two-pin legs, and a single waypoint path cannot be attributed "
+                "to one of them; split the net into 2-pin connectivity[] "
+                "entries to steer individual legs"
+            )
         connectivity.append(
             {"net": net, "pins": parsed_pins, "waypoints_um": waypoints_um}
         )
@@ -2457,6 +2483,302 @@ def route_two_pin(
     }
 
 
+def _pin_ref(pin: dict[str, Any]) -> str:
+    """``"block.port"`` -- the compact form router diagnostics name a pin by."""
+    return f"{pin['block']}.{pin['port']}"
+
+
+def _pin_position_um(
+    pin: dict[str, Any],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> tuple[float, float] | None:
+    """A pin's port position in the *composed* frame, or ``None``.
+
+    ``None`` when the block reported no ``ports[]`` entry for it, or the entry
+    carries no usable ``x_um``/``y_um`` -- exactly the case
+    :func:`route_two_pin` already reports as "one or both ports report no
+    position (empty ports[])". Used only to *order* candidate legs by
+    Manhattan distance (:func:`route_bundle`); the routability verdict itself
+    always comes from :func:`route_two_pin`.
+    """
+    block = blocks.get(pin["block"])
+    if block is None:
+        return None
+    port = (block.get("ports") or {}).get(pin["port"])
+    if not isinstance(port, dict):
+        return None
+    x_um, y_um = port.get("x_um"), port.get("y_um")
+    if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
+        return None
+    if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
+        return None
+    offset = offsets_um[pin["block"]]
+    return (float(x_um) + offset["x"], float(y_um) + offset["y"])
+
+
+def route_bundle(
+    pins: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    width_um: float,
+    route_layer: tuple[int, int] | None = None,
+    extraction_deck: ExtractionDeck | None = None,
+    block_geometry_for: Any = None,
+    leg_conflict: Any = None,
+    waypoints_um: list[tuple[float, float]] | None = None,
+) -> dict[str, Any]:
+    """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
+
+    This is the N-pin generalisation the spike's section 5 item 2 named as
+    "the natural next increment once two-pin routing is proven against a real
+    block" -- a shared supply/ground rail or a fanout node (a bias line, a
+    clock, an inverter chain's tap) touches one port on every block it spans,
+    so a two-pin-only router cannot wire the *majority* of a real circuit's
+    connectivity at all.
+
+    **Algorithm: a routed minimum spanning tree over the net's pins.** Every
+    unordered pin pair is a candidate *leg*; candidates are tried in
+    increasing Manhattan distance (ties broken by pin index, so the result is
+    deterministic and the composed GDS stays byte-reproducible, #320), and a
+    leg is accepted only when it joins two so-far-disconnected parts of the
+    net (Kruskal). The net is routed when every pin ends up in one component.
+    For the canonical rail case -- one north-facing supply port per block
+    across a placement row -- the nearest-first ordering yields exactly the
+    trunk-and-stub shape the issue asks for: a chain of adjacent-block legs,
+    each one an ordinary Manhattan backbone.
+
+    **Every leg is routed by :func:`route_two_pin`**, unchanged. That is the
+    point of decomposing into legs rather than inventing a second geometry
+    routine: all six of its routability checks (channel width, guard/collector
+    ring, self-net pad crossing, self-net drawn-metal short, obstacle overlap,
+    via-drop resolution) apply per leg, for free, with no second
+    implementation to keep in sync. A leg a check rejects is simply not
+    accepted, and the *next* candidate that would join the same two components
+    is tried -- so an N-pin net routes around an individually unroutable pair
+    whenever another spanning tree exists, rather than failing outright.
+
+    **All-or-nothing per net.** When no spanning tree exists, *nothing* is
+    drawn for the net: the caller gets it back in ``unrouted_nets[]`` and
+    wires it themselves. Drawing the legs that did route would leave a
+    half-wired net whose remaining interconnect the caller has to build
+    *around* the router's own geometry -- the exact friction issue #1073
+    reports ("Routing only the handful of genuinely two-pin nets is worse than
+    routing none of them"). Every returned leg therefore reports
+    ``routed: true`` **iff its metal is drawn**, so no leg is ever reported as
+    routed when nothing was drawn for it.
+
+    ``block_geometry_for`` is an optional callable taking a block ``id`` and
+    returning the ``{block_id: geometry}`` mapping :func:`route_two_pin`
+    takes as ``block_geometry`` (``compose()`` passes its lazily-populated
+    per-block cache); it is consulted only for a leg whose two pins sit on the
+    same block, exactly as ``compose()`` did for a two-pin self-net before
+    this function existed. ``leg_conflict`` is an optional callable taking a
+    candidate leg's drawn ``points_um`` and returning a rejection reason (or
+    ``None`` to accept) -- ``compose()`` passes its route-vs-route collision
+    check (#1057) here, so a leg colliding with an *already-routed other net*
+    is rejected as a candidate and an alternative leg is tried, rather than
+    failing the whole net.
+
+    ``waypoints_um`` (#634) applies to the single backbone of a **2-pin** net;
+    supplying it for a >2-pin net raises :class:`GenComposeError` (there is no
+    unambiguous leg for a caller-supplied path to belong to -- see
+    :func:`_parse_connectivity`, which rejects that combination at request-parse
+    time).
+
+    Returns ``{"routed": bool, "route_length_um": float | None, "legs": [...],
+    "reason": str | None}``, where ``route_length_um`` is the summed length of
+    every drawn leg and each ``legs[]`` entry is ``{"pins": [pin_a, pin_b],
+    "routed": bool, "route_length_um": float | None, "reason": str | None,
+    "points_um": list | None, "via_drops": list, "stub_widen": list}`` --
+    ``points_um``/``via_drops``/``stub_widen`` being the same per-leg drawing
+    payload :func:`route_two_pin` returns, consumed by ``compose()``.
+    """
+    if len(pins) < 2:
+        raise GenComposeError("route_bundle() needs at least 2 pins")
+    if waypoints_um is not None and len(pins) != 2:
+        raise GenComposeError(
+            "waypoints_um applies to a 2-pin net's single backbone -- it cannot "
+            f"be attributed to any one leg of a {len(pins)}-pin net"
+        )
+
+    pin_count = len(pins)
+    parent = list(range(pin_count))
+
+    def _find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def _union(left: int, right: int) -> bool:
+        root_left, root_right = _find(left), _find(right)
+        if root_left == root_right:
+            return False
+        parent[max(root_left, root_right)] = min(root_left, root_right)
+        return True
+
+    components = pin_count
+
+    # A pin listed twice (the same block+port) is the same physical point, so
+    # it needs no leg -- pre-union it rather than routing a zero-length route
+    # between a port and itself.
+    first_seen: dict[tuple[str, str], int] = {}
+    for index, pin in enumerate(pins):
+        key = (pin["block"], pin["port"])
+        if key in first_seen:
+            if _union(first_seen[key], index):
+                components -= 1
+        else:
+            first_seen[key] = index
+
+    positions = [_pin_position_um(pin, blocks, offsets_um) for pin in pins]
+
+    def _candidate_distance_um(pair: tuple[int, int]) -> float:
+        pos_i, pos_j = positions[pair[0]], positions[pair[1]]
+        if pos_i is None or pos_j is None:
+            return math.inf
+        return abs(pos_i[0] - pos_j[0]) + abs(pos_i[1] - pos_j[1])
+
+    candidates = sorted(
+        ((i, j) for i in range(pin_count) for j in range(i + 1, pin_count)),
+        key=lambda pair: (_candidate_distance_um(pair), pair[0], pair[1]),
+    )
+
+    legs: list[dict[str, Any]] = []
+    total_length_um = 0.0
+    for i, j in candidates:
+        if components == 1:
+            break
+        if _find(i) == _find(j):
+            continue  # already connected through other legs -- no leg needed
+
+        geometry = None
+        if block_geometry_for is not None and pins[i]["block"] == pins[j]["block"]:
+            geometry = block_geometry_for(pins[i]["block"])
+        result = route_two_pin(
+            pins[i],
+            pins[j],
+            blocks,
+            offsets_um,
+            placed_bboxes_um,
+            width_um,
+            route_layer,
+            extraction_deck,
+            geometry,
+            waypoints_um=waypoints_um,
+        )
+        reason = None if result["routed"] else result["reason"]
+        if result["routed"] and leg_conflict is not None:
+            reason = leg_conflict(result["points_um"])
+
+        if reason is None and result["routed"]:
+            _union(i, j)
+            components -= 1
+            total_length_um += result["route_length_um"]
+            legs.append(
+                {
+                    "pins": [pins[i], pins[j]],
+                    "pin_indices": (i, j),
+                    "routed": True,
+                    "route_length_um": result["route_length_um"],
+                    "reason": None,
+                    "points_um": result["points_um"],
+                    "via_drops": result.get("via_drops", []),
+                    "stub_widen": result.get("stub_widen", []),
+                }
+            )
+        else:
+            legs.append(
+                {
+                    "pins": [pins[i], pins[j]],
+                    "pin_indices": (i, j),
+                    "routed": False,
+                    "route_length_um": None,
+                    "reason": reason,
+                    "points_um": None,
+                    "via_drops": [],
+                    "stub_widen": [],
+                }
+            )
+
+    if components == 1:
+        return {
+            "routed": True,
+            "route_length_um": total_length_um,
+            # Only the accepted legs: a candidate the router rejected on the
+            # way to a working spanning tree is not part of the result.
+            "legs": [leg for leg in legs if leg["routed"]],
+            "reason": None,
+        }
+
+    # --- Unroutable: report which pins were stranded and why ----------------
+    groups: dict[int, list[int]] = {}
+    for index in range(pin_count):
+        groups.setdefault(_find(index), []).append(index)
+    # The largest component is "the net"; every pin outside it is stranded.
+    main_root = max(groups, key=lambda root: (len(groups[root]), -root))
+    stranded = sorted(
+        index
+        for root, members in groups.items()
+        if root != main_root
+        for index in members
+    )
+    stranded_set = set(stranded)
+
+    blocker = next(
+        (
+            leg
+            for leg in legs
+            if not leg["routed"] and set(leg["pin_indices"]) & stranded_set
+        ),
+        None,
+    )
+    blocker_reason = blocker["reason"] if blocker is not None else None
+
+    if pin_count == 2:
+        # A two-pin net has exactly one candidate leg, so the net's own reason
+        # *is* that leg's reason -- byte-identical to the message compose()
+        # reported before this function generalised the two-pin path.
+        reason = blocker_reason or "no routable path between the net's two pins"
+    else:
+        refs = ", ".join(f"'{_pin_ref(pins[index])}'" for index in stranded)
+        reason = (
+            f"{len(stranded)} of {pin_count} pins could not be connected into "
+            f"one net ({refs}) -- every candidate leg reaching them was "
+            "rejected (per-leg detail in nets[].legs[])"
+        )
+        if blocker is not None:
+            reason += (
+                f"; nearest rejection ('{_pin_ref(blocker['pins'][0])}' -> "
+                f"'{_pin_ref(blocker['pins'][1])}'): {blocker_reason}"
+            )
+
+    # Nothing is drawn for a net that could not be fully connected, so every
+    # leg -- including the ones that were individually routable -- reports
+    # routed: false. `legs[].routed` therefore means exactly "this leg's metal
+    # is in the composed output", at both the leg and the net level.
+    for leg in legs:
+        if leg["routed"]:
+            leg["routed"] = False
+            leg["route_length_um"] = None
+            leg["points_um"] = None
+            leg["via_drops"] = []
+            leg["stub_widen"] = []
+            leg["reason"] = (
+                "routable on its own, but the net as a whole could not be "
+                "connected, so no geometry was drawn for any of its legs"
+            )
+
+    return {
+        "routed": False,
+        "route_length_um": None,
+        "legs": legs,
+        "reason": reason,
+    }
+
+
 #: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
 #: application error rather than a silent fallback -- see #328: a typo such
 #: as ``{"pdk": {"name": "gf180mcuD"}}`` (``name`` being what ``klt gen``'s
@@ -2701,39 +3023,49 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     for entry in connectivity:
         net_label = entry["net"]
         pins = entry["pins"]
-        if len(pins) != 2:
-            # Bundle (>2-pin) routing is out of scope this phase (spike section
-            # 5 item 2). Report as a partial-success unrouted net rather than
-            # rejecting the whole request or silently dropping the connection.
-            nets.append(
-                {
-                    "net": net_label,
-                    "pins": pins,
-                    "routed": False,
-                    "route_length_um": None,
-                }
-            )
-            unrouted_nets.append(net_label)
-            notes.append(
-                f"net '{net_label}' has {len(pins)} pins -- bundle (>2-pin) "
-                "routing is out of scope this phase, so it was left unrouted"
-            )
-            continue
+        net_pin_set = frozenset((pin["block"], pin["port"]) for pin in pins)
 
-        result = route_two_pin(
-            pins[0],
-            pins[1],
+        def _leg_conflict(
+            points_um: list[tuple[float, float]],
+            _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
+        ) -> str | None:
+            """Route-vs-route collision check (#1057) for one candidate leg.
+
+            ``route_two_pin``'s checks 1-6 only ever compare a leg's own
+            backbone against *block* geometry -- a positive-area overlap with
+            a route already accepted earlier in this same request is caught
+            here instead, the one place with visibility across nets. Mirrors
+            check 4's "positive area only, not a mere edge touch" rule: a
+            ``kdb.Region`` boolean AND between two backbones already yields an
+            empty region for a mere edge touch, so no separate area threshold
+            is needed. Nets sharing a literal pin are exempt (an intended
+            merge, not a short); the *current* net's own other legs are never
+            in ``accepted_route_regions`` yet, since a net is committed only
+            once every one of its legs is accepted -- so two legs of one
+            bundle net converging on their shared node are never compared
+            against each other either.
+            """
+            region = _drawn_route_region(points_um, width_um, _route_dbu())
+            for other_net, other_pins, other_region in accepted_route_regions:
+                if _net_pin_set & other_pins:
+                    continue  # shared pin -- an intended merge, not a short
+                if not (region & other_region).is_empty():
+                    return f"crosses already-routed net '{other_net}'"
+            return None
+
+        # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
+        # (#1073); a 2-pin net is the degenerate one-leg case of exactly the
+        # same path, so both go through route_bundle().
+        result = route_bundle(
+            pins,
             blocks,
             offsets_um,
             placed_bboxes_um,
             width_um,
             route_layer,
             extraction_deck,
-            (
-                _block_geometry_for(pins[0]["block"])
-                if pins[0]["block"] == pins[1]["block"]
-                else None
-            ),
+            block_geometry_for=_block_geometry_for,
+            leg_conflict=_leg_conflict,
             waypoints_um=entry.get("waypoints_um"),
         )
         nets.append(
@@ -2742,46 +3074,36 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 "pins": pins,
                 "routed": result["routed"],
                 "route_length_um": result["route_length_um"],
+                "legs": [
+                    {
+                        "pins": leg["pins"],
+                        "routed": leg["routed"],
+                        "route_length_um": leg["route_length_um"],
+                        "reason": leg["reason"],
+                    }
+                    for leg in result["legs"]
+                ],
             }
         )
         if result["routed"]:
-            # Route-vs-route collision check (#1057): route_two_pin's checks
-            # 1-6 only ever compare this net's own backbone against *block*
-            # geometry -- a positive-area overlap with a route already
-            # accepted earlier in this same request is caught here instead,
-            # the one place with visibility across nets. Mirrors check 4's
-            # "positive area only, not a mere edge touch" rule: a `kdb.Region`
-            # boolean AND between two backbones already yields an empty
-            # region for a mere edge touch, so no separate area threshold is
-            # needed.
-            new_region = _drawn_route_region(
-                result["points_um"], width_um, _route_dbu()
-            )
-            new_pins = frozenset((pin["block"], pin["port"]) for pin in pins)
-            colliding_net: str | None = None
-            for other_net, other_pins, other_region in accepted_route_regions:
-                if new_pins & other_pins:
-                    continue  # shared pin -- an intended merge, not a short
-                if not (new_region & other_region).is_empty():
-                    colliding_net = other_net
-                    break
-            if colliding_net is not None:
-                nets[-1]["routed"] = False
-                nets[-1]["route_length_um"] = None
-                unrouted_nets.append(net_label)
-                notes.append(
-                    f"net '{net_label}' could not be routed: crosses "
-                    f"already-routed net '{colliding_net}'"
+            for leg_index, leg in enumerate(result["legs"]):
+                accepted_route_regions.append(
+                    (
+                        net_label,
+                        net_pin_set,
+                        _drawn_route_region(leg["points_um"], width_um, _route_dbu()),
+                    )
                 )
-            else:
-                accepted_route_regions.append((net_label, new_pins, new_region))
                 routed_geometry.append(
                     {
                         "net": net_label,
-                        "points_um": result["points_um"],
+                        "points_um": leg["points_um"],
                         "width_um": width_um,
-                        "via_drops": result.get("via_drops", []),
-                        "stub_widen": result.get("stub_widen", []),
+                        "via_drops": leg["via_drops"],
+                        "stub_widen": leg["stub_widen"],
+                        # One kdb.Text per *net*, not per leg: a bundle net's
+                        # legs are one conductor (#1073).
+                        "label": leg_index == 0,
                     }
                 )
         else:
@@ -3103,7 +3425,12 @@ def _write_composed_gds(
             width_dbu = int(round(route["width_um"] / dbu))
             top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
 
-            if label_layer_index is not None:
+            # `label` is False for every leg of a multi-leg (bundle) net after
+            # its first (#1073): the legs are one conductor, so one kdb.Text
+            # names it -- exactly as a two-pin net's single path gets exactly
+            # one label. Absent/True keeps the pre-#1073 one-label-per-entry
+            # behaviour for any other caller.
+            if label_layer_index is not None and route.get("label", True):
                 lx_um, ly_um = _polyline_midpoint_um(points)
                 label_point = kdb.Point(
                     int(round(lx_um / dbu)), int(round(ly_um / dbu))

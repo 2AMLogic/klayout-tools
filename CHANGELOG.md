@@ -626,6 +626,38 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-17 — `klt gen-compose` routes **bundle (>2-pin) `connectivity[]`
+  nets** (issue #1073). A shared supply/ground rail, a bias line, a clock, or
+  any fanout node touches one port on every block it spans, so a two-pin-only
+  router left the majority of a real circuit's connectivity in
+  `unrouted_nets[]` (exit 3) with nothing drawn — the verb degraded to
+  "placement only" for anything past a two-block pair. An N-pin net is now
+  routed as a **spanning tree of two-pin legs**: every unordered pin pair is a
+  candidate leg, candidates are tried nearest-first (Manhattan distance
+  between the ports' composed-frame positions, ties broken by declaration
+  order so output stays byte-reproducible), and a leg is accepted when it
+  joins two so-far-disconnected parts of the net. For a rail across a
+  placement row that yields exactly a trunk: a chain of adjacent-block legs.
+  Every leg goes through the same `route_two_pin` as before, so all of its
+  routability checks (channel width, guard/collector ring, self-net pad
+  crossing, self-net drawn-metal short, obstacle overlap, via-drop
+  resolution) apply **per leg** — and a leg one of them rejects is skipped in
+  favour of the next candidate joining the same two parts, so a net routes
+  around an individually unroutable pair whenever another spanning tree
+  exists. `pins[]` order is not a routing order. Additive response field:
+  `nets[].legs[]` (per-leg `pins`/`routed`/`route_length_um`/`reason`), where
+  `routed: true` means that leg's metal is in the output. A net whose pins
+  cannot all be joined stays in `unrouted_nets[]` and draws **nothing** (a
+  half-wired net would leave the caller building the rest of its interconnect
+  around the router's own geometry), with the per-leg rejection reasons in
+  `legs[]` and a `drc_hints.notes[]` entry naming the pins that could not be
+  reached. A bundle net gets one net label, not one per leg. `waypoints_um`
+  (#634) steers a single backbone and is now rejected at request-parse time
+  (exit 1) on a >2-pin net instead of being silently ignored. Two-pin
+  behavior is unchanged in every respect (it is the degenerate one-leg case
+  of the same path). This is the increment
+  `docs/design/gen-composition-spike.md` section 5 item 2 reserved for "once
+  two-pin routing is proven against a real block".
 - 2026-08-16 — `klt gen-compose` gains a third `placement.strategy`:
   **`"array"`** (issue #1053), for composing a repeated-block regular R
   rows x C columns tiling (a matched-device array, a memory bitcell array, a

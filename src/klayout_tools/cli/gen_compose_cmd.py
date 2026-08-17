@@ -85,11 +85,15 @@ def _print_text(report: dict) -> None:
         print()
         print("nets:")
         for net in nets:
+            legs = net.get("legs") or []
+            # A bundle (>2-pin) net routes as several legs (#1073) -- name the
+            # count so the human summary matches the leg detail in the JSON.
+            leg_note = f"  ({len(legs)} legs)" if len(legs) > 1 else ""
             if net["routed"]:
                 length = net["route_length_um"]
-                print(f"  {net['net']}  routed  length={length}um")
+                print(f"  {net['net']}  routed  length={length}um{leg_note}")
             else:
-                print(f"  {net['net']}  UNROUTED")
+                print(f"  {net['net']}  UNROUTED{leg_note}")
 
     pins = report.get("pins") or []
     if pins:

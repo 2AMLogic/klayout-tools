@@ -416,6 +416,13 @@ bbox/port/obstacle information `gen_compose` already holds internally
 (`route_two_pin`, `gen_compose.py:925`) and a plan compiler has no
 independent way to do that work without duplicating it.
 
+*Status update (issue #1073, 2026-08-17): this gap is now closed.*
+`gen_compose.route_bundle` routes an N-pin `connectivity[]` net as a
+spanning tree of two-pin legs (nearest pair first, every leg through
+`route_two_pin`'s own checks), exactly where this paragraph argued it had to
+land — inside `gen_compose.py`, not above it. Phase D below is therefore
+already delivered; the phase list is left as written for the record.
+
 **Not a gap: multi-row/grid placement and abutment (§3.2, §3.3) fully
 compile onto capabilities `gen_compose` already has** (`"explicit"`
 placement, #321) — no `gen_compose` change is required for those two pieces.
