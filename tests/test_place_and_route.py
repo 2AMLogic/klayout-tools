@@ -2300,6 +2300,39 @@ def test_engine_error_message_without_drt_0305_is_unchanged(tmp_path):
     )
 
 
+def test_engine_error_message_prefers_bracket_error_over_trailer(tmp_path):
+    """OpenROAD's own bracketed diagnostic (`[ERROR IFP-0034] ...`) wins over
+    the generic `Error: <script>.tcl, <line> <code>` trailer that reliably
+    follows it at `-exit` on a Tcl-level failure, even though the trailer is
+    the line the pre-#1079 "last match wins" logic surfaced (issue #1079)."""
+    completed = _FakeCompleted(
+        returncode=1,
+        stdout="[ERROR IFP-0034] no -core_space specified.\n",
+        stderr="Error: pnr_trng_top_floorplan.tcl, 7 IFP-0034\n",
+    )
+
+    message = place_and_route._engine_error_message("floorplan", completed)
+
+    assert message == (
+        "openroad 'floorplan' stage failed: [ERROR IFP-0034] no -core_space specified."
+    )
+
+
+def test_engine_error_message_falls_back_to_trailer_without_bracket_error(tmp_path):
+    """When no bracketed `[ERROR ...]` diagnostic is present at all, the bare
+    `Error:` trailer is still surfaced rather than dropped -- it is
+    uninformative but better than nothing."""
+    completed = _FakeCompleted(
+        returncode=1, stderr="Error: pnr_top_floorplan.tcl, 7 IFP-0034\n"
+    )
+
+    message = place_and_route._engine_error_message("floorplan", completed)
+
+    assert message == (
+        "openroad 'floorplan' stage failed: Error: pnr_top_floorplan.tcl, 7 IFP-0034"
+    )
+
+
 def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
     """The diagnosis reaches the caller through `PlaceAndRouteError`, i.e.
     through `klt place-and-route`'s own JSON `error.message` -- not just
