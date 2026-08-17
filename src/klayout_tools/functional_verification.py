@@ -208,6 +208,20 @@ SDF_DIAGNOSTIC_MARKERS = ("SDF WARNING", "SDF ERROR")
 #:   timing-check family is, because only it is both benign and unavoidable.
 SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
 
+#: A human-readable reason per benign class (:data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS`,
+#: lowercased), surfaced in ``environment.sdf.dropped`` (issue #1102) so a
+#: caller can explain *why* a class was dropped without re-deriving it from
+#: this module's own comments.
+SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
+    "timingcheck": (
+        "Icarus Verilog implements SDF delay annotation (IOPATH/INTERCONNECT) "
+        "but not SDF TIMINGCHECK -- every TIMINGCHECK section in the SDF is "
+        "dropped, so $setup/$hold/$width checks run against the cell "
+        "library's own placeholder timing, not the characterised limits in "
+        "the SDF"
+    ),
+}
+
 #: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
 #: line on this path (spike §3.1): with ``-gspecify`` missing, Icarus drops
 #: the annotation call as an ordinary compile-time ``warning:`` among
@@ -884,20 +898,30 @@ def _check_sdf_engine_capability(version: str | None) -> None:
     )
 
 
-def _scan_sdf_diagnostics(*log_paths: str) -> list[str]:
-    """Every *actionable* SDF diagnostic Icarus emitted across ``log_paths``.
+def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
+    """Every *actionable* SDF diagnostic Icarus emitted across ``log_paths``,
+    plus a per-class count of the *benign* diagnostics filtered out alongside
+    them.
 
-    Non-empty means the annotation did not fully apply -- regardless of the
-    run's own pass/fail verdict, which is exactly the trap: `vvp` exits ``0``
-    in every SDF failure mode (spike §3.3). Benign lines
-    (:data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS`) are filtered out, since a real
-    ``write_sdf`` emits ``TIMINGCHECK`` sections Icarus does not implement
-    and a gate that rejected them would reject every real post-route SDF.
+    Non-empty ``actionable`` means the annotation did not fully apply --
+    regardless of the run's own pass/fail verdict, which is exactly the trap:
+    `vvp` exits ``0`` in every SDF failure mode (spike §3.3).
+
+    The second element counts diagnostics that matched
+    :data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS` and were therefore excluded from
+    ``actionable`` -- a real ``write_sdf`` emits ``TIMINGCHECK`` sections
+    Icarus does not implement, and a gate that rejected them would reject
+    every real post-route SDF. Counting them, rather than silently discarding
+    them the way this function did before issue #1102, is what lets a caller
+    tell "every check in the SDF was applied" apart from "every delay was
+    applied and every TIMINGCHECK was dropped" -- both of which otherwise
+    report ``annotated: true`` identically.
 
     Never raises: a missing/unreadable transcript contributes nothing, the
     same posture :func:`_log_tail` takes.
     """
-    found: list[str] = []
+    actionable: list[str] = []
+    dropped: dict[str, int] = {}
     for log_path in log_paths:
         try:
             with open(log_path, encoding="utf-8", errors="replace") as handle:
@@ -907,14 +931,24 @@ def _scan_sdf_diagnostics(*log_paths: str) -> list[str]:
         for line in lines:
             stripped = line.strip()
             if SDF_OMITTED_ANNOTATION_MARKER in stripped:
-                found.append(stripped)
+                actionable.append(stripped)
                 continue
             if not any(marker in stripped for marker in SDF_DIAGNOSTIC_MARKERS):
                 continue
-            if any(benign in stripped for benign in SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS):
+            benign_class = next(
+                (
+                    benign
+                    for benign in SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS
+                    if benign in stripped
+                ),
+                None,
+            )
+            if benign_class is not None:
+                key = benign_class.lower()
+                dropped[key] = dropped.get(key, 0) + 1
                 continue
-            found.append(stripped)
-    return found
+            actionable.append(stripped)
+    return actionable, dropped
 
 
 def _resolve_parameters(parameters: Any) -> dict[str, Any]:
@@ -1526,6 +1560,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         log_path=test_log,
     )
 
+    sdf_dropped_counts: dict[str, int] = {}
     if sdf is not None:
         # The hard gate (spike §3.3): every SDF failure mode -- unopenable
         # file, unmatched instance, unmatched IOPATH, INTERCONNECT without
@@ -1535,7 +1570,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # transcripts is the only signal there is, and it runs before the
         # verdict is parsed so an annotation failure is reported as one
         # rather than as a (misleadingly green) result.
-        diagnostics = _scan_sdf_diagnostics(build_log, test_log)
+        diagnostics, sdf_dropped_counts = _scan_sdf_diagnostics(build_log, test_log)
         if diagnostics:
             shown = " | ".join(diagnostics[:5])
             more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
@@ -1594,12 +1629,36 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             # can tell an annotated run from an unannotated one *from the
             # JSON*, without reading a transcript. `annotated: true` is
             # load-bearing rather than redundant: reaching this point at all
-            # means the diagnostic scan above found nothing, i.e. the
-            # annotation applied cleanly.
+            # means the diagnostic scan above found nothing *actionable*,
+            # i.e. every non-benign diagnostic class applied cleanly.
+            #
+            # `annotated: true` alone cannot distinguish "every delay and
+            # every timing check applied" from "every IOPATH applied and
+            # every TIMINGCHECK section was dropped" -- the normal case on
+            # Icarus, which has no SDF TIMINGCHECK support at all (issue
+            # #1102). `partial`/`dropped` make that distinction
+            # machine-readable: `partial` is true whenever any benign class
+            # was filtered out of the diagnostic gate above, and `dropped`
+            # names each such class with the count of diagnostic lines
+            # filtered and a human-readable reason
+            # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
+            # -clean run reports `partial: false` and `dropped: {}`.
             "sdf": (
                 None
                 if sdf is None
-                else {"file": sdf["file"], "corner": sdf["corner"], "annotated": True}
+                else {
+                    "file": sdf["file"],
+                    "corner": sdf["corner"],
+                    "annotated": True,
+                    "partial": bool(sdf_dropped_counts),
+                    "dropped": {
+                        klass: {
+                            "count": count,
+                            "reason": SDF_BENIGN_DIAGNOSTIC_REASONS.get(klass, ""),
+                        }
+                        for klass, count in sorted(sdf_dropped_counts.items())
+                    },
+                }
             ),
         },
     }
