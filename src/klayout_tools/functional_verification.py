@@ -112,6 +112,7 @@ synthesize`` takes toward a missing ``yosys`` binary.
 
 from __future__ import annotations
 
+import importlib.metadata
 import os
 import re
 import subprocess
@@ -242,6 +243,20 @@ SDF_OMITTED_ANNOTATION_MARKER = "Omitting $sdf_annotate"
 #: saying so is strictly better than letting a raw compiler error surface
 #: from four layers down.
 SDF_MIN_ICARUS_MAJOR = 13
+
+#: The exact transcript signature cocotb's ``libembed`` emits when its
+#: compiled VPI module was ``dlopen``'d by a different CPython than the one
+#: cocotb was built for (issue #1103's live finding) -- e.g. a ``cp312``
+#: wheel loaded inside a CPython 3.14 simulator subprocess. The pre-flight
+#: ``WHEEL``-tag check (:func:`_check_cocotb_abi_compatibility`) catches this
+#: *before* the runner is invoked in the common case; these markers are the
+#: fallback for whatever that check doesn't cover (unreadable wheel metadata,
+#: a mismatch pattern the tag comparison misses), scanned only once
+#: ``results.xml`` is confirmed missing.
+INTERPRETER_MISMATCH_MARKERS = (
+    "Unexpected sys.executable value",
+    "_embed_init_python",
+)
 
 _ENGINE_VERSION_COMMANDS = {
     "icarus": (["iverilog", "-V"], re.compile(r"Icarus Verilog version (\S+)")),
@@ -951,6 +966,28 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     return actionable, dropped
 
 
+def _scan_interpreter_mismatch_diagnostics(*log_paths: str) -> str | None:
+    """The first line in ``log_paths`` naming cocotb's ABI-mismatch failure
+    mode (issue #1103), or ``None``.
+
+    Fallback for whatever :func:`_check_cocotb_abi_compatibility`'s pre-flight
+    ``WHEEL``-tag check doesn't catch. Modeled directly on
+    :func:`_scan_sdf_diagnostics`: never raises -- a missing/unreadable
+    transcript contributes nothing, the same posture :func:`_log_tail` takes.
+    """
+    for log_path in log_paths:
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            stripped = line.strip()
+            if any(marker in stripped for marker in INTERPRETER_MISMATCH_MARKERS):
+                return stripped
+    return None
+
+
 def _resolve_parameters(parameters: Any) -> dict[str, Any]:
     """Validate the optional ``request.parameters`` object and return it
     unchanged (or ``{}`` when omitted).
@@ -1105,6 +1142,62 @@ def _import_runner():
             "`pip install cocotb` (cocotb 2.0 supports Python <= 3.13)"
         ) from exc
     return runner
+
+
+def _check_cocotb_abi_compatibility() -> None:
+    """Reject an installed cocotb wheel whose compiled ABI tag does not match
+    the running interpreter (issue #1103).
+
+    ``import cocotb_tools.runner`` (:func:`_import_runner`) succeeds even when
+    cocotb was installed as e.g. a ``cp312`` wheel into a CPython 3.14
+    environment -- pure Python still loads fine. The mismatch only manifests
+    later, when cocotb's compiled VPI module is ``dlopen``'d *inside the
+    simulator subprocess* and pulls in a ``libpython`` that does not match the
+    interpreter actually running, which surfaces as the simulator exiting
+    without ever writing ``results.xml`` -- four layers below anything this
+    module otherwise sees. Reading the installed distribution's ``WHEEL``
+    metadata (the same two-line check the issue's own diagnosis settled on)
+    catches this before the runner is ever invoked.
+
+    Never raises for a reason *other than* a confirmed mismatch: missing or
+    malformed ``WHEEL`` metadata (e.g. a pure-Python wheel, an editable
+    install, or a packaging layout this check doesn't recognise) degrades to
+    "skip this check", the same discipline ``_engine_version()``/
+    ``_cocotb_version()`` already follow -- an unreadable probe must never
+    itself crash a run the runner might still serve.
+    """
+    try:
+        wheel_text = importlib.metadata.distribution("cocotb").read_text("WHEEL")
+    except Exception:  # pragma: no cover - defensive, any lookup failure
+        return
+    if not wheel_text:
+        return
+    tags = [
+        line.split(":", 1)[1].strip()
+        for line in wheel_text.splitlines()
+        if line.startswith("Tag:")
+    ]
+    if not tags:
+        return
+    interpreter_tag = f"cp{sys.version_info[0]}{sys.version_info[1]}"
+    if any(interpreter_tag in tag for tag in tags):
+        return
+
+    try:
+        installed_version = importlib.metadata.version("cocotb")
+    except Exception:  # pragma: no cover - defensive
+        installed_version = "unknown"
+    running_version = (
+        f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}"
+    )
+    raise FunctionalVerificationError(
+        f"cocotb {installed_version} is installed as a {'/'.join(tags)} wheel "
+        f"but klt is running on CPython {running_version} -- its compiled VPI "
+        f"module was built for {interpreter_tag} and will dlopen a mismatched "
+        "libpython, so the simulator will exit without writing results.xml. "
+        "Install a cocotb build for this interpreter, or run klt on an "
+        "interpreter cocotb publishes a wheel for."
+    )
 
 
 def _log_tail(log_path: str, lines: int = 8) -> str:
@@ -1531,6 +1624,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     build_args += user_build_args
 
     runner_module = _import_runner()
+    _check_cocotb_abi_compatibility()
     engine_runner = _run_build(
         runner_module,
         engine=engine,
@@ -1582,7 +1676,25 @@ def run_functional_verification(request: str) -> dict[str, Any]:
                 "been a zero-delay one reported as if it were annotated."
             )
 
-    tests = parse_results_xml(results_xml)
+    try:
+        tests = parse_results_xml(results_xml)
+    except FunctionalVerificationError as exc:
+        # The pre-flight ABI check catches the common case up front; this is
+        # the fallback for whatever it doesn't (issue #1103) -- only fires
+        # when `results.xml` is confirmed missing, so a genuinely unparseable
+        # or unreadable results file (a different failure mode entirely)
+        # keeps its own unaugmented message.
+        diagnostic = None
+        if not os.path.isfile(results_xml):
+            diagnostic = _scan_interpreter_mismatch_diagnostics(build_log, test_log)
+        if diagnostic is None:
+            raise
+        raise FunctionalVerificationError(
+            f"{exc} -- probable cause: the {engine} transcript contains "
+            f"{diagnostic!r}, which usually means the installed cocotb was "
+            "built for a different CPython than the one running klt (an "
+            "ABI-mismatched wheel)"
+        ) from exc
     if not tests:
         # An empty regression is not a pass. Reporting `status: "pass"` here
         # would hand `klt eval` a vacuous `valid: true` for a design nothing

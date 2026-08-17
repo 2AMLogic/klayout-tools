@@ -547,6 +547,117 @@ def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# `_check_cocotb_abi_compatibility` -- the WHEEL-tag pre-flight check
+# (issue #1103): `import cocotb_tools.runner` succeeds fine even when the
+# installed cocotb wheel's compiled ABI tag doesn't match the running
+# interpreter -- the mismatch only manifests once the simulator subprocess
+# `dlopen`s cocotb's VPI module. These tests use a synthetic distribution
+# double rather than a genuinely ABI-mismatched cocotb install.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeCocotbDistribution:
+    """Stands in for `importlib.metadata.Distribution` -- just enough surface
+    for `_check_cocotb_abi_compatibility` to read a synthetic `WHEEL` file."""
+
+    def __init__(self, wheel_text):
+        self._wheel_text = wheel_text
+
+    def read_text(self, filename):
+        assert filename == "WHEEL"
+        return self._wheel_text
+
+
+def _stub_cocotb_distribution(monkeypatch, wheel_text, *, version="2.0.1"):
+    monkeypatch.setattr(
+        fv.importlib.metadata,
+        "distribution",
+        lambda name: _FakeCocotbDistribution(wheel_text),
+    )
+    monkeypatch.setattr(fv.importlib.metadata, "version", lambda name: version)
+
+
+def test_cocotb_abi_mismatch_is_an_actionable_error(monkeypatch):
+    """A `cp27` wheel tag can never match this repo's `requires-python >=
+    3.10` floor -- a deliberately unmistakable mismatch, so the test doesn't
+    depend on which CPython minor version actually runs it."""
+    _stub_cocotb_distribution(
+        monkeypatch,
+        "Wheel-Version: 1.0\nTag: cp27-cp27mu-manylinux_2_17_x86_64\n",
+        version="2.0.1",
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"cocotb 2\.0\.1 is installed as a cp27-cp27mu-manylinux_2_17_x86_64 "
+        r"wheel but klt is running on CPython",
+    ):
+        fv._check_cocotb_abi_compatibility()
+
+
+def test_cocotb_abi_match_raises_nothing(monkeypatch):
+    """The matching case must be silent -- this check is a pre-flight guard,
+    not a report."""
+    interpreter_tag = f"cp{sys.version_info[0]}{sys.version_info[1]}"
+    tag = f"{interpreter_tag}-{interpreter_tag}-manylinux_2_17_x86_64"
+    _stub_cocotb_distribution(monkeypatch, f"Wheel-Version: 1.0\nTag: {tag}\n")
+
+    fv._check_cocotb_abi_compatibility()  # must not raise
+
+
+@pytest.mark.parametrize(
+    "wheel_text",
+    [
+        "",
+        "Wheel-Version: 1.0\nRoot-Is-Purelib: false\n",  # no `Tag:` lines
+        "not even WHEEL-shaped metadata",
+    ],
+)
+def test_cocotb_abi_check_degrades_gracefully_on_malformed_wheel_metadata(
+    monkeypatch, wheel_text
+):
+    """Missing/malformed `WHEEL` metadata must skip the check, never crash
+    `klt` -- the same discipline `_engine_version()`/`_cocotb_version()`
+    already follow for their own probes."""
+    _stub_cocotb_distribution(monkeypatch, wheel_text)
+
+    fv._check_cocotb_abi_compatibility()  # must not raise
+
+
+def test_cocotb_abi_check_degrades_gracefully_when_cocotb_is_not_installed(
+    monkeypatch,
+):
+    """`importlib.metadata.distribution("cocotb")` raising
+    `PackageNotFoundError` (or any other lookup failure) must not itself
+    crash `klt` -- callers reach this check only after `_import_runner()`
+    already succeeded, but the check must not assume that invariant."""
+
+    def _raise(name):
+        raise fv.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(fv.importlib.metadata, "distribution", _raise)
+
+    fv._check_cocotb_abi_compatibility()  # must not raise
+
+
+def test_cocotb_abi_check_runs_before_the_build_step(tmp_path, monkeypatch):
+    """The pre-flight check (issue #1103) must reject an ABI-mismatched
+    cocotb before the runner is ever invoked -- not surface as a confusing
+    downstream build/test failure four layers down."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    _stub_cocotb_distribution(
+        monkeypatch, "Wheel-Version: 1.0\nTag: cp27-cp27mu-manylinux_2_17_x86_64\n"
+    )
+
+    with pytest.raises(FunctionalVerificationError, match="cp27-cp27mu"):
+        run_functional_verification(request_path)
+
+    assert runner.build_kwargs is None
+
+
+# --------------------------------------------------------------------------- #
 # `results.xml` parsing -- the spike's own captured fixtures
 # --------------------------------------------------------------------------- #
 
@@ -578,6 +689,53 @@ def test_parse_results_xml_failure_entry(tmp_path):
 def test_parse_results_xml_missing_file(tmp_path):
     with pytest.raises(FunctionalVerificationError, match="produced no results file"):
         parse_results_xml(str(tmp_path / "results.xml"))
+
+
+# --------------------------------------------------------------------------- #
+# `_scan_interpreter_mismatch_diagnostics` -- the transcript-scan fallback
+# (issue #1103), modeled directly on `_scan_sdf_diagnostics`.
+# --------------------------------------------------------------------------- #
+
+
+def test_scan_interpreter_mismatch_diagnostics_finds_the_gpi_marker(tmp_path):
+    log = _write(
+        tmp_path / "test.log",
+        "INFO  gpi ... Using Python 3.12.10 interpreter at <venv>/bin/python\n"
+        "ERROR gpi ... Unexpected sys.executable value (expected "
+        "'<venv>/bin/python', got '.../vvp')\n",
+    )
+    result = fv._scan_interpreter_mismatch_diagnostics(log)
+    assert result is not None
+    assert "Unexpected sys.executable value" in result
+
+
+def test_scan_interpreter_mismatch_diagnostics_finds_the_embed_init_marker(tmp_path):
+    log = _write(tmp_path / "test.log", "FATAL: _embed_init_python failed\n")
+    result = fv._scan_interpreter_mismatch_diagnostics(log)
+    assert result is not None
+    assert "_embed_init_python" in result
+
+
+def test_scan_interpreter_mismatch_diagnostics_none_when_absent(tmp_path):
+    log = _write(tmp_path / "test.log", "fake test log\nTESTS=3 PASS=3 FAIL=0\n")
+    assert fv._scan_interpreter_mismatch_diagnostics(log) is None
+
+
+def test_scan_interpreter_mismatch_diagnostics_tolerates_a_missing_log(tmp_path):
+    """Never raises -- a missing/unreadable transcript contributes nothing,
+    the same posture `_scan_sdf_diagnostics`/`_log_tail` already take."""
+    assert fv._scan_interpreter_mismatch_diagnostics(str(tmp_path / "nope.log")) is None
+
+
+def test_scan_interpreter_mismatch_diagnostics_checks_every_log_in_order(tmp_path):
+    build_log = _write(tmp_path / "build.log", "fake build log\n")
+    test_log = _write(
+        tmp_path / "test.log",
+        "ERROR gpi ... Unexpected sys.executable value (mismatch)\n",
+    )
+    result = fv._scan_interpreter_mismatch_diagnostics(build_log, test_log)
+    assert result is not None
+    assert "Unexpected sys.executable value" in result
 
 
 def test_parse_results_xml_unparseable(tmp_path):
@@ -976,6 +1134,56 @@ def test_stubbed_run_without_results_xml_is_an_error(tmp_path, monkeypatch):
 
     with pytest.raises(FunctionalVerificationError, match="produced no results file"):
         run_functional_verification(request_path)
+
+
+def test_stubbed_run_without_results_xml_keeps_the_original_message_when_clean(
+    tmp_path, monkeypatch
+):
+    """Regression guard (issue #1103's own edge case): a genuinely missing
+    `results.xml` with *no* matching transcript diagnostic must keep the
+    original, unaugmented "did not run to completion" message -- not an
+    unsupported probable-cause guess."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(None))
+
+    with pytest.raises(FunctionalVerificationError) as excinfo:
+        run_functional_verification(request_path)
+
+    assert "did not run to completion" in str(excinfo.value)
+    assert "probable cause" not in str(excinfo.value)
+
+
+def test_stubbed_run_without_results_xml_names_an_interpreter_mismatch(
+    tmp_path, monkeypatch
+):
+    """The transcript-scan fallback (issue #1103): when a run produces no
+    `results.xml` *and* the test transcript carries cocotb's own ABI-mismatch
+    signature (`libembed`'s "Unexpected sys.executable value"), that line is
+    folded into the raised error as a probable cause -- the catch-all for
+    whatever the WHEEL-tag pre-flight check doesn't cover."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            None,
+            extra_test_log=(
+                "INFO  gpi ... Using Python 3.12.10 interpreter at "
+                "<venv>/bin/python\n"
+                "ERROR gpi ... Unexpected sys.executable value (expected "
+                "'<venv>/bin/python', got '.../vvp')\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError, match="produced no results file"
+    ) as excinfo:
+        run_functional_verification(request_path)
+
+    assert "probable cause" in str(excinfo.value)
+    assert "Unexpected sys.executable value" in str(excinfo.value)
 
 
 def test_stubbed_run_ignores_a_stale_results_xml(tmp_path, monkeypatch):
