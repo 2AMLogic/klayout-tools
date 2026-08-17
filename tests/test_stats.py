@@ -213,6 +213,88 @@ def test_top_scopes_area_to_named_cell_hierarchy(tmp_path):
     assert report_b["total"]["area_um2"] < 27.0
 
 
+def _make_array_instanced_layout() -> kdb.Layout:
+    """A leaf cell placed via one large ``CellInstArray``, plus a strap drawn
+    directly in ``TOP`` -- the "array instance plus a couple of straps"
+    shape issue #1105 describes.
+
+    - ``LEAF`` draws a single 1x1 um box on layer (1, 0) -- area 1 um^2.
+    - ``TOP`` instantiates ``LEAF`` via one ``CellInstArray`` with
+      ``na=10, nb=12`` (120 copies) on a 2x2 um pitch, plus one 19x1 um
+      strap box drawn directly on the same layer.
+    - Hierarchy-inclusive bbox: (0,0)-(19000,23000) dbu = 19x23 um ->
+      437 um^2.
+    - Correct (instance-weighted) total area: 120 * 1 um^2 (every array
+      copy) + 19 um^2 (the strap) = 139 um^2 -> density 139/437.
+    - The pre-#1105 bug summed each cell *definition* once regardless of
+      instance count: 1 um^2 (LEAF counted once, not x120) + 19 um^2 =
+      20 um^2 -> a density undercounting the real occupancy by ~7x.
+    """
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+    layout.set_info(li, kdb.LayerInfo(1, 0, "metal1"))
+
+    leaf = layout.create_cell("LEAF")
+    leaf.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+
+    top = layout.create_cell("TOP")
+    na, nb = 10, 12
+    top.insert(
+        kdb.CellInstArray(
+            leaf.cell_index(),
+            kdb.Trans(),
+            kdb.Vector(2000, 0),
+            kdb.Vector(0, 2000),
+            na,
+            nb,
+        )
+    )
+    top.shapes(li).insert(kdb.Box(0, 11000, 19000, 12000))
+
+    return layout
+
+
+def test_array_instanced_leaf_area_multiplies_by_instance_count(tmp_path):
+    """A leaf cell instanced via a single N-copy ``CellInstArray`` (N=120
+    here) contributes N times its own drawn area to the density numerator,
+    not once per cell definition (issue #1105) -- the bbox denominator is
+    already hierarchy-inclusive (spans every array position), so summing
+    the numerator per-definition instead produced a near-zero density for
+    array-instanced macros.
+    """
+    path = tmp_path / "array_instanced.gds"
+    _make_array_instanced_layout().write(str(path))
+
+    report = stats_report(str(path))
+
+    assert report["top_cell"] == "TOP"
+    assert report["bbox_um"]["width"] == pytest.approx(19.0)
+    assert report["bbox_um"]["height"] == pytest.approx(23.0)
+
+    bbox_area_um2 = 19.0 * 23.0
+    na, nb = 10, 12
+    leaf_area_um2 = 1.0
+    strap_area_um2 = 19.0
+    expected_total_area_um2 = na * nb * leaf_area_um2 + strap_area_um2
+    expected_density = expected_total_area_um2 / bbox_area_um2
+
+    assert report["total"]["area_um2"] == pytest.approx(expected_total_area_um2)
+    assert report["total"]["density"] == pytest.approx(expected_density)
+
+    # The pre-#1105 bug summed each cell definition once (LEAF's own 1 um^2
+    # plus the strap's 19 um^2 = 20 um^2), regardless of instance count --
+    # confirm the fixed total is not that undercounted figure.
+    buggy_total_area_um2 = leaf_area_um2 + strap_area_um2
+    assert report["total"]["area_um2"] != pytest.approx(buggy_total_area_um2)
+
+    # polygon_count/vertex_count stay per cell definition (issue #1105 is
+    # scoped to the area/density numerator, not shape counts) -- one box in
+    # LEAF's definition plus one strap box drawn directly in TOP, not
+    # multiplied by the 120 array copies.
+    assert report["total"]["polygon_count"] == 2
+    assert report["total"]["vertex_count"] == 8
+
+
 def test_top_unknown_cell_raises(tmp_path):
     path = tmp_path / "multi_top.gds"
     _make_multi_top_layout().write(str(path))

@@ -45,7 +45,94 @@ def _shape_vertex_count(shape: Any) -> int:
     return polygon.num_points() if polygon is not None else 0
 
 
-def _accumulate(cells: Any, layer_index: int) -> tuple[int, int, int]:
+def _instance_weights(cells: list[Any]) -> dict[int, int]:
+    """Instance multiplicity for each cell *definition* in ``cells``.
+
+    Fixes issue #1105: a leaf cell placed via a single ``CellInstArray`` with
+    N copies previously contributed its shape area to ``_accumulate`` exactly
+    once (per cell *definition*), never multiplied by N, while the density
+    denominator (the top cell's hierarchy-inclusive ``bbox()``) already spans
+    every array position -- producing a near-zero density for
+    array-instanced macros.
+
+    This walks the instance graph restricted to ``cells`` (typically the
+    scope ``_accumulate`` is about to sum over -- either the whole stream or
+    one cell's hierarchy, see :func:`klayout_tools._layout.cells_in_hierarchy`)
+    and computes, for every cell definition in that scope, the total number
+    of times it is reached by walking instances from the scope's own
+    root(s) -- weighting each ``CellInstArray``/``Instance`` edge by
+    ``Instance.size()`` (``na * nb`` for an array, 1 for a single
+    placement), and multiplying by the weight already accumulated on the
+    parent so nested/repeated instantiation compounds correctly.
+
+    A cell with no parent *within the scope* (the scope's own root -- e.g.
+    the ``--top`` cell itself, or an orphan cell never instantiated anywhere
+    in a whole-stream scope) gets weight 1: it is counted once as its own
+    definition, matching the pre-#1105 convention for anything that isn't
+    reached through a multiplying instance edge.
+
+    The cell hierarchy is a DAG (KLayout does not allow instantiation
+    cycles), so a depth-first postorder walk from every such root, reversed,
+    is a valid topological order: every edge parent->child has parent
+    appearing first. Accumulating weights in that order guarantees a cell's
+    weight is fully resolved (every incoming edge counted) before it
+    contributes to its own children -- including diamond-shaped hierarchies,
+    where a cell is instantiated by more than one parent within scope.
+    """
+    scope_indices = {cell.cell_index() for cell in cells}
+    index_to_cell = {cell.cell_index(): cell for cell in cells}
+    children: dict[int, list[tuple[int, int]]] = {idx: [] for idx in scope_indices}
+    in_degree: dict[int, int] = dict.fromkeys(scope_indices, 0)
+
+    for idx in scope_indices:
+        for inst in index_to_cell[idx].each_inst():
+            child_idx = inst.cell_index
+            if child_idx not in scope_indices:
+                continue
+            children[idx].append((child_idx, inst.size()))
+            in_degree[child_idx] += 1
+
+    roots = [idx for idx in scope_indices if in_degree[idx] == 0]
+
+    visited: set[int] = set()
+    order: list[int] = []
+
+    def _visit(idx: int) -> None:
+        stack = [(idx, iter(children[idx]))]
+        visited.add(idx)
+        while stack:
+            node, edges = stack[-1]
+            advanced = False
+            for child_idx, _count in edges:
+                if child_idx not in visited:
+                    visited.add(child_idx)
+                    stack.append((child_idx, iter(children[child_idx])))
+                    advanced = True
+                    break
+            if not advanced:
+                order.append(node)
+                stack.pop()
+
+    for root_idx in roots:
+        _visit(root_idx)
+    order.reverse()
+
+    weights: dict[int, int] = dict.fromkeys(scope_indices, 0)
+    for root_idx in roots:
+        weights[root_idx] = 1
+    for idx in order:
+        weight = weights[idx]
+        if weight == 0:
+            continue
+        for child_idx, count in children[idx]:
+            weights[child_idx] += weight * count
+
+    return weights
+
+
+def _accumulate(
+    cells: Any, layer_index: int, weights: dict[int, int]
+) -> tuple[int, int, int]:
     """Sum (area_dbu2, polygon_count, vertex_count) for one layer.
 
     ``cells`` is the set of cell *definitions* to sum over -- every cell in
@@ -53,20 +140,31 @@ def _accumulate(cells: Any, layer_index: int) -> tuple[int, int, int]:
     named top cell's own hierarchy (itself plus every cell it calls, see
     :func:`klayout_tools._layout.cells_in_hierarchy`), so a scoped ``--top``
     report does not silently keep summing shapes drawn only in unrelated
-    top-cell hierarchies. Each shape is counted once where it is defined,
-    not multiplied by instantiation -- the same convention ``klt layers``
-    uses for shape counts. Overlapping shapes are **not** merged, so area
-    may double-count overlapping geometry; this keeps the computation cheap
-    and exactly reproducible.
+    top-cell hierarchies.
+
+    ``weights`` (issue #1105, see :func:`_instance_weights`) maps each
+    cell's ``cell_index()`` to how many times it is instantiated within that
+    scope. Only ``area_dbu2`` is multiplied by it: the density denominator
+    (the scope's hierarchy-inclusive bounding box, see :func:`stats_report`)
+    already spans every array position, so a leaf cell placed via an N-copy
+    ``CellInstArray`` must contribute N times its own drawn area for
+    ``density`` to mean anything. ``polygon_count``/``vertex_count`` stay
+    per cell *definition* (each shape counted once where it is defined, not
+    multiplied by instantiation) -- the shape-count convention ``klt
+    layers`` also uses, deliberately left unchanged since #1105 is scoped to
+    the area/density numerator, not shape counts. Overlapping shapes are
+    **not** merged, so area may double-count overlapping geometry; this
+    keeps the computation cheap and exactly reproducible.
     """
     area_dbu2 = 0
     polygon_count = 0
     vertex_count = 0
     for cell in cells:
+        weight = weights.get(cell.cell_index(), 0)
         for shape in cell.shapes(layer_index).each():
             if not _is_area_shape(shape):
                 continue
-            area_dbu2 += shape.area()
+            area_dbu2 += weight * shape.area()
             polygon_count += 1
             vertex_count += _shape_vertex_count(shape)
     return area_dbu2, polygon_count, vertex_count
@@ -112,10 +210,16 @@ def stats_report(
     both ``total`` and each ``layers[]`` entry — is drawn area divided by
     this same bbox area, so every density figure shares one reference frame.
 
-    Area and vertex counts are summed **per cell definition** (each shape
-    counted once where it is defined, not multiplied by instantiation),
-    matching ``klt layers``' shape-count convention. Overlapping shapes are
-    not merged, so area may double-count overlapping geometry.
+    ``area_um2`` is weighted by instance multiplicity (issue #1105): a leaf
+    cell's shapes are counted once for each time it is reached by walking
+    instances from the reporting scope's own root (once for a plain
+    placement, N times for an N-copy ``CellInstArray``), so ``density``
+    reflects the layout's actual drawn occupancy rather than the sum of
+    each cell *definition*'s own area regardless of how many times it is
+    placed. ``polygon_count``/``vertex_count`` are **not** weighted this way
+    -- they stay per cell definition (each shape counted once where it is
+    defined), matching ``klt layers``' shape-count convention. Overlapping
+    shapes are not merged, so area may double-count overlapping geometry.
 
     ``layers`` is ``None`` unless ``per_layer=True``, in which case it is a
     list sorted by ``(layer, datatype)`` ascending for deterministic output.
@@ -167,13 +271,21 @@ def stats_report(
     bbox = top_cell.bbox() if top_cell is not None else kdb.Box()
     bbox_area_dbu2 = 0 if bbox.empty() else bbox.width() * bbox.height()
 
+    # Issue #1105: weight each cell definition's area by how many times a
+    # CellInstArray instances it within this scope, so an N-copy array
+    # contributes N times its leaf area to the density numerator -- matching
+    # the hierarchy-inclusive bbox above, which already spans every copy.
+    weights = _instance_weights(scope_cells)
+
     total_area_dbu2 = 0
     total_polygon_count = 0
     total_vertex_count = 0
     per_layer_entries: list[dict[str, Any]] | None = [] if per_layer else None
 
     for layer_index in layout.layer_indexes():
-        area_dbu2, polygon_count, vertex_count = _accumulate(scope_cells, layer_index)
+        area_dbu2, polygon_count, vertex_count = _accumulate(
+            scope_cells, layer_index, weights
+        )
         total_area_dbu2 += area_dbu2
         total_polygon_count += polygon_count
         total_vertex_count += vertex_count
