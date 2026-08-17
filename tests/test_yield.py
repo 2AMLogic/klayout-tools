@@ -609,6 +609,72 @@ def test_sim_report_and_sample_set_agree_on_the_same_draw():
 
 
 # --------------------------------------------------------------------------- #
+# Errored samples and the conditional yield (issue #1082)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_errored_samples_warn_that_the_empirical_yield_is_conditional(tmp_path):
+    """The acute case issue #1082 reports: every sample that produced a value
+    is inside the limits, so the empirical yield is 1.0 -- but most of the
+    draw produced no value at all, and nothing used to say so."""
+    samples = [1.0 + 0.001 * i for i in range(20)] + [None] * 60
+    path = _sample_set(tmp_path, samples, limits={"min": 0.0, "max": 2.0})
+    report = run_yield(path)
+    m = report["measurements"][0]
+
+    assert m["n"] == 20
+    assert m["errored"] == 60
+    assert m["yield"]["empirical"]["estimate"] == 1.0
+
+    # The pre-existing exclusion warning, and the new conditional-yield one
+    # alongside it -- two distinct messages, not a reworded single one.
+    assert any("excluded from every statistic below" in w for w in m["warnings"])
+    conditional = [w for w in m["warnings"] if "conditional on the" in w]
+    assert len(conditional) == 1, m["warnings"]
+    # 20 passing of 80 drawn = 0.25 if every errored sample were a failure.
+    assert "60 of the 80" in conditional[0]
+    assert "0.250000" in conditional[0]
+    assert "#errored-samples-and-conditional-yield" in conditional[0]
+
+    # And the run level points a reader at it.
+    assert any("excluded errored sample" in w for w in report["warnings"])
+
+
+@requires_native
+def test_a_draw_with_no_errored_samples_gets_no_conditional_warning(tmp_path):
+    path = _sample_set(
+        tmp_path, _normal_grid(200, 0.0, 1.0), limits={"min": -2.0, "max": 2.0}
+    )
+    report = run_yield(path)
+    assert report["measurements"][0]["errored"] == 0
+    assert not [
+        w for w in report["measurements"][0]["warnings"] if "conditional on the" in w
+    ]
+    assert not [w for w in report["warnings"] if "excluded errored sample" in w]
+
+
+@requires_native
+def test_an_entirely_errored_draw_is_an_error_that_names_the_errored_count(tmp_path):
+    """`errored == n + errored`: no usable sample survives, so there is no
+    report to warn in -- the sample-floor error has to say the draw failed to
+    *measure* rather than reporting it as merely small."""
+    path = _sample_set(tmp_path, [None] * 40, limits={"min": 0.0, "max": 2.0})
+    with pytest.raises(YieldError, match=r"40 of the 40 sample\(s\)"):
+        run_yield(path)
+
+
+@requires_native
+def test_cli_text_output_surfaces_the_conditional_yield_warning(tmp_path, capsys):
+    samples = [1.0 + 0.001 * i for i in range(20)] + [None] * 60
+    path = _sample_set(tmp_path, samples, limits={"min": 0.0, "max": 2.0})
+    assert main(["yield", path]) == 0
+    out = capsys.readouterr().out
+    assert "conditional on the 20 sample(s) that produced one" in out
+    assert "excluded errored samples from its denominator" in out
+
+
+# --------------------------------------------------------------------------- #
 # negative_control / analytic_cross_check (issue #817)
 # --------------------------------------------------------------------------- #
 

@@ -101,6 +101,19 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
                 .to_string(),
         );
     }
+    // Issue #1082: an errored sample never reaches the denominator, so a
+    // campaign whose failure mode is "no measurement" can report a perfect
+    // yield. Flag it at the run level too -- the per-measurement warning is
+    // the one with the numbers, but a reader scans this array first.
+    if reports.iter().any(|r| r.errored > 0) {
+        warnings.push(
+            "at least one measurement excluded errored samples from its denominator, so its \
+             empirical yield is conditional on the samples that produced a value rather than \
+             over the whole draw -- see that measurement's own warnings, and \
+             docs/cli/yield.md#errored-samples-and-conditional-yield"
+                .to_string(),
+        );
+    }
 
     Ok(YieldResponse {
         schema_version: SCHEMA_VERSION,
@@ -155,10 +168,28 @@ fn analyze_measurement(
 
     let n = m.samples.len();
     if n < min_samples {
+        // Issue #1082: at the 100%-errored end (`errored == n + errored`)
+        // there is no report to carry the conditional-yield warning below,
+        // so this error has to name the errored count itself -- otherwise a
+        // draw of 100 samples that all failed to measure is indistinguishable
+        // from a draw of nothing.
+        let errored_note = if m.errored > 0 {
+            format!(
+                " -- {} of the {} sample(s) drawn produced no usable value and were excluded, \
+                 so this is a draw that mostly failed to *measure*, not a small draw; if a \
+                 missing value is itself a failure for this measurement, map it onto a \
+                 sentinel outside the limits before analysis (see \
+                 docs/cli/yield.md#errored-samples-and-conditional-yield)",
+                m.errored,
+                n as u64 + m.errored
+            )
+        } else {
+            String::new()
+        };
         return Err(format!(
             "measurement '{name}' has {n} usable sample(s), below the minimum of {min_samples}: \
              refusing to report a yield number that cannot carry a confidence interval \
-             (see docs/cli/yield.md, 'Never a bare point estimate')"
+             (see docs/cli/yield.md, 'Never a bare point estimate'){errored_note}"
         ));
     }
 
@@ -328,6 +359,27 @@ fn analyze_measurement(
             "measurement '{name}': {} sample(s) produced no usable value and were excluded from \
              every statistic below",
             m.errored
+        ));
+        // Issue #1082: the exclusion above is the right treatment for a
+        // *tooling* failure (simulator crashed, log unparseable) and the
+        // wrong one for a measurement whose functional failure mode IS the
+        // absence of a value. Excluding those silently turns a campaign that
+        // mostly did not work into a 100%-yield report, so say out loud what
+        // the denominator actually is -- and what the yield would be if
+        // every errored sample were counted as a failure instead.
+        let drawn = n_u + m.errored;
+        warnings.push(format!(
+            "measurement '{name}': {} of the {drawn} sample(s) drawn ({:.1}%) produced no usable \
+             value, so the empirical yield reported here is conditional on the {n} sample(s) that \
+             produced one -- it is not the fraction of the whole draw that met spec. If a missing \
+             value is itself a failure for this measurement (an extraction only defined \
+             in-regime, a search that reports no operating point in range, a `.meas` that does \
+             not trigger), then counting every errored sample as a failure puts the yield over \
+             the whole draw at {:.6}, and the estimate reported here is an upper bound; see \
+             docs/cli/yield.md#errored-samples-and-conditional-yield",
+            m.errored,
+            m.errored as f64 / drawn as f64 * 100.0,
+            passing as f64 / drawn as f64
         ));
     }
     if m.source_corners.len() > 1 {
@@ -1537,6 +1589,149 @@ mod tests {
         let m = &resp.measurements[0];
         assert_eq!(m.distribution.normality.verdict, "rejected");
         assert!(m.warnings.iter().any(|w| w.contains("not consistent")));
+    }
+
+    // ----------------------------------------------------------------- //
+    // Errored samples and the conditional yield (issue #1082)
+    // ----------------------------------------------------------------- //
+
+    /// Same shape as [`request`], but with a non-zero `errored` count --
+    /// the samples that produced no usable value and never reached the
+    /// statistics at all.
+    fn request_with_errored(samples: Vec<f64>, limits: Limits, errored: u64) -> YieldRequest {
+        let mut req = request(samples, limits);
+        req.measurements[0].errored = errored;
+        req
+    }
+
+    #[test]
+    fn errored_samples_warn_that_the_empirical_yield_is_conditional() {
+        // The acute case issue #1082 reports: every sample that produced a
+        // value is inside the limits, so the empirical yield is 1.0 -- but
+        // most of the draw produced no value at all. 60 of 80 errored.
+        let req = request_with_errored(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+            60,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.n, 20);
+        assert_eq!(m.errored, 60);
+        close(m.yield_.empirical.estimate, 1.0, 1e-12);
+
+        // The pre-existing exclusion warning still fires...
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("excluded from every statistic below")),
+            "{:?}",
+            m.warnings
+        );
+        // ...and the new one, distinct from it, says the estimate is
+        // conditional on the samples that produced a value, and names the
+        // whole-draw upper bound (20 passing / 80 drawn = 0.25).
+        let conditional = m
+            .warnings
+            .iter()
+            .find(|w| w.contains("conditional on the"))
+            .unwrap_or_else(|| panic!("no conditional-yield warning: {:?}", m.warnings));
+        assert!(conditional.contains("60 of the 80"), "{conditional}");
+        assert!(conditional.contains("0.250000"), "{conditional}");
+        assert!(
+            conditional.contains("#errored-samples-and-conditional-yield"),
+            "{conditional}"
+        );
+
+        // And the run level points a reader at it.
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("excluded errored sample")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn a_single_errored_sample_still_warns_that_the_yield_is_conditional() {
+        // Threshold is "any non-zero errored fraction", so the smallest
+        // possible one warns too -- 1 of 21.
+        let req = request_with_errored(
+            normal_grid(20, 0.0, 1.0),
+            Limits {
+                min: Some(-2.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+            1,
+        );
+        let resp = analyze(&req).unwrap();
+        assert!(
+            resp.measurements[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("conditional on the")),
+            "{:?}",
+            resp.measurements[0].warnings
+        );
+    }
+
+    #[test]
+    fn a_draw_with_no_errored_samples_gets_no_conditional_warning() {
+        let req = request(
+            normal_grid(200, 0.0, 1.0),
+            Limits {
+                min: Some(-2.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        assert!(
+            !resp.measurements[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("conditional on the")),
+            "{:?}",
+            resp.measurements[0].warnings
+        );
+        assert!(
+            !resp
+                .warnings
+                .iter()
+                .any(|w| w.contains("excluded errored sample")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn an_entirely_errored_measurement_names_the_errored_count_in_its_error() {
+        // `errored == n + errored` -- the 100%-errored end of the range.
+        // There is no report to warn *in* (no usable sample carries a
+        // confidence interval), so the sample-floor error itself has to say
+        // that the draw failed to measure rather than being small.
+        let req = request_with_errored(
+            vec![],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+            100,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("0 usable sample(s)"), "{err}");
+        assert!(err.contains("100 of the 100 sample(s)"), "{err}");
+        assert!(
+            err.contains("#errored-samples-and-conditional-yield"),
+            "{err}"
+        );
     }
 
     // ----------------------------------------------------------------- //
