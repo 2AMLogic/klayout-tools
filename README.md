@@ -70,6 +70,17 @@ source instead:
 uv tool install git+https://github.com/2AMLogic/klayout-tools
 ```
 
+> **`klt yield` (and its `yield-campaign`/`yield-sensitivity` siblings) need
+> an extra step.** Both install commands above ship the pure-Python package
+> only — `klt yield`'s statistics run in a Rust extension
+> (`klt_yield_native`) that is not published as a prebuilt wheel and is not
+> in scope for a single-package install. It requires a full repo checkout
+> plus a Rust toolchain; see
+> [`docs/cli/yield.md#building-the-native-extension`](docs/cli/yield.md#building-the-native-extension).
+> `klt mom` and `klt synthesize --restructure-timing` have the same
+> from-source gap for their own Rust extensions; every other verb works
+> from the commands above alone.
+
 ## Quick start
 
 ```bash
