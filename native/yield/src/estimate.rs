@@ -114,6 +114,18 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
                 .to_string(),
         );
     }
+    // Issue #1095: unlike `errored`, `failed_unmeasurable` draws are already
+    // counted as failures in the denominator -- flag it at the run level too
+    // so a reader knows some of the failure count came from "no value" draws
+    // rather than a numeric sample that missed the limit.
+    if reports.iter().any(|r| r.failed_unmeasurable > 0) {
+        warnings.push(
+            "at least one measurement counted failed_unmeasurable draws (a design failure with \
+             no value to report) as failures in its empirical yield -- see that measurement's \
+             own warnings, and docs/cli/yield.md#errored-samples-and-conditional-yield"
+                .to_string(),
+        );
+    }
 
     Ok(YieldResponse {
         schema_version: SCHEMA_VERSION,
@@ -180,20 +192,38 @@ fn analyze_measurement(
 
     let n = m.samples.len();
     if n < min_samples {
-        // Issue #1082: at the 100%-errored end (`errored == n + errored`)
-        // there is no report to carry the conditional-yield warning below,
-        // so this error has to name the errored count itself -- otherwise a
-        // draw of 100 samples that all failed to measure is indistinguishable
-        // from a draw of nothing.
-        let errored_note = if m.errored > 0 {
+        // Issue #1082 / #1095: at the 100%-no-value end (every draw is
+        // either `errored` or `failed_unmeasurable`) there is no report to
+        // carry the conditional-yield / failed_unmeasurable warnings below,
+        // so this error has to name both counts itself -- otherwise a draw
+        // of 100 samples that all failed to produce a value is
+        // indistinguishable from a draw of nothing. Note that a
+        // `failed_unmeasurable` count alone cannot substitute for the
+        // shortfall here even though it *does* enter the yield below once
+        // the floor is met: `distribution`/`capability` still need a numeric
+        // sample to fit, and there is none to give them.
+        let no_value_note = if m.errored > 0 || m.failed_unmeasurable > 0 {
+            // Errored-only keeps the exact pre-#1095 wording (a bare count,
+            // no qualifier) for backward compatibility with existing
+            // callers scraping this message; the qualifiers only appear
+            // once `failed_unmeasurable` is part of the shortfall.
+            let breakdown = match (m.errored > 0, m.failed_unmeasurable > 0) {
+                (true, true) => format!(
+                    "{} tooling-errored and {} failed_unmeasurable",
+                    m.errored, m.failed_unmeasurable
+                ),
+                (true, false) => format!("{}", m.errored),
+                (false, true) => format!("{} failed_unmeasurable", m.failed_unmeasurable),
+                (false, false) => unreachable!("guarded by the outer if"),
+            };
             format!(
-                " -- {} of the {} sample(s) drawn produced no usable value and were excluded, \
-                 so this is a draw that mostly failed to *measure*, not a small draw; if a \
-                 missing value is itself a failure for this measurement, map it onto a \
-                 sentinel outside the limits before analysis (see \
+                " -- {breakdown} of the {} sample(s) drawn produced no usable value and were \
+                 excluded, so this is a draw that mostly failed to *measure*, not a small draw; \
+                 if a missing value is itself a failure for this measurement, use \
+                 failed_unmeasurable to count it as one directly, or map it onto a sentinel \
+                 outside the limits before analysis (see \
                  docs/cli/yield.md#errored-samples-and-conditional-yield)",
-                m.errored,
-                n as u64 + m.errored
+                n as u64 + m.errored + m.failed_unmeasurable
             )
         } else {
             String::new()
@@ -201,7 +231,7 @@ fn analyze_measurement(
         return Err(format!(
             "measurement '{name}' has {n} usable sample(s), below the minimum of {min_samples}: \
              refusing to report a yield number that cannot carry a confidence interval \
-             (see docs/cli/yield.md, 'Never a bare point estimate'){errored_note}"
+             (see docs/cli/yield.md, 'Never a bare point estimate'){no_value_note}"
         ));
     }
 
@@ -231,23 +261,30 @@ fn analyze_measurement(
     };
 
     // ---- empirical yield ------------------------------------------------- //
+    // Issue #1095: `failed_unmeasurable` draws are, unlike `errored`, a
+    // known failure -- a design that left the regime the measurement is
+    // only defined in. They enter the empirical yield's denominator (and,
+    // since they never produced a value inside the limits, its numerator's
+    // complement) even though they never touch `sorted`/`distribution`/
+    // `capability` above, which need an actual value to fit.
     let passing = sorted.iter().filter(|x| within(**x, &m.limits)).count() as u64;
-    let (cp_low, cp_high) = stats::clopper_pearson(passing, n_u, confidence);
+    let yield_drawn = n_u + m.failed_unmeasurable;
+    let (cp_low, cp_high) = stats::clopper_pearson(passing, yield_drawn, confidence);
     let empirical = Estimate {
         method: "clopper-pearson".to_string(),
-        estimate: passing as f64 / n as f64,
+        estimate: passing as f64 / yield_drawn as f64,
         confidence,
         confidence_interval: Interval {
             low: cp_low,
             high: cp_high,
         },
-        n: n_u,
+        n: yield_drawn,
     };
-    if passing == n_u {
+    if passing == yield_drawn {
         warnings.push(format!(
             "measurement '{name}': no sample fell outside the limits, so the empirical yield is \
-             bounded only from below -- \"at least {:.4}% at {:.0}% confidence, N = {n}\" is the \
-             honest statement, not \"100% yield\"",
+             bounded only from below -- \"at least {:.4}% at {:.0}% confidence, N = {yield_drawn}\" \
+             is the honest statement, not \"100% yield\"",
             cp_low * 100.0,
             confidence * 100.0
         ));
@@ -321,9 +358,11 @@ fn analyze_measurement(
         .map(|e| variance_reduced_sample_size(e, target_ci_halfwidth));
 
     // ---- sample-size verdict --------------------------------------------- //
+    // `yield_drawn`, not `n_u`, matches the `n` backing `empirical.confidence_interval`
+    // above once `failed_unmeasurable` is non-zero.
     let sample_size = sample_size_verdict(
         passing,
-        n_u,
+        yield_drawn,
         confidence,
         target_ci_halfwidth,
         m.limits.target_yield,
@@ -336,21 +375,23 @@ fn analyze_measurement(
     // Scoped to the *precision* half of the verdict specifically: the verdict
     // can also be "insufficient" purely because the claim needs more samples,
     // which the separate warning below states in its own terms.
-    if sample_size.observed_ci_halfwidth > target_ci_halfwidth || n_u < sample_size.required_n {
+    if sample_size.observed_ci_halfwidth > target_ci_halfwidth
+        || yield_drawn < sample_size.required_n
+    {
         warnings.push(format!(
-            "measurement '{name}': N = {n} resolves the yield only to +/-{:.4} at {:.0}% \
-             confidence; {} samples are needed for the requested +/-{target_ci_halfwidth}",
+            "measurement '{name}': N = {yield_drawn} resolves the yield only to +/-{:.4} at \
+             {:.0}% confidence; {} samples are needed for the requested +/-{target_ci_halfwidth}",
             sample_size.observed_ci_halfwidth,
             confidence * 100.0,
             sample_size.required_n
         ));
     }
     if let Some(required) = sample_size.required_n_for_target {
-        if n_u < required {
+        if yield_drawn < required {
             warnings.push(format!(
-                "measurement '{name}': the observed pass rate clears the {} target, but N = {n} \
-                 is too small to *claim* it at {:.0}% confidence (the lower bound is {:.6}); \
-                 {required} samples at this rate would support the claim",
+                "measurement '{name}': the observed pass rate clears the {} target, but N = \
+                 {yield_drawn} is too small to *claim* it at {:.0}% confidence (the lower bound \
+                 is {:.6}); {required} samples at this rate would support the claim",
                 m.limits.target_yield.unwrap_or(f64::NAN),
                 confidence * 100.0,
                 cp_low
@@ -392,6 +433,25 @@ fn analyze_measurement(
             m.errored,
             m.errored as f64 / drawn as f64 * 100.0,
             passing as f64 / drawn as f64
+        ));
+    }
+    // Issue #1095: `failed_unmeasurable` draws are the counterpart of the
+    // `errored` block above, but with the opposite treatment -- they are
+    // *already* counted as failures in `yield.empirical` (see
+    // `yield_drawn` above), not merely excluded and reported as a warning.
+    // This warning exists so the failure count's provenance is still
+    // visible: how much of it is a numeric sample outside the limits versus
+    // a draw that never produced one at all.
+    if m.failed_unmeasurable > 0 {
+        warnings.push(format!(
+            "measurement '{name}': {} of the {yield_drawn} sample(s) drawn ({:.1}%) are \
+             failed_unmeasurable -- they left the regime this measurement is only defined in and \
+             produced no value, so they are counted as failing draws in the empirical yield \
+             below (not excluded, unlike `errored`), and excluded from `distribution`/\
+             `capability` since there is no value to fit; see \
+             docs/cli/yield.md#errored-samples-and-conditional-yield",
+            m.failed_unmeasurable,
+            m.failed_unmeasurable as f64 / yield_drawn as f64 * 100.0
         ));
     }
     if m.source_corners.len() > 1 {
@@ -453,6 +513,7 @@ fn analyze_measurement(
         unit: m.unit.clone(),
         n: n_u,
         errored: m.errored,
+        failed_unmeasurable: m.failed_unmeasurable,
         limits: m.limits,
         source_corners: m.source_corners.clone(),
         distribution,
@@ -1070,38 +1131,60 @@ fn negative_control_report(
         ));
     }
     let n = nc.samples.len();
-    if n < min_samples {
+    let n_u = n as u64;
+    // Issue #1095: unlike the nominal measurement, the negative control's
+    // floor is checked against the *total* draw (numeric samples plus
+    // `failed_unmeasurable`) -- a negative control has no `distribution`/
+    // `capability` of its own to fit (see `NegativeControlReport`), so a
+    // deliberate defect that drives every draw out of the measurable regime
+    // (`n == 0`, `failed_unmeasurable >= min_samples`) is still a valid,
+    // checkable report: its empirical yield is 0 numeric passes out of
+    // `failed_unmeasurable` draws, exactly the degradation the self-check
+    // exists to require.
+    let yield_drawn = n_u + nc.failed_unmeasurable;
+    if yield_drawn < min_samples as u64 {
         return Err(format!(
-            "measurement '{name}' negative_control has {n} usable sample(s), below the minimum \
-             of {min_samples}: it needs its own confidence interval to be checkable, exactly \
-             like the nominal measurement (see docs/cli/yield.md, 'Never a bare point estimate')"
+            "measurement '{name}' negative_control has {n} usable sample(s) and {} \
+             failed_unmeasurable draw(s) ({yield_drawn} total), below the minimum of \
+             {min_samples}: it needs its own confidence interval to be checkable, exactly \
+             like the nominal measurement (see docs/cli/yield.md, 'Never a bare point estimate')",
+            nc.failed_unmeasurable
         ));
     }
-    let n_u = n as u64;
-    let mut sorted = nc.samples.clone();
-    sorted.sort_by(|a, b| {
-        a.partial_cmp(b)
-            .expect("non-finite sample already rejected")
-    });
-    let mean = stats::mean(&sorted);
-    let stddev = stats::sample_stddev(&sorted).expect("n >= 2 checked above");
+    let (mean, stddev, sorted) = if n >= 2 {
+        let mut sorted = nc.samples.clone();
+        sorted.sort_by(|a, b| {
+            a.partial_cmp(b)
+                .expect("non-finite sample already rejected")
+        });
+        let mean = stats::mean(&sorted);
+        let stddev = stats::sample_stddev(&sorted).expect("n >= 2 checked above");
+        (Some(mean), Some(stddev), sorted)
+    } else {
+        (None, None, nc.samples.clone())
+    };
 
     let passing = sorted.iter().filter(|x| within(**x, limits)).count() as u64;
-    let (cp_low, cp_high) = stats::clopper_pearson(passing, n_u, confidence);
+    let (cp_low, cp_high) = stats::clopper_pearson(passing, yield_drawn, confidence);
     let empirical = Estimate {
         method: "clopper-pearson".to_string(),
-        estimate: passing as f64 / n as f64,
+        estimate: passing as f64 / yield_drawn as f64,
         confidence,
         confidence_interval: Interval {
             low: cp_low,
             high: cp_high,
         },
-        n: n_u,
+        n: yield_drawn,
     };
-    let normal = if stddev > 0.0 {
-        Some(normal_estimate(mean, stddev, n, limits, confidence))
-    } else {
-        None
+    // `normal` is fit from the numeric samples alone, exactly like the
+    // nominal measurement's distribution -- `None` both when the fit is
+    // degenerate (zero spread) and when there are too few numeric samples
+    // to fit at all (which `failed_unmeasurable` cannot substitute for).
+    let normal = match (mean, stddev) {
+        (Some(mean), Some(stddev)) if stddev > 0.0 => {
+            Some(normal_estimate(mean, stddev, n, limits, confidence))
+        }
+        _ => None,
     };
 
     // Non-overlapping exact intervals, in the degraded direction: sampling
@@ -1137,6 +1220,7 @@ fn negative_control_report(
             description: nc.description.clone(),
             n: n_u,
             errored: nc.errored,
+            failed_unmeasurable: nc.failed_unmeasurable,
             // A negative control's own samples never declare a sampling
             // strategy in this phase -- it is always analysed as a plain
             // draw against the nominal measurement's limits.
@@ -1301,6 +1385,7 @@ mod tests {
                 unit: None,
                 samples,
                 errored: 0,
+                failed_unmeasurable: 0,
                 limits,
                 source_corners: vec![],
                 negative_control: None,
@@ -1326,6 +1411,7 @@ mod tests {
                 unit: None,
                 samples,
                 errored: 0,
+                failed_unmeasurable: 0,
                 limits,
                 source_corners: vec![],
                 negative_control: None,
@@ -1905,6 +1991,179 @@ mod tests {
     }
 
     // ----------------------------------------------------------------- //
+    // `failed_unmeasurable` -- a design failure with no value (issue #1095)
+    // ----------------------------------------------------------------- //
+
+    /// Same shape as [`request`], but with a non-zero `failed_unmeasurable`
+    /// count -- draws that left the measurable regime entirely.
+    fn request_with_failed_unmeasurable(
+        samples: Vec<f64>,
+        limits: Limits,
+        failed_unmeasurable: u64,
+    ) -> YieldRequest {
+        let mut req = request(samples, limits);
+        req.measurements[0].failed_unmeasurable = failed_unmeasurable;
+        req
+    }
+
+    #[test]
+    fn failed_unmeasurable_draws_count_as_failures_in_the_empirical_yield() {
+        // 20 in-spec numeric samples, 5 failed_unmeasurable draws: the
+        // failed_unmeasurable draws must enter both the numerator's
+        // complement and the denominator, unlike `errored`.
+        let req = request_with_failed_unmeasurable(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            5,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.failed_unmeasurable, 5);
+        // Population backing the distribution fit is still the 20 numeric
+        // samples -- failed_unmeasurable draws never touch it.
+        assert_eq!(m.n, 20);
+        // But the empirical yield's own `n` is 25 (20 + 5), and the
+        // estimate is 20/25, not 20/20.
+        assert_eq!(m.yield_.empirical.n, 25);
+        close(m.yield_.empirical.estimate, 20.0 / 25.0, 1e-12);
+    }
+
+    #[test]
+    fn failed_unmeasurable_draws_are_excluded_from_distribution_fit_and_capability() {
+        let samples = normal_grid(300, 1.0, 0.01);
+        let with_failures = request_with_failed_unmeasurable(
+            samples.clone(),
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+            50,
+        );
+        let without_failures = request(
+            samples,
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+        );
+        let with_resp = analyze(&with_failures).unwrap();
+        let without_resp = analyze(&without_failures).unwrap();
+        let with_m = &with_resp.measurements[0];
+        let without_m = &without_resp.measurements[0];
+        // The distribution fit and Cp/Cpk are computed purely from the
+        // numeric samples -- identical whether or not failed_unmeasurable
+        // draws are present.
+        close(with_m.distribution.mean, without_m.distribution.mean, 1e-15);
+        close(
+            with_m.distribution.stddev,
+            without_m.distribution.stddev,
+            1e-15,
+        );
+        close(
+            with_m.capability.cpk.unwrap(),
+            without_m.capability.cpk.unwrap(),
+            1e-15,
+        );
+        // But the yields differ, since the denominator differs.
+        assert_ne!(
+            with_m.yield_.empirical.estimate,
+            without_m.yield_.empirical.estimate
+        );
+    }
+
+    #[test]
+    fn failed_unmeasurable_draws_are_surfaced_in_the_payload_alongside_errored() {
+        let mut req = request_with_failed_unmeasurable(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            5,
+        );
+        req.measurements[0].errored = 3;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.errored, 3);
+        assert_eq!(m.failed_unmeasurable, 5);
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("failed_unmeasurable") && w.contains("counted as failing")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("counted failed_unmeasurable draws")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn an_entirely_failed_unmeasurable_measurement_does_not_crash_and_names_the_count() {
+        // 100% failed_unmeasurable, no numeric samples at all -- the
+        // distribution fit/capability have nothing to fit, so the main
+        // measurement still errors at the sample floor (unlike the
+        // negative control, which has no distribution/capability of its
+        // own to protect -- see the negative-control test below). The
+        // point is that this is a clean error, not a panic.
+        let req = request_with_failed_unmeasurable(
+            vec![],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            100,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("0 usable sample(s)"), "{err}");
+        assert!(err.contains("100 failed_unmeasurable"), "{err}");
+        assert!(
+            err.contains("#errored-samples-and-conditional-yield"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_measurement_mixing_numeric_errored_and_failed_unmeasurable_draws_analyzes_cleanly() {
+        let mut req = request_with_failed_unmeasurable(
+            normal_grid(50, 1.0, 0.01),
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+            10,
+        );
+        req.measurements[0].errored = 7;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.n, 50);
+        assert_eq!(m.errored, 7);
+        assert_eq!(m.failed_unmeasurable, 10);
+        // Empirical yield's denominator is 50 numeric + 10
+        // failed_unmeasurable = 60 -- `errored` stays excluded entirely.
+        assert_eq!(m.yield_.empirical.n, 60);
+    }
+
+    // ----------------------------------------------------------------- //
     // Negative control (issue #817)
     // ----------------------------------------------------------------- //
 
@@ -1927,6 +2186,7 @@ mod tests {
                 unit: None,
                 samples,
                 errored: 0,
+                failed_unmeasurable: 0,
                 limits,
                 source_corners: vec![],
                 negative_control,
@@ -1955,6 +2215,7 @@ mod tests {
             Some(NegativeControlRequest {
                 samples: bad,
                 errored: 0,
+                failed_unmeasurable: 0,
                 description: Some("vos forced to 0.6 (12x the 0.05 spec sigma)".to_string()),
             }),
             None,
@@ -1997,6 +2258,7 @@ mod tests {
             Some(NegativeControlRequest {
                 samples: not_actually_bad,
                 errored: 0,
+                failed_unmeasurable: 0,
                 description: None,
             }),
             None,
@@ -2048,12 +2310,81 @@ mod tests {
             Some(NegativeControlRequest {
                 samples: vec![9.0],
                 errored: 0,
+                failed_unmeasurable: 0,
                 description: None,
             }),
             None,
         );
         let err = analyze(&req).unwrap_err();
         assert!(err.contains("negative_control"), "{err}");
+        assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    #[test]
+    fn a_negative_control_seeded_entirely_with_failed_unmeasurable_is_detected() {
+        // Issue #1095's core scenario: a deliberate defect that drives
+        // *every* negative-control draw out of the measurable regime, with
+        // no numeric failing samples at all -- the exact case that
+        // vanished into `not_detected` before this issue, since every
+        // failing draw used to disappear into `errored`.
+        let nominal = normal_grid(300, 0.0, 0.05);
+        let req = request_with_self_checks(
+            nominal,
+            Limits {
+                min: Some(-0.5),
+                max: Some(0.5),
+                target_yield: None,
+                ..Default::default()
+            },
+            Some(NegativeControlRequest {
+                samples: vec![],
+                errored: 0,
+                failed_unmeasurable: 20,
+                description: Some(
+                    "the deliberate defect drives every draw out of the measurable regime"
+                        .to_string(),
+                ),
+            }),
+            None,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let nc = m.negative_control.as_ref().unwrap();
+        assert_eq!(nc.n, 0);
+        assert_eq!(nc.failed_unmeasurable, 20);
+        assert_eq!(nc.yield_.empirical.n, 20);
+        close(nc.yield_.empirical.estimate, 0.0, 1e-12);
+        // No numeric samples at all, so there is no normal fit.
+        assert!(nc.yield_.normal.is_none());
+        assert_eq!(nc.verdict, "detected");
+        assert!(nc.degradation_detected);
+        assert!(!m.warnings.iter().any(|w| w.contains("not statistically")));
+    }
+
+    #[test]
+    fn a_negative_control_below_the_sample_floor_still_errors_with_failed_unmeasurable_counted() {
+        // The floor is checked against the *total* (numeric + failed_unmeasurable)
+        // draw -- a handful of failed_unmeasurable draws below min_samples
+        // is still too small to carry a confidence interval.
+        let req = request_with_self_checks(
+            normal_grid(50, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: Some(3.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            Some(NegativeControlRequest {
+                samples: vec![],
+                errored: 0,
+                failed_unmeasurable: 1,
+                description: None,
+            }),
+            None,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("negative_control"), "{err}");
+        assert!(err.contains("failed_unmeasurable"), "{err}");
         assert!(err.contains("confidence interval"), "{err}");
     }
 

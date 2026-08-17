@@ -59,6 +59,14 @@ pub struct MeasurementRequest {
     /// Samples whose value was unextractable and therefore excluded.
     #[serde(default)]
     pub errored: u64,
+    /// Draws that left the regime this measurement is only defined in --
+    /// a design failure with no value to report, as distinct from a
+    /// tooling failure (`errored`). Additive to `errored` (issue #1095):
+    /// unlike `errored`, these **do** enter the empirical yield's
+    /// numerator/denominator as failures, while still being excluded from
+    /// the distribution fit and Cp/Cpk (there is no value to fit).
+    #[serde(default)]
+    pub failed_unmeasurable: u64,
     pub limits: Limits,
     /// Originating (pre-sampling) corner ids this measurement's samples were
     /// pooled from -- informational, echoed back so a pooled multi-corner
@@ -91,6 +99,13 @@ pub struct NegativeControlRequest {
     pub samples: Vec<f64>,
     #[serde(default)]
     pub errored: u64,
+    /// The negative control's own `failed_unmeasurable` count -- same
+    /// treatment as the nominal measurement's (issue #1095): a deliberate
+    /// defect that drives every draw out of the measurable regime must
+    /// still show up as a detected degradation, not vanish alongside
+    /// `errored`.
+    #[serde(default)]
+    pub failed_unmeasurable: u64,
     /// Human description of what was deliberately broken, echoed back so the
     /// report is self-documenting (e.g. "vos forced to 3x spec via a fixed
     /// device offset").
@@ -236,6 +251,11 @@ pub struct MeasurementReport {
     pub unit: Option<String>,
     pub n: u64,
     pub errored: u64,
+    /// Echoes the request's `failed_unmeasurable` (issue #1095) -- draws
+    /// counted as failures in `yield.empirical` below, excluded from
+    /// `distribution`/`capability` like `errored`, but unlike `errored`
+    /// *not* excluded from the yield itself.
+    pub failed_unmeasurable: u64,
     pub limits: Limits,
     pub source_corners: Vec<String>,
     pub distribution: Distribution,
@@ -287,6 +307,9 @@ pub struct NegativeControlReport {
     pub description: Option<String>,
     pub n: u64,
     pub errored: u64,
+    /// Echoes the negative control's own `failed_unmeasurable` (issue
+    /// #1095) -- see [`MeasurementReport::failed_unmeasurable`].
+    pub failed_unmeasurable: u64,
     #[serde(rename = "yield")]
     pub yield_: YieldBlock,
     /// The nominal measurement's empirical yield estimate, echoed here so

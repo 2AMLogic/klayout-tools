@@ -88,7 +88,14 @@ klt yield mc.json --limits spec-limits.json --format json
   non-zero `errored` count raises a warning saying the empirical yield is
   conditional on the samples that produced a value — see
   ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield),
-  which also covers what to do when a missing value *is* the failure.
+  which also covers what to do when a missing value *is* the failure, and
+  the optional `failed_unmeasurable` count that field can be reported through.
+- **`failed_unmeasurable`** is an optional integer on a rollup
+  `measurements[]` entry — like `negative_control`/`analytic_cross_check`/
+  `sampling` below, it is metadata about the measurement rather than
+  something derivable from a corner's `value` (a sim report's per-corner
+  value has no way to distinguish a tooling failure from a design failure).
+  See ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield).
 - **Spec limits** come from the report's own `measurements[].limits`, unless
   `--limits` overrides them.
 - **`source_corners`** echoes the originating (pre-sampling) corner ids, with
@@ -109,6 +116,7 @@ For a draw that did not come from `klt sim`:
       "unit": "V",
       "samples": [1.2035, 1.1987, 1.2101, "..."],
       "errored": 0,
+      "failed_unmeasurable": 0,
       "limits": { "min": 1.15, "max": 1.25, "target_yield": 0.99 }
     }
   ]
@@ -121,17 +129,18 @@ For a draw that did not come from `klt sim`:
 | `unit` | string | Optional, echoed back. |
 | `samples` | array\<number \| null\> | The draw. A `null` entry counts into `errored` rather than being analysed. |
 | `errored` | integer | Optional extra count of samples that produced no usable value (added to the `null`s found in `samples`). Any non-zero total raises a warning that the empirical yield is conditional on the samples that produced a value — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
+| `failed_unmeasurable` | integer | Optional count of draws that failed the limit *without* producing a value — a design failure (a circuit that left the regime the measurement is only defined in), not a tooling failure. Unlike `errored`, these **are** counted as failures in `yield.empirical` below; they are still excluded from `distribution`/`capability`, since there is no value to fit. See ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `limits` | object | `min`/`max`/`target_yield`, each optional — but at least one of `min`/`max` must be resolvable (here or via `--limits`). Optional `exclusive_min`/`exclusive_max` booleans (default `false`) make the corresponding bound *strict* (`>`/`<` instead of the default `>=`/`<=`) — for spec rows ratified as strict inequalities. Setting one with no corresponding `min`/`max` value is an error. |
 | `source_corners` | array\<string\> | Optional; the originating corners the draw was pooled from. |
 | `negative_control` | object | Optional; see "Negative control" below. |
 | `analytic_cross_check` | object | Optional; see "Analytic cross-check" below. |
 | `sampling` | object | Optional; see "Sampling strategies (variance reduction)" below. |
 
-A `klt sim` Monte Carlo report accepts the same three fields on its own
+A `klt sim` Monte Carlo report accepts the same fields on its own
 `measurements[]` rollup entries (alongside `limits`) — a negative control, an
-analytic model, or a sampling strategy is metadata about the measurement, not
-a corner, so each is supplied the same way regardless of which input shape
-carries the draw.
+analytic model, a sampling strategy, or a `failed_unmeasurable` count is
+metadata about the measurement, not a corner, so each is supplied the same
+way regardless of which input shape carries the draw.
 
 ### Spec-limits file (`--limits`)
 
@@ -249,25 +258,32 @@ sim` is reported and never failed.
 
 ### Errored samples and conditional yield
 
-A sample that produced no usable value counts into `errored` and is excluded
-from every statistic — so **`n`, not `n + errored`, is the yield
-denominator**. `yield.empirical` is therefore a *conditional* quantity: the
-fraction of the samples that produced a value which met spec, not the
-fraction of the whole draw.
+A sample that produced no usable value can mean one of two different things,
+and `klt yield` distinguishes them with two separate counts:
 
-That is the right treatment for a sample that failed for a **tooling**
-reason (the simulator crashed, the log was unparseable): those draws carry no
-information about the design either way. It is the wrong treatment for a
-measurement whose functional failure mode **is** the absence of a value —
-an extraction only defined while the circuit is in the regime the measurement
-assumes, a search that reports "no operating point in range" rather than a
-number at the endpoint, a `.meas` that simply does not trigger when the
-circuit misbehaves. For those, "no value" *is* the failure, and excluding it
-inflates the yield.
+- **`errored`** — a **tooling** failure (the simulator crashed, the log was
+  unparseable). Those draws carry no information about the design either way,
+  so they are excluded from every statistic, *including the empirical yield's
+  own denominator*: **`n`, not `n + errored`, is the yield denominator**.
+  `yield.empirical` is therefore a *conditional* quantity when `errored > 0` —
+  the fraction of the samples that produced a value which met spec, not the
+  fraction of the whole draw.
+- **`failed_unmeasurable`** — a **design** failure: the measurement's
+  functional failure mode *is* the absence of a value — an extraction only
+  defined while the circuit is in the regime the measurement assumes, a
+  search that reports "no operating point in range" rather than a number at
+  the endpoint, a `.meas` that simply does not trigger when the circuit
+  misbehaves. For those, "no value" *is* the failure, so it is **counted as
+  one**: `n + failed_unmeasurable` is the empirical yield's denominator, and
+  every `failed_unmeasurable` draw is a non-passing draw in the numerator's
+  complement. Like `errored`, it is excluded from `distribution`/`capability`
+  — there is no value to fit a mean, stddev, or Cpk to.
 
-Because `klt yield` cannot tell the two apart from the sample alone, it does
-not choose for you — it says which reading it published
-([#1082](https://github.com/2AMLogic/klayout-tools/issues/1082)):
+`klt yield` cannot tell the two apart from the sample value alone (both start
+as `null`) — the caller states which one it is, and the tool says which
+reading it published either way
+([#1082](https://github.com/2AMLogic/klayout-tools/issues/1082),
+[#1095](https://github.com/2AMLogic/klayout-tools/issues/1095)):
 
 - **Any non-zero `errored`** (there is no threshold to cross) adds a
   per-measurement warning naming the errored fraction, stating that the
@@ -275,25 +291,40 @@ not choose for you — it says which reading it published
   giving the whole-draw figure the yield would have if every errored sample
   were counted as a failure — so both readings are visible and the published
   one is an explicit upper bound on the other.
-- **The run-level `warnings`** array carries a matching line, so a reader
-  scanning the top of the report is pointed at the measurement rather than
-  having to notice a non-zero `errored` next to a perfect interval.
-- **A measurement where every sample errored** (`errored == n + errored`) has
-  no usable sample left, so it does not produce a report at all: it fails the
-  `min_samples` floor and the resulting error names the errored count, rather
-  than reporting the draw as merely small. That is exit `1`, not a silent
-  pass.
+- **Any non-zero `failed_unmeasurable`** adds a distinct per-measurement
+  warning naming the fraction and stating that, unlike `errored`, these draws
+  are already counted as failures in `yield.empirical` below — not merely
+  excluded and reported as a warning.
+- **The run-level `warnings`** array carries a matching line for each,
+  so a reader scanning the top of the report is pointed at the measurement
+  rather than having to notice a non-zero count next to the interval.
+- **A measurement where every draw is `errored`/`failed_unmeasurable`** (no
+  numeric sample survives) has nothing to fit a distribution to, so it does
+  not produce a report at all: it fails the `min_samples` floor and the
+  resulting error names both counts, rather than reporting the draw as
+  merely small. That is exit `1`, not a silent pass.
 
-**If a missing value is a failure for your measurement**, map it onto a
-sentinel value outside the limits *before* handing the draw to `klt yield`,
-so it lands in the denominator as the failure it is. Note that this is only
-possible on the sample-set path — by the time a `klt sim` Monte Carlo report
-exists, the failed samples are already `null` and their identity as
-functional failures is gone. Making `klt yield` itself count errored samples
-as failures (an `errored_policy` field, or a second yield block reported over
-the whole draw) is deliberately **not** implemented here; it is tracked
-separately, since it changes what a `pass` means rather than only what the
-report says about it.
+**If a missing value is a failure for your measurement, use
+`failed_unmeasurable` to count it as one directly** — this is what the field
+exists for. The earlier workaround (mapping a failing draw onto a numeric
+sentinel value outside the limits before analysis) still works and is not
+removed, but it pollutes `distribution`/`capability` with a magnitude that
+was never measured; `failed_unmeasurable` is now the honest way to say "this
+draw failed the limit without producing a value." Note that
+`failed_unmeasurable` (like `negative_control`/`analytic_cross_check`/
+`sampling`) is metadata on the measurement, so it is available on both the
+sample-set and `klt sim` report input paths — unlike the sentinel-value
+workaround, which is only possible on the sample-set path, since by the time
+a `klt sim` Monte Carlo report exists the failed samples are already `null`
+and their identity as functional failures is gone unless the report's own
+rollup entry states a `failed_unmeasurable` count.
+
+Making `klt yield` itself count *`errored`* samples as failures (an
+`errored_policy` field, or a second yield block reported over the whole
+draw) is deliberately **not** implemented here — that is a different,
+still-tracked idea for the tooling-failure case specifically (see #1082);
+it does not overlap with `failed_unmeasurable`, since a tooling failure
+still carries no design information regardless of how it is counted.
 
 ### Negative control
 
@@ -309,6 +340,7 @@ actually shows up as degraded yield, not just a lower point estimate:
 "negative_control": {
   "samples": [1.32, 1.34, "..."],
   "errored": 0,
+  "failed_unmeasurable": 0,
   "description": "vos forced to 0.6 V (12x the 0.05 V spec sigma)"
 }
 ```
@@ -330,6 +362,22 @@ control is `not_detected` — is flagged with a run-level warning**, not
 silently accepted; there is no exit-code change for this (see "Exit codes"
 below), only the warning, so existing automation is not broken by adopting
 this discipline.
+
+**`failed_unmeasurable` gets the same treatment here as it does for the
+nominal measurement** ([issue #1095](https://github.com/2AMLogic/klayout-tools/issues/1095)):
+a negative control's `failed_unmeasurable` draws are counted as failures in
+its own `yield.empirical`, not excluded. This matters specifically because a
+deliberate defect can be *so* effective that it drives every negative-control
+draw out of the measurable regime — before this issue, every such draw
+vanished into `errored`, so the control's surviving samples were only the
+ones that happened to still produce a value, and the self-check could report
+`not_detected` for a defect that was working exactly as intended. A negative
+control seeded entirely with `failed_unmeasurable` (`samples: []`,
+`failed_unmeasurable: 20`) is a valid, checkable report — its `n` (the
+numeric-sample count backing `yield.normal`) is `0` and `yield.normal` is
+`null`, but `yield.empirical` is still well-defined (`0` numeric passes out
+of `failed_unmeasurable` draws) and correctly reports `detected` when that
+empirical yield is statistically below the nominal's.
 
 ### Analytic cross-check
 
@@ -644,6 +692,7 @@ item-6 claim for the full ratified spec row.
       "unit": "V",
       "n": 300,
       "errored": 0,
+      "failed_unmeasurable": 0,
       "limits": { "min": 1.15, "max": 1.25, "target_yield": 0.99 },
       "source_corners": [],
       "distribution": {
@@ -715,8 +764,9 @@ item-6 claim for the full ratified spec row.
 
 `negative_control` is `null` above because the worked example declares
 none — see "Negative control" for its populated shape
-(`{"description", "n", "errored", "yield", "nominal_empirical_estimate",
-"degradation_detected", "verdict"}`) and "Analytic cross-check" for
+(`{"description", "n", "errored", "failed_unmeasurable", "yield",
+"nominal_empirical_estimate", "degradation_detected", "verdict"}`) and
+"Analytic cross-check" for
 `analytic_cross_check`'s (`{"kind", "analytic_mean", "analytic_stddev",
 "empirical_mean", "empirical_stddev",
 "empirical_mean_confidence_interval", "empirical_stddev_confidence_interval",
@@ -741,26 +791,27 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `status` | string | `"pass"`, `"fail"`, or `"reported"` (no measurement declared a `target_yield`). `fail` wins over `pass`. |
 | `measurement_count` | integer | `== len(measurements)`. |
 | `measurements` | array\<object\> | One entry per analysed measurement, in input order. |
-| `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared, no measurement declared a `negative_control`, one that did not detect degradation, or one that [excluded errored samples](#errored-samples-and-conditional-yield) from its denominator), followed by the core's own. |
+| `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared, no measurement declared a `negative_control`, one that did not detect degradation, one that [excluded errored samples](#errored-samples-and-conditional-yield) from its denominator, or one that [counted `failed_unmeasurable` draws as failures](#errored-samples-and-conditional-yield)), followed by the core's own. |
 
 ### `measurements[]` entries
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `name`/`unit` | string / string \| null | Echoed from the input. |
-| `n` | integer | Usable samples — the population every statistic is computed over. |
-| `errored` | integer | Samples excluded because they had no usable value. `n + errored` is the total draw. Non-zero adds two `warnings` entries: the exclusion itself, and that the yield is conditional on the `n` samples that produced a value — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
+| `n` | integer | Usable **numeric** samples — the population `distribution`/`capability` are computed over. Not the same as `yield.empirical.n` once `failed_unmeasurable` is non-zero — see below. |
+| `errored` | integer | Samples excluded because they had no usable value (a tooling failure). Excluded from `yield.empirical`'s denominator too: `n + errored` is the total draw, not the yield denominator. Non-zero adds two `warnings` entries: the exclusion itself, and that the yield is conditional on the `n` samples that produced a value — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
+| `failed_unmeasurable` | integer | Draws that left the measurement's regime and produced no value (a design failure, not a tooling one). **Counted as failures** in `yield.empirical`'s numerator's complement and denominator — `yield.empirical.n == n + failed_unmeasurable` — while still excluded from `distribution`/`capability` like `errored`. Non-zero adds a per-measurement warning and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
 | `distribution` | object | See "Distribution fit" above. |
-| `yield` | object | `empirical` (always present), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |
+| `yield` | object | `empirical` (always present -- its own `n` is `n + failed_unmeasurable`, not `n` alone, once `failed_unmeasurable` is non-zero), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |
 | `capability` | object | See "Capability" above. |
 | `sample_size` | object | See "Sample-size verdict" above; its own `variance_reduced` field is `null` unless `yield.variance_reduced` exists — see "Sampling strategies (variance reduction)". |
 | `negative_control` | object \| null | `null` unless the input declared one — see "Negative control" above. |
 | `analytic_cross_check` | object \| null | `null` unless the input declared one — see "Analytic cross-check" above. |
 | `sampling` | object | Always present, even for the `plain_random` default — see "Sampling strategies (variance reduction)" above. |
 | `status` | string | `"pass"`, `"fail"`, or `"reported"`. |
-| `warnings` | array\<string\> | Per-measurement warnings (non-normal fit, a one-sided interval, an insufficient `n`, [excluded errored samples and the conditional yield](#errored-samples-and-conditional-yield), pooled corners, a negative control that did not degrade, an inconsistent analytic cross-check). |
+| `warnings` | array\<string\> | Per-measurement warnings (non-normal fit, a one-sided interval, an insufficient `n`, [excluded errored samples and the conditional yield](#errored-samples-and-conditional-yield), [`failed_unmeasurable` draws counted as failures](#errored-samples-and-conditional-yield), pooled corners, a negative control that did not degrade, an inconsistent analytic cross-check). |
 
 ## Why Rust
 
@@ -997,14 +1048,20 @@ whole epic:
 - **No sensitivity ranking here.** Which device mismatches drive the spread
   is a separate command, [`klt yield-sensitivity`](yield-sensitivity.md)
   (Phase 3, issue [#923](https://github.com/2AMLogic/klayout-tools/issues/923)).
-- **Errored samples are warned about, never counted as failures.**
-  [#1082](https://github.com/2AMLogic/klayout-tools/issues/1082) makes a
-  conditional yield say so (see
+- **Errored (tooling-failure) samples are warned about, never counted as
+  failures.** [#1082](https://github.com/2AMLogic/klayout-tools/issues/1082)
+  makes a conditional yield say so (see
   ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield)),
-  but there is no `errored_policy` switch that folds errored samples into the
-  denominator as failures, and no second yield block reported over the whole
-  draw. Both change what a `pass` means rather than only what the report says
-  about it, so they are separate, still-open work.
+  but there is no `errored_policy` switch that folds `errored` samples into
+  the denominator as failures, and no second yield block reported over the
+  whole draw. Both would change what a `pass` means rather than only what
+  the report says about it, so they are separate, still-open work. This is
+  deliberately unrelated to `failed_unmeasurable`
+  ([#1095](https://github.com/2AMLogic/klayout-tools/issues/1095)), which
+  *does* enter the yield as a failure — that field exists precisely because
+  a design failure with no value is not the same "no value" as a tooling
+  failure, so it gets a different, non-optional treatment rather than an
+  opt-in policy switch over the same `errored` bucket.
 
 ## Exit codes
 
