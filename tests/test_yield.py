@@ -355,6 +355,102 @@ def test_negative_control_without_samples_is_an_error(tmp_path):
         _read_samples(path)
 
 
+# --------------------------------------------------------------------------- #
+# `failed_unmeasurable` parsing (issue #1095, no native extension needed --
+# these are input-reader-tier checks across all three normalizers).
+# --------------------------------------------------------------------------- #
+
+
+def test_failed_unmeasurable_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "errored": 2,
+        "failed_unmeasurable": 17,
+        "limits": {"max": 5.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["errored"] == 2
+    assert measurements[0]["failed_unmeasurable"] == 17
+
+
+def test_failed_unmeasurable_defaults_to_zero_on_a_sample_set(tmp_path):
+    path = _sample_set(tmp_path, [1.0, 2.0], limits={"max": 5.0})
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["failed_unmeasurable"] == 0
+
+
+def test_failed_unmeasurable_is_parsed_from_a_sim_report_rollup_entry(tmp_path):
+    """Like `negative_control`/`analytic_cross_check`/`sampling`,
+    `failed_unmeasurable` is metadata on the rollup entry, not derivable
+    from a corner's `value` -- a sim report has no way to distinguish a
+    tooling failure from a design failure at the per-corner level."""
+    path = _sim_report(tmp_path, [1.0, 2.0, 3.0], limits={"min": 0.5, "max": 3.5})
+    report = json.loads(open(path).read())
+    report["measurements"][0]["failed_unmeasurable"] = 9
+    (tmp_path / "sim.json").write_text(json.dumps(report))
+    _kind, measurements, _source = _read_samples(str(tmp_path / "sim.json"))
+    assert measurements[0]["failed_unmeasurable"] == 9
+
+
+def test_failed_unmeasurable_is_parsed_from_a_negative_control(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "negative_control": {
+            "samples": [9.0],
+            "failed_unmeasurable": 20,
+            "description": "the defect drives every draw out of the regime",
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    nc = measurements[0]["negative_control"]
+    assert nc["failed_unmeasurable"] == 20
+
+
+def test_failed_unmeasurable_defaults_to_zero_on_a_negative_control(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "negative_control": {"samples": [9.0]},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["negative_control"]["failed_unmeasurable"] == 0
+
+
+def test_a_negative_failed_unmeasurable_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "failed_unmeasurable": -1,
+        },
+    )
+    with pytest.raises(YieldError, match="failed_unmeasurable must be a"):
+        _read_samples(path)
+
+
+def test_a_non_integer_failed_unmeasurable_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "failed_unmeasurable": "lots",
+        },
+    )
+    with pytest.raises(YieldError, match="failed_unmeasurable must be a"):
+        _read_samples(path)
+
+
 def test_analytic_cross_check_is_parsed_from_a_sample_set(tmp_path):
     entry = {
         "name": "m",
@@ -780,6 +876,75 @@ def test_cli_text_output_surfaces_the_conditional_yield_warning(tmp_path, capsys
 
 
 # --------------------------------------------------------------------------- #
+# `failed_unmeasurable` -- a design failure with no value (issue #1095)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_failed_unmeasurable_draws_count_as_failures_in_the_empirical_yield(tmp_path):
+    """Unlike `errored`, `failed_unmeasurable` draws are *not* excluded from
+    the empirical yield -- they enter its numerator's complement and
+    denominator as failures."""
+    entry = {
+        "name": "m",
+        "samples": [1.0] * 20,
+        "failed_unmeasurable": 5,
+        "limits": {"min": 0.0, "max": 2.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+
+    assert m["n"] == 20
+    assert m["failed_unmeasurable"] == 5
+    # The population backing distribution/capability is still 20 -- the
+    # failed_unmeasurable draws never touch it.
+    assert m["distribution"]["mean"] == 1.0
+    # But the empirical yield's own `n` is 25 (20 + 5), and the estimate is
+    # 20/25, not 20/20.
+    assert m["yield"]["empirical"]["n"] == 25
+    assert abs(m["yield"]["empirical"]["estimate"] - 20 / 25) < 1e-12
+
+    assert any(
+        "failed_unmeasurable" in w and "counted as failing" in w for w in m["warnings"]
+    )
+    assert any("counted failed_unmeasurable draws" in w for w in report["warnings"])
+
+
+@requires_native
+def test_a_draw_with_no_failed_unmeasurable_gets_no_extra_warning(tmp_path):
+    path = _sample_set(
+        tmp_path, _normal_grid(200, 0.0, 1.0), limits={"min": -2.0, "max": 2.0}
+    )
+    report = run_yield(path)
+    assert report["measurements"][0]["failed_unmeasurable"] == 0
+    assert not [
+        w for w in report["measurements"][0]["warnings"] if "failed_unmeasurable" in w
+    ]
+    assert not [
+        w for w in report["warnings"] if "counted failed_unmeasurable draws" in w
+    ]
+
+
+@requires_native
+def test_an_entirely_failed_unmeasurable_draw_does_not_crash_and_names_the_count(
+    tmp_path,
+):
+    """100% failed_unmeasurable, no numeric samples: the distribution fit has
+    nothing to fit, so this still errors at the sample floor -- the point is
+    a clean error, not a crash."""
+    entry = {
+        "name": "m",
+        "samples": [],
+        "failed_unmeasurable": 40,
+        "limits": {"min": 0.0, "max": 2.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    with pytest.raises(YieldError, match="40 failed_unmeasurable"):
+        run_yield(path)
+
+
+# --------------------------------------------------------------------------- #
 # negative_control / analytic_cross_check (issue #817)
 # --------------------------------------------------------------------------- #
 
@@ -809,6 +974,39 @@ def test_a_seeded_known_bad_negative_control_is_detected(tmp_path):
     assert not any(
         "no measurement declared a negative_control" in w for w in report["warnings"]
     )
+
+
+@requires_native
+def test_a_negative_control_seeded_entirely_with_failed_unmeasurable_is_detected(
+    tmp_path,
+):
+    """Issue #1095's core scenario: a deliberate defect that drives *every*
+    negative-control draw out of the measurable regime, with no numeric
+    failing samples at all. Before this issue, every such draw vanished
+    into `errored` and the self-check reported `not_detected` even though
+    the defect was working exactly as intended."""
+    entry = {
+        "name": "vos",
+        "samples": _normal_grid(300, 0.0, 0.05),
+        "limits": {"min": -0.5, "max": 0.5},
+        "negative_control": {
+            "samples": [],
+            "failed_unmeasurable": 20,
+            "description": "the deliberate defect drives every draw out of the "
+            "measurable regime",
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+    nc = m["negative_control"]
+    assert nc["n"] == 0
+    assert nc["failed_unmeasurable"] == 20
+    assert nc["yield"]["empirical"]["n"] == 20
+    assert nc["yield"]["empirical"]["estimate"] == 0.0
+    assert nc["yield"]["normal"] is None
+    assert nc["verdict"] == "detected"
+    assert not any("not statistically" in w for w in report["warnings"])
 
 
 @requires_native

@@ -121,6 +121,24 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
     return limits
 
 
+def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
+    """Normalise a ``failed_unmeasurable`` count -- draws that left the
+    regime a measurement is only defined in and produced no value (issue
+    #1095). Additive to ``errored``: unlike a tooling failure, this **does**
+    enter the empirical yield's numerator/denominator as a failure (see
+    ``native/yield/src/estimate.rs``), while still being excluded from the
+    distribution fit and Cp/Cpk, exactly like ``errored`` is.
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise YieldError(
+            f"{where}: measurement '{name}' failed_unmeasurable must be a "
+            "non-negative integer"
+        )
+    return raw
+
+
 def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
     """Normalise one measurement's ``negative_control`` object (issue #817's
     seeded, known-bad-variant self-check), or ``None`` when absent.
@@ -148,13 +166,26 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
                 "sample value"
             )
         samples.append(float(value))
+    # Issue #1095: a draw that left the measurable regime entirely -- unlike
+    # `errored`, this counts as a failure in the negative control's own
+    # empirical yield rather than being excluded, so a deliberate defect
+    # that drives every draw out of the regime still shows up as a detected
+    # degradation.
+    failed_unmeasurable = _failed_unmeasurable_from(
+        raw.get("failed_unmeasurable"), name, where
+    )
     description = raw.get("description")
     if description is not None and not isinstance(description, str):
         raise YieldError(
             f"{where}: measurement '{name}' negative_control.description must be a "
             "string"
         )
-    return {"samples": samples, "errored": errored, "description": description}
+    return {
+        "samples": samples,
+        "errored": errored,
+        "failed_unmeasurable": failed_unmeasurable,
+        "description": description,
+    }
 
 
 #: Which fields each `analytic_cross_check.kind` accepts, mirroring
@@ -334,6 +365,16 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 "unit": entry.get("unit"),
                 "samples": samples,
                 "errored": errored,
+                # Issue #1095: like `negative_control`/`analytic_cross_check`/
+                # `sampling` below, `failed_unmeasurable` is metadata about
+                # the measurement rather than something derivable from a
+                # corner's `value` -- a sim report's per-corner value shape
+                # has no way to distinguish a tooling failure from a design
+                # failure, so the caller supplies the count directly on the
+                # rollup entry.
+                "failed_unmeasurable": _failed_unmeasurable_from(
+                    entry.get("failed_unmeasurable"), name, "sim report"
+                ),
                 "limits": _limits_from(entry.get("limits"), name, "sim report"),
                 "source_corners": source_corners,
                 # A sim report's own corners are the nominal draw; a
@@ -394,6 +435,11 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "unit": entry.get("unit"),
                 "samples": samples,
                 "errored": errored,
+                # Issue #1095: a draw that failed the limit without producing
+                # a value -- a design failure, not a measurement failure.
+                "failed_unmeasurable": _failed_unmeasurable_from(
+                    entry.get("failed_unmeasurable"), name, "sample set"
+                ),
                 "limits": _limits_from(entry.get("limits"), name, "sample set"),
                 "source_corners": [str(c) for c in source_corners],
                 "negative_control": _negative_control_from(

@@ -760,6 +760,32 @@ not `klt --version`, if you need to detect this kind of drift. See
   `[]` shaped when `request.power` is omitted (the default, byte-for-byte
   unchanged prior behavior). See `docs/cli/place-and-route.md`'s "Power
   delivery" section for the full contract.
+- 2026-08-17 — `klt yield` gains a **`failed_unmeasurable` count**, additive
+  alongside `errored` on a measurement's request (both the sample-set and
+  `klt sim` report input paths, plus `negative_control`) and echoed back in
+  the response (issue #1095). `errored` (a tooling failure -- the simulator
+  crashed, the log was unparseable) stays excluded from every statistic,
+  including the empirical yield's own denominator, exactly as before.
+  `failed_unmeasurable` is the other kind of "no value": a *design* failure,
+  where the measurement's functional failure mode **is** the absence of a
+  value (an extraction only defined in-regime, a search reporting no
+  operating point in range, a `.meas` that does not trigger). Those draws
+  now **enter the empirical yield's numerator's complement and denominator
+  as failures** -- `yield.empirical.n == n + failed_unmeasurable` -- while
+  staying excluded from `distribution`/`capability` like `errored`, since
+  there is still no value to fit a mean, stddev, or Cpk to. Critically, this
+  also fixes `negative_control`: before this change, a deliberate defect
+  effective enough to drive *every* negative-control draw out of the
+  measurable regime reported `not_detected`, because every failing draw
+  vanished into `errored` and the control's surviving samples were only the
+  ones that happened to still produce a value -- the self-check reported the
+  opposite of what actually happened. A negative control seeded entirely
+  with `failed_unmeasurable` (no numeric samples at all) now correctly
+  reports `detected`. PR #1101's existing `errored`-only conditional-yield
+  warnings are unchanged; `failed_unmeasurable` gets its own distinct
+  per-measurement and run-level warnings. See
+  `docs/cli/yield.md#errored-samples-and-conditional-yield` and
+  `docs/cli/yield.md#negative-control`.
 - 2026-08-17 — `klt economy` gains an **AREA-EFF bounds-check mode** (issue
   #1086): a block's absolute area bound (`Area`) can't tell area a block
   *needs* from area it *wastes* — this adds the companion `Area-Eff` spec
