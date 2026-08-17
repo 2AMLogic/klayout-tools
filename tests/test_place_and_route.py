@@ -3492,14 +3492,19 @@ def _write_tiny_macro_lef(
 
 
 def _write_tiny_def_with_macro(
-    path: Path, *, design_name: str, cell_name: str, macro_cell_name: str
+    path: Path,
+    *,
+    design_name: str,
+    cell_name: str,
+    macro_cell_name: str,
+    database_microns: int = 1000,
 ) -> None:
     path.write_text(
         "VERSION 5.8 ;\n"
         'DIVIDERCHAR "/" ;\n'
         'BUSBITCHARS "[]" ;\n'
         f"DESIGN {design_name} ;\n"
-        "UNITS DISTANCE MICRONS 1000 ;\n"
+        f"UNITS DISTANCE MICRONS {database_microns} ;\n"
         "DIEAREA ( 0 0 ) ( 46000 27200 ) ;\n"
         "ROW ROW_0 unithd 0 0 N DO 10 BY 1 STEP 460 0 ;\n"
         "COMPONENTS 2 ;\n"
@@ -3884,6 +3889,220 @@ def test_merge_def_to_gds_falls_back_when_tech_lef_omits_database_microns(tmp_pa
     result.read(str(out_path))
     assert result.top_cell().name == "top"
     assert result.cell("VIA_VIA1_0") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Second-read DBU mismatch (issue #1090, follow-on to #1032): the DEF/tech
+# LEF read itself is correct (#1032's own fix), but the *standard-cell* or
+# *macro* GDS view is written at a differing DBU -- `main_layout.read(...)`
+# on that second read silently adopts the incoming stream's own DBU without
+# rescaling geometry already present, doubling every DEF-derived shape.
+# --------------------------------------------------------------------------- #
+
+
+def test_merge_def_to_gds_preserves_dbu_when_cell_gds_differs(tmp_path):
+    """The DEF and tech LEF agree (`UNITS DISTANCE MICRONS 2000` /
+    `DATABASE MICRONS 2000`, dbu 0.0005) -- this is deliberately *not*
+    #1032's mismatch. The standard-cell GDS view is written at a *different*
+    dbu (0.001, i.e. what a `DATABASE MICRONS 1000`-class PDK's own cell
+    views use). Before this issue's fix, the second, options-less
+    `main_layout.read(cell_gds)` call silently dragged the whole shared
+    layout's dbu from 0.0005 to 0.001, doubling the DEF-derived via-cut
+    geometry already present (real cause verified live against klayout
+    0.30.10 -- see `_merge_gds_view`'s own docstring)."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_via_tech_lef(tech_lef, database_microns=2000)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "gf180mcuC" / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "gds"
+    gds_dir.mkdir(parents=True)
+    # Deliberate mismatch: tech LEF/DEF are DATABASE MICRONS 2000 (dbu
+    # 0.0005), but the cell GDS view is at dbu 0.001 -- the class of defect
+    # this issue reports, independent of #1032's DEF-read mismatch.
+    _write_matching_cell_gds_at_dbu(
+        gds_dir / "gf180mcu_fd_sc_mcu9t5v0.gds", cell_name, dbu=0.001
+    )
+
+    def_path = tmp_path / "design.def"
+    _write_via_def(def_path, database_microns=2000, cell_name=cell_name)
+
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root, variant="gf180mcuC"),
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        hdl_toplevel="top",
+        macros=[],
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+    result = kdb.Layout()
+    result.read(str(out_path))
+
+    # DEF-derived via-cut geometry (`_write_via_tech_lef`'s own fixed
+    # `VIA1_0`, placed by the DEF's `ROUTED` statement) must land at its
+    # true real-micron position -- not doubled by the mismatched cell-GDS
+    # read that follows it.
+    via_cell = result.cell("VIA_VIA1_0")
+    assert via_cell is not None
+    via1_layer = result.layer(kdb.LayerInfo(2, 0))
+    cut_shapes = list(via_cell.shapes(via1_layer).each())
+    assert len(cut_shapes) == 2
+    boxes_um = sorted(
+        tuple(round(v * result.dbu, 4) for v in (b.left, b.bottom, b.right, b.top))
+        for b in (s.bbox() for s in cut_shapes)
+    )
+    assert boxes_um == [
+        (-0.0705, -0.0705, -0.07, -0.07),
+        (0.07, 0.07, 0.0705, 0.0705),
+    ]
+
+    # The standard-cell GDS view's own drawn box (100x100 raw units at
+    # dbu=0.001 -- 0.1 x 0.1 real microns) must also come out at its true
+    # size, not further rescaled by the DBU unification.
+    cell = result.cell(cell_name)
+    assert cell is not None
+    met1_layer = result.layer(kdb.LayerInfo(68, 20))
+    cell_shapes = list(cell.shapes(met1_layer).each())
+    assert len(cell_shapes) == 1
+    box_um = cell_shapes[0].bbox().to_dtype(result.dbu)
+    assert round(box_um.width(), 4) == pytest.approx(0.1)
+    assert round(box_um.height(), 4) == pytest.approx(0.1)
+
+
+def test_merge_def_to_gds_preserves_dbu_when_macro_gds_differs(tmp_path):
+    """Same DBU-mismatch shape as
+    `test_merge_def_to_gds_preserves_dbu_when_cell_gds_differs`, but for the
+    `macros[].gds` merge path (issue #1090's second acceptance criterion):
+    the standard-cell GDS view matches the tech LEF's own dbu (0.0005), but
+    the macro's own declared `gds` is written at a differing dbu (0.001)."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    macro_cell_name = "analog_block"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    macro_lef = tmp_path / "analog_block.lef"
+    macro_gds = tmp_path / "analog_block.gds"
+    _write_via_tech_lef(tech_lef, database_microns=2000)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+    _write_tiny_macro_lef(macro_lef, macro_cell_name, (5.0, 5.0))
+    _write_matching_cell_gds_at_dbu(macro_gds, macro_cell_name, dbu=0.001)
+
+    gds_dir = root / "gf180mcuC" / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds_at_dbu(
+        gds_dir / "gf180mcu_fd_sc_mcu9t5v0.gds", cell_name, dbu=0.0005
+    )
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def_with_macro(
+        def_path,
+        design_name="top",
+        cell_name=cell_name,
+        macro_cell_name=macro_cell_name,
+        database_microns=2000,
+    )
+
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root, variant="gf180mcuC"),
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        hdl_toplevel="top",
+        macros=[
+            {
+                "instance": "u_macro",
+                "lef": str(macro_lef),
+                "cell_name": macro_cell_name,
+                "x_um": 5.0,
+                "y_um": 5.0,
+                "orientation": "R0",
+                "gds": str(macro_gds),
+            }
+        ],
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+    result = kdb.Layout()
+    result.read(str(out_path))
+
+    # The macro's own drawn box (100x100 raw units at dbu=0.001 -- 0.1x0.1
+    # real microns) must come out at its true size, not rescaled by the
+    # DBU-mismatched macro-GDS read.
+    macro_cell = result.cell(macro_cell_name)
+    assert macro_cell is not None
+    met1_layer = result.layer(kdb.LayerInfo(68, 20))
+    macro_shapes = list(macro_cell.shapes(met1_layer).each())
+    assert len(macro_shapes) == 1
+    box_um = macro_shapes[0].bbox().to_dtype(result.dbu)
+    assert round(box_um.width(), 4) == pytest.approx(0.1)
+    assert round(box_um.height(), 4) == pytest.approx(0.1)
+
+    # The DEF-derived instance placement (raw 10000 / DATABASE MICRONS 2000
+    # = 5.0 real microns) must also survive the subsequent macro-GDS read
+    # unrescaled.
+    top_cell = result.top_cell()
+    macro_insts = [
+        inst for inst in top_cell.each_inst() if inst.cell.name == macro_cell_name
+    ]
+    assert len(macro_insts) == 1
+    disp_um = macro_insts[0].dtrans.disp
+    assert round(disp_um.x, 4) == pytest.approx(5.0)
+    assert round(disp_um.y, 4) == pytest.approx(5.0)
+
+
+def test_merge_def_to_gds_rejects_merged_bbox_outside_diearea(tmp_path):
+    """Regression guard for issue #1090's second, independent fix: a merged
+    top-cell bounding box that extends beyond the DEF's own `DIEAREA` -- the
+    same symptom a DBU mismatch produces -- must raise, not silently write a
+    wrong GDS. Engineered directly (a standard-cell GDS view whose own drawn
+    geometry sits far outside the die boundary) rather than via an actual
+    DBU mismatch, so this test exercises the sanity check itself,
+    independent of whether the read-side fix above is doing its job."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    # A cell GDS view whose own shape sits far outside the DEF's declared
+    # `DIEAREA ( 0 0 ) ( 4600 2720 )` (4.6 x 2.72 um) -- e.g. a box spanning
+    # 100..200 um, more than 20x the die's own extent.
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell(cell_name)
+    layer = layout.layer(kdb.LayerInfo(68, 20))
+    cell.shapes(layer).insert(
+        kdb.Box(100_000_000, 100_000_000, 200_000_000, 200_000_000)
+    )
+    layout.write(str(gds_dir / "sky130_fd_sc_hd.gds"))
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    with pytest.raises(PlaceAndRouteError, match="DIEAREA"):
+        place_and_route._merge_def_to_gds(
+            def_path=str(def_path),
+            tech_lef=str(tech_lef),
+            cell_lef=str(cell_lef),
+            pdk_info=_fake_pdk_info(root),
+            cell_library="sky130_fd_sc_hd",
+            hdl_toplevel="top",
+            macros=[],
+            out_path=str(tmp_path / "out.gds"),
+        )
 
 
 # --------------------------------------------------------------------------- #
