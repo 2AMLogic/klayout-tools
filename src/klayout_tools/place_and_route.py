@@ -2686,8 +2686,14 @@ def _run_corner_sweep(
 
 def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) -> str:
     """Build an actionable error message from a failed per-stage OpenROAD
-    run -- prefers the last ``[ERROR ...]``/``Error:`` line OpenROAD itself
-    printed, on either stream (mirrors ``synthesize.py``'s
+    run.
+
+    Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
+    -- on either stream, first occurrence -- over a bare ``Error:`` trailer
+    line (just ``<script>.tcl, <line> <code>``, no message text) that
+    reliably follows it on a Tcl-level failure at ``-exit`` (issue #1079).
+    Only when no bracketed diagnostic is present do we fall back to the last
+    bare ``Error:`` line, on either stream (mirrors ``synthesize.py``'s
     ``_synthesis_error_message``).
 
     ``DRT-0305`` (a constant-tie net reaching TritonRoute) is additionally
@@ -2699,14 +2705,20 @@ def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) ->
         error_line, hint = diagnosis
         return f"openroad '{stage}' stage failed: {error_line} -- {hint}"
 
-    for stream in (completed.stderr or "", completed.stdout or ""):
-        error_lines = [
-            line.strip()
-            for line in stream.splitlines()
-            if "[ERROR" in line or line.strip().startswith("Error:")
-        ]
-        if error_lines:
-            return f"openroad '{stage}' stage failed: {error_lines[-1]}"
+    bracket_lines: list[str] = []
+    bare_error_lines: list[str] = []
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in stream.splitlines():
+            stripped = line.strip()
+            if "[ERROR" in stripped:
+                bracket_lines.append(stripped)
+            elif stripped.startswith("Error:"):
+                bare_error_lines.append(stripped)
+
+    if bracket_lines:
+        return f"openroad '{stage}' stage failed: {bracket_lines[0]}"
+    if bare_error_lines:
+        return f"openroad '{stage}' stage failed: {bare_error_lines[-1]}"
 
     tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
     snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
