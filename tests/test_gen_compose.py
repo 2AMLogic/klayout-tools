@@ -21,6 +21,7 @@ from klayout_tools.gen_compose import (
     GenComposeError,
     _cleanup_points,
     _parse_array_placement,
+    _pin_ref,
     _polyline_midpoint_um,
     _resolve_label_layer,
     _resolve_via_drop_layer,
@@ -1894,9 +1895,198 @@ def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
     assert any("BADNET" in note for note in report["drc_hints"]["notes"])
 
 
-def test_compose_defers_bundle_net_as_unrouted(tmp_path, pdk_root):
-    # A >2-pin (bundle) net is out of scope this phase -- reported unrouted
-    # (partial success), not rejected as an application error.
+# --------------------------------------------------------------------------- #
+# Bundle (>2-pin) nets (#1073): a shared supply rail or fanout node touches one
+# port on every block it spans, so a two-pin-only router cannot wire the
+# majority of a real circuit's connectivity. `route_bundle` routes such a net
+# as a spanning tree of two-pin legs (nearest pair first), every leg going
+# through `route_two_pin` unchanged so all of its routability checks apply per
+# leg.
+# --------------------------------------------------------------------------- #
+
+
+def _gate_rail_blocks(tmp_path, pdk_root, count, cols=1, prefix="rail_m"):
+    """`count` 1-row mos_arrays whose gates are on the metal role.
+
+    `gate_contact=True` (#492) puts the gate terminal on `metal`, so a metal
+    rail actually lands on a contacted pad; `dummy=0` keeps a dummy column's
+    own (also contacted) gate pad out of the inter-gate channel the rail runs
+    through -- the same fixture shape
+    `test_compose_routes_gate_contact_port_end_to_end` already uses for the
+    two-pin case.
+    """
+    return [
+        _gen_block(
+            tmp_path,
+            pdk_root,
+            "mos_array",
+            f"{prefix}{index}",
+            rows=1,
+            cols=cols,
+            dummy=0,
+            gate_contact=True,
+        )
+        for index in range(count)
+    ]
+
+
+def _gate_rail_request(pdk_root, reports, pin_order, output, cell_name, net="VBIAS"):
+    ids = [f"b{index + 1}" for index in range(len(reports))]
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": block_id, "generator_report": report}
+            for block_id, report in zip(ids, reports, strict=True)
+        ],
+        "placement": {"strategy": "row", "order": ids, "spacing_um": 2.0},
+        "connectivity": [
+            {"net": net, "pins": [dict(pin) for pin in pin_order]},
+        ],
+        # A pad-wide trace: both gate ports face north, so a trace narrower
+        # than the pad would leave a sub-li1.space.1 slit beside each stub
+        # (see test_compose_routes_gate_contact_port_end_to_end's own note).
+        "routing": {"layer_role": "metal", "width_um": 0.42},
+        "options": {"cell_name": cell_name, "output": str(output)},
+    }
+
+
+def test_compose_routes_three_pin_rail_shared_by_three_blocks(tmp_path, pdk_root):
+    # The issue's own reproduction: three blocks sharing one supply/bias rail.
+    # Before #1073 this came back in `unrouted_nets[]` (exit 3) with nothing
+    # drawn; it must now be routed as a real, single conductor.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    output = tmp_path / "rail3.gds"
+    report = compose(
+        _gate_rail_request(
+            pdk_root,
+            reports,
+            [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+            output,
+            "rail3_0",
+        )
+    )
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    # A 3-pin net spans with 2 legs, each between adjacent blocks in the row.
+    assert [sorted(pin["block"] for pin in leg["pins"]) for leg in net["legs"]] == [
+        ["b1", "b2"],
+        ["b2", "b3"],
+    ]
+    assert all(leg["routed"] is True for leg in net["legs"])
+    assert net["route_length_um"] == pytest.approx(
+        sum(leg["route_length_um"] for leg in net["legs"])
+    )
+
+    # All three gate pads are one merged li1 polygon -- a real rail, not three
+    # stubs (the whole point of the issue).
+    positions = []
+    for index, block_report in enumerate(reports):
+        gate = next(p for p in block_report["ports"] if p["name"] == "U0_G")
+        offset = report["blocks"][index]["offset_um"]
+        positions.append((gate["x_um"] + offset["x"], gate["y_um"] + offset["y"]))
+    assert _shares_merged_polygon(output, "rail3_0", 67, 20, positions[0], positions[1])
+    assert _shares_merged_polygon(output, "rail3_0", 67, 20, positions[0], positions[2])
+
+    # One kdb.Text for the net, not one per leg -- the legs are one conductor.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    texts = list(layout.cell("rail3_0").shapes(layout.layer(67, 5)).each())
+    assert [text.text.string for text in texts] == ["VBIAS"]
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # ...and the loop closes: extraction sees all three gates on one named net.
+    result = extract.run_extract(str(output), "sky130", top="rail3_0")
+    gate_nets = [d["nets"]["g"] for d in result["devices"] if d["class"] == "nfet"]
+    assert gate_nets == ["VBIAS", "VBIAS", "VBIAS"], result["devices"]
+    assert "VBIAS" in {net["name"] for net in result["nets"] if net["pin"]}
+
+
+def test_compose_routes_four_pin_rail_regardless_of_pin_declaration_order(
+    tmp_path, pdk_root
+):
+    # 4 pins spanning 4 blocks, declared in a scrambled order: the spanning
+    # tree is built nearest-pair-first, so the caller's `pins[]` order is not
+    # a routing order -- a chain declared out of order still routes.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 4)
+    output = tmp_path / "rail4.gds"
+    report = compose(
+        _gate_rail_request(
+            pdk_root,
+            reports,
+            [{"block": f"b{i}", "port": "U0_G"} for i in (3, 1, 4, 2)],
+            output,
+            "rail4_0",
+        )
+    )
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    # 4 pins -> exactly 3 legs, every one of them between *adjacent* blocks
+    # (the nearest-first ordering is what makes this a trunk, not a star).
+    assert len(net["legs"]) == 3
+    for leg in net["legs"]:
+        left, right = sorted(int(pin["block"][1:]) for pin in leg["pins"])
+        assert right - left == 1, leg
+
+    result = extract.run_extract(str(output), "sky130", top="rail4_0")
+    gate_nets = [d["nets"]["g"] for d in result["devices"] if d["class"] == "nfet"]
+    assert gate_nets == ["VBIAS"] * 4, result["devices"]
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_routes_bundle_net_mixing_a_self_net_leg_and_a_cross_block_leg(
+    tmp_path, pdk_root
+):
+    # A fanout node that taps two terminals of one block plus one of another:
+    # the nearest leg is a *self*-net (both pins on b1), which goes through
+    # exactly the same route_two_pin self-net checks (#433/#453/#469) a 2-pin
+    # self-net does.
+    b1 = _gate_rail_blocks(tmp_path, pdk_root, 1, cols=2, prefix="hub_a")[0]
+    b2 = _gate_rail_blocks(tmp_path, pdk_root, 1, prefix="hub_b")[0]
+    output = tmp_path / "hub.gds"
+    report = compose(
+        _gate_rail_request(
+            pdk_root,
+            [b1, b2],
+            [
+                {"block": "b1", "port": "U0_G"},
+                {"block": "b1", "port": "U1_G"},
+                {"block": "b2", "port": "U0_G"},
+            ],
+            output,
+            "hub_0",
+        )
+    )
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert len(net["legs"]) == 2
+    # The self-net leg (both pins on b1) is the nearest pair, so it is tried
+    # -- and accepted -- first.
+    assert [pin["block"] for pin in net["legs"][0]["pins"]] == ["b1", "b1"]
+
+    result = extract.run_extract(str(output), "sky130", top="hub_0")
+    gate_nets = [d["nets"]["g"] for d in result["devices"] if d["class"] == "nfet"]
+    assert gate_nets == ["VBIAS", "VBIAS", "VBIAS"], result["devices"]
+
+
+def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
+    tmp_path, pdk_root
+):
+    # The pre-#1073 fixture (this test replaces
+    # `test_compose_defers_bundle_net_as_unrouted`, which asserted the net was
+    # deferred *because* it had >2 pins). The net is still unrouted -- but now
+    # for a real, per-leg geometric reason, reported per leg rather than as a
+    # blanket "bundle routing is out of scope".
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
     output = tmp_path / "bundle.gds"
@@ -1922,9 +2112,200 @@ def test_compose_defers_bundle_net_as_unrouted(tmp_path, pdk_root):
             "options": {"cell_name": "bundle_0", "output": str(output)},
         }
     )
+
     assert report["unrouted_nets"] == ["BUS"]
-    assert report["nets"][0]["routed"] is False
-    assert any("bundle" in note for note in report["drc_hints"]["notes"])
+    net = report["nets"][0]
+    assert net["routed"] is False
+    assert net["route_length_um"] is None
+
+    legs = {tuple(_pin_ref(pin) for pin in leg["pins"]): leg for leg in net["legs"]}
+    # The b1.P1 leg across b1's own body is rejected by the self-net
+    # drawn-metal check (#453/#469) -- the per-leg reason names it...
+    self_leg = legs[("b1.P1", "b1.P2")]
+    assert self_leg["routed"] is False
+    assert "drawn" in self_leg["reason"]
+    # ...and the router still tried the farther alternative to b1.P1, which
+    # the obstacle check rejects for plowing through b1.
+    around_leg = legs[("b1.P1", "b2.P1")]
+    assert around_leg["routed"] is False
+    assert "crosses" in around_leg["reason"]
+    # The b1.P2-b2.P1 leg is routable on its own, but nothing is drawn for a
+    # net that could not be fully connected: `legs[].routed` means "drawn".
+    connectable_leg = legs[("b1.P2", "b2.P1")]
+    assert connectable_leg["routed"] is False
+    assert "net as a whole could not be connected" in connectable_leg["reason"]
+
+    note = next(note for note in report["drc_hints"]["notes"] if "BUS" in note)
+    assert "'b1.P1'" in note  # names the pin that could not be reached
+    assert "nets[].legs[]" in note
+
+    # All-or-nothing: no route metal at all for an unconnectable net.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bundle_0")
+    assert [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()] == []
+    assert list(top.shapes(layout.layer(67, 5)).each()) == []
+
+
+def test_compose_bundle_net_tries_every_candidate_leg_to_an_unreachable_pin(
+    tmp_path, pdk_root
+):
+    # A pin behind a closed guard ring cannot be reached from anywhere, so
+    # *both* candidate legs into it are attempted and rejected -- evidence
+    # that a rejected leg is retried against another partner rather than
+    # failing the net at the first rejection.
+    m1, m2 = _gate_rail_blocks(tmp_path, pdk_root, 2)
+    ringed = _gen_block(tmp_path, pdk_root, "diff_pair", "ringed", splits=1)
+    output = tmp_path / "ringed_bundle.gds"
+    report = compose(
+        _gate_rail_request(
+            pdk_root,
+            [m1, m2, ringed],
+            [
+                {"block": "b1", "port": "U0_G"},
+                {"block": "b2", "port": "U0_G"},
+                {"block": "b3", "port": "Q1_1_S"},
+            ],
+            output,
+            "ringed_bundle_0",
+        )
+    )
+
+    assert report["unrouted_nets"] == ["VBIAS"]
+    net = report["nets"][0]
+    assert net["routed"] is False
+    ring_legs = [
+        leg for leg in net["legs"] if any(pin["block"] == "b3" for pin in leg["pins"])
+    ]
+    assert len(ring_legs) == 2  # both partners tried
+    assert all("closed guard/collector ring" in leg["reason"] for leg in ring_legs)
+
+
+def test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected(
+    tmp_path, pdk_root
+):
+    # Direct `route_bundle` test of the `leg_conflict` hook -- the same hook
+    # `compose()` passes its route-vs-route collision check (#1057) through.
+    # Rejecting the nearest leg (b1-b2) must not fail the net: the next
+    # candidate that joins the same two parts (b1-b3, spanning over b2) is
+    # tried instead.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    ids = ["b1", "b2", "b3"]
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": block_id, "generator_report": report}
+            for block_id, report in zip(ids, reports, strict=True)
+        ]
+    )
+    bboxes = {block_id: blocks[block_id]["bbox_um"] for block_id in ids}
+    offsets = compute_row_offsets(ids, bboxes, spacing_um=2.0)
+    placed = {
+        block_id: _translate_bbox(bboxes[block_id], offsets[block_id])
+        for block_id in ids
+    }
+    pins = [{"block": block_id, "port": "U0_G"} for block_id in ids]
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+
+    def _gate_x(block_id):
+        gate = blocks[block_id]["ports"]["U0_G"]
+        return round(gate["x_um"] + offsets[block_id]["x"], 6)
+
+    def _reject_b1_b2(points_um):
+        endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
+        if endpoints == {_gate_x("b1"), _gate_x("b2")}:
+            return "simulated collision with an already-routed net"
+        return None
+
+    baseline = gen_compose.route_bundle(
+        pins, blocks, offsets, placed, 0.42, route_layer
+    )
+    assert baseline["routed"] is True
+    assert [
+        sorted(pin["block"] for pin in leg["pins"]) for leg in baseline["legs"]
+    ] == [["b1", "b2"], ["b2", "b3"]]
+
+    result = gen_compose.route_bundle(
+        pins,
+        blocks,
+        offsets,
+        placed,
+        0.42,
+        route_layer,
+        leg_conflict=_reject_b1_b2,
+    )
+    assert result["routed"] is True
+    accepted = [
+        sorted(pin["block"] for pin in leg["pins"])
+        for leg in result["legs"]
+        if leg["routed"]
+    ]
+    assert ["b1", "b2"] not in accepted
+    # Still a spanning tree: 2 legs covering all three blocks.
+    assert len(accepted) == 2
+    assert {block_id for leg in accepted for block_id in leg} == set(ids)
+
+
+def test_compose_rejects_waypoints_um_on_a_bundle_net(tmp_path, pdk_root):
+    # `waypoints_um` (#634) steers *one* backbone; a >2-pin net routes as a
+    # spanning tree of legs, so there is no unambiguous leg for it to belong
+    # to -- an application error at parse time, never a silently ignored field.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+        tmp_path / "waypoint_bundle.gds",
+        "waypoint_bundle_0",
+    )
+    request["connectivity"][0]["waypoints_um"] = [[1.0, 5.0]]
+    with pytest.raises(GenComposeError, match="only supported for a 2-pin net"):
+        compose(request)
+
+
+def test_compose_reports_a_two_pin_net_as_a_single_leg(tmp_path, pdk_root):
+    # The 2-pin path is the degenerate one-leg case of the same router --
+    # `nets[].legs[]` is present for every net, so a consumer never has to
+    # special-case pin count.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 2)
+    output = tmp_path / "two_pin_legs.gds"
+    report = compose(
+        _gate_rail_request(
+            pdk_root,
+            reports,
+            [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2)],
+            output,
+            "two_pin_legs_0",
+        )
+    )
+
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert len(net["legs"]) == 1
+    assert net["legs"][0]["pins"] == net["pins"]
+    assert net["legs"][0]["route_length_um"] == pytest.approx(net["route_length_um"])
+    assert net["legs"][0]["reason"] is None
+
+
+def test_compose_bundle_net_needs_no_leg_for_a_pin_listed_twice(tmp_path, pdk_root):
+    # A duplicated {block, port} is the same physical point, so it needs no
+    # leg of its own -- the net still routes with the same 2 legs a 3-pin
+    # declaration would use, not a zero-length route to itself.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    output = tmp_path / "dup_pin.gds"
+    report = compose(
+        _gate_rail_request(
+            pdk_root,
+            reports,
+            [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3, 2)],
+            output,
+            "dup_pin_0",
+        )
+    )
+
+    assert report["unrouted_nets"] == []
+    assert len(report["nets"][0]["legs"]) == 2
 
 
 def test_compose_requires_routing_spec_when_connectivity_present(tmp_path, pdk_root):
@@ -4081,8 +4462,12 @@ def test_cli_gen_compose_connectivity_error_exit_1(tmp_path, pdk_root, capsys):
 
 
 def test_cli_gen_compose_partial_success_exit_3(tmp_path, pdk_root, capsys):
-    # A bundle (>2-pin) net is left unrouted -> partial success (exit 3) with
-    # the full success payload still on stdout.
+    # A net the router cannot connect is left unrouted -> partial success
+    # (exit 3) with the full success payload still on stdout. Since #1073 the
+    # >2-pin shape below is *routed* when its legs are routable; here b1.P1 is
+    # reachable neither across b1's own body (a self-net short) nor around it
+    # (plowing through b1's interior), so the net is still unrouted -- for a
+    # per-leg geometric reason rather than for having more than two pins.
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
     request_path = tmp_path / "request.json"

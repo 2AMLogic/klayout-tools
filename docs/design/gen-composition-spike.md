@@ -467,6 +467,16 @@ proposal, for whoever eventually spikes the implementation epic:
    exactly two ports) before bundle/multi-pin routing — `route_bundle`-style
    many-pin nets (§1) are the natural next increment once two-pin routing
    is proven against a real block.
+
+   *Status (issue #1073): both increments have landed.* Two-pin routing
+   shipped with Epic #191 phase 2 and was hardened against real blocks
+   (#199/#433/#453/#454/#461/#469/#492/#496/#634/#999/#1057); the bundle
+   increment this item reserved is now implemented as
+   `gen_compose.route_bundle` — an N-pin net routes as a spanning tree of
+   two-pin legs, nearest pair first, every leg going through the same
+   `route_two_pin` checks. This item is recorded as *sequencing* rather than
+   as a permanent scope boundary, and that sequencing held: bundle routing
+   was built on the two-pin primitive rather than instead of it.
 3. **`matched_groups[]` reporting** (§2, read-only echo of every
    `matched_group_id` seen) before `placement.symmetry_axis` verification —
    consuming the hook by *reporting* it is strictly simpler than consuming

@@ -64,15 +64,44 @@ cleanly.
   accepted spike for a later phase (a row-wrap layout of *distinct* blocks
   into `placement.cols` columns) — deliberately not the name used for
   `"array"` above, to avoid colliding with that reservation.
-- **Routing** — two-pin, point-to-point Manhattan routing between the named
-  ports listed in `connectivity[]`. Each 2-pin net is drawn as a native
-  `pya.Path` (backbone → corner bends → straight fill) on the resolved
+- **Routing** — point-to-point Manhattan routing between the named ports
+  listed in `connectivity[]`. Each 2-pin net is drawn as a native `pya.Path`
+  (backbone → corner bends → straight fill) on the resolved
   `routing.layer_role` layer at `routing.width_um` width; `nets[]` reports
   `routed` and `route_length_um` per net. A net the router cannot connect is
   reported in `unrouted_nets[]` (a **partial success**, exit code `3`), not a
-  hard failure. **Bundle (>2-pin) routing is out of scope this phase** — a net
-  with more than two pins is left unrouted (reported in `unrouted_nets[]` with
-  an explanatory `drc_hints.notes[]` entry), not rejected.
+  hard failure.
+- **Bundle (>2-pin) routing (#1073)** — a `connectivity[]` net with three or
+  more pins (a shared supply/ground rail, a bias line, a clock, any fanout
+  node) is routed as a **spanning tree of two-pin legs**: every unordered pin
+  pair is a candidate leg, candidates are tried nearest-first (Manhattan
+  distance between the two ports' composed-frame positions, ties broken by
+  declaration order so the output stays byte-reproducible), and a leg is
+  accepted when it joins two so-far-disconnected parts of the net. For the
+  canonical rail case — one supply port per block across a placement row —
+  that yields exactly a trunk: a chain of adjacent-block legs. Consequences
+  worth knowing:
+  - **Every leg is routed by the same two-pin router**, so all of its
+    routability checks (channel width, guard/collector ring, self-net pad
+    crossing, self-net drawn-metal short, obstacle overlap, via-drop
+    resolution) apply per leg. A leg one of them rejects is skipped in favour
+    of the next candidate joining the same two parts, so a net routes around
+    an individually unroutable pair whenever another spanning tree exists.
+  - **`pins[]` order is not a routing order.** The tree is built
+    nearest-first, so a rail declared in an arbitrary block order routes the
+    same way as one declared left to right.
+  - **All-or-nothing per net.** If the pins cannot all be joined, *nothing* is
+    drawn for the net and it is reported in `unrouted_nets[]` — a half-wired
+    net would leave the caller building the rest of its interconnect around
+    the router's own geometry. `nets[].legs[]` reports every attempted leg
+    with its own rejection reason, so the failure is per leg, never a blanket
+    "this net is too big".
+  - **One net label, not one per leg** — the legs are one conductor, so the
+    net gets exactly one `kdb.Text` (same as a 2-pin net's single path).
+  - `waypoints_um` (#634) steers a single backbone and is therefore only
+    accepted on a **2-pin** net; supplying it on a >2-pin net is an
+    application error (exit `1`), never a silently ignored field. Split the
+    net into 2-pin `connectivity[]` entries to steer individual legs.
 - **Via-drop routing (#454)** — a family whose curated extraction deck
   declares a second routing-metal level exposes it as a second
   `routing.layer_role` (sky130's `"metal2"`, resolving to met1 `68/20`;
@@ -660,8 +689,8 @@ exit codes).
 | `placement.rows`/`placement.cols` | integer | **Required when `strategy: "array"`** (#1053), otherwise not read. The grid's row/column counts — each must be a positive integer (`>= 1`); a non-integer, zero, or negative value is an application error (exit 1). |
 | `placement.row_pitch_um`/`placement.col_pitch_um` | number | **Required when `strategy: "array"`**, otherwise not read. The fixed spacing between adjacent tile origins along each axis — each must be `> 0` (a zero or negative pitch is an application error, exit 1, even for a degenerate `rows: 1` or `cols: 1` array, where the corresponding pitch is otherwise unused geometrically). |
 | `placement.origin_um` | object | Optional, **`strategy: "array"` only** — the base (row 0, col 0) tile's own `{"x": number, "y": number}` origin, i.e. that block's `offset_um`. Defaults to `{"x": 0.0, "y": 0.0}` when omitted, mirroring `"row"` placement's own implicit first-block origin. A non-numeric `x`/`y` is an application error (exit 1). |
-| `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. A **2-pin** net is routed point-to-point (see "Scope"); a **>2-pin** (bundle) net is left unrouted this phase. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
-| `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1). Omitting it changes nothing (today's fixed one-jog/corner shape). |
+| `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. A **2-pin** net is routed point-to-point; a **>2-pin** (bundle) net is routed as a spanning tree of two-pin legs, nearest pair first (#1073) — see "Scope". Pin order is not a routing order. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
+| `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1), as is supplying it on a **>2-pin** net (#1073 — a bundle net's spanning tree has no single backbone for the path to belong to; split the net into 2-pin entries to steer individual legs). Omitting it changes nothing (today's fixed one-jog/corner shape). |
 | `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
 | `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |
@@ -695,7 +724,18 @@ exit codes).
         { "block": "mirror", "port": "M1_1_D" }
       ],
       "routed": true,
-      "route_length_um": 3.2
+      "route_length_um": 3.2,
+      "legs": [
+        {
+          "pins": [
+            { "block": "diffpair", "port": "Q1_1_D" },
+            { "block": "mirror", "port": "M1_1_D" }
+          ],
+          "routed": true,
+          "route_length_um": 3.2,
+          "reason": null
+        }
+      ]
     }
   ],
   "pins": [
@@ -727,9 +767,10 @@ exit codes).
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields. |
 | `bbox_um` | object | Bounding box of the *composed* cell — the union of every placed block's own `bbox_um`, translated by its `offset_um` (computed arithmetically from each block's reported `bbox_um`, never re-derived from drawn geometry). |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
-| `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean) and `route_length_um` (total routed wire length in um, or `null` when the net was not routed — for a caller doing a first-order parasitic estimate before extraction). Present for every net including bundle (>2-pin) and unroutable ones (with `routed: false`). |
+| `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean), `route_length_um` (total routed wire length in um across **all** the net's legs, or `null` when the net was not routed — for a caller doing a first-order parasitic estimate before extraction) and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). |
+| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, and `reason` (`null` when routed, otherwise why this leg was not drawn). A 2-pin net has exactly one leg; an N-pin net has N−1 when routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output** — a net that could not be fully connected draws nothing at all, so *every* one of its legs reports `routed: false` (a leg that was individually routable says so in its `reason`), and legs the router tried and rejected on the way to a working spanning tree are dropped from a routed net's list. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
-| `unrouted_nets[]` | array\<string\> | Net labels the router could not connect (an unroutable 2-pin net, or a >2-pin bundle net deferred this phase). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. |
+| `unrouted_nets[]` | array\<string\> | Net labels the router could not connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. Nothing is drawn for a listed net (a bundle net is all-or-nothing), so the caller can wire it themselves without colliding with a half-drawn route. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. |
 
@@ -739,7 +780,7 @@ exit codes).
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed) — **`"row"` placement only**. `null` when no `connectivity[]` was supplied (nothing was routed, so no routing/placement spacing was exercised as a clearance), and always `null` under `"explicit"` (#321) or `"array"` (#1053) placement — neither has a single shared spacing value to report (`"explicit"`'s per-pair separation is exactly what a caller-declared origin expresses; `"array"` has two independent pitches, `row_pitch_um`/`col_pitch_um`, not one). |
 | `matched_groups[]` | array\<object\> | One entry per distinct `matched_group_id` seen among the input blocks' own `generator_report.drc_hints.matched_group_id` (in first-seen order): `matched_group_id` (echoed), `blocks` (the request-level block `id`s carrying it), and `placement_symmetric` (always `null` this phase — symmetry *verification* against a declared symmetry axis is out of scope). Empty when no input block carries a `matched_group_id`. |
-| `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, a bundle net deferred this phase, or a route-vs-route collision with an already-routed net, #1057). Always present, empty when there is nothing to report. |
+| `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, a route-vs-route collision with an already-routed net #1057, or, for a bundle net, which pins could not be reached plus the nearest per-leg rejection #1073). Always present, empty when there is nothing to report. |
 
 #### `blocks[]` entries
 
@@ -786,6 +827,7 @@ blocks:
 
 nets:
   VOUT  routed  length=3.2um
+  VDD  routed  length=8.76um  (2 legs)
 
 matched_groups:
   diff_pair:pair:2  (diffpair)
@@ -798,7 +840,7 @@ matched_groups:
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
 | `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
-| `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed, or a >2-pin bundle net was deferred this phase). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
+| `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
 On error, a concise message is written to **stderr** and nothing is written
 to stdout (and no GDS/OASIS file is written). No Python traceback is
@@ -996,8 +1038,9 @@ $ klt gen diff_pair --params '{"mirror": true, "splits": 1, "add_guard_ring": fa
 
 # Compose them into one row-placed cell. Connectivity: TAIL_A/TAIL_B tie the
 # pair's two source nodes and the tail device's drain into one three-way tail
-# node (decomposed into two 2-pin nets sharing the tail.U0_D endpoint, since
-# bundle/>2-pin nets are out of scope this phase); N1/VOUT tie each input
+# node (decomposed into two 2-pin nets sharing the tail.U0_D endpoint -- the
+# only way to express it before #1073; see the note under this request for
+# the single 3-pin form that now routes the same node); N1/VOUT tie each input
 # device's drain to the mirror's *source*-side port on the matching row --
 # not literally "drain to drain" (#199 above; see the comment there for why),
 # but the closest topologically-meaningful connection this phase's router can
@@ -1024,6 +1067,28 @@ EOF
 # Exit 0 -- every block placed, every net routed (unrouted_nets: []).
 $ klt gen-compose compose_request.json --format json
 ```
+
+**The tail node as one bundle net (#1073).** The `TAIL_A`/`TAIL_B` pair above
+is one three-way node written as two 2-pin nets sharing the `tail.U0_D`
+endpoint, because that was the only shape a two-pin-only router accepted.
+Since #1073 the same node can be declared directly, and the router builds the
+spanning tree itself:
+
+```json
+{ "net": "TAIL", "pins": [
+  { "block": "tail", "port": "U0_D" },
+  { "block": "diffpair", "port": "Q1_1_S" },
+  { "block": "diffpair", "port": "Q2_1_S" }
+] }
+```
+
+Verified on this exact block set: exit `0`, `unrouted_nets: []`, the net
+routed as two legs (`diffpair.Q1_1_S`–`diffpair.Q2_1_S`, then
+`tail.U0_D`–`diffpair.Q1_1_S`) totalling 4.52um, `klt drc` clean, and
+`klt extract` reporting a single `TAIL` pin instead of the `TAIL_A|TAIL_B`
+two-label alias the decomposed form produces. The example above is left in
+its two-net form because the LVS reference netlist below matches against that
+node naming.
 
 ### Extraction and LVS
 
