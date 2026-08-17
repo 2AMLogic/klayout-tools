@@ -555,6 +555,82 @@ class ResistorFlavour:
 
 
 @dataclass(frozen=True)
+class MOSFlavour:
+    """One additional, marker-scoped MOS voltage/gate-oxide flavour an
+    :class:`ExtractionDeck` recognises via its optional ``mos_flavours``
+    field (issue #1111, option 2 of #552) -- e.g. gf180mcu's ``Dualgate``
+    (55/0) selecting its 5V/6V thick-oxide domain, whose real device models
+    (``nfet_06v0``/``pfet_06v0``) differ from the deck's default 3.3V
+    ``nfet_03v3``/``pfet_03v3``.
+
+    Before this field existed, a deck derived NMOS/PMOS purely from
+    ``active``/``nwell`` (see :class:`ExtractionDeck`'s own docstring) and
+    bound every recognised transistor to the same model regardless of any
+    other marker layer drawn over it -- ``decks.get_unmodeled_voltage_markers``
+    (issue #577) only *warned* about the resulting mismatch, it never fixed
+    it. Each ``MOSFlavour`` entry narrows that split for the geometry drawn
+    inside ``marker``: ``extract.py`` computes this deck's ordinary
+    ``nfet``/``pfet`` regions from ``active`` with every declared flavour's
+    marker-interacting geometry first set aside (so the default split is
+    unaffected outside every flavour marker -- no regression for the common
+    case), then re-derives an *additional* ``nfet``/``pfet`` split from just
+    that set-aside geometry per flavour, extracted with its own
+    ``kdb.DeviceExtractorMOS4Transistor`` pass.
+
+    Deliberately does **not** introduce a new ``devices[].class`` label for
+    flavoured transistors: every MOS device -- flavoured or not -- still
+    extracts under the deck's ordinary ``nfet_class``/``pfet_class`` (e.g.
+    plain ``"nfet"``/``"pfet"``), so this has no effect on ``device_counts``,
+    ``klt lvs`` device-class matching, or any other consumer of the
+    structural netlist. Instead, ``extract.py`` tags each flavoured device
+    with a KLayout device *property* (``pdk_models.MOS_FLAVOUR_PROPERTY``,
+    keyed by :attr:`flavour`) that only the ``--pdk`` SPICE model-binding
+    writer (:mod:`klayout_tools.pdk_models`) reads, to select the flavour's
+    own real subcircuit instead of the deck's default one -- the property is
+    invisible to every other consumer (JSON response, LVS comparison,
+    unbound ``M``-card output). See ``pdk_models``'s module docstring for the
+    matching ``(deck_name, pdk_variant_family) -> {flavour: {"nfet": ...,
+    "pfet": ...}}`` binding table this ties into.
+
+    ``marker`` should be a layer this deck also registers via
+    ``get_unmodeled_voltage_markers`` describing what remains unmodelled
+    beyond MOS recognition (e.g. gf180mcu's DRC rules that still do not read
+    ``Dualgate``) -- reusing that same marker, not a new deck-specific
+    hardcode, is what makes a flavour declaration here also suppress
+    ``extract.py``'s own MOS ``voltage_domain_warnings`` for exactly the
+    geometry this entry now correctly models (issue #577's diagnostic is a
+    *residual*-gap signal; once a gap is closed here, the warning for it
+    should stop firing).
+
+    ``flavour`` is a short caller-invisible identifier (e.g. ``"06v0"``) that
+    must match a key in ``pdk_models``'s per-deck flavour binding table --
+    the single point of contact between this deck-geometry declaration and
+    that PDK-model-name table (kept in separate modules, matching this
+    codebase's existing "geometry vs. model binding" module split).
+
+    A transistor's *whole* active-diffusion island (both source and drain,
+    not just the gate -- gf180mcu draws a MOS device's active mask as one
+    continuous polygon spanning source-gate-drain) is classified against
+    ``marker`` as a single unit: an island that ``interacting`` overlaps the
+    marker *at all* is entirely this flavour's, never split mid-island. This
+    is a deliberate, documented choice for the marker-straddling case (the
+    DRM does not contemplate a transistor legally straddling a voltage-
+    domain boundary at all -- every real device is either fully inside or
+    fully outside the marker), and matches the "any overlap counts" idiom
+    ``_detect_voltage_domain_overlap`` (issue #552/#577) already uses for its
+    own marker-interaction gate.
+
+    ``description`` is a short human-readable label for this flavour
+    (currently unused by any consumer beyond documentation -- a placeholder
+    for a future per-flavour JSON surface).
+    """
+
+    marker: tuple[int, int]
+    flavour: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class ExtractionDeck:
     """Connectivity + device-extraction rule set for ``klt extract`` (see
     ``docs/design/lvs-extraction-spike.md`` and ``docs/cli/extract.md``).
@@ -696,14 +772,23 @@ class ExtractionDeck:
     recognition rule was transcribed from -- the device-recognition analogue
     of :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s own
     docstring), applied to the two MOS device classes this deck *always*
-    recognises via its own ``active``/``poly``/``nwell`` fields above. Unlike
-    ``bipolars``/``capacitors``/``resistors``/``diodes``, MOS recognition has
-    no per-entry list to attach a ``provenance`` field to (a deck declares
-    exactly one NMOS and one PMOS recognition rule, not a variable-length
-    collection), so these two citations live directly on the deck instead.
-    Both default to ``None`` -- no structured provenance backfilled yet, the
-    same "prose comment remains the record" default every other
-    ``provenance`` field in this module carries.
+    recognises via its own ``active``/``poly``/``nwell`` fields above. A deck
+    still declares exactly one *default* NMOS and one *default* PMOS
+    recognition rule this way -- ``mos_flavours`` below is the (optional,
+    additive) per-entry list for every *additional*, marker-scoped MOS
+    voltage flavour a deck also recognises, rather than a change to this
+    default pair. Both default to ``None`` -- no structured provenance
+    backfilled yet, the same "prose comment remains the record" default every
+    other ``provenance`` field in this module carries.
+
+    ``mos_flavours`` (issue #1111, option 2 of #552) is an optional tuple of
+    :class:`MOSFlavour` entries (empty by default) declaring additional,
+    marker-scoped MOS voltage/gate-oxide flavours this deck recognises beyond
+    the default ``active``/``nwell`` split above -- see :class:`MOSFlavour`'s
+    own docstring for the full derivation and why it does not introduce a new
+    ``devices[].class`` label. Empty for a deck with no such flavour (every
+    deck as of this field's introduction, until gf180mcu's own module sets
+    it) extracts exactly as it did before the field existed.
     """
 
     active: tuple[int, int]
@@ -726,6 +811,7 @@ class ExtractionDeck:
     capacitors: tuple[CapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
+    mos_flavours: tuple[MOSFlavour, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
 
@@ -837,6 +923,8 @@ class ExtractionDeck:
                 layers.add(diode.anode)
             if diode.cathode is not None:
                 layers.add(diode.cathode)
+        for mos_flavour in self.mos_flavours:
+            layers.add(mos_flavour.marker)
         return frozenset(layers)
 
     @property

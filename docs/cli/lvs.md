@@ -237,6 +237,19 @@ A reference netlist that *mixes* plain-element `M` cards and subckt-call `X`
 device cards converts correctly under `form: "subckt-call"` — the `M` cards
 pass through unchanged.
 
+**gf180mcu MOS flavour subcircuits** (issue #1111): the curated table also
+recognises `nfet_06v0`/`pfet_06v0` (gf180mcu's `Dualgate`-scoped 5V/6V MOS
+flavour `klt extract --pdk` binds a transistor drawn inside `Dualgate` to —
+see [`klt extract`'s "Voltage-domain markers and per-flavour MOS binding"
+section](extract.md#voltage-domain-markers-issue-552-and-per-flavour-mos-binding-issue-1111))
+alongside the default `nfet_03v3`/`pfet_03v3`. Both flavours convert to the
+*same* plain-element class, `nfet`/`pfet` — not a separate `nfet_06v0`
+class — matching the layout side: `klt extract`'s own structural
+`devices[].class` never varies by MOS flavour either (only the *bound SPICE
+model name* does, under `--pdk`), so a reference netlist naming either
+flavour's subcircuit compares correctly against the extracted layout's
+`nfet`/`pfet` devices.
+
 **Unit suffixes matter.** `NetlistSpiceReader` interprets a bare numeric
 literal for a MOS `W`/`L` parameter as plain SI (metres) per the SPICE
 standard, but an explicit `U` (or `UM`) suffix as micrometres — the

@@ -378,6 +378,7 @@ from . import (
     DrcRule,
     ExtractionDeck,
     LayerRC,
+    MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
     ResistorFlavour,
@@ -1203,38 +1204,37 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # not 0.22/0.28 um, and `drc.py` no longer counts geometry those four rules
 # checked toward this warning's gate.
 #
-# What is NOT modelled, and is what this entry now warns about: (a) every
-# other DRC rule above still encodes the 3.3V column only and never reads
+# What is NOT modelled, and is what this entry now warns about: every other
+# DRC rule above still encodes the 3.3V column only and never reads
 # `Dualgate` -- including DRM rules with an `_MV` column this deck has not
 # transcribed at all yet (`DF.6` COMP extend beyond gate 0.24 vs. 0.40,
-# `PL.5a`/`PL.5b` field poly to COMP 0.10 vs. 0.30) -- and (b)
-# `EXTRACTION_DECK` below derives `nfet`/`pfet` from `Nwell` alone (no
-# `Dualgate` read at all), so a transistor drawn entirely inside `Dualgate`
-# still extracts as the wrong (3.3V) model. Registered here as a "fail
-# loudly" diagnostic (`decks.get_unmodeled_voltage_markers`, consumed by
-# `drc.py`'s `coverage.voltage_domain_warnings` and `extract.py`'s
-# `voltage_domain_warnings`) for exactly that residue; per-flavour MOS marker
-# + `_06v0` model table entries (issue #552's option 2) remain a separate
-# follow-on.
+# `PL.5a`/`PL.5b` field poly to COMP 0.10 vs. 0.30).
 #
-# `Dualgate` is *also* read correctly today (not part of this gap) by the
-# `DiodeDevice` entries further below, each via its own
-# `requires=(..., Dualgate)` field (issue #542) -- this registry only
-# concerns the paths that remain unscoped: every DRC rule above other than
-# the four `Comp` voltage-split ones, and the plain `nfet`/`pfet` MOS
-# recognition in `EXTRACTION_DECK`.
+# What issue #1111 (#552's option 2) additionally closed: `EXTRACTION_DECK`
+# below now declares one `mos_flavours` entry keyed on this same `Dualgate`
+# marker (see `MOSFlavour`'s own docstring in `decks/__init__.py`), so a
+# transistor drawn entirely inside `Dualgate` extracts bound to the real
+# `nfet_06v0`/`pfet_06v0` models (`--pdk`-resolved SPICE output) instead of
+# the default 3.3V ones -- `extract.py`'s own MOS `voltage_domain_warnings`
+# no longer fires for this marker (it only ever warned about the *MOS*
+# binding gap; the DRC-rule gap above is unaffected and still fires via
+# `drc.py`'s own per-rule `coverage.voltage_domain_warnings` gate). This
+# registry entry stays -- and its description below is updated to drop the
+# now-closed MOS claim -- because the DRC-rule residue above remains real.
+#
+# `Dualgate` is *also* read correctly today (not part of either gap above) by
+# the `DiodeDevice` entries further below, each via its own
+# `requires=(..., Dualgate)` field (issue #542).
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (55, 0): (
         "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
         "This curated deck models it for the DF.1a/DF.3a COMP width/space "
-        "rules only, which ship as _LV/_MV pairs (0.22/0.30 and 0.28/0.36 um) "
-        "scoped to the marker; every other DRC rule still applies the "
-        "3.3V/_LV thresholds regardless of Dualgate's presence (e.g. DF.6 "
-        "COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field poly to "
-        "COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in this "
-        "deck yet), and MOS extraction always binds the 3.3V models "
-        "(nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside "
-        "Dualgate."
+        "rules and (issue #1111) MOS device recognition/model binding "
+        "(nfet_06v0/pfet_06v0 under --pdk) only; every other DRC rule still "
+        "applies the 3.3V/_LV thresholds regardless of Dualgate's presence "
+        "(e.g. DF.6 COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field "
+        "poly to COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in "
+        "this deck yet)."
     ),
 }
 
@@ -1831,17 +1831,33 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
         ),
     ),
-    # MOS recognition always binds the 3.3V models (issue #904) -- the
-    # module docstring's own `UNMODELED_VOLTAGE_MARKERS` note above already
-    # states this explicitly ("extraction always binds the 3.3V models
-    # (nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside
-    # Dualgate"), so `nfet_03v3`/`pfet_03v3` are the official upstream
-    # device-class names cited here, not a new claim.
+    # Default MOS recognition binds the 3.3V models (issue #904) --
+    # `nfet_03v3`/`pfet_03v3` are the official upstream device-class names
+    # cited here for every transistor drawn *outside* `Dualgate`.
     nfet_provenance=_gf180mcu_lvs_provenance(
         _GF180MCU_MOS_LVS_SOURCE_PATH, "gf180mcu_fd_pr__nfet_03v3"
     ),
     pfet_provenance=_gf180mcu_lvs_provenance(
         _GF180MCU_MOS_LVS_SOURCE_PATH, "gf180mcu_fd_pr__pfet_03v3"
+    ),
+    # Per-flavour MOS marker (issue #1111, option 2 of #552): a transistor
+    # drawn entirely inside `Dualgate` (55/0) is gf180mcu's 5V/6V thick-oxide
+    # flavour, whose real upstream device-class names are `nfet_06v0`/
+    # `pfet_06v0` (same `mos_extraction.lvs` source as the default pair
+    # above -- see `_GF180MCU_MOS_LVS_SOURCE_PATH`'s own lower-confidence
+    # note). `MOSFlavour.flavour="06v0"` is the key `pdk_models.py`'s
+    # `_MOS_MODEL_FLAVOURS[("gf180mcu", "gf180mcu")]` table binds to those
+    # two real subcircuit names under `--pdk` -- see that module's docstring
+    # for the verified-provenance citation (`nfet_06v0` is independently
+    # confirmed in the same real fetched install this deck's other MOS/
+    # diode/resistor citations use, e.g. `gf180mcu_fd_io.spice`'s own
+    # `X5 n56 IE VSS VSS nfet_06v0 ...` instantiation).
+    mos_flavours=(
+        MOSFlavour(
+            marker=(55, 0),  # Dualgate
+            flavour="06v0",
+            description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
+        ),
     ),
 )
 

@@ -164,6 +164,7 @@ from .decks import (
 from .lef_header import read_lef_macro_pin_ports
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
+    MOS_FLAVOUR_PROPERTY,
     DeviceBinding,
     ModelBindingError,
     create_model_binding_delegate,
@@ -1814,18 +1815,25 @@ def run_extract(
     marker layer (registered per-deck via
     :func:`~klayout_tools.decks.get_unmodeled_voltage_markers`, e.g.
     gf180mcu's ``Dualgate`` 55/0) whose geometry overlaps extracted MOS
-    device geometry -- see :func:`_detect_voltage_domain_overlap`. This
-    deck's ``ExtractionDeck`` derives MOS flavour from the well layer alone
-    and never reads such a marker, so a transistor drawn inside it still
-    extracts bound to the deck's single (default) model name (e.g.
-    ``nfet_03v3``/``pfet_03v3``) -- this field is the loud signal that the
-    binding may be wrong, not a corrected one: the model name itself is
-    unchanged. One entry per flagged marker, each ``{"marker":
-    "<layer>/<datatype>", "description": str}`` -- the same registry entry
-    ``klt drc``'s ``coverage.voltage_domain_warnings`` surfaces for the same
-    deck, so the wording matches across both commands. A matching prose
-    entry is also appended to ``warnings``. Always a list, empty for a deck
-    that registers no such marker or a layout that draws none of it
+    device geometry -- see :func:`_detect_voltage_domain_overlap`. A marker
+    the deck's ``ExtractionDeck.mos_flavours`` also declares (issue #1111,
+    gf180mcu's ``Dualgate`` as of that issue) is excluded here: MOS
+    recognition for that marker *is* now flavour-aware (a transistor drawn
+    inside it extracts bound to the flavour's own real model, e.g.
+    ``nfet_06v0``/``pfet_06v0``, under ``--pdk``), so the gap this warning
+    exists to flag no longer applies to it -- only a marker with no
+    ``mos_flavours`` coverage (deriving MOS flavour from the well layer
+    alone, still binding every transistor to the deck's single default
+    model regardless of the marker) is flagged. One entry per flagged
+    marker, each ``{"marker": "<layer>/<datatype>", "description": str}`` --
+    the same registry entry ``klt drc``'s ``coverage.voltage_domain_warnings``
+    surfaces for the same deck (that command's own per-*rule* gate is
+    independent of this ``mos_flavours`` exclusion -- see
+    ``decks/gf180mcu.py``'s ``UNMODELED_VOLTAGE_MARKERS`` note), so the
+    wording matches across both commands wherever both still flag the same
+    marker. A matching prose entry is also appended to ``warnings``. Always
+    a list, empty for a deck that registers no such marker, a marker fully
+    covered by ``mos_flavours``, or a layout that draws none of it
     overlapping MOS geometry.
 
     ``merged_net_labels`` (issue #470) reports every net whose KLayout-
@@ -4818,28 +4826,36 @@ def _detect_voltage_domain_overlap(
     marker this deck doesn't model" shape, but for a *different* gap: not a
     device class this deck fails to recognise at all, but a device class
     (MOS) it recognises and extracts with the *wrong* model. Some decks
-    (today, gf180mcu's ``Dualgate`` 55/0, registered via
+    (today, sg13g2's ``ThickGateOx`` 44/0, registered via
     :func:`~klayout_tools.decks.get_unmodeled_voltage_markers`) draw a
-    marker selecting a second gate-oxide/voltage domain -- e.g. a 5V/6V
-    thick-oxide flavour -- with its own correct MOS model, which this
-    deck's ``ExtractionDeck.nfet_class``/``pfet_class`` derivation (well
-    layer alone) does not read, so a transistor drawn entirely inside the
-    marker still extracts bound to the default (e.g. 3.3V) model name with
-    no signal that anything is off.
+    marker selecting a second gate-oxide/voltage domain -- e.g. a thick-
+    oxide flavour -- with its own correct MOS model, which this deck's
+    ``ExtractionDeck.nfet_class``/``pfet_class`` derivation (well layer
+    alone) does not read, so a transistor drawn entirely inside the marker
+    still extracts bound to the default model name with no signal that
+    anything is off.
+
+    A marker this deck's ``ExtractionDeck.mos_flavours`` *also* declares
+    (issue #1111 -- today, gf180mcu's ``Dualgate`` 55/0) is skipped
+    entirely: MOS recognition for that marker is flavour-aware, so a
+    transistor drawn inside it already extracts bound to the flavour's own
+    real model (under ``--pdk``) -- the gap this function exists to flag
+    does not apply to it, and flagging it anyway would be a stale warning
+    about an already-closed gap.
 
     A marker/description pair is only flagged when the marker's geometry
     actually *interacts* with ``deck.active`` (the MOS device-recognition
     footprint, evaluated for the whole layout, both flavours combined) --
-    not merely present somewhere in the stream -- so a ``Dualgate`` shape
-    drawn only over, say, an ESD diode this deck's ``DiodeDevice`` entries
-    already scope correctly to it produces no false-positive warning here.
+    not merely present somewhere in the stream -- so a marker shape drawn
+    only over, say, an ESD diode this deck's ``DiodeDevice`` entries already
+    scope correctly to it produces no false-positive warning here.
 
     Returns ``(warnings, voltage_domain_warnings)``: ``warnings`` has one
     prose string per flagged marker (empty when this deck registers no
-    marker, or none of what it registers overlaps ``deck.active``);
-    ``voltage_domain_warnings`` is the matching structured view -- one
-    ``{"marker": "<layer>/<datatype>", "description": str}`` entry per
-    flagged marker, mirroring ``klt drc``'s
+    marker, every registered marker is covered by ``mos_flavours``, or none
+    of the remainder overlaps ``deck.active``); ``voltage_domain_warnings``
+    is the matching structured view -- one ``{"marker": "<layer>/<datatype>",
+    "description": str}`` entry per flagged marker, mirroring ``klt drc``'s
     ``coverage.voltage_domain_warnings`` shape (same registry, same
     description text) so a caller correlating the two commands' output for
     the same layout sees the identical wording. Always a list, empty when
@@ -4848,6 +4864,12 @@ def _detect_voltage_domain_overlap(
     from .decks import get_unmodeled_voltage_markers
 
     unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
+    flavour_markers = {flavour.marker for flavour in deck.mos_flavours}
+    unmodeled_markers = {
+        marker: description
+        for marker, description in unmodeled_markers.items()
+        if marker not in flavour_markers
+    }
     if not unmodeled_markers:
         return [], []
 
@@ -5146,6 +5168,35 @@ def _extract_netlist(
         active = active - tap
         tap_declared = True
 
+    # Per-flavour MOS marker split (issue #1111, option 2 of #552): a deck
+    # may declare one or more `mos_flavours` entries (e.g. gf180mcu's
+    # `Dualgate` 55/0, selecting its 5V/6V thick-oxide domain) narrowing this
+    # deck's ordinary `active`/`nwell` MOS split to just the geometry drawn
+    # inside a marker layer. Classified on the *undivided* `active` region's
+    # own connected components -- before the nwell/poly split below -- since
+    # a MOS device's active mask is drawn as one continuous polygon spanning
+    # source-gate-drain, the natural per-device unit for this decision (see
+    # `MOSFlavour`'s own docstring in `decks/__init__.py` for the full
+    # derivation, including the marker-straddling policy: any overlap at all
+    # claims the whole island for that flavour). Each flavour's claimed
+    # geometry is removed from `active` before the default nfet/pfet split
+    # further below, so the default split is unaffected outside every
+    # flavour marker -- no regression for the common (unflavoured) case.
+    flavour_active: list[kdb.Region] = []
+    for flavour in deck.mos_flavours:
+        marker_region = _region(layout, top_cell, flavour.marker)
+        claimed = kdb.Region()
+        if not marker_region.is_empty() and not active.is_empty():
+            remaining = kdb.Region()
+            for component in active.merged().each():
+                component_region = kdb.Region(component)
+                if not component_region.interacting(marker_region).is_empty():
+                    claimed += component_region
+                else:
+                    remaining += component_region
+            active = remaining
+        flavour_active.append(claimed)
+
     # NMOS is active outside the well; PMOS is active inside it -- KLayout's
     # standard "well marks the flip side" MOS-splitting idiom (see
     # `ExtractionDeck`'s docstring). Splitting SD from the gate polygon
@@ -5159,6 +5210,20 @@ def _extract_netlist(
     pfet_gate = pfet_active & poly
     nfet_sd = nfet_active - poly
     pfet_sd = pfet_active - poly
+
+    # Same NMOS/PMOS + gate/SD split, per declared flavour (index-aligned
+    # with `deck.mos_flavours`/`flavour_active` above).
+    flavour_nfet_gate: list[kdb.Region] = []
+    flavour_pfet_gate: list[kdb.Region] = []
+    flavour_nfet_sd: list[kdb.Region] = []
+    flavour_pfet_sd: list[kdb.Region] = []
+    for claimed in flavour_active:
+        f_nfet_active = claimed - nwell
+        f_pfet_active = claimed & nwell
+        flavour_nfet_gate.append(f_nfet_active & poly)
+        flavour_pfet_gate.append(f_pfet_active & poly)
+        flavour_nfet_sd.append(f_nfet_active - poly)
+        flavour_pfet_sd.append(f_pfet_active - poly)
 
     # Unmodelled-device diagnostic (issue #288, split by marker presence in
     # #299, resistor-body/routing false positives narrowed in #324):
@@ -5184,11 +5249,22 @@ def _extract_netlist(
         if spec.body == deck.poly:
             poly_resistor_markers += _region(layout, top_cell, spec.marker)
     poly_resistor_bodies = poly_resistor_candidate_bodies
+    # Combine the default nfet/pfet gates with every declared flavour's own
+    # (issue #1111): a flavoured transistor's gate is a real, recognised MOS
+    # gate just like the default split's, and must not be misflagged as
+    # unmodelled poly merely because it is not part of `nfet_gate`/
+    # `pfet_gate` specifically.
+    all_nfet_gate = nfet_gate
+    for gate in flavour_nfet_gate:
+        all_nfet_gate = all_nfet_gate + gate
+    all_pfet_gate = pfet_gate
+    for gate in flavour_pfet_gate:
+        all_pfet_gate = all_pfet_gate + gate
     unmodelled_device_warnings, unmodelled_poly = _detect_unmodelled_poly_bodies(
         poly,
         contact,
-        nfet_gate,
-        pfet_gate,
+        all_nfet_gate,
+        all_pfet_gate,
         poly_resistor_markers,
         poly_resistor_bodies,
         layout.dbu,
@@ -5221,12 +5297,14 @@ def _extract_netlist(
     # gate is a clean geometric cut, not a dropped device: the remaining gate
     # area still extracts, so it is not counted.
     if not dummy.is_empty():
-        for gate in (nfet_gate, pfet_gate):
+        for gate in (nfet_gate, pfet_gate, *flavour_nfet_gate, *flavour_pfet_gate):
             for component in gate.merged().each():
                 if (kdb.Region(component) - dummy).is_empty():
                     dummy_devices_dropped += 1
         nfet_gate = nfet_gate - dummy
         pfet_gate = pfet_gate - dummy
+        flavour_nfet_gate = [gate - dummy for gate in flavour_nfet_gate]
+        flavour_pfet_gate = [gate - dummy for gate in flavour_pfet_gate]
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
     # `register` returns the layer index `polygons_of_net(net, index)` needs
@@ -5244,6 +5322,29 @@ def _extract_netlist(
         ("tap", tap),
     ]:
         layer_index[name] = l2n.register(region, name)
+    # Per-flavour MOS SD/gate regions (issue #1111), registered under their
+    # own `nfet_sd_<flavour>`/`pfet_gate_<flavour>`-style names into the same
+    # `layer_index` map -- kept distinct from the default `nfet_sd`/
+    # `nfet_gate` entries above (rather than folded into a union under the
+    # same name) so each flavour's own `extract_devices` call below feeds it
+    # *only* that flavour's geometry, never double-counting the default
+    # split. `_compute_parasitics` folds these back into its diffusion/poly
+    # roles alongside the default pair (see its own docstring).
+    for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
+        deck.mos_flavours,
+        flavour_nfet_sd,
+        flavour_nfet_gate,
+        flavour_pfet_sd,
+        flavour_pfet_gate,
+        strict=True,
+    ):
+        for name, region in [
+            (f"nfet_sd_{flavour.flavour}", f_nfet_sd),
+            (f"nfet_gate_{flavour.flavour}", f_nfet_gate),
+            (f"pfet_sd_{flavour.flavour}", f_pfet_sd),
+            (f"pfet_gate_{flavour.flavour}", f_pfet_gate),
+        ]:
+            layer_index[name] = l2n.register(region, name)
     metal_index: list[int] = []
     for index, region in enumerate(metals):
         metal_index.append(l2n.register(region, f"metal{index}"))
@@ -5301,6 +5402,49 @@ def _extract_netlist(
     pfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.pfet_class)
     l2n.extract_devices(nfet_extractor, {"SD": nfet_sd, "G": nfet_gate, "W": nfet_body})
     l2n.extract_devices(pfet_extractor, {"SD": pfet_sd, "G": pfet_gate, "W": nwell})
+
+    # Per-flavour MOS device extraction (issue #1111): one *additional*
+    # `nfet`/`pfet` extraction pass per declared flavour, against that
+    # flavour's own SD/gate regions (registered above). Reuses the deck's
+    # ordinary `nfet_class`/`pfet_class` for the extractor's class name --
+    # not a distinct class -- so KLayout folds every pass's devices into the
+    # same two `DeviceClassMOS4Transistor` objects the default pair above
+    # created (empirically confirmed: `LayoutToNetlist` looks up/reuses a
+    # device class by name rather than creating a duplicate), leaving
+    # `devices[].class` and `device_counts` unaffected by flavour (see
+    # `MOSFlavour`'s own docstring for why). Each newly-added device is then
+    # tagged with `MOS_FLAVOUR_PROPERTY` (a KLayout device *property*, not a
+    # netlist-visible terminal/parameter) so only the `--pdk` model-binding
+    # writer (`pdk_models.create_model_binding_delegate`) can tell it apart
+    # from a default-flavour device, to select the flavour's own real
+    # subcircuit. `l2n.netlist()` is safe to call more than once mid-
+    # construction (empirically confirmed: it returns a live view of the
+    # netlist built so far, and further `extract_devices`/`connect()` calls
+    # after it keep working normally) -- taking a before/after device-id
+    # snapshot around each flavour's own `extract_devices` call is how the
+    # newly-added devices are identified without needing any geometric
+    # correlation back to a device after the fact.
+    for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
+        deck.mos_flavours,
+        flavour_nfet_sd,
+        flavour_nfet_gate,
+        flavour_pfet_sd,
+        flavour_pfet_gate,
+        strict=True,
+    ):
+        circuit = l2n.netlist().circuit_by_name(top_cell.name)
+        before_ids = {device.id() for device in circuit.each_device()}
+        f_nfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.nfet_class)
+        l2n.extract_devices(
+            f_nfet_extractor, {"SD": f_nfet_sd, "G": f_nfet_gate, "W": nfet_body}
+        )
+        f_pfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.pfet_class)
+        l2n.extract_devices(
+            f_pfet_extractor, {"SD": f_pfet_sd, "G": f_pfet_gate, "W": nwell}
+        )
+        for device in l2n.netlist().circuit_by_name(top_cell.name).each_device():
+            if device.id() not in before_ids:
+                device.set_property(MOS_FLAVOUR_PROPERTY, flavour.flavour)
 
     # Bipolar (BJT) device recognition (issue #223): each of the deck's
     # optional `bipolars` entries (see `BipolarDevice` in `decks/__init__.py`)
@@ -5572,6 +5716,22 @@ def _extract_netlist(
     l2n.connect(poly)
     l2n.connect(nfet_gate, poly)
     l2n.connect(pfet_gate, poly)
+    # Same connectivity, per declared MOS flavour (issue #1111) -- mirrors
+    # the default pair above exactly, just against each flavour's own SD/gate
+    # regions.
+    for f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
+        flavour_nfet_sd,
+        flavour_nfet_gate,
+        flavour_pfet_sd,
+        flavour_pfet_gate,
+        strict=True,
+    ):
+        l2n.connect(f_nfet_sd)
+        l2n.connect(f_pfet_sd)
+        l2n.connect(f_nfet_gate)
+        l2n.connect(f_pfet_gate)
+        l2n.connect(f_nfet_gate, poly)
+        l2n.connect(f_pfet_gate, poly)
     l2n.connect(nwell)
     if tap_declared:
         l2n.connect(tap)
@@ -5596,6 +5756,9 @@ def _extract_netlist(
     l2n.connect(contact)
     l2n.connect(nfet_sd, contact)
     l2n.connect(pfet_sd, contact)
+    for f_nfet_sd, f_pfet_sd in zip(flavour_nfet_sd, flavour_pfet_sd, strict=True):
+        l2n.connect(f_nfet_sd, contact)
+        l2n.connect(f_pfet_sd, contact)
     l2n.connect(poly, contact)
 
     if metals:
@@ -6431,12 +6594,29 @@ def _compute_parasitics(
     # The subtract list is empty except for the poly role, which removes the
     # transistor gate regions (see below). Metal roles are handled separately
     # below since they participate in the vertical-overlap coupling pass.
+    #
+    # Every declared MOS flavour's own SD/gate registrations (issue #1111,
+    # `layer_index[f"nfet_sd_{flavour}"]` etc. -- see `_extract_netlist`'s own
+    # registration loop) are folded in alongside the default `nfet_sd`/
+    # `pfet_sd`/`nfet_gate`/`pfet_gate` indices below, so a flavoured
+    # transistor's own diffusion/gate geometry is measured (or excluded from
+    # the poly role) exactly like an unflavoured one -- neither role would
+    # otherwise "see" it at all, silently under-measuring a net that happens
+    # to carry a flavoured device.
+    flavour_sd_indices: list[int] = []
+    flavour_gate_indices: list[int] = []
+    for flavour in deck.mos_flavours:
+        flavour_sd_indices.append(layer_index[f"nfet_sd_{flavour.flavour}"])
+        flavour_sd_indices.append(layer_index[f"pfet_sd_{flavour.flavour}"])
+        flavour_gate_indices.append(layer_index[f"nfet_gate_{flavour.flavour}"])
+        flavour_gate_indices.append(layer_index[f"pfet_gate_{flavour.flavour}"])
+
     non_metal_roles: list[tuple[Any, list[int], list[int]]] = []
     if parasitics_deck.diffusion is not None:
         non_metal_roles.append(
             (
                 parasitics_deck.diffusion,
-                [layer_index["nfet_sd"], layer_index["pfet_sd"]],
+                [layer_index["nfet_sd"], layer_index["pfet_sd"], *flavour_sd_indices],
                 [],
             )
         )
@@ -6451,7 +6631,11 @@ def _compute_parasitics(
             (
                 parasitics_deck.poly,
                 [layer_index["poly"]],
-                [layer_index["nfet_gate"], layer_index["pfet_gate"]],
+                [
+                    layer_index["nfet_gate"],
+                    layer_index["pfet_gate"],
+                    *flavour_gate_indices,
+                ],
             )
         )
 
