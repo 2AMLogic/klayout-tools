@@ -1781,6 +1781,7 @@ mod tests {
                 min: Some(0.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
             60,
         );
@@ -1833,6 +1834,7 @@ mod tests {
                 min: Some(-2.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
             1,
         );
@@ -1855,6 +1857,7 @@ mod tests {
                 min: Some(-2.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1888,6 +1891,7 @@ mod tests {
                 min: Some(0.0),
                 max: Some(2.0),
                 target_yield: None,
+                ..Default::default()
             },
             100,
         );
