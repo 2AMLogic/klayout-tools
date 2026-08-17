@@ -2207,7 +2207,10 @@ def create_parser() -> argparse.ArgumentParser:
 
     yield_parser = subparsers.add_parser(
         "yield",
-        help="Monte Carlo sample set + spec limits -> yield estimate with CIs",
+        help=(
+            "Monte Carlo sample set + spec limits -> yield estimate with CIs "
+            "(needs a separately built Rust extension)"
+        ),
         description=(
             "Turn a Monte Carlo sample set and its spec limits into a yield "
             "estimate that always carries its confidence interval, "
@@ -2217,9 +2220,14 @@ def create_parser() -> argparse.ArgumentParser:
             "The tool never emits a bare point estimate: a request that "
             "could only produce one -- a single sample, a confidence level "
             "of 0 or 1, a measurement with no limits -- is an error, not a "
-            "warning. Statistics run in the klt_yield_native Rust extension "
-            "(native/yield/); see docs/cli/yield.md for the input/output "
-            "schema and how to build the extension."
+            "warning. Statistics run in the klt_yield_native Rust "
+            "extension (native/yield/), which is NOT published as a "
+            "prebuilt wheel and is therefore unreachable from a "
+            "single-package `pip install`/`uv tool install` (including its "
+            "git-pinned `@git+...` form) -- it needs a full repo checkout "
+            "plus a Rust toolchain. See "
+            "docs/cli/yield.md#building-the-native-extension for the "
+            "input/output schema and how to build the extension."
         ),
     )
     yield_parser.add_argument(
@@ -2286,7 +2294,10 @@ def create_parser() -> argparse.ArgumentParser:
 
     yield_campaign_parser = subparsers.add_parser(
         "yield-campaign",
-        help="launch + analyse a Monte Carlo yield campaign from a spec",
+        help=(
+            "launch + analyse a Monte Carlo yield campaign from a spec "
+            "(needs a separately built Rust extension)"
+        ),
         description=(
             "Launch and manage a Monte Carlo yield campaign directly, "
             "rather than requiring a pre-run `klt sim` report -- issue #906, "
@@ -2298,7 +2309,10 @@ def create_parser() -> argparse.ArgumentParser:
             "shard/merge engine, including a real EC2 fleet for `backend: "
             '"remote"` + `hosts > 1`), and the resulting `klt sim` report '
             "is analysed by `klt yield`'s own unmodified Phase 1 pipeline -- "
-            "see docs/cli/yield.md's 'Campaign orchestration' section."
+            "see docs/cli/yield.md's 'Campaign orchestration' section. "
+            "That pipeline requires the klt_yield_native Rust extension "
+            "(same gap, same fix, as `klt yield`) -- see "
+            "docs/cli/yield.md#building-the-native-extension."
         ),
     )
     yield_campaign_parser.add_argument(
@@ -2393,7 +2407,8 @@ def create_parser() -> argparse.ArgumentParser:
         "yield-sensitivity",
         help=(
             "campaign parameter draws + output values -> ranked "
-            "contribution to the spread"
+            "contribution to the spread (needs a separately built Rust "
+            "extension)"
         ),
         description=(
             "Rank a completed Monte Carlo campaign's device/process "
@@ -2411,7 +2426,9 @@ def create_parser() -> argparse.ArgumentParser:
             "yield-campaign`/`klt gen-compose`'s own precedent for a "
             "second analysis mode of existing data. Statistics run in the "
             "klt_yield_native Rust extension (native/yield/, the same "
-            "crate `klt yield` uses)."
+            "crate `klt yield` uses, and the same build-from-source gap "
+            "for a single-package install -- see "
+            "docs/cli/yield.md#building-the-native-extension)."
         ),
     )
     yield_sensitivity_parser.add_argument(

@@ -734,6 +734,18 @@ Rust toolchain (`cargo`/`rustc`) — which is exactly why it is **optional**
 rather than a hard dependency: every other `klt` verb stays installable with
 no Rust toolchain in sight.
 
+> **Not reachable from a single-package install.** Neither `uv tool install
+> klayout-tools`/`pip install klayout-tools` nor the git-pinned form (`uv
+> tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<ref>"`)
+> builds this extension — both install only the pure-Python package, with no
+> `native/yield/` source tree or dependency group in scope. `klt yield`,
+> `klt yield-campaign`, and `klt yield-sensitivity` all share this
+> requirement (same crate). Getting the extension needs the **full repo
+> checkout** shown below, not just an installed `klt`. This is the only
+> `klt` verb with that constraint today.
+
+To build it:
+
 ```bash
 # From a repo checkout, with a Rust toolchain installed. `yield` is a PEP 735
 # dependency group in the top-level pyproject.toml, resolved from native/yield/
