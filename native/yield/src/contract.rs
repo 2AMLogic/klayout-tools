@@ -177,18 +177,36 @@ pub enum SamplingRequest {
     },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 pub struct Limits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    /// When `true`, `min` is a *strict* lower bound (`x > min` passes, not
+    /// `x >= min`) -- for spec rows ratified as strict inequalities ("must
+    /// be strictly positive"), so the limits file can transcribe the spec
+    /// literally instead of encoding the strictness as an epsilon baked
+    /// into `min` (issue #1083). Ignored (and rejected as an error, see
+    /// `analyze_measurement`) unless `min` is also present. Defaults to
+    /// `false` -- the pre-existing inclusive comparison -- so it is
+    /// backwards compatible with every limits document that predates it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclusive_min: bool,
+    /// The `max`-side counterpart of `exclusive_min`: `true` makes `max` a
+    /// strict upper bound (`x < max`, not `x <= max`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclusive_max: bool,
     /// Optional yield the design is claimed to meet. When present, the
     /// measurement passes only if the **lower** confidence bound of the
     /// empirical yield reaches it -- a claim at the stated confidence, not a
     /// point estimate that happened to clear the bar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_yield: Option<f64>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 // --------------------------------------------------------------------------- //

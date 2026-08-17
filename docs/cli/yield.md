@@ -121,7 +121,7 @@ For a draw that did not come from `klt sim`:
 | `unit` | string | Optional, echoed back. |
 | `samples` | array\<number \| null\> | The draw. A `null` entry counts into `errored` rather than being analysed. |
 | `errored` | integer | Optional extra count of samples that produced no usable value (added to the `null`s found in `samples`). Any non-zero total raises a warning that the empirical yield is conditional on the samples that produced a value — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
-| `limits` | object | `min`/`max`/`target_yield`, each optional — but at least one of `min`/`max` must be resolvable (here or via `--limits`). |
+| `limits` | object | `min`/`max`/`target_yield`, each optional — but at least one of `min`/`max` must be resolvable (here or via `--limits`). Optional `exclusive_min`/`exclusive_max` booleans (default `false`) make the corresponding bound *strict* (`>`/`<` instead of the default `>=`/`<=`) — for spec rows ratified as strict inequalities. Setting one with no corresponding `min`/`max` value is an error. |
 | `source_corners` | array\<string\> | Optional; the originating corners the draw was pooled from. |
 | `negative_control` | object | Optional; see "Negative control" below. |
 | `analytic_cross_check` | object | Optional; see "Analytic cross-check" below. |
@@ -146,7 +146,8 @@ limits the sample document carried — it is the caller's explicit spec.
   "target_yield": 0.99,
   "measurements": {
     "vref":  { "min": 1.15, "max": 1.25, "target_yield": 0.99 },
-    "iq_ua": { "max": 10.0 }
+    "iq_ua": { "max": 10.0 },
+    "iss":   { "min": 0.0, "exclusive_min": true }
   }
 }
 ```
@@ -159,6 +160,13 @@ limits the sample document carried — it is the caller's explicit spec.
   whatever limits it already had. A measurement that ends up with neither
   `min` nor `max` is skipped with a warning — unless it was named explicitly
   via `--measurement`, in which case it is an error.
+- `exclusive_min`/`exclusive_max` (booleans, optional, default `false`) make
+  the corresponding bound strict — `iss` above requires a sample to be
+  *strictly* greater than `0.0`, not merely `>= 0.0`. A spec-limits file's
+  `exclusive_min`/`exclusive_max` overrides the sample document's, the same
+  way `min`/`max`/`target_yield` do. Setting either flag with no matching
+  `min`/`max` value in the **merged** limits is an error, since a strictness
+  flag with no bound to make strict is meaningless.
 
 ## What is computed
 
@@ -465,7 +473,7 @@ confidence: 0.95  target_ci_halfwidth: 0.01
 status: fail  measurements: 2
 
 vref [V]  status: fail  N: 300
-  limits: min=1.15 max=1.25 target_yield=0.99
+  limits: min(>=)=1.15 max(<=)=1.25 target_yield=0.99
   fit (normal): mean=1.2015 stddev=0.0159719 normality=consistent
   yield (empirical, clopper-pearson): 1.000000 [0.987779, 1.000000] at 95%, N=300
   yield (normal, normal-delta): 0.998172 [0.996626, 0.999718] at 95%, N=300
@@ -742,7 +750,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `name`/`unit` | string / string \| null | Echoed from the input. |
 | `n` | integer | Usable samples — the population every statistic is computed over. |
 | `errored` | integer | Samples excluded because they had no usable value. `n + errored` is the total draw. Non-zero adds two `warnings` entries: the exclusion itself, and that the yield is conditional on the `n` samples that produced a value — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
-| `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set). |
+| `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
 | `distribution` | object | See "Distribution fit" above. |
 | `yield` | object | `empirical` (always present), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |

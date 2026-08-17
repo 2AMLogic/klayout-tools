@@ -76,8 +76,11 @@ def _print_text(report: dict) -> None:
         print()
         print(f"{m['name']}{unit}  status: {m['status']}  N: {m['n']}")
         limits = m["limits"]
+        min_op = ">" if limits.get("exclusive_min") else ">="
+        max_op = "<" if limits.get("exclusive_max") else "<="
         print(
-            f"  limits: min={_fmt(limits.get('min'))} max={_fmt(limits.get('max'))} "
+            f"  limits: min({min_op})={_fmt(limits.get('min'))} "
+            f"max({max_op})={_fmt(limits.get('max'))} "
             f"target_yield={_fmt(limits.get('target_yield'))}"
         )
         dist = m["distribution"]

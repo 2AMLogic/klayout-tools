@@ -105,6 +105,19 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
         limits[key] = float(value)
+    # issue #1083: optional strict-inequality flags -- `exclusive_min` /
+    # `exclusive_max` make the corresponding `min`/`max` a strict bound
+    # (`>`/`<` instead of `>=`/`<=`). Booleans only; the native extension is
+    # the single source of truth for the "flag with no matching value" error.
+    for key in ("exclusive_min", "exclusive_max"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise YieldError(
+                f"{where}: measurement '{name}' limits.{key} must be a boolean"
+            )
+        limits[key] = value
     return limits
 
 
