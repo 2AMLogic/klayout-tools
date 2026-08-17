@@ -2965,6 +2965,88 @@ def _extract_stage_metrics(
 # DEF -> GDS merge (ported from def2stream.py onto klayout.db, in-process)
 # --------------------------------------------------------------------------- #
 
+#: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
+#: ``_UNITS_RE`` (kept as a separate, module-local copy here rather than
+#: imported, matching this file's existing small-targeted-scan convention
+#: for DEF text, e.g. :func:`_def_pin_net_names` above).
+_DEF_UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;")
+#: ``DIEAREA ( x0 y0 ) ( x1 y1 ) ;`` -- DEF's ``DIEAREA`` is technically an
+#: arbitrary rectilinear polygon, but every point pair this regex captures
+#: is reduced to its bounding box below, which is exact for the common
+#: rectangular case and a conservative (over-)approximation otherwise.
+_DEF_DIEAREA_RE = re.compile(r"DIEAREA\s+((?:\(\s*-?\d+\s+-?\d+\s*\)\s*)+);")
+_DEF_DIEAREA_POINT_RE = re.compile(r"\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+
+
+def _parse_def_die_area_um(def_path: str) -> tuple[float, float, float, float] | None:
+    """Parse ``def_path``'s own ``DIEAREA`` bounding box in real microns
+    (``(x0_um, y0_um, x1_um, y1_um)``), or ``None`` when the DEF has no
+    ``UNITS DISTANCE MICRONS``/``DIEAREA`` statement to parse -- an unusual
+    but not necessarily invalid DEF, so the post-merge sanity check this
+    backs (issue #1090's second, independent fix) is skipped rather than
+    raising in that case, matching :func:`read_lef_header`'s own
+    "malformed/absent input never raises" convention.
+    """
+    try:
+        with open(def_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+
+    units_match = _DEF_UNITS_RE.search(text)
+    die_match = _DEF_DIEAREA_RE.search(text)
+    if units_match is None or die_match is None:
+        return None
+
+    scale = float(units_match.group(1))
+    points = [
+        (int(x) / scale, int(y) / scale)
+        for x, y in _DEF_DIEAREA_POINT_RE.findall(die_match.group(1))
+    ]
+    if len(points) < 2:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
+    """Merge a GDS view (the standard-cell library GDS, or a macro's own
+    declared ``gds``) into ``main_layout``, preserving ``main_layout``'s own
+    DBU regardless of ``gds_path``'s own declared DBU (issue #1090, a
+    follow-on to #1032's fix for the *first* DEF/LEF read's own DBU).
+
+    A plain ``main_layout.read(gds_path)`` on an existing, non-empty
+    ``Layout`` silently *adopts* the incoming GDS stream's own DBU whenever
+    it differs from ``main_layout.dbu`` -- confirmed directly against the
+    installed ``klayout`` build -- without rescaling any geometry already
+    present. Every DEF-derived shape (instance placements, routed wires,
+    vias -- correct at the DEF's own DBU, itself resolved from the tech LEF
+    per #1032) then gets silently *reinterpreted* at the GDS's own DBU on
+    this second read, doubling (or halving) every DEF-derived coordinate in
+    real microns while the standard-cell/macro geometry that arrives with
+    this same read stays correct -- a geometrically-plausible-looking but
+    wrong merged GDS that passes the "empty (unmatched) cells"/"orphan
+    cells" checks below.
+
+    Reading the incoming view into its own scratch ``Layout`` first,
+    rescaling it (only when its DBU actually differs) to
+    ``main_layout.dbu``, and re-serializing it in-memory before the real
+    merge keeps both sides in one coordinate system by construction: the
+    DBU-adoption behavior above can then only ever apply to the scratch
+    layout's own (already-rescaled) content, never to ``main_layout``'s
+    existing geometry, regardless of which DBU either side started at.
+    """
+    scratch = kdb.Layout()
+    scratch.read(gds_path)
+    if scratch.dbu != main_layout.dbu:
+        scale = scratch.dbu / main_layout.dbu
+        scratch.transform(kdb.ICplxTrans(scale))
+        scratch.dbu = main_layout.dbu
+    save_opts = kdb.SaveLayoutOptions()
+    save_opts.format = "GDS2"
+    main_layout.read_bytes(scratch.write_bytes(save_opts), kdb.LoadLayoutOptions())
+
 
 def _merge_def_to_gds(
     *,
@@ -3054,7 +3136,7 @@ def _merge_def_to_gds(
                 cell.clear()
 
     try:
-        main_layout.read(cell_gds)
+        _merge_gds_view(kdb, main_layout, cell_gds)
     except Exception as exc:
         raise PlaceAndRouteError(
             f"could not read standard-cell GDS view '{cell_gds}' for GDS merge: {exc}"
@@ -3064,7 +3146,7 @@ def _merge_def_to_gds(
         if macro["gds"] is None:
             continue
         try:
-            main_layout.read(macro["gds"])
+            _merge_gds_view(kdb, main_layout, macro["gds"])
         except Exception as exc:
             raise PlaceAndRouteError(
                 f"could not read macro GDS view '{macro['gds']}' for GDS merge: {exc}"
@@ -3102,6 +3184,43 @@ def _merge_def_to_gds(
         raise PlaceAndRouteError(
             "DEF/GDS merge produced orphan cells: " + ", ".join(orphans[:10])
         )
+
+    # Post-merge sanity check (issue #1090's second, independent fix): a
+    # merged top cell whose bounding box extends beyond the DEF's own
+    # `DIEAREA` is a defect no valid design can produce on its own (OpenROAD
+    # never places/routes outside the declared die boundary) -- exactly the
+    # symptom a DBU mismatch between the DEF-derived geometry and a
+    # subsequently-merged GDS view produces (a doubled/halved coordinate
+    # system silently blows the merged extent past the die). This is a
+    # regression guard, not just a check for *this* fix: it fires even if a
+    # future edit reintroduces a bare, DBU-unsafe `main_layout.read(...)`
+    # call in place of :func:`_merge_gds_view`. Skipped (rather than
+    # raising) when the DEF carries no parseable `DIEAREA`, matching
+    # `_parse_def_die_area_um`'s own "malformed/absent input never raises"
+    # convention.
+    die_area_um = _parse_def_die_area_um(def_path)
+    if die_area_um is not None:
+        die_x0, die_y0, die_x1, die_y1 = die_area_um
+        bbox_um = top.bbox().to_dtype(top_only.dbu)
+        # A small absolute tolerance (not a DBU-doubling-scale-sized one)
+        # absorbs ordinary OFFGRID/rounding overhang at the die boundary
+        # without masking the doubling/halving this check exists to catch.
+        tolerance_um = 0.01
+        if (
+            bbox_um.left < die_x0 - tolerance_um
+            or bbox_um.bottom < die_y0 - tolerance_um
+            or bbox_um.right > die_x1 + tolerance_um
+            or bbox_um.top > die_y1 + tolerance_um
+        ):
+            raise PlaceAndRouteError(
+                "DEF/GDS merge produced a top cell bounding box "
+                f"({bbox_um.left:.4f}, {bbox_um.bottom:.4f}) .. "
+                f"({bbox_um.right:.4f}, {bbox_um.top:.4f}) um that extends "
+                f"beyond the DEF's own DIEAREA ({die_x0:.4f}, {die_y0:.4f}) "
+                f".. ({die_x1:.4f}, {die_y1:.4f}) um -- possible DBU "
+                "mismatch between the DEF-derived geometry and a merged GDS "
+                "view"
+            )
 
     try:
         top_only.write(out_path)
