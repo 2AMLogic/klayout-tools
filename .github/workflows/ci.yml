@@ -443,6 +443,77 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  site:
+    name: site/ (tsc + vitest)
+    # `site/` is a self-contained Vite + React project (site/README.md) --
+    # its own package.json, not part of the Python/Rust toolchains above.
+    # Before this job, no CI job ran its vitest suite or `tsc -b` type
+    # check: deploy-site.yml only fires on push to main (never on PRs) and
+    # only runs a Vite build, not the tests or the type check (issue #1064).
+    # So a `site/**` PR got zero CI signal on its frontend tests until it
+    # merged.
+    #
+    # Path-filtered to site/** via the "Check for site/** changes" step
+    # below (not a workflow-level `paths:` filter, which would gate every
+    # job in this file, not just this one) so a PR that never touches the
+    # frontend skips the Node setup / npm ci cost -- mirrors how
+    # deploy-site.yml path-filters its own trigger.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the diff below can compare against the PR base
+          # / pre-push commit -- the default shallow (depth-1) checkout
+          # only has the tip commit.
+          fetch-depth: 0
+
+      - name: Check for site/** changes
+        id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+          # Fall back to "changed" if BASE is unavailable/unknown (e.g. a
+          # force-pushed branch's `before` predates this shallow-turned-full
+          # clone's history) rather than silently skipping the job.
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "site_changed=true" >>"$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE" "$HEAD" -- site/ | grep -q .; then
+            echo "site_changed=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "site_changed=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node
+        if: steps.filter.outputs.site_changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          # Node 22+ per site/README.md / site's @types/node -- matches
+          # deploy-site.yml's own Node setup.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies
+        if: steps.filter.outputs.site_changed == 'true'
+        run: npm --prefix site ci
+
+      - name: Type check (tsc -b)
+        # site/package.json's "check" script -- the same `tsc -b` the
+        # "build" script runs before prerendering.
+        if: steps.filter.outputs.site_changed == 'true'
+        run: npm --prefix site run check
+
+      - name: vitest run
+        # site/package.json's "test" script.
+        if: steps.filter.outputs.site_changed == 'true'
+        run: npm --prefix site test
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
