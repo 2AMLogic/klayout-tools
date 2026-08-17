@@ -23,9 +23,12 @@ resolver ``docs/design/pdk-device-corner-metadata-spike.md`` proposes as a
 follow-up epic -- see issue #209's Curator enhancement). As of issue #339 the
 binding covers, per PDK family (``sky130``, ``gf180mcu``):
 
-- **MOS** (both decks) -- one voltage flavor per family (the only flavor the
-  curated extraction decks' device recognition distinguishes; see
-  ``klayout_tools.extract``'s module docstring).
+- **MOS** (both decks) -- the deck's default voltage flavor per family, plus
+  (issue #1111, gf180mcu only) any additional marker-scoped flavor its
+  ``ExtractionDeck.mos_flavours`` declares (``nfet_06v0``/``pfet_06v0`` for a
+  transistor recognised inside ``Dualgate``) -- see :data:`MOS_FLAVOUR_PROPERTY`
+  and :data:`_MOS_MODEL_FLAVOURS` below, and ``klayout_tools.extract``'s
+  module docstring.
 - **Resistor** (both decks) -- every ``ResistorDevice`` class each deck
   declares (:func:`resolve_device_bindings` reads the deck's own list).
 - **Capacitor** (both decks) -- every ``CapacitorDevice`` class each deck
@@ -237,6 +240,52 @@ _MOS_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
     },
 }
 
+#: The KLayout device-property key `extract.py` sets (`kdb.Device.set_property`)
+#: on a MOS device it extracted from inside a
+#: `~klayout_tools.decks.ExtractionDeck.mos_flavours` marker (issue #1111),
+#: keyed by that entry's own `MOSFlavour.flavour` string (e.g. `"06v0"`).
+#: `create_model_binding_delegate`'s writer reads it back via
+#: `kdb.Device.property` to select the matching `_MOS_MODEL_FLAVOURS` entry
+#: below instead of the device class's base subcircuit -- the *only* consumer
+#: of this property. It is deliberately not a new `devices[].class` label (see
+#: `MOSFlavour`'s own docstring for why): every flavoured transistor still
+#: extracts under the deck's ordinary `nfet_class`/`pfet_class`, so this
+#: property is invisible to `device_counts`, `klt lvs` device-class matching,
+#: and the unbound `M`-card writer (which never reads device properties).
+MOS_FLAVOUR_PROPERTY = "mos_flavour"
+
+#: (deck_name, pdk_variant_family) -> {flavour -> {"nfet": <subckt-name>,
+#: "pfet": <subckt-name>}}. The additive, per-flavour sibling of
+#: `_MOS_MODEL_TABLE` above (issue #1111, option 2 of #552): `flavour` is the
+#: same string an `ExtractionDeck.mos_flavours[].flavour` entry declares
+#: (e.g. gf180mcu's `"06v0"`, `decks/gf180mcu.py`'s `Dualgate`-scoped entry).
+#: `resolve_device_bindings` folds this into each MOS `DeviceBinding`'s
+#: `flavour_subckts` map; `known_mos_subckt_names`/`build_subckt_to_class_map`
+#: fold it into the *base* `"nfet"`/`"pfet"` role instead (deliberately -- see
+#: those functions' own docstrings) so a flavour subcircuit name resolves back
+#: to the same structural device class its base sibling does.
+#:
+#: `nfet_06v0`/`pfet_06v0` confirmed in the same real fetched gf180mcuA
+#: install the module docstring's MOS section cites for `nfet_03v3`
+#: (`~/.volare/gf180mcuA/libs.tech/ngspice/sm141064.ngspice`'s `.subckt
+#: nfet_06v0 d g s b w=... l=... + as=0 ad=0 ps=0 pd=0 ...`, same `d g s b`
+#: terminal order and `as`/`ad`/`ps`/`pd` call-site parameters as the 3.3V
+#: pair) and a real in-the-wild instantiation
+#: (`~/.volare/gf180mcuA/libs.ref/gf180mcu_fd_io/spice/gf180mcu_fd_io.spice`'s
+#: `X5 n56 IE VSS VSS nfet_06v0 m=1.0 w=1.5e-6 l=700e-9 ...`, already cited by
+#: the module docstring's MOS section). `pfet_06v0` follows the identical
+#: no-prefix, `d g s b`-terminal, raw-metre-`w`/`l` convention (not
+#: independently re-verified in a second in-the-wild instantiation, but from
+#: the same `.subckt`-table source as `nfet_06v0`).
+_MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
+    ("gf180mcu", "gf180mcu"): {
+        "06v0": {
+            "nfet": "nfet_06v0",
+            "pfet": "pfet_06v0",
+        },
+    },
+}
+
 #: PDK families this table knows how to classify a resolved `--pdk` variant
 #: name into (e.g. "sky130A"/"sky130B" -> "sky130", "gf180mcuA".."D" ->
 #: "gf180mcu") -- the same family prefixes `klayout_tools.decks`' registry
@@ -320,13 +369,27 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
     issue #280) -- the mirror of the writer delegate's plain-element ->
     subckt-call direction (:func:`create_model_binding_delegate`).
 
+    Every ``_MOS_MODEL_FLAVOURS`` subcircuit name (issue #1111, e.g.
+    gf180mcu's ``nfet_06v0``/``pfet_06v0``) resolves to the *same* base
+    ``"nfet"``/``"pfet"`` device class its default-flavour sibling does, not
+    a separate class of its own: a reference netlist that instantiates a
+    flavour subcircuit directly is still structurally an ordinary MOS device
+    for ``klt lvs`` comparison purposes (the extracted layout side reports
+    every MOS device -- flavoured or not -- under the same base class too,
+    see ``MOSFlavour``'s own docstring in ``decks/__init__.py`` for why), so
+    this reverse direction deliberately does not distinguish them.
+
     Raises :class:`ModelBindingError` (via
     :func:`resolve_mos_model_table_for_deck`) for an unknown deck.
     """
-    return {
+    result = {
         subckt: device_class
         for device_class, subckt in resolve_mos_model_table_for_deck(deck_name).items()
     }
+    for flavour_table in _MOS_MODEL_FLAVOURS.get((deck_name, deck_name), {}).values():
+        for device_class, subckt in flavour_table.items():
+            result.setdefault(subckt, device_class)
+    return result
 
 
 def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
@@ -340,11 +403,20 @@ def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
     schematic-equivalent plain-element form ``klt lvs`` requires (issue #280).
     Subcircuit names are unique across the curated decks, so the mapping is
     unambiguous.
+
+    Includes every ``_MOS_MODEL_FLAVOURS`` entry (issue #1111, e.g.
+    gf180mcu's ``nfet_06v0``/``pfet_06v0``), resolved to the same
+    ``(deck_name, "nfet"|"pfet")`` base device class its default-flavour
+    sibling is -- see :func:`build_subckt_to_class_map`'s docstring for why.
     """
     result: dict[str, tuple[str, str]] = {}
     for (deck_name, _family), table in _MOS_MODEL_TABLE.items():
         for device_class, subckt in table.items():
             result[subckt] = (deck_name, device_class)
+    for (deck_name, _family), flavours in _MOS_MODEL_FLAVOURS.items():
+        for flavour_table in flavours.values():
+            for device_class, subckt in flavour_table.items():
+                result.setdefault(subckt, (deck_name, device_class))
     return result
 
 
@@ -440,6 +512,21 @@ class DeviceBinding:
     parameterized -- see :attr:`variants`), so the extractor's measured base/
     collector area+perimeter and emitter count have no call-site parameter to
     land on at all.
+
+    ``flavour_subckts`` (issue #1111, ``"mos"`` only) is an optional
+    ``{MOSFlavour.flavour -> subcircuit name}`` override map. The writer
+    checks it *before* falling back to :attr:`subckt`: when the device
+    carries the ``pdk_models.MOS_FLAVOUR_PROPERTY`` KLayout property (set by
+    ``extract.py`` for a transistor recognised inside one of the deck's
+    ``mos_flavours`` markers) and the property's value is a key of this map,
+    the mapped subcircuit is used instead of the class's default one -- e.g.
+    gf180mcu's ``"nfet"`` binding's default ``subckt`` stays ``nfet_03v3``,
+    but ``flavour_subckts={"06v0": "nfet_06v0"}`` rebinds a Dualgate-scoped
+    device to ``nfet_06v0`` without needing a distinct KLayout device class
+    (see ``MOSFlavour``'s own docstring in ``decks/__init__.py`` for why a
+    distinct class was deliberately avoided). Empty for every device class
+    with no declared flavour -- every class before this field existed, and
+    every non-``"mos"`` kind today.
     """
 
     kind: str
@@ -449,6 +536,7 @@ class DeviceBinding:
     width_param: str = "W"
     variants: tuple[tuple[float, str], ...] = field(default_factory=tuple)
     dropped_params: tuple[str, ...] = field(default_factory=tuple)
+    flavour_subckts: dict[str, str] = field(default_factory=dict)
 
 
 #: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> subckt name}.
@@ -531,9 +619,9 @@ def resolve_device_bindings(
     capacitor class the deck declares, plus a bindable bipolar class.
 
     ``deck`` is the deck object (duck-typed: its ``nfet_class``/``pfet_class``,
-    ``resistors``, ``capacitors`` and ``bipolars`` attributes are read) -- kept
-    a parameter rather than an import so this module stays free of a
-    ``decks`` dependency.
+    ``mos_flavours``, ``resistors``, ``capacitors`` and ``bipolars``
+    attributes are read) -- kept a parameter rather than an import so this
+    module stays free of a ``decks`` dependency.
 
     Raises :class:`ModelBindingError` (via :func:`resolve_mos_model_table`)
     when ``pdk_variant``'s family has no curated MOS entry for ``deck_name`` --
@@ -541,12 +629,42 @@ def resolve_device_bindings(
     device class with no curated binding of its own (today: only gf180mcu's
     ``bjt``) is left out of the map, so the writer keeps its bare primitive
     card -- a documented carve-out, never a silent wrong subcircuit call.
+
+    Each MOS ``DeviceBinding``'s ``flavour_subckts`` (issue #1111) is
+    populated from ``_MOS_MODEL_FLAVOURS`` for every ``deck.mos_flavours``
+    entry with a matching table row -- a flavour the deck declares
+    geometrically but this table has no curated subcircuit name for (should
+    never happen for a shipped deck, but not fatal here either) simply
+    contributes no override, leaving that flavour's devices bound to the
+    base subcircuit, same as an unbound device class elsewhere in this
+    function.
     """
     family = _pdk_variant_family(pdk_variant)
     mos = resolve_mos_model_table(deck_name, pdk_variant)
+    mos_flavours = _MOS_MODEL_FLAVOURS.get((deck_name, family), {})
+    nfet_flavour_subckts = {
+        flavour: table["nfet"]
+        for flavour, table in mos_flavours.items()
+        if "nfet" in table
+    }
+    pfet_flavour_subckts = {
+        flavour: table["pfet"]
+        for flavour, table in mos_flavours.items()
+        if "pfet" in table
+    }
     bindings: dict[str, DeviceBinding] = {
-        deck.nfet_class: DeviceBinding("mos", mos["nfet"], ("D", "G", "S", "B")),
-        deck.pfet_class: DeviceBinding("mos", mos["pfet"], ("D", "G", "S", "B")),
+        deck.nfet_class: DeviceBinding(
+            "mos",
+            mos["nfet"],
+            ("D", "G", "S", "B"),
+            flavour_subckts=nfet_flavour_subckts,
+        ),
+        deck.pfet_class: DeviceBinding(
+            "mos",
+            mos["pfet"],
+            ("D", "G", "S", "B"),
+            flavour_subckts=pfet_flavour_subckts,
+        ),
     }
 
     res_table = _RESISTOR_MODEL_TABLE.get((deck_name, family), {})
@@ -642,6 +760,20 @@ def create_model_binding_delegate(
             pins = " ".join(net_str(terminal) for terminal in binding.terminals)
             name = self.format_name(device.expanded_name())
 
+            # Per-flavour MOS subcircuit override (issue #1111): a device
+            # `extract.py` tagged with `MOS_FLAVOUR_PROPERTY` (recognised
+            # inside one of the deck's `mos_flavours` markers, e.g. gf180mcu's
+            # `Dualgate`) rebinds to that flavour's own real subcircuit
+            # instead of the class's default one -- see `DeviceBinding
+            # .flavour_subckts`'s own docstring. No-op (falls through to
+            # `binding.subckt` below) for an unflavoured device, or a class
+            # with no declared flavours at all.
+            subckt = binding.subckt
+            if binding.kind == "mos" and binding.flavour_subckts:
+                flavour_value = device.property(MOS_FLAVOUR_PROPERTY)
+                if flavour_value is not None:
+                    subckt = binding.flavour_subckts.get(str(flavour_value), subckt)
+
             if binding.kind == "bipolar":
                 subckt = _select_bipolar_variant(
                     self._device_param(device, "AE") or 0.0, binding.variants
@@ -687,7 +819,7 @@ def create_model_binding_delegate(
                 )
 
             self.emit_line(
-                f"X{name} {pins} {binding.subckt} "
+                f"X{name} {pins} {subckt} "
                 f"{binding.length_param}={_format_um(length_um)} "
                 f"{binding.width_param}={_format_um(width_um)}{extra_params}"
             )

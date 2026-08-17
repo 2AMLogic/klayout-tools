@@ -2519,7 +2519,17 @@ def test_pdk_resolved_writes_x_card_model_binding_sky130(tmp_path):
 
 def test_pdk_resolved_writes_x_card_model_binding_gf180mcu(tmp_path):
     """--pdk gf180mcuA resolves against the gf180mcu deck -> `X` subckt
-    calls against gf180mcu's real 3.3V-core primitive device library."""
+    calls against gf180mcu's real primitive device library.
+
+    ``gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds`` is one of this repo's own
+    5V/6V-flavour standard-cell corpus fixtures (the ``9t5v0`` naming, as
+    opposed to a ``9t3v3`` library) -- its transistors are drawn entirely
+    inside ``Dualgate`` (55/0), confirmed directly against the fixture. Before
+    issue #1111 this always (wrongly) bound the 3.3V core-voltage models
+    (``nfet_03v3``/``pfet_03v3``) regardless; the per-flavour MOS marker this
+    issue added now correctly binds ``nfet_06v0``/``pfet_06v0`` instead --
+    see ``test_gf180mcu_extract_binds_nfet_03v3_outside_dualgate`` below for
+    the thin-oxide counterpart."""
     layout_path = CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds"
     root = _make_pdk_install(tmp_path, "gf180mcuA")
 
@@ -2532,6 +2542,7 @@ def test_pdk_resolved_writes_x_card_model_binding_gf180mcu(tmp_path):
     )
 
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert report["voltage_domain_warnings"] == []
 
     text = Path(report["netlist_path"]).read_text()
     device_lines = [
@@ -2539,8 +2550,41 @@ def test_pdk_resolved_writes_x_card_model_binding_gf180mcu(tmp_path):
     ]
     assert device_lines
     assert all(line.startswith("X") for line in device_lines)
+    assert any(" nfet_06v0 " in line for line in device_lines)
+    assert any(" pfet_06v0 " in line for line in device_lines)
+    assert not any(" nfet_03v3 " in line for line in device_lines)
+    assert not any(" pfet_03v3 " in line for line in device_lines)
+
+
+def test_gf180mcu_extract_binds_nfet_03v3_outside_dualgate(tmp_path):
+    """Regression counterpart of the flavoured test above: a MOS device drawn
+    entirely outside `Dualgate` still binds the deck's default 3.3V models
+    under `--pdk` (issue #1111 acceptance criterion) -- no change for the
+    common thin-oxide case."""
+    path = _write_gds(
+        _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=False),
+        tmp_path / "lv_mos.gds",
+    )
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "lv_mos.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert device_lines
     assert any(" nfet_03v3 " in line for line in device_lines)
-    assert any(" pfet_03v3 " in line for line in device_lines)
+    assert not any(" nfet_06v0 " in line for line in device_lines)
 
 
 def test_pdk_resolved_x_card_carries_l_w_with_unit_suffix(tmp_path):
@@ -4937,14 +4981,15 @@ def _make_gf180mcu_dualgate_mos_layout(*, dualgate_overlap: bool) -> kdb.Layout:
     return layout
 
 
-def test_gf180mcu_extract_warns_mos_inside_dualgate_marker(tmp_path):
-    """Issue #552's own extraction reproducer: a transistor drawn entirely
-    inside `Dualgate` (the 5V/6V marker) still extracts as an ordinary
-    `nfet` device -- this deck derives MOS flavour from the well layer alone
-    and never reads the marker, so the extracted class/model binding is
-    unchanged -- but `voltage_domain_warnings` is the new loud signal that
-    the model this device would bind to under `--pdk` (`nfet_03v3`) may be
-    wrong for it."""
+def test_gf180mcu_extract_no_warning_mos_inside_dualgate_marker(tmp_path):
+    """Issue #552's original extraction reproducer, now closed by issue
+    #1111's per-flavour MOS marker: a transistor drawn entirely inside
+    `Dualgate` (the 5V/6V marker) still extracts as an ordinary `nfet`
+    device (`device_counts`/`devices[].class` unaffected by flavour -- see
+    `MOSFlavour`'s own docstring for why), but `voltage_domain_warnings` no
+    longer fires for it -- MOS recognition for this marker is now flavour-
+    aware (see `test_pdk_resolved_writes_x_card_model_binding_gf180mcu` for
+    the corresponding `nfet_06v0` model-binding assertion)."""
     path = _write_gds(
         _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=True),
         tmp_path / "mv_mos.gds",
@@ -4952,11 +4997,8 @@ def test_gf180mcu_extract_warns_mos_inside_dualgate_marker(tmp_path):
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "mv_mos.spice"))
 
     assert report["device_counts"] == {"nfet": 1}
-    expected_description = get_unmodeled_voltage_markers("gf180mcu")[(55, 0)]
-    assert report["voltage_domain_warnings"] == [
-        {"marker": "55/0", "description": expected_description}
-    ]
-    assert any("55/0" in warning for warning in report["warnings"])
+    assert report["voltage_domain_warnings"] == []
+    assert not any("55/0" in warning for warning in report["warnings"])
 
 
 def test_gf180mcu_extract_no_warning_without_dualgate_overlap(tmp_path):
@@ -4973,6 +5015,79 @@ def test_gf180mcu_extract_no_warning_without_dualgate_overlap(tmp_path):
 
     assert report["device_counts"] == {"nfet": 1}
     assert report["voltage_domain_warnings"] == []
+
+
+def test_gf180mcu_unmodeled_voltage_marker_registry_no_longer_claims_mos_gap():
+    """Issue #1111 closed the MOS half of `Dualgate`'s registered gap
+    (`UNMODELED_VOLTAGE_MARKERS`, issue #552/#577): the registry entry stays
+    (the DRC-rule residue -- DF.6, PL.5a/PL.5b -- is unaffected), but its
+    description no longer claims MOS extraction binds the wrong model."""
+    description = get_unmodeled_voltage_markers("gf180mcu")[(55, 0)]
+    assert "nfet_03v3/pfet_03v3" not in description
+    assert "DF.6" in description
+
+
+def test_gf180mcu_deck_declares_dualgate_mos_flavour():
+    """The gf180mcu extraction deck declares one `mos_flavours` entry keyed
+    on `Dualgate` (55/0) -- the deck-data half of issue #1111."""
+    deck = get_extraction_deck("gf180mcu")
+    assert len(deck.mos_flavours) == 1
+    flavour = deck.mos_flavours[0]
+    assert flavour.marker == (55, 0)
+    assert flavour.flavour == "06v0"
+
+
+def _make_gf180mcu_straddling_dualgate_mos_layout() -> kdb.Layout:
+    """One gf180mcu NMOS (`_draw_gf180mcu_nmos`) with a `Dualgate` (55/0)
+    marker overlapping only *part* of its active geometry -- the source pad
+    is inside the marker, the drain pad is not. `MOSFlavour`'s documented
+    policy (`decks/__init__.py`) is "any overlap claims the whole active
+    island for that flavour" (the DRM does not contemplate a transistor
+    legally straddling a voltage-domain boundary), so this should extract
+    the same as `dualgate_overlap=True` above -- entirely the flavoured
+    class -- not split into two partial devices."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Covers only the source half (x in [0, 1500)) of the NMOS drawn by
+    # `_draw_gf180mcu_nmos` (active spans x in [0, 3000)) -- not the drain.
+    d(55, 0, kdb.Box(-500, -500, 1500, 1500))
+    return layout
+
+
+def test_gf180mcu_extract_straddling_dualgate_claims_whole_device(tmp_path):
+    """A transistor whose active geometry only *partially* overlaps
+    `Dualgate` is claimed entirely by the flavour (documented policy, see
+    `MOSFlavour`'s own docstring) -- it extracts as one ordinary `nfet`
+    device (not split into two), with no `voltage_domain_warnings`, and
+    binds `nfet_06v0` under `--pdk` like a fully-inside device would."""
+    path = _write_gds(
+        _make_gf180mcu_straddling_dualgate_mos_layout(),
+        tmp_path / "straddle.gds",
+    )
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "straddle.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert len(device_lines) == 1
+    assert " nfet_06v0 " in device_lines[0]
 
 
 def test_gf180mcu_deck_declares_full_metal_stack():

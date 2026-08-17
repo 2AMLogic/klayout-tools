@@ -1163,27 +1163,37 @@ no server-side fix for this today: a caller that intentionally uses
 `merged_net_labels[]` entry whose `labels` do not actually correspond to
 independent naming intents.
 
-### Voltage-domain markers (issue #552)
+### Voltage-domain markers (issue #552) and per-flavour MOS binding (issue #1111)
 
 Some PDKs draw **two gate-oxide/voltage domains** on the same wafer, selected
 by a marker layer — e.g. gf180mcu's `Dualgate` (55/0) selects its 5V/6V
 thick-oxide domain, whose DRM publishes a distinct set of MOS models with
 materially different characteristics from the default (thin-oxide) ones.
 This curated deck derives MOS flavour from the well layer alone
-(`nfet_active = active - nwell`) and never reads such a marker, so a
-transistor drawn entirely inside `Dualgate` still extracts bound to the
-deck's single (default) model name — e.g. `nfet_03v3` even for a device that
-is actually 5V/6V, once `--pdk` resolves a subcircuit binding. Nothing about
-the JSON response says the binding might be wrong.
+(`nfet_active = active - nwell`) plus, as of issue #1111, any additional
+marker declared by the deck's `ExtractionDeck.mos_flavours` field: a
+transistor whose active-diffusion geometry overlaps such a marker at all
+(the whole island, source *and* drain — not split mid-device even when the
+marker only partially covers it, since the DRM does not contemplate a
+transistor legally straddling a voltage-domain boundary) is claimed entirely
+by that flavour. gf180mcu declares one such entry keyed on `Dualgate`, so a
+transistor drawn (fully or partially) inside it now extracts bound to
+`nfet_06v0`/`pfet_06v0` under `--pdk`, instead of the default
+`nfet_03v3`/`pfet_03v3` — the structural `devices[].class`/`device_counts`
+labels are unaffected either way (every MOS device, flavoured or not, still
+reports the deck's ordinary `"nfet"`/`"pfet"` class; only the *bound SPICE
+model name* differs).
 
-`klt extract` flags this rather than silently emitting a plausible-looking
-wrong model: whenever a deck-registered voltage-domain marker (today, only
-gf180mcu's `Dualgate`) is present in the input stream and its geometry
-overlaps extracted MOS device geometry (the deck's `active` region), two
-things are produced:
+`sky130` and `sg13g2` declare no `mos_flavours` entry today (`sky130`'s
+curated deck has no high-voltage/thick-oxide marker layer at all; `sg13g2`'s
+`ThickGateOx` 44/0 marker is registered as a diagnostic-only gap, same as
+gf180mcu's `Dualgate` was before issue #1111 — a real per-flavour marker for
+it is a separate, not-yet-done follow-on), so a deck-registered voltage-
+domain marker with **no** matching `mos_flavours` entry still only produces
+the diagnostic below, never a corrected binding:
 
 - A structured entry in the response's `voltage_domain_warnings[]` array
-  (see "JSON schema" above): `{ "marker": "55/0", "description": str }` —
+  (see "JSON schema" above): `{ "marker": "44/0", "description": str }` —
   the same registry entry (and description text) `klt drc`'s
   `coverage.voltage_domain_warnings` surfaces for the same deck, so the
   wording matches across both commands for the same layout. Because the
@@ -1194,12 +1204,15 @@ things are produced:
   that changes extraction, which still ignores the marker entirely.
 - A matching prose entry in `warnings[]`.
 
-**What this field does and does not guarantee**: it flags that the bound
-model name may be wrong for this device. It does **not** correct the
-binding — that would require a per-flavour MOS marker field this deck's
-`ExtractionDeck` does not have yet (a separate, larger follow-on). The
-device still extracts, and still binds to the same (default) model name, as
-it did before this field existed; only the signal is new.
+**What this field does and does not guarantee**: for a marker with no
+`mos_flavours` coverage, it only flags that the bound model name may be
+wrong — it does not correct the binding. For a marker `mos_flavours` *does*
+cover (gf180mcu's `Dualgate` as of issue #1111), the binding gap this field
+exists to flag is closed, so `voltage_domain_warnings` no longer fires for
+MOS device geometry inside it at all — the registry entry itself is
+unaffected (gf180mcu's `Dualgate` entry stays registered for the DRC-rule
+residue `klt drc`'s own coverage still tracks — `DF.6`, `PL.5a`/`PL.5b`, not
+transcribed by this curated deck yet).
 
 ### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462 and to junction diodes in #542)
 
@@ -1728,10 +1741,19 @@ recognised analog device classes):
 
 | Device class | sky130 | gf180mcu | Geometry on the `X` card |
 |---|---|---|---|
-| MOS (`nfet`/`pfet`) | ✅ | ✅ | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
+| MOS (`nfet`/`pfet`) | ✅ | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
 | Resistor | ✅ | ✅ (all flavours) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | none — a geometry-named variant selected by emitter area |
+
+MOS flavour note (issue #1111): gf180mcu's `nfet`/`pfet` binding is no
+longer a single fixed subcircuit name. A transistor drawn (fully or
+partially — see "Voltage-domain markers and per-flavour MOS binding" above)
+inside `Dualgate` (55/0) binds `nfet_06v0`/`pfet_06v0` instead of the
+default `nfet_03v3`/`pfet_03v3`; a transistor drawn entirely outside it is
+unaffected. Selecting a flavour this way never changes `devices[].class`
+(both flavours report the deck's ordinary `"nfet"`/`"pfet"` class) or
+`device_counts` — only which real subcircuit the `X` card names.
 
 Resistor note: the binding is **flavour-complete** on gf180mcu — every value
 `--deck-option poly_res=` accepts binds its own real subcircuit
@@ -1755,11 +1777,15 @@ the substrate internally, but no separate substrate pin is emitted on the
 resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
 future epic):
 
-- **One voltage/flavor per class**, the only flavor the curated extraction
-  decks distinguish (see the module docstring): e.g. sky130's `01v8` MOS core
-  devices and gf180mcu's `03v3` MOS core devices (gf180mcu has no
-  `gf180mcu_fd_pr__`-prefixed naming convention the way sky130 does), and the
-  specific resistor/capacitor device names each deck already declares.
+- **One voltage/flavor per class, with one documented exception.** sky130's
+  `01v8` MOS core devices, sky130/gf180mcu's specific resistor/capacitor
+  device names, and gf180mcu's *default* `03v3` MOS core devices (gf180mcu
+  has no `gf180mcu_fd_pr__`-prefixed naming convention the way sky130 does)
+  are each still the one flavor those classes distinguish. gf180mcu's MOS
+  classes are the exception (issue #1111): a `Dualgate`-marked transistor
+  binds a second, real flavour (`nfet_06v0`/`pfet_06v0`) instead — see the
+  "MOS flavour note" above. `sky130`/`sg13g2` declare no such marker-scoped
+  flavour today.
 - **gf180mcu bipolar is deliberately left unbound** — its recognised `bjt`
   device stays a bare `Q` card under `--pdk`, **not** a subcircuit call. This
   is a *documented carve-out*, not an oversight: the gf180mcu deck itself has
@@ -3268,7 +3294,7 @@ exit codes).
 | `abstracted_cells` | array\<object\>            | One entry per distinct cell type matched by `--abstract-cells` (issue #620 — see "Cell-level (black-box + pins) abstraction" above), each `{ "cell": string, "instance_count": int, "pin_count": int, "resolution_source": "in_cell_labels" \| "lef_abstract", "lef_path": string \| null }` (`lef_path` names the specific `--abstract-cell-lef` file for `"lef_abstract"`, `null` for `"in_cell_labels"`). Always present, empty unless `--abstract-cells` matched at least one instantiated cell. |
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
-| `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
+| `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |

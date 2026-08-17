@@ -29,6 +29,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   now share one `_combined_content_hash` implementation in
   `klayout_tools/_provenance.py`; the single-source case (`build_provenance`'s
   `input_path`) is unaffected.
+- 2026-08-17 — `klt extract --deck gf180mcu --pdk ...` now binds a MOS
+  device drawn (fully or partially) inside `Dualgate` (55/0) to the real
+  **5V/6V models** (`nfet_06v0`/`pfet_06v0`) instead of the default 3.3V
+  ones (`nfet_03v3`/`pfet_03v3`), closing the MOS-extraction half of #552
+  (issue #1111, option 2). `ExtractionDeck` gains an optional
+  `mos_flavours` field (a tuple of `MOSFlavour` entries, empty for every
+  other deck) declaring a marker-scoped MOS voltage flavour; gf180mcu
+  declares one keyed on `Dualgate`. `devices[].class`/`device_counts` are
+  **unaffected** — every MOS device still reports the deck's ordinary
+  `"nfet"`/`"pfet"` class regardless of flavour, so LVS device-class
+  matching, `klt lvs`'s reference-netlist `subckt-call` conversion
+  (`known_mos_subckt_names`/`build_subckt_to_class_map`, both now also
+  resolve `nfet_06v0`/`pfet_06v0` back to the base `nfet`/`pfet` class),
+  and every other structural-netlist consumer are unchanged; only the
+  `--pdk`-bound SPICE model name differs. `voltage_domain_warnings` no
+  longer fires for MOS device geometry inside `Dualgate` (the gap it
+  flagged for MOS is now closed) — the registry entry itself stays
+  (gf180mcu's DRC-rule residue beyond `DF.1a`/`DF.3a`, e.g. `DF.6`,
+  `PL.5a`/`PL.5b`, is unaffected and still flagged both by `klt drc` and by
+  this field's description text). A transistor whose active geometry only
+  partially overlaps `Dualgate` is claimed entirely by the flavour (a
+  documented policy — the DRM does not contemplate a transistor legally
+  straddling a voltage-domain boundary).
+
 - 2026-08-17 — `klt drc --deck gf180mcu` now enforces the **5V/6V (`_MV`)
   thresholds** on `Comp` geometry drawn inside `Dualgate` (55/0) instead of
   checking every `Comp` shape against the 3.3V (`_LV`) column (issue #1110,
