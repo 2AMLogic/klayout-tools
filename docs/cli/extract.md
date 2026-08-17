@@ -114,7 +114,16 @@ this repo's sole runtime dependency).
 Extraction is **flat**, not hierarchical: every deck layer is a single
 flattened `Region`/`Texts` collection over the selected top cell (via
 `Cell.begin_shapes_rec`), the same whole-layout flattening idiom `klt drc`
-uses. Device recognition splits NMOS (`active - nwell`) from PMOS
+uses. One consequence (issue #1085): a `klt extract`-derived layout netlist
+can never structurally match a **hierarchical** reference netlist (one leaf
+`.subckt` plus N instance calls of it — the shape a macro built by tiling
+one verified leaf cell naturally takes) in `klt lvs`, since the comparer
+pairs circuits one-for-one and the flat layout side simply has no
+subcircuit-call circuit to pair against the reference's — see
+[`docs/cli/lvs.md`](lvs.md) → `options.flatten_reference` for the fix (an
+in-process flatten of the *reference* netlist before comparing, so both
+sides are flat) rather than a hierarchy-preserving extraction mode, which
+this command does not have. Device recognition splits NMOS (`active - nwell`) from PMOS
 (`active & nwell`) and runs KLayout's native `DeviceExtractorMOS4Transistor`
 for each — one generic `nfet`/`pfet` device class per deck (no
 voltage-flavor distinction). A deck may additionally declare one or more

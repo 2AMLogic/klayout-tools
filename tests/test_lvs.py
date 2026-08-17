@@ -1708,6 +1708,282 @@ def test_equivalent_pins_hint_unknown_pin_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# options.flatten_reference / options.flatten_layout (issue #1085): `klt
+# extract` always extracts a *flat* layout netlist, so a hierarchical
+# reference (one leaf `.subckt` plus N instance calls of it -- the shape a
+# macro built by tiling one verified leaf cell naturally takes) can never
+# structurally match it without one side being flattened first.
+# --------------------------------------------------------------------------- #
+
+#: Two chained instances of a one-resistor leaf, both declared -- the
+#: hierarchical form. `top`'s three pins (P1/P2/P3) chain X1's B pin to X2's
+#: A pin through the shared net P2.
+_HIERARCHICAL_DIVIDER_SPICE = """
+.subckt leaf A B
+R1 A B 1k
+.ends
+.subckt top P1 P2 P3
+X1 P1 P2 leaf
+X2 P2 P3 leaf
+.ends
+"""
+
+#: The same two-resistor chain, already flattened -- exactly what `klt
+#: extract`'s always-flat extraction (or a hand-written flat netlist) would
+#: produce for the layout above.
+_FLAT_DIVIDER_SPICE = """
+.subckt top P1 P2 P3
+R1 P1 P2 1k
+R2 P2 P3 1k
+.ends
+"""
+
+
+def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_path):
+    """Bug-reproducing baseline (issue #1085): without any flatten option, a
+    flat layout-side netlist compared against a hierarchical reference of
+    the same topology is a hard, undiagnosable `topology` mismatch on both
+    sides -- `NetlistComparer` has no subcircuit-call circuit on the layout
+    side to pair against the reference's, so it declines to even attempt a
+    per-net/per-device compare. This is the exact failure mode the issue
+    reports; the tests below show `options.flatten_reference`/
+    `options.flatten_layout` turning it into a real verdict."""
+    layout_path = _write(tmp_path / "layout.spice", _FLAT_DIVIDER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _HIERARCHICAL_DIVIDER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"topology": 2}
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 0, "matched": 0}
+    assert all(m["category"] == "topology" for m in report["mismatches"])
+    assert "topology.flattened" not in report["category_counts"]
+
+
+def test_flatten_reference_turns_the_topology_mismatch_into_a_match(tmp_path):
+    """`options.flatten_reference: true` collapses the reference's two
+    subcircuit-call circuits into its top circuit before comparing, so it
+    now structurally matches the already-flat layout side."""
+    layout_path = _write(tmp_path / "layout.spice", _FLAT_DIVIDER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _HIERARCHICAL_DIVIDER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {"flatten_reference": True},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["counts"]["nets"]["matched"] == 3
+    assert len(report["net_correspondence"]) == 3
+
+    # Disclosed, not silent: a `"match"` reached after an opted-in flatten is
+    # never indistinguishable from one reached against the original
+    # hierarchy (mirrors `device.parameter_tolerated`/`device.bulk_reconciled`'s
+    # own transparency precedent).
+    assert report["category_counts"] == {"topology.flattened": 1}
+    [flattened] = report["mismatches"]
+    assert flattened["category"] == "topology.flattened"
+    assert flattened["severity"] == "warning"
+    assert flattened["side"] == "reference"
+    assert "2 circuit(s)" in flattened["description"]
+    assert "1 top-level circuit(s)" in flattened["description"]
+
+
+def test_flatten_layout_turns_a_hierarchical_layout_netlist_into_a_match(tmp_path):
+    """Symmetric counterpart (issue #1085's item 2): a pre-extracted
+    `layout.netlist` can itself be hierarchical -- `options.flatten_layout`
+    flattens that side instead, matching against an already-flat
+    reference."""
+    layout_path = _write(tmp_path / "layout.spice", _HIERARCHICAL_DIVIDER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _FLAT_DIVIDER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {"flatten_layout": True},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["category_counts"] == {"topology.flattened": 1}
+    [flattened] = report["mismatches"]
+    assert flattened["side"] == "layout"
+    assert "options.flatten_layout" in flattened["description"]
+
+
+def test_flatten_options_default_false_leaves_status_unchanged(tmp_path):
+    """Omitting both flags entirely reproduces today's unconditional
+    behaviour byte-for-byte -- same baseline as
+    `test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch`,
+    just asserted via the explicit `{}` `options` form some callers use."""
+    layout_path = _write(tmp_path / "layout.spice", _FLAT_DIVIDER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _HIERARCHICAL_DIVIDER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {"flatten_reference": False, "flatten_layout": False},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"topology": 2}
+
+
+def test_flatten_reference_is_a_silent_noop_on_an_already_flat_netlist(tmp_path):
+    """`options.flatten_reference`/`options.flatten_layout` on a netlist that
+    already has only its top circuit (no subcircuit calls to substitute) is a
+    true no-op: `Netlist.flatten()` leaves the circuit count unchanged, so no
+    `topology.flattened` disclosure is added and the verdict is identical to
+    the option being omitted -- a caller who always opts in (e.g. as a
+    blanket default) never pays a spurious-warning cost on an
+    already-flat pair."""
+    layout_path = _write(tmp_path / "layout.spice", _FLAT_DIVIDER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _FLAT_DIVIDER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {"flatten_reference": True, "flatten_layout": True},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert report["mismatch_count"] == 0
+
+
+def _make_leaf_nmos_cell(layout, name: str = "LEAF"):
+    """One NMOS (sky130 layers), gate/source/drain labelled `A`/`VGND`/`Y` --
+    the minimal single-device leaf cell used by the `CellInstArray` test
+    below. Mirrors `_make_single_nmos_layout` above, but builds a standalone
+    leaf *cell* (not a whole `Layout`) so it can be instanced twice via one
+    `CellInstArray`."""
+    import klayout.db as kdb
+
+    cell = layout.create_cell(name)
+
+    def draw(layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (no nwell -> nmos)
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (gate)
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (source side)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (drain side)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (source pad)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (drain pad)
+
+    label(66, 20, "A", 1000, 500)  # gate
+    label(67, 5, "VGND", 200, 500)  # source pad
+    label(67, 5, "Y", 1800, 500)  # drain pad
+
+    return cell
+
+
+def test_flatten_reference_matches_a_real_cell_inst_array_layout(tmp_path):
+    """End-to-end reproduction of the issue's own repro shape: a real GDS
+    layout with one leaf cell instanced twice via a single `CellInstArray`
+    (the issue's "N instances of one cell" macro pattern, trimmed to N=2),
+    compared -- via inline extraction (`layout.file` + `layout.deck`) --
+    against a hand-written hierarchical reference netlist declaring exactly
+    that shape (one `leaf` `.subckt` plus two `X` instance calls).
+    `klt extract` always extracts flat (see `docs/cli/extract.md`'s
+    "flat, not hierarchical" note), so without `options.flatten_reference`
+    this is the issue's undiagnosable `topology` mismatch; with it, a real
+    `"match"` verdict."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    leaf = _make_leaf_nmos_cell(layout)
+    top = layout.create_cell("TOP")
+    top.insert(
+        kdb.CellInstArray(
+            leaf.cell_index(),
+            kdb.Trans(kdb.Vector(0, 0)),
+            kdb.Vector(5000, 0),
+            kdb.Vector(0, 5000),
+            2,
+            1,
+        )
+    )
+    gds_path = str(tmp_path / "array.gds")
+    layout.write(gds_path)
+
+    # Hand-written hierarchical reference: one leaf subcircuit (gate/drain/
+    # source/bulk terminals, matching `klt extract`'s own D-G-S-B M-card
+    # convention), instanced twice by `top`. Device parameters copied
+    # verbatim from what `klt extract`'s sky130 deck derives for this exact
+    # leaf geometry (2um x 1um diff, 0.4um x 1um poly gate) -- an exact
+    # parameter match isn't this test's point (`options.parameter_tolerance`
+    # covers that), so the reference is written to already agree.
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt leaf A Y VGND SUB
+M1 Y A VGND SUB nfet L=0.4U W=1U AS=0.8P AD=0.8P PS=3.6U PD=3.6U
+.ends
+.subckt top VGND VGND1 Y Y1 SUB
+X1 g1 Y VGND SUB leaf
+X2 g2 Y1 VGND1 SUB leaf
+.ends
+""",
+    )
+
+    baseline_path = _write_request(
+        tmp_path / "baseline_request.json",
+        {
+            "layout": {"file": gds_path, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    baseline_report = run_lvs(baseline_path)
+    assert baseline_report["status"] == "mismatch"
+    assert baseline_report["category_counts"]["topology"] >= 2
+
+    flattened_path = _write_request(
+        tmp_path / "flattened_request.json",
+        {
+            "layout": {"file": gds_path, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {"flatten_reference": True},
+        },
+    )
+    flattened_report = run_lvs(flattened_path)
+
+    assert flattened_report["status"] == "match"
+    assert flattened_report["counts"]["devices"] == {
+        "layout": 2,
+        "reference": 2,
+        "matched": 2,
+    }
+    assert "topology.flattened" in flattened_report["category_counts"]
+    assert flattened_report["category_counts"]["topology.flattened"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # options.keep_extracted / inline extraction (layout.file + layout.deck)
 # --------------------------------------------------------------------------- #
 

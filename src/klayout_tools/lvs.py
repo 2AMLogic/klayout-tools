@@ -178,6 +178,12 @@ CATEGORY_TOPOLOGY = "topology"
 #: `must_match=True` that the comparer refused to confirm -- see
 #: `_build_mismatches`'s `same_nets_hints` handling.
 CATEGORY_HINTS_REJECTED = "hints.rejected"
+#: Issue #1085: `options.flatten_reference`/`options.flatten_layout`
+#: collapsed that side's subcircuit-call hierarchy into its top circuit(s)
+#: before comparing -- the disclosure that a verdict rests on a caller-opted
+#: structural flatten rather than the netlist's original hierarchy (see
+#: `_flatten_netlist_safely`).
+CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
 
 #: Substring KLayout's own ``Netlist.combine_devices()`` internal-consistency
 #: ``RuntimeError`` always carries (issue #466) -- e.g. "Internal error:
@@ -376,6 +382,27 @@ def run_lvs(request: str) -> dict[str, Any]:
     echoed as the response's ``parameter_tolerance`` field (``null`` when
     omitted), and every parameter it absorbs yields its own
     ``severity: "warning"`` ``device.parameter_tolerated`` entry.
+
+    ``options.flatten_reference`` / ``options.flatten_layout`` (issue #1085)
+    are the fix for the flat-vs-hierarchical seam ``klt extract``'s
+    always-flat extraction creates: a hierarchical reference netlist (one
+    leaf ``.subckt`` plus N instance calls of it -- the shape a macro built
+    by tiling one verified leaf cell naturally takes) can never structurally
+    match a flat layout-side netlist, because ``NetlistComparer`` compares
+    circuit-by-circuit, and the flat side simply has no subcircuit-call
+    circuit to pair against the reference's. Both options call KLayout's own
+    ``Netlist.flatten()`` in-process -- ``options.flatten_reference`` on the
+    reference netlist (right after it is read, before circuit selection),
+    ``options.flatten_layout`` on the layout netlist (right after it is
+    resolved -- meaningful for the pre-extracted ``layout.netlist`` shape,
+    which can itself be hierarchical; a no-op for inline ``layout.file``
+    extraction, which is already flat). Both default ``false``, so omitting
+    them leaves every verdict and every ``mismatches[]`` entry exactly as
+    before. Each side that is actually flattened (its circuit count changes)
+    yields its own ``severity: "warning"`` ``topology.flattened`` entry, so a
+    ``"match"`` reached after flattening is never silently indistinguishable
+    from one reached against the netlist's original hierarchy. See
+    :func:`_flatten_netlist_safely`.
     """
     request, request_dir = load_request_arg(request)
 
@@ -421,6 +448,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     keep_extracted = bool(options.get("keep_extracted", False))
     combine_devices = bool(options.get("combine_devices", False))
     parameter_tolerance = _parse_parameter_tolerance(options)
+    # Issue #1085: opt-in, per-side structural flatten -- see
+    # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
+    # extract` is always flat, so a hierarchical reference/pre-extracted
+    # layout netlist otherwise can never structurally match it).
+    flatten_reference = bool(options.get("flatten_reference", False))
+    flatten_layout = bool(options.get("flatten_layout", False))
 
     import klayout.db as kdb
 
@@ -432,6 +465,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     ) = _resolve_layout(
         layout_spec, request_dir, keep_extracted, combine_devices, deck_options
     )
+
+    flatten_warnings: list[dict[str, Any]] = []
+    if flatten_layout:
+        layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
+        if layout_flatten_warning is not None:
+            flatten_warnings.append(layout_flatten_warning)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -462,6 +501,13 @@ def run_lvs(request: str) -> dict[str, Any]:
         deck=reference_spec.get("deck"),
         device_map=reference_device_map,
     )
+
+    if flatten_reference:
+        reference_flatten_warning = _flatten_netlist_safely(
+            reference_netlist, "reference"
+        )
+        if reference_flatten_warning is not None:
+            flatten_warnings.append(reference_flatten_warning)
 
     layout_circuit = _select_circuit(layout_netlist, layout_spec.get("top"), "layout")
     reference_circuit = _select_circuit(
@@ -863,11 +909,24 @@ def run_lvs(request: str) -> dict[str, Any]:
         # from one where the two values actually agreed.
         mismatches.extend(tolerance_warnings)
 
+    if flatten_warnings:
+        # Issue #1085: same rationale as the disclosures above -- a
+        # `flatten_reference`/`flatten_layout` structural flatten is a
+        # request-side transform applied before the compare (indeed, before
+        # `_select_circuit` even runs), not a `NetlistComparer` event, so it
+        # is appended here rather than folded into `_build_mismatches`.
+        # Collected once, up front (before the `combine_devices`/engine
+        # branches below even run), so it fires for any request shape --
+        # both engines, both layout shapes -- the same way `combine_warnings`
+        # does.
+        mismatches.extend(flatten_warnings)
+
     if (
         layout_deck is not None
         or combine_warnings
         or bulk_warnings
         or tolerance_warnings
+        or flatten_warnings
     ):
         mismatches.sort(key=_sort_key)
 
@@ -1290,6 +1349,64 @@ def _combine_devices_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
             side,
         )
     return None
+
+
+def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
+    """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
+    #1085's ``options.flatten_reference``/``options.flatten_layout``).
+
+    ``klt extract`` always extracts a **flat** layout-side netlist (a single
+    top circuit; see ``extract.py``'s own module docstring) -- so a
+    hierarchical reference netlist (one leaf ``.subckt`` plus N instance
+    calls of it, the shape a large regular macro's schematic naturally
+    takes) can never structurally match it: ``NetlistComparer`` sees a flat
+    top circuit with N x (devices per leaf) devices on one side and a top
+    circuit with *zero* devices plus N subcircuit calls on the other, and
+    reports a hard, undiagnosable ``topology`` mismatch on both sides (see
+    this module's docstring, and ``docs/cli/lvs.md``'s "`layout.flatten` /
+    `reference.flatten`" section) -- not a partial result a caller can act
+    on.
+
+    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten: "After
+    calling this method, only the top circuits will remain" -- every
+    subcircuit-call instance is substituted in-place, in-process. Called
+    here, before :func:`_select_circuit`, so a caller-declared ``top`` name
+    still resolves normally afterwards whenever it already named a genuine
+    top-level circuit (the common case -- the design's own top level, not
+    an interior leaf that flatten would have inlined away).
+
+    Symmetric and opt-in on **both** sides (``options.flatten_reference``
+    for the reference netlist, ``options.flatten_layout`` for the layout
+    netlist -- the pre-extracted ``layout.netlist`` shape can be
+    hierarchical too, issue #1085's item 2), so the default (both flags
+    omitted) is byte-identical to today's behaviour and a caller who
+    genuinely wants a hierarchy-preserving compare is never silently
+    flattened out from under them.
+
+    Returns a ``severity: "warning"`` ``mismatches[]`` entry
+    (``category: "topology.flattened"``) disclosing how many circuits were
+    collapsed, so a ``"match"`` reached after flattening is never silently
+    indistinguishable from one reached against the netlist's original
+    hierarchy -- or ``None`` when the netlist already had only its top
+    circuit(s) (nothing to flatten, e.g. an already-flat ``klt extract``
+    layout side), in which case there is nothing to disclose.
+    """
+    circuits_before = sum(1 for _ in netlist.each_circuit())
+    netlist.flatten()
+    circuits_after = sum(1 for _ in netlist.each_circuit())
+    if circuits_before == circuits_after:
+        return None
+    return _mismatch(
+        CATEGORY_TOPOLOGY_FLATTENED,
+        "warning",
+        f"options.flatten_{side} flattened the {side} netlist before "
+        f"comparing: {circuits_before} circuit(s) were collapsed into "
+        f"{circuits_after} top-level circuit(s), substituting every "
+        "subcircuit-call instance in place -- this compare verified "
+        "topology only after removing the original hierarchy boundaries on "
+        f'this side (see docs/cli/lvs.md, "topology.flattened")',
+        side,
+    )
 
 
 def _purge_emptied_nets(netlist: kdb.Netlist) -> None:
