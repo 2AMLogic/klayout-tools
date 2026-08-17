@@ -169,6 +169,7 @@ this one.
 ```json
 {
   "schema_version": 1,
+  "generator": "draw",
   "gds_path": "bad.gds",
   "cell_name": "TOP",
   "dbu_um": 0.001,
@@ -184,6 +185,12 @@ this one.
 }
 ```
 
+- `generator` — always the literal string `"draw"`. Present so this response
+  can be fed unmodified into [`klt gen-compose`](gen-compose.md)'s
+  `blocks[].generator_report` — that command hard-requires a `generator`
+  field and otherwise reads only `cell_name`/`gds_path`/`bbox_um` (already
+  present here) and `ports[]` (absent from `draw`'s output, which
+  `gen-compose` already defaults to `[]`).
 - `shape_count` — the total number of shapes actually written, i.e. every
   `array`-expanded instance counted individually, not the number of entries in
   `params.shapes` (a single entry with `array.count: [71, 71]` contributes

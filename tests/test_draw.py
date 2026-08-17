@@ -70,6 +70,7 @@ def test_rect_round_trips_to_requested_layer_and_coords(tmp_path):
     )
 
     assert report["schema_version"] == 1
+    assert report["generator"] == "draw"
     assert report["gds_path"] == output
     assert report["cell_name"] == "TOP"  # default
     assert report["shape_count"] == 1
