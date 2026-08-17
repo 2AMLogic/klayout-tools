@@ -1,30 +1,42 @@
 {
   "schema_version": 1,
-  "placeholder": true,
-  "placeholder_note": "Computed by .claude/skills/economy-review/scripts/economy_metrics.py, a minimal stand-in pending the dedicated `klt economy` command (issue #1012).",
   "file": "blocks/sky130_fd_sc_hd__buf_4/output/sky130_fd_sc_hd__buf_4.gds",
   "top": "sky130_fd_sc_hd__buf_4",
+  "dbu_um": 0.001,
   "bbox_um": {
     "left": -0.19,
     "bottom": -0.24,
     "right": 2.95,
-    "top": 2.96
+    "top": 2.96,
+    "width": 3.14,
+    "height": 3.2
   },
-  "width_um": 3.14,
-  "height_um": 3.2,
-  "aspect_ratio": 0.98125,
   "bbox_area_um2": 10.048,
+  "bbox_area_mm2": 1.0048e-05,
+  "aspect_ratio": 0.98125,
   "drawn_area_um2": 9.4419,
   "utilization": 0.9396795382165606,
+  "tight_bbox_um": {
+    "left": -0.19,
+    "bottom": -0.24,
+    "right": 2.95,
+    "top": 2.96,
+    "width": 3.14,
+    "height": 3.2
+  },
+  "tight_bbox_area_um2": 10.048,
+  "bbox_tightness": 1.0,
   "dead_margins_um": {
     "left": 0.0,
     "right": 0.0,
     "bottom": 0.0,
     "top": 0.0
   },
+  "whitespace_area_um2": 0.6060999999999996,
+  "whitespace_fraction": 0.060320461783439416,
   "whitespace_grid": {
-    "cols": 8,
-    "rows": 6,
+    "cols": 4,
+    "rows": 4,
     "cells": [
       {
         "row": 0,
@@ -32,534 +44,302 @@
         "bbox_um": {
           "left": -0.19,
           "bottom": -0.24,
-          "right": 0.202,
-          "top": 0.293
+          "right": 0.595,
+          "top": 0.56,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 0.5153061224489796
+        "covered_fraction": 0.7579617834394905,
+        "whitespace_fraction": 0.2420382165605095
       },
       {
         "row": 0,
         "col": 1,
         "bbox_um": {
-          "left": 0.202,
+          "left": 0.595,
           "bottom": -0.24,
-          "right": 0.595,
-          "top": 0.293
+          "right": 1.3800000000000001,
+          "top": 0.56,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 0,
         "col": 2,
         "bbox_um": {
-          "left": 0.595,
+          "left": 1.3800000000000001,
           "bottom": -0.24,
-          "right": 0.988,
-          "top": 0.293
+          "right": 2.165,
+          "top": 0.56,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 0,
         "col": 3,
         "bbox_um": {
-          "left": 0.988,
-          "bottom": -0.24,
-          "right": 1.3800000000000001,
-          "top": 0.293
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 0,
-        "col": 4,
-        "bbox_um": {
-          "left": 1.3800000000000001,
-          "bottom": -0.24,
-          "right": 1.772,
-          "top": 0.293
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 0,
-        "col": 5,
-        "bbox_um": {
-          "left": 1.772,
-          "bottom": -0.24,
-          "right": 2.165,
-          "top": 0.293
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 0,
-        "col": 6,
-        "bbox_um": {
           "left": 2.165,
           "bottom": -0.24,
-          "right": 2.5580000000000003,
-          "top": 0.293
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 0,
-        "col": 7,
-        "bbox_um": {
-          "left": 2.5580000000000003,
-          "bottom": -0.24,
           "right": 2.95,
-          "top": 0.293
+          "top": 0.56,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 0.5153061224489796
+        "covered_fraction": 0.7579617834394905,
+        "whitespace_fraction": 0.2420382165605095
       },
       {
         "row": 1,
         "col": 0,
         "bbox_um": {
           "left": -0.19,
-          "bottom": 0.293,
-          "right": 0.202,
-          "top": 0.8270000000000001
+          "bottom": 0.56,
+          "right": 0.595,
+          "top": 1.36,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 0.5153061224489796
+        "covered_fraction": 0.7746019108280254,
+        "whitespace_fraction": 0.22539808917197457
       },
       {
         "row": 1,
         "col": 1,
         "bbox_um": {
-          "left": 0.202,
-          "bottom": 0.293,
-          "right": 0.595,
-          "top": 0.8270000000000001
+          "left": 0.595,
+          "bottom": 0.56,
+          "right": 1.3800000000000001,
+          "top": 1.36,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 1,
         "col": 2,
         "bbox_um": {
-          "left": 0.595,
-          "bottom": 0.293,
-          "right": 0.988,
-          "top": 0.8270000000000001
+          "left": 1.3800000000000001,
+          "bottom": 0.56,
+          "right": 2.165,
+          "top": 1.36,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 1,
         "col": 3,
         "bbox_um": {
-          "left": 0.988,
-          "bottom": 0.293,
-          "right": 1.3800000000000001,
-          "top": 0.8270000000000001
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 1,
-        "col": 4,
-        "bbox_um": {
-          "left": 1.3800000000000001,
-          "bottom": 0.293,
-          "right": 1.772,
-          "top": 0.8270000000000001
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 1,
-        "col": 5,
-        "bbox_um": {
-          "left": 1.772,
-          "bottom": 0.293,
-          "right": 2.165,
-          "top": 0.8270000000000001
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 1,
-        "col": 6,
-        "bbox_um": {
           "left": 2.165,
-          "bottom": 0.293,
-          "right": 2.5580000000000003,
-          "top": 0.8270000000000001
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 1,
-        "col": 7,
-        "bbox_um": {
-          "left": 2.5580000000000003,
-          "bottom": 0.293,
+          "bottom": 0.56,
           "right": 2.95,
-          "top": 0.8270000000000001
+          "top": 1.36,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 0.5153061224489796
+        "covered_fraction": 0.7746019108280254,
+        "whitespace_fraction": 0.22539808917197457
       },
       {
         "row": 2,
         "col": 0,
         "bbox_um": {
           "left": -0.19,
-          "bottom": 0.8270000000000001,
-          "right": 0.202,
-          "top": 1.36
+          "bottom": 1.36,
+          "right": 0.595,
+          "top": 2.16,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 0.5653214381437378
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 2,
         "col": 1,
         "bbox_um": {
-          "left": 0.202,
-          "bottom": 0.8270000000000001,
-          "right": 0.595,
-          "top": 1.36
+          "left": 0.595,
+          "bottom": 1.36,
+          "right": 1.3800000000000001,
+          "top": 2.16,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 2,
         "col": 2,
         "bbox_um": {
-          "left": 0.595,
-          "bottom": 0.8270000000000001,
-          "right": 0.988,
-          "top": 1.36
+          "left": 1.3800000000000001,
+          "bottom": 1.36,
+          "right": 2.165,
+          "top": 2.16,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 2,
         "col": 3,
         "bbox_um": {
-          "left": 0.988,
-          "bottom": 0.8270000000000001,
-          "right": 1.3800000000000001,
-          "top": 1.36
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 2,
-        "col": 4,
-        "bbox_um": {
-          "left": 1.3800000000000001,
-          "bottom": 0.8270000000000001,
-          "right": 1.772,
-          "top": 1.36
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 2,
-        "col": 5,
-        "bbox_um": {
-          "left": 1.772,
-          "bottom": 0.8270000000000001,
-          "right": 2.165,
-          "top": 1.36
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 2,
-        "col": 6,
-        "bbox_um": {
           "left": 2.165,
-          "bottom": 0.8270000000000001,
-          "right": 2.5580000000000003,
-          "top": 1.36
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 2,
-        "col": 7,
-        "bbox_um": {
-          "left": 2.5580000000000003,
-          "bottom": 0.8270000000000001,
+          "bottom": 1.36,
           "right": 2.95,
-          "top": 1.36
+          "top": 2.16,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 0.5653214381437378
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 3,
         "col": 0,
         "bbox_um": {
           "left": -0.19,
-          "bottom": 1.36,
-          "right": 0.202,
-          "top": 1.893
+          "bottom": 2.16,
+          "right": 0.595,
+          "top": 2.96,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 0.9848726114649682,
+        "whitespace_fraction": 0.015127388535031816
       },
       {
         "row": 3,
         "col": 1,
         "bbox_um": {
-          "left": 0.202,
-          "bottom": 1.36,
-          "right": 0.595,
-          "top": 1.893
+          "left": 0.595,
+          "bottom": 2.16,
+          "right": 1.3800000000000001,
+          "top": 2.96,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 3,
         "col": 2,
         "bbox_um": {
-          "left": 0.595,
-          "bottom": 1.36,
-          "right": 0.988,
-          "top": 1.893
+          "left": 1.3800000000000001,
+          "bottom": 2.16,
+          "right": 2.165,
+          "top": 2.96,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
+        "covered_fraction": 1.0,
+        "whitespace_fraction": 0.0
       },
       {
         "row": 3,
         "col": 3,
         "bbox_um": {
-          "left": 0.988,
-          "bottom": 1.36,
-          "right": 1.3800000000000001,
-          "top": 1.893
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 3,
-        "col": 4,
-        "bbox_um": {
-          "left": 1.3800000000000001,
-          "bottom": 1.36,
-          "right": 1.772,
-          "top": 1.893
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 3,
-        "col": 5,
-        "bbox_um": {
-          "left": 1.772,
-          "bottom": 1.36,
-          "right": 2.165,
-          "top": 1.893
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 3,
-        "col": 6,
-        "bbox_um": {
           "left": 2.165,
-          "bottom": 1.36,
-          "right": 2.5580000000000003,
-          "top": 1.893
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 3,
-        "col": 7,
-        "bbox_um": {
-          "left": 2.5580000000000003,
-          "bottom": 1.36,
+          "bottom": 2.16,
           "right": 2.95,
-          "top": 1.893
+          "top": 2.96,
+          "width": 0.785,
+          "height": 0.8
         },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 0,
-        "bbox_um": {
-          "left": -0.19,
-          "bottom": 1.893,
-          "right": 0.202,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 1,
-        "bbox_um": {
-          "left": 0.202,
-          "bottom": 1.893,
-          "right": 0.595,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 2,
-        "bbox_um": {
-          "left": 0.595,
-          "bottom": 1.893,
-          "right": 0.988,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 3,
-        "bbox_um": {
-          "left": 0.988,
-          "bottom": 1.893,
-          "right": 1.3800000000000001,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 4,
-        "bbox_um": {
-          "left": 1.3800000000000001,
-          "bottom": 1.893,
-          "right": 1.772,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 5,
-        "bbox_um": {
-          "left": 1.772,
-          "bottom": 1.893,
-          "right": 2.165,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 6,
-        "bbox_um": {
-          "left": 2.165,
-          "bottom": 1.893,
-          "right": 2.5580000000000003,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 4,
-        "col": 7,
-        "bbox_um": {
-          "left": 2.5580000000000003,
-          "bottom": 1.893,
-          "right": 2.95,
-          "top": 2.427
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 0,
-        "bbox_um": {
-          "left": -0.19,
-          "bottom": 2.427,
-          "right": 0.202,
-          "top": 2.96
-        },
-        "covered_fraction": 0.9545315311865834
-      },
-      {
-        "row": 5,
-        "col": 1,
-        "bbox_um": {
-          "left": 0.202,
-          "bottom": 2.427,
-          "right": 0.595,
-          "top": 2.96
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 2,
-        "bbox_um": {
-          "left": 0.595,
-          "bottom": 2.427,
-          "right": 0.988,
-          "top": 2.96
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 3,
-        "bbox_um": {
-          "left": 0.988,
-          "bottom": 2.427,
-          "right": 1.3800000000000001,
-          "top": 2.96
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 4,
-        "bbox_um": {
-          "left": 1.3800000000000001,
-          "bottom": 2.427,
-          "right": 1.772,
-          "top": 2.96
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 5,
-        "bbox_um": {
-          "left": 1.772,
-          "bottom": 2.427,
-          "right": 2.165,
-          "top": 2.96
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 6,
-        "bbox_um": {
-          "left": 2.165,
-          "bottom": 2.427,
-          "right": 2.5580000000000003,
-          "top": 2.96
-        },
-        "covered_fraction": 1.0
-      },
-      {
-        "row": 5,
-        "col": 7,
-        "bbox_um": {
-          "left": 2.5580000000000003,
-          "bottom": 2.427,
-          "right": 2.95,
-          "top": 2.96
-        },
-        "covered_fraction": 0.9545315311865834
+        "covered_fraction": 0.9848726114649682,
+        "whitespace_fraction": 0.015127388535031816
       }
     ]
   },
-  "empty_regions": [],
+  "largest_empty_regions": [
+    {
+      "bbox_um": {
+        "left": -0.19,
+        "bottom": -0.24,
+        "right": 0.0,
+        "top": 1.305,
+        "width": 0.19,
+        "height": 1.545
+      },
+      "area_um2": 0.29355000000000003,
+      "fill_fraction": 1.0
+    },
+    {
+      "bbox_um": {
+        "left": 2.7600000000000002,
+        "bottom": -0.24,
+        "right": 2.95,
+        "top": 1.305,
+        "width": 0.19,
+        "height": 1.545
+      },
+      "area_um2": 0.29355000000000003,
+      "fill_fraction": 1.0
+    },
+    {
+      "bbox_um": {
+        "left": -0.19,
+        "bottom": 2.91,
+        "right": 0.0,
+        "top": 2.96,
+        "width": 0.19,
+        "height": 0.05
+      },
+      "area_um2": 0.0095,
+      "fill_fraction": 1.0
+    },
+    {
+      "bbox_um": {
+        "left": 2.7600000000000002,
+        "bottom": 2.91,
+        "right": 2.95,
+        "top": 2.96,
+        "width": 0.19,
+        "height": 0.05
+      },
+      "area_um2": 0.0095,
+      "fill_fraction": 1.0
+    }
+  ],
+  "empty_region_count": 4,
+  "cells": [
+    {
+      "name": "sky130_fd_sc_hd__buf_4",
+      "bbox_um": {
+        "left": -0.19,
+        "bottom": -0.24,
+        "right": 2.95,
+        "top": 2.96,
+        "width": 3.14,
+        "height": 3.2
+      },
+      "bbox_area_um2": 10.048,
+      "drawn_area_um2": 9.4419,
+      "utilization": 0.9396795382165606
+    }
+  ],
+  "row_utilization": null,
+  "annotation_layers_excluded": [],
   "provenance": {
-    "input_content_hash": "sha256:50d31323ec85291e1631f826576c7add7482994f711756a5f4c4c90eb81153f0",
+    "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
-    "annotation_layers_excluded": []
+    "pdk": null,
+    "deck": null,
+    "input": {
+      "content_hash": "sha256:50d31323ec85291e1631f826576c7add7482994f711756a5f4c4c90eb81153f0"
+    }
   }
 }

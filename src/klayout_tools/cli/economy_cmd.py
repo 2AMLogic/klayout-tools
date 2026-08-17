@@ -16,6 +16,12 @@ def run(args: argparse.Namespace) -> int:
             max_empty_regions=args.max_empty_regions,
             budget_um2=args.budget_um2,
             reference_area_um2=args.reference_area_um2,
+            area_eff_max_dead_margin_um=args.area_eff_max_dead_margin_um,
+            area_eff_min_utilization=args.area_eff_min_utilization,
+            area_eff_max_empty_region_fraction=(
+                args.area_eff_max_empty_region_fraction
+            ),
+            area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -85,6 +91,34 @@ def _print_text(report: dict) -> None:
             f"(actual={reference['actual_area_um2']:.3f} um2, "
             f"reference={reference['reference_area_um2']:.3f} um2)"
         )
+
+    area_eff = report.get("area_eff")
+    if area_eff is not None:
+        print(f"area_eff: {area_eff['status']}")
+        checks = area_eff["checks"]
+        if "dead_margins" in checks:
+            c = checks["dead_margins"]
+            print(
+                f"  dead_margins: {c['status']} "
+                f"(actual_max={c['actual_max_um']:.3f} um, "
+                f"max_allowed={c['max_allowed_um']:.3f} um)"
+            )
+        if "utilization" in checks:
+            c = checks["utilization"]
+            print(
+                f"  utilization: {c['status']} "
+                f"(actual={c['actual']:.4f}, floor={c['floor']:.4f})"
+            )
+        if "largest_empty_region_fraction" in checks:
+            c = checks["largest_empty_region_fraction"]
+            print(
+                f"  largest_empty_region_fraction: {c['status']} "
+                f"(actual={c['actual_fraction']:.4f}, "
+                f"max_allowed={c['max_allowed_fraction']:.4f})"
+            )
+        if "bbox_tightness" in checks:
+            c = checks["bbox_tightness"]
+            print(f"  bbox_tightness: {c['status']} (actual={c['actual']:.4f})")
 
     cells = report["cells"]
     if not cells:

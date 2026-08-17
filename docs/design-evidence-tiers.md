@@ -163,6 +163,148 @@ every block.
     and how to reproduce every result; a license; CI that at minimum
     keeps the harness and evidence formats valid.
 
+## Area-efficiency spec convention (AREA-EFF)
+
+An absolute area bound alone cannot tell **area a block needs** from **area
+a block wastes** — a block can pass every T1 item while sprawling (the
+premise `klt economy`, issue #1012, was built on: agent-produced layouts
+are correct-but-sprawling by default, and area is unit cost). This section
+defines a second, companion spec row that answers the efficiency question
+an `Area` row cannot, so a decision to loosen an area bound can turn on
+*whether the area is well spent*, not only on how much of it there is.
+
+### Two spec rows per block
+
+- **`Area`** — absolute bbox area ≤ X mm². Ratified, customer-facing,
+  revisable through the normal DR process. This is the row canary READMEs
+  already carry (see "Where a ratified spec lives" below).
+- **`Area-Eff`** — layout efficiency: a small composite metric backed
+  entirely by fields `klt economy` (issue #1012, `docs/cli/economy.md`)
+  already reports, checked in one command via `klt economy`'s
+  `--area-eff-*` flags (`docs/cli/economy.md`'s "AREA-EFF bounds-check
+  block" section documents the exact request/response shape):
+  - **Hard bounds on unambiguous waste** — no analog-legitimacy defense
+    (guard ring, matching symmetry, isolation spacing) applies to any of
+    these:
+    - `dead_margins_um` (`--area-eff-max-dead-margin-um`) — a per-edge cap
+      on empty bands at the block's own bbox edges.
+    - `bbox_tightness` (`--area-eff-require-bbox-tightness`) — must equal
+      `1.0`: the bbox must not extend past the drawn content at all.
+    - `largest_empty_regions` (`--area-eff-max-empty-region-fraction`) — no
+      single disjoint empty region above a set fraction of the bbox area.
+  - **Calibrated bound**: `utilization` (`--area-eff-min-utilization`) ≥ a
+    per-block-kind floor. Unlike the checks above, this one is *not* a
+    fixed rule for every block — see "Hard bounds vs. a calibrated bound"
+    below.
+  - **Where a comparable design exists**: `klt economy`'s existing
+    `--reference-area-um2` ratio (a general area comparison, not
+    AREA-EFF-specific) can additionally be cited against a hand-designed
+    reference.
+  - **Judgment layer**: an `economy-review` skill
+    (`.claude/skills/economy-review/SKILL.md`) verdict of `pass` — the
+    rubric distinguishes guard rings / matching symmetry / isolation
+    spacing from genuine waste, the reason the metrics above can't stand
+    alone as automatic gates.
+
+### Hard bounds vs. a calibrated bound
+
+**Goodhart cuts both ways here.** A utilization floor alone pressures
+cramming, which trades against matching and DRC margin — the opposite
+failure from sprawl. That is why only the unambiguous-waste metrics
+(`dead_margins_um`, `bbox_tightness`, `largest_empty_regions`) get hard,
+one-size-fits-every-block bounds, while `utilization` gets a calibrated,
+block-kind-dependent floor with the `economy-review` skill's rubric
+verdict as the judgment layer that catches what a bare number can't (a
+floorplan that is tight everywhere but shaped wrong, or legitimately
+sparse for a documented reason).
+
+Per-block-kind utilization floors are seeded from the `economy-review`
+skill's own rubric table (`.claude/skills/economy-review/SKILL.md`,
+calibrated against two real canaries — see "Calibration evidence" below),
+not invented here. Only the digital row carries a named hard floor today;
+the analog/mixed-signal rows carry a typical range (and, for matched
+pairs, a soft "flag, not automatic fail" threshold) rather than a single
+number, precisely because a wrong floor there is the cramming-vs-matching
+Goodhart failure this section exists to avoid — an `Area-Eff` row for one
+of those kinds should set `--area-eff-min-utilization` from the *typical
+range's own low end* only when the block's own evidence (an `economy-review`
+verdict, or prior fab data) supports it, not by default:
+
+| Block kind | `--area-eff-min-utilization` | Typical range |
+|---|---|---|
+| Digital standard-cell rows | 0.70 (named floor) | ≥ 0.85 typical |
+| Analog matched pairs / current mirrors | no named floor — below ~0.25 is a flag, not an automatic fail | 0.35–0.55 typical |
+| Analog isolation-heavy (bandgap, LDO, references) | no named floor | 0.30–0.50 typical |
+| Mixed-signal top-level integration | no named floor | 0.40–0.65 typical |
+
+A ratified `Area`-row budget always overrides these ranges when one exists
+— they are a starting point for setting an `Area-Eff` row's own bound, not
+a substitute for one. Do not restate the derivation of any of these ranges
+here; the `economy-review` skill's `SKILL.md` is their source of truth and
+this table only mirrors it for convenience at the point an `Area-Eff` row
+is being drafted.
+
+### Calibration evidence
+
+The floors above were cross-checked against real `klt economy` output
+(issue #1086), not only the placeholder script that originally seeded
+`SKILL.md`'s table:
+
+- `blocks/sky130_fd_sc_hd__buf_4` (digital standard cell, known-tight):
+  `klt economy` reports `utilization: 0.9397`, `dead_margins_um` all zero,
+  `bbox_tightness: 1.0` — comfortably clears the 0.70 digital floor and
+  every hard bound. See `evidence/economy-review/sky130_fd_sc_hd__buf_4/`.
+- `blocks/sky130-bandgap` (analog, isolation-heavy, known-loose — its own
+  `NOTE.md` documents the area budget was relaxed to fit the drawn layout):
+  `klt economy` reports `utilization: 0.3805` (inside the 0.30–0.50
+  isolation-heavy range on its own) but `dead_margins_um` of ~41 um on both
+  left and right edges — exactly the case an `Area-Eff` row's hard bounds
+  exist for: utilization alone would not flag this block, but an
+  unambiguous-waste bound does. See
+  `evidence/economy-review/sky130-bandgap/`.
+
+Both records' `klt economy` numbers matched the placeholder script's
+numbers that originally seeded `SKILL.md`'s table (to full float
+precision, same input content hash) — the floors above did not need
+revision, only confirmation against the shipped tool.
+
+### Where a ratified spec lives
+
+There is no in-repo JSON/table schema this repo owns for spec rows —
+ratified specs live in each block's own canary repo README under a
+`## Target specification (...)` heading, parsed by
+`scripts/ingest-canary.py`'s `parse_spec_summary()` into
+`spec_summary.rows[]` (keyed by slugified column headers —
+`parameter`/`target`/`stretch`/`corner_binding` for the two current
+canaries, not hardcoded so a future canary can add/drop columns) plus a
+`status_note` from the heading's parenthetical (e.g. `"RATIFIED
+2026-07-31, see issue #1 and #35"`).
+
+The existing row-name convention is `Area` (not `AREA`) — an `Area-Eff` row
+follows the same casing for consistency. `parse_spec_summary()` reads
+column headers verbatim and does not match `parameter` cell values against
+a fixed enum, so an `Area-Eff` row parses with no code change.
+
+### How this binds
+
+Once an `Area-Eff` row is in a block's ratified spec, T1 checklist item 5
+above ("full corner verification vs a ratified spec — every spec row, per-
+row pass/fail") makes it binding through machinery that already exists —
+**no change to the T1 checklist or the tier ladder is needed.** The
+`economy-review` skill's stance is unchanged by this: it "renders opinions,
+nothing here blocks a merge by itself" — `Area-Eff` binds through a block's
+*ratified spec*, not through a new lifecycle gate.
+
+### Relationship to matching-and-floorplanning.md
+
+`docs/design/matching-and-floorplanning.md`'s "Relationship to the #1013
+layout-economy rubric" section already derives the numeric relationship
+between Pelgrom-law matching requirements and legitimate matching-driven
+area — that derivation is not repeated here. This section only names the
+spec-row convention and the CLI mechanism that checks it; the sizing-time
+question of *how much* area a specific matched structure legitimately
+needs stays owned by that document.
+
 ## Verification rules
 
 - **Staleness is failure.** Every report is checked against current source

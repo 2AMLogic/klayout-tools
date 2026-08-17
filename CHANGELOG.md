@@ -674,6 +674,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-17 — `klt economy` gains an **AREA-EFF bounds-check mode** (issue
+  #1086): a block's absolute area bound (`Area`) can't tell area a block
+  *needs* from area it *wastes* — this adds the companion `Area-Eff` spec
+  row's machine-checkable side. Four independently-optional flags each add
+  one check to a new `area_eff` block (present only when at least one is
+  given, mirroring `--budget-um2`/`--reference-area-um2`'s optional-block
+  convention): `--area-eff-max-dead-margin-um` (hard bound — caps every
+  edge of `dead_margins_um`), `--area-eff-max-empty-region-fraction` (hard
+  bound — caps the largest `largest_empty_regions[]` entry's share of the
+  bbox), `--area-eff-require-bbox-tightness` (hard bound — `bbox_tightness`
+  must equal `1.0`), and `--area-eff-min-utilization` (calibrated bound — a
+  per-block-kind floor, deliberately the only non-hard check since a floor
+  set too high pressures cramming against matching/DRC margin). `area_eff`
+  reports a `checks` sub-object (only the requested checks) and an overall
+  `status`, `"pass"` only when every requested check passes. See
+  `docs/design-evidence-tiers.md`'s new "Area-efficiency spec convention
+  (AREA-EFF)" section for the full convention (including seeded
+  per-block-kind utilization floors, cross-checked against real `klt
+  economy` output on both existing `evidence/economy-review/` canaries) and
+  `docs/cli/economy.md`'s "AREA-EFF bounds-check block" for the JSON shape.
 - 2026-08-17 — `klt gen-compose` routes **bundle (>2-pin) `connectivity[]`
   nets** (issue #1073). A shared supply/ground rail, a bias line, a clock, or
   any fanout node touches one port on every block it spans, so a two-pin-only
