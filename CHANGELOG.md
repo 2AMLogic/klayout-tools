@@ -16,6 +16,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-17 — `klt lvs` can now compare a `klt extract`-derived (always
+  flat) layout netlist against a **hierarchical** reference netlist — one
+  leaf `.subckt` plus N instance calls of it, the shape a macro built by
+  tiling one verified leaf cell naturally takes (issue #1085). Previously
+  this was an unconditional `topology` "circuit could not be matched to a
+  counterpart" mismatch on both sides: `NetlistComparer` pairs circuits
+  one-for-one, and the flat layout side has no subcircuit-call circuit to
+  pair against the reference's, so the compare declined to even attempt a
+  per-net/per-device verdict. New opt-in `options.flatten_reference` /
+  `options.flatten_layout` booleans (default `false`, unchanged behavior)
+  call KLayout's own `Netlist.flatten()` in-process on the named side
+  before comparing, collapsing its subcircuit-call hierarchy into its top
+  circuit(s) so it becomes directly comparable against an already-flat
+  netlist on the other side. Each side actually flattened is disclosed as a
+  new `severity: "warning"`, `category: "topology.flattened"`
+  `mismatches[]` entry, so a `"match"` reached after an opted-in flatten is
+  never silently indistinguishable from one reached against the netlist's
+  original hierarchy. See `docs/cli/lvs.md`'s `options.flatten_reference`
+  and `"topology.flattened"` sections.
 - 2026-08-17 — `klt yield`'s spec `limits` (`min`/`max`) were inclusive-only,
   so a spec row ratified as a strict inequality ("must be strictly positive")
   had to be transcribed as `min: <epsilon>` — no longer a literal copy of the
