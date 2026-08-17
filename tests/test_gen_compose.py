@@ -1461,6 +1461,49 @@ def test_compose_single_block_degenerate_case(tmp_path, pdk_root):
     assert report["bbox_um"] == pytest.approx(r1["bbox_um"])
 
 
+def test_compose_accepts_unmodified_draw_report_as_a_block(tmp_path, pdk_root):
+    """A `klt draw` response (issue #1059), fed straight into
+    `blocks[].generator_report` with no hand-patching, must compose --
+    `draw`'s output already carries `generator: "draw"` plus the
+    `cell_name`/`gds_path`/`bbox_um` fields `_parse_blocks` requires, and has
+    no `ports[]` key at all (which `_parse_blocks` already defaults to
+    `[]`)."""
+    from klayout_tools.draw import REQUEST_SCHEMA as DRAW_REQUEST_SCHEMA
+    from klayout_tools.draw import draw
+
+    draw_output = tmp_path / "solo_drawn.gds"
+    draw_report = draw(
+        {
+            "schema": DRAW_REQUEST_SCHEMA,
+            "params": {
+                "shapes": [
+                    {
+                        "layer": [66, 20],
+                        "name": "poly.drawing",
+                        "rect_um": [0, 0, 1.0, 2.0],
+                    }
+                ]
+            },
+            "options": {"cell_name": "solo_drawn", "output": str(draw_output)},
+        }
+    )
+    assert draw_report["generator"] == "draw"
+    assert "ports" not in draw_report
+
+    output = tmp_path / "solo_drawn_composed.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "solo", "generator_report": draw_report}],
+            "placement": {"strategy": "row", "order": ["solo"], "spacing_um": 2.0},
+            "options": {"cell_name": "solo_drawn_composed", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["blocks"][0]["generator"] == "draw"
+    assert report["bbox_um"] == pytest.approx(draw_report["bbox_um"])
+
+
 def test_compose_accepts_inline_and_file_generator_report(tmp_path, pdk_root):
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
