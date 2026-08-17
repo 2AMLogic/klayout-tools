@@ -2650,9 +2650,54 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return block_geometry_cache
 
+    # dbu for the route-vs-route collision check below (#1057), read lazily
+    # (only once connectivity[] actually has a net to check) from any one
+    # block's own GDS -- _write_composed_gds is the authoritative place that
+    # reads every block's full geometry and requires (and validates) that
+    # they all share one dbu, so any single block's value is safe to reuse
+    # here ahead of that.
+    _route_dbu_cache: list[float] = []
+
+    def _route_dbu() -> float:
+        if not _route_dbu_cache:
+            import klayout.db as kdb
+
+            probe_block_id = order[0]
+            probe_gds_path = blocks[probe_block_id]["gds_path"]
+            probe_layout = kdb.Layout()
+            try:
+                probe_layout.read(probe_gds_path)
+            except Exception as exc:  # klayout raises RuntimeError for bad paths
+                raise GenComposeError(
+                    f"block '{probe_block_id}': could not read gds_path "
+                    f"'{probe_gds_path}': {exc}"
+                ) from exc
+            _route_dbu_cache.append(probe_layout.dbu)
+        return _route_dbu_cache[0]
+
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
     routed_geometry: list[dict[str, Any]] = []
+    # Regions already accepted into routed_geometry so far in this request,
+    # kept in lock-step with it (#1057) -- a route-vs-block collision is
+    # covered by route_two_pin's own checks 1-6, but nothing previously
+    # compared one connectivity[] entry's drawn backbone against *another*
+    # entry's already-accepted one, so two distinct nets on the same
+    # routing.layer_role could be drawn crossing each other, both reporting
+    # routed: true, with nothing to flag the silent short. Each entry also
+    # keeps the pin set that produced it (``{(block_id, port_name), ...}``)
+    # -- two connectivity[] entries that share a literal pin (e.g. bussing
+    # three ports into one node via two chained 2-pin nets, as
+    # test_compose_via_drop_routes_self_net_that_pure_metal_would_reject
+    # already exercises) are, by construction, the same electrical node at
+    # that shared pin: both backbones' approach stubs necessarily converge on
+    # the identical point, from the identical direction, drawing a real
+    # positive-area overlap there that is the caller's intended merge, not an
+    # accidental short -- so a pair sharing a pin is exempt from this check
+    # entirely (see the "shared pin" skip below). kdb.Region objects are not
+    # JSON-serialisable, so this stays a private side list rather than living
+    # on routed_geometry/nets[] themselves.
+    accepted_route_regions: list[tuple[str, frozenset[tuple[str, str]], Any]] = []
     for entry in connectivity:
         net_label = entry["net"]
         pins = entry["pins"]
@@ -2700,15 +2745,45 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             }
         )
         if result["routed"]:
-            routed_geometry.append(
-                {
-                    "net": net_label,
-                    "points_um": result["points_um"],
-                    "width_um": width_um,
-                    "via_drops": result.get("via_drops", []),
-                    "stub_widen": result.get("stub_widen", []),
-                }
+            # Route-vs-route collision check (#1057): route_two_pin's checks
+            # 1-6 only ever compare this net's own backbone against *block*
+            # geometry -- a positive-area overlap with a route already
+            # accepted earlier in this same request is caught here instead,
+            # the one place with visibility across nets. Mirrors check 4's
+            # "positive area only, not a mere edge touch" rule: a `kdb.Region`
+            # boolean AND between two backbones already yields an empty
+            # region for a mere edge touch, so no separate area threshold is
+            # needed.
+            new_region = _drawn_route_region(
+                result["points_um"], width_um, _route_dbu()
             )
+            new_pins = frozenset((pin["block"], pin["port"]) for pin in pins)
+            colliding_net: str | None = None
+            for other_net, other_pins, other_region in accepted_route_regions:
+                if new_pins & other_pins:
+                    continue  # shared pin -- an intended merge, not a short
+                if not (new_region & other_region).is_empty():
+                    colliding_net = other_net
+                    break
+            if colliding_net is not None:
+                nets[-1]["routed"] = False
+                nets[-1]["route_length_um"] = None
+                unrouted_nets.append(net_label)
+                notes.append(
+                    f"net '{net_label}' could not be routed: crosses "
+                    f"already-routed net '{colliding_net}'"
+                )
+            else:
+                accepted_route_regions.append((net_label, new_pins, new_region))
+                routed_geometry.append(
+                    {
+                        "net": net_label,
+                        "points_um": result["points_um"],
+                        "width_um": width_um,
+                        "via_drops": result.get("via_drops", []),
+                        "stub_widen": result.get("stub_widen", []),
+                    }
+                )
         else:
             unrouted_nets.append(net_label)
             notes.append(f"net '{net_label}' could not be routed: {result['reason']}")
