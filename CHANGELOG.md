@@ -16,6 +16,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-17 — `klt yield`'s spec `limits` (`min`/`max`) were inclusive-only,
+  so a spec row ratified as a strict inequality ("must be strictly positive")
+  had to be transcribed as `min: <epsilon>` — no longer a literal copy of the
+  spec, and silently wrong for anyone who forgot the epsilon (issue #1083).
+  `limits` gains optional `exclusive_min`/`exclusive_max` booleans (default
+  `false`) that make the corresponding bound a *strict* comparison (`>`/`<`
+  instead of `>=`/`<=`); declaring one with no matching `min`/`max` value is a
+  validation error rather than silently ignored. Additive and backwards
+  compatible — no `schema_version` bump. The human-readable report now shows
+  the comparison operator (`min(>)=0` vs `min(>=)=0`) so the strictness is
+  visible, not just present in the JSON; see `docs/cli/yield.md`'s `limits`
+  shape table for the worked example.
 - 2026-08-17 — `klt yield` no longer reports a conditional yield as if it were
   unconditional (issue #1082). An errored sample never entered the yield
   denominator, so a campaign whose failure mode is *"no measurement"* — an
