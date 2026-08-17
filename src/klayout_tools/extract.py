@@ -144,7 +144,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
-from ._layout import load_layout
+from ._layout import load_layout, resolve_top_cell
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._provenance import _klt_version, build_provenance, sha256_file
@@ -2945,7 +2945,7 @@ def extract_netlist_from_layout(
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
-    top_cell = _resolve_top_cell(layout, top, path)
+    top_cell = resolve_top_cell(layout, top, ExtractError, path=path)
 
     # `--abstract-cells` (issue #620): resolved *before* `_extract_netlist`
     # runs, by mutating `layout` in place -- see
@@ -3029,28 +3029,6 @@ def extract_netlist_from_layout(
     )
 
 
-def _resolve_top_cell(layout: kdb.Layout, top: str | None, path: str) -> kdb.Cell:
-    """Pick the extraction top cell: ``top`` by name if given, else the
-    layout's sole top cell (an ambiguous/missing choice is an
-    :class:`ExtractError`)."""
-    if top is not None:
-        cell = layout.cell(top)
-        if cell is None:
-            raise ExtractError(f"cell '{top}' not found in '{path}'")
-        return cell
-
-    top_cells = list(layout.top_cells())
-    if len(top_cells) == 0:
-        raise ExtractError(f"'{path}' has no top cell")
-    if len(top_cells) > 1:
-        names = ", ".join(sorted(cell.name for cell in top_cells))
-        raise ExtractError(
-            f"'{path}' has {len(top_cells)} top cells ({names}); "
-            "pass --top to select one"
-        )
-    return top_cells[0]
-
-
 def _default_output_path(path: str) -> str:
     """``<file>`` with its extension replaced by ``.spice`` (spike section 2a)."""
     stem, _ext = os.path.splitext(path)
@@ -3121,7 +3099,7 @@ def run_extract_klayout_engine(
       *zero* devices, for every fixture tried, including ones the script's
       own extraction logging confirmed it had recognised a device on;
       ``net_only``/``top_lvl_pins`` avoid that pruning) and promotes every
-      labelled net to a top-level pin (needed for :func:`_resolve_top_cell`-
+      labelled net to a top-level pin (needed for :func:`resolve_top_cell`-
       selected fixtures whose only pins are drawn labels, mirroring how this
       module's own compiled-deck path always promotes them).
 
@@ -3223,7 +3201,7 @@ def run_extract_klayout_engine(
         raise ExtractError(f"LVS deck file not found: {lvs_deck_file}")
 
     layout = load_layout(path, ExtractError)
-    top_cell = _resolve_top_cell(layout, top, path)
+    top_cell = resolve_top_cell(layout, top, ExtractError, path=path)
     top_cell_name = top_cell.name
 
     work_dir = tempfile.mkdtemp(prefix="klt-extract-klayout-")

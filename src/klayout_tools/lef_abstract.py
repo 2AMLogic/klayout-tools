@@ -75,7 +75,7 @@ import os
 import re
 from typing import Any
 
-from ._layout import load_layout
+from ._layout import load_layout, resolve_top_cell
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
 from .pdk import PdkNotFoundError, find_pdk, lef_files
@@ -180,7 +180,7 @@ def run_lef_abstract(
     tech LEF for ``cell_library``, or a write failure.
     """
     layout = load_layout(layout_path, LefAbstractError)
-    top_cell = _resolve_top_cell(layout, top, layout_path)
+    top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
 
     try:
         descriptor = _load_descriptor(socket_path)
@@ -305,30 +305,6 @@ def run_lef_abstract(
         "warnings": warnings,
         "provenance": provenance,
     }
-
-
-# --------------------------------------------------------------------------- #
-# top-cell resolution (mirrors extract.py's own _resolve_top_cell)
-# --------------------------------------------------------------------------- #
-
-
-def _resolve_top_cell(layout: Any, top: str | None, path: str) -> Any:
-    if top is not None:
-        cell = layout.cell(top)
-        if cell is None:
-            raise LefAbstractError(f"cell '{top}' not found in '{path}'")
-        return cell
-
-    top_cells = list(layout.top_cells())
-    if len(top_cells) == 0:
-        raise LefAbstractError(f"'{path}' has no top cell")
-    if len(top_cells) > 1:
-        names = ", ".join(sorted(cell.name for cell in top_cells))
-        raise LefAbstractError(
-            f"'{path}' has {len(top_cells)} top cells ({names}); "
-            "pass --top to select one"
-        )
-    return top_cells[0]
 
 
 # --------------------------------------------------------------------------- #

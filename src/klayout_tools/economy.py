@@ -72,7 +72,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
-from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout
+from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
 
 SCHEMA_VERSION = 1
@@ -138,25 +138,6 @@ class EconomyError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback.
     """
-
-
-def _resolve_top_cell(layout: Any, top: str | None) -> Any:
-    if top is not None:
-        cell = layout.cell(top)
-        if cell is None:
-            raise EconomyError(f"top cell not found in stream: {top}")
-        return cell
-
-    top_cells = list(layout.top_cells())
-    if len(top_cells) > 1:
-        names = ", ".join(sorted(c.name for c in top_cells))
-        raise EconomyError(
-            f"layout has multiple top cells ({names}); a single top cell is "
-            "required for the bounding-box reference. Pass --top to select one."
-        )
-    if not top_cells:
-        raise EconomyError("layout has no cells")
-    return top_cells[0]
 
 
 def _annotation_pairs(layout: Any) -> set[tuple[int, int]]:
@@ -541,7 +522,7 @@ def economy_report(
     # convention (`_layout.py`'s module docstring).
     import klayout.db as kdb
 
-    top_cell = _resolve_top_cell(layout, top)
+    top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
 
     bbox = top_cell.bbox()
