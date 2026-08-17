@@ -968,6 +968,15 @@ live re-measurement above.
   "macros": [
     { "instance": "u_analog", "lef": "analog_block.lef", "x_um": 12.5, "y_um": 3.0, "orientation": "R0" }
   ],
+  "power": {
+    "power_net": "VDD",
+    "ground_net": "VSS",
+    "straps": [
+      { "layer": "met1", "width_um": 0.48, "pitch_um": 5.44, "followpins": true },
+      { "layer": "met4", "width_um": 1.6, "pitch_um": 27.14, "offset_um": 13.57 },
+      { "layer": "met5", "width_um": 1.6, "pitch_um": 27.2, "offset_um": 13.6 }
+    ]
+  },
   "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
   "seed": 1,
   "target_stage": "route"
@@ -985,6 +994,9 @@ live re-measurement above.
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
+| `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly: no `SPECIALNETS`, no tapcells/fillers. |
+| `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
+| `power.straps` | array\<object\> | Required when `power` is given, non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
@@ -1049,6 +1061,20 @@ live re-measurement above.
     "annotation_complete": true,
     "annotation_warning": null
   },
+  "power": {
+    "pdn": true,
+    "global_connect": true,
+    "power_net": "VDD",
+    "ground_net": "VSS",
+    "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+    "endcap_master": null,
+    "filler_masters": [
+      "sky130_fd_sc_hd__fill_1",
+      "sky130_fd_sc_hd__fill_2",
+      "sky130_fd_sc_hd__fill_4",
+      "sky130_fd_sc_hd__fill_8"
+    ]
+  },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -1084,6 +1110,7 @@ live re-measurement above.
 | `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
+| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 
 ## As-built netlist (`verilog_path`, issue #996)
@@ -1139,6 +1166,78 @@ corresponds to (it predates `repair_antennas`'s diode insertions) and would
 need a second response field with no `def_path`/`gds_path` to pair with.
 `verilog_path` therefore follows those two fields exactly.
 
+## Power delivery (`request.power`, issue #1091)
+
+Before this field existed, this command's generated Tcl never called
+`global_connect`/`pdngen` and never inserted tapcells or filler cells: the
+routed DEF it wrote had no `SPECIALNETS` section at all, every standard
+cell's `VDD`/`VSS` LEF pin belonged to no net, and cell rows were
+discontinuous wherever placement left a gap. `target_stage: "route"`
+returning `status: "ok"` therefore meant "signal routing completed," not
+"this design has been placed and routed" in the sense a caller taking
+`def_path`/`gds_path` onward would assume — DRC (well/substrate ties, rail
+continuity), LVS (power nets in the reference netlist), and any real handoff
+all need power delivery first.
+
+The optional `request.power` block closes this gap. Net names for the
+power/ground rails (`power_net`/`ground_net`, default `"VDD"`/`"VSS"`) plus
+the PDN strap geometry (`straps[]` — `layer`/`width_um`/`pitch_um`, plus
+optional `offset_um`/`followpins`, listed bottom-to-top) drive, at the end
+of the `"floorplan"` stage (immediately after `place_macro`/`make_tracks`,
+before that stage's own `write_db`):
+
+1. `tapcell` — well/substrate ties, using the per-library master + distance
+   this command already knows (sourced the same verified-not-guessed way as
+   the CTS buffer/routing-layer-range/antenna-diode tables — see
+   `place_and_route.py`'s own module docstring).
+2. `add_global_connection` (one call per per-library pin-pattern rule) +
+   `global_connect` — wiring every standard cell's PG pin to the named
+   power/ground net.
+3. `set_voltage_domain` + `define_pdn_grid` + `add_pdn_stripe` (one per
+   requested strap) + `add_pdn_connect` (between each consecutive strap
+   pair) + `pdngen` — the strap/rail grid itself.
+
+...and, at the end of the `"route"` stage (immediately after the
+antenna-repair loop, before `write_def`):
+
+4. `filler_placement` — closing every row gap, using the per-library filler
+   masters this command already knows.
+5. A second `global_connect` — wiring the newly-placed filler instances'
+   own PG pins, mirroring OpenROAD-flow-scripts' own
+   `flow/scripts/final_connect.tcl`, whose own comment states exactly why:
+   "Ensure all OR created (rsz/cts) instances are connected."
+
+This insertion ordering mirrors OpenROAD-flow-scripts' own stage sequence
+exactly (`flow/scripts/tapcell.tcl` → `pdn.tcl` → global placement;
+`detail_route.tcl` → `fillcell.tcl` → `final_connect.tcl`).
+
+`request.power` omitted (the default) preserves prior behavior exactly — no
+`SPECIALNETS`, no tapcells/fillers, and the response's `power` field reports
+that nothing ran.
+
+**Response `power` field: what it reports, and what it doesn't.** `pdn`/
+`global_connect`/`power_net`/`ground_net`/`tapcell_master`/`endcap_master`
+name what this run was *configured* with — not a live placed-instance
+count. OpenROAD reports real per-master instance counts only via a
+`report_design_area`/`get_cells -filter`-style query this command does not
+yet thread through its per-stage `-metrics <file>.json` mechanism (the same
+mechanism `stages[]`'s own metric fields already use); adding that is a
+natural, separable follow-up. `filler_masters` is `[]` unless `stage_reached`
+is `"route"` (`filler_placement` is a `"route"`-stage-only call) — it names
+the masters passed to that call, not how many filler instances OpenROAD
+actually placed.
+
+**Macro-specific PDN grids are out of scope for this v1.** `pdngen` here
+builds only the flat standard-cell grid (`define_pdn_grid` with no
+`-macro`) — a design with hard macros needs a caller-supplied macro
+halo/grid spec this field does not yet expose.
+
+**`write_verilog` strips the new physical-only cells.** When `request.power`
+is set, the `"route"` stage's `write_verilog` call (see "As-built netlist"
+above) additionally passes `-remove_cells` naming the tapcell/endcap/filler
+masters this run used — keeping `verilog_path` diffable against `klt
+synthesize`'s own netlist, which never contains them.
+
 ## Partial completion (`target_stage`)
 
 A request with `target_stage: "place"` asks only for floorplan through
@@ -1193,13 +1292,18 @@ diagnosis remains for netlists produced by anything else.
 
 ## Out of scope
 
-- **Tapcell insertion, power-grid generation (PDN), metal fill,
-  `DONT_USE_CELLS`-style cell exclusion.** A core-only block v1, matching
-  the contract's own IO-ring/footprint exclusion — none of these are part
-  of the request/response contract this phase implements, and can be added
-  later as additive request fields without a contract-shape change.
-  (Hard-macro placement was originally scoped out here too — see
-  "Hard-macro placement" above; issue #438 closed that gap.)
+- **Metal fill (density fill), `DONT_USE_CELLS`-style cell exclusion.** A
+  core-only block v1, matching the contract's own IO-ring/footprint
+  exclusion — neither is part of the request/response contract this phase
+  implements, and each can be added later as an additive request field
+  without a contract-shape change. (Hard-macro placement and tapcell/PDN
+  power delivery were originally scoped out here too — see "Hard-macro
+  placement" above and "Power delivery" below; issues #438 and #1091 closed
+  those gaps.)
+- **Macro-specific PDN grids.** `request.power`'s `pdngen` call builds only
+  the flat standard-cell grid (`define_pdn_grid` with no `-macro`) — a
+  design with hard macros needs a caller-supplied macro halo/grid spec this
+  field does not yet expose. See "Power delivery" below.
 - **IO-ring/footprint floorplanning.** Out of scope for a core-only block,
   per the OpenROAD survey section 2.
 - **A second P&R engine.** `request.engine` exists from day one so a later

@@ -710,6 +710,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-17 — `klt place-and-route` gains an optional **`request.power`
+  power-delivery stage** (issue #1091): previously the generated Tcl never
+  called `global_connect`/`pdngen` and never inserted tapcells or filler
+  cells, so a routed DEF had no `SPECIALNETS` section, every standard
+  cell's `VDD`/`VSS` LEF pin belonged to no net, and cell rows were
+  discontinuous wherever placement left a gap — `target_stage: "route"`
+  meant "signals route," not "the block is implemented." The new optional
+  `power` request block (`power_net`/`ground_net`, default `"VDD"`/`"VSS"`,
+  plus `straps[]` naming PDN layer/width/pitch geometry) drives real
+  `tapcell`/`add_global_connection`/`global_connect`/`pdngen` Tcl at the end
+  of the `"floorplan"` stage and `filler_placement`/`global_connect` at the
+  end of the `"route"` stage — verified live end-to-end against a real
+  `openroad` binary and a real sky130A install (non-empty `SPECIALNETS`,
+  every standard cell's PG pins wired, 105 tapcells + 807 fillers placed on
+  the `gcd` worked example). Per-library tapcell/filler-cell/pin-pattern
+  reference data lives in three new tables (`_TAPCELL_CELLS`,
+  `_FILLER_CELLS`, `_POWER_PIN_PATTERNS`), sourced and dated the same
+  verified-not-guessed way as the existing CTS-buffer/routing-layer-range/
+  antenna-diode tables. The response gains an additive `power` field
+  (`pdn`/`global_connect` booleans, `power_net`/`ground_net`,
+  `tapcell_master`/`endcap_master`, `filler_masters`) so a caller can tell a
+  signal-only "route" result from a power-complete one without parsing the
+  DEF for a missing `SPECIALNETS` section — always present, `false`/`null`/
+  `[]` shaped when `request.power` is omitted (the default, byte-for-byte
+  unchanged prior behavior). See `docs/cli/place-and-route.md`'s "Power
+  delivery" section for the full contract.
 - 2026-08-17 — `klt economy` gains an **AREA-EFF bounds-check mode** (issue
   #1086): a block's absolute area bound (`Area`) can't tell area a block
   *needs* from area it *wastes* — this adds the companion `Area-Eff` spec
