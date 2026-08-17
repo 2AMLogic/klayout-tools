@@ -552,8 +552,9 @@ variant-selection mechanism is a documented follow-up, not silently punted.
 in a real layout straps its top-metal pad down through a via/metal stack to
 wherever the core circuit routes — but neither curated deck models a via
 role between `top_metal` and any lower level this generator's sibling
-generators already expose (`metal`/`metal2`/`metal3` for sky130,
-`metal`/`metal2` for gf180mcu; see `_PDK_ROLE_LAYERS`'s `"top_metal"` entry).
+generators already expose (`metal`/`metal2`/`metal3` for sky130, and — since
+issue #1058 — the same `metal`/`metal2`/`metal3` for gf180mcu; see
+`_PDK_ROLE_LAYERS`'s `"top_metal"` entry).
 `down_to` therefore supports only its default, `"top_metal"` (no via drawn);
 any other value is rejected (`GenError`) rather than silently drawing a
 DRC-illegal via between layers that were never meant to touch directly.
