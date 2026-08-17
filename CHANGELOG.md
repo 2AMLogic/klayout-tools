@@ -760,6 +760,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   Rust boundary backing `klt synthesize`'s integrated, pre-layout,
   gate-level `sta` report). See `docs/cli/sta.md` for the full
   request/response contract.
+- 2026-08-17 — `klt place-and-route`'s post-route multi-corner sweep (issue
+  #949) now reports a per-corner breakdown and can be scoped to a named
+  subset of the shipped corners (issue #1092). A new response field,
+  `corners: [{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ...},
+  ...]`, names which swept corner produced `worst_setup_slack_ns`/
+  `worst_hold_slack_ns` — previously only the two aggregate numbers were
+  reported, with no way to tell which of a cell library's shipped corners
+  decided either one. A new optional request field,
+  `pdk.sweep_corners: [...]`, lets a caller scope the sweep to the corners
+  a design actually operates at instead of always sweeping every corner the
+  cell library ships (a multi-supply library's sweep is otherwise dominated
+  by decks a single-supply design never runs at); an unresolvable corner
+  name raises `PlaceAndRouteError`. Both fields are additive — omitting
+  `sweep_corners` reproduces today's "sweep everything" behavior exactly,
+  and the two existing aggregate fields are unchanged in meaning. See
+  `docs/cli/place-and-route.md`'s "Multi-corner setup/hold sweep" section.
 - 2026-08-17 — `klt place-and-route` gains an optional **`request.power`
   power-delivery stage** (issue #1091): previously the generated Tcl never
   called `global_connect`/`pdngen` and never inserted tapcells or filler
