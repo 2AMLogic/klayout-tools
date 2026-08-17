@@ -43,6 +43,7 @@ from . import (
     sim_cmd,
     size_cmd,
     socket_check_cmd,
+    sta_cmd,
     stats_cmd,
     synthesize_cmd,
     techmap_cmd,
@@ -1545,6 +1546,42 @@ def create_parser() -> argparse.ArgumentParser:
     _add_pdk_args(place_and_route_parser)
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
+
+    sta_parser = subparsers.add_parser(
+        "sta",
+        help=(
+            "standalone timing/power analysis of an already-implemented "
+            "(placed & routed) design via OpenSTA"
+        ),
+        description=(
+            "Run a standalone OpenSTA timing/power analysis over an "
+            "already-routed DEF, independent of `klt place-and-route`'s own "
+            "in-flow STA (issue #1099). Unlike `klt place-and-route`, this "
+            "command never places, routes, or runs CTS -- there is no "
+            "`target_stage`, no netlist, no `link_design`; the `def` handed "
+            "in is the one and only geometry analysed. This is what makes "
+            "correct corner characterization possible: analysing one fixed "
+            "piece of geometry at N corners, rather than re-running "
+            "`place-and-route` N times (which produces N different "
+            "placements/routings, since global placement and detailed "
+            "routing are not corner-invariant). `pdk.cell_library`/`corner` "
+            "resolve via the same `find_pdk()`/`libs_ref` discovery `klt "
+            "place-and-route` uses; `constraints.clock_port`/"
+            "`clock_period_ns` are required (a standalone STA run has no "
+            "meaning without a clock). An optional `spef` path feeds a "
+            "caller-supplied SPEF (e.g. from `klt extract --parasitics`) in "
+            "via `read_spef`, with the same net-name-correlation sanity "
+            "check `klt place-and-route`'s own `post_route_spef` pass runs. "
+            "See docs/cli/sta.md for the full request/response contract. "
+            "Runs `openroad` as a subprocess -- requires an `openroad` "
+            "binary on `$PATH`. Takes a request-document path (like `klt "
+            "place-and-route`/`klt synthesize`), not positional file args."
+        ),
+    )
+    sta_parser.add_argument("request", help="path to a klt sta request JSON file")
+    _add_pdk_args(sta_parser)
+    _add_format_arg(sta_parser)
+    sta_parser.set_defaults(func=sta_cmd.run)
 
     eval_parser = subparsers.add_parser(
         "eval",

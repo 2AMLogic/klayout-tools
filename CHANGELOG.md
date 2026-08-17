@@ -734,6 +734,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-17 — New verb **`klt sta`** (issue #1099): standalone timing/power
+  analysis of an already-implemented (placed & routed) design, independent
+  of `klt place-and-route`'s own in-flow STA. Previously the only way to
+  get a timing number for an existing routed DEF was to re-run the entire
+  `place-and-route` flow — which makes correct multi-corner
+  characterization impossible (re-running place-and-route per corner
+  produces N *different* placements/routings, since global placement and
+  detailed routing are seeded but not corner-invariant) and is expensive (a
+  full flow per corner where the analysis itself is seconds). `klt sta
+  <request.json>` instead runs a single, fresh OpenSTA session over a
+  caller-supplied routed `def` (`read_lef` x2, `read_def` — no
+  `-floorplan_initialize` — `read_liberty`, `create_clock`, optionally
+  `read_spef`), with no placement/routing/CTS of its own, and reports the
+  same timing/power fields `place-and-route`'s response already carries
+  (`worst_slack_ns`, `total_negative_slack_ns`, `fmax_mhz`,
+  `setup_violation_count`, `hold_violation_count`, `clock_skew_ns`,
+  `estimated_power_mw`), plus a `provenance` block built via the shared
+  `build_provenance` helper. An optional `spef` request field feeds a
+  caller-supplied SPEF in via `read_spef`, with the same net-name-
+  correlation sanity check (`spef_annotation`) `klt place-and-route`'s own
+  `post_route_spef` in-flow pass already runs. Backed by a new
+  `klayout_tools/post_route_sta.py` module (named to avoid clobbering the
+  pre-existing, unrelated `klayout_tools/sta.py` — the `klt_statime_native`
+  Rust boundary backing `klt synthesize`'s integrated, pre-layout,
+  gate-level `sta` report). See `docs/cli/sta.md` for the full
+  request/response contract.
 - 2026-08-17 — `klt place-and-route` gains an optional **`request.power`
   power-delivery stage** (issue #1091): previously the generated Tcl never
   called `global_connect`/`pdngen` and never inserted tapcells or filler

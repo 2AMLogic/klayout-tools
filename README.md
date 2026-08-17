@@ -110,6 +110,7 @@ klt mom design.gds stackup.json          # quasi-static capacitance matrix (Meth
 klt lvs request.json                     # compare extracted vs reference netlist
 klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
 klt place-and-route request.json         # netlist -> placed+routed DEF/GDS (OpenROAD), JSON out
+klt sta request.json                     # standalone timing/power analysis of an already-routed DEF (OpenSTA), no re-implementation
 klt power routed.gds power.json          # routed power/ground nets -> resistive network + static IR-drop map
 klt erc routed.gds erc.json --pdk sky130 # per-gate connectivity model + antenna-ratio verdict + core ERC findings (floating gate, unconnected/shorted net, missing tie)
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage

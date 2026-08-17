@@ -49,6 +49,7 @@ docs/
     sim.md
     size.md
     socket-check.md
+    sta.md
     stats.md
     synthesize.md
     trajectory.md
