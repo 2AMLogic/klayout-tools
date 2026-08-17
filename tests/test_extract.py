@@ -692,6 +692,227 @@ def test_sky130_tap_straddling_nwell_boundary_extracts_without_error(tmp_path):
     assert nfet["nets"]["b"] == pfet["nets"]["b"] == "STRADDLE"
 
 
+# --------------------------------------------------------------------------- #
+# gf180mcu derived tap (issue #1084): `tap_nplus`/`tap_pplus` let this deck,
+# which draws no distinct `tap` layer at all, derive an equivalent well-/
+# substrate-tie region from its own already-declared `Nplus`/`Pplus` implant
+# layers -- mirroring the sky130 `tap.drawing` tests above (issue #490), one
+# per acceptance-criterion case: well-tie resolution, substrate-tie
+# resolution, no-tie fallback (additive-only guarantee), and a straddling
+# tie extracting without error.
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_inverter_layout(
+    *, well_tap_label: str | None = None, substrate_tap_label: str | None = None
+) -> kdb.Layout:
+    """A minimal gf180mcu inverter (NMOS `Comp` outside `Nwell`, PMOS `Comp`
+    inside it, sharing a `Poly2` gate, contacted up through `Contact`/
+    `Metal1`) -- the gf180mcu-layer-number counterpart of
+    `_make_inverter_layout`, shaped to exercise the deck's derived
+    `tap_nplus`/`tap_pplus` well-/substrate-tie mechanism (issue #1084).
+
+    When `well_tap_label` is given, an `Nplus`-covered `Comp` strip is drawn
+    *inside* the `Nwell` (a well tie -- n+ diffusion tied to the n-type
+    well), contacted + labelled with the given text. When
+    `substrate_tap_label` is given, a `Pplus`-covered `Comp` strip is drawn
+    *outside* every `Nwell` (a substrate tie -- p+ diffusion tied to the
+    p-type substrate), likewise contacted + labelled. Both off to the side
+    (x -450..-150), clear of the transistors' own `Comp` geometry (x
+    0..2000), so neither can be mistaken for ordinary source/drain
+    diffusion. Either or both left `None` (the default) draws no
+    corresponding tie -- exercising the pre-#1084 fallback behaviour."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # NMOS: Comp strip 0..2000 x 0..1000 (outside Nwell). PMOS: Comp strip
+    # 0..2000 x 2000..3000 (inside Nwell -500..2500 x 1500..3500). One
+    # continuous Poly2 gate bar crosses both, mirroring `_make_inverter_
+    # layout`'s sky130 shape one-for-one on gf180mcu's own layer numbers.
+    draw(22, 0, kdb.Box(0, 0, 2000, 1000))  # Comp (nmos active)
+    draw(22, 0, kdb.Box(0, 2000, 2000, 3000))  # Comp (pmos active)
+    draw(21, 0, kdb.Box(-500, 1500, 2500, 3500))  # Nwell
+    draw(30, 0, kdb.Box(800, -200, 1200, 3200))  # Poly2 (shared gate bar)
+
+    for y0 in (0, 2000):
+        draw(33, 0, kdb.Box(100, y0 + 300, 300, y0 + 700))  # Contact (S side)
+        draw(33, 0, kdb.Box(1700, y0 + 300, 1900, y0 + 700))  # Contact (D side)
+        draw(34, 0, kdb.Box(0, y0 + 200, 400, y0 + 800))  # Metal1 (S side)
+        draw(34, 0, kdb.Box(1600, y0 + 200, 2000, y0 + 800))  # Metal1 (D side)
+
+    draw(33, 0, kdb.Box(900, 1400, 1100, 1600))  # gate Contact
+    draw(34, 0, kdb.Box(850, 1350, 1150, 1650))  # gate Metal1
+
+    label(34, 10, "VGND", 200, 500)
+    label(34, 10, "Y", 1800, 500)
+    label(34, 10, "VPWR", 200, 2500)
+    label(34, 10, "Y", 1800, 2500)
+    label(34, 10, "A", 1000, 1500)
+
+    if well_tap_label is not None:
+        # Well tie: Nplus-covered Comp inside the Nwell, off to the side so
+        # it never touches the PMOS's own Comp strip.
+        draw(22, 0, kdb.Box(-400, 2400, -200, 2600))  # Comp
+        draw(32, 0, kdb.Box(-400, 2400, -200, 2600))  # Nplus (well-tie doping)
+        draw(33, 0, kdb.Box(-380, 2450, -220, 2550))  # Contact
+        draw(34, 0, kdb.Box(-450, 2400, -150, 2600))  # Metal1
+        label(34, 10, well_tap_label, -300, 2500)
+
+    if substrate_tap_label is not None:
+        # Substrate tie: Pplus-covered Comp outside every Nwell, well below
+        # the NMOS active strip (y < 0) so it never touches it.
+        draw(22, 0, kdb.Box(-400, -800, -200, -200))  # Comp
+        draw(31, 0, kdb.Box(-400, -800, -200, -200))  # Pplus (substrate-tie doping)
+        draw(33, 0, kdb.Box(-380, -650, -220, -550))  # Contact
+        draw(34, 0, kdb.Box(-450, -700, -150, -500))  # Metal1
+        label(34, 10, substrate_tap_label, -300, -600)
+
+    return layout
+
+
+def test_gf180mcu_pmos_body_resolves_to_drawn_well_tap_net(tmp_path):
+    """An `Nplus`-over-`Comp` well tie drawn inside `Nwell` and contacted up
+    to a labelled net is now the PMOS body terminal's real net -- not an
+    anonymous `$n` net (issue #1084, mirroring sky130's `tap.drawing`
+    mechanism from issue #490). The NMOS body is unaffected (no substrate
+    tie drawn in this fixture), and the floating-PMOS-body warning
+    (`unbiased_pmos_body_nets[]`) no longer fires."""
+    path = _write_gds(
+        _make_gf180mcu_inverter_layout(well_tap_label="WTIE"),
+        tmp_path / "inv.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "inv.spice"))
+
+    devices = report["devices"]
+    nfet = next(d for d in devices if d["class"] == "nfet")
+    pfet = next(d for d in devices if d["class"] == "pfet")
+    assert pfet["nets"]["b"] == "WTIE"
+    assert nfet["nets"]["b"] == "vsubs"
+
+    assert report["unbiased_pmos_body_nets"] == []
+    assert not any("no DC bias path" in warning for warning in report["warnings"])
+
+
+def test_gf180mcu_nmos_body_resolves_to_drawn_substrate_tap_net(tmp_path):
+    """A `Pplus`-over-`Comp` substrate tie drawn outside every `Nwell` and
+    contacted up to a labelled net is now the NMOS body terminal's real net
+    -- not the deck's synthesized `vsubs` global (issue #1084). The PMOS
+    body is unaffected (no well tie drawn in this fixture) -- still an
+    anonymous, floating net, exactly as it was before this issue's fix."""
+    path = _write_gds(
+        _make_gf180mcu_inverter_layout(substrate_tap_label="STIE"),
+        tmp_path / "inv.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "inv.spice"))
+
+    devices = report["devices"]
+    nfet = next(d for d in devices if d["class"] == "nfet")
+    pfet = next(d for d in devices if d["class"] == "pfet")
+    assert nfet["nets"]["b"] == "STIE"
+    assert pfet["nets"]["b"].startswith("$")
+
+    # The synthesized global name never shows up: the tie's own real net
+    # fully absorbs the (otherwise-empty) global net.
+    net_names = {n["name"] for n in report["nets"]}
+    assert "STIE" in net_names
+    assert "vsubs" not in net_names
+
+
+def test_gf180mcu_nmos_body_falls_back_to_substrate_global_without_tap(tmp_path):
+    """No drawn tie at all: both bodies fall back to exactly the pre-#1084
+    behaviour -- the NMOS body terminal ties to the deck's synthesized
+    `vsubs` global, and the PMOS body terminal is a floating, anonymous net
+    that still fires the `unbiased_pmos_body_nets[]`/`warnings[]` signal --
+    the additive-capability guarantee this issue's acceptance criteria
+    require for a layout that draws no tie."""
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "inv.spice"))
+
+    devices = report["devices"]
+    nfet = next(d for d in devices if d["class"] == "nfet")
+    pfet = next(d for d in devices if d["class"] == "pfet")
+    assert nfet["nets"]["b"] == "vsubs"
+    assert pfet["nets"]["b"].startswith("$")
+
+    assert report["unbiased_pmos_body_nets"] == [
+        {"device": pfet["name"], "net": pfet["nets"]["b"]}
+    ]
+    assert any("no DC bias path" in warning for warning in report["warnings"])
+
+
+def test_gf180mcu_tap_straddling_nwell_boundary_extracts_without_error(tmp_path):
+    """A single drawn tie shape straddling the `Nwell` boundary -- half
+    covered by `Nplus` *inside* the well (a well tie), half covered by
+    `Pplus` *outside* it (a substrate tie), physically one connected `Comp`
+    conductor -- is a real electrical short in silicon. Confirms the
+    well/substrate derivation (issue #1084) handles this without raising and
+    without silently dropping or double-counting the geometry: because the
+    two halves are genuinely one connected shape, both device bodies land on
+    the *same* net (the tie's own label), correctly reflecting the short a
+    real straddling tie would draw in silicon -- mirroring
+    `test_sky130_tap_straddling_nwell_boundary_extracts_without_error`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # Same NMOS/PMOS/Nwell/gate shape as `_make_gf180mcu_inverter_layout`.
+    draw(22, 0, kdb.Box(0, 0, 2000, 1000))  # Comp (nmos active)
+    draw(22, 0, kdb.Box(0, 2000, 2000, 3000))  # Comp (pmos active)
+    draw(21, 0, kdb.Box(-500, 1500, 2500, 3500))  # Nwell
+    draw(30, 0, kdb.Box(800, -200, 1200, 3200))  # Poly2 (shared gate)
+
+    for y0 in (0, 2000):
+        draw(33, 0, kdb.Box(100, y0 + 300, 300, y0 + 700))  # Contact (S)
+        draw(33, 0, kdb.Box(1700, y0 + 300, 1900, y0 + 700))  # Contact (D)
+        draw(34, 0, kdb.Box(0, y0 + 200, 400, y0 + 800))  # Metal1 (S)
+        draw(34, 0, kdb.Box(1600, y0 + 200, 2000, y0 + 800))  # Metal1 (D)
+    draw(33, 0, kdb.Box(900, 1400, 1100, 1600))  # gate Contact
+    draw(34, 0, kdb.Box(850, 1350, 1150, 1650))  # gate Metal1
+
+    label(34, 10, "VGND", 200, 500)
+    label(34, 10, "Y", 1800, 500)
+    label(34, 10, "VPWR", 200, 2500)
+    label(34, 10, "Y", 1800, 2500)
+    label(34, 10, "A", 1000, 1500)
+
+    # One Comp polygon straddling the Nwell's bottom edge (y=1500): drawn
+    # 1300..1700, i.e. 200 inside the well (>=1500, covered by Nplus) and
+    # 200 outside it (<1500, covered by Pplus), off to the side (x
+    # -400..-200) so it never touches the transistors' own Comp geometry.
+    # Contacted + labelled on its outside-the-well (substrate) end.
+    draw(22, 0, kdb.Box(-400, 1300, -200, 1700))  # Comp (straddling)
+    draw(32, 0, kdb.Box(-400, 1500, -200, 1700))  # Nplus (inside-well half)
+    draw(31, 0, kdb.Box(-400, 1300, -200, 1500))  # Pplus (outside-well half)
+    draw(33, 0, kdb.Box(-380, 1320, -220, 1420))  # Contact (outside-well end)
+    draw(34, 0, kdb.Box(-450, 1300, -150, 1440))  # Metal1 (outside-well end)
+    label(34, 10, "STRADDLE", -300, 1370)
+
+    path = _write_gds(layout, tmp_path / "straddle.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "straddle.spice"))
+
+    devices = report["devices"]
+    nfet = next(d for d in devices if d["class"] == "nfet")
+    pfet = next(d for d in devices if d["class"] == "pfet")
+    assert nfet["nets"]["b"] is not None
+    assert pfet["nets"]["b"] is not None
+    assert nfet["nets"]["b"] == pfet["nets"]["b"] == "STRADDLE"
+
+
 def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
     """Issue #331: `provenance.input.content_hash` identifies the input
     layout *stream* a report was produced from -- byte-identical inputs hash

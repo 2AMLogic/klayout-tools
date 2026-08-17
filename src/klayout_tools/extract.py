@@ -1844,10 +1844,14 @@ def run_extract(
     anonymous, KLayout-synthesized net -- the ``"$5"``-style placeholder
     ``Net.expanded_name()`` assigns to a net with no drawn label, as opposed
     to the deck's own synthesized (but *named*) global substrate net (e.g.
-    ``"vsubs"``, tied via ``connect_global``). This happens today on decks
-    whose curated layer set has no distinct well-tie/tap layer separate from
-    transistor active (gf180mcu, see ``decks/gf180mcu.py``); sky130's
-    ``well_label``/``tap`` fields mean it never fires there. Unlike
+    ``"vsubs"``, tied via ``connect_global``). This happens whenever no well
+    tie -- drawn on a distinct ``tap`` layer, or derived from
+    ``tap_nplus``/``tap_pplus`` implants (issue #1084) -- reaches a given
+    PMOS device's ``nwell`` island; a deck with neither mechanism declared
+    at all hits this for *every* PMOS unconditionally (gf180mcu, before
+    #1084 gave it a derivable ``tap_nplus``/``tap_pplus`` pair -- see
+    ``decks/gf180mcu.py``), while a deck that declares one but whose
+    specific layout draws no tie still hits it per-device. Unlike
     ``devices[].nets["b"]`` (which already carries the same net name, just
     not flagged), this field is the structured, no-grep-required signal that
     the reported net has **no DC bias path at all** -- see
@@ -2236,27 +2240,31 @@ def run_extract(
         )
 
     # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
-    # decks with no distinct well-tie/tap layer (gf180mcu) extract the PMOS
-    # body onto a KLayout-synthesized `$<n>` net with no DC bias path at
-    # all -- the net name was already readable via `devices[].nets["b"]`,
-    # but nothing flagged it as *this specific* gap. Surfaced two ways: a
-    # structured `unbiased_pmos_body_nets[]` entry (so a caller does not have
-    # to re-derive the anonymous-net convention itself) and a matching prose
-    # `warnings[]` entry. The `warnings[]` entry is a single aggregate line
-    # with the count baked in, mirroring `_detect_unmodelled_poly_bodies`'s
-    # aggregate pattern (issue #599) -- one line per device would blow up
-    # `warnings[]` at scale (e.g. 148 entries for 148 floating PMOS bodies)
-    # and defeat literal-list pinning by a caller.
+    # a PMOS body extracts onto a KLayout-synthesized `$<n>` net with no DC
+    # bias path whenever no well tie -- drawn on a distinct `tap` layer, or
+    # derived from `tap_nplus`/`tap_pplus` implants (issue #1084) -- reaches
+    # this specific device's `nwell` island; a deck with neither mechanism
+    # at all (e.g. gf180mcu before #1084) hits this for *every* PMOS,
+    # unconditionally. The net name was already readable via
+    # `devices[].nets["b"]`, but nothing flagged it as *this specific* gap.
+    # Surfaced two ways: a structured `unbiased_pmos_body_nets[]` entry (so
+    # a caller does not have to re-derive the anonymous-net convention
+    # itself) and a matching prose `warnings[]` entry. The `warnings[]`
+    # entry is a single aggregate line with the count baked in, mirroring
+    # `_detect_unmodelled_poly_bodies`'s aggregate pattern (issue #599) --
+    # one line per device would blow up `warnings[]` at scale (e.g. 148
+    # entries for 148 floating PMOS bodies) and defeat literal-list pinning
+    # by a caller.
     unbiased_pmos_body_nets = _detect_unbiased_pmos_body_nets(devices, deck)
     if unbiased_pmos_body_nets:
         device_word = "device" if len(unbiased_pmos_body_nets) == 1 else "devices"
         warnings.append(
             f"{len(unbiased_pmos_body_nets)} PMOS {device_word} tie their "
-            "body to an anonymous net with no DC bias path -- "
-            f"'{deck_name}' has no distinct well-tie/tap layer for this "
-            "PMOS body, so it is left floating rather than tied to a real "
-            "supply rail; resimulating this netlist directly will not "
-            "reproduce the schematic-level PMOS body bias -- see "
+            "body to an anonymous net with no DC bias path -- no drawn (or "
+            f"derivable) well tie connects this PMOS body to a real supply "
+            "rail on this layout, so it is left floating rather than tied "
+            "to a real supply rail; resimulating this netlist directly "
+            "will not reproduce the schematic-level PMOS body bias -- see "
             "unbiased_pmos_body_nets[] for the full list. See "
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
@@ -5100,6 +5108,44 @@ def _extract_netlist(
     # plates together.
     vias = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
 
+    # Derived tap for a PDK family with no distinct tap layer (issue #1084):
+    # when the deck declares no `tap` but does declare one or both of
+    # `tap_nplus`/`tap_pplus`, derive an equivalent tap region from the
+    # deck's own `active`/`nwell` plus those implant layers -- exactly how
+    # the PDK's own official LVS deck recognises a well/substrate tie with
+    # no dedicated tap mask (see `ExtractionDeck.tap_nplus`/`tap_pplus`'s
+    # docstring for the full derivation and doping-side reasoning). A well
+    # tie is `tap_nplus`-covered diffusion *inside* `nwell` (opposite
+    # doping from an ordinary PMOS source/drain, which is `tap_pplus`-
+    # covered there); a substrate tie is `tap_pplus`-covered diffusion
+    # *outside* every `nwell` (opposite doping from an ordinary NMOS
+    # source/drain, `tap_nplus`-covered there) -- so this can never collide
+    # with a real device's own source/drain diffusion. `- poly` drops any
+    # sliver still crossed by a gate, matching the PDK's own "AND COMP NOT
+    # Poly2" tie derivation the issue's own guidance cites.
+    #
+    # `tap` computed this way feeds the *same* tap/`tap_substrate`
+    # connectivity mechanism below (issue #490) a directly-drawn `tap`
+    # layer already uses, so nothing downstream needs a second, parallel
+    # code path. `tap_declared` records whether *some* tap mechanism (drawn
+    # or derived) exists for this deck -- gating the connectivity block
+    # below the same way `deck.tap is not None` alone used to.
+    tap_declared = deck.tap is not None
+    if deck.tap is None and (deck.tap_nplus is not None or deck.tap_pplus is not None):
+        tap_nplus_region = _region(layout, top_cell, deck.tap_nplus)
+        tap_pplus_region = _region(layout, top_cell, deck.tap_pplus)
+        tap = (
+            (tap_nplus_region & active & nwell) | (tap_pplus_region & (active - nwell))
+        ) - poly
+        # Exclude the derived tie geometry from `active` before the NMOS/
+        # PMOS source/drain split just below, so a tie strip is never also
+        # registered as ordinary device-terminal diffusion (`nfet_sd`/
+        # `pfet_sd`) -- mirroring how a dummy/resistor-body shape is
+        # already cut out of `active`/`poly` above, before device
+        # recognition runs.
+        active = active - tap
+        tap_declared = True
+
     # NMOS is active outside the well; PMOS is active inside it -- KLayout's
     # standard "well marks the flip side" MOS-splitting idiom (see
     # `ExtractionDeck`'s docstring). Splitting SD from the gate polygon
@@ -5225,25 +5271,27 @@ def _extract_netlist(
     # no-op'ing. `connect_global` alone -- never plain `connect()` -- is the
     # only supported way to give this placeholder a net identity.
     #
-    # `tap` (already resolved above) serves double duty in this curated
-    # deck: a shape drawn *inside* `nwell` is a PMOS well tie (handled
-    # below, unchanged), a shape drawn *outside* `nwell` sits on native
+    # `tap` (already resolved above -- drawn, or derived per issue #1084's
+    # `tap_declared` block) serves double duty in this curated deck: a shape
+    # drawn/derived *inside* `nwell` is a PMOS well tie (handled below,
+    # unchanged), a shape drawn/derived *outside* `nwell` sits on native
     # P-substrate and is a genuine, drawable substrate tie. `tap_substrate`
     # is that outside-the-well slice -- real, possibly-empty geometry (empty
-    # exactly when the deck draws no `tap` layer at all, e.g. gf180mcu, or
-    # when no tap shape happens to sit outside every `nwell` in this
-    # particular layout) -- registered as its own, ordinary (not a device
-    # terminal) layer, so it is safe to `connect()` to `contact`/the metal
-    # stack the same way the well-tie slice already is (see the
-    # `deck.tap is not None` connectivity block below). It is then tied to
-    # `nfet_body`'s shared identity purely via `connect_global` using the
-    # *same* global name (`deck.substrate_net`) -- `connect_global` unifies
-    # every layer/region tied to a given name into one net regardless of
-    # geometric overlap between them, so a drawn tap ring's real, routed net
-    # and every device sharing the (still-empty) `nfet_body` placeholder
-    # land on that one net together, while a layout with no drawn tap ring
-    # at all (`tap_substrate` empty) still falls back to exactly the same
-    # synthesized `substrate_net` identity as before this fix.
+    # exactly when the deck has no tap mechanism at all, drawn or derived
+    # (`tap_declared` is `False`), or when no tap shape happens to sit
+    # outside every `nwell` in this particular layout) -- registered as its
+    # own, ordinary (not a device terminal) layer, so it is safe to
+    # `connect()` to `contact`/the metal stack the same way the well-tie
+    # slice already is (see the `tap_declared` connectivity block below). It
+    # is then tied to `nfet_body`'s shared identity purely via
+    # `connect_global` using the *same* global name (`deck.substrate_net`)
+    # -- `connect_global` unifies every layer/region tied to a given name
+    # into one net regardless of geometric overlap between them, so a drawn
+    # (or derived) tap ring's real, routed net and every device sharing the
+    # (still-empty) `nfet_body` placeholder land on that one net together,
+    # while a layout with no drawn tap ring at all (`tap_substrate` empty)
+    # still falls back to exactly the same synthesized `substrate_net`
+    # identity as before this fix.
     nfet_body = kdb.Region()
     l2n.register(nfet_body, "nfet_body")
     tap_substrate = tap - nwell
@@ -5514,8 +5562,9 @@ def _extract_netlist(
     # `contact` as a blanket rule -- see `ExtractionDeck`'s docstring: the
     # well is a background region spanning the whole PMOS area, so a
     # blanket well<->contact connect would short every terminal inside the
-    # well together. Only a genuinely distinct `tap` region (present only
-    # when the deck declares one) is safe to tie the well to directly.
+    # well together. Only a genuinely distinct `tap` region (drawn or
+    # derived -- `tap_declared`, issue #1084) is safe to tie the well to
+    # directly.
     l2n.connect(nfet_sd)
     l2n.connect(pfet_sd)
     l2n.connect(nfet_gate)
@@ -5524,7 +5573,7 @@ def _extract_netlist(
     l2n.connect(nfet_gate, poly)
     l2n.connect(pfet_gate, poly)
     l2n.connect(nwell)
-    if deck.tap is not None:
+    if tap_declared:
         l2n.connect(tap)
         l2n.connect(nwell, tap)
         l2n.connect(tap, contact)
