@@ -1325,6 +1325,7 @@ def _stub_openroad_success(
     antenna_violations: dict[str, int] | None = None,
     route_drc_violations: int = 0,
     corner_sweep_metrics: dict[str, float] | None = None,
+    per_corner_sweep_metrics: dict[str, dict[str, float]] | None = None,
     version: str = "26Q3-771-gdeadbeef",
 ) -> None:
     setup_violations = setup_violations or {}
@@ -1333,6 +1334,13 @@ def _stub_openroad_success(
     corner_sweep_metrics = (
         _CORNER_SWEEP_METRICS if corner_sweep_metrics is None else corner_sweep_metrics
     )
+    # Issue #1092: per-corner breakdown -- one single-corner OpenROAD
+    # invocation per swept corner (`_run_corner_sweep`'s own `len(corners) >
+    # 1` branch), each with its own `-metrics` dump. Defaults to reporting
+    # `corner_sweep_metrics` for every corner (the same value the combined
+    # session's own aggregate uses) unless a test overrides a specific
+    # corner's own numbers.
+    per_corner_sweep_metrics = per_corner_sweep_metrics or {}
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
@@ -1354,6 +1362,22 @@ def _stub_openroad_success(
             # fake, no violation-marker stdout to emit.
             with open(metrics_path, "w", encoding="utf-8") as handle:
                 json.dump(corner_sweep_metrics, handle)
+            return _FakeCompleted(returncode=0, stdout="")
+        corner_script_match = re.match(
+            r".*_route_corner_(?P<name>.+)\.tcl$", os.path.basename(script_path)
+        )
+        if corner_script_match is not None:
+            # Issue #1092's own per-corner single-corner sweep invocation
+            # (`_run_corner_sweep`'s `len(corners) > 1` branch) -- same
+            # shape as the combined-sweep branch above, one per swept
+            # corner, defaulting to `corner_sweep_metrics` unless overridden
+            # for that specific corner name.
+            corner_name = corner_script_match.group("name")
+            with open(metrics_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    per_corner_sweep_metrics.get(corner_name, corner_sweep_metrics),
+                    handle,
+                )
             return _FakeCompleted(returncode=0, stdout="")
         stage = _stage_from_script_path(script_path)
         assert stage in stages
@@ -3446,6 +3470,14 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
     assert route_stage["name"] == "route"
     assert route_stage["worst_setup_slack_ns"] == pytest.approx(-7.5)
     assert route_stage["worst_hold_slack_ns"] == pytest.approx(0.25)
+    # Issue #1092: a single-shipped-corner library's per-corner breakdown is
+    # a one-element array naming that corner, built directly from the
+    # aggregate above -- no second OpenROAD invocation needed (see
+    # `_run_corner_sweep`'s own `len(corners) == 1` docstring note).
+    assert report["corners"] == [
+        {"name": "tt_025C_1v80", "setup_slack_ns": -7.5, "hold_slack_ns": 0.25}
+    ]
+    assert route_stage["corners"] == report["corners"]
 
 
 def test_corner_sweep_skipped_when_target_stage_before_route(tmp_path, monkeypatch):
@@ -3461,7 +3493,189 @@ def test_corner_sweep_skipped_when_target_stage_before_route(tmp_path, monkeypat
     assert report["stage_reached"] == "place"
     assert report["worst_setup_slack_ns"] is None
     assert report["worst_hold_slack_ns"] is None
+    # Issue #1092: `corners` is `null`, not `[]`, pre-"route" -- same
+    # `.get`-degrades-to-absent convention `worst_setup_slack_ns` follows.
+    assert report["corners"] is None
     assert not os.path.isfile(_corner_sweep_script(request_path))
+
+
+# --------------------------------------------------------------------------- #
+# Corner-sweep per-corner breakdown + request-scoped `sweep_corners`
+# (issue #1092).
+# --------------------------------------------------------------------------- #
+
+
+def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypatch):
+    """A multi-corner library's `corners[]` breakdown names each swept
+    corner's own setup/hold slack -- one single-corner OpenROAD invocation
+    per corner (`_run_corner_sweep`'s `len(corners) > 1` branch), letting a
+    caller identify which corner decided `worst_setup_slack_ns`/
+    `worst_hold_slack_ns` without re-deriving it externally (issue #1092)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", corner="ss_100C_1v60")
+    _make_pdk_install(install_root, "sky130A", corner="ff_n40C_1v95")
+    _stub_openroad_success(
+        monkeypatch,
+        corner_sweep_metrics={
+            "timing__setup__ws": -22.2093,
+            "timing__hold__ws": 0.28443,
+        },
+        per_corner_sweep_metrics={
+            "tt_025C_1v80": {
+                "timing__setup__ws": -1.94402,
+                "timing__hold__ws": 0.5,
+            },
+            "ss_100C_1v60": {
+                "timing__setup__ws": -22.2093,
+                "timing__hold__ws": 1.2,
+            },
+            "ff_n40C_1v95": {
+                "timing__setup__ws": -3.1,
+                "timing__hold__ws": 0.28443,
+            },
+        },
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["worst_setup_slack_ns"] == pytest.approx(-22.2093)
+    assert report["worst_hold_slack_ns"] == pytest.approx(0.28443)
+    corners_by_name = {entry["name"]: entry for entry in report["corners"]}
+    assert set(corners_by_name) == {"tt_025C_1v80", "ss_100C_1v60", "ff_n40C_1v95"}
+    assert corners_by_name["tt_025C_1v80"] == {
+        "name": "tt_025C_1v80",
+        "setup_slack_ns": pytest.approx(-1.94402),
+        "hold_slack_ns": pytest.approx(0.5),
+    }
+    assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
+    assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)
+    # The aggregate's deciding corner is derivable from the array: the
+    # minimum (worst) setup slack among the three is `ss_100C_1v60`'s own
+    # -22.2093, matching `worst_setup_slack_ns` above; the minimum hold
+    # slack is `ff_n40C_1v95`'s own 0.28443, matching `worst_hold_slack_ns`.
+    assert (
+        min(report["corners"], key=lambda c: c["setup_slack_ns"])["name"]
+        == "ss_100C_1v60"
+    )
+    assert (
+        min(report["corners"], key=lambda c: c["hold_slack_ns"])["name"]
+        == "ff_n40C_1v95"
+    )
+
+
+def test_sweep_corners_scopes_the_sweep_to_named_corners(tmp_path, monkeypatch):
+    """`request.pdk.sweep_corners` narrows the swept set below the full
+    shipped-corner enumeration -- the combined sweep script only
+    `define_corners`s the requested subset, and `corners[]` only reports
+    entries for the requested names (issue #1092)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "sweep_corners": ["tt_025C_1v80", "ff_n40C_1v95"],
+        },
+    )
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", corner="ss_100C_1v60")
+    _make_pdk_install(install_root, "sky130A", corner="ff_n40C_1v95")
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    sweep_lines = _script_lines(_corner_sweep_script(request_path))
+    define_corners_line = next(
+        line for line in sweep_lines if line.startswith("define_corners")
+    )
+    tags = define_corners_line.split()[1:]
+    assert sorted(tags) == ["ff_n40C_1v95", "tt_025C_1v80"]
+    assert "ss_100C_1v60" not in "\n".join(sweep_lines)
+
+    assert {entry["name"] for entry in report["corners"]} == {
+        "tt_025C_1v80",
+        "ff_n40C_1v95",
+    }
+
+
+def test_sweep_corners_empty_list_sweeps_nothing(tmp_path, monkeypatch):
+    """An explicit `sweep_corners: []` is honoured literally -- distinct
+    from omitting the field entirely (which sweeps everything) -- degrading
+    `worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` to `null`/`[]`
+    exactly like `_run_corner_sweep`'s own empty-``corners``-list
+    short-circuit (issue #1092)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "sweep_corners": [],
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["worst_setup_slack_ns"] is None
+    assert report["worst_hold_slack_ns"] is None
+    assert report["corners"] == []
+    assert not os.path.isfile(_corner_sweep_script(request_path))
+
+
+def test_sweep_corners_unknown_name_raises(tmp_path, monkeypatch):
+    """An unresolvable `sweep_corners` entry raises `PlaceAndRouteError`
+    naming the unknown corner(s) and the corners that *are* valid --
+    matching this module's existing unresolvable-request-field convention
+    (issue #1092)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "sweep_corners": ["tt_025C_1v80", "does_not_exist_corner"],
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    with pytest.raises(
+        PlaceAndRouteError, match="unknown corner.*does_not_exist_corner"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_sweep_corners_rejects_non_list(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "sweep_corners": "tt_025C_1v80",
+        },
+    )
+    with pytest.raises(PlaceAndRouteError, match="sweep_corners must be a list"):
+        run_place_and_route(request_path)
+
+
+def test_sweep_corners_rejects_non_string_elements(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "sweep_corners": ["tt_025C_1v80", 3],
+        },
+    )
+    with pytest.raises(PlaceAndRouteError, match="sweep_corners must be a list"):
+        run_place_and_route(request_path)
 
 
 def test_place_stage_enables_routability_and_timing_driven_global_placement(

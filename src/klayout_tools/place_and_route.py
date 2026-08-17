@@ -839,6 +839,13 @@ _TOP_LEVEL_METRIC_KEYS = (
     # `_run_corner_sweep`).
     "worst_setup_slack_ns",
     "worst_hold_slack_ns",
+    # Additive (issue #1092): per-corner setup/hold slack breakdown --
+    # names which swept corner produced `worst_setup_slack_ns`/
+    # `worst_hold_slack_ns` above, the same "restated at top level" rule
+    # every other `stages[]` metric field already follows. `null` (never
+    # `[]`) on any stage before `"route"`, matching `worst_setup_slack_ns`'s
+    # own convention.
+    "corners",
 )
 
 
@@ -953,6 +960,11 @@ def run_place_and_route(
             "request.pdk.interconnect_corner must be one of: "
             + ", ".join(sorted(_TECH_LEF_CORNERS))
         )
+    # Issue #1092: scopes the post-route multi-corner sweep to a named
+    # subset of the shipped corners -- shape-validated here, membership-
+    # validated once `cell_library`'s corner set is resolved below (the
+    # "route" stage branch).
+    sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
@@ -1107,6 +1119,7 @@ def run_place_and_route(
         route_drc_count = None
         worst_setup_slack_ns = None
         worst_hold_slack_ns = None
+        corner_breakdown: list[dict[str, Any]] | None = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
             # Same deterministic path `_stage_script_lines`'s own `route`
@@ -1125,14 +1138,38 @@ def run_place_and_route(
             # is a separate session rather than more Tcl appended above.
             assert io_spec is not None  # required to reach "route" (validated above)
             corners = list_lib_corners(cell_library, pdk_info)
-            worst_setup_slack_ns, worst_hold_slack_ns = _run_corner_sweep(
-                checkpoint_in=next_checkpoint,
-                corners=corners,
-                io_spec=io_spec,
-                clock_port=clock_port,
-                clock_period_ns=clock_period_ns,
-                output_dir=output_dir,
-                hdl_toplevel=hdl_toplevel,
+            # Issue #1092: scope the sweep to `request.pdk.sweep_corners`
+            # when given -- every requested name must actually be one of
+            # `cell_library`'s own shipped corners, or this is a clear
+            # request error (matching this module's existing unresolvable-
+            # request-field convention) rather than a silently-dropped name.
+            if sweep_corners is not None:
+                available_names = {corner["name"] for corner in corners}
+                unknown_names = sorted(set(sweep_corners) - available_names)
+                if unknown_names:
+                    raise PlaceAndRouteError(
+                        "request.pdk.sweep_corners names unknown corner(s) "
+                        f"{', '.join(unknown_names)} for cell_library "
+                        f"'{cell_library}' -- available corners: "
+                        + (
+                            ", ".join(sorted(available_names))
+                            if available_names
+                            else "(none shipped)"
+                        )
+                    )
+                corners = [
+                    corner for corner in corners if corner["name"] in sweep_corners
+                ]
+            worst_setup_slack_ns, worst_hold_slack_ns, corner_breakdown = (
+                _run_corner_sweep(
+                    checkpoint_in=next_checkpoint,
+                    corners=corners,
+                    io_spec=io_spec,
+                    clock_port=clock_port,
+                    clock_period_ns=clock_period_ns,
+                    output_dir=output_dir,
+                    hdl_toplevel=hdl_toplevel,
+                )
             )
 
         stages.append(
@@ -1145,6 +1182,7 @@ def run_place_and_route(
                 route_drc_count,
                 worst_setup_slack_ns=worst_setup_slack_ns,
                 worst_hold_slack_ns=worst_hold_slack_ns,
+                corners=corner_breakdown,
             )
         )
         checkpoint_path = next_checkpoint
@@ -1818,6 +1856,46 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
         raise PlaceAndRouteError(
             "request.max_antenna_repair_iterations must be between 1 and "
             f"{_MAX_ANTENNA_REPAIR_ITERATIONS_CAP}"
+        )
+    return value
+
+
+def _validate_sweep_corners(value: Any) -> list[str] | None:
+    """Optional ``request.pdk.sweep_corners`` (issue #1092) -- scopes the
+    post-route multi-corner sweep (issue #949, :func:`_run_corner_sweep`) to
+    a caller-named subset of the ``.lib`` corners ``request.pdk.cell_library``
+    ships, instead of always sweeping every shipped corner
+    (:func:`klayout_tools.pdk.list_lib_corners`'s own unfiltered return).
+
+    A design has exactly one operating supply -- for a cell library shipping
+    several (e.g. 15 ``.lib`` files spanning three nominal-supply families),
+    the unscoped sweep is dominated by decks the design never runs at (this
+    issue's own motivating gap). ``None`` (omitted, the default) reproduces
+    today's "sweep everything the cell library ships" behaviour exactly --
+    the backward-compatible default this field's own acceptance criteria
+    require. An explicit ``[]`` is honoured literally (sweep zero corners --
+    ``worst_setup_slack_ns``/``worst_hold_slack_ns``/``corners`` all degrade
+    the same way a pre-``"route"`` run's do, via :func:`_run_corner_sweep`'s
+    own empty-``corners``-list short-circuit), distinct from omitting the
+    field entirely.
+
+    Each requested name is validated against the *unfiltered* shipped-corner
+    set once ``cell_library``/``pdk_info`` are resolved (see the ``"route"``
+    stage branch in :func:`run_place_and_route`) -- an unknown name raises
+    :class:`PlaceAndRouteError` naming every corner that *is* valid, matching
+    this module's existing unresolvable-request-field convention (e.g.
+    :func:`_validate_route_critical_nets_percentage`'s sibling validators).
+    This function only validates *shape* (a list of non-empty strings);
+    membership validation needs the resolved corner set and so cannot happen
+    here.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise PlaceAndRouteError(
+            "request.pdk.sweep_corners must be a list of non-empty strings"
         )
     return value
 
@@ -3162,22 +3240,55 @@ def _run_corner_sweep(
     clock_period_ns: float | None,
     output_dir: str,
     hdl_toplevel: str,
-) -> tuple[float | None, float | None]:
+) -> tuple[float | None, float | None, list[dict[str, Any]]]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
     already written ``checkpoint_in`` -- see :func:`_corner_sweep_script_lines`
     for why this cannot be folded into that script's own session.
 
-    Returns ``(worst_setup_slack_ns, worst_hold_slack_ns)``, each rounded to
-    5 decimal places (matching :func:`_extract_stage_metrics`'s own
-    ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
-    ``-metrics`` dump didn't populate the corresponding key. ``(None, None)``
-    when ``corners`` is empty -- should not happen in practice (the resolved
-    ``liberty_path`` a run already reached ``"route"`` with implies at least
-    that one corner's own ``.lib`` file exists under the same ``lib/``
-    directory :func:`~klayout_tools.pdk.list_lib_corners` walks), but
-    degrading to ``null`` rather than raising on an empty sweep target list
-    keeps this helper total.
+    Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners)``. The
+    first two, each rounded to 5 decimal places (matching
+    :func:`_extract_stage_metrics`'s own ``worst_slack_ns`` rounding) or
+    ``None`` if that invocation's own ``-metrics`` dump didn't populate the
+    corresponding key, are issue #949's original aggregate fields --
+    unchanged by issue #1092, still sourced from this same combined,
+    every-``corners``-loaded-at-once session's own unscoped
+    ``report_worst_slack_metric -setup``/``-hold`` calls. ``([], [], [])``
+    (well, ``(None, None, [])``) when ``corners`` is empty -- either the
+    "should not happen in practice" case the original #949 docstring named
+    (a resolved ``liberty_path`` implies at least one shipped ``.lib``), or
+    issue #1092's own explicit ``request.pdk.sweep_corners: []`` (sweep zero
+    corners) -- degrading to ``null``/``[]`` rather than raising on an empty
+    sweep target list keeps this helper total either way.
+
+    The third element is issue #1092's own addition: a per-corner
+    breakdown, ``[{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
+    ...}, ...]``, naming which corner produced each of the two aggregates
+    above -- closing the "response never names the corner that decided
+    either one" gap #1092 reports. Deliberately **not** derived by adding a
+    ``-corner`` argument to ``report_worst_slack_metric`` inside the
+    existing combined session: this module's own live-verified finding
+    (``docs/cli/place-and-route.md``'s "Multi-corner setup/hold sweep"
+    section) is that ``report_worst_slack_metric`` has no way to scope its
+    result back to one corner once more than one is loaded, and
+    ``docs/design/post-route-sta-survey.md`` section 4.2 itself left "N
+    re-runs (or one ``define_corners`` session, whichever a live-verified
+    audit finds cheaper/more correct)" as an explicitly open implementation
+    choice. Absent a real OpenROAD container to re-verify a corner-scoped
+    variant against (not available in this environment either), this
+    resolves that choice conservatively: one lightweight single-corner
+    OpenROAD invocation per swept corner, reusing this exact same
+    single-corner-session shape the combined sweep script already reduces
+    to at ``len(corners) == 1`` -- a mechanism this module has run and
+    tested for years, not new, unverified Tcl surface. The common case
+    (a library with exactly one shipped/scoped corner) needs **no** extra
+    invocation at all: with only one corner loaded, the combined session's
+    own aggregate values already *are* that corner's own values, so the
+    breakdown is built directly from them. Only ``len(corners) > 1`` pays
+    the documented extra wall-clock cost of ``len(corners)`` additional
+    OpenROAD subprocess launches -- see ``docs/cli/place-and-route.md``'s
+    "Multi-corner setup/hold sweep" section for the measured baseline this
+    adds on top of.
 
     Raises :class:`PlaceAndRouteError` on an OpenROAD engine failure, exactly
     like every other stage invocation in this module -- silently degrading
@@ -3186,7 +3297,7 @@ def _run_corner_sweep(
     ``docs/design-evidence-tiers.md``).
     """
     if not corners:
-        return None, None
+        return None, None, []
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
     metrics_path = os.path.join(
@@ -3208,12 +3319,64 @@ def _run_corner_sweep(
         )
 
     metrics = _read_metrics(metrics_path, "route (corner sweep)")
-    worst_setup = metrics.get("timing__setup__ws")
-    worst_hold = metrics.get("timing__hold__ws")
-    return (
-        round(worst_setup, 5) if worst_setup is not None else None,
-        round(worst_hold, 5) if worst_hold is not None else None,
-    )
+    worst_setup_raw = metrics.get("timing__setup__ws")
+    worst_hold_raw = metrics.get("timing__hold__ws")
+    worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
+    worst_hold = round(worst_hold_raw, 5) if worst_hold_raw is not None else None
+
+    if len(corners) == 1:
+        # The combined session's own aggregate already *is* this single
+        # corner's own value -- no second invocation needed (see docstring).
+        corner_breakdown = [
+            {
+                "name": corners[0]["name"],
+                "setup_slack_ns": worst_setup,
+                "hold_slack_ns": worst_hold,
+            }
+        ]
+        return worst_setup, worst_hold, corner_breakdown
+
+    corner_breakdown = []
+    for corner in corners:
+        corner_name = corner["name"]
+        corner_script_path = os.path.join(
+            output_dir, f"pnr_{hdl_toplevel}_route_corner_{corner_name}.tcl"
+        )
+        corner_metrics_path = os.path.join(
+            output_dir, f"{hdl_toplevel}_route_corner_{corner_name}_metrics.json"
+        )
+        corner_lines = _corner_sweep_script_lines(
+            checkpoint_in=checkpoint_in,
+            corners=[corner],
+            io_spec=io_spec,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+        )
+        _write_script(corner_script_path, corner_lines)
+
+        corner_stage_name = f"route (corner sweep: {corner_name})"
+        corner_completed = _run_openroad(corner_script_path, corner_metrics_path)
+        if corner_completed.returncode != 0:
+            raise PlaceAndRouteError(
+                _engine_error_message(corner_stage_name, corner_completed)
+            )
+
+        corner_metrics = _read_metrics(corner_metrics_path, corner_stage_name)
+        corner_setup_raw = corner_metrics.get("timing__setup__ws")
+        corner_hold_raw = corner_metrics.get("timing__hold__ws")
+        corner_breakdown.append(
+            {
+                "name": corner_name,
+                "setup_slack_ns": (
+                    round(corner_setup_raw, 5) if corner_setup_raw is not None else None
+                ),
+                "hold_slack_ns": (
+                    round(corner_hold_raw, 5) if corner_hold_raw is not None else None
+                ),
+            }
+        )
+
+    return worst_setup, worst_hold, corner_breakdown
 
 
 def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) -> str:
@@ -3426,6 +3589,7 @@ def _extract_stage_metrics(
     route_drc_violation_count: int | None = None,
     worst_setup_slack_ns: float | None = None,
     worst_hold_slack_ns: float | None = None,
+    corners: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -3489,6 +3653,13 @@ def _extract_stage_metrics(
             entry["worst_setup_slack_ns"] = worst_setup_slack_ns
         if worst_hold_slack_ns is not None:
             entry["worst_hold_slack_ns"] = worst_hold_slack_ns
+        # Issue #1092: the per-corner setup/hold slack breakdown backing the
+        # two aggregates above -- `is not None` (not truthiness) so an
+        # explicit `request.pdk.sweep_corners: []` (sweep zero corners)
+        # reports `corners: []`, distinct from the `None`/absent value every
+        # pre-`"route"` stage reports.
+        if corners is not None:
+            entry["corners"] = corners
 
     return entry
 

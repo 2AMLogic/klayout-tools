@@ -445,6 +445,57 @@ classification is needed on the Python side.
   are `null`, the same convention `route_drc_violation_count` already
   follows for a route-stage-only metric.
 
+### Per-corner breakdown (`corners`) and request-scoped sweeping (`pdk.sweep_corners`, issue #1092)
+
+The two aggregates above answer "what is the worst case across everything
+swept" but never *which* corner produced either one, and the swept set was
+always "everything the cell library ships" — for a library characterised at
+several nominal supplies (e.g. 15 `.lib` files across three ~1.8V/3.3V/5.0V
+families), the aggregate is dominated by decks a design running on one rail
+never operates at. Issue #1092 closes both gaps additively:
+
+- **`corners`** — a `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
+  ...}` entry per swept corner (see the response field table above). The
+  entry with the lowest `setup_slack_ns` is the corner `worst_setup_slack_ns`
+  came from; likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`.
+  When exactly one corner is swept (today's common case — a single-supply
+  library, or a `sweep_corners` request naming one corner), `corners` is a
+  one-element array built directly from the combined sweep's own aggregate
+  — **no extra OpenROAD invocation**. When more than one corner is swept,
+  each corner's own setup/hold slack is measured via its own lightweight
+  single-corner OpenROAD invocation (reusing the exact same single-corner
+  session shape the combined sweep already reduces to at one corner) — one
+  additional subprocess launch per swept corner, on top of the combined
+  sweep's own single invocation that still produces the two aggregates.
+  This design was chosen over adding a `-corner` argument to
+  `report_worst_slack_metric` inside the existing combined session because
+  this module's own live-verified finding (above) is that
+  `report_worst_slack_metric` cannot be scoped back to one corner once more
+  than one is loaded — the N-single-corner-invocation alternative was
+  explicitly left open by `docs/design/post-route-sta-survey.md` §4.2
+  ("N re-runs (or one `define_corners` session)... an open implementation
+  question"), and reuses only already-tested single-corner-session
+  mechanics rather than new, unverified Tcl surface.
+- **`pdk.sweep_corners`** — scopes both the combined sweep and the
+  per-corner breakdown to a caller-named subset of the shipped corners
+  (see the request field table above). Every named corner must resolve
+  against the *unfiltered* `list_lib_corners` enumeration; an unresolvable
+  name raises `PlaceAndRouteError` before any OpenROAD invocation runs,
+  naming both the unresolvable name(s) and the full list of valid corners.
+
+**Wall-clock cost, updated.** A `sweep_corners`-scoped or naturally
+single-corner run pays exactly the original #949 cost above (one combined
+invocation, no more). An unscoped multi-corner sweep additionally pays one
+more OpenROAD subprocess launch per swept corner beyond the first — for the
+16-corner `sky130_fd_sc_hd` measurement above, that is up to 15 more
+per-corner invocations on top of the ~5–6 second combined-sweep cost already
+measured; not evaluated with a real OpenROAD container as of this field's
+introduction (see the module docstring's own methodology note for
+`_run_corner_sweep`). A caller with a real wall-clock budget and a
+many-corner library should use `sweep_corners` to scope the sweep down to
+the corners the design actually operates at, which also caps this added
+cost at the scoped subset's own size.
+
 ## Post-route SPEF STA (`post_route_spef`, issue #948)
 
 Issue #948 (Epic #700 Phase 3's
@@ -972,7 +1023,8 @@ live re-measurement above.
   "pdk": {
     "cell_library": "sky130_fd_sc_hd",
     "corner": "tt_025C_1v80",
-    "interconnect_corner": "nom"
+    "interconnect_corner": "nom",
+    "sweep_corners": ["tt_025C_1v80", "ss_100C_1v60", "ff_n40C_1v95"]
   },
   "floorplan": {
     "method": "utilization",
@@ -1009,6 +1061,7 @@ live re-measurement above.
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. |
 | `pdk.interconnect_corner` | string \| omitted | `"min"` \| `"nom"` \| `"max"` — tech-LEF *parasitic-extraction* corner selector, independent of `pdk.corner` (issue #1100). Default `"nom"`, byte-identical to this command's behavior before this field existed. An install that doesn't stage the requested corner's tech LEF is a clear application error (exit 1), never a silent fallback. Echoed back as the response's own `interconnect_corner` field — see "PDK / LEF / liberty resolution" above. |
+| `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitted (the default) sweeps every shipped corner, reproducing today's behaviour exactly. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
@@ -1048,6 +1101,11 @@ live re-measurement above.
   "route_drc_violation_count": 0,
   "worst_setup_slack_ns": -4.02163,
   "worst_hold_slack_ns": 0.08421,
+  "corners": [
+    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011 },
+    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882 },
+    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421 }
+  ],
   "estimated_power_mw": 11.6,
   "clock_skew_ns": 0.0421,
   "stages": [
@@ -1121,6 +1179,7 @@ live re-measurement above.
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), parsed from the report's per-violation `"violation type: ..."` header lines. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
+| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ...}`. Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
