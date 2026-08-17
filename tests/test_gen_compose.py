@@ -3176,6 +3176,52 @@ def test_compose_allows_disjoint_routes_on_the_same_layer(tmp_path, pdk_root):
     assert report["nets"][1]["routed"] is True
 
 
+def test_compose_route_dbu_probe_wraps_bad_gds_path_in_gen_compose_error(
+    tmp_path, pdk_root
+):
+    # Regression: `_route_dbu()` (only invoked when connectivity[] is
+    # non-empty) reads `blocks[order[0]]["gds_path"]` via a bare
+    # `kdb.Layout().read()`, same as `read_block_layer_geometry()` and
+    # `_write_composed_gds()` -- both of which wrap that call in
+    # try/except and re-raise `GenComposeError` because klayout raises a
+    # bare `RuntimeError` for a missing/corrupt GDS file. Before that
+    # wrapping was added to `_route_dbu()` too, a bad `gds_path` on the
+    # first-placed block escaped compose() as an unhandled `RuntimeError`
+    # instead of the documented JSON error envelope.
+    b1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "b1")
+    b2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "b2")
+    b1["gds_path"] = str(tmp_path / "does-not-exist.gds")
+    with pytest.raises(GenComposeError, match="does-not-exist.gds"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": b1},
+                    {"id": "b2", "generator_report": b2},
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["b1", "b2"],
+                    "spacing_um": 1.0,
+                },
+                "connectivity": [
+                    {
+                        "net": "N1",
+                        "pins": [
+                            {"block": "b1", "port": "P2"},
+                            {"block": "b2", "port": "P1"},
+                        ],
+                    }
+                ],
+                "routing": {"layer_role": "metal", "width_um": 0.17},
+                "options": {
+                    "cell_name": "bad_gds_path",
+                    "output": str(tmp_path / "bad_gds_path.gds"),
+                },
+            }
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Via-drop routing (#454, re-raising #433's Ask options 1/2): a `"metal2"`
 # `routing.layer_role` runs the backbone on sky130's met1 and drops to each

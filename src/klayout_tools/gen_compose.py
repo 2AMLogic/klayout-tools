@@ -2662,8 +2662,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         if not _route_dbu_cache:
             import klayout.db as kdb
 
+            probe_block_id = order[0]
+            probe_gds_path = blocks[probe_block_id]["gds_path"]
             probe_layout = kdb.Layout()
-            probe_layout.read(blocks[order[0]]["gds_path"])
+            try:
+                probe_layout.read(probe_gds_path)
+            except Exception as exc:  # klayout raises RuntimeError for bad paths
+                raise GenComposeError(
+                    f"block '{probe_block_id}': could not read gds_path "
+                    f"'{probe_gds_path}': {exc}"
+                ) from exc
             _route_dbu_cache.append(probe_layout.dbu)
         return _route_dbu_cache[0]
 
