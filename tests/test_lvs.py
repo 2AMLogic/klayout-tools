@@ -3105,10 +3105,16 @@ def test_deck_options_invalid_value_on_pre_extracted_netlist_shape_raises(tmp_pa
         run_lvs(path)
 
 
-def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
-    """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
-    PMOS well-tap layer either (`Comp` is shared with ordinary active,
-    `ExtractionDeck.tap is None`) -- both polarities warn."""
+def test_body_unverified_warns_nmos_only_on_gf180mcu(tmp_path):
+    """gf180mcu draws no distinct NMOS substrate/tap layer -- `Comp` is
+    shared with ordinary active, `ExtractionDeck.tap is None` -- so the NMOS
+    body always warns. The PMOS side no longer warns unconditionally (issue
+    #1084): this deck now declares `tap_nplus`/`tap_pplus`, a *derivable*
+    well-tap mechanism, mirroring sky130's own deck-structural (not
+    per-device) treatment of a deck that has *some* tap mechanism -- even
+    though `GF180_CLKINV` itself draws no well tie, so its one PMOS body
+    still resolves to an anonymous net (see
+    `test_gf180mcu_clkinv_1_spot_check` in `tests/test_extract.py`)."""
     from klayout_tools.extract import run_extract
 
     reference_path = str(tmp_path / "ref.spice")
@@ -3128,9 +3134,106 @@ def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
         for m in report["mismatches"]
         if m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
     }
-    assert set(body_entries) == {"nfet", "pfet"}
+    assert set(body_entries) == {"nfet"}
     assert all(entry["severity"] == "warning" for entry in body_entries.values())
     assert all(entry["side"] == "layout" for entry in body_entries.values())
+
+
+# --------------------------------------------------------------------------- #
+# gf180mcu derived tap (issue #1084): a layout that draws an Nplus/Pplus-
+# over-Comp well/substrate tie reaches `status: "match"` against a reference
+# netlist whose bulk terminals name the real supply rails -- with **no**
+# caller-side reference-netlist rewriting, this issue's own core acceptance
+# criterion -- mirroring #490's sky130 substrate-tap match test above.
+# --------------------------------------------------------------------------- #
+
+
+def _write_gf180mcu_clkinv_with_ties(path: Path) -> str:
+    """The real `gf180mcu_fd_sc_mcu9t5v0__clkinv_1` corpus cell, plus *added*
+    Nplus/Pplus-over-Comp tie geometry: an n+ well tie inside `Nwell`
+    routed up through `Metal1` into the cell's own `VDD` rail shape, and a
+    p+ substrate tie outside every `Nwell` routed down into the cell's own
+    `VSS` rail shape -- exactly the issue's own "Nplus-over-COMP strip
+    inside Nwell tied to the positive rail... Pplus-over-COMP strip on
+    substrate tied to the ground rail" repro. Both ties' `Comp`/`Nplus`/
+    `Pplus` diffusion sits at x 1700..1900 -- clear of the cell's own
+    `Comp` geometry (PMOS `Comp` bbox x180..1560, NMOS `Comp` bbox
+    x180..1660) -- and each `Metal1` landing pad is extended up/down into
+    the real `VDD`/`VSS` rail polygons' own solid area (verified against
+    the corpus GDS directly: the rail shapes are not solid rectangles --
+    the `VDD` rail's fill starts at y=4590, the `VSS` rail's fill runs
+    through y=800 at this x -- rather than actually *touching* real rail
+    geometry, a same-named-but-disconnected label (as sky130's tap tests
+    use) would extract as a second, separate net of the same name, not a
+    real merge, since KLayout does not merge nets by matching label text)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds"))
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Well tie: Nplus-covered Comp inside Nwell (Nwell y >= 2265), Metal1
+    # routed up into the VDD rail's solid top band (y >= 4590).
+    draw(22, 0, kdb.Box(1700, 3600, 1900, 3800))  # Comp
+    draw(32, 0, kdb.Box(1700, 3600, 1900, 3800))  # Nplus (well-tie doping)
+    draw(33, 0, kdb.Box(1720, 3620, 1880, 3780))  # Contact
+    draw(34, 0, kdb.Box(1700, 3600, 1900, 4700))  # Metal1 -- reaches VDD rail
+
+    # Substrate tie: Pplus-covered Comp outside every Nwell, Metal1 routed
+    # down into the VSS rail's solid area.
+    draw(22, 0, kdb.Box(1700, -300, 1900, -100))  # Comp
+    draw(31, 0, kdb.Box(1700, -300, 1900, -100))  # Pplus (substrate-tie doping)
+    draw(33, 0, kdb.Box(1720, -280, 1880, -120))  # Contact
+    draw(34, 0, kdb.Box(1700, -300, 1900, 800))  # Metal1 -- reaches VSS rail
+
+    layout.write(str(path))
+    return str(path)
+
+
+#: Reference schematic for `gf180mcu_fd_sc_mcu9t5v0__clkinv_1` naming both
+#: devices' bulk terminals on the real supply rails -- exactly what a real
+#: schematic-derived reference netlist does (the issue's own framing), not
+#: the deck's synthesized `vsubs`/an anonymous net a caller would otherwise
+#: have to rewrite around.
+_GF180MCU_CLKINV_SPICE_NAMED_RAILS = """
+.subckt gf180mcu_fd_sc_mcu9t5v0__clkinv_1 I VDD VSS ZN vsubs
+M1 ZN I VSS VSS nfet L=0.6U W=0.73U
+M2 ZN I VDD VDD pfet L=0.5U W=1.83U
+.ends
+"""
+
+
+def test_gf180mcu_lvs_matches_reference_named_rails_without_netlist_rewriting(
+    tmp_path,
+):
+    """Issue #1084's own core acceptance criterion: a gf180mcu layout that
+    draws a real Nplus/Pplus-over-Comp well/substrate tie reaches
+    `status: "match"` against a reference netlist that names both devices'
+    bulk terminals on the real supply rails -- with **no** caller-side
+    reference-netlist rewriting, and neither `device.body_unverified` entry
+    fires (both body terminals resolved to real, named nets)."""
+    gds = _write_gf180mcu_clkinv_with_ties(tmp_path / "clkinv.gds")
+    reference_path = _write(tmp_path / "ref.spice", _GF180MCU_CLKINV_SPICE_NAMED_RAILS)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": gds, "deck": "gf180mcu"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "gf180mcu_fd_sc_mcu9t5v0__clkinv_1",
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        for m in report["mismatches"]
+    )
 
 
 def test_body_unverified_absent_for_pre_extracted_layout_netlist(tmp_path):
@@ -3990,14 +4093,20 @@ def test_corpus_known_good_cell_matches_cleanly(
     # Issue #281: every NMOS body terminal is tied to the deck's synthetic
     # substrate net (neither curated deck draws a distinct NMOS tap layer),
     # so the `device.body_unverified` warning always fires for `nfet`; the
-    # `pfet` counterpart additionally fires only when the deck has no
-    # distinct well-tap layer either (gf180mcu today; sky130's `tap` layer
-    # gives PMOS bodies a real net).
+    # `pfet` counterpart additionally fires only when the deck has **no** tap
+    # mechanism at all -- neither a distinct drawn `tap` layer nor a
+    # derivable one (issue #1084: gf180mcu now declares `tap_nplus`/
+    # `tap_pplus`, so it no longer qualifies, exactly like sky130's drawn
+    # `tap` -- even though neither corpus cell here draws an actual tie).
     from klayout_tools.decks import get_extraction_deck
 
     deck_config = get_extraction_deck(deck)
     expected_body_classes = {deck_config.nfet_class}
-    if deck_config.tap is None:
+    if (
+        deck_config.tap is None
+        and deck_config.tap_nplus is None
+        and deck_config.tap_pplus is None
+    ):
         expected_body_classes.add(deck_config.pfet_class)
     body_unverified_classes = {
         m["device"]["class"]

@@ -1128,19 +1128,41 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # convention.
 #
 # Unlike sky130, gf180mcu's curated layer set has no distinct substrate/well
-# tie layer -- a well tap is drawn on the *same* `Comp` layer as transistor
-# active (`tap=None` below). This deck therefore does not attempt to derive
-# a well-tie net name: the PMOS body terminal picks up whatever net (if any)
-# a Comp/contact/metal shape *inside* the Nwell polygon happens to be tied
-# to via ordinary connectivity (see `ExtractionDeck`'s docstring on why
-# `nwell` is never connected to `contact` directly), and is otherwise a
-# floating, anonymous net in the extracted netlist -- a documented
-# approximation for this PDK's curated deck (no `well_label`/`tap` fields
-# are set), not a real substrate-tap extraction.
+# tie layer -- a well/substrate tap is drawn on the *same* `Comp` layer as
+# transistor active, so `tap` itself is left `None` below. Issue #1084:
+# rather than leaving well/substrate ties structurally unrecognisable
+# (`tap=None` with no fallback -- this deck's own pre-#1084 documented
+# approximation, and the friction that issue reports), this deck instead
+# declares `tap_nplus`/`tap_pplus` -- the same `Nplus` (32/0) / `Pplus`
+# (31/0) implant layers already named/used above for bipolar/resistor/diode
+# recognition -- so `extract.py` can *derive* an equivalent tap region: an
+# n+ (`Nplus`)-covered Comp shape *inside* `Nwell` is a well tie (ties the
+# PMOS body to the well's real net), a p+ (`Pplus`)-covered Comp shape
+# *outside* every `Nwell` is a substrate tie (ties the NMOS body to the
+# substrate's real net) -- exactly how the PDK's own official LVS deck
+# recognises a tie with no dedicated tap mask (see the issue's own "What
+# would close this" section). Neither can collide with an ordinary
+# transistor's own source/drain diffusion: gf180mcu's PMOS source/drain is
+# `Pplus`-covered Comp *inside* the well (opposite doping from a well tie
+# there) and its NMOS source/drain is `Nplus`-covered Comp *outside* the
+# well (opposite doping from a substrate tie there) -- see
+# `ExtractionDeck.tap_nplus`/`tap_pplus`'s own docstring for the exact
+# derivation `extract.py` performs.
+#
+# A layout that draws no such tie extracts exactly as it always did (both
+# `tap_nplus`/`tap_pplus` are additive-only derivation inputs, not device-
+# recognition layers -- there is no drawn geometry to derive a tap region
+# from, so `extract.py`'s `tap` region for it is empty, same as before this
+# field existed): the PMOS body terminal picks up whatever net (if any) a
+# Comp/contact/metal shape *inside* the Nwell polygon happens to be tied to
+# via ordinary connectivity (see `ExtractionDeck`'s docstring on why `nwell`
+# is never connected to `contact` directly), and is otherwise a floating,
+# anonymous net in the extracted netlist.
 #
 # NMOS body: as with sky130, no separate substrate layer is drawn in this
-# curated deck, so the NMOS body terminal is tied to the deck's
-# `substrate_net` global (`ExtractionDeck.substrate_net`, default `"vsubs"`).
+# curated deck, so absent a drawn substrate tie, the NMOS body terminal is
+# tied to the deck's `substrate_net` global (`ExtractionDeck.substrate_net`,
+# default `"vsubs"`) -- exactly as before #1084.
 #
 # Bipolar (BJT) device recognition (issue #223): base = Nwell (the physical
 # n-type body a vertical bipolar's emitter diffusion sits in -- the same
@@ -1456,6 +1478,12 @@ EXTRACTION_DECK = ExtractionDeck(
     poly=(30, 0),  # Poly2
     nwell=(21, 0),  # Nwell
     contact=(33, 0),  # Contact
+    # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
+    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
+    # region from these same implant layers (issue #1084, see the module
+    # docstring note above this deck's definition for the full derivation).
+    tap_nplus=(32, 0),  # Nplus -- well-tie implant (n+ diffusion inside Nwell)
+    tap_pplus=(31, 0),  # Pplus -- substrate-tie implant (p+ diffusion outside Nwell)
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
     # Full Metal1-Metal5 routing stack (#220). Before this, `metals` stopped
     # at Metal1, so anything drawn above it was invisible to the connectivity

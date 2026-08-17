@@ -2143,15 +2143,23 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     terminal to a real, named net when a layout draws a substrate-tie ring
     outside every ``nwell`` and contacts it up to that net -- only a device
     whose body terminal *still* reaches the deck's synthesized
-    ``substrate_net`` global (no ring drawn, or ``deck.tap is None`` and no
-    split is possible at all, e.g. gf180mcu) is structurally unverified. The
-    NMOS warning therefore counts only devices whose body net name equals
+    ``substrate_net`` global (no ring drawn, or no tap mechanism at all,
+    e.g. gf180mcu before issue #1084) is structurally unverified. The NMOS
+    warning therefore counts only devices whose body net name equals
     ``deck.substrate_net`` (or resolves to no net at all), not every NMOS
-    device. The PMOS warning only fires when the deck also has no distinct
-    well-tap layer (``deck.tap is None``) -- a deck that draws a real tap
-    ties PMOS bodies to a genuine, named net unconditionally (no ring
-    required, since every PMOS sits inside an ``nwell`` by construction), so
-    no warning is warranted there.
+    device. The PMOS warning only fires when the deck also has no tap
+    mechanism at all -- neither a distinct drawn ``tap`` layer nor a
+    derived one (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``,
+    issue #1084) -- a deck that has *either* ties PMOS bodies to a genuine,
+    named net unconditionally (no ring required, since every PMOS sits
+    inside an ``nwell`` by construction), so no warning is warranted there.
+    A gf180mcu layout whose declared ``tap_nplus``/``tap_pplus`` implant
+    layers happen to draw no real tie shape in a *specific* layout still
+    resolves each such PMOS body to an anonymous net -- exactly as it did
+    before this deck declared those fields -- but is no longer flagged by
+    this deck-structural warning, mirroring sky130's own long-standing
+    (optimistic) treatment of a deck that merely *has* a tap mechanism as
+    sufficient, not a guarantee that every individual instance used it.
 
     Neither warning fires at all for the pre-extracted ``layout.netlist``
     request form -- callers only reach this helper when ``layout.file`` +
@@ -2188,7 +2196,7 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
             )
         )
 
-    if deck.tap is None:
+    if deck.tap is None and deck.tap_nplus is None and deck.tap_pplus is None:
         pfet_count = sum(
             1
             for device in layout_circuit.each_device()

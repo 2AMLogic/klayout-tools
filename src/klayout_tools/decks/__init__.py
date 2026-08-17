@@ -527,6 +527,33 @@ class ExtractionDeck:
     well together; only a genuinely distinct tap region is safe to tie to
     the well directly).
 
+    ``tap_nplus``/``tap_pplus`` (issue #1084) are optional companion fields
+    for exactly the ``tap is None`` case above -- a PDK family that draws no
+    dedicated tap mask at all, but *does* draw a well/substrate tie as
+    ordinary ``active`` diffusion covered by an implant layer the deck
+    already declares for other purposes (e.g. gf180mcu's ``Nplus``/
+    ``Pplus``, used elsewhere in that deck's diode/resistor/bipolar
+    recognition). When ``tap`` is ``None`` and at least one of these is set,
+    ``extract.py`` *derives* an equivalent tap region rather than requiring
+    a literal drawn tap layer: ``tap_nplus & active & nwell`` is a well tie
+    (n+ diffusion tied to the well from *inside* it -- opposite doping from
+    an ordinary PMOS source/drain, which is p+ inside the well, so the two
+    never collide), ``tap_pplus & active - nwell`` is a substrate tie (p+
+    diffusion tied to the substrate from *outside* every well -- opposite
+    doping from an ordinary NMOS source/drain, which is n+ outside the
+    well). The derived region then feeds the exact same tap/``tap_substrate``
+    connectivity mechanism a directly-drawn ``tap`` layer already uses
+    (issue #490) -- ties the PMOS body (via ``nwell``) and the NMOS body
+    (via the ``substrate_net`` global) to whatever real, routed net the tie
+    reaches, instead of a second, parallel mechanism. Either field left
+    ``None`` simply contributes nothing to the derived region (a deck may
+    declare only one side). Both default to ``None``: a deck that declares
+    neither -- every deck as of this field's introduction, until gf180mcu's
+    own module sets them -- derives no tap at all, byte-for-byte the same
+    behaviour as before these fields existed. Ignored outright when ``tap``
+    itself is set: a genuinely distinct drawn tap layer always wins over a
+    derived one.
+
     ``contact`` connects ``active``/``poly``/``tap`` to the first metal
     level. ``metals`` is the ordered metal-stack layer list (index 0 is the
     one ``contact`` lands on); ``metal_labels`` is the matching list of
@@ -631,6 +658,8 @@ class ExtractionDeck:
     contact: tuple[int, int]
     metals: tuple[tuple[int, int], ...]
     tap: tuple[int, int] | None = None
+    tap_nplus: tuple[int, int] | None = None
+    tap_pplus: tuple[int, int] | None = None
     well_label: tuple[int, int] | None = None
     poly_label: tuple[int, int] | None = None
     dummy: tuple[int, int] | None = None
@@ -761,9 +790,9 @@ class ExtractionDeck:
         """The MOS-core and label layers this deck reads for a role other
         than ``metals``/``vias`` connectivity or bipolar/capacitor/resistor/
         diode device recognition -- ``active``/``poly``/``nwell``/
-        ``contact``, the optional ``tap``/``well_label``/``poly_label``/
-        ``dummy``, and every ``metal_labels`` entry. ``None`` optionals are
-        skipped.
+        ``contact``, the optional ``tap``/``tap_nplus``/``tap_pplus``/
+        ``well_label``/``poly_label``/``dummy``, and every ``metal_labels``
+        entry. ``None`` optionals are skipped.
 
         Subtracted from :attr:`device_recognition_only_layers` (issue #619):
         a bipolar device can legitimately reuse the deck's own MOS-core
@@ -781,7 +810,14 @@ class ExtractionDeck:
             self.nwell,
             self.contact,
         }
-        for optional in (self.tap, self.well_label, self.poly_label, self.dummy):
+        for optional in (
+            self.tap,
+            self.tap_nplus,
+            self.tap_pplus,
+            self.well_label,
+            self.poly_label,
+            self.dummy,
+        ):
             if optional is not None:
                 layers.add(optional)
         layers.update(label for label in self.metal_labels if label is not None)
@@ -835,7 +871,8 @@ class ExtractionDeck:
         of ``klt drc``'s ``coverage.layers_in_stream_without_rules``).
 
         Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
-        ``contact``, plus optional ``tap``), the ``metals``/``vias`` stack
+        ``contact``, plus optional ``tap``/``tap_nplus``/``tap_pplus``), the
+        ``metals``/``vias`` stack
         (:attr:`merge_layers`) and every label layer (``well_label``/
         ``poly_label``/``metal_labels``), and each ``bipolars``/
         ``capacitors``/``resistors``/``diodes`` entry's own recognition
@@ -853,7 +890,14 @@ class ExtractionDeck:
             self.nwell,
             self.contact,
         }
-        for optional in (self.tap, self.well_label, self.poly_label, self.dummy):
+        for optional in (
+            self.tap,
+            self.tap_nplus,
+            self.tap_pplus,
+            self.well_label,
+            self.poly_label,
+            self.dummy,
+        ):
             if optional is not None:
                 layers.add(optional)
         layers.update(self.merge_layers)

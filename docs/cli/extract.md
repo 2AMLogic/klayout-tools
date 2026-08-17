@@ -175,7 +175,9 @@ declared level extracts as connected nets, not a pile of disconnected
 ones), not a full PDK's device zoo. Both decks
 are defined in `src/klayout_tools/decks/sky130.py` /
 `src/klayout_tools/decks/gf180mcu.py` as an `ExtractionDeck` (layer roles:
-`active`, `poly`, `nwell`, optional `tap`, `contact`, an ordered `metals`
+`active`, `poly`, `nwell`, optional `tap` (plus the optional
+`tap_nplus`/`tap_pplus` implant pair a deck with no distinct `tap` layer can
+declare instead — issue #1084, see below), `contact`, an ordered `metals`
 stack with matching `metal_labels`/`vias`, an optional `well_label`, and an
 optional `dummy` marker layer for drawn dummy devices — see "Dummy devices:
 the `dummy` marker layer") —
@@ -183,8 +185,7 @@ each field's exact layer numbers and provenance are documented in the deck
 module's own docstring, verified against this repo's real corpus fixtures
 (`tests/corpus/sky130/`, `tests/corpus/gf180mcu/`).
 
-Two known connectivity-fidelity limitations, both documented in the deck
-modules and deliberate (not oversights):
+**NMOS/PMOS body resolution**, both documented in the deck modules:
 
 - **NMOS body.** Neither curated deck draws a separate substrate/pwell
   layer. On **sky130**, `tap.drawing` is reused for both purposes: a shape
@@ -195,20 +196,57 @@ modules and deliberate (not oversights):
   and collector-less bipolar collector terminals) resolve to that real net
   (issue #490). Only a layout with **no** such ring falls back to a global
   net (`vsubs` by default) via KLayout's `connect_global`. **gf180mcu** has
-  no distinct tap layer at all (`Comp` is shared with transistor active), so
-  its NMOS body always falls back to the global net.
-- **PMOS body (gf180mcu only).** sky130's curated deck draws well taps on a
-  *distinct* layer from transistor active (`tap.drawing`), so the well body
-  net picks up its real name via that tap + an `nwell` pin label (verified
-  against the sky130 corpus: the PMOS body of a real inverter cell extracts
-  to the correct `VPB` pin). gf180mcu's curated layer set has no distinct
-  tap layer (`Comp` is shared with the transistor active layer) and no
-  well-label layer, so its PMOS body terminal is a floating, anonymous net.
-  This is also a **simulation** caveat, not only an LVS-comparison one: that
-  anonymous net has no DC bias path at all, which corrupts a direct
-  resimulation of the extracted netlist — see "Parasitic (RC) extraction" →
-  "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" below
-  for the full consequence and how the JSON response surfaces it.
+  no distinct tap layer at all (`Comp` is shared with transistor active),
+  but declares `tap_nplus`/`tap_pplus` (issue #1084, see below) so the same
+  fallback/resolution split applies there too, derived rather than drawn.
+- **PMOS body.** sky130's curated deck draws well taps on a *distinct*
+  layer from transistor active (`tap.drawing`), so the well body net picks
+  up its real name via that tap + an `nwell` pin label (verified against
+  the sky130 corpus: the PMOS body of a real inverter cell extracts to the
+  correct `VPB` pin). **gf180mcu**'s curated layer set has no distinct tap
+  layer (`Comp` is shared with the transistor active layer) and no
+  well-label layer, but (issue #1084) derives an equivalent tap region from
+  its already-declared `Nplus`/`Pplus` implant layers: a layout that draws
+  an `Nplus`-covered `Comp` shape inside the `Nwell`, contacted up to a
+  named net, resolves the PMOS body to that real net the same way sky130's
+  drawn tap does. A layout that draws **no** such tie still leaves the
+  PMOS body terminal a floating, anonymous net, exactly as before #1084 —
+  strictly additive, not a behaviour change for a tie-less layout. This is
+  also a **simulation** caveat when it does happen, not only an
+  LVS-comparison one: an anonymous body net has no DC bias path at all,
+  which corrupts a direct resimulation of the extracted netlist — see
+  "Parasitic (RC) extraction" → "Known gap: an anonymous PMOS body net has
+  no DC bias path" below for the full consequence and how the JSON response
+  surfaces it.
+
+### Deriving a tap region with no dedicated tap layer (issue #1084)
+
+Some PDK families (gf180mcu) draw a well/substrate tie as ordinary `active`
+diffusion covered by an implant mask rather than on a dedicated tap layer —
+exactly how the PDK's own official LVS deck itself recognises a tie with no
+dedicated tap mask. `ExtractionDeck.tap_nplus`/`tap_pplus` let a deck declare
+that pair of implant layers instead of (or in addition to leaving) `tap`
+unset; `klt extract` then derives an equivalent `tap` region:
+
+- a **well tie** is `tap_nplus`-covered diffusion *inside* the well (n+
+  diffusion tied to the n-type well — opposite doping from an ordinary PMOS
+  source/drain, which is `tap_pplus`-covered there, so the two can never
+  collide);
+- a **substrate tie** is `tap_pplus`-covered diffusion *outside* every well
+  (p+ diffusion tied to the p-type substrate — opposite doping from an
+  ordinary NMOS source/drain, which is `tap_nplus`-covered there).
+
+The derived region feeds the exact same tap/well/substrate connectivity
+machinery a directly-drawn `tap` layer already uses (issue #490) — a well
+tie ties the PMOS body via `nwell`, a substrate tie ties the NMOS body via
+the `substrate_net` global — so `klt lvs` against a reference netlist whose
+bulk terminals name the real supply rails can reach a clean match on a
+layout that draws such a tie, with no caller-side netlist rewriting. Either
+field left unset simply contributes nothing to the derived region (a deck
+may declare only one side); both default to `None`, so a deck that declares
+neither derives no tap at all — byte-for-byte the same extraction as before
+these fields existed. Ignored outright when `tap` itself is set: a
+genuinely distinct drawn tap layer always wins.
 
 Connecting a well region to *every* contact inside it (rather than only a
 genuinely distinct tap region) is deliberately **not** done — the well is a
@@ -484,24 +522,26 @@ collector layer (the vertical bipolar's collector is the substrate itself),
 so the collector terminal is tied to the deck's global substrate net
 (`vsubs` by default), mirroring the NMOS-body wiring above.
 
-**Base-terminal net resolution — inherits the "PMOS body (gf180mcu only)"
-limitation above.** Because `BipolarDevice.base` reuses the deck's own
-`nwell` layer (the very layer used for PMOS body recognition), the base
-terminal's net is only as resolvable as that `nwell` node is —
-`extract.py` wires `l2n.connect(bipolar_base, nwell)`, so the base
-inherits whatever name `nwell` picks up. Whether that `nwell` node
-resolves through to contact/metals therefore depends entirely on the
-deck's `tap`/`well_label` mechanism (`extract.py` only wires
-`nwell → tap → contact` when `deck.tap is not None`, and names the node
-via `nwell → well_label`):
+**Base-terminal net resolution — inherits the "PMOS body" limitation
+above.** Because `BipolarDevice.base` reuses the deck's own `nwell` layer
+(the very layer used for PMOS body recognition), the base terminal's net is
+only as resolvable as that `nwell` node is — `extract.py` wires
+`l2n.connect(bipolar_base, nwell)`, so the base inherits whatever name
+`nwell` picks up. Whether that `nwell` node resolves through to
+contact/metals therefore depends on the deck's tap mechanism (drawn `tap`,
+or — issue #1084 — a derived one from `tap_nplus`/`tap_pplus`) and/or
+`well_label` (`extract.py` only wires `nwell → tap → contact` when a tap
+mechanism is declared, and names the node via `nwell → well_label`):
 
-- **gf180mcu** declares *neither* `tap` *nor* `well_label` (`Comp` is
-  shared with transistor active, and there is no well-label layer), so its
-  `nwell` node — and hence its BJT base terminal — is a floating, anonymous
-  net. This is the **exact same gap** as the "PMOS body (gf180mcu only)"
-  limitation documented under "Coverage" above; the drawn BJT's base can no
-  more be LVS'd or simulated against a schematic base net than gf180mcu's
-  PMOS body can.
+- **gf180mcu** declares no `well_label` and no drawn `tap`, but does declare
+  `tap_nplus`/`tap_pplus` (issue #1084), so its `nwell` node — and hence its
+  BJT base terminal — resolves through `nwell → tap (derived) → contact →
+  metals` exactly when the layout draws an `Nplus`-covered `Comp` well tie
+  inside that same `Nwell`, contacted up to a named net; absent such a tie
+  it is still a floating, anonymous net. This is the **exact same
+  condition** as the "PMOS body" limitation documented under "Coverage"
+  above; the drawn BJT's base can no more be LVS'd or simulated against a
+  schematic base net than a tie-less gf180mcu PMOS body can.
 - **sky130** *does* declare `tap` (65/44, distinct from `diff.drawing`) and
   `well_label` (64/5), so its base terminal resolves correctly through
   `nwell → tap → contact → metals` and picks up its real pin name via the
@@ -2578,19 +2618,26 @@ the same posture as the duplicate-net-name limitation noted above.
   strictly more accurate but substantially larger undertaking, deliberately
   deferred as issue #592's own "Option 2".
 
-### Known gap: gf180mcu's anonymous PMOS body net has no DC bias path (issue #555)
+### Known gap: an anonymous PMOS body net has no DC bias path (issue #555)
 
 This is a **simulation**, not just an LVS-comparison, caveat — read it before
-resimulating a `--parasitics`-extracted gf180mcu netlist directly, not only
-if you are comparing it against a schematic reference.
+resimulating a `--parasitics`-extracted netlist directly, not only if you are
+comparing it against a schematic reference.
 
-"Coverage" above documents, as a known deck limitation, that gf180mcu's
-curated layer set has no distinct well-tie/tap layer and no well-label layer,
-so a PMOS device's body terminal extracts onto a **floating, anonymous net**
-(a KLayout-synthesized `$5`-style name) rather than a real, named net — unlike
-the NMOS body, which always resolves to the deck's synthesized global
-substrate net (`vsubs`) via `connect_global`, and unlike sky130's PMOS body,
-which resolves to a real well-tie pin (e.g. `VPB`).
+"Coverage" above documents when this happens: a PMOS device's body terminal
+extracts onto a **floating, anonymous net** (a KLayout-synthesized `$5`-style
+name) rather than a real, named net whenever no well tie — drawn (sky130's
+`tap.drawing`) or derived (gf180mcu's `tap_nplus`/`tap_pplus`, issue #1084) —
+reaches that device's `nwell` island. On **gf180mcu**, before #1084 this hit
+*every* PMOS unconditionally (no tap mechanism existed at all); since #1084 a
+layout that draws an `Nplus`-covered `Comp` well tie, contacted to a named
+net, resolves the PMOS body to that real net instead — a layout with no such
+tie still hits this gap exactly as before. This is unlike the NMOS body,
+which always resolves to the deck's synthesized global substrate net
+(`vsubs`) via `connect_global` absent a drawn/derived substrate tie, and
+unlike a PMOS body reached by a real well tie (sky130's drawn `tap.drawing` +
+`well_label` pin, e.g. `VPB`, or gf180mcu's derived `tap_nplus` tie), which
+resolves to that real net instead of this floating one.
 
 The consequence for `--parasitics` (and for any direct resimulation of the
 extracted netlist, with or without `--parasitics`): that anonymous net has
@@ -3217,7 +3264,7 @@ exit codes).
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
-| `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
+| `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
 | `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |

@@ -824,22 +824,26 @@ Notes on the semantics:
 #### `device.body_unverified`: MOS body terminals compared against a deck-synthesized net
 
 The curated extraction decks can give some MOS body terminals a net that does
-not come from any drawn tap/well-label geometry (`docs/cli/extract.md` →
-"Coverage"). On **sky130**, `tap.drawing` does double duty: a shape drawn
-outside every `nwell` is a genuine, drawable P-substrate tie, so a layout
-that draws one and contacts it up to a named net gives the NMOS body
-terminal (and the identically-modelled `bulk_to_substrate` resistor bulk and
-collector-less bipolar collector) a real net (issue #490) — only a layout
-with **no** such ring falls back to the deck's global substrate net
-(`connect_global`, e.g. `vsubs`). **gf180mcu** has no distinct tap layer at
-all (`Comp` is shared with ordinary transistor active), so its NMOS bodies —
-and, since it also has no distinct well-tap layer, its PMOS bodies too — land
-on an anonymous, deck-synthesized net unconditionally. Comparing a
-synthesized net against a schematic reference's real ground/rail net still
-produces a genuine `NetlistComparer` finding if they disagree, but a *clean*
-compare on that dimension does not mean the well/substrate tie was actually
-verified against the schematic — it means both sides were forced onto the
-same synthetic net.
+not come from any drawn/derived tap or well-label geometry
+(`docs/cli/extract.md` → "Coverage"). On **sky130**, `tap.drawing` does
+double duty: a shape drawn outside every `nwell` is a genuine, drawable
+P-substrate tie, so a layout that draws one and contacts it up to a named
+net gives the NMOS body terminal (and the identically-modelled
+`bulk_to_substrate` resistor bulk and collector-less bipolar collector) a
+real net (issue #490) — only a layout with **no** such ring falls back to
+the deck's global substrate net (`connect_global`, e.g. `vsubs`).
+**gf180mcu** has no distinct drawn tap layer at all (`Comp` is shared with
+ordinary transistor active), but (issue #1084) declares `tap_nplus`/
+`tap_pplus` so `klt extract` can *derive* an equivalent tap region from a
+drawn `Nplus`/`Pplus`-over-`Comp` tie — a layout that draws one gets the
+same real-net resolution as sky130's drawn tap; a layout that draws neither
+still lands its NMOS/PMOS bodies on an anonymous, deck-synthesized net
+unconditionally, exactly as before #1084. Comparing a synthesized net
+against a schematic reference's real ground/rail net still produces a
+genuine `NetlistComparer` finding if they disagree, but a *clean* compare on
+that dimension does not mean the well/substrate tie was actually verified
+against the schematic — it means both sides were forced onto the same
+synthetic net.
 
 `klt lvs` surfaces this as one or two `severity: "warning"` entries
 (`category: "device.body_unverified"`, `side: "layout"`) whenever
@@ -850,14 +854,18 @@ synthetic-net behaviour) is involved there:
 - An NMOS entry fires when the layout has one or more NMOS devices whose
   body terminal **still** resolved to the deck's synthesized `substrate_net`
   (`device.class` is the deck's `nfet_class`, e.g. `"nfet"`) — a device whose
-  body terminal resolved to a real, drawn-tap-derived net (sky130 only, and
-  only where a layout actually draws one) is not counted.
-- A PMOS entry additionally fires when the layout-side deck has no distinct
-  well-tap layer (`ExtractionDeck.tap is None`, gf180mcu today) **and** the
-  layout has one or more PMOS devices (`device.class` is the deck's
-  `pfet_class`, e.g. `"pfet"`). sky130's `tap` layer gives PMOS bodies a real,
-  named net unconditionally (every PMOS sits inside an `nwell` by
-  construction), so sky130 never emits this entry.
+  body terminal resolved to a real, drawn- or derived-tap net (only where a
+  layout actually draws one) is not counted.
+- A PMOS entry additionally fires when the layout-side deck has **no tap
+  mechanism at all** — neither a distinct drawn `tap` layer nor a derivable
+  one (`ExtractionDeck.tap`/`tap_nplus`/`tap_pplus` all `None`; gf180mcu
+  before issue #1084) — **and** the layout has one or more PMOS devices
+  (`device.class` is the deck's `pfet_class`, e.g. `"pfet"`). A deck that has
+  *either* mechanism gives PMOS bodies a real, named net unconditionally
+  (every PMOS sits inside an `nwell` by construction), so neither sky130 nor
+  (since #1084) gf180mcu emits this entry — even for a specific device whose
+  own `nwell` island happens to draw no tie, mirroring this deck-structural
+  check's existing (optimistic) treatment for sky130.
 
 Both entries reflect real device-level extraction outcomes (per-device for
 NMOS since #490; still deck-structural for PMOS, a property of which deck
