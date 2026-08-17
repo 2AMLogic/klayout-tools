@@ -1335,8 +1335,8 @@ def _purge_emptied_nets(netlist: kdb.Netlist) -> None:
 def _select_circuit(netlist: kdb.Netlist, top: str | None, side: str) -> kdb.Circuit:
     """Pick the circuit to compare: ``top`` by name if given, else the
     netlist's sole top circuit (an ambiguous/missing choice is an
-    :class:`LvsError`) -- the netlist-compare analogue of ``extract.py``'s
-    ``_resolve_top_cell``."""
+    :class:`LvsError`) -- the netlist-compare analogue of ``_layout.py``'s
+    ``resolve_top_cell``."""
     if top is not None:
         circuit = netlist.circuit_by_name(top)
         if circuit is None:

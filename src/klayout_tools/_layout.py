@@ -85,6 +85,67 @@ def select_top_cells(
     return [cell]
 
 
+def resolve_top_cell(
+    layout: kdb.Layout,
+    top: str | None,
+    error_cls: type[Exception],
+    *,
+    path: str | None = None,
+) -> kdb.Cell:
+    """Pick the single top cell a verb should operate on: ``top`` by name if
+    given, else the layout's sole top cell (issue #1088).
+
+    This is the "exactly one" counterpart to :func:`select_top_cells`'s
+    "zero or more, optionally filtered" -- verbs that need a single
+    ``kdb.Cell`` back (rather than a list) to compute a bounding box, walk a
+    hierarchy from one root, etc. treat an ambiguous (more than one) or
+    missing (zero, or a named ``top`` that does not exist) top cell as
+    ``error_cls``.
+
+    ``path`` toggles between the two message-text conventions already in use
+    at the call sites this consolidates (extract.py/lef_abstract.py vs.
+    economy.py) -- passed, the messages cite the input path by name
+    (``"'<path>' has no top cell"`` / ``"'<path>' has N top cells (...);
+    pass --top to select one"`` / ``"cell '<top>' not found in '<path>'"``);
+    omitted, they use economy.py's stream-relative wording instead
+    (``"layout has no cells"`` / ``"layout has multiple top cells (...); a
+    single top cell is required for the bounding-box reference. Pass --top
+    to select one."`` / ``"top cell not found in stream: <top>"``). Wording
+    is preserved verbatim per call site rather than unified, since these
+    exception classes' text is part of each verb's JSON-contract error
+    envelope.
+    """
+    if top is not None:
+        cell = layout.cell(top)
+        if cell is None:
+            if path is not None:
+                raise error_cls(f"cell '{top}' not found in '{path}'")
+            raise error_cls(f"top cell not found in stream: {top}")
+        return cell
+
+    top_cells = list(layout.top_cells())
+    if path is not None:
+        if len(top_cells) == 0:
+            raise error_cls(f"'{path}' has no top cell")
+        if len(top_cells) > 1:
+            names = ", ".join(sorted(cell.name for cell in top_cells))
+            raise error_cls(
+                f"'{path}' has {len(top_cells)} top cells ({names}); "
+                "pass --top to select one"
+            )
+    else:
+        if len(top_cells) > 1:
+            names = ", ".join(sorted(cell.name for cell in top_cells))
+            raise error_cls(
+                f"layout has multiple top cells ({names}); a single top "
+                "cell is required for the bounding-box reference. Pass "
+                "--top to select one."
+            )
+        if not top_cells:
+            raise error_cls("layout has no cells")
+    return top_cells[0]
+
+
 def cells_in_hierarchy(layout: kdb.Layout, top_cell: kdb.Cell) -> list[kdb.Cell]:
     """Every cell *definition* reachable from ``top_cell``: itself plus every
     cell it calls, directly or indirectly (``Cell.called_cells()``).
