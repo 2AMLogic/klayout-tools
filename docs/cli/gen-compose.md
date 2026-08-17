@@ -94,7 +94,10 @@ cleanly.
   met1↔met2 via, `68/44`) — usable the same way, but only from a pin already
   on `"metal2"` (met1, one via hop away); a pin still on the base `"metal"`
   role (li1) is two hops from `"metal3"` and the via-drop's single-hop limit
-  (below) rejects it. gf180mcu's own deck still exposes only `"metal2"`.
+  (below) rejects it. gf180mcu's own deck exposes the same third level
+  (#1058): `"metal3"` (Metal3 `42/0`) plus its own connecting via role
+  (`"via2"`, the Metal2↔Metal3 via, `38/0`) — usable the same way, from a
+  pin already on `"metal2"` (Metal2, one via hop away) only.
 - **Net labels (#200, fixed)** — every routed 2-pin net also gets one
   `kdb.Text` label, named after its own `connectivity[].net` field, on the
   PDK-family label layer that pairs with the resolved routing layer (e.g.
@@ -471,15 +474,16 @@ drawing something that does not connect:
 - A pin whose layer is a *different* metals-stack level than
   `routing.layer_role`, more than one via hop away — sky130's/gf180mcu's
   `"metal2"`/`"via1"` pair is always exactly one hop from `"metal"`, so this
-  case does not arise for either family's second level. sky130's third
-  level (`"metal3"`/`"via2"`, issue #508) is where it first becomes real: a
-  `"metal3"` route to a pin still on the base `"metal"` role (li1) is two
-  hops away and hits this rejection — only a pin already on `"metal2"`
-  (met1, one hop from met2) resolves. gf180mcu's Metal3-5 levels remain
-  unexposed as `routing.layer_role` roles at all (its curated
+  case does not arise for either family's second level. Both families' third
+  level (`"metal3"`/`"via2"`, sky130 issue #508, gf180mcu issue #1058) is
+  where it first becomes real: a `"metal3"` route to a pin still on the base
+  `"metal"` role (sky130 li1, gf180mcu Metal1) is two hops away and hits this
+  rejection — only a pin already on `"metal2"` (sky130 met1, gf180mcu
+  Metal2, one hop from `"metal3"`) resolves. gf180mcu's Metal4-5 levels
+  remain unexposed as `routing.layer_role` roles at all (its curated
   `EXTRACTION_DECK` declares the full Metal1-Metal5 stack for extraction,
-  but `klayout_tools.gen._PDK_ROLE_LAYERS["gf180mcu"]` stops at `"metal2"`),
-  so this case stays unreachable on that family.
+  but `klayout_tools.gen._PDK_ROLE_LAYERS["gf180mcu"]` stops at `"metal3"`),
+  so this case stays unreachable for those levels on that family.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
   drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
   metals stack lands on poly, so the backbone would end as an uncontacted

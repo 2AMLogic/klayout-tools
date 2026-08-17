@@ -398,12 +398,31 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # rationale as sky130's pair above). gf180mcu's curated extraction
         # deck's `metals` stack already runs Metal1-Metal5 (#220); this only
         # exposes the next level up (Metal2) and the via connecting it to
-        # `"metal"` (Metal1) -- `gen_compose`'s via-drop is single-hop only,
-        # so Metal3-5/`vias[1:]` stay unexposed here (out of this issue's
-        # scope, not a structural limit -- see `EXTRACTION_DECK.metals`/
-        # `.vias` in `klayout_tools.decks.gf180mcu`).
+        # `"metal"` (Metal1) -- `gen_compose`'s via-drop is single-hop only.
+        # A third plane (`"metal3"`/`"via2"`, Metal3) was added below by
+        # issue #1058; Metal4-5/`vias[2:]` still stay unexposed here (out of
+        # that issue's scope, not a structural limit -- see
+        # `EXTRACTION_DECK.metals`/`.vias` in `klayout_tools.decks.gf180mcu`).
         "metal2": (36, 0),  # Metal2 -- EXTRACTION_DECK.metals[1]
         "via1": (35, 0),  # Via1 -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
+        # Third routing-metal role + its connecting via (issue #1058, same
+        # shape as sky130's #508 addition above): gf180mcu's curated
+        # *extraction* deck's `metals` stack already runs Metal1-Metal5
+        # (#220), but this table stopped at `"metal2"`/`"via1"` (Metal2), the
+        # only routing plane above the base `"metal"` pads -- a block whose
+        # own nets needed to cross had no second independent plane to route
+        # on. This exposes the next level up (Metal3) and the via connecting
+        # it to `"metal2"` (Metal2), mirroring `"metal2"`/`"via1"`'s own
+        # rationale exactly. `gen_compose`'s via-drop is single-hop only (see
+        # `_resolve_via_drop_layer`), so `"metal3"` only reaches a pin already
+        # on `"metal2"` (Metal2, one via hop away) -- a pin still on the base
+        # `"metal"` role (Metal1, two hops away) is not reachable from a
+        # `"metal3"` backbone, same "more-than-one-hop" rejection sky130
+        # already produces. Metal4-5/`vias[2:]` stay unexposed here (out of
+        # this issue's scope, not a structural limit -- see
+        # `EXTRACTION_DECK.metals`/`.vias` in `klayout_tools.decks.gf180mcu`).
+        "metal3": (42, 0),  # Metal3 -- EXTRACTION_DECK.metals[2]
+        "via2": (38, 0),  # Via2 -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
         # Bond-pad roles (issue #568, same rationale as sky130's pair above).
         # `pad` matches `decks/gf180mcu.py`'s `pad.enclosing.metal5.1` (PAD.4)
         # `other_layer`; `top_metal` matches that same rule's `layer` --

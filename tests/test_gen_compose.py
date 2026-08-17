@@ -3359,6 +3359,38 @@ def test_resolve_route_layer_metal3_and_via2_roles():
     assert gen_compose._resolve_route_layer("sky130A", "via2") == (68, 44)
 
 
+def test_resolve_via_drop_layer_metal3_to_metal2_resolves_the_via_gf180mcu():
+    # gf180mcu equivalent of the sky130 case above (issue #1058): a route on
+    # Metal3 (metals[2], "metal3") to a pin on Metal2 (metals[1], "metal2")
+    # is exactly one via hop apart -- resolves to the Metal2<->Metal3 via
+    # (Via2, 38/0).
+    deck = get_extraction_deck("gf180mcu")
+    via_layer, error = _resolve_via_drop_layer(deck, (42, 0), (36, 0))
+    assert via_layer == (38, 0)
+    assert error is None
+
+
+def test_resolve_via_drop_layer_non_adjacent_metals_is_unresolvable_gf180mcu():
+    # gf180mcu equivalent of the sky130 case above (issue #1058): a route on
+    # Metal3 (metals[2], "metal3") to a pin still on Metal1 (metals[0], the
+    # base "metal" role) is two via hops apart, exercising the >1-hop
+    # rejection path against the real gf180mcu deck.
+    deck = get_extraction_deck("gf180mcu")
+    via_layer, error = _resolve_via_drop_layer(deck, (42, 0), (34, 0))
+    assert via_layer is None
+    assert error is not None
+    assert "single-hop" in error
+
+
+def test_resolve_route_layer_metal3_and_via2_roles_gf180mcu():
+    # `routing.layer_role`/the connecting via role resolve through the same
+    # `_PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
+    # deck directly -- confirming the router-facing role names (issue #1058)
+    # match gf180mcu's own Metal3/Via2 layers.
+    assert gen_compose._resolve_route_layer("gf180mcuA", "metal3") == (42, 0)
+    assert gen_compose._resolve_route_layer("gf180mcuA", "via2") == (38, 0)
+
+
 def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
     tmp_path, pdk_root
 ):
