@@ -3451,17 +3451,133 @@ consume.
 
 `nets` is sorted by `name` for deterministic, diff-clean output.
 
+## `--check` / `--rerun`
+
+A `klt extract --format json` report is often committed as evidence
+alongside a design (e.g. as a `klt signoff` manifest citation, or as the
+netlist `klt lvs` compared against a reference), but nothing previously let
+a consumer *verify* that a committed report still reproduces against the
+current input/deck/tool version without hand-rolling a normalize-and-diff.
+This matters in particular because a curated deck (e.g. `decks/gf180mcu.py`)
+is a plain Python module, not a data file — *any* byte change to it,
+including a device-recognition change (e.g. to the substrate/well-tap
+derivation described above), changes its content hash with no separate
+"semantic vs. cosmetic" signal. `klt extract --check <report.json>` (issue
+#1149) closes that gap, mirroring `klt drc --check`/`klt lvs --check`
+(issue #1106) exactly:
+
+```
+klt extract --check design.extract.json                  # cheap mode (default)
+klt extract --check design.extract.json --rerun          # full mode
+```
+
+`--check` is mutually exclusive with the positional `<file>` argument (and
+with `--deck`/`--top`/etc., which are ignored) — the input path and deck are
+both read from `<report.json>` itself, not given again on the command line.
+
+### Cheap mode (default)
+
+Re-hashes the input layout stream and the deck named in the committed
+report's own `provenance` block (reusing
+`klayout_tools._provenance.sha256_file`, never reimplementing hashing) and
+compares each against the `sha256:`-prefixed digest the report already
+recorded — **no extraction engine re-run**. Response shape:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "report": "design.extract.json",
+  "status": "match",
+  "checks": [
+    {
+      "field": "provenance.input.content_hash",
+      "expected": "sha256:<hex>",
+      "actual": "sha256:<hex>",
+      "match": true
+    },
+    {
+      "field": "provenance.deck.content_hash",
+      "expected": "sha256:<hex>",
+      "actual": "sha256:<hex>",
+      "match": true
+    }
+  ]
+}
+```
+
+`status` is `"match"` only when every `checks[]` entry's `match` is `true`.
+A report with no recorded hash to compare against (e.g. one produced before
+`provenance.input`/`provenance.deck.content_hash` existed) always renders
+that check `match: false` — a missing baseline is never treated as a pass
+(mirrors `klt signoff`'s `_grade_evidence()` "never a false pass"
+discipline). A `provenance.deck.content_hash` mismatch here is exactly the
+signal issue #1149 was filed to add: it means the curated deck's own source
+changed since this report was committed, so the previously-recorded
+`devices`/`nets` (and any downstream `klt lvs` comparison against them) can
+no longer be trusted to still reproduce without re-running.
+
+### Full mode (`--rerun`)
+
+Actually re-runs the extraction (`run_extract`) against the `file`/`deck`/
+`top` the committed report itself names, plus `provenance.deck.options`
+(`--deck-option`) when present, writing the fresh netlist back to the same
+`netlist_path` the committed report recorded. Diffs the fresh report against
+the committed one, field by field. `provenance.klt_version`/
+`provenance.klayout_version`/`provenance.pdk.version` are excluded from the
+diff — these legitimately vary between two runs of identical inputs on
+different tool installs/PDK snapshots; every other field (including
+`device_count`, `devices`, `nets`, and the hashes cheap mode also checks) is
+load-bearing. Response shape:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "rerun",
+  "report": "design.extract.json",
+  "status": "drifted",
+  "drift": [
+    { "field": "devices.0.nets.b", "committed": "vsubs", "fresh": "STIE" }
+  ],
+  "fresh": { "...": "the freshly produced klt extract report, full shape" }
+}
+```
+
+`status` is `"match"` only when `drift` is empty. `fresh` embeds the
+complete report `--rerun` just produced, so a consumer can inspect the
+current state without a second invocation.
+
+**Known limitation**: only `file`/`deck`/`top`/`provenance.deck.options` are
+reconstructed from the committed report. Every other optional flag
+(`--parasitics`, `--mom-net`, `--spef`, `--critical-net`,
+`--distributed-rc`, `--def-net-names`, `--def-net-connections`,
+`--mom-rlc-*`, `--top-cell-pins`, `--pins`,
+`--defer-resistor-fixed-offset`, `--abstract-cells`, `--abstract-cell-lef`,
+`--matched-group`, `--pdk`/`--pdk-root`) is never echoed anywhere in the
+response, so a report produced with any of them will legitimately (and
+unhelpfully) show drift in the corresponding fields under `--rerun`. Use
+cheap mode instead when any of these apply.
+
+### Exit codes for `--check` / `--rerun`
+
+Both modes use the same 0/3 split described below: `0` when `status` is
+`"match"`, `3` when it is `"drifted"`. A missing or unparseable
+`<report.json>` exits `1` with a clean error message, same as any other
+application-level failure.
+
 ## Exit codes
 
 | Code | Meaning                                                                                          |
 | ---- | --------------------------------------------------------------------------------------------------- |
-| `0`  | Extraction succeeded, netlist written.                                                              |
-| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). |
-| `2`  | Usage error (missing argument, bad `--format` value) — from argparse.                               |
+| `0`  | Extraction succeeded, netlist written. Under `--check`: the committed report still holds (`status: "match"`). |
+| `1`  | Failed to run — bad file, missing/unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). Under `--check`: a missing/unparseable committed report, or `--rerun` given without `--check`. |
+| `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
+| `3`  | Under `--check`: the committed report drifted from the current deck/input (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 
-There is no exit code `3` — unlike `klt drc`/`klt lvs`, there is no "ran but
-found problems" outcome for extraction; it either produces a netlist or it
-fails (matching `klt gen`'s reasoning for omitting a `3`).
+Outside `--check`, there is no "ran but found problems" outcome for a fresh
+extraction; it either produces a netlist or it fails (matching `klt gen`'s
+reasoning for omitting a `3` there) — exit code `3` is reachable only via
+`--check`.
 
 On error (exit 1), a concise message is written to **stderr** and nothing is
 written to stdout. No Python traceback is printed.

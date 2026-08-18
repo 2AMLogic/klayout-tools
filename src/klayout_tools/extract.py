@@ -147,7 +147,9 @@ from ._annotation import is_reserved_annotation_layer
 from ._layout import load_layout, resolve_top_cell
 from ._layout import region as _region
 from ._layout import texts as _texts
-from ._provenance import _klt_version, build_provenance, sha256_file
+from ._provenance import _content_hash, _klt_version, build_provenance, sha256_file
+from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
     BipolarDevice,
     CapacitorDevice,
@@ -2801,6 +2803,136 @@ def run_extract(
     result["spef_path"] = spef_path
 
     return result
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #1149)
+# --------------------------------------------------------------------------- #
+
+
+def check_extract_report(report_path: str) -> dict[str, Any]:
+    """``klt extract --check`` (cheap mode, issue #1149): verify a previously
+    committed ``klt extract --format json`` report at ``report_path`` still
+    reproduces, without re-running the extraction engine at all.
+
+    Mirrors ``klt drc --check``'s ``check_drc_report()`` (``drc.py``) and
+    ``klt lvs --check``'s ``check_lvs_report()`` (``lvs.py``) exactly, wiring
+    ``klt extract`` up to the same shared ``_report_verify.py`` machinery
+    issue #1106 built for those two verbs: re-hashes the input layout stream
+    (``committed["file"]``) and the deck
+    (:func:`~klayout_tools.decks.deck_source_path`, resolved from
+    ``committed["provenance"]["deck"]["name"]``) and compares each against
+    the ``sha256:``-prefixed digest already recorded in
+    ``provenance.input.content_hash``/``provenance.deck.content_hash``
+    (:func:`klayout_tools._provenance._content_hash`) -- reusing
+    :func:`klayout_tools._provenance.sha256_file`, never reimplementing
+    hashing. Returns the shared ``--check`` payload built by
+    :func:`klayout_tools._report_verify.build_check_result`: ``status:
+    "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
+    otherwise.
+
+    This is what surfaces a deck rebuild that silently changed
+    device-recognition behavior (e.g. gf180mcu's substrate/well-tap
+    derivation, issue #1149) underneath a previously-committed extraction:
+    since a curated deck is a plain Python module (``decks/gf180mcu.py``),
+    *any* byte change to it -- including a device-recognition change --
+    changes ``content_hash``, so a caller re-checking a committed report
+    against a newer deck build sees ``status: "drifted"`` even though the
+    reported ``klt --version``/``klayout_version`` may be unchanged.
+
+    A recorded hash that is itself ``None`` (a report predating
+    ``provenance.input``/``deck.content_hash``) never counts as a match --
+    see :func:`klayout_tools._report_verify.hash_check`'s docstring. ``klt
+    extract --deck`` is required for every run, so ``provenance.deck`` is
+    always populated for a genuine committed report; an unresolvable deck
+    name (e.g. the deck module was since renamed/removed) hashes to ``None``
+    via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
+    counts as a match.
+
+    Raises :class:`ExtractError` for a missing/unparseable committed report
+    (:func:`klayout_tools._report_verify.load_committed_report`) -- never a
+    traceback.
+    """
+    committed = _load_committed_report(report_path, ExtractError)
+    deck_name = get_path(committed, ("provenance", "deck", "name"))
+    checks = [
+        hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            _content_hash(committed.get("file")),
+        ),
+        hash_check(
+            "provenance.deck.content_hash",
+            get_path(committed, ("provenance", "deck", "content_hash")),
+            _content_hash(deck_source_path(deck_name) if deck_name else None),
+        ),
+    ]
+    return build_check_result(report_path=report_path, checks=checks)
+
+
+def rerun_extract_report(report_path: str) -> dict[str, Any]:
+    """``klt extract --check <report> --rerun`` (full mode, issue #1149):
+    verify a previously committed ``klt extract --format json`` report at
+    ``report_path`` by actually re-running the extraction it describes and
+    diffing the fresh report against the committed one.
+
+    Re-runs :func:`run_extract` against the ``file``/``deck``/``top`` the
+    committed report itself names, plus ``provenance.deck.options`` (issue
+    #595's ``--deck-option`` selections) when present, writing the fresh
+    netlist back to the same ``netlist_path`` the committed report recorded
+    (so that field, too, is a meaningful comparison rather than an
+    incidental path difference). **Known limitation**, mirroring ``klt lvs
+    --check``'s ``rerun_lvs_report()`` (``lvs.py``): every *other* optional
+    ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
+    ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
+    ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
+    ``--pins``, ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
+    ``--abstract-cell-lef``, ``--matched-group``, ``--pdk``/``--pdk-root``)
+    is never echoed anywhere in the response, so none of them can be
+    reconstructed here -- a committed report produced with any of those will
+    legitimately (and unhelpfully) show drift in the corresponding
+    fields/blocks under ``--rerun``. Use ``--check`` (cheap mode) instead
+    when any of these apply.
+
+    Diffs the fresh report against the committed one via
+    :func:`klayout_tools._report_verify.diff_verdict_fields`, excluding
+    :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version``).
+    ``status: "drifted"`` names every other field that changed, including a
+    changed ``device_count``/``devices``/``nets``/etc. (the
+    extraction-outcome-changed case, e.g. a deck's substrate/well-tap
+    recognition change, issue #1149) as well as a changed
+    ``provenance.input.content_hash``/``provenance.deck.content_hash`` (the
+    input-moved case ``--check`` also catches, redundantly but harmlessly
+    here since this mode always re-hashes as a side effect of re-running).
+
+    Raises :class:`ExtractError` for a missing/unparseable committed report,
+    a report missing ``file``/``deck`` to rerun, or any error the rerun
+    itself raises (bad file, unknown deck, engine error) -- never a
+    traceback.
+    """
+    committed = _load_committed_report(report_path, ExtractError)
+    file_path = committed.get("file")
+    if not file_path:
+        raise ExtractError(
+            f"committed report has no 'file' field to rerun: {report_path}"
+        )
+    deck_name = committed.get("deck")
+    if not deck_name:
+        raise ExtractError(
+            f"committed report has no 'deck' field to rerun: {report_path}"
+        )
+
+    deck_options = get_path(committed, ("provenance", "deck", "options"))
+
+    fresh = run_extract(
+        file_path,
+        deck_name,
+        output=committed.get("netlist_path"),
+        top=committed.get("top"),
+        deck_options=deck_options,
+    )
+    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 
 
 def extract_netlist_from_layout(

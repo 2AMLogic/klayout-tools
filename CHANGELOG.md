@@ -875,6 +875,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   unbound device class elsewhere in this deck already gets) — see
   `docs/cli/extract.md`'s "Selecting a shared-geometry MiM capacitor density
   flavour" section.
+- 2026-08-18 — `klt extract` gains **`--check <report.json>`** (issue
+  #1149), closing the one gap issue #1106 left open: `klt drc`/`klt lvs`
+  already let a caller verify a previously committed report still
+  reproduces, but `klt extract` -- the verb that actually contains a
+  curated deck's device-recognition logic (e.g. gf180mcu's substrate/
+  well-tap derivation, issue #1084) -- had no such check, so a caller
+  re-running an extraction against an updated deck build got a silently
+  different result with no signal that the deck itself had changed
+  underneath them. Wires `klt extract` up to the same shared
+  `_report_verify.py` machinery `drc`/`lvs` already use -- no new hashing
+  scheme. Cheap mode (default) re-hashes the input layout and deck the
+  committed report names (`provenance.input.content_hash`/
+  `provenance.deck.content_hash`) and compares against the values the
+  report already recorded -- no extraction engine re-run. Combine with
+  `--rerun` for full mode: re-run the extraction (reconstructing `file`/
+  `deck`/`top`/`provenance.deck.options` from the committed report) and
+  diff every verdict-bearing field, excluding `provenance.klt_version`/
+  `klayout_version`/`pdk.version`. Both modes report `status: "match"`
+  (exit `0`) or `"drifted"` (exit `3`, naming which field(s) moved)
+  through the standard envelope. `--check` is mutually exclusive with the
+  positional `<file>` argument -- a required, mutually exclusive argparse
+  group, so omitting or combining both is a usage error (exit `2`);
+  `--deck` is consequently no longer `required=True` at the argparse level
+  (an omitted `--deck` alongside `<file>` is now a clean application-level
+  error, exit `1`, not a usage error). Purely additive otherwise: no
+  existing field or exit code changes meaning for a normal (non-`--check`)
+  run. See `docs/cli/extract.md`, "`--check` / `--rerun`".
 - 2026-08-18 — `klt gen` gains a new **`cap_array`** generator (issue
   #1117): a row of matched unit MiM (Metal-Insulator-Metal) capacitor
   cells, each a top-plate-metal-over-bottom-plate-metal stack (sky130's

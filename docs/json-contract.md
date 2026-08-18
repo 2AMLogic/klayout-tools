@@ -130,6 +130,25 @@ silently fabricated. The block is built once in
 `src/klayout_tools/_provenance.py`; each verb's `docs/cli/<verb>.md` notes only
 which of `pdk`/`deck`/`input` it populates.
 
+**Verifying a committed report still reproduces.** A committed
+`--format json` report (e.g. cited as `klt signoff` manifest evidence) is
+only trustworthy for as long as its `provenance.deck.content_hash`/
+`provenance.input.content_hash` still match the current deck/input — a
+caller previously had to hand-roll that diff themselves. `klt drc`, `klt
+lvs`, and `klt extract` (issue #1149, closing the gap the first two verbs'
+issue #1106 left in the third) all support `--check <report.json>` (cheap:
+re-hash and compare, no engine re-run) and `--check <report.json> --rerun`
+(full: re-run and diff every verdict-bearing field, excluding
+`klt_version`/`klayout_version`/`pdk.version`), reporting `status: "match"`
+or `"drifted"` — see each verb's own `docs/cli/<verb>.md`, "`--check`
+/ `--rerun`". This is what surfaces a curated deck rebuild that silently
+changed device-recognition behavior (e.g. gf180mcu's substrate/well-tap
+derivation) underneath a previously-committed report: since a deck is a
+plain Python module, any byte change to it — cosmetic or
+device-recognition-affecting — changes `content_hash`, and `--check`/
+`--rerun` are what turn that into a caller-visible signal instead of a
+silent mismatch.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written
