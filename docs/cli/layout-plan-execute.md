@@ -105,7 +105,8 @@ For every `device_groups[]` entry, this module resolves the `params` a
 
    | Generator | Digest params consumed | `klt gen` params set |
    | --- | --- | --- |
-   | `mos_array`, `diff_pair` | MOS `L`, `W` | `l_um`, `w_um` |
+   | `mos_array` | MOS `L`, `W` | `l_um`, `w_um` |
+   | `diff_pair` | MOS `L`, `W` | `l_um`, `w_um` (per-unit — see below) |
    | `esd_device` | MOS `L`, `W` | `l_um`, `finger_width_um` |
    | `res_array` | resistor `L`, `W` | `length_um`, `width_um` |
 
@@ -129,6 +130,26 @@ For every `device_groups[]` entry, this module resolves the `params` a
    pathological case — every unit in a matched group should share the same
    schematic sizing), the first device's value wins and every disagreement
    is recorded in `warnings[]`, never silently averaged or dropped.
+
+   `diff_pair`'s `w_um` `klt gen` param is the width of one **unit
+   sub-instance**, not the matched device as a whole — `_diff_pair_layout()`
+   draws each of the two matched devices as `params.splits` interleaved unit
+   instances (default `splits=2`). To keep the drawn device's total width
+   matching the netlist `W`, a netlist-derived `w_um` for a `diff_pair`
+   group is auto-divided by the group's resolved `splits` (the group's own
+   `params.splits` override, or `2` if not overridden) *after* `params`
+   overrides (layer 3, below) are applied — so a `W=20` device with the
+   default `splits=2` resolves `w_um=10.0`, and a `warnings[]` entry always
+   names the auto-division whenever the resolved `splits` is not `1` (even
+   though the result now matches the netlist, a caller relying on the
+   `splits=2` default should still be told their `w_um` was derived, not
+   copied, from the netlist `W`). This division only applies to a
+   netlist-derived `w_um` — an explicit `params.w_um` override is the
+   caller directly setting the per-unit PCell param and is left alone.
+   `mos_array`'s `w_um` mapping is unaffected: a `mos_array` group's
+   `rows`/`cols` are set explicitly by the plan author, so the
+   one-netlist-device-to-one-unit-device correspondence this section
+   otherwise assumes actually holds there.
 
 2. **`device_groups[].topology`** (when declared) is layered in as
    `params.topology` **only for `mos_array`/`bjt_array`** — the only two
