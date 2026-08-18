@@ -6617,6 +6617,83 @@ def test_abstract_cells_lef_fallback_resolves_disjoint_pin_rects_to_routed_net(
     assert tokens[2] == "OUT", x_line
 
 
+def test_abstract_cells_in_cell_label_resolves_disjoint_fragment_to_routed_net(
+    tmp_path,
+):
+    """Issue #1183: an ``in_cell_labels`` pin whose *own* text label sits on
+    one li1 fragment, while a second, geometrically disjoint li1 fragment of
+    the exact same electrical node is the one that actually receives
+    external routing, must resolve to the *routed* net -- not the label's
+    own isolated fragment.
+
+    Reproduces the mechanism confirmed against the real ``gf180-trng``
+    ``clkload13``/``I`` pin this issue reports: the two li1 fragments are
+    tied together only through the cell's own poly (self-connected, then
+    ``contact``-linked to each fragment) -- exactly the internal
+    connectivity :func:`~klayout_tools.extract._erase_abstracted_cell_geometry`
+    deliberately erases for black-box abstraction. Before this issue's fix,
+    :func:`~klayout_tools.extract._resolve_abstract_cell_pins` only ever
+    captured the ``"I"`` label's own point as pin ``I``'s sole candidate,
+    so it probed straight onto the label's own now-isolated ~2-shape
+    fragment (li1 + its own contact) instead of the externally-routed one --
+    #1181/#1182's multi-candidate probing (:func:`~klayout_tools.extract.
+    _probe_abstract_pin_net`) never helped here, since it only had the one
+    candidate to probe. The fix
+    (:func:`~klayout_tools.extract._local_pin_candidate_points`) discovers
+    the routed fragment as an *additional* candidate by computing this
+    connectivity once, before erasure.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("SPLIT_LABEL_PIN")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # A single poly strip spans both contacted locations -- the cell's own
+    # internal "jumper" tying the two li1 fragments together (only visible
+    # before `--abstract-cells` erases poly from this cell's definition).
+    draw(leaf, 66, 20, kdb.Box(1000, 900, 3000, 1100))  # poly.drawing
+    draw(leaf, 66, 44, kdb.Box(1100, 900, 1300, 1100))  # licon1 over fragment A
+    draw(leaf, 66, 44, kdb.Box(2700, 900, 2900, 1100))  # licon1 over fragment B
+
+    # Fragment A (label lives here) and fragment B (routed externally) are
+    # geometrically disjoint li1 shapes -- 1300 dbu apart, never touching.
+    draw(leaf, 67, 20, kdb.Box(1000, 700, 1400, 1300))  # li1 fragment A
+    draw(leaf, 67, 20, kdb.Box(2600, 700, 3000, 1300))  # li1 fragment B
+    leaf.shapes(layout.layer(67, 5)).insert(
+        kdb.Text("I", kdb.Trans(1200, 1000))
+    )  # li1 label -- sits on fragment A only
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+
+    # External routing lands only on fragment B: mcon + met1 + a net-name
+    # label, landing directly over B's own li1 pad. Fragment A receives no
+    # external routing at all.
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(2600, 700, 3000, 1300))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2600, 700, 3000, 1300))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("ROUTED", kdb.Trans(2800, 1000)))
+
+    path = _write_gds(layout, tmp_path / "split_label_pin.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "split_label_pin.spice"),
+        abstract_cell_patterns=("SPLIT_LABEL_PIN",),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "SPLIT_LABEL_PIN"
+    assert entry["instance_count"] == 1
+    assert entry["pin_count"] == 1
+    assert entry["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    tokens = x_line.split()
+    assert tokens[1] == "ROUTED", x_line
+
+
 def test_abstract_cells_present_in_cli_json(tmp_path, capsys):
     """`abstracted_cells` is part of the JSON contract and is emitted by the
     CLI, via the repeatable `--abstract-cells` flag."""
