@@ -337,6 +337,35 @@ PEX_PASS_ENVELOPE = {
 
 PEX_FAIL_ENVELOPE = {**PEX_PASS_ENVELOPE, "status": "fail", "passed": 2, "failed": 1}
 
+#: "generic" (issue #1152) -- an opt-in, non-`klt`-native evidence envelope:
+#: the ingestion path for T1 item 8 ("Characterization report"), the one
+#: item whose own checklist text names no specific `klt` verb. Classified
+#: purely by its own literal ``"kind": "generic"`` self-declaration -- see
+#: signoff.py's "Generic evidence ingestion" docstring section.
+GENERIC_PASS_ENVELOPE = {
+    "schema_version": 1,
+    "kind": "generic",
+    "status": "pass",
+    "summary": "Q3 characterization sweep: all spec rows within limits",
+    "source": "docs/characterization/2026-q3-report.md",
+}
+
+GENERIC_FAIL_ENVELOPE = {**GENERIC_PASS_ENVELOPE, "status": "fail"}
+
+#: Same generic shape, but with an optional `provenance` block populated --
+#: proves the staleness/consistency machinery picks it up for free, with no
+#: generic-specific code path (unlike `klt yield`'s samples-hash fallback).
+GENERIC_PASS_ENVELOPE_WITH_PROVENANCE = {
+    **GENERIC_PASS_ENVELOPE,
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": None,
+        "deck": None,
+        "input": {"content_hash": "sha256:characterization-input"},
+    },
+}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -481,6 +510,72 @@ def test_error_envelope_never_passes(tmp_path):
     assert check["provenance"] is None
     assert check["detail"]["command"] == "drc"
     assert check["detail"]["message"] == "file not found: missing.gds"
+
+
+# --------------------------------------------------------------------------- #
+# "generic" evidence kind (issue #1152)
+# --------------------------------------------------------------------------- #
+
+
+def test_generic_pass_check_passes(tmp_path):
+    path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["kind"] == "generic"
+    assert check["status"] == "pass"
+    assert check["passed"] is True
+    assert check["detail"]["summary"] == GENERIC_PASS_ENVELOPE["summary"]
+    assert check["detail"]["source"] == GENERIC_PASS_ENVELOPE["source"]
+    assert check["provenance"] is None
+
+
+def test_generic_fail_check_fails(tmp_path):
+    path = _write(tmp_path, "characterization.json", GENERIC_FAIL_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "generic"
+    assert check["passed"] is False
+
+
+def test_generic_envelope_with_provenance_participates_in_consistency_check(tmp_path):
+    """An optional `provenance` block on a generic envelope is picked up by
+    the same machinery every native kind uses -- no generic-specific code
+    path (contrast with `klt yield`'s samples-hash fallback)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    generic_path = _write(
+        tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE_WITH_PROVENANCE
+    )
+
+    result = build_signoff([drc_path, generic_path])
+
+    # DRC's input.content_hash is "sha256:layoutA"; the generic envelope
+    # names a different one -- provenance consistency must catch it exactly
+    # like a mismatch between two native kinds would.
+    assert result["status"] == "refused"
+    assert result["provenance_consistency"]["ok"] is False
+
+
+def test_generic_envelope_with_matching_provenance_stays_consistent(tmp_path):
+    matching_generic = {
+        **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE,
+        "provenance": {
+            **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE["provenance"],
+            "input": {"content_hash": "sha256:layoutA"},
+        },
+    }
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    generic_path = _write(tmp_path, "characterization.json", matching_generic)
+
+    result = build_signoff([drc_path, generic_path])
+
+    assert result["status"] == "pass"
+    assert result["provenance_consistency"]["ok"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -703,6 +798,36 @@ def test_layout_metrics_shape_is_unrecognized(tmp_path):
 def test_no_sources_raises():
     with pytest.raises(SignoffError, match="at least one"):
         build_signoff([])
+
+
+def test_valid_json_matching_no_recognized_kind_still_raises(tmp_path):
+    """AC: a file that is valid JSON but matches none of the seven kinds
+    (six native + generic) still raises SignoffError naming the mismatch --
+    unchanged behavior."""
+    path = _write(
+        tmp_path,
+        "unknown.json",
+        {"schema_version": 1, "kind": "not-a-real-kind", "status": "pass"},
+    )
+
+    with pytest.raises(SignoffError, match="unrecognized shape"):
+        build_signoff([path])
+
+
+def test_generic_kind_marker_takes_priority_over_native_structural_shape(tmp_path):
+    """The explicit "kind": "generic" self-declaration is checked ahead of
+    every native structural check, so an incidental field collision (e.g. a
+    generic envelope that happens to also carry a `violations` list) is
+    never misclassified as a native kind instead."""
+    collision_envelope = {
+        **GENERIC_PASS_ENVELOPE,
+        "violations": ["not actually a DRC violations list"],
+    }
+    path = _write(tmp_path, "characterization.json", collision_envelope)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["kind"] == "generic"
 
 
 # --------------------------------------------------------------------------- #
@@ -1237,6 +1362,157 @@ def test_items_other_than_7_are_unaffected_by_the_kind_restriction(tmp_path):
         if item["tier"] == "T1" and item["id"] != 7:
             assert item["status"] == "met", item["id"]
             assert item["citation"]["kind"] == "drc"
+
+
+# --------------------------------------------------------------------------- #
+# Generic evidence binding: item 8 only (issue #1152)
+# --------------------------------------------------------------------------- #
+
+
+def test_generic_evidence_satisfies_item_8(tmp_path):
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["reason"] is None
+    assert item_8["citation"] == {
+        "file": generic_path,
+        "command": None,
+        "kind": "generic",
+        "check_status": "pass",
+        "content_hash": None,
+        "exit_status": 0,
+    }
+
+
+def test_generic_fail_status_for_item_8_renders_unmet_check_failed(tmp_path):
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_FAIL_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "check_failed"
+    assert item_8["citation"] is None
+
+
+def test_item_8_still_accepts_a_native_kind_too(tmp_path):
+    """Item 8 was, and remains, otherwise unrestricted: "generic" is an
+    *additional* accepted kind for it, not a replacement for the existing
+    any-native-kind permissiveness (issue #871's docstring, "every item
+    except item 7 accepts any recognised, passing envelope kind")."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": drc_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["kind"] == "drc"
+
+
+@pytest.mark.parametrize("item_id", [3, 4, 5, 6, 7])
+def test_generic_evidence_for_items_3_through_7_renders_unmet_wrong_kind(
+    tmp_path, item_id
+):
+    """The concrete regression this issue guards against: a passing generic
+    citation must never satisfy DRC/LVS/corner-verification/Monte-Carlo/
+    post-layout items -- even though its own `status` genuinely is "pass".
+    This preserves the strict-kind guarantee for the `klt`-verb-backed T1
+    items; only item 8 (no named verb) may accept "generic" evidence."""
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): generic_path}))
+
+    item = next(item for item in result["items"] if item["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_generic_evidence_for_unrestricted_non_item_8_items_still_rejected(
+    tmp_path, item_id
+):
+    """Items 1, 2, 9, and 10 are otherwise unrestricted (any native kind
+    satisfies them, like items 3-6) but do not opt in to "generic" either --
+    only item 8 does."""
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): generic_path}))
+
+    item = next(item for item in result["items"] if item["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+def test_command_evidence_generic_wrong_kind_renders_unmet(monkeypatch):
+    """The kind restriction applies to command-backed evidence exactly like
+    file-backed evidence."""
+
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(GENERIC_PASS_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["klt", "some-generic-check"]}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "wrong_kind"
+    assert item_3["citation"] is None
+
+
+def test_no_backing_generic_evidence_for_item_8_renders_unmet_never_assumed_met():
+    result = build_tier_report(_manifest(evidence={}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "no_evidence"
+    assert item_8["citation"] is None
+
+
+def test_unprovenanced_generic_evidence_cannot_satisfy_a_pinned_content_hash(tmp_path):
+    """A generic envelope with no `provenance` block (the documented
+    caveat) can never match a manifest's pinned `content_hash` -- it renders
+    "unmet"/"stale_evidence" rather than a false pass."""
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"8": {"file": generic_path, "content_hash": "sha256:expected"}}
+        )
+    )
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "stale_evidence"
+    assert item_8["citation"] is None
+
+
+def test_generic_evidence_with_matching_provenance_content_hash_renders_met(tmp_path):
+    generic_path = _write(
+        tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE_WITH_PROVENANCE
+    )
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "8": {
+                    "file": generic_path,
+                    "content_hash": "sha256:characterization-input",
+                }
+            }
+        )
+    )
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["content_hash"] == "sha256:characterization-input"
 
 
 # --------------------------------------------------------------------------- #

@@ -149,6 +149,60 @@ in ``tests/test_signoff.py`` (issue #872) for the walk-through, including one
 that runs a real ``klt yield`` subprocess and shows a block's ``tier``
 change from ``null`` to ``"T1"`` once that evidence is bound.
 
+## Generic evidence ingestion (issue #1152)
+
+Every kind through Phase 2c above is a `klt` verb's own output -- `_classify`
+detects each one from a structural marker no other verb's shape carries
+(``violations``/``mismatches``/``delta``+``reference_netlist``/etc.). That
+closed set has no ingestion path for evidence that is not a `klt` JSON
+envelope at all: a project's own hand-rolled Markdown characterization
+record, or any other non-`klt`-native artifact. T1 item 8
+("Characterization report", ``docs/design-evidence-tiers.md``) names no
+specific `klt` verb -- unlike items 3-7, there is no command whose output
+could ever satisfy it structurally -- so before this phase it could never be
+machine-graded ``"met"`` by `klt signoff` at all.
+
+This phase adds a seventh, deliberately **opt-in** kind, ``"generic"``: a
+minimal envelope carrying ``schema_version``, an explicit, literal
+``"kind": "generic"`` self-declaration (checked in :func:`_classify` ahead
+of every structural check, so an incidental field collision with a native
+shape can never misclassify it), and ``status: "pass"|"fail"`` -- graded by
+:func:`_check_passed`/:func:`_detail` exactly like every other kind in
+envelope-aggregation mode. A ``provenance`` block is optional, not required:
+when a caller includes one (the same shared shape every native kind uses),
+:func:`_provenance_consistency` and the ``--manifest`` staleness gate
+(:func:`_grade_evidence`'s ``content_hash`` comparison) pick it up for free,
+with no generic-specific code path -- exactly like `klt yield`'s envelope
+would if it populated ``provenance.input.content_hash`` itself (see
+"Statistical-evidence binding" above). Omitting it is a documented,
+caller-visible caveat (see ``docs/cli/signoff.md``): an unprovenanced
+generic citation can never satisfy a ``content_hash``-pinned evidence entry
+(its ``actual_hash`` is always ``None``, so a pinned ``expected_hash`` never
+matches -- the same "stale, not a false pass" rule every other kind already
+gets, see :data:`_REASON_STALE_EVIDENCE`), and its freshness is otherwise
+un-checked, same as it would be with no evidence at all.
+
+**Item 8 only, not a global unlock.** Naively adding ``"generic"`` to
+:func:`_classify`'s recognised set, with no further change, would let a
+generic citation satisfy *any* unrestricted T1 item (1-6, 8-10 today) the
+same way any other recognised, passing kind already can -- exactly the
+false-positive risk this issue's own "Non-goals" section warns against:
+`klt signoff` would then let a hand-rolled "yep, it's fine" JSON record
+stand in for DRC/LVS/corner/Monte-Carlo/post-layout evidence it never
+actually proved. :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` closes that gap
+independently of the existing :data:`_ITEM_ALLOWED_KINDS` mechanism (item
+7's ``pex``-only restriction): :func:`_build_tier_item` downgrades a
+``"met"`` grading on a ``"generic"``-kind citation to ``"unmet"``/
+``"wrong_kind"`` for every item *not* in that set, regardless of whether
+``allowed_kinds`` would otherwise have accepted it. Today the set is
+``{8}`` -- the one T1 item whose own checklist text names no `klt` verb.
+Items 3-7 (DRC, LVS, corner verification, Monte Carlo, post-layout) reject a
+``"generic"`` citation unconditionally, the same ``"wrong_kind"`` outcome
+item 7 already renders for any non-``pex`` citation; this phase does not
+touch items 3-6's separate, pre-existing permissiveness toward *other*
+recognised native kinds (:data:`_ITEM_ALLOWED_KINDS` still names only item
+7) -- closing that wider gap is out of this issue's scope.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -225,6 +279,21 @@ _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 _ITEM_ALLOWED_KINDS: dict[int, set[str]] = {
     7: {"pex"},
 }
+
+#: T1 item ids whose own checklist text in ``docs/design-evidence-tiers.md``
+#: names no specific `klt` verb (issue #1152) -- the only items a
+#: ``"generic"``-kind citation (see this module's "Generic evidence
+#: ingestion" docstring section) may satisfy. Checked independently of
+#: :data:`_ITEM_ALLOWED_KINDS` in :func:`_build_tier_item`: a passing
+#: ``"generic"`` citation for any item *not* in this set is always
+#: downgraded to ``"unmet"``/``"wrong_kind"``, even for an item that would
+#: otherwise accept any recognised native kind (``allowed_kinds is None``).
+#: Today this is only item 8 ("Characterization report") -- every other
+#: item's checklist text names a concrete `klt` verb (`klt
+#: drc`/`lvs`/sim/yield/pex) or a repo-state artifact no envelope, native or
+#: generic, could ever stand in for (items 1, 2, 9, 10), so none of them
+#: opt in.
+_ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({8})
 
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
@@ -326,7 +395,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                 {
                     "source": <str, the entry from `sources`>,
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
-                            | "error",
+                            | "generic" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -443,7 +512,15 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
 
     Order matters: an ``error`` envelope (any verb's own ``--format json``
     failure output) is checked first since a failed verb run carries none
-    of the success-shape markers below.
+    of the success-shape markers below. ``"generic"`` (issue #1152) is
+    checked next, ahead of every native structural check, for the opposite
+    reason every native kind is checked *after* it: a hand-rolled, non-`klt`
+    envelope could plausibly carry any field name by coincidence (e.g. a
+    caller-chosen ``"violations"`` key that has nothing to do with `klt
+    drc`), so it is never inferred structurally like the six kinds below --
+    only an explicit, literal ``"kind": "generic"`` self-declaration
+    classifies as ``"generic"``, checked first so no such coincidence can
+    ever misroute it into a native kind instead.
     """
     if "schema_version" not in envelope:
         raise SignoffError(
@@ -454,6 +531,14 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     error = envelope.get("error")
     if isinstance(error, dict) and "message" in error:
         return "error"
+
+    # "generic" (issue #1152): an opt-in envelope for evidence that is not a
+    # `klt` verb's own output at all -- e.g. hand-rolled from a Markdown
+    # characterization record. See this module's "Generic evidence
+    # ingestion" docstring section and docs/cli/signoff.md for this shape's
+    # full contract and which --manifest items may cite it.
+    if envelope.get("kind") == "generic":
+        return "generic"
 
     if isinstance(envelope.get("violations"), list):
         return "drc"
@@ -494,8 +579,10 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield/pex success or error envelope -- klt signoff aggregates only "
-        "those six verbs today (see docs/cli/signoff.md)"
+        "yield/pex success or error envelope, and not a generic evidence "
+        'envelope ("kind": "generic") either -- klt signoff aggregates '
+        "those six verbs' output plus opt-in generic evidence today (see "
+        "docs/cli/signoff.md)"
     )
 
 
@@ -538,6 +625,10 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     - ``pex`` (issue #871; shape ratified by #801, `klt pex`) passes on
       ``status == "pass"`` -- mirrors ``sim``: every graded delta row met
       its tolerance.
+    - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
+      envelope's own, caller-asserted verdict; unlike every native kind
+      above, nothing here re-derives that verdict from any other field,
+      since a generic envelope's content is not otherwise defined.
     - ``error`` never passes.
     """
     if kind == "drc":
@@ -551,6 +642,8 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     if kind == "extract":
         return True
     if kind == "pex":
+        return envelope.get("status") == "pass"
+    if kind == "generic":
         return envelope.get("status") == "pass"
     return False  # kind == "error"
 
@@ -606,6 +699,11 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "passed": envelope.get("passed"),
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
+        }
+    if kind == "generic":
+        return {
+            "summary": envelope.get("summary"),
+            "source": envelope.get("source"),
         }
     # kind == "error"
     error = envelope.get("error") or {}
@@ -806,20 +904,22 @@ def build_tier_report(
 
     An item's ``status`` is ``"met"`` only when its ``evidence`` entry
     resolves to a *readable* ``klt`` JSON envelope, classifiable as one of
-    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex`` (:func:`_classify`),
-    whose own check passed (:func:`_check_passed`) -- and, if the evidence
-    entry pinned an expected ``content_hash``, whose input content hash
-    matches it (``provenance.input.content_hash`` for drc/lvs/extract/sim;
-    the hashed ``samples`` document for yield, per
+    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex``/``generic``
+    (:func:`_classify`), whose own check passed (:func:`_check_passed`) --
+    and, if the evidence entry pinned an expected ``content_hash``, whose
+    input content hash matches it (``provenance.input.content_hash`` for
+    drc/lvs/extract/sim/pex/generic -- a ``generic`` envelope populates this
+    only if its author chose to include a ``provenance`` block, see "Generic
+    evidence ingestion" above; the hashed ``samples`` document for yield, per
     :func:`_yield_samples_content_hash` -- a mismatch means the check ran
     against a *different* layout/sample revision than the one being claimed
     -- stale, so it renders ``"unmet"``, never a false pass). Every other
     case (no evidence entry, a malformed entry, an unreadable/unparsable
     evidence file, a command that could not be run to completion or whose
     stdout didn't parse, an unrecognised envelope shape, a failing check, or
-    (issue #871) a passing check of a kind this item does not accept) also
-    renders ``"unmet"``: this phase never infers a ``"met"`` verdict for an
-    item with no runnable check behind it.
+    (issue #871, extended by issue #1152) a passing check of a kind this
+    item does not accept) also renders ``"unmet"``: this phase never infers
+    a ``"met"`` verdict for an item with no runnable check behind it.
 
     **Item 7 is kind-restricted** (issue #871, Phase 2b of epic #706): every
     other T1 item accepts any recognised, passing envelope kind, but item 7
@@ -828,9 +928,19 @@ def build_tier_report(
     (Epic #709, issue #801, ``src/klayout_tools/pex.py``) run produces (see
     this module's "Post-layout binding" docstring section, and
     ``docs/cli/pex.md`` for `klt pex`'s own contract). A
-    ``drc``/``lvs``/``sim``/``extract``/``yield`` citation for item 7 -- even
-    a genuinely passing one -- renders ``"unmet"`` with
+    ``drc``/``lvs``/``sim``/``extract``/``yield``/``generic`` citation for
+    item 7 -- even a genuinely passing one -- renders ``"unmet"`` with
     ``reason: "wrong_kind"``, never a borrowed pass.
+
+    **Only item 8 accepts ``"generic"`` evidence** (issue #1152): a
+    ``"generic"``-kind citation (see "Generic evidence ingestion" above)
+    satisfies only the T1 items whose own checklist text names no specific
+    `klt` verb -- today, item 8 ("Characterization report") alone. Every
+    other item, including the six otherwise-unrestricted items 1-6/9-10 that
+    accept any *native* recognised kind, renders ``"unmet"`` with
+    ``reason: "wrong_kind"`` for a ``"generic"`` citation -- this does not
+    loosen items 3-7's own evidence requirements, only adds a new kind item
+    8 alone may satisfy.
 
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
@@ -864,11 +974,14 @@ def build_tier_report(
       ``provenance.input.content_hash`` does not match the manifest's
       pinned ``content_hash`` -- the check ran against a different layout
       revision than the one being claimed.
-    - ``"wrong_kind"`` (issue #871) -- the evidence resolved to a recognised,
-      *passing* envelope, but its classified kind is not one this item
-      accepts (today, only item 7 restricts kinds -- see "Item 7 is
-      kind-restricted" above). The cited check did not fail on its own
-      terms; it simply does not prove what this item requires.
+    - ``"wrong_kind"`` (issue #871, extended by issue #1152) -- the evidence
+      resolved to a recognised, *passing* envelope, but its classified kind
+      is not one this item accepts: either item 7's ``"pex"``-only
+      restriction (see "Item 7 is kind-restricted" above), or a
+      ``"generic"``-kind citation for any item other than item 8 (see "Only
+      item 8 accepts 'generic' evidence" above). The cited check did not
+      fail on its own terms; it simply does not prove what this item
+      requires.
     - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
       repository has no mechanism to run a T2+ check at all.
 
@@ -1155,7 +1268,14 @@ def _grade_evidence(
     computes it instead, by hashing the samples document the report names,
     so the staleness gate (and the citation's ``content_hash``) still work
     for the statistical-evidence item, not just the four deterministic
-    kinds.
+    kinds. A ``"generic"`` envelope (issue #1152) gets no such fallback: its
+    ``provenance`` block, when present, is read exactly like a native kind's
+    (no generic-specific hashing), and when absent, ``actual_hash`` is
+    simply ``None`` -- a manifest that pins ``content_hash`` for a generic
+    entry with no matching provenance always renders that item
+    ``"stale_evidence"``, per this function's own mismatch check below; a
+    manifest that pins no ``content_hash`` at all is unaffected (no
+    staleness claim was ever made).
     """
     expected_hash = spec.get("content_hash")
 
@@ -1259,6 +1379,14 @@ def _build_tier_item(
     restriction, preserving Phase 0/1's original behaviour where any
     recognised, passing envelope kind satisfies any item -- every T1 item
     except item 7 still passes ``None`` (see :data:`_ITEM_ALLOWED_KINDS`).
+
+    A ``"generic"``-kind citation (issue #1152) is gated independently of
+    ``allowed_kinds``: it only satisfies an item whose id is a member of
+    :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` (today, item 8 only) -- checked
+    first, so ``"generic"`` never borrows a pass from an item's otherwise
+    unrestricted ``allowed_kinds=None`` (which was written for the six
+    `klt`-verb-native kinds, before ``"generic"`` existed, and would
+    otherwise happily accept it too).
     """
     citation = None
     status = "unmet"
@@ -1272,6 +1400,14 @@ def _build_tier_item(
         else:
             status, reason, citation = _grade_evidence(spec)
             if (
+                status == "met"
+                and citation["kind"] == "generic"
+                and item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE
+            ):
+                status = "unmet"
+                reason = _REASON_WRONG_KIND
+                citation = None
+            elif (
                 status == "met"
                 and allowed_kinds is not None
                 and citation["kind"] not in allowed_kinds
