@@ -4159,13 +4159,26 @@ def _resolve_abstract_cell_pins(
     cell: kdb.Cell,
     deck: ExtractionDeck,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
-) -> tuple[list[tuple[str, kdb.Point, str | None]], str | None, str | None, list[str]]:
+) -> tuple[
+    list[tuple[str, list[kdb.Point], str | None]], str | None, str | None, list[str]
+]:
     """Resolve one abstracted cell type's pins (issue #620).
 
     Returns ``(pins, resolution_source, lef_path, warnings)`` where ``pins`` is
-    ``[(pin name, access point in **cell-local dbu**, probe layer role or
-    ``None``), ...]`` sorted by pin name (the stable ``.subckt`` pin order),
-    and ``resolution_source`` is:
+    ``[(pin name, access points in **cell-local dbu**, probe layer role or
+    ``None``), ...]`` sorted by pin name (the stable ``.subckt`` pin order).
+    ``access points`` is a *list* rather than a single point (issue #1181): a
+    LEF ``PIN`` may legally declare multiple disjoint same-layer ``PORT``
+    rectangles for one electrical node (and an in-cell label may likewise be
+    drawn more than once for the same pin name), and in a routed design only
+    a subset of those rectangles/labels may receive external routing -- the
+    rest still belong to the same logical pin but sit on the cell's own
+    isolated, unrouted conductor. Every candidate point is carried through so
+    :func:`_probe_abstract_pin_net` can probe all of them and pick whichever
+    one actually lands on routed geometry, instead of this function silently
+    committing to the first candidate (LEF source order / label scan order)
+    regardless of whether it is the one the design actually routes.
+    ``resolution_source`` is:
 
     - ``"in_cell_labels"`` -- the cell draws text on one of the deck's own
       label layers (``metal_labels[i]``/``well_label``/``poly_label``)
@@ -4207,7 +4220,8 @@ def _resolve_abstract_cell_pins(
     macro and pin so the gap has a caller-visible signal instead of a
     silently incomplete black-box ``.SUBCKT``. Always ``[]`` on the
     ``"in_cell_labels"``/``None`` paths, where every resolved pin always
-    carries a concrete point (an in-cell label is never geometry-less).
+    carries at least one concrete point (an in-cell label is never
+    geometry-less).
     """
     import klayout.db as kdb
 
@@ -4219,7 +4233,7 @@ def _resolve_abstract_cell_pins(
         (layer, f"metal{index}") for index, layer in enumerate(deck.metal_labels)
     ]
 
-    in_cell: dict[str, tuple[kdb.Point, str]] = {}
+    in_cell: dict[str, tuple[list[kdb.Point], str]] = {}
     for layer, role in label_roles:
         if layer is None:
             continue
@@ -4227,14 +4241,23 @@ def _resolve_abstract_cell_pins(
         if layer_index is None:
             continue
         for text in kdb.Texts(cell.shapes(layer_index)).each():
-            # First label wins for a repeated name (a pin drawn with two
-            # access points): both name the same electrical node, so probing
-            # either resolves the same net -- picking deterministically is
-            # what matters, and `label_roles` is itself a fixed order.
-            in_cell.setdefault(text.string, (kdb.Point(text.x, text.y), role))
+            # Every label for a repeated name (a pin drawn with two access
+            # points, issue #1181) is kept, not just the first: nothing
+            # guarantees both labels' points land on the same probed net --
+            # e.g. one point could sit on an externally-routed rectangle and
+            # the other on an isolated, unrouted one, exactly the failure
+            # mode this issue reports for LEF-declared multi-rectangle pins.
+            # `_probe_abstract_pin_net` probes every candidate and picks
+            # whichever one actually resolves to routed geometry, so keeping
+            # every point here is what makes that possible. The role
+            # recorded is the first-seen layer's (a real pin's labels should
+            # all share one layer role; `label_roles`'s fixed order still
+            # makes this deterministic if they don't).
+            points, _role = in_cell.setdefault(text.string, ([], role))
+            points.append(kdb.Point(text.x, text.y))
 
     if in_cell:
-        pins = [(name, point, role) for name, (point, role) in in_cell.items()]
+        pins = [(name, points, role) for name, (points, role) in in_cell.items()]
         pins.sort(key=lambda entry: entry[0])
         return pins, "in_cell_labels", None, []
 
@@ -4242,7 +4265,7 @@ def _resolve_abstract_cell_pins(
     if entry is not None:
         lef_path, lef_pins = entry
         dbu = layout.dbu
-        lef_resolved: list[tuple[str, kdb.Point, str | None]] = []
+        lef_resolved: list[tuple[str, list[kdb.Point], str | None]] = []
         lef_warnings: list[str] = []
         for pin_name in sorted(lef_pins):
             boxes = lef_pins[pin_name]
@@ -4255,17 +4278,25 @@ def _resolve_abstract_cell_pins(
                     "the abstracted cell's resolved pin list"
                 )
                 continue
-            x0, y0, x1, y1 = boxes[0]["bbox_um"]
-            lef_resolved.append(
-                (
-                    pin_name,
-                    kdb.Point(
-                        round(((x0 + x1) / 2) / dbu),
-                        round(((y0 + y1) / 2) / dbu),
-                    ),
-                    None,
+            # Every disjoint PORT box's bounding-box centre is kept as its
+            # own candidate access point (issue #1181), not just the first
+            # in LEF source order: a LEF pin may legally declare several
+            # disjoint same-layer rectangles for one electrical node, and
+            # only a subset may receive external routing in any given
+            # placement. Committing to `boxes[0]` here silently discarded
+            # every rectangle after the first, so if the externally-routed
+            # one was not first, the whole pin resolved onto an isolated
+            # island net instead of the routed net. `_probe_abstract_pin_net`
+            # probes every candidate point and keeps whichever one actually
+            # lands on routed geometry.
+            points = [
+                kdb.Point(
+                    round(((x0 + x1) / 2) / dbu),
+                    round(((y0 + y1) / 2) / dbu),
                 )
-            )
+                for x0, y0, x1, y1 in (box["bbox_um"] for box in boxes)
+            ]
+            lef_resolved.append((pin_name, points, None))
         if lef_resolved:
             return lef_resolved, "lef_abstract", lef_path, lef_warnings
 
@@ -4375,13 +4406,13 @@ def _apply_def_net_name_overrides(
     return renamed, sorted(unresolved)
 
 
-def _probe_abstract_pin_net(
+def _probe_single_abstract_pin_point(
     l2n: kdb.LayoutToNetlist,
     point: kdb.Point,
     role: str | None,
     probe_layers: list[tuple[str, kdb.Region]],
 ) -> kdb.Net | None:
-    """The extracted net at ``point``, via
+    """The extracted net at exactly one candidate ``point``, via
     ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``.
 
     ``role`` (present for a label-resolved pin) names the conductor the pin's
@@ -4392,6 +4423,11 @@ def _probe_abstract_pin_net(
     takes the first hit, since a standard cell's pins land on the lowest
     metal available. Returns ``None`` when no conductor carries geometry at
     that point at all.
+
+    This is the single-candidate core :func:`_probe_abstract_pin_net` calls
+    once per access-point candidate for a pin (issue #1181) -- kept separate
+    so that per-point probing logic and the multi-point "pick the best
+    result" policy stay independently readable.
     """
     if role is not None:
         for name, region in probe_layers:
@@ -4405,6 +4441,80 @@ def _probe_abstract_pin_net(
         if net is not None:
             return net
     return None
+
+
+def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
+    """Ranking key for choosing among several nets one pin's candidate
+    access points resolve to (issue #1181): ``(has_name, connectivity)``,
+    compared lexicographically so a named net always outranks an unnamed
+    one regardless of connectivity, and among same-name-ness, richer
+    connectivity wins.
+
+    - **Named over unnamed.** By the time :func:`_wire_abstract_cells` runs,
+      ``extract_netlist()`` and (if requested) ``--def-net-names``
+      (:func:`_apply_def_net_name_overrides`) have already assigned every
+      *real*, routed net its name (from a drawn label or an explicit DEF
+      net-name override); a net probed off a LEF pin rectangle with no
+      external routing landing on it is a fresh, disconnected island that
+      never earns a name from either source. A name is therefore strong,
+      already-available evidence of "this is the routed net", independent of
+      whether other terminals on it have been wired into the netlist yet.
+    - **Richer connectivity as the tiebreak.** ``net.terminal_count()
+      + net.subcircuit_pin_count() + net.pin_count()`` is the same "is this
+      net actually connected to anything" signal
+      :func:`_purge_truly_floating_nets` and :func:`_promote_orphan_named_nets`
+      already use elsewhere in this module to distinguish a real net from a
+      floating one; a bare single-rectangle island scores 0 on all three,
+      while a net carrying other devices/subcircuits/top-level pins scores
+      higher.
+
+    A single-candidate pin (the overwhelmingly common case: one LEF box, one
+    label) never has anything to compare against, so this function's choice
+    is moot for it -- behaviour for every existing single-rectangle-pin
+    design is unchanged.
+    """
+    connectivity = net.terminal_count() + net.subcircuit_pin_count() + net.pin_count()
+    return (1 if net.name else 0, connectivity)
+
+
+def _probe_abstract_pin_net(
+    l2n: kdb.LayoutToNetlist,
+    points: list[kdb.Point],
+    role: str | None,
+    probe_layers: list[tuple[str, kdb.Region]],
+) -> kdb.Net | None:
+    """The best-resolved net across every candidate access point for one
+    abstracted-cell pin (issue #1181).
+
+    A LEF-declared pin may legally carry several disjoint same-layer ``PORT``
+    rectangles for one electrical node (and an in-cell label may likewise
+    repeat), of which only a subset may receive external routing in any
+    given placement -- the rest sit on the cell's own isolated conductor.
+    Probing only the first candidate (as this function used to) is routing-
+    blind: if the externally-routed rectangle/label is not first, the pin
+    resolves onto an isolated single-shape island net instead of the net the
+    design actually routes it to (the bug this issue reports).
+
+    Every point in ``points`` is probed independently via
+    :func:`_probe_single_abstract_pin_point`; among every point that
+    resolves to a net at all, the one with the highest
+    :func:`_abstract_pin_net_score` wins, with ties broken by ``points``'
+    own order (so a single-candidate pin's behaviour is unchanged). Returns
+    ``None`` only when *no* candidate point resolves to any net -- the "pin
+    lands on no conductor anywhere" case the caller already reports as a
+    per-instance warning.
+    """
+    best_net: kdb.Net | None = None
+    best_score: tuple[int, int] | None = None
+    for point in points:
+        net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
+        if net is None:
+            continue
+        score = _abstract_pin_net_score(net)
+        if best_score is None or score > best_score:
+            best_net = net
+            best_score = score
+    return best_net
 
 
 def _wire_abstract_cells(
@@ -4499,7 +4609,7 @@ def _wire_abstract_cells(
         black_box_circuit = kdb.Circuit()
         black_box_circuit.name = cell.name
         pin_ids: dict[str, int] = {}
-        for pin_name, _point, _role in pins:
+        for pin_name, _points, _role in pins:
             pin = black_box_circuit.create_pin(pin_name)
             net = black_box_circuit.create_net(pin_name)
             black_box_circuit.connect_pin(pin, net)
@@ -4509,9 +4619,9 @@ def _wire_abstract_cells(
         for index, trans in enumerate(transforms):
             instance_name = _sanitize_instance_name(f"{cell.name}_{index}")
             subcircuit = top_circuit.create_subcircuit(black_box_circuit, instance_name)
-            for pin_name, point, role in pins:
-                global_point = trans * point
-                net = _probe_abstract_pin_net(l2n, global_point, role, probe_layers)
+            for pin_name, points, role in pins:
+                global_points = [trans * point for point in points]
+                net = _probe_abstract_pin_net(l2n, global_points, role, probe_layers)
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
                     warnings.append(
