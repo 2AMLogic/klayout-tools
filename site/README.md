@@ -192,6 +192,48 @@ fetched client-side by the viewer. This mirrors `klt sim`'s own
 status pending issue #99 (the signals pipeline that will produce this data
 for real).
 
+### Schematic section (issue #1121)
+
+When a block's `layout.json` sets a `schematic` field (see `LayoutSchematic`
+in `src/data/types.ts`), `DetailPage.tsx` renders a "Schematic" section
+above the Renders section — it is the explainer for the layer renders below
+it, bridging "colored polygons" to "the circuit those polygons implement"
+for a viewer who isn't an IC designer. Blocks with no `schematic` field
+render exactly as before (the section is omitted, not shown empty) — the
+same omit-absent convention as `renders`/`downloadable`/`signals`/
+`spec_summary`.
+
+**Staging convention**: an optional `blocks/<slug>/output/schematic.svg`
+(the same `output/`-relative-path convention as `renders`/`layout_file`/
+`signals.corners[].waveform` — see `blockAssetUrl()` in
+`src/lib/blockAssets.ts`), referenced from `layout.json` as
+`schematic.path`. `scripts/copy-renders.mjs` stages it into
+`site/public/blocks/<slug>/...` alongside renders/downloads/signals,
+served at `/blocks/<slug>/<schematic path>`. `layout.json`'s `schematic`
+also carries a required `provenance` string, rendered as a caption line
+under the diagram — either "source repo + commit" (for a diagram exported
+from an external tool/repo) or "drawn from `<PDK>` netlist `<file>@<hash>`"
+(for one hand-derived from a netlist/GDS), per the two documented formats.
+
+**Theme rule**: a staged `schematic.svg` is loaded via a plain `<img>` tag,
+so **`currentColor` in the SVG does NOT inherit the host page's text
+color** — an `<img>`-loaded SVG renders as its own document, not inlined
+into the page DOM, so page CSS custom properties/`currentColor` never reach
+it. `prefers-color-scheme` is **not** a substitute: it tracks the visitor's
+OS/browser setting, not this site's own theme, and this site is always dark
+with no `prefers-color-scheme`/`color-scheme` switching of its own — a
+diagram that keys its palette to that media query goes invisible for any
+visitor whose OS is set to light (or has no preference), which is the
+common case, not an edge case. Diagrams MUST therefore use a single
+mid-tone, self-contained palette (no media query) that clears the WCAG 3:1
+non-text contrast threshold against both this site's dark background and a
+light background (e.g. GitHub's raw SVG viewer, other embeds) — never a
+light/dark pairing switched by `prefers-color-scheme`, and never a single
+baked-in black-on-white (or white-on-black) color pairing. See
+`blocks/sky130_fd_sc_hd__inv_1/output/schematic.svg` for a worked example
+(the seed diagram, an inverter's 2-transistor CMOS topology, using `#6b7280`)
+and its in-file comment explaining the convention in full.
+
 ### SPICE model decks (playground, phase A)
 
 For the in-browser SPICE playground (Epic #90, issue #149 / parent #148), the

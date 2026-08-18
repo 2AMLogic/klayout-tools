@@ -10,6 +10,10 @@
   "instance_count": 0,
   "layout_file": "sky130_fd_sc_hd__inv_1.gds",
   "downloadable": true,
+  "schematic": {
+    "path": "schematic.svg",
+    "provenance": "Hand-drawn 2-transistor CMOS inverter topology, illustrating `sky130_fd_sc_hd__inv_1.gds` (sha256 18a9cfa39995…7914c4). See issue #1123 for netlist-derived standard-cell diagrams."
+  },
   "renders": {
     "overview": "renders/overview.png",
     "layer_64_5": "renders/64_5.png",

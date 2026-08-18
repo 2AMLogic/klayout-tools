@@ -99,6 +99,26 @@ describe("loadLayout", () => {
     expect(layout.drc?.deck).toBe("sky130");
     expect(layout.drc?.violation_count).toBe(0);
     expect(layout.renders?.top).toBe("renders/top.png");
+    // No `schematic` field written -> omitted, per the omit-absent
+    // convention (issue #1121); not rendered as `null`/`undefined`.
+    expect(layout.schematic).toBeUndefined();
+  });
+
+  it("parses an optional layout.schematic field (issue #1121)", () => {
+    writeLayoutJson(
+      "sky130_fd_sc_hd__inv_1",
+      validLayout("sky130_fd_sc_hd__inv_1", {
+        schematic: {
+          path: "schematic.svg",
+          provenance: "Drawn from sky130_fd_sc_hd__inv_1.spice @ 9f8e7d6",
+        },
+      }),
+    );
+    const layout = loadLayout(join(root, "sky130_fd_sc_hd__inv_1"));
+    expect(layout.schematic?.path).toBe("schematic.svg");
+    expect(layout.schematic?.provenance).toBe(
+      "Drawn from sky130_fd_sc_hd__inv_1.spice @ 9f8e7d6",
+    );
   });
 
   it('accepts the "in design — simulation evidence" status (issue #62 canary blocks)', () => {

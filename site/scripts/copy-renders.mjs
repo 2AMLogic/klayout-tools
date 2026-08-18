@@ -34,6 +34,12 @@
  *     page's `WaveformViewer` can `fetch()` it client-side at
  *     `/blocks/<slug>/<waveform path>`. Absent for every block until the
  *     signals pipeline (#99) lands.
+ *   - Schematic diagram (issue #1121): when `layout.json` sets a
+ *     `schematic.path` (relative to `output/`, same convention as
+ *     `renders`), the referenced `schematic.svg` is staged the same way, so
+ *     the block detail page's "Schematic" section can reference it at
+ *     `/blocks/<slug>/<schematic path>`. Absent for most blocks -- only
+ *     blocks with a hand-authored or exported diagram carry it.
  *
  * Discovery rules mirror `src/data/loadLayouts.ts`: immediate subdirectories
  * of `blocks/`, skipping hidden / `_`-prefixed entries. The block directory
@@ -143,6 +149,7 @@ function main() {
   let blocksWithRenders = 0;
   let downloadCount = 0;
   let signalsCount = 0;
+  let schematicCount = 0;
 
   for (const { slug, dir } of discoverBlocks(root)) {
     const layout = readLayoutJson(dir);
@@ -171,12 +178,18 @@ function main() {
       if (typeof relPath !== "string") continue;
       if (stageFile(dir, destRoot, slug, relPath)) signalsCount += 1;
     }
+
+    const schematicPath =
+      layout.schematic && typeof layout.schematic === "object" ? layout.schematic.path : null;
+    if (typeof schematicPath === "string") {
+      if (stageFile(dir, destRoot, slug, schematicPath)) schematicCount += 1;
+    }
   }
 
   console.log(
     `[copy-renders] staged ${renderCount} render(s) from ${blocksWithRenders} block(s), ` +
-      `${downloadCount} downloadable layout file(s), and ${signalsCount} signals waveform(s) ` +
-      `into ${destRoot}`,
+      `${downloadCount} downloadable layout file(s), ${signalsCount} signals waveform(s), and ` +
+      `${schematicCount} schematic diagram(s) into ${destRoot}`,
   );
 }
 
