@@ -163,6 +163,11 @@ def test_execute_routes_two_pin_and_bundle_nets_full_success(tmp_path, pdk_root)
     assert by_id["b1"]["devices"] == [{"name": "1", "device_class": "NFET"}]
     assert by_id["b1"]["resolved_params"]["l_um"] == pytest.approx(0.28)
     assert by_id["b1"]["resolved_params"]["w_um"] == pytest.approx(0.42)
+    # mos_array is one of the two generators that actually declares a
+    # `params.topology` field (_TOPOLOGY_PARAM_GENERATORS) -- the plan's
+    # declared `topology: "array"` must still reach `klt gen`'s params
+    # unchanged (issue #1160's second acceptance criterion).
+    assert by_id["b1"]["resolved_params"]["topology"] == "array"
     assert "offset_um" in by_id["b1"] and "bbox_um" in by_id["b1"]
 
 
@@ -239,6 +244,53 @@ M1 D G VSS VSS nfet L=0.5U W=2U
         "params.w_um override" in warning and "diverges" in warning
         for warning in response["warnings"]
     )
+
+
+def test_diff_pair_group_with_declared_topology_executes_successfully(
+    tmp_path, pdk_root
+):
+    """`diff_pair` declares no `params.topology` of its own -- Phase B's
+    `_GENERATOR_TOPOLOGY_SUPPORT` nonetheless accepts `topology:
+    "common_centroid"` on a `diff_pair` group as a plan-level assertion
+    that already matches what the generator always draws. Before issue
+    #1160, `_resolve_group_params` injected that declared topology into
+    every group's `params` unconditionally, so this exact plan reached
+    `klt gen` with an unknown `params.topology` and died with
+    `LayoutPlanExecuteError` in Phase C despite passing Phase B validation.
+    """
+    netlist = """
+.subckt one_fet D G
+M1 D G VSS VSS nfet L=0.28U W=0.42U
+.ends
+"""
+    netlist_path = _write(tmp_path, "one_fet.spice", netlist)
+    request = {
+        "netlist": {"path": netlist_path, "top": "one_fet"},
+        "pdk": _pdk_spec(pdk_root),
+        "device_groups": [
+            {
+                "id": "dp",
+                "devices": ["1"],
+                "generator": "diff_pair",
+                "topology": "common_centroid",
+            }
+        ],
+        "rows": [{"order": ["dp"], "spacing_um": 0.0}],
+        "options": {"output": str(tmp_path / "diff_pair_0.gds")},
+    }
+
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["schema_version"] == 1
+    assert os.path.isfile(response["gds_path"])
+
+    group = response["device_groups"][0]
+    # The declared topology is accepted (no error, no warning -- it already
+    # matches diff_pair's always-common-centroid layout) but never injected
+    # into `params`, since `diff_pair` has no `params.topology` field for
+    # `klt gen` to accept.
+    assert "topology" not in group["resolved_params"]
+    assert not any("topology" in warning for warning in response["warnings"])
 
 
 # ---------------------------------------------------------------------------

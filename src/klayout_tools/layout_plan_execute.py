@@ -184,6 +184,21 @@ _SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
 #: that is already placed (see :func:`_abutment_target_offset`).
 _INVERT_EDGE = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}
 
+#: Generators that actually declare a ``params.topology`` ``klt gen`` field
+#: (``gen.py``'s ``_build_pcell_classes()`` -- grep the two ``"topology"``
+#: PCellDeclarationHelper params there) -- see :func:`_resolve_group_params`.
+#: ``diff_pair`` is deliberately excluded even though
+#: ``layout_plan._GENERATOR_TOPOLOGY_SUPPORT`` accepts a
+#: ``device_groups[].topology: "common_centroid"`` declaration against it:
+#: ``diff_pair`` always draws a common-centroid cross-quad pattern and takes
+#: no ``params.topology`` of its own (``docs/cli/gen.md``), so a declared
+#: ``"common_centroid"`` topology on a ``diff_pair`` group is a plan-level
+#: assertion that already matches what the generator draws, not a value that
+#: needs to (or can) reach ``klt gen``'s ``params`` -- injecting it would
+#: make ``gen._resolve_params()`` hard-reject the call as an unknown param
+#: (issue #1160).
+_TOPOLOGY_PARAM_GENERATORS = frozenset({"mos_array", "bjt_array"})
+
 
 class LayoutPlanExecuteError(Exception):
     """Raised when a validated plan cannot be executed: an unresolvable PDK,
@@ -329,13 +344,27 @@ def _resolve_group_params(
     resolved = dict(derived)
     # `device_groups[].topology` is a top-level plan field (Phase B's own
     # matching-pattern concept, already validated against the named
-    # generator's own support table) but a real `klt gen` request expects
+    # generator's own support table) but only `mos_array`/`bjt_array` accept
     # it as an ordinary `params.topology` -- map it here so a plan's
-    # topology declaration actually reaches the generator, rather than
-    # silently falling back to that generator's own default topology.
+    # topology declaration actually reaches those generators, rather than
+    # silently falling back to the generator's own default topology.
     # `params` overrides (below) still win if a caller redundantly repeats
     # it there.
-    if group.get("topology"):
+    #
+    # A generator outside `_TOPOLOGY_PARAM_GENERATORS` (today, only
+    # `diff_pair`) that still declares a topology is left alone here: Phase
+    # B's own `layout_plan._GENERATOR_TOPOLOGY_SUPPORT` already limits which
+    # generator/value pairs reach this point at all, and the one pair it
+    # allows through for such a generator -- `diff_pair`/`common_centroid`
+    # -- is a plan-level assertion that already matches what `diff_pair`
+    # always draws, so accepting it silently (no `params` injection, no
+    # warning) is correct rather than a silent drop of a value that would
+    # otherwise change the drawn layout. If a future generator is added to
+    # `_GENERATOR_TOPOLOGY_SUPPORT` with a *non-default* topology value that
+    # it cannot accept via `params.topology`, that combination would need a
+    # `warnings[]` entry here instead of silent acceptance -- no such case
+    # exists today.
+    if group.get("topology") and group["generator"] in _TOPOLOGY_PARAM_GENERATORS:
         resolved["topology"] = group["topology"]
     for param_name, value in overrides.items():
         if param_name in derived and derived[param_name] != value:
