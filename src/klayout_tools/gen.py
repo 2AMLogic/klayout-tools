@@ -109,6 +109,12 @@ _HIDDEN_PARAMS = {
     "salicide_block_present",
     "voltage_flavor_mark_layer",
     "voltage_flavor_mark_present",
+    "cap_top_plate_layer",
+    "cap_bottom_plate_layer",
+    "cap_top_via_layer",
+    "cap_top_via_present",
+    "cap_top_via_metal_layer",
+    "cap_top_via_metal_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -185,6 +191,19 @@ UNIT_MIN_W_UM = 0.42
 #: 0.23um is the binding one; sky130's ``li1.space.1`` is only 0.17um), with
 #: margin. `mos_array`/`diff_pair` default their ``l_um`` param to this.
 GATE_LENGTH_SAFE_MIN_UM = 0.28
+
+#: Extra margin (um) `cap_array`'s bottom-plate conductor (sky130's `met3`)
+#: is drawn beyond its unit cell's top-plate mark (`capm`) footprint on every
+#: side -- an implementation choice, not a transcribed DRC/LVS rule (neither
+#: curated deck constrains this repo's MiM-cap layer pair, and sky130 needs
+#: no "virtual bottom plate" derivation the way gf180mcu's stack does -- see
+#: `CapacitorDevice.bottom_plate_oversize_um`'s docstring). Sized generously
+#: so the bottom conductor's own edge is never the limiting edge of the
+#: top/bottom overlap area `CapacitorDevice.area_cap_f_um2` derives `C` from
+#: (`extract.py`'s `_capacitor_plate_regions`), and so the top-plate via's
+#: own `ENCLOSURE_MARGIN_UM` clearance from the bottom-plate edge is never in
+#: question either.
+CAP_BOTTOM_PLATE_MARGIN_UM = 0.5
 
 #: Guard ring sizing `diff_pair` uses for its own, automatically-generated
 #: ring. `GUARD_RING_DEFAULT_PADDING_UM` is the default for `diff_pair`'s own
@@ -308,6 +327,31 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `res_xhigh_po`) that differ only in those masks, so they live in the
         # per-flavour :data:`_PDK_RES_FLAVOR_LAYERS` table below, selected by
         # `res_array`'s `flavor` request param (issue #463).
+        # MiM-capacitor plate roles (issue #1117), for `cap_array`: the
+        # *same* layer/datatype pair `klayout_tools.decks.sky130`'s
+        # `EXTRACTION_DECK.capacitors[0]` (`sky130_fd_pr__model__cap_mim`)
+        # declares -- not a second, private map, so a `cap_array` cell's
+        # output round-trips through `klt extract` to that exact device
+        # class rather than drifting from it. `cap_top_plate` is `capm`
+        # (89/44), the purpose-drawn MiM top-plate mark; `cap_bottom_plate`
+        # is `met3` (70/20), the conductor the bottom plate is drawn on --
+        # sky130 needs no "virtual bottom plate" oversize derivation the way
+        # gf180mcu's `FuseTop`/`Metal4` stack does (see
+        # `CapacitorDevice.bottom_plate_oversize_um`'s docstring), so the
+        # generator can draw the bottom plate as an ordinary, generously
+        # sized conductor around the top-plate mark. `cap_top_via`/
+        # `cap_top_via_metal` are `via3`/`met4` (70/44, 71/20) -- the real
+        # via that lands directly on the top plate and the metal it connects
+        # up to (`CapacitorDevice.top_plate_via`/`top_plate_via_metal`,
+        # issue #775), giving the drawn top plate a routable local-metal
+        # landing pad instead of an isolated node. Only sky130 is wired up
+        # today -- gf180mcu's own MiM stack is out of this generator's
+        # initial scope (see `_cap_family_layers`); a family missing these
+        # keys is a supported "not implemented yet" state, not a bug.
+        "cap_top_plate": (89, 44),  # capm.drawing
+        "cap_bottom_plate": (70, 20),  # met3.drawing
+        "cap_top_via": (70, 44),  # via3.drawing (met3<->met4)
+        "cap_top_via_metal": (71, 20),  # met4.drawing
         # Second routing-metal role + its connecting via (issue #454, follow-up
         # to #433): sky130's curated *extraction* deck already declares a
         # second metal level and the via that lands on it
@@ -725,6 +769,72 @@ def _resistor_layer_params(
         "res_block_present": block is not None,
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
+    }
+
+
+def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
+    """Return the resolved MiM-cap plate/via layer pairs for ``family`` (see
+    :data:`_PDK_ROLE_LAYERS`'s ``"cap_top_plate"``/``"cap_bottom_plate"``/
+    ``"cap_top_via"``/``"cap_top_via_metal"`` roles).
+
+    Raises :class:`GenError` for a family with no ``cap_top_plate``/
+    ``cap_bottom_plate`` configured -- mirrors :func:`_res_flavor_layers`'s
+    own unsupported-value error. Only ``sky130`` is wired up as of issue
+    #1117; gf180mcu's own MiM stack needs an additional "virtual bottom
+    plate" oversize derivation (see
+    :class:`klayout_tools.decks.CapacitorDevice`'s ``bottom_plate_oversize_um``
+    docstring) that is out of this generator's initial scope -- a family
+    missing these keys is a documented "not implemented yet" state, not a
+    deck-authoring bug the way an unresolvable family name in
+    :func:`_pdk_family` is."""
+    roles = _PDK_ROLE_LAYERS[family]
+    top = roles.get("cap_top_plate")
+    bottom = roles.get("cap_bottom_plate")
+    if top is None or bottom is None:
+        raise GenError(
+            f"generator 'cap_array': PDK family '{family}' has no MiM "
+            "capacitor plate layers configured -- supported families: sky130"
+        )
+    return {
+        "cap_top_plate": top,
+        "cap_bottom_plate": bottom,
+        "cap_top_via": roles.get("cap_top_via"),
+        "cap_top_via_metal": roles.get("cap_top_via_metal"),
+    }
+
+
+def _cap_array_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``cap_array`` (a top-plate-metal-over-
+    bottom-plate-metal MiM stack, plus a top-plate via/local-metal landing
+    pad) -- the capacitor sibling of :func:`_resistor_layer_params`.
+
+    ``cap_top_via_present``/``cap_top_via_metal_present`` follow the
+    ``res_mark_present`` precedent even though sky130 (the only family
+    :func:`_cap_family_layers` resolves today) always sets both -- a future
+    family that declares plates but not a top-plate via can still resolve
+    cleanly, matching :class:`~klayout_tools.decks.CapacitorDevice`'s own
+    ``top_plate_via``/``top_plate_via_metal`` being optional fields."""
+    import klayout.db as kdb
+
+    family = _pdk_family(pdk_info["variant"])
+    layers = _cap_family_layers(family)
+    top_via = layers["cap_top_via"]
+    top_via_metal = layers["cap_top_via_metal"]
+    return {
+        "cap_top_plate_layer": kdb.LayerInfo(*layers["cap_top_plate"]),
+        "cap_bottom_plate_layer": kdb.LayerInfo(*layers["cap_bottom_plate"]),
+        "cap_top_via_layer": (
+            kdb.LayerInfo(*top_via) if top_via is not None else kdb.LayerInfo(0, 0)
+        ),
+        "cap_top_via_present": top_via is not None,
+        "cap_top_via_metal_layer": (
+            kdb.LayerInfo(*top_via_metal)
+            if top_via_metal is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "cap_top_via_metal_present": top_via_metal is not None,
     }
 
 
@@ -1458,6 +1568,59 @@ def _res_array_layout(
         "cells": cells,
         "dummy_cells": dummy_cells,
     }
+
+
+def _cap_unit_layout(plate_w_um: float, plate_h_um: float) -> dict[str, Any]:
+    """One unit MiM capacitor cell: a ``plate_w_um`` x ``plate_h_um``
+    top-plate mark (sky130's ``capm``) centred over a larger bottom-plate
+    conductor (``met3``), with a top-plate via + local-metal landing pad
+    (``via3``/``met4``) centred on the top plate -- the capacitor sibling of
+    :func:`_res_unit_layout`, with a single centred via/pad standing in for
+    that function's two end contacts (a MiM cap has no resistive body to
+    keep a via clear of, so the via lands in the middle of the plate rather
+    than at either end)."""
+    margin = CAP_BOTTOM_PLATE_MARGIN_UM
+    bottom_w = plate_w_um + 2 * margin
+    bottom_h = plate_h_um + 2 * margin
+    cx, cy = bottom_w / 2.0, bottom_h / 2.0
+
+    via_half = CONTACT_SIZE_UM / 2.0
+    pad_half = (CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM) / 2.0
+    top_via_box = _snap_square_box_um(cx, cy, via_half, _GRID_DBU_UM)
+    top_via_metal_box = _snap_square_box_um(cx, cy, pad_half, _GRID_DBU_UM)
+
+    boxes: dict[str, list[tuple[float, float, float, float]]] = {
+        "bottom_plate": [(0.0, 0.0, bottom_w, bottom_h)],
+        "top_plate": [(margin, margin, margin + plate_w_um, margin + plate_h_um)],
+        "top_via": [top_via_box],
+        "top_via_metal": [top_via_metal_box],
+    }
+    return {
+        "total_w_um": bottom_w,
+        "total_h_um": bottom_h,
+        "boxes_um": boxes,
+        # Bottom-plate port: the conductor's own local-left edge, mirroring
+        # `_res_unit_layout`'s `a_xy`. Top-plate port: the via/landing-pad
+        # centre -- the same point `top_via`/`top_via_metal` are drawn at.
+        "bot_xy": (0.0, cy),
+        "top_xy": (cx, cy),
+    }
+
+
+def _cap_array_layout(
+    plate_w_um: float, plate_h_um: float, spacing_um: float, num: int
+) -> dict[str, Any]:
+    """``num`` matched unit MiM capacitors (see :func:`_cap_unit_layout`) in
+    a single row, spaced ``spacing_um`` apart -- the capacitor sibling of
+    :func:`_res_array_layout`'s own (unfolded, single-row) layout. No
+    ``rows`` folding or ``dummy`` padding yet (issue #1117 scopes this
+    generator's first increment to the core plate/via geometry; both are
+    natural `res_array`-parity follow-ups, not correctness gaps -- a MiM
+    cap array with only a handful of matched units rarely needs either)."""
+    unit = _cap_unit_layout(plate_w_um, plate_h_um)
+    pitch = unit["total_w_um"] + spacing_um
+    cells = [{"idx": i, "x0_um": i * pitch, "y0_um": 0.0} for i in range(num)]
+    return {"unit": unit, "pitch_um": pitch, "cells": cells}
 
 
 #: The four sides a ring gap (``ring_gap_side``) can be cut on, and the
@@ -2881,6 +3044,125 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li_dummy, dbu, marker_boxes, c["x0_um"], c["y0_um"]
                     )
 
+    class _CapArrayPCell(kdb.PCellDeclarationHelper):
+        """Unit MiM capacitor array: a row of ``num`` matched unit cells
+        (see :func:`_cap_unit_layout`), each a top-plate-metal-over-
+        bottom-plate-metal MiM stack with a top-plate via + local-metal
+        landing pad -- the capacitor sibling of ``res_array`` (issue
+        #1117)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.param(
+                "plate_w_um",
+                self.TypeDouble,
+                "Unit top-plate width (um)",
+                default=5.0,
+            )
+            self.param(
+                "plate_h_um",
+                self.TypeDouble,
+                "Unit top-plate height (um)",
+                default=5.0,
+            )
+            self.param(
+                "spacing_um",
+                self.TypeDouble,
+                "Spacing between unit capacitors (um)",
+                default=0.5,
+            )
+            self.param(
+                "num", self.TypeInt, "Number of matched unit capacitors", default=4
+            )
+            self.param(
+                "cap_top_plate_layer",
+                self.TypeLayer,
+                "MiM top-plate drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "cap_bottom_plate_layer",
+                self.TypeLayer,
+                "MiM bottom-plate drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "cap_top_via_layer",
+                self.TypeLayer,
+                "Top-plate via drawing layer (only used when cap_top_via_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "cap_top_via_present",
+                self.TypeBoolean,
+                "Whether cap_top_via_layer is a real, DRC-checked layer for "
+                "the resolved PDK",
+                default=False,
+            )
+            self.param(
+                "cap_top_via_metal_layer",
+                self.TypeLayer,
+                "Top-plate via landing-metal drawing layer (only used when "
+                "cap_top_via_metal_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "cap_top_via_metal_present",
+                self.TypeBoolean,
+                "Whether cap_top_via_metal_layer is a real, DRC-checked "
+                "layer for the resolved PDK",
+                default=False,
+            )
+
+        def display_text_impl(self) -> str:
+            return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
+
+        def produce_impl(self) -> None:
+            dbu = self.layout.dbu
+            li_top = self.layout.layer(self.cap_top_plate_layer)
+            li_bottom = self.layout.layer(self.cap_bottom_plate_layer)
+            info = _cap_array_layout(
+                self.plate_w_um, self.plate_h_um, self.spacing_um, self.num
+            )
+            unit_boxes = info["unit"]["boxes_um"]
+            for c in info["cells"]:
+                _insert_boxes(
+                    self.cell,
+                    li_bottom,
+                    dbu,
+                    unit_boxes["bottom_plate"],
+                    c["x0_um"],
+                    c["y0_um"],
+                )
+                _insert_boxes(
+                    self.cell,
+                    li_top,
+                    dbu,
+                    unit_boxes["top_plate"],
+                    c["x0_um"],
+                    c["y0_um"],
+                )
+                if self.cap_top_via_present:
+                    li_via = self.layout.layer(self.cap_top_via_layer)
+                    _insert_boxes(
+                        self.cell,
+                        li_via,
+                        dbu,
+                        unit_boxes["top_via"],
+                        c["x0_um"],
+                        c["y0_um"],
+                    )
+                if self.cap_top_via_metal_present:
+                    li_via_metal = self.layout.layer(self.cap_top_via_metal_layer)
+                    _insert_boxes(
+                        self.cell,
+                        li_via_metal,
+                        dbu,
+                        unit_boxes["top_via_metal"],
+                        c["x0_um"],
+                        c["y0_um"],
+                    )
+
     class _GuardRingPCell(kdb.PCellDeclarationHelper):
         """Substrate/well tap guard ring (spike section 4's family 3): a
         tap ring + local-metal ring with evenly-spaced contacts (see
@@ -3879,6 +4161,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         "resistor_strip": _ResistorStripPCell,
         "mos_array": _MosArrayPCell,
         "res_array": _ResArrayPCell,
+        "cap_array": _CapArrayPCell,
         "guard_ring": _GuardRingPCell,
         "diff_pair": _DiffPairPCell,
         "bjt_array": _BjtArrayPCell,
@@ -4308,6 +4591,111 @@ def _res_array_describe(
         "drc_hints": {
             "min_spacing_um": params["spacing_um"],
             "matched_group_id": f"res_array:{params['num']}",
+            "snapped_to_grid": snapped,
+            "notes": notes,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
+
+
+def _cap_array_validate(params: dict[str, Any]) -> None:
+    if params["plate_w_um"] < UNIT_MIN_W_UM:
+        raise GenError(
+            f"generator 'cap_array': params.plate_w_um must be >= {UNIT_MIN_W_UM}"
+        )
+    if params["plate_h_um"] < UNIT_MIN_W_UM:
+        raise GenError(
+            f"generator 'cap_array': params.plate_h_um must be >= {UNIT_MIN_W_UM}"
+        )
+    if params["spacing_um"] < 0:
+        raise GenError("generator 'cap_array': params.spacing_um must be >= 0")
+    if params["num"] < 1:
+        raise GenError("generator 'cap_array': params.num must be >= 1")
+
+
+def _cap_array_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    family = _pdk_family(pdk_info["variant"])
+    layers = _cap_family_layers(family)
+    info = _cap_array_layout(
+        params["plate_w_um"], params["plate_h_um"], params["spacing_um"], params["num"]
+    )
+    unit = info["unit"]
+    bottom_pair = layers["cap_bottom_plate"]
+    bottom_layer = {"layer": bottom_pair[0], "datatype": bottom_pair[1], "name": None}
+    # The top-plate port reports the via's own landing-metal layer (`met4`)
+    # when one is configured -- the terminal a downstream router would
+    # actually connect to -- falling back to the bare top-plate mark
+    # (`capm`) layer for a family that declares plates but no top-plate via
+    # (see `_cap_family_layers`'s docstring; not exercised by sky130 today).
+    top_via_metal_pair = layers["cap_top_via_metal"] or layers["cap_top_plate"]
+    top_layer = {
+        "layer": top_via_metal_pair[0],
+        "datatype": top_via_metal_pair[1],
+        "name": None,
+    }
+    top_port_width_um = (
+        CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+        if layers["cap_top_via_metal"] is not None
+        else params["plate_w_um"]
+    )
+
+    ports = []
+    for c in info["cells"]:
+        idx = c["idx"]
+        bot_xy = unit["bot_xy"]
+        top_xy = unit["top_xy"]
+        ports.append(
+            {
+                "name": f"C{idx}_BOT",
+                "net": None,
+                "layer": bottom_layer,
+                "x_um": c["x0_um"] + bot_xy[0],
+                "y_um": c["y0_um"] + bot_xy[1],
+                "width_um": unit["total_h_um"],
+                "direction_deg": 180,
+            }
+        )
+        ports.append(
+            {
+                "name": f"C{idx}_TOP",
+                "net": None,
+                "layer": top_layer,
+                "x_um": c["x0_um"] + top_xy[0],
+                "y_um": c["y0_um"] + top_xy[1],
+                "width_um": top_port_width_um,
+                # The top-plate via/landing pad sits at the unit cell's own
+                # interior centre, not on an edge -- there is no single
+                # geometrically-correct outward direction, so this reports a
+                # fixed value, mirroring `mos_array`'s interior gate-contact
+                # port (`_mos_unit_layout`'s own `g_xy`, always `270`).
+                "direction_deg": 90,
+            }
+        )
+
+    notes = []
+    if 0 <= params["spacing_um"] < MIN_SAME_LAYER_SPACING_UM:
+        notes.append(
+            "spacing_um is below the recommended "
+            f"{MIN_SAME_LAYER_SPACING_UM}um margin -- may violate the target "
+            "PDK's minimum same-layer spacing rule"
+        )
+
+    snapped = _grid_snapped(
+        dbu, params["plate_w_um"], params["plate_h_um"], params["spacing_um"]
+    )
+
+    return {
+        "device_count": params["num"],
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": params["spacing_um"],
+            "matched_group_id": f"cap_array:{params['num']}",
             "snapped_to_grid": snapped,
             "notes": notes,
         },
@@ -5225,6 +5613,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_res_array_validate,
         describe=_res_array_describe,
         layer_params=_resistor_layer_params,
+    ),
+    "cap_array": _GeneratorSpec(
+        name="cap_array",
+        summary=(
+            "Unit MiM capacitor array: a row of matched unit cells, each a "
+            "top-plate-metal-over-bottom-plate-metal MiM stack (sky130's "
+            "capm/met3) with a top-plate via + local-metal landing pad -- "
+            "the capacitor sibling of res_array (issue #1117)."
+        ),
+        dbu=0.001,
+        validate=_cap_array_validate,
+        describe=_cap_array_describe,
+        layer_params=_cap_array_layer_params,
     ),
     "guard_ring": _GeneratorSpec(
         name="guard_ring",
