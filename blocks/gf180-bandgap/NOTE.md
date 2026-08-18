@@ -30,3 +30,27 @@ Re-running `python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap`
 refreshes this file from the source repo's current state (still gated on
 that repo staying public) — as its layout advances, this is the repeatable
 way to pick it up; no separate refresh mechanism exists or is needed.
+
+## `schematic.svg` (issue #1122)
+
+`schematic.svg` is a headless `xschem --svg` export of
+`design/bandgap_core.sch` in
+[`2AMLogic/gf180-bandgap`](https://github.com/2AMLogic/gf180-bandgap) @
+`04c59f1103504e824fdcb224eaa7e070ef8e2b82`, post-processed to the site's
+theme convention (`currentColor` ink, no baked dark-canvas background,
+cropped `viewBox`) — full provenance and the post-processing diff are
+recorded in the SVG's own leading `<!-- ... -->` comment. `bandgap_core.sch`
+(the actual Brokaw-core topology) was chosen over the literal hierarchy
+root `design/bandgap_top.sch`, which is a pure black-box interconnect of
+`bandgap_core`/`bandgap_amp`/`bandgap_startup` with no devices of its own —
+per issue #1122's "top-level schematic is the MVP, sub-blocks can come
+later" decision, the informative core cell is the more useful "top-level"
+diagram to ship first.
+
+Device-count spot-check against `design/bandgap_core.sch` at that commit:
+17 non-pin/non-comment `C {...}` instances — `M1`-`M5`, `MC1`-`MC4`, `MCB`,
+`MNB` (`pfet_03v3`/`nfet_03v3` mirrors/cascodes/tail), `Q1`-`Q3`
+(`pnp_05p00x05p00`/`pnp_10p00x10p00`), `R1`, `R2` (`ppolyf_u`), and `XTRIM`
+(`bandgap_trim.sym`, drawn as a black box — its internals are a separate
+sub-block, out of scope per the decision above) — matches the diagram
+exactly.
