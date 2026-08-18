@@ -7,6 +7,7 @@ Epic #153, following the layout-vs-schematic pattern
 
 ```
 klt lvs <request> [--format text|json]
+klt lvs --check <report.json> [--rerun] [--format text|json]
 ```
 
 This is phase 3 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -36,6 +37,13 @@ cleanly.
     inline-JSON forms — there is no request file to anchor them to in that
     case. Prefer absolute paths (or paths relative to your invocation's
     `cwd`) when using `-` or inline JSON.
+- `--check` — verify a previously committed `--format json` report instead
+  of running a fresh compare (issue #1106). Mutually exclusive with
+  `<request>` (inputs are read from the report itself) — see "`--check` /
+  `--rerun`" below.
+- `--rerun` — full mode for `--check`: best-effort re-run of the compare the
+  report describes, instead of only re-hashing its inputs. Requires
+  `--check`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -1037,14 +1045,127 @@ every possible multi-defect input; a compare run with several independent
 net defects at once may classify some of them generically (`topology`)
 rather than precisely.
 
+## `--check` / `--rerun`
+
+A `klt lvs --format json` report is often committed as evidence alongside a
+design (e.g. as a `klt signoff` manifest citation), but nothing previously
+let a consumer *verify* that a committed report still reproduces against the
+current layout/reference/deck/tool version without hand-rolling a
+normalize-and-diff (issue #1106). `klt lvs --check <report.json>` closes
+that gap:
+
+```
+klt lvs --check design.lvs.json                  # cheap mode (default)
+klt lvs --check design.lvs.json --rerun           # full mode
+```
+
+`--check` is mutually exclusive with the positional `<request>` argument —
+the layout/reference paths, engine, and (when used) extraction deck are all
+read from `<report.json>` itself, not given again on the command line.
+
+### Cheap mode (default)
+
+Reconciles all three hashes an LVS report can carry (unlike `klt drc`'s
+single input hash — see the `provenance`/`environment` fields
+[`docs/json-contract.md`](../json-contract.md) documents): re-hashes
+`layout`/`reference` (the paths exactly as the report echoes them back) via
+`klayout_tools._provenance.sha256_file` and compares against
+`environment.layout_sha256`/`environment.reference_sha256`; when the report
+used an extraction deck (`provenance.deck` is non-`null`), also re-hashes
+that deck's source and compares against `provenance.deck.content_hash`.
+**No compare engine re-run.** Response shape:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "report": "design.lvs.json",
+  "status": "match",
+  "checks": [
+    {
+      "field": "environment.layout_sha256",
+      "expected": "<hex>",
+      "actual": "<hex>",
+      "match": true
+    },
+    {
+      "field": "environment.reference_sha256",
+      "expected": "<hex>",
+      "actual": "<hex>",
+      "match": true
+    }
+  ]
+}
+```
+
+(A `provenance.deck.content_hash` entry is appended to `checks[]` only when
+the original run used an extraction deck.) `status` is `"match"` only when
+every `checks[]` entry's `match` is `true` — a report with no recorded hash
+to compare against always renders that check `match: false`, never a false
+pass.
+
+**Known limitation**: `layout`/`reference` are echoed exactly as given in
+the original request document, which may have been relative to that request
+*file's own directory* — not necessarily the current working directory (see
+"Request" above). This re-hashes them relative to the current working
+directory of the `--check` invocation, the same convention `klt drc
+--check`'s `file` field uses; if the original request used request-file-
+relative paths, invoke `--check` from that same directory, or commit
+reports whose `layout`/`reference` are already absolute paths.
+
+### Full mode (`--rerun`)
+
+Best-effort re-run of the compare the committed report describes,
+reconstructed from the fields the response actually echoes (`engine`,
+`layout`/`reference`, `top`, the deck name/options under `provenance.deck`,
+and `parameter_tolerance`), then diffs the fresh report against the
+committed one field by field — same volatile-field exclusions as `klt drc
+--rerun` (`provenance.klt_version`/`klayout_version`/`pdk.version`; `pdk` is
+always `null` for LVS, so only the first two ever apply in practice).
+Response shape mirrors `klt drc --rerun`'s:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "rerun",
+  "report": "design.lvs.json",
+  "status": "drifted",
+  "drift": [
+    { "field": "status", "committed": "match", "fresh": "mismatch" },
+    { "field": "mismatch_count", "committed": 0, "fresh": 1 }
+  ],
+  "fresh": { "...": "the freshly produced klt lvs report, full shape" }
+}
+```
+
+**Known limitations** (best-effort, not a byte-exact replay of the original
+request): the pre-extracted-netlist-with-deck combo (`layout.netlist` +
+`layout.deck`, issue #585) is indistinguishable from plain `layout.file`
+inline extraction from the response alone — both populate `provenance.deck`
+— so `--rerun` always reconstructs `layout.file`; in that specific combo it
+fails loudly (a clean error, not a silent wrong answer) since the named path
+is actually a SPICE netlist, not a layout stream. A non-default
+`reference.form` (`"subckt-call"`), `options.combine_devices`/
+`flatten_reference`/`flatten_layout`, and `layout.top_cell_pins`/
+`declared_pins`/`device_bulk` are never echoed anywhere in the response and
+are always reconstructed as each option's own default. Use cheap mode
+instead when any of these apply to the original request.
+
+### Exit codes for `--check` / `--rerun`
+
+Both modes reuse the same 0/3 split a normal run uses: `0` when `status` is
+`"match"`, `3` when it is `"drifted"` (see "Exit codes" below). A missing or
+unparseable `<report.json>` exits `1` with a clean error message, same as
+any other application-level failure.
+
 ## Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | LVS clean — layout matches reference (`status: "match"`). |
-| `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error. |
-| `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
-| `3` | Ran successfully; mismatches found (`status: "mismatch"`); the documented payload is on stdout. |
+| `0` | LVS clean — layout matches reference (`status: "match"`). Under `--check`: the committed report still holds (`status: "match"`). |
+| `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error. Under `--check`: a missing/unparseable committed report. |
+| `2` | Usage error (missing argument, bad `--format` value, or combining `<request>` with `--check`) — from argparse. |
+| `3` | Ran successfully; mismatches found (`status: "mismatch"`); the documented payload is on stdout. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 
 This is `klt lvs`'s direct analogue of `klt drc`'s `3` ("ran clean but found
 findings") — LVS is a clean/dirty verdict like DRC, so it uses `drc`'s

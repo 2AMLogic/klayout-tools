@@ -20,7 +20,7 @@ from klayout_tools.decks import (
     get_extraction_deck,
     get_unmodeled_voltage_markers,
 )
-from klayout_tools.drc import DrcError, run_drc
+from klayout_tools.drc import DrcError, check_drc_report, rerun_drc_report, run_drc
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
@@ -5070,3 +5070,226 @@ def test_sg13g2_extraction_deck_declares_mos_recognition():
     assert deck.vias == ((19, 0),)
     assert deck.tap is None
     assert deck.device_classes == ("nfet", "pfet")
+
+
+# --------------------------------------------------------------------------- #
+# `klt drc --check` / `--rerun` (issue #1106): verify a committed report
+# --------------------------------------------------------------------------- #
+
+
+def _write_report(path: Path, report: dict) -> str:
+    path.write_text(json.dumps(report))
+    return str(path)
+
+
+def test_check_drc_report_clean_pass(tmp_path):
+    """Cheap mode: an unmutated input/deck re-hashes to the same values the
+    committed report already recorded -- `status: "match"`, every check
+    `match: True`."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+
+    result = check_drc_report(str(report_path))
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["report"] == str(report_path)
+    assert result["status"] == "match"
+    assert len(result["checks"]) == 2
+    assert all(check["match"] for check in result["checks"])
+
+
+def test_check_drc_report_detects_moved_input_hash(tmp_path):
+    """A layout mutated after the report was committed is caught -- only the
+    `provenance.input.content_hash` check fails, `deck` still matches."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+
+    _make_violation_layout().write(str(path))  # overwrite in place
+
+    result = check_drc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.deck.content_hash"]["match"] is True
+
+
+def test_check_drc_report_missing_recorded_hash_is_never_a_false_pass(tmp_path):
+    """A report predating issue #331 (no recorded `provenance.input
+    .content_hash`) renders `"drifted"`, never a false `"match"` -- mirrors
+    `klt signoff`'s `_grade_evidence()` "never a false pass" discipline
+    (see `_report_verify.hash_check`'s docstring)."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    report["provenance"]["input"] = None
+    report_path = tmp_path / "old.drc.json"
+    _write_report(report_path, report)
+
+    result = check_drc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["expected"] is None
+
+
+def test_check_drc_report_missing_file_raises(tmp_path):
+    with pytest.raises(DrcError, match="not found"):
+        check_drc_report(str(tmp_path / "nope.drc.json"))
+
+
+def test_check_drc_report_malformed_json_raises(tmp_path):
+    report_path = tmp_path / "bad.drc.json"
+    report_path.write_text("not json")
+    with pytest.raises(DrcError, match="not valid JSON"):
+        check_drc_report(str(report_path))
+
+
+def test_rerun_drc_report_clean_pass(tmp_path):
+    """Full mode: re-running an unchanged input/deck produces an
+    identical-modulo-volatile-fields report -- `status: "match"`, empty
+    `drift`."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["status"] == "clean"
+
+
+def test_rerun_drc_report_detects_new_violation(tmp_path):
+    """A layout mutated to introduce a violation after the report was
+    committed drifts under full-mode `--rerun`, naming `status`/
+    `violation_count`/`violations` among the drifted fields."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+
+    _make_violation_layout().write(str(path))  # overwrite in place
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    drifted_fields = {entry["field"] for entry in result["drift"]}
+    assert "status" in drifted_fields
+    assert "violation_count" in drifted_fields
+    assert result["fresh"]["status"] == "violations"
+
+
+def test_rerun_drc_report_excludes_volatile_provenance_fields(tmp_path):
+    """`provenance.klt_version`/`klayout_version` legitimately vary between
+    runs -- forging different values into the committed report must not
+    show up in `drift` when nothing else changed."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    report["provenance"]["klt_version"] = "0.0.1-forged"
+    report["provenance"]["klayout_version"] = "0.0.1-forged"
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, report)
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_drc_report_missing_deck_field_raises(tmp_path):
+    report_path = tmp_path / "bad.drc.json"
+    _write_report(report_path, {"file": "x.gds"})
+    with pytest.raises(DrcError, match="deck"):
+        rerun_drc_report(str(report_path))
+
+
+def test_cli_check_clean_exits_zero(tmp_path, capsys):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+    capsys.readouterr()
+
+    assert main(["drc", "--check", str(report_path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "check"
+    assert data["status"] == "match"
+
+
+def test_cli_check_drifted_exits_three(tmp_path, capsys):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+    _make_violation_layout().write(str(path))
+    capsys.readouterr()
+
+    assert main(["drc", "--check", str(report_path), "--format", "json"]) == 3
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "drifted"
+
+
+def test_cli_check_rerun_exits_three_on_drift(tmp_path, capsys):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+    _make_violation_layout().write(str(path))
+    capsys.readouterr()
+
+    assert (
+        main(["drc", "--check", str(report_path), "--rerun", "--format", "json"]) == 3
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "rerun"
+    assert data["status"] == "drifted"
+
+
+def test_cli_check_with_file_argument_is_a_usage_error(tmp_path):
+    """`file` and `--check` are a required, mutually exclusive argparse
+    group (issue #1106) -- combining them is a usage error (exit 2), the
+    same as any other mutually exclusive argparse pair, not an
+    application-level (`--format json` error envelope) one."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["drc", str(path), "--check", str(report_path), "--format", "json"])
+    assert exc_info.value.code == 2
+
+
+def test_cli_rerun_without_check_is_rejected(tmp_path, capsys):
+    """`--rerun` alongside `file` (no `--check`) passes argparse's
+    mutually-exclusive-group check (`file` alone already satisfies "one of
+    file/--check required") but is still a semantic error at the
+    application level (exit 1) -- `--rerun` only means something for
+    `--check`."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    capsys.readouterr()
+
+    assert main(["drc", str(path), "--rerun", "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "requires --check" in err["error"]["message"]
+
+
+def test_cli_no_file_no_check_is_a_usage_error():
+    """Omitting both `file` and `--check` is a usage error (exit 2) --
+    unchanged from the pre-#1106 "`file` is a required positional"
+    contract, now enforced via a required mutually exclusive group instead
+    of a plain required positional (see `parser.py`'s `drc_input_group`)."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["drc", "--format", "json"])
+    assert exc_info.value.code == 2
