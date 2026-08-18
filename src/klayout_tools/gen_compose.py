@@ -2792,6 +2792,8 @@ def route_two_pin(
                 extraction_deck,
                 block_geometry,
                 waypoints_um=lane,
+                cross_block_route_layer=cross_block_route_layer,
+                cross_block_geometry=cross_block_geometry,
             )
             if retry["routed"]:
                 return retry
