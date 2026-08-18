@@ -805,6 +805,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-18 — `klt signoff --manifest` gains an opt-in **generic evidence
+  envelope** (`"kind": "generic"`, issue #1152) as the ingestion path for T1
+  item 8 ("Characterization report"), the one T1 checklist item naming no
+  specific `klt` verb -- e.g. a project's own hand-rolled record backing a
+  committed Markdown characterization report. A minimal JSON wrapper
+  (`schema_version`, `"kind": "generic"`, `status: "pass"|"fail"`, plus
+  optional `summary`/`source`/`provenance`) is recognized by `_classify` via
+  its explicit `"kind"` self-declaration, checked ahead of every native
+  structural check so an incidental field collision can never misclassify
+  it; graded in envelope-aggregation mode exactly like the six native
+  kinds. A new, independent `_ITEMS_ACCEPTING_GENERIC_EVIDENCE` set (today
+  `{8}`) gates which `--manifest` tier items a passing `"generic"` citation
+  may satisfy -- items 3-7 (DRC/LVS/corner/Monte-Carlo/post-layout) and the
+  otherwise-unrestricted items 1, 2, 9, 10 all continue to render
+  `"unmet"`/`"wrong_kind"` for a `"generic"` citation, never a borrowed
+  pass. `provenance` is optional, unlike every native kind: when given, it
+  participates in the existing staleness/consistency machinery for free; when
+  omitted, a manifest-pinned `content_hash` against that entry always
+  renders `"unmet"`/`"stale_evidence"`, never a false pass. No
+  `SCHEMA_VERSION`/`TIER_REPORT_SCHEMA_VERSION` bump -- additive, matching
+  the precedent set when `yield`/`pex` were added. See
+  `docs/cli/signoff.md`'s "Generic evidence (opt-in, non-`klt`-native)"
+  section.
 - 2026-08-18 — new **`klt.layout_plan.request/1`** contract plus a
   library-level reference validator (issue #1131, Phase B of
   `docs/design/netlist-driven-layout-spike.md`): a declarative plan

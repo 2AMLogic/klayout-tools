@@ -155,7 +155,17 @@ every block.
    evidence record each verdict rests on (#309 tracks the aggregation
    tool). For a digital or mixed-signal digital partition this includes
    Fmax, area, and power across the corner set, not just functional
-   pass/fail.
+   pass/fail. Unlike every other T1 item, this one names no specific `klt`
+   verb — there is no dedicated aggregation command, and its evidence may be
+   a hand-assembled record (e.g. a committed Markdown characterization
+   report) rather than one `klt` verb's own JSON output. `klt signoff
+   --manifest` grades it via an opt-in **generic evidence envelope**
+   (`"kind": "generic"`, issue #1152) — a minimal, hand-rolled JSON wrapper
+   asserting `status: "pass"|"fail"` for whatever record backs it — and,
+   unlike every other item, item 8 is the *only* T1 item this generic kind
+   may satisfy: see `docs/cli/signoff.md`'s "Generic evidence (opt-in,
+   non-`klt`-native)" section for the envelope shape and why items 3–7 keep
+   rejecting it.
 9. **Testbenches shipped** — every claimed measurement's testbench
    committed, with a documented cold-start invocation a third party can
    run; pinned PDK revision.
