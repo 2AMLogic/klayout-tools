@@ -4896,6 +4896,46 @@ def _detect_voltage_domain_overlap(
     return warnings, voltage_domain_warnings
 
 
+def _partition_region_by_islands(
+    region: kdb.Region, islands: list[kdb.Region]
+) -> tuple[kdb.Region, list[kdb.Region]]:
+    """Split ``region``'s own connected components into an "outside every
+    island" remainder plus one bucket per entry in ``islands`` (issue #1128,
+    see ``ExtractionDeck.substrate_isolation``'s docstring) -- the same "any
+    overlap claims the whole connected component" idiom ``mos_flavours``
+    marker classification already uses in :func:`_extract_netlist` (a
+    component cannot legally straddle two distinct isolation islands any
+    more than a transistor can legally straddle a voltage-domain marker
+    boundary, so whichever island is tested first for an overlapping
+    component wins).
+
+    Returns ``(region, [])`` -- ``region`` itself, completely unmodified,
+    with no connected-component walk at all -- when ``islands`` is empty.
+    This is the overwhelmingly common case (a deck that declares no
+    ``substrate_isolation``, or a layout that draws no shapes on one that is
+    declared) and is deliberately a fast, no-op path: skipping the walk
+    means the returned region is the exact same object passed in, not a
+    reassembled-from-merged-components copy that could fracture polygons
+    differently, so every caller stays byte-for-byte identical to the
+    pre-#1128 code path in that case.
+    """
+    if not islands:
+        return region, []
+    import klayout.db as kdb
+
+    outside = kdb.Region()
+    per_island: list[kdb.Region] = [kdb.Region() for _ in islands]
+    for component in region.merged().each():
+        component_region = kdb.Region(component)
+        for index, island in enumerate(islands):
+            if not component_region.interacting(island).is_empty():
+                per_island[index] += component_region
+                break
+        else:
+            outside += component_region
+    return outside, per_island
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -5211,6 +5251,45 @@ def _extract_netlist(
     nfet_sd = nfet_active - poly
     pfet_sd = pfet_active - poly
 
+    # Per-isolated-region substrate scoping (issue #1128): when the deck
+    # declares `substrate_isolation` (e.g. gf180mcu's DNWELL), NMOS bodies
+    # -- and any substrate-tie tap geometry (below) -- inside a connected
+    # component of that layer get their own synthesized identity instead of
+    # sharing the deck-wide `substrate_net` global. See
+    # `ExtractionDeck.substrate_isolation`'s own docstring for the full
+    # derivation. `isolation_islands` is sorted by bounding box (not raw
+    # `Region` iteration order, which is not a documented stability
+    # guarantee) so the per-island identities synthesized below are stable
+    # across re-runs of the same layout. Empty -- and every downstream
+    # partition below a guaranteed no-op via
+    # `_partition_region_by_islands` -- for the overwhelmingly common case:
+    # a deck that leaves this field `None` (every deck as of this field's
+    # introduction until gf180mcu's own module sets it), or a layout that
+    # draws no shapes on a deck's declared isolation layer at all.
+    isolation_region = _region(layout, top_cell, deck.substrate_isolation)
+    isolation_islands: list[kdb.Region] = sorted(
+        (kdb.Region(component) for component in isolation_region.merged().each()),
+        key=lambda region: (
+            region.bbox().left,
+            region.bbox().bottom,
+            region.bbox().right,
+            region.bbox().top,
+        ),
+    )
+    # `nfet_active_outside`/`nfet_active_isolated` feed only the device-
+    # recognition ("W" terminal) split below -- `nfet_gate`/`nfet_sd` above
+    # stay the full (unpartitioned) region for every *other* purpose
+    # (ordinary gate/SD net connectivity, the `_compute_parasitics` poly-
+    # role gate exclusion), so a transistor's signal terminals route
+    # normally regardless of which body-identity group it falls into.
+    nfet_active_outside, nfet_active_isolated = _partition_region_by_islands(
+        nfet_active, isolation_islands
+    )
+    nfet_gate_outside = nfet_active_outside & poly
+    nfet_sd_outside = nfet_active_outside - poly
+    nfet_gate_isolated = [region & poly for region in nfet_active_isolated]
+    nfet_sd_isolated = [region - poly for region in nfet_active_isolated]
+
     # Same NMOS/PMOS + gate/SD split, per declared flavour (index-aligned
     # with `deck.mos_flavours`/`flavour_active` above).
     flavour_nfet_gate: list[kdb.Region] = []
@@ -5398,10 +5477,73 @@ def _extract_netlist(
     tap_substrate = tap - nwell
     l2n.register(tap_substrate, "tap_substrate")
 
+    # Per-isolated-region body placeholders (issue #1128): one additional,
+    # equally-empty placeholder `Region` per `isolation_islands` entry,
+    # registered under its own name -- the exact same "shared, permanently
+    # empty, `connect_global`-only" contract `nfet_body` above documents,
+    # just one instance per isolated region instead of one for the whole
+    # layout. `tap_substrate` is likewise split into the slice outside
+    # every isolation island (`tap_substrate_outside` -- ties to
+    # `nfet_body`/`deck.substrate_net` exactly as `tap_substrate` did before
+    # this field existed) and one slice per island
+    # (`tap_substrate_isolated`, aligned with `nfet_body_isolated`) tied to
+    # that island's own synthesized identity instead. Both partitions are
+    # true no-ops (`tap_substrate_outside is tap_substrate`,
+    # `nfet_body_isolated == []`) when `isolation_islands` is empty.
+    nfet_body_isolated: list[kdb.Region] = []
+    for index in range(len(isolation_islands)):
+        island_body = kdb.Region()
+        l2n.register(island_body, f"nfet_body_iso{index}")
+        nfet_body_isolated.append(island_body)
+    tap_substrate_outside, tap_substrate_isolated = _partition_region_by_islands(
+        tap_substrate, isolation_islands
+    )
+    if isolation_islands:
+        l2n.register(tap_substrate_outside, "tap_substrate_outside")
+        for index, isolated_slice in enumerate(tap_substrate_isolated):
+            l2n.register(isolated_slice, f"tap_substrate_iso{index}")
+
     nfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.nfet_class)
     pfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.pfet_class)
-    l2n.extract_devices(nfet_extractor, {"SD": nfet_sd, "G": nfet_gate, "W": nfet_body})
+    if isolation_islands:
+        # Devices whose active island overlaps no isolation component still
+        # extract through this same default pass, just against the
+        # `_outside` subset of `nfet_sd`/`nfet_gate` rather than the full
+        # region -- the per-island pass just below extracts the rest, so
+        # together they cover exactly the same geometry `nfet_sd`/
+        # `nfet_gate` do, split only by which "W" placeholder each
+        # transistor's recognised device lands on.
+        l2n.register(nfet_sd_outside, "nfet_sd_substrate_outside")
+        l2n.register(nfet_gate_outside, "nfet_gate_substrate_outside")
+        l2n.extract_devices(
+            nfet_extractor,
+            {"SD": nfet_sd_outside, "G": nfet_gate_outside, "W": nfet_body},
+        )
+    else:
+        l2n.extract_devices(
+            nfet_extractor, {"SD": nfet_sd, "G": nfet_gate, "W": nfet_body}
+        )
     l2n.extract_devices(pfet_extractor, {"SD": pfet_sd, "G": pfet_gate, "W": nwell})
+
+    # One additional `nfet` extraction pass per isolated region (issue
+    # #1128), mirroring the `mos_flavours` "additional pass, same device
+    # class" pattern just below: reuses `deck.nfet_class` (not a distinct
+    # class), so KLayout folds these devices into the same
+    # `DeviceClassMOS4Transistor` the default pass above created --
+    # `devices[].class`/`device_counts` are unaffected by isolation
+    # scoping, only each device's own "W"/body net identity is. Applies
+    # only to this deck's *default* (non-`mos_flavours`) NMOS recognition
+    # -- see `ExtractionDeck.substrate_isolation`'s docstring for the
+    # documented flavour/isolation interaction gap.
+    for index, (sd_region, gate_region, body_region) in enumerate(
+        zip(nfet_sd_isolated, nfet_gate_isolated, nfet_body_isolated, strict=True)
+    ):
+        l2n.register(sd_region, f"nfet_sd_iso{index}")
+        l2n.register(gate_region, f"nfet_gate_iso{index}")
+        island_extractor = kdb.DeviceExtractorMOS4Transistor(deck.nfet_class)
+        l2n.extract_devices(
+            island_extractor, {"SD": sd_region, "G": gate_region, "W": body_region}
+        )
 
     # Per-flavour MOS device extraction (issue #1111): one *additional*
     # `nfet`/`pfet` extraction pass per declared flavour, against that
@@ -5424,6 +5566,15 @@ def _extract_netlist(
     # snapshot around each flavour's own `extract_devices` call is how the
     # newly-added devices are identified without needing any geometric
     # correlation back to a device after the fact.
+    #
+    # A flavoured NMOS device's own "W" terminal is always `nfet_body` (the
+    # deck-wide outside/global identity) below, never one of
+    # `nfet_body_isolated` -- issue #1128's per-isolated-region scoping is
+    # not applied to `mos_flavours` geometry. A flavoured transistor whose
+    # active island happens to sit inside an isolation region still resolves
+    # to `deck.substrate_net`, exactly as every NMOS device did before
+    # #1128 existed: a known, documented residual gap (see
+    # `ExtractionDeck.substrate_isolation`'s docstring), not a regression.
     for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
         deck.mos_flavours,
         flavour_nfet_sd,
@@ -5732,6 +5883,29 @@ def _extract_netlist(
         l2n.connect(f_pfet_gate)
         l2n.connect(f_nfet_gate, poly)
         l2n.connect(f_pfet_gate, poly)
+    # Same connectivity again, this time against the isolation-split "SD"/
+    # "G" regions actually passed to `extract_devices` above (issue #1128):
+    # KLayout ties a device terminal's connectivity to the *exact*
+    # registered layer object passed as that terminal, not merely to its
+    # underlying geometry, so `nfet_sd_outside`/`nfet_sd_isolated[i]` (and
+    # the matching gate regions) need their own `connect()` calls here even
+    # though they physically overlap `nfet_sd`/`nfet_gate` above -- both
+    # ends geometrically meet at `contact`/`poly`, so this still resolves
+    # into the exact same merged nets, just reached through two registered
+    # layers instead of one. A no-op block (`isolation_islands` empty) for
+    # every deck that leaves `substrate_isolation` unset.
+    if isolation_islands:
+        l2n.connect(nfet_sd_outside)
+        l2n.connect(nfet_gate_outside)
+        l2n.connect(nfet_gate_outside, poly)
+        l2n.connect(nfet_sd_outside, contact)
+        for sd_region, gate_region in zip(
+            nfet_sd_isolated, nfet_gate_isolated, strict=True
+        ):
+            l2n.connect(sd_region)
+            l2n.connect(gate_region)
+            l2n.connect(gate_region, poly)
+            l2n.connect(sd_region, contact)
     l2n.connect(nwell)
     if tap_declared:
         l2n.connect(tap)
@@ -5744,8 +5918,14 @@ def _extract_netlist(
         # join the same metal-routed net a tap ring's shapes reach via
         # `tap`/`contact` above. Safe to `connect()` normally here (unlike
         # `nfet_body` above): `tap_substrate` is never passed to
-        # `extract_devices` as a terminal.
-        l2n.connect(tap_substrate, contact)
+        # `extract_devices` as a terminal. Split by isolated region (issue
+        # #1128): `tap_substrate_outside` is `tap_substrate` itself when
+        # `isolation_islands` is empty, so this is a no-op change in the
+        # common case; each `tap_substrate_isolated` slice gets its own
+        # `contact` connection the same way.
+        l2n.connect(tap_substrate_outside, contact)
+        for isolated_slice in tap_substrate_isolated:
+            l2n.connect(isolated_slice, contact)
     l2n.connect(nwell, well_label)
     # Name a poly/gate node directly off a text on the poly-label layer -- the
     # only way a bare-poly gate (no contact/metal landing pad) can carry a
@@ -5780,7 +5960,23 @@ def _extract_netlist(
     # `nfet_body`/`tap_substrate` docstring above) -- the only supported way
     # to give a drawn substrate-tap ring's real net the same identity as
     # every device's `nfet_body` terminal.
-    l2n.connect_global(tap_substrate, deck.substrate_net)
+    l2n.connect_global(tap_substrate_outside, deck.substrate_net)
+
+    # Per-isolated-region substrate identities (issue #1128): each
+    # `isolation_islands[i]` bucket gets its own placeholder body region
+    # (`nfet_body_isolated[i]`, extracted above) and its own slice of any
+    # substrate-tie tap geometry landing inside that island
+    # (`tap_substrate_isolated[i]`) tied together via `connect_global` under
+    # a per-island synthesized name -- the same "empty placeholder +
+    # `connect_global`" mechanism the deck-wide `substrate_net` identity
+    # above uses, just scoped to geometry physically inside one connected
+    # component of `deck.substrate_isolation` instead of the whole layout.
+    # A no-op loop (`nfet_body_isolated == []`) whenever `isolation_islands`
+    # is empty.
+    for index, island_body in enumerate(nfet_body_isolated):
+        island_net = f"{deck.substrate_net}_iso{index}"
+        l2n.connect_global(island_body, island_net)
+        l2n.connect_global(tap_substrate_isolated[index], island_net)
 
     for bipolar, bipolar_base, bipolar_emitter, bipolar_collector in bipolar_regions:
         # Base shares net identity with the deck's own `nwell` (`bipolar_base`
@@ -6642,7 +6838,15 @@ def _compute_parasitics(
     nets: list[kdb.Net] = []
     for net in circuit.each_net():
         name = net.expanded_name()
-        if name == deck.substrate_net:
+        # Every per-isolated-region substrate identity (issue #1128, named
+        # `f"{substrate_net}_iso{n}"` -- see `ExtractionDeck.
+        # substrate_isolation`'s docstring) is skipped here the same way the
+        # deck-wide `substrate_net` global is: each is itself a synthesized
+        # local AC-ground reference for its own isolated region, not an
+        # ordinary signal net whose own ground capacitance should be
+        # measured. No-op when the deck declares no `substrate_isolation`
+        # (no net is ever named this way).
+        if name == deck.substrate_net or name.startswith(f"{deck.substrate_net}_iso"):
             continue
         if net.cluster_id == 0:
             # Belt-and-braces (issue #563): `cluster_id` is the key
