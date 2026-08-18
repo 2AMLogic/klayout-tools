@@ -136,11 +136,12 @@ A's digest adapter) — never a private SPICE parse.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `schema` | string | no | Contract identifier + major version, `"klt.layout_plan.request/1"`. Documentation/tooling may check it; the reference validator does not require it. |
-| `netlist` | object | **yes** | The **same** shape [`klt lvs`](lvs.md)'s reference side accepts — a plan resolves its netlist through the identical ingestion path. |
+| `netlist` | object | **yes** | The **same** `path`/`top`/`form`/`deck`/`device_map` shape [`klt lvs`](lvs.md)'s reference side accepts — a plan resolves its netlist through the identical ingestion path. An unrecognised key is a **usage** error, mirroring `pdk`'s own unknown-key check. |
 | `netlist.path` | string | **yes** | Path to the SPICE netlist. Relative paths resolve against the request's own directory. |
 | `netlist.top` | string | no | Which circuit to digest. Omit when the netlist has exactly one top-level circuit; an ambiguous or missing top circuit is an application error. |
 | `netlist.form` | string | no | `"plain-element"` (default) reads the file as-is; `"subckt-call"` converts a PDK schematic flow's simulation-form netlist first. |
 | `netlist.deck` | string | no | Only meaningful with `form: "subckt-call"` — `"sky130"`/`"gf180mcu"` selects that deck's curated device-name map. |
+| `netlist.device_map` | object\<string, string\> | no | Only meaningful with `form: "subckt-call"`. Explicit `{ "<subckt-name>": "<device_class>" }` overrides, merged on top of `netlist.deck`'s map — for a device subcircuit name the curated table does not cover. Same shape and same ingestion path as [`klt lvs`](lvs.md)'s `reference.device_map`, including its current limitation: every entry is resolved as a MOS-shaped (4-terminal) override, so mapping a non-MOS (e.g. 2-terminal resistor/capacitor) subcircuit raises a clear `device_map only supports MOS-shaped 4-terminal overrides today` error rather than an opaque terminal-count mismatch. Use `netlist.deck` instead for a curated non-MOS device class. |
 | `pdk` | object | no | `variant`/`root` only — the exact fields [`klt gen`](gen.md)/[`klt gen-compose`](gen-compose.md) accept. Any other key (e.g. `name`, a plausible typo for `variant`) is a **usage** error, never a silent fallback. Shape-checked only at Phase B. |
 | `device_groups[]` | array\<object\> | **yes** | One entry per matched/placed unit. May be empty (a plan that declares no groups yet is valid, not an error). |
 | `device_groups[].id` | string | **yes** | Caller-chosen label, addressed by `rows`/`abutment`/`encloses` — mirrors `klt gen-compose`'s `blocks[].id`. Must be unique within `device_groups[]`. |
@@ -264,7 +265,7 @@ see [`docs/json-contract.md`](../json-contract.md)):
 | --- | --- | --- |
 | `schema_version` | integer | Bumped only on a non-additive (breaking) change to this response shape. |
 | `valid` | boolean | Always `true` on return — an invalid plan raises instead of returning `false`, so a caller cannot ignore a failure by forgetting to check a flag. |
-| `netlist` | object | The plan's own `path`/`top`/`form`/`deck`, plus what the digest resolved: `circuit` (the digested circuit's name), `device_count`, `net_count`. |
+| `netlist` | object | The plan's own `path`/`top`/`form`/`deck`/`device_map`, plus what the digest resolved: `circuit` (the digested circuit's name), `device_count`, `net_count`. |
 | `pdk` | object | The plan's `variant`/`root`, echoed (`null` when unset). Not resolved against an installed PDK at Phase B. |
 | `device_groups[]` | array\<object\> | Per group: `id`, `generator`, `topology` (`null` when undeclared), `devices` (**fully qualified** — see "Device references are per-class"), `encloses`. |
 | `rows[]` / `abutment[]` / `options` | — | The plan's own values, normalized with defaults applied (`spacing_um`/`gap_um` as floats, `align` defaulted to `"bottom"`). |
@@ -280,7 +281,7 @@ classes via `exit_code_for()`:
 | --- | --- | --- |
 | `0` | — | The plan is structurally valid and every reference resolves. |
 | `1` | `LayoutPlanError` | **Application error** — the document is shaped correctly but a reference does not resolve: an unknown `device_groups[].devices` name, an ambiguous bare name, a `device_class` that name does not have, a `generator` `klt gen` does not have, a `topology` that generator does not support, an unknown `encloses`/`rows[].order`/`abutment[].a`/`.b` group id, an `abutment[]` entry naming one group on both sides, or a `netlist` that could not be ingested (missing file, unparseable SPICE, ambiguous top circuit). |
-| `2` | `LayoutPlanUsageError` | **Usage error** — the document itself does not conform: invalid JSON syntax, a field of the wrong JSON type, a missing required field, a duplicate `device_groups[].id`, an unknown `pdk` key, or an enum-like field outside its literal set. Every one of these is decidable from the document alone, with no netlist, generator table, or sibling group needed. |
+| `2` | `LayoutPlanUsageError` | **Usage error** — the document itself does not conform: invalid JSON syntax, a field of the wrong JSON type, a missing required field, a duplicate `device_groups[].id`, an unknown `pdk` or `netlist` key, or an enum-like field outside its literal set. Every one of these is decidable from the document alone, with no netlist, generator table, or sibling group needed. |
 
 `LayoutPlanUsageError` subclasses `LayoutPlanError`, so a caller that only
 cares "did this fail" catches the base class and one that needs the exit

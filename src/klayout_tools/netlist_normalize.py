@@ -284,7 +284,9 @@ def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
 
 
 def _convert_x_card(
-    line: str, subckt_to_binding: dict[str, DeviceLookup] | None
+    line: str,
+    subckt_to_binding: dict[str, DeviceLookup] | None,
+    device_map_names: frozenset[str] = frozenset(),
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -295,6 +297,12 @@ def _convert_x_card(
     :class:`~klayout_tools.pdk_models.DeviceLookup`. When ``None`` (no deck /
     no explicit map given), the binding is resolved per-name against the
     whole curated table.
+
+    ``device_map_names`` is the subset of ``subckt_to_binding`` keys that
+    came from a caller-supplied ``device_map`` override (as opposed to
+    ``deck``'s curated table) -- see :func:`_build_subckt_map`'s docstring.
+    It is only used to give a clearer error (issue #1163) when such an
+    override does not actually describe a MOS-shaped device.
     """
     tokens = _tokenize(line)
     if not tokens:
@@ -326,7 +334,14 @@ def _convert_x_card(
     instance = _instance_name(name_token, lookup.kind)
 
     if lookup.kind == "mos":
-        return _convert_mos_card(instance, nodes, subckt_name, lookup, params)
+        return _convert_mos_card(
+            instance,
+            nodes,
+            subckt_name,
+            lookup,
+            params,
+            from_device_map=subckt_name in device_map_names,
+        )
     if lookup.kind == "resistor":
         return _convert_geometry_card("R", instance, nodes, subckt_name, lookup, params)
     if lookup.kind == "capacitor":
@@ -340,12 +355,33 @@ def _convert_mos_card(
     subckt_name: str,
     lookup: DeviceLookup,
     params: dict[str, str],
+    *,
+    from_device_map: bool = False,
 ) -> str:
     """The original #280 MOS conversion (``d g s b`` -> plain ``M`` card),
     unchanged in behaviour -- only its resolved-binding plumbing moved to
     share the new multi-family dispatch in :func:`_convert_x_card`.
+
+    ``from_device_map`` (issue #1163) marks a binding that came from a
+    caller-supplied ``device_map`` override rather than a curated ``deck``
+    table -- every ``device_map`` entry is currently resolved as a MOS
+    binding regardless of what the real device is (see
+    :func:`_build_subckt_map`'s docstring), so a terminal-count mismatch
+    here is not a malformed netlist, it is a non-MOS device the override
+    cannot express yet. That case gets a clear, actionable error instead of
+    the generic mismatch message.
     """
     if len(nodes) != _MOS_TERMINALS:
+        if from_device_map:
+            raise NormalizeError(
+                f"device '{instance}' (subcircuit '{subckt_name}'): "
+                f"device_map only supports MOS-shaped {_MOS_TERMINALS}-terminal "
+                f"overrides today, but this subcircuit has {len(nodes)} "
+                f"terminal(s) ({' '.join(nodes) or '<none>'}) -- pass a "
+                'deck ("sky130"/"gf180mcu") instead if this device is '
+                "one of that deck's curated non-MOS (resistor/capacitor/"
+                "bipolar) classes, or flatten it out of the netlist"
+            )
         raise NormalizeError(
             f"device '{instance}' (subcircuit '{subckt_name}'): expected "
             f"{_MOS_TERMINALS} terminals (d g s b), found {len(nodes)} "
@@ -618,17 +654,23 @@ def _instance_name(name_token: str, kind: str = "mos") -> str:
 
 def _build_subckt_map(
     deck: str | None, device_map: dict[str, str] | None
-) -> dict[str, DeviceLookup] | None:
+) -> tuple[dict[str, DeviceLookup] | None, frozenset[str]]:
     """Resolve the ``<subckt-name> -> DeviceLookup`` map for a conversion
     request from an optional deck name and/or an optional explicit override
-    map. Returns ``None`` when neither is given (per-name auto-resolution
+    map. Returns ``(map, device_map_names)``; ``map`` is ``None`` when
+    neither ``deck`` nor ``device_map`` is given (per-name auto-resolution
     against the whole curated table).
 
     ``device_map`` (issue #280's caller-supplied override) is always treated
     as a MOS ``l``/``w`` binding -- unchanged from before this issue's
     device-family extension; a non-MOS override is not yet supported (a
     caller needing one should use ``deck`` instead, whose curated table
-    already covers every family).
+    already covers every family). ``device_map_names`` (issue #1163) is the
+    subset of the returned map's keys that came from ``device_map`` itself
+    (as opposed to ``deck``) -- used only so a non-MOS ``device_map`` entry
+    fails with a clear, named error (:func:`_convert_mos_card`) rather than
+    an opaque terminal-count mismatch indistinguishable from a genuinely
+    malformed netlist.
     """
     resolved: dict[str, DeviceLookup] = {}
     if deck is not None:
@@ -636,6 +678,9 @@ def _build_subckt_map(
             resolved.update(build_device_binding_map(deck))
         except ModelBindingError as exc:
             raise NormalizeError(str(exc)) from exc
+    device_map_names: frozenset[str] = (
+        frozenset(device_map) if device_map else frozenset()
+    )
     if device_map:
         resolved.update(
             {
@@ -643,7 +688,7 @@ def _build_subckt_map(
                 for name, device_class in device_map.items()
             }
         )
-    return resolved or None
+    return resolved or None, device_map_names
 
 
 def normalize_reference_netlist(
@@ -665,7 +710,7 @@ def normalize_reference_netlist(
     device lines converts correctly. Raises :class:`NormalizeError` for any
     device card that cannot be converted correctly and unambiguously.
     """
-    subckt_to_binding = _build_subckt_map(deck, device_map)
+    subckt_to_binding, device_map_names = _build_subckt_map(deck, device_map)
     logical_lines = _merge_continuations(text.splitlines())
 
     out: list[str] = []
@@ -676,7 +721,7 @@ def normalize_reference_netlist(
             continue
         first = stripped.split(None, 1)[0]
         if first and first[0] in "Xx":
-            out.append(_convert_x_card(line, subckt_to_binding))
+            out.append(_convert_x_card(line, subckt_to_binding, device_map_names))
         else:
             out.append(line)
     return "\n".join(out) + "\n"

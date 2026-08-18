@@ -381,6 +381,28 @@ def test_unknown_pdk_key_is_usage_error(bandgap_digest):
     assert exit_code_for(excinfo.value) == 2
 
 
+def test_unknown_netlist_key_is_usage_error(bandgap_digest):
+    # issue #1163: request.netlist previously silently dropped any key
+    # outside path/top/form/deck -- it must now reject one, mirroring pdk's
+    # own unknown-key check.
+    plan = _valid_plan()
+    plan["netlist"]["name"] = "typo"  # not an allowed netlist key
+
+    with pytest.raises(LayoutPlanUsageError) as excinfo:
+        validate_layout_plan(plan, bandgap_digest)
+    assert exit_code_for(excinfo.value) == 2
+    assert "device_map" in str(excinfo.value)  # names the allowed key set
+
+
+def test_netlist_device_map_must_be_a_json_object(bandgap_digest):
+    plan = _valid_plan()
+    plan["netlist"]["device_map"] = ["not", "an", "object"]
+
+    with pytest.raises(LayoutPlanUsageError) as excinfo:
+        validate_layout_plan(plan, bandgap_digest)
+    assert exit_code_for(excinfo.value) == 2
+
+
 def test_duplicate_device_group_id_is_usage_error(bandgap_digest):
     plan = _valid_plan()
     plan["device_groups"][1]["id"] = "diffpair"
@@ -540,6 +562,37 @@ XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
     assert result["netlist"]["device_count"] == 2
 
 
+def test_netlist_device_map_is_threaded_through_digest_ingestion(tmp_path):
+    # issue #1163: request.netlist.device_map must actually reach
+    # build_netlist_digest() -- previously silently dropped, so a netlist
+    # naming a device subckt outside the curated deck's table could not be
+    # planned at all (klt lvs's reference.device_map already handles this
+    # exact case for the same ingestion path).
+    text = """
+.subckt analog_block A Y GND VPWR VGND
+XM1 Y A VGND VGND my_custom_nfet L=0.15u W=0.65u
+.ends
+"""
+    _write(tmp_path, "custom.spice", text)
+    plan = {
+        "schema": REQUEST_SCHEMA,
+        "netlist": {
+            "path": "custom.spice",
+            "top": "analog_block",
+            "form": "subckt-call",
+            "device_map": {"my_custom_nfet": "nfet"},
+        },
+        "device_groups": [
+            {"id": "m1", "devices": ["1"], "generator": "mos_array"},
+        ],
+    }
+
+    result = validate_layout_plan_document(plan, request_dir=str(tmp_path))
+    assert result["valid"] is True
+    assert result["netlist"]["device_count"] == 1
+    assert result["netlist"]["device_map"] == {"my_custom_nfet": "nfet"}
+
+
 # -- The published JSON Schema agrees with the reference validator --------
 
 
@@ -581,6 +634,9 @@ def test_class_qualified_device_reference_conforms_to_published_schema():
             lambda p: p["netlist"].update(form="not_a_form"), id="unknown-form"
         ),
         pytest.param(lambda p: p.update(pdk={"name": "sky130A"}), id="unknown-pdk-key"),
+        pytest.param(
+            lambda p: p["netlist"].update(name="typo"), id="unknown-netlist-key"
+        ),
         pytest.param(
             lambda p: p["device_groups"][0].update(devices=[{"nam": "1"}]),
             id="malformed-device-reference",

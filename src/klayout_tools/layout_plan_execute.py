@@ -827,6 +827,7 @@ def execute_layout_plan_document(
             top=netlist_spec["top"],
             form=netlist_spec["form"],
             deck=netlist_spec["deck"],
+            device_map=netlist_spec["device_map"],
         )
     except LvsError as exc:
         raise layout_plan.LayoutPlanError(
