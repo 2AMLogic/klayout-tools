@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 400" width="380" height="400"
+     role="img" aria-labelledby="title desc">
+  <title id="title">sky130_fd_sc_hd__nand2_2 schematic</title>
+  <desc id="desc">
+    A 2-input CMOS NAND gate: two PMOS transistors in parallel between VDD and output node Y (gated by A and B), and two NMOS transistors in series between Y and VSS (A nearer Y, B nearer VSS). The real layout folds each of these 4 logical transistors into 2 parallel fingers for drive strength (8 physical devices in the netlist); this diagram shows the logical topology.
+  </desc>
+  <!--
+    Theme-aware convention (matches site/README.md "Schematic section"):
+    self-contained light/dark palette via `prefers-color-scheme`, since a
+    staged SVG is loaded via <img> and cannot inherit host-page currentColor.
+    Verified against sky130_fd_sc_hd__nand2_2.spice (see provenance line in
+    layout.json) — 8 physical devices (4 N, 4 P), each logical transistor
+    folded x2. See issue #1123 PR body for the full device-by-device trace.
+  -->
+  <style>
+    .wire, .body { stroke: #1f2430; fill: none; stroke-width: 2; stroke-linecap: round; }
+    .dot { fill: #1f2430; }
+    .label { fill: #1f2430; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+    .label-sm { fill: #1f2430; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+    .block { stroke: #1f2430; fill: none; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    @media (prefers-color-scheme: dark) {
+      .wire, .body { stroke: #c6cdd6; }
+      .dot { fill: #c6cdd6; }
+      .label { fill: #c6cdd6; }
+      .label-sm { fill: #c6cdd6; }
+      .block { stroke: #c6cdd6; }
+    }
+  </style>
+
+  <line class="wire" x1="100" y1="40" x2="280" y2="40" />
+  <text class="label" x="190" y="26" text-anchor="middle">VDD</text>
+  <line class="wire" x1="100" y1="350" x2="280" y2="350" />
+  <text class="label" x="190" y="375" text-anchor="middle">VSS</text>
+  <line class="wire" x1="140" y1="40" x2="140" y2="75" />
+  <line class="body" x1="140" y1="75" x2="140" y2="145" />
+  <line class="wire" x1="140" y1="180" x2="140" y2="145" />
+  <circle class="dot" cx="134" cy="110" r="4" />
+  <line class="wire" x1="60" y1="110" x2="134" y2="110" />
+  <text class="label-sm" x="155" y="90" text-anchor="start">MP_A (x2)</text>
+  <line class="wire" x1="240" y1="40" x2="240" y2="75" />
+  <line class="body" x1="240" y1="75" x2="240" y2="145" />
+  <line class="wire" x1="240" y1="180" x2="240" y2="145" />
+  <circle class="dot" cx="246" cy="110" r="4" />
+  <line class="wire" x1="320" y1="110" x2="246" y2="110" />
+  <text class="label-sm" x="225" y="90" text-anchor="end">MP_B (x2)</text>
+  <line class="wire" x1="140" y1="180" x2="340" y2="180" />
+  <circle class="dot" cx="190" cy="180" r="4" />
+  <text class="label" x="348" y="185" text-anchor="start">Y</text>
+  <line class="wire" x1="190" y1="180" x2="190" y2="215" />
+  <line class="body" x1="190" y1="215" x2="190" y2="250" />
+  <line class="wire" x1="190" y1="250" x2="190" y2="285" />
+  <line class="body" x1="190" y1="285" x2="190" y2="320" />
+  <line class="wire" x1="190" y1="320" x2="190" y2="350" />
+  <text class="label-sm" x="205" y="235" text-anchor="start">MN_A (x2)</text>
+  <text class="label-sm" x="205" y="305" text-anchor="start">MN_B (x2)</text>
+  <line class="wire" x1="60" y1="215" x2="190" y2="215" />
+  <line class="wire" x1="320" y1="285" x2="190" y2="285" />
+  <line class="wire" x1="60" y1="110" x2="60" y2="215" />
+  <line class="wire" x1="20" y1="162" x2="60" y2="162" />
+  <text class="label" x="12" y="167" text-anchor="end">A</text>
+  <line class="wire" x1="320" y1="110" x2="320" y2="285" />
+  <line class="wire" x1="320" y1="197" x2="360" y2="197" />
+  <text class="label" x="368" y="202" text-anchor="start">B</text>
+</svg>
