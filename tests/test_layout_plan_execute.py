@@ -316,12 +316,26 @@ def _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows, abutment=
     }
 
 
-def _strip_group(group_id: str, length_um: float, width_um: float) -> dict:
+def _strip_group(
+    group_id: str, length_um: float, width_um: float, *, spacing_um: float = 0.0
+) -> dict:
+    # ``spacing_um`` also feeds ``resistor_strip``'s own declared
+    # ``drc_hints.min_spacing_um`` (gen.py's ``_resistor_strip_describe``) --
+    # explicitly zeroed by default so the row-offset/align/abutment tests
+    # below stay decoupled from the inter-row-margin behavior covered by the
+    # dedicated tests in "Inter-row margin" below (issue #1170). With
+    # ``num=1`` a nonzero ``spacing_um`` has no effect on this group's own
+    # drawn geometry (there is only one unit resistor to space).
     return {
         "id": group_id,
         "devices": [],
         "generator": "resistor_strip",
-        "params": {"length_um": length_um, "width_um": width_um, "num": 1},
+        "params": {
+            "length_um": length_um,
+            "width_um": width_um,
+            "num": 1,
+            "spacing_um": spacing_um,
+        },
     }
 
 
@@ -345,8 +359,10 @@ def test_row_of_rows_offset_stacking_bottom_align(tmp_path, pdk_root, empty_netl
     assert offsets["a"] == pytest.approx({"x": 0.0, "y": 0.0})
     assert offsets["b"] == pytest.approx({"x": 3.0, "y": 0.0})
     # Row 2 ("c"): stacked above row 1 by row 1's tallest group ("b",
-    # height 3.0um) -- no additional inter-row margin (the spike's own
-    # row-of-rows description names none).
+    # height 3.0um) -- no inter-row margin here since every group's own
+    # declared drc_hints.min_spacing_um is 0.0 (see `_strip_group`'s default
+    # `spacing_um=0.0`); the dedicated "Inter-row margin" tests below cover
+    # the nonzero-default and explicit-override cases (issue #1170).
     assert offsets["c"] == pytest.approx({"x": 0.0, "y": 3.0})
 
 
@@ -451,6 +467,110 @@ def test_abutment_overrides_row_derived_placement_with_warning(
     assert any(
         "overrides device_groups 'b'" in warning for warning in response["warnings"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Inter-row margin (issue #1170): `_resolve_placement()` no longer stacks
+# `rows[]` at exactly the running height total with 0.00um separation by
+# default -- it now adds a margin before every row after the first.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_row_default_margin_uses_larger_declared_min_spacing_um(
+    tmp_path, pdk_root, empty_netlist
+):
+    """With no explicit `rows[].margin_um`, the default vertical gap between
+    two rows is the larger of the two rows' groups' own declared
+    `drc_hints.min_spacing_um` -- not the previous, always-0.00um default.
+    """
+    groups = [
+        _strip_group("a", 2.0, 1.0, spacing_um=0.3),
+        _strip_group("b", 2.0, 1.0, spacing_um=0.6),
+    ]
+    rows = [
+        {"order": ["a"], "spacing_um": 0.0, "align": "bottom"},
+        {"order": ["b"], "spacing_um": 0.0, "align": "bottom"},
+    ]
+    request = _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    assert exit_code_for(response) == 0
+
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    # Row 1 ("a") sits at y=0, height 1.0um. Row 2 ("b") stacks on top with
+    # the larger of the two rows' declared min_spacing_um (0.6, from "b")
+    # as the default inter-row margin.
+    assert offsets["a"]["y"] == pytest.approx(0.0)
+    assert offsets["b"]["y"] == pytest.approx(1.0 + 0.6)
+
+    # The advisory clearance warning that fired by default before this fix
+    # (gen_compose's "closer than ... declared drc_hints.min_spacing_um")
+    # must not fire now that the gap satisfies both groups' declared minimum.
+    assert not any("closer than" in warning for warning in response["warnings"])
+
+
+def test_multi_row_explicit_margin_um_overrides_default(
+    tmp_path, pdk_root, empty_netlist
+):
+    groups = [
+        _strip_group("a", 2.0, 1.0, spacing_um=0.3),
+        _strip_group("b", 2.0, 1.0, spacing_um=0.6),
+    ]
+    rows = [
+        {"order": ["a"], "spacing_um": 0.0, "align": "bottom"},
+        {
+            "order": ["b"],
+            "spacing_um": 0.0,
+            "align": "bottom",
+            "margin_um": 2.0,
+        },
+    ]
+    request = _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    assert exit_code_for(response) == 0
+
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    # An explicit rows[].margin_um wins outright over the declared-spacing
+    # default (2.0um here, larger than the 0.6um default would have been).
+    assert offsets["b"]["y"] == pytest.approx(1.0 + 2.0)
+
+
+def test_multi_row_explicit_margin_um_zero_forces_flush_stack(
+    tmp_path, pdk_root, empty_netlist
+):
+    """An explicit `margin_um: 0.0` is a deliberate caller choice, distinct
+    from leaving it unset, and is honored even when the declared-spacing
+    default would otherwise add a gap -- the clearance check stays advisory
+    only (#692), never a hard error."""
+    groups = [
+        _strip_group("a", 2.0, 1.0, spacing_um=0.3),
+        _strip_group("b", 2.0, 1.0, spacing_um=0.6),
+    ]
+    rows = [
+        {"order": ["a"], "spacing_um": 0.0, "align": "bottom"},
+        {"order": ["b"], "spacing_um": 0.0, "align": "bottom", "margin_um": 0.0},
+    ]
+    request = _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    assert exit_code_for(response) == 0
+
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    assert offsets["b"]["y"] == pytest.approx(1.0)  # flush -- no margin added
+
+
+def test_single_row_plan_is_unaffected_by_margin_default(
+    tmp_path, pdk_root, empty_netlist
+):
+    """A single-row plan has no "previous row" to add a margin after, so a
+    nonzero declared min_spacing_um must not shift anything -- regression
+    guard for existing single-row plans (issue #1170's acceptance
+    criteria)."""
+    groups = [_strip_group("a", 2.0, 1.0, spacing_um=0.6)]
+    rows = [{"order": ["a"], "spacing_um": 0.0, "align": "bottom"}]
+    request = _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    assert offsets["a"] == pytest.approx({"x": 0.0, "y": 0.0})
 
 
 # ---------------------------------------------------------------------------

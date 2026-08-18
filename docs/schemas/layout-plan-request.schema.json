@@ -189,6 +189,11 @@
             ],
             "default": "bottom",
             "description": "Vertical alignment of this row's groups relative to each other."
+          },
+          "margin_um": {
+            "type": "number",
+            "minimum": 0,
+            "description": "The vertical gap between this row and the previous row (ignored for the first row). Omit (the default) to let plan execution (Phase C) derive it automatically as the larger of the two adjacent rows' groups' own declared drc_hints.min_spacing_um, so a default multi-row stack no longer places vertically-adjacent groups at exactly 0.00um separation (issue #1170). An explicit value -- including 0.0, a caller's deliberate flush-stack choice -- always wins over that default."
           }
         }
       }

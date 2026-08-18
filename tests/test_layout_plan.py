@@ -421,6 +421,34 @@ def test_invalid_abutment_edge_is_usage_error(bandgap_digest):
     assert exit_code_for(excinfo.value) == 2
 
 
+def test_negative_row_margin_um_is_usage_error(bandgap_digest):
+    # issue #1170: rows[].margin_um, like spacing_um/gap_um, must be >= 0.
+    plan = _valid_plan()
+    plan["rows"][1]["margin_um"] = -0.5
+
+    with pytest.raises(LayoutPlanUsageError) as excinfo:
+        validate_layout_plan(plan, bandgap_digest)
+    assert exit_code_for(excinfo.value) == 2
+
+
+def test_non_numeric_row_margin_um_is_usage_error(bandgap_digest):
+    plan = _valid_plan()
+    plan["rows"][1]["margin_um"] = "1.0"
+
+    with pytest.raises(LayoutPlanUsageError) as excinfo:
+        validate_layout_plan(plan, bandgap_digest)
+    assert exit_code_for(excinfo.value) == 2
+
+
+def test_row_margin_um_is_parsed_and_echoed(bandgap_digest):
+    plan = _valid_plan()
+    plan["rows"][1]["margin_um"] = 0.75
+
+    result = validate_layout_plan(plan, bandgap_digest)
+    assert result["rows"][0]["margin_um"] is None  # unset -- Phase C defaults it
+    assert result["rows"][1]["margin_um"] == pytest.approx(0.75)
+
+
 # -- Edge cases named in the issue's own test plan ------------------------
 
 

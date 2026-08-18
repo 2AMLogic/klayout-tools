@@ -598,13 +598,34 @@ def _parse_rows(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
             allowed = ", ".join(sorted(_ROW_ALIGN_VALUES))
             raise LayoutPlanUsageError(f"{where}.align must be one of {allowed}")
 
+        # ``margin_um`` (issue #1170): the vertical gap between this row and
+        # the previous row (ignored for the first row). ``None`` (the
+        # default -- distinct from ``0.0``, which forces a flush stack) asks
+        # Phase C to derive it automatically from the two adjacent rows' own
+        # declared ``drc_hints.min_spacing_um`` -- see
+        # ``layout_plan_execute._resolve_placement``.
+        margin_um = raw_row.get("margin_um")
+        if margin_um is not None:
+            if isinstance(margin_um, bool) or not isinstance(margin_um, (int, float)):
+                raise LayoutPlanUsageError(f"{where}.margin_um must be a number")
+            margin_um = float(margin_um)
+            if margin_um < 0:
+                raise LayoutPlanUsageError(f"{where}.margin_um must be >= 0")
+
         for group_id in order:
             if group_id not in group_ids:
                 raise LayoutPlanError(
                     f"{where}.order references unknown device_groups id '{group_id}'"
                 )
 
-        rows.append({"order": order, "spacing_um": spacing_um, "align": align})
+        rows.append(
+            {
+                "order": order,
+                "spacing_um": spacing_um,
+                "align": align,
+                "margin_um": margin_um,
+            }
+        )
 
     return rows
 
