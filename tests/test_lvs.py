@@ -1765,6 +1765,72 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     assert all(m["category"] == "topology" for m in report["mismatches"])
     assert "topology.flattened" not in report["category_counts"]
 
+    # Issue #1132: `category_error_counts`/`error_count` split `error`
+    # entries out of `category_counts`'s combined error+warning tally -- on
+    # this all-error report they agree with `category_counts` exactly.
+    assert report["category_error_counts"] == {"topology": 2}
+    assert report["error_count"] == 2
+    # Each unmatched-*circuit* (as opposed to unmatched subcircuit
+    # *instance*, covered by
+    # `test_subcircuit_instance_mismatch_names_the_instance_and_its_type`
+    # below) entry names the circuit(s) that failed to pair, so this
+    # `topology` finding is attributable without a side-channel netlist
+    # diff -- `instance`/`subcircuit` stay `null` (this is a whole-circuit
+    # mismatch, not a subcircuit-instance one).
+    assert [m["circuit"] for m in report["mismatches"]] == [
+        {"layout": "TOP", "reference": "TOP"},
+        {"layout": None, "reference": "LEAF"},
+    ]
+    assert all(
+        m["instance"] is None and m["subcircuit"] is None for m in report["mismatches"]
+    )
+
+
+def test_subcircuit_instance_mismatch_names_the_instance_and_its_type(tmp_path):
+    """Issue #1132: an unmatched subcircuit *instance* -- as opposed to a
+    whole unmatched circuit, covered by
+    `test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch`
+    above -- names the containing circuit, the instance's own name, and the
+    circuit it instantiates, not just an anonymous `topology` entry. Both
+    sides are hierarchical and otherwise identical; the reference adds one
+    extra `leaf` instance (`X3`) on two brand-new nets, so `NetlistComparer`
+    can still structurally pair `top`'s other two instances and reports the
+    extra one as a genuine one-sided `subcircuit_mismatch` event (not a
+    whole-`top`-circuit `circuit_mismatch`, the scenario above)."""
+    layout_path = _write(tmp_path / "layout.spice", _HIERARCHICAL_DIVIDER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _HIERARCHICAL_DIVIDER_SPICE.replace(
+            "X2 P2 P3 leaf\n.ends",
+            "X2 P2 P3 leaf\nX3 N4 N5 leaf\n.ends",
+        ),
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    (entry,) = [m for m in report["mismatches"] if m["category"] == "topology"]
+    assert entry["description"] == (
+        "subcircuit instance could not be matched to a counterpart"
+    )
+    assert entry["severity"] == "error"
+    assert entry["side"] == "reference"
+    assert entry["circuit"] == {"layout": None, "reference": "TOP"}
+    assert entry["instance"] == {"layout": None, "reference": "3"}
+    assert entry["subcircuit"] == {"layout": None, "reference": "LEAF"}
+    # Collateral `net.unmatched` findings for X3's two dangling nets --
+    # not this issue's concern, but pinned so a future change to how those
+    # collaterals are classified doesn't silently change this test's shape.
+    assert report["category_counts"]["net.unmatched"] == 2
+    assert report["category_error_counts"] == {"net.unmatched": 2, "topology": 1}
+    assert report["error_count"] == 3
+
 
 def test_flatten_reference_turns_the_topology_mismatch_into_a_match(tmp_path):
     """`options.flatten_reference: true` collapses the reference's two
@@ -3749,6 +3815,30 @@ class _FakeNamed:
         return self._name
 
 
+class _FakeSubCircuit:
+    """Stands in for a `klayout.db.SubCircuit` object (issue #1132):
+    `.expanded_name()` (the instance's own name), `.circuit()` (the
+    containing circuit), and `.circuit_ref()` (the circuit it
+    instantiates) -- the three attributes
+    `_subcircuit_parent_name`/`_subcircuit_ref_name`/`_name_or_none` read
+    to populate an unmatched-subcircuit `mismatches[]` entry's
+    `circuit`/`instance`/`subcircuit` fields."""
+
+    def __init__(self, name: str, parent: str, ref: str) -> None:
+        self._name = name
+        self._parent = _FakeNamed(parent)
+        self._ref = _FakeNamed(ref)
+
+    def expanded_name(self) -> str:
+        return self._name
+
+    def circuit(self) -> _FakeNamed:
+        return self._parent
+
+    def circuit_ref(self) -> _FakeNamed:
+        return self._ref
+
+
 class _FakeParam:
     def __init__(self, name: str, param_id: int) -> None:
         self.name = name
@@ -3896,6 +3986,44 @@ def test_build_mismatches_circuit_and_subcircuit_and_device_class_topology():
     assert all(e["category"] == lvs.CATEGORY_TOPOLOGY for e in entries)
     sides = sorted(e["side"] for e in entries)
     assert sides == ["layout", "layout", "reference"]
+
+    # Issue #1132: the circuit-mismatch entry names the circuit that failed
+    # to pair (`_FakeNamed` stands in for a bare `kdb.Circuit`, so only
+    # `circuit` -- never `instance`/`subcircuit`, which are subcircuit-
+    # instance-only fields -- is populated).
+    [circuit_entry] = [e for e in entries if e["side"] == "layout" and e["circuit"]]
+    assert circuit_entry["circuit"] == {"layout": "SUBA", "reference": None}
+    assert circuit_entry["instance"] is None
+    assert circuit_entry["subcircuit"] is None
+
+    # The subcircuit-mismatch entry's `instance` names the instance itself
+    # from whatever the comparer handed it (`_FakeNamed` only implements
+    # `expanded_name()`, not the real `kdb.SubCircuit`'s `circuit()`/
+    # `circuit_ref()` -- those degrade to `None` rather than raising, per
+    # `_subcircuit_parent_name`/`_subcircuit_ref_name`'s `getattr` guards).
+    [subcircuit_entry] = [e for e in entries if e["side"] == "reference"]
+    assert subcircuit_entry["instance"] == {"layout": None, "reference": "X1"}
+    assert subcircuit_entry["circuit"] == {"layout": None, "reference": None}
+    assert subcircuit_entry["subcircuit"] == {"layout": None, "reference": None}
+
+
+def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
+    """Issue #1132: given a real `kdb.SubCircuit`-shaped object (stood in by
+    `_FakeSubCircuit`, exposing `circuit()`/`circuit_ref()` in addition to
+    `expanded_name()`), the unmatched-subcircuit entry names the containing
+    circuit, the instance itself, and the circuit it instantiates."""
+    logger = _FakeLogger()
+    logger.subcircuit_mismatches.append(
+        (_FakeSubCircuit("Xfill_1_0", "trng_top", "lib__fill_1"), None)
+    )
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["category"] == lvs.CATEGORY_TOPOLOGY
+    assert entry["severity"] == "error"
+    assert entry["side"] == "layout"
+    assert entry["circuit"] == {"layout": "trng_top", "reference": None}
+    assert entry["instance"] == {"layout": "Xfill_1_0", "reference": None}
+    assert entry["subcircuit"] == {"layout": "lib__fill_1", "reference": None}
 
 
 def test_build_mismatches_ambiguous_net_is_warning_topology():

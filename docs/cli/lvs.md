@@ -477,7 +477,9 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
   "parameter_tolerance": null,
   "status": "match",
   "mismatch_count": 0,
+  "error_count": 0,
   "category_counts": {},
+  "category_error_counts": {},
   "counts": {
     "nets": { "layout": 7, "reference": 7, "matched": 7 },
     "devices": { "layout": 5, "reference": 5, "matched": 5 },
@@ -517,7 +519,9 @@ section this engine buckets rather than fully structures:
   "engine": "netgen",
   "status": "mismatch",
   "mismatch_count": 1,
+  "error_count": 1,
   "category_counts": { "net.unmatched": 1 },
+  "category_error_counts": { "net.unmatched": 1 },
   "counts": {
     "nets": { "layout": 4, "reference": 4, "matched": 0 },
     "devices": { "layout": 2, "reference": 2, "matched": 0 },
@@ -536,7 +540,10 @@ section this engine buckets rather than fully structures:
       "net": null,
       "device": null,
       "property": null,
-      "details": { "raw": "NET mismatches: Class fragments follow ...\n..." }
+      "details": { "raw": "NET mismatches: Class fragments follow ...\n..." },
+      "circuit": null,
+      "instance": null,
+      "subcircuit": null
     }
   ],
   "net_correspondence": []
@@ -555,7 +562,9 @@ section this engine buckets rather than fully structures:
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
 | `status` | `"match"` \| `"mismatch"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
-| `category_counts` | object\<string, int\> | Per-category mismatch counts, keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
+| `error_count` | integer | Issue #1132: the number of `mismatches[]` entries with `severity: "error"` — `sum(category_error_counts.values())`. `mismatch_count` alone cannot tell a caller this without re-reading every entry, since a nonzero `mismatch_count` can be entirely `severity: "warning"` (e.g. a report whose only finding is a `device.bulk_reconciled` disclosure). `0` on a `status: "match"` report exactly (a `"match"` verdict never carries an `error` entry). |
+| `category_counts` | object\<string, int\> | Per-category mismatch counts (`error` and `warning` entries combined), keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
+| `category_error_counts` | object\<string, int\> | Issue #1132: `category_counts`, but counting only `severity: "error"` entries per category — lets a caller gate on "does category X have any real defect" without re-reading `mismatches[]` and re-filtering by `severity` itself. Same sorted-keys convention as `category_counts`; a category with zero `error` entries (all `warning`, e.g. an all-`warning` `topology.flattened` run) is simply absent from this object rather than reported as `0`, matching `category_counts`'s own "no entries of this category" convention. `sum(category_error_counts.values()) == error_count`. |
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. For `"engine": "netgen"`, `matched` is exact on a `"match"` verdict and `0` on a `"mismatch"` verdict (a known limitation — see "Engine" -> `"netgen"` above). |
 | `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Present (currently `["nfet", "pfet", "resistor"]` for both registered decks — MOS plus one drawn precision resistor, see `klt extract`'s "Drawn resistors") whenever a `layout.deck` is given — always for `layout.file` (inline extraction, where the deck is required), and also for the pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it (issue #585). `null` only when no `layout.deck` was given (the bare `{"netlist": ..., "top": ...}` shape). |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
@@ -580,6 +589,9 @@ objects involved.
 | `device` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>, "class": <string\|null>}` when a device is involved. |
 | `property` | object \| `null` | `{"name": <string>, "layout": <value>, "reference": <value>}` for a `device.property` mismatch, and for a `device.parameter_tolerated` disclosure (whose `reference` is always the reference netlist's *original* value, never the snapped one). `name` is `w_um`/`l_um` for the width/length parameters (matching `klt extract`'s own convention); every other declared device-class parameter is reported under its own lower-cased name. |
 | `details` | object \| `null` | Engine-specific/category-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Populated for every `"klayout"`-engine `device.class_arity` entry (see below) with `{"layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}`, and for every `device.bulk_reconciled` entry (see below) with `{"terminal": <string>, "reference_net": <string>, "reference_net_created": <bool>, "devices": <integer>, "layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}` (`reference_terminals` is the pre-reconciliation list), and for every `device.parameter_tolerated` entry (see below) with `{"relative_delta": <number>, "tolerance": <number>}` (the observed `|layout - reference| / max(|layout|, |reference|)` and the effective `options.parameter_tolerance` it was accepted under). Also populated by the `"netgen"` engine for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every other entry (including `"netgen"`-engine device-class-arity mismatches, which this issue's fix does not cover — see "`device.class_arity`" below). |
+| `circuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the circuit (module) involved, for a `topology` entry from an unmatched *circuit* (the circuit itself has no counterpart) or an unmatched subcircuit *instance* (the circuit **containing** the instance, not the instance's own name — see `instance`/`subcircuit` below). `null` for every other entry, matching `net`/`device`'s own "populated only on the categories that involve one" convention. Currently only the `"klayout"` engine populates this field — the `"netgen"`-engine `net.unmatched`/`device.unmatched` entries (see `details` above) do not name a circuit, since netgen's own report does not structure one out. |
+| `instance` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the subcircuit instance's own name (e.g. `"Xfill_1_0"`), populated only for an unmatched-subcircuit-*instance* `topology` entry. `null` for an unmatched-*circuit* entry (there is no instance — the whole circuit definition has no counterpart) and for every other category. |
+| `subcircuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the name of the circuit the unmatched instance refers to (its "cell type", e.g. `"sky130_fd_sc_hd__fill_1"`), populated only alongside `instance` above. `null` everywhere `instance` is `null`. |
 
 `mismatches` is sorted by `(category, side, device.layout, device.reference,
 net.layout, net.reference)` (missing fields sort first) so repeated runs
@@ -965,10 +977,15 @@ despite a name/identity conflict. Six classification sites inside
 
 - **Circuit mismatch** (`lvs.py:1132-1141`, from `logger.circuit_mismatches`)
   — a circuit (module) on one side has no counterpart on the other. Always
-  `severity: "error"`.
+  `severity: "error"`. Names the circuit in `circuit` (issue #1132) —
+  `instance`/`subcircuit` stay `null` (there is no instance; the whole
+  circuit definition has no counterpart).
 - **Subcircuit mismatch** (`lvs.py:1143-1152`, from
   `logger.subcircuit_mismatches`) — a subcircuit instance has no
-  counterpart. Always `"error"`.
+  counterpart. Always `"error"`. Names the containing circuit (`circuit`),
+  the instance itself (`instance`), and the circuit it instantiates
+  (`subcircuit`) (issue #1132), so a macro-scale report attributes *which*
+  instance failed to pair without a side-channel netlist diff.
 - **Device-class mismatch** (`lvs.py:1154-1192`, from
   `logger.device_class_mismatches`) — a device class (e.g. `nfet`)
   registered on one side has no counterpart class on the other side.
@@ -1000,6 +1017,25 @@ despite a name/identity conflict. Six classification sites inside
   conflict, and neither side has an accompanying one-sided leftover net
   (the merge/split case documented below, which absorbs the same
   underlying event when a leftover is present). Always `"error"`.
+
+A one-sided subcircuit-instance mismatch (issue #1132) — the layout's `top`
+circuit instantiates a `fill_1` cell the reference does not:
+
+```json
+{
+  "category": "topology",
+  "severity": "error",
+  "description": "subcircuit instance could not be matched to a counterpart",
+  "side": "layout",
+  "net": null,
+  "device": null,
+  "property": null,
+  "details": null,
+  "circuit": { "layout": "top", "reference": null },
+  "instance": { "layout": "Xfill_1_0", "reference": null },
+  "subcircuit": { "layout": "sky130_fd_sc_hd__fill_1", "reference": null }
+}
+```
 
 A seventh entry (`lvs.py:377`) is a safety net, not a classification site: if
 `NetlistComparer.compare()` reports a mismatch but none of the sources above
