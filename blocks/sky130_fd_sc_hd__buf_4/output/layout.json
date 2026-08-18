@@ -10,6 +10,10 @@
   "instance_count": 0,
   "layout_file": "sky130_fd_sc_hd__buf_4.gds",
   "downloadable": true,
+  "schematic": {
+    "path": "schematic.svg",
+    "provenance": "Drawn from PDK netlist `sky130_fd_sc_hd__buf_4.spice` @ commit `ac7fb61f` (google/skywater-pdk-libs-sky130_fd_sc_hd), sha256 `ea462df08556…40d682`. 2 series CMOS inverter stages (10 physical devices: 1+1 for the first stage, 4+4 folded for the drive-boosted second stage) — verified device-by-device in issue #1123's PR body."
+  },
   "renders": {
     "overview": "renders/overview.png",
     "layer_64_5": "renders/64_5.png",

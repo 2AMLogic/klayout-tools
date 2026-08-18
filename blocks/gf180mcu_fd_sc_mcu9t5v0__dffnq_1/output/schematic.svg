@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 520" width="950" height="520"
+     role="img" aria-labelledby="title desc">
+  <title id="title">gf180mcu_fd_sc_mcu9t5v0__dffnq_1 schematic</title>
+  <desc id="desc">
+    A D flip-flop (Q output only, no set/reset) built as a transmission-gate master-slave latch pair, structurally identical to the sky130 dfxtp_2 cell: a local clock buffer generates both clock phases (cki, ncki) from CLKN; D is inverted then passed through the master latch's transmission gate into a storage inverter with a clock-gated feedback keeper; a second transmission gate passes the master's output into an identical slave latch; the slave's output drives Q through a single-finger output inverter (no extra drive-strength folding, unlike dfxtp_2's doubled output stage). Presented as a functional block diagram, not a flat transistor net.
+  </desc>
+  <!--
+    Theme-aware convention (matches site/README.md "Schematic section"):
+    self-contained light/dark palette via `prefers-color-scheme`, since a
+    staged SVG is loaded via <img> and cannot inherit host-page currentColor.
+    Verified against gf180mcu_fd_sc_mcu9t5v0__dffnq_1.cdl (see provenance
+    line in layout.json): 24 physical devices (12 N, 12 P), fully traced by
+    gate/drain/source connectivity into the 10 functional blocks below (2
+    CLK buffer + 2 D-input-INV + 2 TG1 + 2 master-storage-INV + 4
+    master-feedback + 2 TG2 + 2 slave-storage-INV + 4 slave-feedback + 2
+    output-driver = 24, 2 fewer than dfxtp_2 because the output driver is
+    single-finger here). See issue #1123 PR body for the full trace.
+  -->
+  <style>
+    .wire, .body { stroke: #1f2430; fill: none; stroke-width: 2; stroke-linecap: round; }
+    .dot { fill: #1f2430; }
+    .label { fill: #1f2430; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+    .label-sm { fill: #1f2430; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+    .block { stroke: #1f2430; fill: none; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    @media (prefers-color-scheme: dark) {
+      .wire, .body { stroke: #c6cdd6; }
+      .dot { fill: #c6cdd6; }
+      .label { fill: #c6cdd6; }
+      .label-sm { fill: #c6cdd6; }
+      .block { stroke: #c6cdd6; }
+    }
+  </style>
+
+  <line class="wire" x1="10" y1="315" x2="40" y2="315" />
+  <text class="label" x="6" y="320" text-anchor="start">D</text>
+  <rect class="block" x="40" y="250" width="140" height="130" rx="6" />
+  <text class="label" x="110" y="272" text-anchor="middle">D input INV</text>
+  <text class="label-sm" x="110" y="294" text-anchor="middle">M_tn10/M_tp10: D→net2</text>
+  <line class="wire" x1="180" y1="315" x2="210" y2="315" />
+  <text class="label-sm" x="195" y="307" text-anchor="middle">Dbar</text>
+  <rect class="block" x="210" y="250" width="220" height="130" rx="6" />
+  <text class="label" x="320" y="272" text-anchor="middle">Master latch</text>
+  <text class="label-sm" x="320" y="294" text-anchor="middle">TG1 M_tn11/M_tp11 (cki/ncki)</text>
+  <text class="label-sm" x="320" y="310" text-anchor="middle">storage INV M_tn15/M_tp15</text>
+  <text class="label-sm" x="320" y="326" text-anchor="middle">fb: tn1,tn0,tp1,tp0</text>
+  <line class="wire" x1="430" y1="315" x2="460" y2="315" />
+  <text class="label-sm" x="445" y="307" text-anchor="middle">M / Mbar</text>
+  <rect class="block" x="460" y="250" width="220" height="130" rx="6" />
+  <text class="label" x="570" y="272" text-anchor="middle">Slave latch</text>
+  <text class="label-sm" x="570" y="294" text-anchor="middle">TG2 M_tn2/M_tp7 (ncki/cki)</text>
+  <text class="label-sm" x="570" y="310" text-anchor="middle">storage INV M_tn5/M_tp3</text>
+  <text class="label-sm" x="570" y="326" text-anchor="middle">fb: tn4,tn3,tp2,tp6</text>
+  <line class="wire" x1="680" y1="315" x2="710" y2="315" />
+  <text class="label-sm" x="695" y="307" text-anchor="middle">S / Sbar</text>
+  <rect class="block" x="710" y="250" width="130" height="130" rx="6" />
+  <text class="label" x="775" y="272" text-anchor="middle">Output driver</text>
+  <text class="label-sm" x="775" y="294" text-anchor="middle">INV M_tn6/M_tp4</text>
+  <text class="label-sm" x="775" y="310" text-anchor="middle">(single finger)</text>
+  <line class="wire" x1="840" y1="315" x2="900" y2="315" />
+  <text class="label" x="908" y="320" text-anchor="start">Q</text>
+  <line class="wire" x1="10" y1="75" x2="300" y2="75" />
+  <text class="label" x="6" y="80" text-anchor="start">CLKN</text>
+  <rect class="block" x="300" y="40" width="220" height="70" rx="6" />
+  <text class="label" x="410" y="62" text-anchor="middle">CLK buffer</text>
+  <text class="label-sm" x="410" y="84" text-anchor="middle">INV1 M_tn9/M_tp9: CLKN→ncki</text>
+  <text class="label-sm" x="410" y="100" text-anchor="middle">INV2 M_tn16/M_tp16: ncki→cki</text>
+  <line class="wire" x1="410" y1="110" x2="410" y2="190" />
+  <line class="wire" x1="410" y1="190" x2="320" y2="190" />
+  <line class="wire" x1="320" y1="190" x2="320" y2="250" />
+  <line class="wire" x1="410" y1="190" x2="570" y2="190" />
+  <line class="wire" x1="570" y1="190" x2="570" y2="250" />
+  <text class="label-sm" x="410" y="184" text-anchor="middle">CLKB / CLKQ to both latches</text>
+</svg>

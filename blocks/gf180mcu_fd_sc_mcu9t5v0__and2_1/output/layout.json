@@ -10,6 +10,10 @@
   "instance_count": 0,
   "layout_file": "gf180mcu_fd_sc_mcu9t5v0__and2_1.gds",
   "downloadable": true,
+  "schematic": {
+    "path": "schematic.svg",
+    "provenance": "Drawn from PDK netlist `gf180mcu_fd_sc_mcu9t5v0__and2_1.cdl` @ commit `3781fd29` (google/globalfoundries-pdk-libs-gf180mcu_fd_sc_mcu9t5v0), sha256 `c4a48feea59b…436d25`. NAND2 + output inverter, 6 physical devices, 1:1 with this diagram (no folding) — verified device-by-device in issue #1123's PR body."
+  },
   "renders": {
     "overview": "renders/overview.png",
     "layer_0_0": "renders/0_0.png",

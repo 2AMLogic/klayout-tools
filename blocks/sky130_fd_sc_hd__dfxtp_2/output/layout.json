@@ -10,6 +10,10 @@
   "instance_count": 0,
   "layout_file": "sky130_fd_sc_hd__dfxtp_2.gds",
   "downloadable": true,
+  "schematic": {
+    "path": "schematic.svg",
+    "provenance": "Drawn from PDK netlist `sky130_fd_sc_hd__dfxtp_2.spice` @ commit `ac7fb61f` (google/skywater-pdk-libs-sky130_fd_sc_hd), sha256 `5ea5d93ac947…b13aef`. Transmission-gate master-slave D flip-flop (26 physical devices), presented as a functional block diagram — every device fully traced by gate/drain/source connectivity into its functional block in issue #1123's PR body."
+  },
   "renders": {
     "overview": "renders/overview.png",
     "layer_64_5": "renders/64_5.png",
