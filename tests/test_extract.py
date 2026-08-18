@@ -493,7 +493,10 @@ def test_bare_poly_gate_anonymous_without_poly_label(tmp_path):
     report = run_extract(path, "sky130", output=str(tmp_path / "nolabel.spice"))
     assert report["device_counts"] == {"nfet": 1}
     nfet = next(d for d in report["devices"] if d["class"] == "nfet")
-    assert nfet["nets"]["g"].startswith("$")  # anonymous, unbiasable
+    # Anonymous, unbiasable -- KLayout's own auto-generated "$n" placeholder,
+    # backslash-escaped to match the written netlist's own node spelling
+    # (issue #1162).
+    assert nfet["nets"]["g"].startswith("\\$")
 
 
 def test_synthetic_inverter_extracts_two_devices(tmp_path):
@@ -817,7 +820,7 @@ def test_gf180mcu_nmos_body_resolves_to_drawn_substrate_tap_net(tmp_path):
     nfet = next(d for d in devices if d["class"] == "nfet")
     pfet = next(d for d in devices if d["class"] == "pfet")
     assert nfet["nets"]["b"] == "STIE"
-    assert pfet["nets"]["b"].startswith("$")
+    assert pfet["nets"]["b"].startswith("\\$")
 
     # The synthesized global name never shows up: the tie's own real net
     # fully absorbs the (otherwise-empty) global net.
@@ -840,7 +843,7 @@ def test_gf180mcu_nmos_body_falls_back_to_substrate_global_without_tap(tmp_path)
     nfet = next(d for d in devices if d["class"] == "nfet")
     pfet = next(d for d in devices if d["class"] == "pfet")
     assert nfet["nets"]["b"] == "vsubs"
-    assert pfet["nets"]["b"].startswith("$")
+    assert pfet["nets"]["b"].startswith("\\$")
 
     assert report["unbiased_pmos_body_nets"] == [
         {"device": pfet["name"], "net": pfet["nets"]["b"]}
@@ -1578,7 +1581,7 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
     assert device["class"] == "bjt"
     assert device["nets"]["c"] == "vsubs"
     assert device["nets"]["e"] == "EMIT"
-    assert device["nets"]["b"].startswith("$")  # anonymous, no base tie drawn
+    assert device["nets"]["b"].startswith("\\$")  # anonymous, no base tie drawn
 
 
 def test_gf180mcu_bjt_base_contact_ring_extracts_one_device(tmp_path):
@@ -1890,7 +1893,7 @@ def test_gf180mcu_synthetic_diode_layout_extracts_both_clamp_diodes(tmp_path):
 
     pd2nw = by_class["diode_pd2nw_06v0"]
     assert pd2nw["nets"]["a"] == "ANOD"
-    assert pd2nw["nets"]["c"].startswith("$")  # untapped well, anonymous
+    assert pd2nw["nets"]["c"].startswith("\\$")  # untapped well, anonymous
     assert pd2nw["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
 
 
@@ -2186,7 +2189,7 @@ def test_gf180mcu_capacitor_bottom_plate_connects_to_routed_metal_net(tmp_path):
     assert device["params"]["c_f"] == pytest.approx(2.08532e-13)
     assert device["params"]["area_um2"] == pytest.approx(100.0)
     assert device["nets"]["a"] == "VBOT"
-    assert device["nets"]["b"].startswith("$")
+    assert device["nets"]["b"].startswith("\\$")
 
 
 def test_gf180mcu_capacitor_top_plate_connects_to_routed_metal_net(tmp_path):
@@ -2210,7 +2213,7 @@ def test_gf180mcu_capacitor_top_plate_connects_to_routed_metal_net(tmp_path):
     assert device["params"]["c_f"] == pytest.approx(2.08532e-13)
     assert device["params"]["area_um2"] == pytest.approx(100.0)
     assert device["nets"]["b"] == "VTOP"
-    assert device["nets"]["a"].startswith("$")
+    assert device["nets"]["a"].startswith("\\$")
 
 
 def _make_gf180mcu_mim_layout_with_drm_legal_top_via() -> kdb.Layout:
@@ -4951,7 +4954,7 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     # a matching prose `warnings[]` entry pointing at the docs caveat. The
     # NMOS body's `vsubs` net (a real DC bias path via `connect_global`)
     # never appears here.
-    assert pfet["nets"]["b"].startswith("$")
+    assert pfet["nets"]["b"].startswith("\\$")
     assert report["unbiased_pmos_body_nets"] == [
         {"device": pfet["name"], "net": pfet["nets"]["b"]}
     ]
@@ -5114,8 +5117,10 @@ def test_floating_gate_nmos_reports_single_terminal_net(tmp_path):
     (nfet,) = report["devices"]
     assert nfet["class"] == "nfet"
     gate_net = nfet["nets"]["g"]
-    # Unlabeled -> KLayout's anonymous "$n" placeholder, not a declared pin.
-    assert gate_net.startswith("$")
+    # Unlabeled -> KLayout's anonymous "$n" placeholder, not a declared pin --
+    # backslash-escaped to match the written netlist's own node spelling
+    # (issue #1162).
+    assert gate_net.startswith("\\$")
 
     single_terminal_by_net = {
         entry["net"]: entry for entry in report["single_terminal_nets"]
@@ -8459,7 +8464,10 @@ def test_parasitics_covers_internal_unlabelled_nets_with_real_geometry(tmp_path)
     ]
     assert len(internal_nets) == 1
     internal_name = internal_nets[0]["name"]
-    assert internal_name.startswith("$")  # KLayout's auto-generated form
+    # KLayout's auto-generated "$n" form, backslash-escaped (issue #1162) to
+    # match the written netlist's own node spelling -- see the regression
+    # test below for the direct written-netlist-text comparison.
+    assert internal_name.startswith("\\$")
 
     para_nets = {n["net"]: n for n in report["parasitics"]["nets"]}
     assert internal_name in para_nets
@@ -8476,6 +8484,65 @@ def test_parasitics_covers_internal_unlabelled_nets_with_real_geometry(tmp_path)
     assert "Y" in para_nets
     assert para_nets["VGND"]["capacitance_ff"] > 0.0
     assert para_nets["Y"]["capacitance_ff"] > 0.0
+
+
+def test_anonymous_net_json_spelling_matches_written_netlist_node_token(tmp_path):
+    """Regression (issue #1162): `docs/cli/extract.md` claims `nets[].name`/
+    `parasitics.nets[].net`/`.terminals[].leg_net` are byte-identical to how
+    the written netlist spells the same net -- but before this fix, an
+    anonymous (unlabelled, KLayout-synthesized `$<n>`) net's JSON spelling
+    was the *bare* `"$2"` while the written `.spice` file's own node
+    references (KLayout's `NetlistSpiceWriter` backslash-escapes a leading
+    `$` so ngspice does not treat it as an inline-comment marker) used
+    `\\$2`. A caller that copied the bare JSON spelling verbatim into a
+    hand-authored SPICE card reproduced that exact silent-truncation hazard.
+    This test reads the **actual written `.spice` file text** (not just the
+    JSON report, which no prior test did for this field) and asserts every
+    JSON spelling below is the literal substring KLayout's own writer used
+    for that net's node references."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "series.spice"), parasitics=True
+    )
+    internal_nets = [
+        n for n in report["nets"] if not n["pin"] and n["device_count"] == 2
+    ]
+    assert len(internal_nets) == 1
+    internal_name = internal_nets[0]["name"]
+    assert internal_name == "\\$2"
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+
+    # `nets[].name` is the exact node token the netlist's `M` (MOSFET)
+    # instance lines reference for this net -- surrounded by whitespace, not
+    # merely a substring of a longer token (e.g. `\$20` must not
+    # false-positive against a `\$2` search).
+    node_tokens = set()
+    for line in netlist_text.splitlines():
+        if line.startswith((".", "*")):
+            continue
+        node_tokens.update(line.split())
+    assert internal_name in node_tokens
+
+    para_entry = next(
+        n for n in report["parasitics"]["nets"] if n["net"] == internal_name
+    )
+    # `parasitics.nets[].net`/`.hub_net` and `.terminals[].leg_net` all carry
+    # the same escaped spelling, and each is itself a real node token the
+    # written netlist's `R`/`C`/`M` lines reference.
+    assert para_entry["net"] == internal_name
+    assert para_entry["hub_net"] == internal_name
+    assert para_entry["hub_net"] in node_tokens
+    leg_nets = [term["leg_net"] for term in para_entry["terminals"]]
+    assert len(leg_nets) == 2
+    for leg_net in leg_nets:
+        assert leg_net.startswith("\\$")
+        assert leg_net in node_tokens
+    # No leg net is double-escaped (issue #1162's own regression: an
+    # already-escaped identity fed back into net creation would pick up a
+    # *second* backslash from `NetlistSpiceWriter`'s own escaping).
+    for leg_net in leg_nets:
+        assert not leg_net.startswith("\\\\")
 
 
 def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
@@ -8947,7 +9014,9 @@ def test_parasitics_sanitizes_unlabelled_net_instance_name(tmp_path):
         path, "sky130", output=str(tmp_path / "series.spice"), parasitics=True
     )
     para_names = [n["net"] for n in report["parasitics"]["nets"]]
-    assert any(name.startswith("$") for name in para_names)  # sanity: repro present
+    # Sanity: repro present -- backslash-escaped (issue #1162) to match the
+    # written netlist's own node spelling.
+    assert any(name.startswith("\\$") for name in para_names)
 
     netlist_text = Path(report["netlist_path"]).read_text()
     _assert_rc_cards_have_safe_instance_names(netlist_text)
@@ -11079,6 +11148,46 @@ def test_spef_escapes_reserved_characters_in_every_identifier_position(tmp_path)
         stripped = line.replace("a_in[13]", "")
         assert "$" not in stripped.replace(r"\$", ""), line
         assert "[" not in stripped.replace(r"\[", ""), line
+
+
+def test_spef_anonymous_net_is_not_double_escaped(tmp_path):
+    """Regression (issue #1162): `_write_spef` reads straight from the
+    already-built `parasitics_report`, which -- after `spice_safe_net_name`
+    started backslash-escaping an anonymous net's leading `$` -- carries the
+    *already-escaped* `\\$N` spelling for `net`/`hub_net`/`terminals[].
+    leg_net`/`coupled[].net`. SPEF's own grammar (`_spef_name`) escapes
+    every character outside `[A-Za-z0-9_]`, including a literal backslash,
+    so feeding it that already-escaped string double-escapes it into
+    `\\\\\\$N` (confirmed against a live `_spef_name` call while fixing this
+    issue) -- a real, live-verified `read_spef` parse error
+    (`test_spef_escapes_reserved_characters_in_every_identifier_position`'s
+    own docstring), now hit by *every* anonymous net's `*D_NET` block.
+    Exercises the full `run_extract(..., spef_output=...)` path end to end
+    (unlike the hand-built-`report`-dict tests above, which never carried
+    the escaped JSON spelling and so could not catch this)."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series.spice"),
+        parasitics=True,
+        spef_output=str(tmp_path / "series.spef"),
+    )
+    internal_nets = [
+        n for n in report["nets"] if not n["pin"] and n["device_count"] == 2
+    ]
+    assert len(internal_nets) == 1
+    internal_name = internal_nets[0]["name"]
+    assert internal_name == "\\$2"  # sanity: repro present
+
+    spef_text = Path(report["spef_path"]).read_text()
+    assert f"*D_NET {internal_name} " in spef_text
+    # Exactly one backslash before the `$`, on every line -- never zero
+    # (unescaped, illegal in SPEF) and never two-or-more (double-escaped).
+    for line in spef_text.splitlines():
+        assert "\\\\$" not in line, f"double-escaped $ in SPEF line: {line!r}"
+        if "$" in line:
+            assert "\\$" in line, f"unescaped $ in SPEF line: {line!r}"
 
 
 def test_spef_cli_json_and_text(tmp_path, capsys):

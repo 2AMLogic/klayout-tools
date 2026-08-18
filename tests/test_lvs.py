@@ -711,12 +711,13 @@ R2 VDD $2 1k
     assert by_reference["VDD"] == {"layout": "VDD", "reference": "VDD", "pin": True}
     assert {"P1", "P2"} <= by_reference.keys()
     # The ambiguous pair's layout side is `$1`/`$2` (unlabelled, neither a
-    # declared pin) -- which reference name each happened to resolve to is
-    # not asserted, since the comparer's own tie-break is not part of this
-    # module's documented contract.
+    # declared pin), backslash-escaped (issue #1162) to match the written
+    # netlist's own node spelling -- which reference name each happened to
+    # resolve to is not asserted, since the comparer's own tie-break is not
+    # part of this module's documented contract.
     assert {by_reference["P1"]["layout"], by_reference["P2"]["layout"]} == {
-        "$1",
-        "$2",
+        "\\$1",
+        "\\$2",
     }
     assert by_reference["P1"]["pin"] is False
     assert by_reference["P2"]["pin"] is False

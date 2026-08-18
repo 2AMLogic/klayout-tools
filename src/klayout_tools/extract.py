@@ -636,6 +636,30 @@ def _spef_net_topology_nodes(
     return net_node, hub_node, next_idx
 
 
+def _unescape_spice_safe_net_name(name: str) -> str:
+    """Reverse :func:`spice_safe_net_name`'s leading-``$`` backslash escape
+    (issue #1162) for a net-name string already read out of a *built*
+    JSON-shaped report (``parasitics_report``, the same dict ``klt
+    extract``'s own JSON response returns).
+
+    :func:`_write_spef` reads straight from ``parasitics_report``, which
+    already carries :func:`spice_safe_net_name`'s escaped ``\\$N`` spelling
+    for an anonymous net. SPEF's *own* grammar (:func:`_spef_name`)
+    independently escapes every character outside ``[A-Za-z0-9_]`` --
+    including a literal backslash -- so feeding it an already-escaped
+    ``\\$N`` string double-escapes it into ``\\\\\\$N`` (confirmed directly
+    against a live ``_spef_name`` call). Reversing this one, narrow,
+    unambiguous transform first -- no ordinary net name otherwise starts
+    with a literal backslash -- restores the raw KLayout identity spelling
+    SPEF's own escaping expects, exactly as it worked before issue #1162
+    introduced the JSON-level escape. A no-op for every net name that is not
+    itself an escaped anonymous net.
+    """
+    if name.startswith("\\$"):
+        return name[1:]
+    return name
+
+
 def _write_spef(
     path: str,
     *,
@@ -787,6 +811,37 @@ def _write_spef(
 
     Raises :class:`ExtractError` if ``path`` cannot be written.
     """
+    # Reverse `spice_safe_net_name`'s leading-`$` backslash escape (issue
+    # #1162) on every net-name-shaped value this function reads out of
+    # `parasitics_report`/`port_names` *before* any of the SPEF-specific
+    # logic below runs -- restores this function's pre-#1162 raw-identity
+    # input shape unchanged, so `_spef_name`'s own escaping (applied further
+    # down) is not handed an already-escaped string it would double-escape.
+    # See `_unescape_spice_safe_net_name`'s docstring.
+    parasitics_report = {
+        **parasitics_report,
+        "nets": [
+            {
+                **entry,
+                "net": _unescape_spice_safe_net_name(entry["net"]),
+                "hub_net": _unescape_spice_safe_net_name(entry["hub_net"]),
+                "terminals": [
+                    {
+                        **terminal,
+                        "leg_net": _unescape_spice_safe_net_name(terminal["leg_net"]),
+                    }
+                    for terminal in entry.get("terminals", [])
+                ],
+                "coupled": [
+                    {**coupled, "net": _unescape_spice_safe_net_name(coupled["net"])}
+                    for coupled in entry.get("coupled", [])
+                ],
+            }
+            for entry in parasitics_report["nets"]
+        ],
+    }
+    port_names = [_unescape_spice_safe_net_name(name) for name in port_names]
+
     port_name_set = frozenset(port_names)
     net_instance_pins_map: Mapping[str, Sequence[tuple[str, str]]] = (
         net_instance_pins or {}
@@ -2596,7 +2651,14 @@ def run_extract(
             list(critical_nets) if critical_nets else []
         )
         if critical_nets_set:
-            matched_net_names = {entry["net"] for entry in ground_nets}
+            # `ground_nets[].net` is the unescaped identity spelling (issue
+            # #1162, see `_net_identity_name`'s docstring); `critical_nets_set`
+            # is caller-supplied and named using the escaped spelling this
+            # module reports everywhere else, so the comparison set below
+            # re-escapes each entry.
+            matched_net_names = {
+                spice_safe_net_name(entry["net"]) for entry in ground_nets
+            }
             unmatched = sorted(critical_nets_set - matched_net_names)
             if unmatched:
                 warnings.append(
@@ -7079,12 +7141,12 @@ def _compute_parasitics(
         if not lower_nets or not upper_nets:
             continue
         upper_items = [
-            (net_b, spice_safe_net_name(net_b.expanded_name()), region_b)
+            (net_b, _net_identity_name(net_b), region_b)
             for net_b, region_b in upper_nets.items()
         ]
         for net_a, region_a in lower_nets.items():
             bbox_a = region_a.bbox()
-            name_a = spice_safe_net_name(net_a.expanded_name())
+            name_a = _net_identity_name(net_a)
             for net_b, name_b, region_b in upper_items:
                 if net_a is net_b:
                     # Same-net overlap (a via stack) is excluded by
@@ -7160,16 +7222,24 @@ def _compute_parasitics(
                 continue
             lookback_dbu = max(1, round(lookback_um / dbu))
             items = [
-                (net, spice_safe_net_name(net.expanded_name()), region)
+                (net, _net_identity_name(net), region)
                 for net, region in level_nets.items()
             ]
             for a_index, (net_a, name_a, region_a) in enumerate(items):
-                a_is_critical = name_a in critical_nets
+                # `critical_nets` is caller-supplied (`--critical-net`), so it
+                # names nets using the same escaped spelling this module
+                # reports everywhere else (issue #1162) -- `name_a`/`name_b`
+                # themselves stay in the unescaped identity namespace (see
+                # `_net_identity_name`'s docstring), so the membership check
+                # re-escapes just for this comparison.
+                a_is_critical = spice_safe_net_name(name_a) in critical_nets
                 halo_bbox = region_a.bbox().enlarged(
                     kdb.Point(lookback_dbu, lookback_dbu)
                 )
                 for net_b, name_b, region_b in items[a_index + 1 :]:
-                    if not (a_is_critical or name_b in critical_nets):
+                    if not (
+                        a_is_critical or spice_safe_net_name(name_b) in critical_nets
+                    ):
                         continue
                     if net_a is net_b:
                         # Same edge case the vertical pass excludes (a via
@@ -7244,7 +7314,12 @@ def _compute_parasitics(
             continue
         results.append(
             {
-                "net": spice_safe_net_name(net.expanded_name()),
+                # Unescaped identity spelling (issue #1162) -- this feeds
+                # `_inject_parasitics`'s real net/instance-name construction
+                # below; the JSON `parasitics.nets[].net` value is derived
+                # from it via `spice_safe_net_name` at the point it enters
+                # the response, not baked in here.
+                "net": _net_identity_name(net),
                 "net_id": net.cluster_id,
                 "resistance_ohm": round(base_r_ohm.get(net, 0.0), 4),
                 "capacitance_ff": round(max(0.0, c_ff), 6),
@@ -7675,12 +7750,13 @@ def _inject_parasitics(
     # while `expanded_name()` is not -- two distinct nets can carry the
     # same layout label. `existing_names` (used below purely for
     # collision-avoidance when minting fresh leg/hub net *names*) still
-    # needs the set of every current net name, so it is built separately
-    # via `spice_safe_net_name` (issue #696) exactly as before.
+    # needs the set of every current net name, so it is built separately via
+    # `_net_identity_name` (issue #696) exactly as before -- the *unescaped*
+    # namespace fresh leg/hub nets are actually minted into (issue #1162;
+    # see `_net_identity_name`'s docstring for why baking the escaped
+    # spelling in here would double-escape the written netlist).
     nets_by_id = {net.cluster_id: net for net in circuit.each_net()}
-    existing_names = {
-        spice_safe_net_name(net.expanded_name()) for net in circuit.each_net()
-    }
+    existing_names = {_net_identity_name(net) for net in circuit.each_net()}
 
     # Tracks how many entries so far have sanitized to a given base
     # instance name (issue #765): two entries can share a `net` string
@@ -7704,6 +7780,11 @@ def _inject_parasitics(
         ):
             coupled_by_net.setdefault(this_net, []).append(
                 {
+                    # Unescaped identity spelling (issue #1162), matching
+                    # `this_net`'s own namespace so sorting below stays
+                    # stable -- escaped to the netlist's own spelling only
+                    # at the `report_nets` construction site further down,
+                    # via `spice_safe_net_name`.
                     "net": other_net,
                     "capacitance_ff": pair["capacitance_ff"],
                     "levels": pair["levels"],
@@ -7760,7 +7841,11 @@ def _inject_parasitics(
         net_c_count = 0
         if (
             distributed_rc_nets is not None
-            and entry["net"] in distributed_rc_nets
+            # `distributed_rc_nets` is caller-supplied (`--critical-net`
+            # naming a `--distributed-rc` target): re-escaped for the
+            # comparison, same rationale as the lateral-coupling pass above
+            # (issue #1162).
+            and spice_safe_net_name(entry["net"]) in distributed_rc_nets
             and len(terminal_refs) >= 2
         ):
             # Distributed (multi-segment) RC ladder (issue #977, Epic #709
@@ -7824,7 +7909,12 @@ def _inject_parasitics(
                     {
                         "device": device.expanded_name(),
                         "terminal": terminal_def.name,
-                        "leg_net": leg_name,
+                        # Report-boundary escape (issue #1162): `leg_name`
+                        # is this leg's real, unescaped net identity (see
+                        # `_net_identity_name`'s docstring); `spice_safe_
+                        # net_name` makes this JSON value byte-identical to
+                        # the written netlist's own node spelling for it.
+                        "leg_net": spice_safe_net_name(leg_name),
                         "order": position_in_order,
                         "capacitance_ff": round(node_c_ff[position_in_order], 6),
                     }
@@ -7841,8 +7931,10 @@ def _inject_parasitics(
                 total_r_count += 1
                 segment_reports.append(
                     {
-                        "net_a": leg_names[seg_index],
-                        "net_b": leg_names[seg_index + 1],
+                        # Report-boundary escape (issue #1162), same
+                        # rationale as `terminal_reports[].leg_net` above.
+                        "net_a": spice_safe_net_name(leg_names[seg_index]),
+                        "net_b": spice_safe_net_name(leg_names[seg_index + 1]),
                         "resistance_ohm": round(seg_r_ohm_clamped, 4),
                     }
                 )
@@ -7883,7 +7975,9 @@ def _inject_parasitics(
                     {
                         "device": device.expanded_name(),
                         "terminal": terminal_def.name,
-                        "leg_net": leg_name,
+                        # Report-boundary escape (issue #1162), same
+                        # rationale as the distributed-model case above.
+                        "leg_net": spice_safe_net_name(leg_name),
                         "resistance_ohm": round(leg_r_ohm, 4),
                     }
                 )
@@ -7912,7 +8006,13 @@ def _inject_parasitics(
             # below: `hub` unless this splice applies, in which case it is
             # the fresh node between the inductor and the capacitor.
             c_ground_node = hub
-            if mom_rlc_inductor is not None and entry["net"] == mom_rlc_inductor[0]:
+            # `mom_rlc_inductor[0]` is caller-supplied (`--mom-rlc-net`):
+            # re-escaped for the comparison, same rationale as
+            # `distributed_rc_nets` above (issue #1162).
+            if (
+                mom_rlc_inductor is not None
+                and spice_safe_net_name(entry["net"]) == mom_rlc_inductor[0]
+            ):
                 net_inductance_nh = mom_rlc_inductor[1]
                 l_node_name = _unique_net_name(
                     entry["net"], existing_names, suffix="__l"
@@ -7943,7 +8043,12 @@ def _inject_parasitics(
         total_c_count += net_c_count
         report_nets.append(
             {
-                "net": entry["net"],
+                # Report-boundary escape (issue #1162): `entry["net"]` is
+                # this net's unescaped identity spelling (see
+                # `_net_identity_name`'s docstring); `spice_safe_net_name`
+                # makes this JSON value byte-identical to the written
+                # netlist's own node spelling for it.
+                "net": spice_safe_net_name(entry["net"]),
                 # Additive field (issue #765): disambiguates entries whose
                 # `net` string collides across distinct net objects (e.g.
                 # separate un-strapped `VGND` islands) -- see
@@ -7957,7 +8062,7 @@ def _inject_parasitics(
                 # for every net unless `--mom-rlc-net`/
                 # `--mom-rlc-inductance-nh` named this one.
                 "inductance_nh": net_inductance_nh,
-                "hub_net": hub_name,
+                "hub_net": spice_safe_net_name(hub_name),
                 # Additive field (issue #977): `"lumped"` (the pre-#977
                 # star/Gamma-shunt model, always this value unless
                 # `--distributed-rc` named this net) or `"distributed"` (the
@@ -7968,7 +8073,10 @@ def _inject_parasitics(
                 # resistors, in `order` sequence -- `[]` unless
                 # `rc_model == "distributed"`.
                 "segments": segment_reports,
-                "coupled": coupled_by_net.get(entry["net"], []),
+                "coupled": [
+                    {**c, "net": spice_safe_net_name(c["net"])}
+                    for c in coupled_by_net.get(entry["net"], [])
+                ],
             }
         )
 
@@ -8015,32 +8123,86 @@ def spice_safe_net_name(name: str) -> str:
     """Rewrite a KLayout ``Net.expanded_name()`` string to the exact spelling
     KLayout's own ``NetlistSpiceWriter`` writes for that net's *node*
     references in the ``.SUBCKT``/instance lines of the written SPICE file
-    (issue #696).
+    (issue #696, issue #1162).
 
-    ``Net.expanded_name()`` joins every distinct text label found on one
-    electrical net with ``,`` (see :func:`_detect_merged_net_labels`'s
-    docstring, issue #470) -- but a SPICE node token cannot contain a comma
-    (a common argument separator), so ``NetlistSpiceWriter`` writes the
-    *same* joined net using ``|`` instead wherever it appears as an actual
-    node reference (only its leading ``* pin ...``/``* net ...`` comments
-    keep the comma-joined form). Before this function existed, every net
-    name this module put into the JSON response (``nets[].name``,
-    ``devices[].nets[...]``, ``merged_net_labels[].net``,
-    ``parasitics.nets[].net``) used the *unescaped* comma form, while the
-    written netlist used the escaped pipe form -- the same net, spelled two
-    different ways depending which artifact you read it from, with no way
-    for a caller to know the two strings named the same node short of
-    hard-coding the ``,`` -> ``|`` substitution itself. Calling this on every
-    net name before it enters the response makes it byte-identical to the
-    netlist's own spelling everywhere it is reported (also applied by
-    ``klt lvs``'s ``net_correspondence``/``mismatches[].net`` via
-    ``lvs.py``'s ``_name_or_none``, sourced from the same
-    ``Net.expanded_name()`` convention).
+    Two independent rewrites, both mirroring escaping ``NetlistSpiceWriter``
+    already applies when it writes a net as a node reference (as opposed to
+    the raw form it keeps in its own leading ``* pin ...``/``* net ...``
+    comments):
 
-    A no-op for the overwhelming majority of net names, which contain no
-    comma at all.
+    1. **Merged labels (issue #696).** ``Net.expanded_name()`` joins every
+       distinct text label found on one electrical net with ``,`` (see
+       :func:`_detect_merged_net_labels`'s docstring, issue #470) -- but a
+       SPICE node token cannot contain a comma (a common argument
+       separator), so ``NetlistSpiceWriter`` writes the *same* joined net
+       using ``|`` instead wherever it appears as an actual node reference.
+    2. **Anonymous nets (issue #1162).** A net with no drawn label at all
+       gets KLayout's auto-generated ``$<n>`` placeholder as its
+       ``expanded_name()`` (e.g. ``$2``) -- but ngspice (and the wider
+       SPICE3/HSPICE-descended dialect family) treats a token that *starts*
+       with ``$`` as an inline-comment marker, silently truncating the rest
+       of the card. ``NetlistSpiceWriter`` backslash-escapes a leading ``$``
+       (``\\$2``, confirmed against a live ``NetlistSpiceWriter`` run: a
+       node named ``$weird`` writes as ``\\$weird``, while a *mid-token*
+       ``$`` such as ``mid$dle`` is left alone -- only the leading
+       character triggers the ngspice comment hazard) wherever it appears
+       as a node reference; this function does the same.
+
+    Before this function existed (for case 1) and before issue #1162 (for
+    case 2), every net name this module put into the JSON response
+    (``nets[].name``, ``devices[].nets[...]``, ``merged_net_labels[].net``,
+    ``parasitics.nets[].net``, ``parasitics.nets[].terminals[].leg_net``)
+    used the *unescaped* form, while the written netlist used the escaped
+    form -- the same net, spelled two different ways depending which
+    artifact you read it from, with no way for a caller to know the two
+    strings named the same node short of hard-coding the substitutions
+    themselves (and, for the anonymous-net case, a caller that copied the
+    unescaped JSON spelling verbatim into a hand-authored SPICE card would
+    reproduce the very comment-truncation hazard ``NetlistSpiceWriter``
+    itself already avoids). Calling this on every net name before it enters
+    the response makes it byte-identical to the netlist's own spelling
+    everywhere it is reported (also applied by ``klt lvs``'s
+    ``net_correspondence``/``mismatches[].net`` via ``lvs.py``'s
+    ``_name_or_none``, sourced from the same ``Net.expanded_name()``
+    convention).
+
+    A no-op for the overwhelming majority of net names, which contain
+    neither a comma nor a leading ``$``.
     """
-    return name.replace(",", "|")
+    escaped = name.replace(",", "|")
+    if escaped.startswith("$"):
+        escaped = "\\" + escaped
+    return escaped
+
+
+def _net_identity_name(net: kdb.Net) -> str:
+    """The comma -> ``|`` (issue #696) rewrite of ``net.expanded_name()``
+    *without* :func:`spice_safe_net_name`'s leading-``$`` backslash escape
+    (issue #1162) -- used only where the resulting string becomes (part of)
+    the *real* name of a ``kdb.Net``/``kdb.Device`` this module creates in
+    the working circuit (``_compute_parasitics``'s internal coupling-pair
+    keys and ground-net list, and everything derived from them inside
+    ``_inject_parasitics``: ``_unique_net_name``'s collision-avoidance set,
+    the actual leg/hub nets ``circuit.create_net`` mints, and
+    ``_sanitize_instance_name``'s input).
+
+    Baking the *already-escaped* (``\\$2``-style) spelling into a real net's
+    name would double-escape it: ``NetlistSpiceWriter`` applies its own
+    leading-``$``/backslash escaping when it writes a net as a node
+    reference, so a net whose actual name already starts with a literal
+    backslash comes out with *two* backslashes in the written netlist
+    (confirmed directly against a live ``NetlistSpiceWriter`` run). Net
+    identity, instance-name sanitization, and CLI net-name matching
+    (``--critical-net``, ``--mom-rlc-net``) all stay in this *unescaped*
+    namespace -- exactly the pre-#1162 ``spice_safe_net_name`` behavior --
+    so a leading ``$`` continues to compare/collide the same way it always
+    has. Only the JSON *report* value derived from a name in this namespace
+    (built by re-running it through :func:`spice_safe_net_name` at the point
+    it enters a response field, e.g. ``parasitics.nets[].net``/``hub_net``/
+    ``terminals[].leg_net``) picks up the escape, matching the netlist's own
+    spelling without touching what the underlying net is actually called.
+    """
+    return net.expanded_name().replace(",", "|")
 
 
 _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
@@ -8384,7 +8546,13 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
     return merged
 
 
-_ANONYMOUS_NET_PREFIX = "$"
+#: Every anonymous KLayout-synthesized net name reported anywhere in this
+#: module's JSON (``devices[].nets[...]``, ``nets[].name``, etc.) has already
+#: passed through :func:`spice_safe_net_name`, which backslash-escapes a
+#: raw ``Net.expanded_name()`` leading ``$`` to match the written netlist's
+#: own node spelling (issue #1162) -- so the *reported* prefix is ``\$``,
+#: not KLayout's own raw ``$``.
+_ANONYMOUS_NET_PREFIX = "\\$"
 
 
 def _detect_unbiased_pmos_body_nets(
@@ -8397,9 +8565,11 @@ def _detect_unbiased_pmos_body_nets(
     for every PMOS device (``device["class"] == deck.pfet_class``) whose body
     terminal (``nets["b"]``) is an anonymous, KLayout-synthesized net --
     identified by ``Net.expanded_name()``'s own ``"$<n>"`` placeholder
-    convention for a net with no drawn label (the same convention
-    ``tests/test_extract.py`` already asserts against, e.g.
-    ``pfet["nets"]["b"].startswith("$")``). A *named* net -- including the
+    convention for a net with no drawn label, reported here already
+    backslash-escaped to ``"\\$<n>"`` by :func:`spice_safe_net_name` (issue
+    #1162, matching the written netlist's own node spelling -- the same
+    convention ``tests/test_extract.py`` already asserts against, e.g.
+    ``pfet["nets"]["b"].startswith("\\$")``). A *named* net -- including the
     deck's own synthesized global substrate net (e.g. ``"vsubs"``) -- never
     matches, so an NMOS body (tied via ``connect_global``) or a well-labelled
     PMOS body (a deck with a real ``well_label``/``tap`` layer, e.g. sky130)

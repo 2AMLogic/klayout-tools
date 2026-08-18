@@ -16,6 +16,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-18 — An anonymous (unlabelled, KLayout-synthesized `$N`
+  placeholder) net's name is now backslash-escaped (`\$N`) everywhere `klt
+  extract`/`klt lvs` report it — `nets[].name`, `devices[].nets[...]`,
+  `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, and `klt lvs`'s
+  `net_correspondence[]`/`mismatches[].net` — matching the escaped spelling
+  KLayout's own `NetlistSpiceWriter` already used for that net's *node*
+  references in the written `.spice` file (issue #1162). Before this, these
+  JSON fields carried the *bare*, unescaped `$N` form while the written
+  netlist used `\$N`; ngspice (and the wider SPICE3/HSPICE-descended dialect
+  family) treats a token that starts with `$` as an inline-comment marker,
+  so a caller who copied one of these fields verbatim into a hand-authored
+  SPICE card (a testbench, a `.save`/probe directive, a manual
+  instantiation) reproduced a silent per-card truncation `NetlistSpiceWriter`
+  itself already avoids internally. A `--critical-net`/`--distributed-rc`/
+  `--mom-rlc-net`/`--mom-net` argument naming an anonymous net must now use
+  this same escaped `\$N` spelling. No `schema_version` bump on either
+  command — field names and types are unchanged; only the string *value* of
+  an already-documented field changes, and only for the narrow case of an
+  anonymous net, the identical precedent issue #696/PR set for the
+  merged-label-net spelling fix. See `docs/cli/extract.md`'s "Anonymous nets
+  are backslash-escaped" section.
 - 2026-08-18 — `klt functional-verification`'s `options.sdf` transcript gate no
   longer fails a run on a *corrupted* transcript line (issue #1136). Icarus's
   C-level SDF diagnostic output and cocotb's Python logging share one stdout
