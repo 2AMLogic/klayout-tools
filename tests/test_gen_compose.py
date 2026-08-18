@@ -1891,6 +1891,7 @@ def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
     assert output.is_file()  # blocks still placed
     assert report["unrouted_nets"] == ["BADNET"]
     assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["status"] == "unrouted"  # 0 of 1 legs drawn, #1169
     assert report["nets"][0]["route_length_um"] is None
     assert any("BADNET" in note for note in report["drc_hints"]["notes"])
 
@@ -1969,6 +1970,7 @@ def test_compose_routes_three_pin_rail_shared_by_three_blocks(tmp_path, pdk_root
     assert report["unrouted_nets"] == []
     net = report["nets"][0]
     assert net["routed"] is True
+    assert net["status"] == "routed"  # full spanning tree, #1169
     # A 3-pin net spans with 2 legs, each between adjacent blocks in the row.
     assert [sorted(pin["block"] for pin in leg["pins"]) for leg in net["legs"]] == [
         ["b1", "b2"],
@@ -2084,9 +2086,12 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
 ):
     # The pre-#1073 fixture (this test replaces
     # `test_compose_defers_bundle_net_as_unrouted`, which asserted the net was
-    # deferred *because* it had >2 pins). The net is still unrouted -- but now
-    # for a real, per-leg geometric reason, reported per leg rather than as a
-    # blanket "bundle routing is out of scope".
+    # deferred *because* it had >2 pins). The net is still not fully
+    # connected -- but now for a real, per-leg geometric reason, reported per
+    # leg rather than as a blanket "bundle routing is out of scope". Since
+    # #1169, the one leg that *is* individually routable (b1.P2-b2.P1) is now
+    # drawn rather than discarded -- this is the "2-leg net (3 pins), one leg
+    # unroutable" partial-routing case.
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
     output = tmp_path / "bundle.gds"
@@ -2113,10 +2118,13 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
         }
     )
 
+    # Still not fully routed -- unrouted_nets[] still names it -- but it is a
+    # *partial* success now, not a zero-geometry one.
     assert report["unrouted_nets"] == ["BUS"]
     net = report["nets"][0]
     assert net["routed"] is False
-    assert net["route_length_um"] is None
+    assert net["status"] == "partial"
+    assert net["route_length_um"] is not None  # the one drawn leg's length
 
     legs = {tuple(_pin_ref(pin) for pin in leg["pins"]): leg for leg in net["legs"]}
     # The b1.P1 leg across b1's own body is rejected by the self-net
@@ -2129,24 +2137,31 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
     around_leg = legs[("b1.P1", "b2.P1")]
     assert around_leg["routed"] is False
     assert "crosses" in around_leg["reason"]
-    # The b1.P2-b2.P1 leg is routable on its own, but nothing is drawn for a
-    # net that could not be fully connected: `legs[].routed` means "drawn".
+    # The b1.P2-b2.P1 leg is routable on its own, and #1169 now draws it even
+    # though b1.P1 is stranded: `legs[].routed` still means "drawn", but a
+    # leg no longer needs its whole net to succeed to earn that.
     connectable_leg = legs[("b1.P2", "b2.P1")]
-    assert connectable_leg["routed"] is False
-    assert "net as a whole could not be connected" in connectable_leg["reason"]
+    assert connectable_leg["routed"] is True
+    assert connectable_leg["reason"] is None
+    assert connectable_leg["route_length_um"] == pytest.approx(net["route_length_um"])
 
     note = next(note for note in report["drc_hints"]["notes"] if "BUS" in note)
     assert "'b1.P1'" in note  # names the pin that could not be reached
     assert "nets[].legs[]" in note
 
-    # All-or-nothing: no route metal at all for an unconnectable net.
+    # Partial routing: the one routable leg's metal is drawn, the rejected
+    # legs' metal is not.
     import klayout.db as kdb
 
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.cell("bundle_0")
-    assert [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()] == []
-    assert list(top.shapes(layout.layer(67, 5)).each()) == []
+    paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    assert len(paths) == 1  # exactly the connectable leg's backbone, not 0
+
+    # The drawn subset must itself stay DRC-clean (#1169 acceptance criteria).
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_compose_bundle_net_tries_every_candidate_leg_to_an_unreachable_pin(
@@ -2155,7 +2170,11 @@ def test_compose_bundle_net_tries_every_candidate_leg_to_an_unreachable_pin(
     # A pin behind a closed guard ring cannot be reached from anywhere, so
     # *both* candidate legs into it are attempted and rejected -- evidence
     # that a rejected leg is retried against another partner rather than
-    # failing the net at the first rejection.
+    # failing the net at the first rejection. Since #1169, the b1-b2 leg --
+    # individually routable and unrelated to the ring obstacle -- is drawn
+    # even though b3 ends up stranded: the "2-leg net (3 pins), one leg
+    # unroutable" partial-routing case, this time via a real closed-ring
+    # obstacle rather than a self-net one.
     m1, m2 = _gate_rail_blocks(tmp_path, pdk_root, 2)
     ringed = _gen_block(tmp_path, pdk_root, "diff_pair", "ringed", splits=1)
     output = tmp_path / "ringed_bundle.gds"
@@ -2176,11 +2195,36 @@ def test_compose_bundle_net_tries_every_candidate_leg_to_an_unreachable_pin(
     assert report["unrouted_nets"] == ["VBIAS"]
     net = report["nets"][0]
     assert net["routed"] is False
+    assert net["status"] == "partial"
+    assert net["route_length_um"] is not None  # the b1-b2 leg's length
     ring_legs = [
         leg for leg in net["legs"] if any(pin["block"] == "b3" for pin in leg["pins"])
     ]
     assert len(ring_legs) == 2  # both partners tried
     assert all("closed guard/collector ring" in leg["reason"] for leg in ring_legs)
+    assert all(leg["routed"] is False for leg in ring_legs)
+
+    # The b1-b2 leg has nothing to do with the ring obstacle -- it is drawn.
+    bridge_leg = next(
+        leg
+        for leg in net["legs"]
+        if {pin["block"] for pin in leg["pins"]} == {"b1", "b2"}
+    )
+    assert bridge_leg["routed"] is True
+    assert bridge_leg["reason"] is None
+    assert bridge_leg["route_length_um"] == pytest.approx(net["route_length_um"])
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("ringed_bundle_0")
+    paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    assert len(paths) == 1  # exactly the b1-b2 backbone
+
+    # The drawn subset must itself stay DRC-clean (#1169 acceptance criteria).
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected(
@@ -2245,6 +2289,127 @@ def test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected(
     # Still a spanning tree: 2 legs covering all three blocks.
     assert len(accepted) == 2
     assert {block_id for leg in accepted for block_id in leg} == set(ids)
+
+
+def _route_bundle_row_fixture(tmp_path, pdk_root, count, spacing_um=2.0):
+    """Shared setup for a direct `route_bundle()` call over `count` blocks in
+    a row -- factored out of
+    `test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected`
+    so #1169's partial-routing tests below can reuse it.
+    """
+    reports = _gate_rail_blocks(tmp_path, pdk_root, count)
+    ids = [f"b{index + 1}" for index in range(count)]
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": block_id, "generator_report": report}
+            for block_id, report in zip(ids, reports, strict=True)
+        ]
+    )
+    bboxes = {block_id: blocks[block_id]["bbox_um"] for block_id in ids}
+    offsets = compute_row_offsets(ids, bboxes, spacing_um=spacing_um)
+    placed = {
+        block_id: _translate_bbox(bboxes[block_id], offsets[block_id])
+        for block_id in ids
+    }
+    pins = [{"block": block_id, "port": "U0_G"} for block_id in ids]
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+
+    def _gate_x(block_id):
+        gate = blocks[block_id]["ports"]["U0_G"]
+        return round(gate["x_um"] + offsets[block_id]["x"], 6)
+
+    return ids, blocks, offsets, placed, pins, route_layer, _gate_x
+
+
+def test_route_bundle_draws_the_routable_legs_of_a_4_pin_net_when_the_bridge_fails(
+    tmp_path, pdk_root
+):
+    # 4 pins -> a full spanning tree needs 3 legs. `leg_conflict` rejects
+    # every candidate leg that would bridge the {b1, b2} / {b3, b4} halves
+    # (the same hook `compose()` wires its real route-vs-route collision
+    # check, #1057, through -- an "obstacle" in exactly the mechanism this
+    # test suite already uses for it), leaving the two *within-half* legs
+    # (b1-b2, b3-b4) as the only two individually routable candidates. Before
+    # #1169, a spanning-tree failure discarded *all* of a net's geometry,
+    # including these two routable legs; #1169 requires them drawn, and the
+    # net reported `status: "partial"` (2 of the 3 legs a full tree needs),
+    # not silently dropped.
+    ids, blocks, offsets, placed, pins, route_layer, _gate_x = (
+        _route_bundle_row_fixture(tmp_path, pdk_root, 4)
+    )
+    halves = ({"b1", "b2"}, {"b3", "b4"})
+
+    def _block_of(x):
+        return next(block_id for block_id in ids if _gate_x(block_id) == x)
+
+    def _reject_cross_half_bridge(points_um):
+        endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
+        blocks_touched = {_block_of(x) for x in endpoints}
+        if any(blocks_touched <= half for half in halves):
+            return None  # within one half -- not a bridge, always routable
+        return "simulated collision with an already-routed net"
+
+    result = gen_compose.route_bundle(
+        pins,
+        blocks,
+        offsets,
+        placed,
+        0.42,
+        route_layer,
+        leg_conflict=_reject_cross_half_bridge,
+    )
+
+    assert result["routed"] is False
+    assert result["status"] == "partial"
+    assert result["route_length_um"] is not None
+
+    drawn = [leg for leg in result["legs"] if leg["routed"]]
+    assert sorted(sorted(pin["block"] for pin in leg["pins"]) for leg in drawn) == [
+        ["b1", "b2"],
+        ["b3", "b4"],
+    ]
+    assert result["route_length_um"] == pytest.approx(
+        sum(leg["route_length_um"] for leg in drawn)
+    )
+    for leg in drawn:
+        assert leg["reason"] is None
+
+    rejected = [leg for leg in result["legs"] if not leg["routed"]]
+    assert rejected  # every bridging candidate was tried and rejected
+    assert all("simulated collision" in leg["reason"] for leg in rejected)
+    assert result["reason"] is not None  # net-level reason still reported
+
+
+def test_route_bundle_reports_unrouted_not_partial_when_zero_legs_drawn(
+    tmp_path, pdk_root
+):
+    # 0-of-N legs routed must stay "unrouted", never "partial" with an empty
+    # drawn set -- the acceptance criterion #1169 calls out explicitly (a
+    # net with zero drawn legs is not meaningfully different from the
+    # pre-#1169 all-or-nothing failure, and must report identically).
+    ids, blocks, offsets, placed, pins, route_layer, _gate_x = (
+        _route_bundle_row_fixture(tmp_path, pdk_root, 3)
+    )
+
+    def _reject_everything(points_um):
+        return "simulated collision with an already-routed net"
+
+    result = gen_compose.route_bundle(
+        pins,
+        blocks,
+        offsets,
+        placed,
+        0.42,
+        route_layer,
+        leg_conflict=_reject_everything,
+    )
+
+    assert result["routed"] is False
+    assert result["status"] == "unrouted"
+    assert result["route_length_um"] is None
+    assert result["legs"]  # every candidate pair was still tried...
+    assert all(leg["routed"] is False for leg in result["legs"])
+    assert all("simulated collision" in leg["reason"] for leg in result["legs"])
 
 
 def test_compose_rejects_waypoints_um_on_a_bundle_net(tmp_path, pdk_root):

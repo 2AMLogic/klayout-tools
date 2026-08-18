@@ -16,6 +16,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-18 — `klt gen-compose`'s bundle-net router (`gen_compose.route_bundle()`,
+  #1073) no longer discards a net's already-routable geometry when the net as
+  a whole cannot be fully connected. Before, a spanning-tree failure reset
+  *every* leg back to `routed: false`, even legs that individually passed
+  every routability check — a net with `N` legs where `M < N` were routable
+  drew nothing at all. Now the `M` routable legs are drawn and only the
+  remaining `N - M` are left unrouted, each with its own `legs[].reason`. A
+  new `nets[].status` field (`"routed"` / `"partial"` / `"unrouted"`)
+  distinguishes a partially-drawn net from a fully-undrawn one — both still
+  report `nets[].routed: false` and appear in `unrouted_nets[]`, so a caller
+  reading `status` (rather than counting `legs[].routed`) is required to tell
+  them apart. Fully-routable and fully-unroutable nets are unaffected (issue
+  #1169). No `schema_version` bump — `nets[].status` is a new, additive
+  field; every existing field keeps its prior meaning. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Bundle (>2-pin)
+  routing" section and its `nets[]`/`nets[].legs[]`/`unrouted_nets[]` field
+  descriptions.
 - 2026-08-18 — An anonymous (unlabelled, KLayout-synthesized `$N`
   placeholder) net's name is now backslash-escaped (`\$N`) everywhere `klt
   extract`/`klt lvs` report it — `nets[].name`, `devices[].nets[...]`,

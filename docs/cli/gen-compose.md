@@ -90,12 +90,24 @@ cleanly.
   - **`pins[]` order is not a routing order.** The tree is built
     nearest-first, so a rail declared in an arbitrary block order routes the
     same way as one declared left to right.
-  - **All-or-nothing per net.** If the pins cannot all be joined, *nothing* is
-    drawn for the net and it is reported in `unrouted_nets[]` — a half-wired
-    net would leave the caller building the rest of its interconnect around
-    the router's own geometry. `nets[].legs[]` reports every attempted leg
-    with its own rejection reason, so the failure is per leg, never a blanket
-    "this net is too big".
+  - **Partial routing when the pins cannot all be joined (issue #1169).** The
+    net is still reported in `unrouted_nets[]` (it is not *fully* connected),
+    but every leg the spanning-tree search *did* accept is drawn — only the
+    pins left stranded (and any candidate leg rejected on the way to reaching
+    them) stay undrawn. `nets[].status` is `"routed"` (fully connected),
+    `"partial"` (at least one leg drawn but not fully connected), or
+    `"unrouted"` (no leg accepted) — the caller must read this field rather
+    than infer it from `legs[].routed` counts, since both a partial and a
+    fully-unrouted net report `nets[].routed: false`. `nets[].legs[]` reports
+    every attempted leg with its own rejection reason (or `routed: true` and
+    no reason, for a drawn one), so the failure is per leg, never a blanket
+    "this net is too big". (Before #1169, a net that could not be fully
+    connected was all-or-nothing: any spanning-tree failure discarded *every*
+    leg's geometry, including legs that were individually routable — this
+    made debugging a real composition failure harder than necessary, for no
+    DRC benefit, since a leg that already passed its own routability checks
+    cannot become unsafe just because a different leg of the same net
+    failed.)
   - **One net label, not one per leg** — the legs are one conductor, so the
     net gets exactly one `kdb.Text` (same as a 2-pin net's single path).
   - `waypoints_um` (#634) steers a single backbone and is therefore only
@@ -725,6 +737,7 @@ exit codes).
       ],
       "routed": true,
       "route_length_um": 3.2,
+      "status": "routed",
       "legs": [
         {
           "pins": [
@@ -767,10 +780,11 @@ exit codes).
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields. |
 | `bbox_um` | object | Bounding box of the *composed* cell — the union of every placed block's own `bbox_um`, translated by its `offset_um` (computed arithmetically from each block's reported `bbox_um`, never re-derived from drawn geometry). |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
-| `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean), `route_length_um` (total routed wire length in um across **all** the net's legs, or `null` when the net was not routed — for a caller doing a first-order parasitic estimate before extraction) and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). |
-| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, and `reason` (`null` when routed, otherwise why this leg was not drawn). A 2-pin net has exactly one leg; an N-pin net has N−1 when routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output** — a net that could not be fully connected draws nothing at all, so *every* one of its legs reports `routed: false` (a leg that was individually routable says so in its `reason`), and legs the router tried and rejected on the way to a working spanning tree are dropped from a routed net's list. |
+| `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean — `true` only when *every* pin joined one component), `route_length_um` (summed wire length in um across the net's **drawn** legs, or `null` when zero legs were drawn — for a caller doing a first-order parasitic estimate before extraction), `status` (below), and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). |
+| `nets[].status` | string | One of `"routed"` (every pin connected into one component), `"partial"` (at least one leg drawn, but the net is not fully connected), or `"unrouted"` (no leg was ever accepted) — issue #1169. Distinguishes a partially-drawn net from a fully-undrawn one: both report `routed: false`, so a caller must read `status` (not just count `legs[].routed`) to tell them apart. |
+| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, and `reason` (`null` when routed, otherwise why this leg was not drawn). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
-| `unrouted_nets[]` | array\<string\> | Net labels the router could not connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. Nothing is drawn for a listed net (a bundle net is all-or-nothing), so the caller can wire it themselves without colliding with a half-drawn route. |
+| `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. |
 

@@ -89,9 +89,17 @@ def _print_text(report: dict) -> None:
             # A bundle (>2-pin) net routes as several legs (#1073) -- name the
             # count so the human summary matches the leg detail in the JSON.
             leg_note = f"  ({len(legs)} legs)" if len(legs) > 1 else ""
-            if net["routed"]:
+            status = net.get("status", "routed" if net["routed"] else "unrouted")
+            if status == "routed":
                 length = net["route_length_um"]
                 print(f"  {net['net']}  routed  length={length}um{leg_note}")
+            elif status == "partial":
+                drawn = sum(1 for leg in legs if leg["routed"])
+                length = net["route_length_um"]
+                print(
+                    f"  {net['net']}  PARTIAL ({drawn}/{len(legs)} legs)  "
+                    f"length={length}um{leg_note}"
+                )
             else:
                 print(f"  {net['net']}  UNROUTED{leg_note}")
 
