@@ -20,7 +20,10 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * rather than a raw id (issue #942) -- name + description, source
  * provenance (`layout.source`, issue #62), a Specification section gated
  * behind `layout.spec_summary` (issue #62, canary blocks' target-spec
- * table), a metrics table covering every present optional field
+ * table), a Schematic section (issue #1121) gated behind `layout.schematic`
+ * -- the explainer for the renders below it, so it is placed directly above
+ * them -- showing the staged SVG diagram plus a provenance line, a metrics
+ * table covering every present optional field
  * (omit-absent rule — a missing field is never rendered as
  * "null"/"undefined"), a Signals section (issue #100, Epic #90 Phase 2)
  * gated behind `layout.signals` and rendered by `@/components/waveform`'s
@@ -258,6 +261,22 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
               ))}
             </TableBody>
           </Table>
+        </section>
+      )}
+
+      {layout.schematic && (
+        <section aria-label="Schematic" className="mt-9">
+          <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Schematic</h2>
+          <figure className="overflow-hidden rounded-lg border border-border bg-panel">
+            <img
+              src={blockAssetUrl(layout.slug, layout.schematic.path)}
+              alt={`Schematic diagram of ${displayName}`}
+              loading="lazy"
+              decoding="async"
+              className="block w-full bg-night object-contain"
+            />
+          </figure>
+          <p className="mt-2 text-[0.8rem] text-fog-dim">{layout.schematic.provenance}</p>
         </section>
       )}
 

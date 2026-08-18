@@ -177,6 +177,31 @@ export interface LayoutSignals {
 }
 
 /**
+ * A block's schematic / logic-circuit diagram (issue #1121) — the explainer
+ * for the layer renders below it, bridging "colored polygons" to "the
+ * circuit those polygons implement" for a viewer who isn't an IC designer.
+ * Present only for blocks with a staged `schematic.svg`; see
+ * `site/README.md`'s "Schematic section" for the staging convention
+ * (`blocks/<slug>/output/schematic.svg`, staged by
+ * `site/scripts/copy-renders.mjs` like every other render/artifact path).
+ */
+export interface LayoutSchematic {
+  /** Path to the schematic SVG, relative to the block's `output/`
+   *  directory -- the same convention `renders`/`layout_file`/
+   *  `signals.corners[].waveform` values use. */
+  path: string;
+  /**
+   * Human-readable provenance line rendered under the diagram, e.g.
+   * `"Source: 2AMLogic/sky130-bandgap @ a1b2c3d4e5f6"` or `"Drawn from
+   * sky130_fd_sc_hd__inv_1.spice @ 9f8e7d6"` (source repo + commit, or
+   * "drawn from <PDK> netlist `<file>@<hash>`" per the issue's provenance
+   * convention). Free text, not a structured object, since the two
+   * documented formats above don't share a common shape.
+   */
+  provenance: string;
+}
+
+/**
  * One row of a canary block's target-spec table (issue #62), parsed
  * verbatim from the source repo's `README.md` "Target specification"
  * section by `scripts/ingest-canary.py::parse_spec_summary`. Keys mirror
@@ -289,4 +314,11 @@ export interface Layout {
   spec_summary?: LayoutSpecSummary;
   /** Canary block source-repo provenance (issue #62). See `LayoutSource`. */
   source?: LayoutSource;
+  /**
+   * Optional schematic / logic-circuit diagram (issue #1121), staged from
+   * `blocks/<slug>/output/schematic.svg`. Gated the same omit-absent way as
+   * `renders`/`downloadable`/`signals` -- a block with no diagram renders no
+   * "Schematic" section. See `LayoutSchematic`.
+   */
+  schematic?: LayoutSchematic;
 }

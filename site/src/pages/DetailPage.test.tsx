@@ -289,6 +289,34 @@ describe("DetailPage Field Data section (Epic #840 Phase 3b, issue #959)", () =>
   });
 });
 
+describe("DetailPage Schematic section (issue #1121)", () => {
+  it("renders the diagram and provenance line when layout.schematic is present", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          schematic: {
+            path: "schematic.svg",
+            provenance: "Drawn from sky130_fd_sc_hd__inv_1.spice @ 9f8e7d6",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Schematic" })).toBeInTheDocument();
+    const img = screen.getByAltText("Schematic diagram of buf_4");
+    expect(img).toHaveAttribute("src", "/blocks/sky130_fd_sc_hd__buf_4/schematic.svg");
+    expect(
+      screen.getByText("Drawn from sky130_fd_sc_hd__inv_1.spice @ 9f8e7d6"),
+    ).toBeInTheDocument();
+  });
+
+  it("omits the Schematic section entirely when layout.schematic is absent", () => {
+    render(<DetailPage layout={makeLayout({ schematic: undefined })} />);
+
+    expect(screen.queryByRole("heading", { name: "Schematic" })).not.toBeInTheDocument();
+  });
+});
+
 describe("DetailPage Renders section (issue #942)", () => {
   it("shows the overview as a hero image, groups the rest below it with human-readable captions", () => {
     render(

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 380" width="260" height="380"
+     role="img" aria-labelledby="title desc">
+  <title id="title">sky130_fd_sc_hd__inv_1 schematic</title>
+  <desc id="desc">
+    A 2-transistor CMOS inverter: a PMOS pull-up between VDD and the output
+    node Y, and an NMOS pull-down between Y and VSS, with both gates tied to
+    input A.
+  </desc>
+  <!--
+    Theme-aware convention (site/README.md "Schematic section"): this file
+    is staged and loaded via a plain <img> tag, so `currentColor` would NOT
+    inherit the host page's text color (an <img>-loaded SVG is its own
+    document, not inlined into the page DOM). Instead this stylesheet
+    defaults to a dark-on-transparent palette that reads on a light
+    background (e.g. GitHub's raw SVG viewer) and switches to a light-on-
+    transparent palette under `prefers-color-scheme: dark` (matching this
+    site's always-dark theme for most visitors) -- never a single baked-in
+    black-on-white pairing.
+  -->
+  <style>
+    .wire, .body { stroke: #1f2430; fill: none; stroke-width: 2; stroke-linecap: round; }
+    .dot { fill: #1f2430; }
+    .label { fill: #1f2430; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+    @media (prefers-color-scheme: dark) {
+      .wire, .body { stroke: #c6cdd6; }
+      .dot { fill: #c6cdd6; }
+      .label { fill: #c6cdd6; }
+    }
+  </style>
+
+  <!-- VDD rail -->
+  <line class="wire" x1="50" y1="40" x2="210" y2="40" />
+  <text class="label" x="130" y="26" text-anchor="middle">VDD</text>
+
+  <!-- PMOS (pull-up): source at VDD, drain at Y, gate bubble = active-low -->
+  <line class="wire" x1="130" y1="40" x2="130" y2="75" />
+  <line class="body" x1="130" y1="75" x2="130" y2="145" />
+  <line class="wire" x1="95" y1="110" x2="122" y2="110" />
+  <circle class="dot" cx="126" cy="110" r="4" />
+  <text class="label" x="150" y="90" text-anchor="start">MP (PMOS)</text>
+  <line class="wire" x1="130" y1="145" x2="130" y2="180" />
+
+  <!-- Output node Y -->
+  <circle class="dot" cx="130" cy="180" r="4" />
+  <line class="wire" x1="130" y1="180" x2="230" y2="180" />
+  <text class="label" x="238" y="185" text-anchor="start">Y</text>
+
+  <!-- NMOS (pull-down): drain at Y, source at VSS, no gate bubble -->
+  <line class="wire" x1="130" y1="180" x2="130" y2="220" />
+  <line class="body" x1="130" y1="220" x2="130" y2="290" />
+  <line class="wire" x1="95" y1="255" x2="130" y2="255" />
+  <text class="label" x="150" y="235" text-anchor="start">MN (NMOS)</text>
+  <line class="wire" x1="130" y1="290" x2="130" y2="320" />
+
+  <!-- Input A, tied to both gates -->
+  <line class="wire" x1="95" y1="110" x2="95" y2="255" />
+  <circle class="dot" cx="95" cy="182" r="4" />
+  <line class="wire" x1="20" y1="182" x2="95" y2="182" />
+  <text class="label" x="10" y="185" text-anchor="start">A</text>
+
+  <!-- VSS / GND rail -->
+  <line class="wire" x1="50" y1="320" x2="210" y2="320" />
+  <text class="label" x="130" y="345" text-anchor="middle">VSS</text>
+</svg>
