@@ -853,6 +853,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   *execution* is Phase C, not yet built. See the new
   `docs/cli/layout-plan.md` and
   `docs/schemas/layout-plan-request.schema.json`.
+- 2026-08-18 — new **plan compiler/executor**,
+  `klayout_tools.layout_plan_execute` (issue #1155, Phase C of
+  `docs/design/netlist-driven-layout-spike.md`): turns an already-validated
+  `klt.layout_plan.request/1` document (Phase B, issue #1131) into a real
+  generated/placed/routed layout by calling only already-shipped machinery
+  — `klt gen`'s `generate()` per `device_groups[]` entry (netlist-derived
+  `L`/`W` sizing, with `params` overrides layered on top and every
+  divergence surfaced as a `warnings[]` entry), `rows[]`/`abutment[]`
+  compiled onto `klt gen-compose`'s existing `"explicit"` placement
+  strategy (reusing `compute_row_offsets` per row, then stacking rows
+  vertically), the netlist digest's device-to-net map compiled into
+  `gen-compose`'s `connectivity[]` (a 3+-pin net becomes an ordinary bundle
+  entry — `compose()` already routes every entry through `route_bundle()`
+  regardless of pin count since issue #1073, so this module never calls
+  the router itself), and one final `gen_compose.compose()` call for the
+  actual generation/placement/routing pass. No new placement/routing
+  primitive anywhere in this phase. Response extends `klt gen-compose`'s
+  shape with `device_groups[]` (`resolved_params`/`offset_um`/`bbox_um`)
+  and the one new field, `unmapped_netlist_nets[]` (every digest net that
+  resolved to zero device-group ports — including a deliberately-unrouted
+  supply/bulk net, always reported unconditionally, no
+  `netlist.ignore_nets[]`-style opt-out added). Exit-code trichotomy: `0`
+  full success, `1` application error (`LayoutPlanExecuteError` — an
+  unresolvable PDK, a generation failure, an empty `device_groups[]`, or a
+  group with no `rows[]`/`abutment[]` path to a placed position), `2`
+  reserved for a future CLI subcommand (none added this phase — library-
+  only, mirroring Phase B), `3` partial success
+  (`unrouted_nets[]`/`unmapped_netlist_nets[]` non-empty, via
+  `exit_code_for()`/`partial_success()`). See the new
+  `docs/cli/layout-plan-execute.md`.
 - 2026-08-18 — `klt extract --deck-option mim_cap=<value>` selects which of
   gf180mcu's three PDK-offered MiM-capacitor densities
   (`cap_mim_1f0_m4m5_noshield`/`cap_mim_1f5_m4m5_noshield`/
