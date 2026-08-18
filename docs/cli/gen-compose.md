@@ -558,6 +558,92 @@ drawing something that does not connect:
   self-net's own block. The two checks compose rather than replace each
   other: either can catch a short the other's information set cannot see.
 
+## Cross-block bus routing (`routing.cross_block_layer_role`, #1168)
+
+`routing.layer_role` resolves to exactly **one** `(layer, datatype)` pair for
+the *whole* composition — selecting `"metal2"` (the "Via-drop routing"
+section above) moves every `connectivity[]` net in the request to the second
+metal, not just the one net that actually needed to escape a same-layer
+short. A real circuit's bus/supply nets are exactly the ones most likely to
+cross an intermediate block's own pin on the way to a farther pin (a
+same-block self-net leg bussing two of a matched array's terminals together
+across a third terminal sitting between them — the reproduction "Self-net
+pad-crossing"/"drawn-metal" checks above reject), while most of that same
+composition's other nets never need anything but the base `"metal"` role.
+Before #1168, fixing the busy nets meant moving the *entire* composition to
+`"metal2"`, or hand-supplying `waypoints_um` to route around the crossed pad
+on the same layer (not always geometrically possible).
+
+`routing.cross_block_layer_role` names a **second**, higher metal role —
+resolved through the same per-PDK-family table `routing.layer_role` is
+(`gen_compose._resolve_cross_block_route_layer`), and required to be exactly
+one via hop from `routing.layer_role` in the resolved PDK family's own
+`ExtractionDeck.metals`/`.vias` stack (an application error, exit 1,
+otherwise — the same single-hop limit "Via-drop routing" documents). It
+changes nothing by itself: only a same-block self-net leg whose backbone
+would draw a silent short on `routing.layer_role` (checks 3/4 above) is
+retried on `routing.cross_block_layer_role` instead of failing outright, for
+that leg's **entire** length (not just the segment crossing the pad) —
+`route_two_pin()`'s same-drawing-layer short checks run again, unmodified, on
+the second layer, so a *different* obstacle that happens to also sit on the
+cross layer is still caught, not silently ignored. Every endpoint whose own
+reported pad sits on the primary `routing.layer_role` then needs exactly the
+via-drop "Via-drop routing" above already knows how to draw — resolved by the
+identical `_resolve_via_drop_layer()` call, just against the leg's own
+effective drawing layer. Every other net in the same request — and any leg
+that never crosses another same-layer pad in the first place — is completely
+unaffected and keeps drawing on `routing.layer_role`, exactly as before this
+issue.
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [{ "id": "arr", "generator_report": "arr.json" }],
+  "placement": { "strategy": "row", "order": ["arr"], "spacing_um": 1.0 },
+  "connectivity": [
+    {
+      "net": "EBUS1",
+      "pins": [
+        { "block": "arr", "port": "Q0_E" },
+        { "block": "arr", "port": "Q1_E" }
+      ]
+    },
+    {
+      "net": "EBUS2",
+      "pins": [
+        { "block": "arr", "port": "Q1_E" },
+        { "block": "arr", "port": "Q2_E" }
+      ]
+    }
+  ],
+  "routing": {
+    "layer_role": "metal",
+    "width_um": 0.17,
+    "cross_block_layer_role": "metal2"
+  },
+  "options": { "cell_name": "bjt_bus_cross_block", "output": "bjt_bus_cross_block.gds" }
+}
+```
+
+Against the same 8-unit `bjt_array` reproduction "Via-drop routing" uses,
+both `EBUS1`/`EBUS2` route here too — but `routing.layer_role` stays
+`"metal"` for the request as a whole, so a third net wired between two
+*different* blocks in the same composition (an ordinary block-to-block net
+that never crosses another pad) still draws on li1, not met1. The composed
+output is DRC-clean against `klt drc --deck sky130`, and `klt extract --deck
+sky130` merges exactly the three targeted emitters into one node, same as
+the whole-composition `"metal2"` case.
+
+Two errors are raised before any routing is attempted, both at request-parse
+time (exit 1, matching every other `routing.*` validation error):
+
+- `routing.cross_block_layer_role` resolving to the **same** layer as
+  `routing.layer_role` — a cross-block bus layer must be a distinct metal.
+- `routing.cross_block_layer_role` and `routing.layer_role` not connectable
+  by a single via hop — the same non-adjacent-metals-stack and
+  no-declared-via cases "Via-drop routing" documents for a pin's own layer,
+  applied here to the two layer roles themselves.
+
 ## CLI shape (a Builder decision, per the spike's own flag)
 
 The spike's contract section names `klt gen compose` as a working name only
@@ -709,6 +795,7 @@ exit codes).
 | `pins[].port` | string | A port name from that block's own `generator_report.ports[]`. An unknown port is an application error (exit 1). A `(block, port)` that also appears in any `connectivity[]` entry is rejected (exit 1) — the router already labels that shape. The label lands at the port's own composed-frame position on the label layer paired with the port's own drawn layer; a port on a layer with no label convention is not labelled (a `drc_hints.notes[]` partial-success note, not an error). |
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) when `connectivity[]` is non-empty; otherwise ignored. `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** when `connectivity[]` is non-empty; otherwise ignored. |
+| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer exactly one via hop from `routing.layer_role` in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 
 ### Response

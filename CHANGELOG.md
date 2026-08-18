@@ -843,6 +843,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-18 — `klt gen-compose`'s `routing` gains an optional
+  `cross_block_layer_role` (issue #1168): a second, higher metal role a
+  same-block self-net leg falls back to when it would otherwise draw a
+  silent short across another of that block's own pads on the primary
+  `routing.layer_role` — exactly the case an existing rejection reason
+  already named as the fix ("route to a layer_role with a metal2/via stack
+  instead") without a way to configure it. Before this, escaping that short
+  required moving the *whole* composition's `routing.layer_role` to the
+  second metal (`"metal2"`, issue #454), even for nets that never needed it.
+  `gen_compose._resolve_cross_block_route_layer` resolves and via-hop
+  validates the new role against the same per-PDK-family table
+  `routing.layer_role` uses (an application error, exit 1, when it is not
+  exactly one via hop from the primary role); `route_two_pin()` retries only
+  the same-drawing-layer-short checks on the cross layer for a leg that
+  trips them on the primary layer, redrawing that leg's entire backbone
+  there with an endpoint via-drop wherever needed — every other net in the
+  same request, and any leg that never crosses another same-layer pad,
+  is unaffected. No `schema_version` bump — purely additive to the
+  `routing` request object and the `nets[].legs[]`/`routed_geometry`
+  internals; the response shape is unchanged. See `docs/cli/gen-compose.md`'s
+  "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)"
+  section.
 - 2026-08-18 — `klt signoff --manifest` gains an opt-in **generic evidence
   envelope** (`"kind": "generic"`, issue #1152) as the ingestion path for T1
   item 8 ("Characterization report"), the one T1 checklist item naming no

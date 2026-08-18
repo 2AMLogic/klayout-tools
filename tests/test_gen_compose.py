@@ -4038,6 +4038,285 @@ def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
 
 
 # --------------------------------------------------------------------------- #
+# Cross-block bus routing (routing.cross_block_layer_role, #1168): unlike the
+# via-drop tests above -- which route the *whole composition* on "metal2" --
+# a single `routing.layer_role: "metal"` composition can now name a *second*
+# layer_role that only a same-block self-net leg falls back to when it would
+# otherwise short across another of the block's own same-layer pads, leaving
+# every other net in the same request on the primary layer.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_cross_block_route_layer_resolves_adjacent_metals():
+    # sky130's "metal" (li1, 67/20) and "metal2" (met1, 68/20) are exactly one
+    # via hop apart (mcon, 67/44) -- the same pair the via-drop tests above
+    # use, just resolved from the opposite direction.
+    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+        "sky130A", "metal", "metal2"
+    )
+    assert cross_layer == (68, 20)
+    assert via_layer == (67, 44)
+
+
+def test_resolve_cross_block_route_layer_rejects_identical_roles():
+    with pytest.raises(GenComposeError, match="same layer"):
+        gen_compose._resolve_cross_block_route_layer("sky130A", "metal", "metal")
+
+
+def test_resolve_cross_block_route_layer_rejects_non_adjacent_metals():
+    # "metal" (li1, metals[0]) and "metal3" (met2, metals[2]) are two via
+    # hops apart -- not resolvable by a single hop, mirroring
+    # _resolve_via_drop_layer's own non-adjacent rejection.
+    with pytest.raises(GenComposeError, match="single via"):
+        gen_compose._resolve_cross_block_route_layer("sky130A", "metal", "metal3")
+
+
+def test_resolve_cross_block_route_layer_gf180mcu():
+    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+        "gf180mcuA", "metal2", "metal3"
+    )
+    assert cross_layer == (42, 0)
+    assert via_layer == (38, 0)
+
+
+def test_compose_rejects_unknown_cross_block_layer_role(tmp_path, pdk_root):
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    with pytest.raises(GenComposeError, match="cross_block_layer_role"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "arr", "generator_report": arr}],
+                "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+                "connectivity": [
+                    {
+                        "net": "EBUS1",
+                        "pins": [
+                            {"block": "arr", "port": "Q0_E"},
+                            {"block": "arr", "port": "Q1_E"},
+                        ],
+                    }
+                ],
+                "routing": {
+                    "layer_role": "metal",
+                    "width_um": 0.17,
+                    "cross_block_layer_role": "not-a-real-role",
+                },
+                "options": {
+                    "cell_name": "bad_cross_role",
+                    "output": str(tmp_path / "bad_cross_role.gds"),
+                },
+            }
+        )
+
+
+def test_compose_cross_block_layer_role_routes_the_exact_433_reproduction(
+    tmp_path, pdk_root
+):
+    # Byte-identical reproduction and request to
+    # test_compose_rejects_self_net_that_crosses_another_pad_on_same_block
+    # above, except `routing.layer_role` stays "metal" (unlike the via-drop
+    # test, which moves the *entire* composition to "metal2") and instead
+    # names "metal2" as `routing.cross_block_layer_role` -- both EBUS1/EBUS2
+    # now route, falling back to met1 only for these two crossing legs.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_bus_cross_block.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                {
+                    "net": "EBUS2",
+                    "pins": [
+                        {"block": "arr", "port": "Q1_E"},
+                        {"block": "arr", "port": "Q2_E"},
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {"cell_name": "bjt_bus_cross_block", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+    assert report["nets"][1]["routed"] is True
+    assert report["nets"][1]["route_length_um"] > 0
+
+    # Both legs' backbones drew on met1 (68/20), with an mcon via (67/44) at
+    # each endpoint back down to the emitters' own li1 pads -- li1 itself
+    # carries no *new path* (only the pre-existing block geometry plus the
+    # via-drop's own landing-pad boxes, never a kdb.Path).
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bjt_bus_cross_block")
+    met1 = layout.layer(68, 20)
+    mcon = layout.layer(67, 44)
+    assert [s for s in top.shapes(met1).each() if s.is_path()]
+    assert list(top.shapes(mcon).each())
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    result = extract.run_extract(str(output), "sky130", top="bjt_bus_cross_block")
+    bjt_devices = [d for d in result["devices"] if d["class"] == "pnp"]
+    assert len(bjt_devices) == 8
+    emitter_nets = {d["name"]: d["nets"]["e"] for d in bjt_devices}
+    bussed = {name: net for name, net in emitter_nets.items() if net is not None}
+    from collections import Counter
+
+    counts = Counter(bussed.values())
+    assert 3 in counts.values(), emitter_nets
+    bussed_net = next(net for net, n in counts.items() if n == 3)
+    bussed_devices = {name for name, net in emitter_nets.items() if net == bussed_net}
+    assert len(bussed_devices) == 3
+    base_nets = {d["nets"]["b"] for d in bjt_devices}
+    assert bussed_net not in base_nets
+
+
+def test_compose_cross_block_layer_role_leaves_non_crossing_nets_on_primary_layer(
+    tmp_path, pdk_root
+):
+    # #1168's own point: `routing.cross_block_layer_role` is a *per-leg*
+    # fallback, not a whole-composition layer switch like `routing.
+    # layer_role: "metal2"` (the via-drop tests above) is. One composition
+    # with three blocks -- a bjt_array whose own self-net bus must cross its
+    # middle unit's base pad, plus two independent mos_array blocks joined by
+    # an ordinary block-to-block net -- routes the crossing legs on met1 and
+    # leaves the untouched block-to-block net on li1, exactly as it would
+    # with no `cross_block_layer_role` configured at all.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    m1 = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m1",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    m2 = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m2",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    output = tmp_path / "mixed_layer_bus.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["arr", "b1", "b2"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                {
+                    "net": "GBIAS",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {"cell_name": "mixed_layer_bus", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["net"] == "EBUS1"
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["net"] == "GBIAS"
+    assert report["nets"][1]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("mixed_layer_bus")
+    li1 = layout.layer(67, 20)
+    met1 = layout.layer(68, 20)
+    li1_paths = [s for s in top.shapes(li1).each() if s.is_path()]
+    met1_paths = [s for s in top.shapes(met1).each() if s.is_path()]
+    # EBUS1's leg fell back to met1; GBIAS's own backbone still runs on li1 --
+    # both drawing layers carry exactly one routed kdb.Path each.
+    assert len(li1_paths) == 1
+    assert len(met1_paths) == 1
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
 # Gate-port routing (#492): before this, a `connectivity[]` net naming a
 # bare-poly gate port was drawn as a metal stub *over* the gate with no
 # contact joining the two -- `routed: true`, no note, and an open net only a
