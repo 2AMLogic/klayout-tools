@@ -5290,6 +5290,195 @@ def test_run_lvs_subckt_call_unknown_device_errors(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# netlist_normalize.py device-family extension: resistor/capacitor/bipolar
+# (issue #1130)
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_sky130_resistor_carries_lw():
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 sky130_fd_pr__res_generic_po l=48.2u w=1u\n", deck="sky130"
+    )
+    assert out.strip() == "R1 r0 r1 0 res_generic_po L=48.2U W=1U"
+
+
+def test_normalize_gf180_resistor_carries_r_length_r_width():
+    # gf180mcu's resistor call-site params are spelled r_length/r_width (not
+    # l/w), in SI metres (a real in-the-wild convention, see pdk_models.py).
+    out = normalize_reference_netlist(
+        "XR1 1 2 3 ppolyf_u r_width=800e-9 r_length=1.6e-6 m=1.0 par=1\n",
+        deck="gf180mcu",
+    )
+    assert out.strip() == "R1 1 2 3 0 ppolyf_u L=1.6U W=0.8U"
+
+
+def test_normalize_resistor_without_geometry_omits_lw():
+    # No l/w on the call at all -- the subcircuit's own default geometry
+    # applies; the converted card carries no L=/W= (not an error).
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 sky130_fd_pr__res_generic_po\n", deck="sky130"
+    )
+    assert out.strip() == "R1 r0 r1 0 res_generic_po"
+
+
+def test_normalize_resistor_multiplicity_gt_one_rejected():
+    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
+        normalize_reference_netlist(
+            "XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u m=2\n", deck="sky130"
+        )
+
+
+def test_normalize_sky130_capacitor_derives_area_perimeter():
+    # A 5x5 um plate: area = 25 um^2, perimeter = 2*(5+5) = 20 um.
+    out = normalize_reference_netlist(
+        "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u mf=1\n", deck="sky130"
+    )
+    assert out.strip() == "C1 c0 c1 0 sky130_fd_pr__model__cap_mim A=25P P=20U"
+
+
+def test_normalize_gf180_capacitor_derives_area_perimeter_from_si_metres():
+    out = normalize_reference_netlist(
+        "XC1 1 2 cap_mim_2f0_m4m5_noshield c_length=2e-6 c_width=2e-6\n",
+        deck="gf180mcu",
+    )
+    assert out.strip() == "C1 1 2 0 cap_mim_2f0_m4m5_noshield A=4P P=8U"
+
+
+def test_normalize_capacitor_wrong_terminal_count_fails():
+    with pytest.raises(NormalizeError, match="expected 2 terminals"):
+        normalize_reference_netlist(
+            "XC1 c0 c1 c2 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u\n", deck="sky130"
+        )
+
+
+def test_normalize_capacitor_multiplicity_gt_one_rejected():
+    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
+        normalize_reference_netlist(
+            "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u mf=2\n", deck="sky130"
+        )
+
+
+def test_normalize_sky130_bipolar_resolves_by_name_no_lw_needed():
+    # sky130's pnp_05v5 cells carry no length/width-style call-site
+    # parameter at all -- resolved by subcircuit name alone.
+    out = normalize_reference_netlist(
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n", deck="sky130"
+    )
+    assert out.strip() == "Q1 c b e pnp"
+
+
+def test_normalize_bipolar_mult_carried_onto_ne():
+    out = normalize_reference_netlist(
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=4\n", deck="sky130"
+    )
+    assert out.strip() == "Q1 c b e pnp NE=4"
+
+
+def test_normalize_bipolar_wrong_terminal_count_fails():
+    with pytest.raises(NormalizeError, match="expected 3 terminals"):
+        normalize_reference_netlist(
+            "XQ1 c b sky130_fd_pr__pnp_05v5_W0p68L0p68\n", deck="sky130"
+        )
+
+
+def test_normalize_device_families_auto_resolve_without_deck():
+    # No `deck`/`device_map` given: every family resolves against the whole
+    # curated cross-deck table, same as MOS's existing auto-resolution.
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u\n"
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n"
+    )
+    assert "R1 r0 r1 0 res_generic_po L=1U W=1U" in out
+    assert "Q1 c b e pnp" in out
+
+
+def test_normalize_unresolvable_resistor_shaped_name_still_raises():
+    # A resistor-shaped call (r_length/r_width present) whose name is not a
+    # curated device is a hard error, not a silent passthrough -- the
+    # device-family extension must not silently degrade #280's original
+    # loud-failure discipline (issue #1130's edge case).
+    with pytest.raises(NormalizeError, match="not a known device"):
+        normalize_reference_netlist(
+            "XR1 1 2 3 not_a_real_resistor r_length=1e-6 r_width=1e-6\n",
+            deck="gf180mcu",
+        )
+
+
+def test_normalize_unnamed_bipolar_like_subckt_passes_through():
+    # Bipolar has no reliable carried-parameter signal of device-hood (see
+    # the module docstring): an unrecognised subcircuit name with no
+    # geometry-style parameter either is a genuine hierarchical instance,
+    # not a device call gone wrong -- passes through untouched, the same
+    # discipline #280 already applied to an unrecognised MOS-shaped name
+    # with no l/w (`test_normalize_non_device_subckt_passes_through`).
+    text = "XQ1 c b e totally_made_up_bipolar\n"
+    assert normalize_reference_netlist(text, deck="sky130").strip() == text.strip()
+
+
+def test_normalize_mos_missing_lw_after_name_match_raises_cleanly():
+    # A recognised MOS subcircuit name with neither l nor w supplied used to
+    # be unreachable (l/w presence was the *only* detection gate); the
+    # device-family extension's name-first resolution can now reach this
+    # path, so it must fail with a clear NormalizeError, not a bare KeyError.
+    with pytest.raises(NormalizeError, match="missing required parameter"):
+        normalize_reference_netlist(
+            "XM1 d g s b sky130_fd_pr__nfet_01v8\n", deck="sky130"
+        )
+
+
+def test_normalize_mos_lw_handling_unchanged_by_device_family_extension():
+    # Regression lock (acceptance criterion): the device-family extension
+    # must not alter existing MOS l/w handling byte-for-byte.
+    out = normalize_reference_netlist(_INVERTER_SUBCKT_CALL_SKY130)
+    assert "M1 Y A VGND VGND nfet L=0.15U W=0.65U" in out
+    assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
+
+
+def test_detect_reports_resistor_and_capacitor_and_bipolar():
+    text = (
+        "XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u\n"
+        "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u\n"
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n"
+    )
+    assert detect_subckt_call_devices(text) == [
+        "sky130_fd_pr__res_generic_po",
+        "sky130_fd_pr__cap_mim_m3_1",
+        "sky130_fd_pr__pnp_05v5_W0p68L0p68",
+    ]
+
+
+def test_run_lvs_subckt_call_reference_resistor_family_converts_and_reads(tmp_path):
+    # A resistor-family reference converts and reads through `klt lvs`
+    # end-to-end without erroring (not a full "match" -- this module has no
+    # PDK sheet-resistance data, so the reference's `R` value is a `0`
+    # placeholder, see `netlist_normalize.py`'s module docstring -- a real
+    # ohms compare is unaffected by this issue's scope, only that the
+    # subckt-call conversion + parse succeeds and produces a comparable
+    # device).
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt res_block A B\nR1 A B 0 res_generic_po L=48.2U W=1U\n.ends\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt res_block A B\n"
+        "XR1 A B sky130_fd_pr__res_generic_po l=48.2u w=1u\n"
+        ".ends\n",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "res_block"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "res_block",
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
 # netgen engine (issue #343): stubbed-subprocess tests
 #
 # Follows `tests/test_sim.py`'s `_stub_subprocess_run` pattern for the

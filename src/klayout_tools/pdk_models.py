@@ -420,6 +420,119 @@ def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
     return result
 
 
+@dataclass(frozen=True)
+class DeviceLookup:
+    """One entry of the netlist-*ingestion*-direction reverse lookup table
+    (issue #1130): the sibling of :class:`DeviceBinding` for turning a
+    subcircuit-call ``X`` card *back* into a plain-element card
+    (:mod:`klayout_tools.netlist_normalize`'s job), built entirely from this
+    module's static curated subcircuit-name tables -- unlike
+    :func:`resolve_device_bindings`, this direction never needs a live
+    ``ExtractionDeck`` object (a deck's own ``resistors``/``capacitors``/
+    ``bipolars`` lists), only the fixed ``<device-class> -> <subckt-name>``
+    tables that are already deck-name-keyed.
+
+    ``kind`` mirrors :attr:`DeviceBinding.kind`
+    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``). ``device_class``
+    is the plain-element card's model-field label (``nfet``,
+    ``res_generic_po``, ...). ``length_param``/``width_param`` are the *real*
+    subcircuit's own call-site parameter spellings (``l``/``w`` for sky130,
+    ``r_length``/``r_width`` or ``c_length``/``c_width`` for gf180mcu) --
+    ``None`` for a kind with no geometry call-site parameter (bipolar's
+    fixed-geometry cells, see :func:`known_device_subckt_names`'s
+    docstring).
+    """
+
+    kind: str
+    device_class: str
+    length_param: str | None = None
+    width_param: str | None = None
+
+
+def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
+    """Every curated device subcircuit name across *all* decks and *all*
+    device families (MOS, resistor, capacitor, bipolar), mapped to the
+    ``(deck_name, DeviceLookup)`` it resolves to (issue #1130's
+    device-family extension of :func:`known_mos_subckt_names`, used the same
+    way: auto-resolution when a caller gives no explicit ``deck``).
+
+    A curated bipolar subcircuit (e.g. sky130's fixed-geometry
+    ``sky130_fd_pr__pnp_05v5_W0p68L0p68``) carries no call-site
+    length/width-style parameter at all -- unlike MOS/resistor/capacitor, an
+    ``X`` card instantiating one cannot be recognised by a carried-parameter
+    heuristic, only by this table's subcircuit name itself
+    (:mod:`klayout_tools.netlist_normalize` resolves bipolar purely by name
+    for exactly this reason).
+    """
+    result: dict[str, tuple[str, DeviceLookup]] = {}
+    for subckt, (deck_name, device_class) in known_mos_subckt_names().items():
+        result[subckt] = (deck_name, DeviceLookup("mos", device_class, "l", "w"))
+    for (deck_name, family), table in _RESISTOR_MODEL_TABLE.items():
+        length_param, width_param = _RESISTOR_PARAM_STYLE.get(family, ("l", "w"))
+        for device_class, subckt in table.items():
+            result.setdefault(
+                subckt,
+                (
+                    deck_name,
+                    DeviceLookup("resistor", device_class, length_param, width_param),
+                ),
+            )
+    for (deck_name, family), table in _CAPACITOR_MODEL_TABLE.items():
+        length_param, width_param = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
+        for device_class, subckt in table.items():
+            result.setdefault(
+                subckt,
+                (
+                    deck_name,
+                    DeviceLookup("capacitor", device_class, length_param, width_param),
+                ),
+            )
+    for (deck_name, _family), table in _BIPOLAR_MODEL_TABLE.items():
+        for device_class, variants in table.items():
+            for _nominal_ae, subckt in variants:
+                result.setdefault(
+                    subckt, (deck_name, DeviceLookup("bipolar", device_class))
+                )
+    return result
+
+
+def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
+    """Reverse of :func:`resolve_device_bindings`'s static (deck-object-free)
+    portion: ``<subckt-name> -> DeviceLookup`` for every curated MOS,
+    resistor, capacitor, and bipolar device this table knows for
+    ``deck_name`` (issue #1130's device-family extension of
+    :func:`build_subckt_to_class_map`).
+
+    Raises :class:`ModelBindingError` (via :func:`build_subckt_to_class_map`)
+    for an unknown deck -- never returns a partial/guessed table.
+    """
+    result: dict[str, DeviceLookup] = {
+        subckt: DeviceLookup("mos", device_class, "l", "w")
+        for subckt, device_class in build_subckt_to_class_map(deck_name).items()
+    }
+    family = deck_name
+    res_len, res_wid = _RESISTOR_PARAM_STYLE.get(family, ("l", "w"))
+    for device_class, subckt in _RESISTOR_MODEL_TABLE.get(
+        (deck_name, family), {}
+    ).items():
+        result.setdefault(
+            subckt, DeviceLookup("resistor", device_class, res_len, res_wid)
+        )
+    cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
+    for device_class, subckt in _CAPACITOR_MODEL_TABLE.get(
+        (deck_name, family), {}
+    ).items():
+        result.setdefault(
+            subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
+        )
+    for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
+        (deck_name, family), {}
+    ).items():
+        for _nominal_ae, subckt in variants:
+            result.setdefault(subckt, DeviceLookup("bipolar", device_class))
+    return result
+
+
 def _format_um(value: float) -> str:
     """Format a micrometre value the same way KLayout's own default
     ``M``-card writer formats ``L``/``W`` (e.g. ``8.0`` -> ``"8U"``, ``0.5``
