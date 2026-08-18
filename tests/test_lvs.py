@@ -5324,6 +5324,29 @@ def test_normalize_device_map_override():
     assert "M1 d g s b nfet L=0.5U W=1U" in out
 
 
+def test_normalize_device_map_non_mos_terminal_count_gets_clear_error():
+    # issue #1163: a device_map entry naming a 2-terminal (or otherwise
+    # non-MOS-shaped) subcircuit must not surface the opaque generic
+    # "expected 4 terminals" mismatch -- device_map only supports
+    # MOS-shaped overrides today, so the error must say so explicitly.
+    with pytest.raises(NormalizeError, match="device_map only supports MOS-shaped"):
+        normalize_reference_netlist(
+            "XR1 a b my_custom_res L=1u W=1u\n",
+            device_map={"my_custom_res": "res_generic_po"},
+        )
+
+
+def test_normalize_deck_mos_terminal_count_keeps_generic_error():
+    # The same wrong-terminal-count case, but resolved from `deck` (a
+    # genuinely malformed MOS call), keeps the original generic message --
+    # the device_map-specific error is only for device_map-sourced bindings.
+    with pytest.raises(NormalizeError, match="expected 4 terminals") as excinfo:
+        normalize_reference_netlist(
+            "XM1 d g s nfet_03v3 L=0.5u W=1u\n", deck="gf180mcu"
+        )
+    assert "device_map" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("param,value", [("nf", "2"), ("m", "4"), ("mult", "2")])
 def test_normalize_multiplicity_gt_one_rejected(param, value):
     with pytest.raises(NormalizeError, match="multi-finger/multiplied"):

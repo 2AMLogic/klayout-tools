@@ -17,11 +17,11 @@
     },
     "netlist": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": [
         "path"
       ],
-      "description": "The same path/top/form/deck shape klt lvs's reference-side request already accepts (docs/cli/lvs.md) -- a plan resolves its netlist through the identical ingestion path.",
+      "description": "The same path/top/form/deck/device_map shape klt lvs's reference-side request already accepts (docs/cli/lvs.md) -- a plan resolves its netlist through the identical ingestion path. An unrecognised key is a usage error, mirroring pdk's own unknown-key check.",
       "properties": {
         "path": {
           "type": "string",
@@ -46,6 +46,14 @@
           "type": "string",
           "minLength": 1,
           "description": "Only used with form: \"subckt-call\". \"sky130\"/\"gf180mcu\" -- selects that deck's curated device-name map for the conversion."
+        },
+        "device_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Only used with form: \"subckt-call\". Explicit <subckt-name> -> <device_class> overrides, merged on top of deck's curated table -- the same shape klt lvs's reference.device_map accepts (docs/cli/lvs.md). Every entry is currently resolved as a MOS-shaped (4-terminal) override; a non-MOS subcircuit name raises a clear error instead of a silent misbind."
         }
       }
     },

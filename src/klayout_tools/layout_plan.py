@@ -21,7 +21,8 @@ are checked against that digest's own ``devices[]`` entries, by
 ``(name, device_class)`` (see the per-class note below).
 :func:`validate_layout_plan_document` is the convenience wrapper that builds
 the digest for the caller, from the plan's own ``netlist.path``/``top``/
-``form``/``deck`` fields, via :func:`klayout_tools.netlist_digest.build_netlist_digest`
+``form``/``deck``/``device_map`` fields, via
+:func:`klayout_tools.netlist_digest.build_netlist_digest`
 -- the same ``klt lvs`` reference-side ingestion path Phase A itself reuses,
 never a private parse.
 
@@ -187,6 +188,12 @@ _NETLIST_FORMS = ("plain-element", "subckt-call")
 #: order.
 _ALLOWED_PDK_KEYS = {"variant", "root"}
 
+#: Allowed keys in ``request.netlist`` -- the same ``path``/``top``/``form``/
+#: ``deck``/``device_map`` shape ``klt lvs``'s ``request.reference`` already
+#: accepts (issue #1163): an unrecognised key is a usage error rather than a
+#: silent drop, mirroring :data:`_ALLOWED_PDK_KEYS`.
+_ALLOWED_NETLIST_KEYS = {"path", "top", "form", "deck", "device_map"}
+
 #: Every ``device_groups[].topology`` value the spike's contract names
 #: (spike section 2 field table). Membership here is a *shape* check
 #: (usage error, exit 2) -- whether a given generator actually supports the
@@ -255,6 +262,14 @@ def _parse_netlist(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise LayoutPlanUsageError("request.netlist must be a JSON object")
 
+    unknown = set(raw) - _ALLOWED_NETLIST_KEYS
+    if unknown:
+        allowed = ", ".join(sorted(_ALLOWED_NETLIST_KEYS))
+        raise LayoutPlanUsageError(
+            "request.netlist has unknown field(s): "
+            f"{', '.join(sorted(unknown))} -- allowed: {allowed}"
+        )
+
     path = raw.get("path")
     if not isinstance(path, str) or not path:
         raise LayoutPlanUsageError(
@@ -278,7 +293,17 @@ def _parse_netlist(raw: Any) -> dict[str, Any]:
             "request.netlist.deck must be a non-empty string when given"
         )
 
-    return {"path": path, "top": top, "form": form, "deck": deck}
+    device_map = raw.get("device_map")
+    if device_map is not None and not isinstance(device_map, dict):
+        raise LayoutPlanUsageError("request.netlist.device_map must be a JSON object")
+
+    return {
+        "path": path,
+        "top": top,
+        "form": form,
+        "deck": deck,
+        "device_map": device_map,
+    }
 
 
 def _parse_pdk(raw: Any) -> dict[str, Any]:
@@ -796,6 +821,7 @@ def validate_layout_plan_document(
             top=netlist_spec["top"],
             form=netlist_spec["form"],
             deck=netlist_spec["deck"],
+            device_map=netlist_spec["device_map"],
         )
     except LvsError as exc:
         raise LayoutPlanError(f"request.netlist could not be ingested: {exc}") from exc
