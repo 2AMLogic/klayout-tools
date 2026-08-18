@@ -83,10 +83,13 @@ split the space this module *does* own, using the same distinction
   does not conform to the ``klt.layout_plan.request/1`` shape: invalid
   JSON syntax, a field with the wrong JSON type, a required field missing,
   or an enum-like field (``netlist.form``, ``device_groups[].topology``,
-  ``rows[].align``, ``abutment[].edge``) holding a value outside its known
-  literal set. Every one of these is checkable by reading the request
-  document alone -- no netlist digest, no generator table, no sibling
-  ``device_groups[]`` entry is needed to know the document is malformed.
+  ``device_groups[].orientation`` (#1166 -- the same
+  ``klayout_tools.gen_compose.blocks[].orientation`` enum, imported
+  directly as :data:`klayout_tools.gen_compose._ORIENTATIONS`), ``rows[].align``,
+  ``abutment[].edge``) holding a value outside its known literal set. Every
+  one of these is checkable by reading the request document alone -- no
+  netlist digest, no generator table, no sibling ``device_groups[]`` entry
+  is needed to know the document is malformed.
 * :class:`LayoutPlanError` (exit ``1``) -- the document is shaped
   correctly, but a value that is supposed to *reference* something does
   not resolve: a ``device_groups[].devices`` name absent from the netlist
@@ -166,6 +169,7 @@ from typing import Any
 
 from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
+from .gen_compose import _ORIENTATIONS
 from .netlist_digest import build_netlist_digest
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -426,6 +430,21 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
                 f"{entry_where}.topology must be one of {allowed} when given"
             )
 
+        # device_groups[].orientation (#1166) -- the same mirror/rotate enum
+        # klayout_tools.gen_compose.blocks[].orientation accepts (imported
+        # directly, _ORIENTATIONS, so the two never drift): a plan-level group
+        # compiles down to one gen-compose blocks[] entry (this module's own
+        # docstring), so its own orientation carries through unchanged. An
+        # enum-shape check only, exactly like topology/align/edge above --
+        # this module does not (yet) validate that a group's placement
+        # actually needs the mirror it declares (Phase C's concern).
+        orientation = raw_group.get("orientation", "none")
+        if orientation not in _ORIENTATIONS:
+            allowed = ", ".join(sorted(_ORIENTATIONS))
+            raise LayoutPlanUsageError(
+                f"{entry_where}.orientation must be one of {allowed} when given"
+            )
+
         encloses = raw_group.get("encloses", [])
         if not isinstance(encloses, list) or not all(
             isinstance(e, str) and e for e in encloses
@@ -451,6 +470,7 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
                 "encloses": encloses,
                 "dummy": dummy,
                 "params": params,
+                "orientation": orientation,
             }
         )
 
@@ -796,6 +816,7 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
                 "topology": g["topology"],
                 "devices": g["devices"],
                 "encloses": g["encloses"],
+                "orientation": g["orientation"],
             }
             for g in raw_groups
         ],

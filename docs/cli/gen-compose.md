@@ -43,10 +43,9 @@ cleanly.
     positions, per-pair separation) can be expressed directly rather than
     forced through a single row's uniform spacing. `placement.spacing_um` is
     not read under `"explicit"` — the declared origins are the whole
-    placement. **Two things `"explicit"` does not do**: it supports no
-    orientation/rotation (translation only, exactly like `"row"`), and it
-    performs no overlap validation of its own — an overlapping or abutting
-    pair of declared origins composes successfully; `klt drc` remains the
+    placement. **One thing `"explicit"` does not do**: it performs no
+    overlap validation of its own — an overlapping or abutting pair of
+    declared origins composes successfully; `klt drc` remains the
     rule-compliance authority on the composed output (see "Geometry is
     advisory" below).
   - `"array"` (#1053) — the **one** `blocks[]` entry named in
@@ -57,8 +56,11 @@ cleanly.
     instance rather than `rows * cols` individual placements — see "Array
     placement (a repeated-block regular tiling, #1053)" below. Takes exactly
     one `blocks[]` entry (an `"array"` request with more than one is an
-    application error) and, like `"explicit"`, supports no orientation
-    (translation only).
+    application error); every tile shares that one entry's own `orientation`
+    uniformly (no *per-tile* override).
+  - **Block orientation** (`blocks[].orientation`, #1166) — a per-block
+    mirror/rotation, orthogonal to (composes with) every strategy above; see
+    "Block orientation (mirror/rotate, #1166)" below.
 
   `"grid"` is a *different*, still-unimplemented feature reserved by the
   accepted spike for a later phase (a row-wrap layout of *distinct* blocks
@@ -780,6 +782,7 @@ exit codes).
 | `blocks[]` | array\<object\> | Each already-generated primitive to place — see below. |
 | `blocks[].id` | string | Caller-chosen label used to address the block's ports elsewhere in this request (`placement.order`, `connectivity[].pins[].block`). Must be unique within `blocks[]`. |
 | `blocks[].generator_report` | object \| string | The block's own [`klt gen`](gen.md) JSON response — either an inline object, or a path to a file holding one (mirrors `klt gen --params`'s own path-or-inline duality). A relative path string resolves against **the request file's own directory** (not the process's current working directory), matching `klt lvs`'s request-relative path convention — an absolute path is unaffected. When `compose()` is called directly as a library (no request file at all), relative paths resolve against the process's current working directory instead. This command's only input about a block's geometry is its already-reported `bbox_um`/`ports[]`/`cell_name`/`gds_path` — never a second, private inspection of the GDS stream at request-parse time. [`klt draw`](draw.md)'s own JSON response is also accepted unmodified — its `generator: "draw"` field and `cell_name`/`gds_path`/`bbox_um` already satisfy this schema (a `draw` block has no `ports[]`, which defaults to `[]`). |
+| `blocks[].orientation` | string | Optional, default `"none"` (#1166). `"none"`, `"mirror_x"`, `"mirror_y"`, or `"rotate_180"` — this block's own mirror/rotation, applied about its own local origin *before* placement translates it. See "Block orientation (mirror/rotate, #1166)" below for the exact transform and the same-facing-port case it unblocks. An unrecognised value is an application error (exit 1). |
 | `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |
 | `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"` or `"array"`. |
@@ -812,7 +815,8 @@ exit codes).
       "id": "diffpair",
       "generator": "diff_pair",
       "offset_um": { "x": 0.0, "y": 0.0 },
-      "bbox_um": { "x0": -0.92, "y0": -0.92, "x1": 3.56, "y1": 2.16 }
+      "bbox_um": { "x0": -0.92, "y0": -0.92, "x1": 3.56, "y1": 2.16 },
+      "orientation": "none"
     }
   ],
   "nets": [
@@ -890,7 +894,8 @@ exit codes).
 | `id` | string | Echo of the request's `blocks[].id`. |
 | `generator` | string | Echoed from that block's own `generator_report.generator`. |
 | `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). Under `"array"` (#1053), `offset_um` is exactly `placement.origin_um` (the base, row-0/col-0 tile) — every *other* tile's own position is implied by `rows`/`cols`/`row_pitch_um`/`col_pitch_um` rather than reported as a separate `blocks[]` entry (there is still exactly one `blocks[]` entry for an `"array"`-placed block, echoing this base tile). |
-| `bbox_um` | object | That block's own `generator_report.bbox_um`, translated by `offset_um`, in the composed cell's coordinate frame — **except under `"array"`** (#1053), where `bbox_um` is instead the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. |
+| `bbox_um` | object | That block's own `generator_report.bbox_um`, transformed by `orientation` (#1166, about the block's own local origin) then translated by `offset_um`, in the composed cell's coordinate frame — **except under `"array"`** (#1053), where `bbox_um` is instead the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. |
+| `orientation` | string | Echo of the request's `blocks[].orientation` (#1166), `"none"` when omitted. |
 
 ### Semantics and guarantees
 
@@ -939,7 +944,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -994,9 +999,8 @@ only along `x`; a net between two blocks placed at different `y` (not just
 different `x`) routes through a **vertical** jog exactly the same way a
 row-placed net routes through a horizontal one.
 
-Two things `"explicit"` deliberately does not add (see "Scope" above):
-placed blocks carry no orientation/rotation (an origin is a translation
-only), and `gen-compose` performs no overlap check of its own — a caller
+One thing `"explicit"` deliberately does not add (see "Scope" above):
+`gen-compose` performs no overlap check of its own — a caller
 that declares two blocks at overlapping origins gets a composed GDS with
 overlapping geometry and no error from this command. `klt drc` is the
 authority for illegal *shapes* on the composed output, but it is not a
@@ -1083,14 +1087,16 @@ own count (`== 1`) rather than only the rendered geometry — a flattened
 `rows * cols`-insert implementation could look visually identical while
 failing this requirement.
 
-Three things `"array"` deliberately does not do (see "Scope" above):
+Two things `"array"` deliberately does not do (see "Scope" above):
 - **Only one block.** `blocks[]`/`placement.order` must have exactly one
   entry — a caller composing several distinct blocks alongside a repeated
   array needs a separate `gen-compose` request per block (or a follow-on
   request that reads this one's own `gds_path` as an input, once that
   composition-of-compositions capability exists).
-- **No orientation.** Like `"row"`/`"explicit"`, every tile is a translation
-  only — no per-tile rotation or mirroring.
+- **No per-tile orientation override.** The one `blocks[]` entry's own
+  `orientation` (#1166) applies uniformly to every tile — there is no
+  per-tile mirroring (e.g. alternating flipped rows/columns, a common
+  "stitched" layout style, is not expressible this way).
 - **No per-tile `connectivity[]`/`pins[]` shorthand.** `connectivity[]` and
   `pins[]` still address the array-placed block by its one `blocks[].id`, so
   they can only reach the **base** (row 0, col 0) tile's own ports — there is
@@ -1101,6 +1107,88 @@ Three things `"array"` deliberately does not do (see "Scope" above):
   to be useful on its own (a caller with a fully regular tiling still saves
   the `O(rows * cols)` request-size cost `"explicit"` would otherwise impose,
   even before grid-aware routing exists).
+
+## Block orientation (mirror/rotate, #1166)
+
+Every `blocks[]` entry accepts an optional `orientation` field
+(`"none"` (default), `"mirror_x"`, `"mirror_y"`, or `"rotate_180"`), applied
+about that block's own local origin *before* placement translates it —
+orthogonal to (composes with) every `placement.strategy` above, since it is
+a per-block attribute, not a placement-strategy one.
+
+**Why this exists**: placement alone (translation only, no rotation) cannot
+make two same-facing ports face each other. A minimal two-device "CMOS
+inverter" (one `mos_array` standing in for an nfet, one for a pfet, side by
+side) is the canonical case: `mos_array` always reports its source on the
+left edge (`180deg`) and its drain on the right edge (`0deg`) of its own
+local frame (see [`gen.md`](gen.md)'s `mos_array` section). Two such blocks
+placed in a row therefore have their drains on the *same* absolute side —
+the second block's drain faces away from the first, on its own far edge —
+so wiring them together (`connectivity[]`'s shared `VOUT` net) forces the
+backbone to cross straight through the second block's own interior, which
+`route_two_pin`'s obstacle-overlap check (check 5) rejects outright. This was
+root cause #1 of #1164's friction report: "if [a CMOS inverter] cannot
+route, nothing larger can."
+
+`orientation: "mirror_x"` on the second block fixes exactly this: it moves
+that block's own drain from its right edge to its left edge (and flips its
+reported `direction_deg` from `0` to `180`), so the two drains now sit
+directly across the row's `spacing_um` channel, facing each other — the net
+routes as a plain straight backbone, no waypoints needed.
+
+```json
+{
+  "blocks": [
+    { "id": "n", "generator_report": "nfet.json" },
+    { "id": "p", "generator_report": "pfet.json", "orientation": "mirror_x" }
+  ],
+  "placement": { "strategy": "row", "order": ["n", "p"], "spacing_um": 1.0 },
+  "connectivity": [
+    { "net": "VOUT", "pins": [{ "block": "n", "port": "U0_D" }, { "block": "p", "port": "U0_D" }] }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17 },
+  "options": { "cell_name": "inverter_0", "output": "inverter_0.gds" }
+}
+```
+
+**Transform semantics** (about the block's own local `(0, 0)`, matching
+`klayout.db.Trans`'s own mirror-then-rotate-then-translate composition —
+verified 1:1 against it in the test suite):
+
+| `orientation` | Point transform `(x, y) ->` | Direction remap (`direction_deg`) |
+| --- | --- | --- |
+| `"none"` (default) | `(x, y)` — unchanged | unchanged |
+| `"mirror_x"` | `(-x, y)` — horizontal flip (left-right) | `0 <-> 180`, `90`/`270` unchanged |
+| `"mirror_y"` | `(x, -y)` — vertical flip (top-bottom) | `90 <-> 270`, `0`/`180` unchanged |
+| `"rotate_180"` | `(-x, -y)` | `0 <-> 180`, `90 <-> 270` |
+
+Applied consistently everywhere a block's own geometry is consumed, so a
+block's reported metadata never disagrees with what is actually drawn:
+
+- **`bbox_um`** (both the response's per-block `bbox_um` and every placement
+  strategy's own internal bbox math) — mirrored/rotated, then translated by
+  `offset_um`. Width/height are always preserved (every orientation is an
+  axis-aligned flip, never a diagonal rotation).
+- **`ports[]`** — each port's `x_um`/`y_um` and `direction_deg` are
+  transformed identically, so `connectivity[]`/`pins[]` routing, ring-opening
+  detection, and stub-widen all see an already-correct, already-oriented
+  port without any of that logic special-casing orientation itself.
+- **Drawn GDS geometry** — the actual sub-cell instance
+  `_write_composed_gds` inserts (via `kdb.Trans(rot, mirrx, x, y)`) and the
+  obstacle geometry `read_block_layer_geometry` reads back for the self-net
+  drawn-metal check (#453/#469) both apply the identical transform, so a
+  self-net's pad-crossing checks stay correct for a mirrored block too.
+
+**What orientation does not do**: it never changes a port's *identity* (its
+name, `width_um`/contact size, or which layer it is on) — only its position
+and facing direction. It composes with `"explicit"` placement's own
+`offset_um` (mirror first, about the block's local origin, then translate by
+the declared origin — never the other way around) and with `"array"`
+placement (the one array-placed block's orientation applies uniformly to
+every tile, matching `kdb.CellInstArray`'s own semantics — its `a`/`b` step
+vectors are added in the *parent* frame, after the instance's own
+rotation/mirror). An unrecognised `orientation` value is an application
+error (exit 1).
 
 ## Worked example
 
