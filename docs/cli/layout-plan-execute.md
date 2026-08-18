@@ -131,9 +131,21 @@ For every `device_groups[]` entry, this module resolves the `params` a
    is recorded in `warnings[]`, never silently averaged or dropped.
 
 2. **`device_groups[].topology`** (when declared) is layered in as
-   `params.topology` — the plan's own top-level matching-pattern field maps
-   directly onto the identically-named `klt gen` params field
-   `mos_array`/`bjt_array` already accept.
+   `params.topology` **only for `mos_array`/`bjt_array`** — the only two
+   generators with an identically-named `klt gen` params field to receive
+   it (`_TOPOLOGY_PARAM_GENERATORS` in `layout_plan_execute.py`). A
+   generator outside that set can still carry a declared topology past
+   Phase B — today, only `diff_pair`/`common_centroid`, the one
+   generator/value pair `layout_plan._GENERATOR_TOPOLOGY_SUPPORT` allows for
+   a generator with no `params.topology` of its own — and it is left as a
+   plan-level assertion only: `diff_pair` always draws a common-centroid
+   cross-quad pattern, so `common_centroid` already matches what it draws
+   and is accepted silently, with nothing injected into `params` (injecting
+   it would make `klt gen` hard-reject the call as an unknown param). A
+   future generator/topology pair that would *change* the drawn layout but
+   still can't be expressed as a `klt gen` param would need a `warnings[]`
+   entry instead of this silent-accept treatment — no such case exists
+   today.
 
 3. **`device_groups[].params` overrides** (read from the request document,
    not from Phase B's validated response — Phase B only shape-checks
