@@ -207,6 +207,78 @@ M3 D3 VBIAS VSS VSS nfet L=0.28U W=0.42U
     assert exit_code_for(response) == 3
 
 
+# device_groups[].orientation (#1166) must actually reach compose() through
+# this module's Phase C execution path, not just be validated/echoed by Phase
+# B (`layout_plan.validate_layout_plan`) -- the same same-facing-drain
+# scenario `test_gen_compose.py`'s
+# `test_compose_same_facing_drain_net_is_unrouted_without_orientation` /
+# `test_compose_mirrored_block_routes_same_facing_drain_net_and_is_drc_clean`
+# pair exercises directly against `compose()`, driven here end to end from a
+# netlist-derived `klt.layout_plan.request/1` document instead.
+_SAME_FACING_DRAIN_NETLIST = """
+.subckt inverter VOUT
+M1 VOUT G1 S1 S1 nfet L=0.28U W=0.42U
+M2 VOUT G2 S2 S2 nfet L=0.28U W=0.42U
+.ends
+"""
+
+
+def _same_facing_drain_groups(p_orientation=None) -> list[dict]:
+    p_group = {
+        "id": "p",
+        "devices": ["2"],
+        "generator": "mos_array",
+        "params": {"rows": 1, "cols": 1, "dummy": 0},
+    }
+    if p_orientation is not None:
+        p_group["orientation"] = p_orientation
+    return [
+        {
+            "id": "n",
+            "devices": ["1"],
+            "generator": "mos_array",
+            "params": {"rows": 1, "cols": 1, "dummy": 0},
+        },
+        p_group,
+    ]
+
+
+def _same_facing_drain_request(tmp_path, pdk_root, p_orientation=None) -> dict:
+    netlist_path = _write(tmp_path, "inverter.spice", _SAME_FACING_DRAIN_NETLIST)
+    return {
+        "netlist": {"path": netlist_path, "top": "inverter"},
+        "pdk": _pdk_spec(pdk_root),
+        "device_groups": _same_facing_drain_groups(p_orientation),
+        "rows": [{"order": ["n", "p"], "spacing_um": 1.0}],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {
+            "cell_name": "inverter_0",
+            "output": str(tmp_path / "inverter_0.gds"),
+        },
+    }
+
+
+def test_execute_same_facing_drain_net_is_unrouted_without_orientation(
+    tmp_path, pdk_root
+):
+    request = _same_facing_drain_request(tmp_path, pdk_root)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert "VOUT" in response["unrouted_nets"]
+    assert partial_success(response) is True
+
+
+def test_execute_group_orientation_reaches_compose_and_routes_same_facing_drain_net(
+    tmp_path, pdk_root
+):
+    request = _same_facing_drain_request(tmp_path, pdk_root, p_orientation="mirror_x")
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["unrouted_nets"] == []
+    nets_by_name = {net["net"]: net for net in response["nets"]}
+    assert nets_by_name["VOUT"]["routed"] is True
+
+
 # ---------------------------------------------------------------------------
 # Per-group parameter resolution: netlist-derived sizing + override warning.
 # ---------------------------------------------------------------------------

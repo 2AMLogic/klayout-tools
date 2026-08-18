@@ -134,6 +134,17 @@
             ],
             "description": "The matching pattern for this group. \"array\"/\"common_centroid\" map onto the topology param mos_array/bjt_array already accept; diff_pair always lays out \"common_centroid\". \"interdigitated\"/\"single\" are proposed values no generator supports yet -- declaring either (on any generator) is flagged as an application error, exit code 1, not silently accepted. See docs/cli/layout-plan.md."
           },
+          "orientation": {
+            "type": "string",
+            "enum": [
+              "none",
+              "mirror_x",
+              "mirror_y",
+              "rotate_180"
+            ],
+            "default": "none",
+            "description": "This group's own mirror/rotation (issue #1166), applied about its local origin before placement -- the same blocks[].orientation klt gen-compose accepts, so a group compiles down to one gen-compose blocks[] entry with this value carried through unchanged. \"mirror_x\" mirrors left-right (negates local x -- e.g. a right-edge port moves to the left edge), \"mirror_y\" mirrors top-bottom (negates local y), \"rotate_180\" negates both. This is what lets two groups placed side by side with same-facing ports (e.g. a CMOS inverter's nfet/pfet pair sharing a drain net) be mirrored to face each other so the shared net can route. Defaults to \"none\" (today's translation-only placement, unchanged). An unrecognised value is a usage error, exit code 2 -- checkable by reading the request document alone, exactly like topology/rows[].align/abutment[].edge."
+          },
           "dummy": {
             "type": "object",
             "description": "Leading/trailing or row/col dummy-element counts -- routed to the named generator's own dummy_rows/dummy_cols-style param at execution time (Phase C). Not deeply validated at Phase B."

@@ -33,8 +33,9 @@ Schema is
 resolve?*
 
 - **Structure** — required fields, JSON types, and enum-like values
-  (`netlist.form`, `device_groups[].topology`, `rows[].align`,
-  `abutment[].edge`) are checked against their known literal sets.
+  (`netlist.form`, `device_groups[].topology`, `device_groups[].orientation`,
+  `rows[].align`, `abutment[].edge`) are checked against their known literal
+  sets.
 - **Device references** — every `device_groups[].devices` entry must
   resolve to a real device in the ingested netlist digest, by
   `(name, device_class)` (see "Device references are per-class" below).
@@ -112,7 +113,8 @@ A's digest adapter) — never a private SPICE parse.
       "id": "rref_string",
       "devices": ["11", "12"],
       "generator": "res_array",
-      "dummy": { "leading": 1, "trailing": 1 }
+      "dummy": { "leading": 1, "trailing": 1 },
+      "orientation": "mirror_x"
     },
     {
       "id": "core_guard_ring",
@@ -148,6 +150,7 @@ A's digest adapter) — never a private SPICE parse.
 | `device_groups[].devices` | array\<string \| object\> | no (default `[]`) | The netlist device instances this group is generated from — either a bare name or a `{"name", "device_class"}` object. See "Device references are per-class" below. Empty for an enclosure-shaped group like a guard ring. |
 | `device_groups[].generator` | string | **yes** | Which existing [`klt gen`](gen.md) generator draws this group. A plan invents no generator; naming one `klt gen` does not have is an application error. |
 | `device_groups[].topology` | string | no | `"array"`, `"common_centroid"`, `"interdigitated"`, or `"single"` — the matching pattern. Must be one the named generator supports; see "Topology support". |
+| `device_groups[].orientation` | string | no (default `"none"`) | `"none"`, `"mirror_x"`, `"mirror_y"`, or `"rotate_180"` (#1166) — this group's own mirror/rotation, applied about its local origin before placement. The same enum [`klt gen-compose`](gen-compose.md)'s `blocks[].orientation` accepts (imported directly, so the two never drift) — a group compiles down to one `gen-compose` `blocks[]` entry at Phase C, carrying this value through unchanged. `"mirror_x"` mirrors left-right, `"mirror_y"` mirrors top-bottom, `"rotate_180"` does both — see [`klt gen-compose`](gen-compose.md#block-orientation-mirrorrotate-1166) for the exact transform semantics and the CMOS-inverter-shaped case this unblocks (two same-facing groups sharing a net). An unrecognised value is a **usage** error. |
 | `device_groups[].dummy` | object | no | Leading/trailing or row/col dummy-element counts, routed to the named generator's own dummy params at execution time (Phase C). Not deeply validated here. |
 | `device_groups[].encloses` | array\<string\> | no (default `[]`) | For an enclosure-shaped generator (`guard_ring`): which other `device_groups[].id`s it must surround, so the ring is sized from the enclosed groups' placed bounding boxes rather than a caller-guessed inner size. Each id must resolve, and may not be the group's own id. |
 | `device_groups[].params` | object | no | Generator-specific overrides layered on top of the parameters Phase C resolves from the netlist's own device sizing. Not deeply validated here. |
@@ -251,7 +254,8 @@ see [`docs/json-contract.md`](../json-contract.md)):
         { "name": "1", "device_class": "PFET" },
         { "name": "2", "device_class": "PFET" }
       ],
-      "encloses": []
+      "encloses": [],
+      "orientation": "none"
     }
   ],
   "rows": [{ "order": ["diffpair"], "spacing_um": 1.0, "align": "bottom" }],
@@ -268,7 +272,7 @@ see [`docs/json-contract.md`](../json-contract.md)):
 | `valid` | boolean | Always `true` on return — an invalid plan raises instead of returning `false`, so a caller cannot ignore a failure by forgetting to check a flag. |
 | `netlist` | object | The plan's own `path`/`top`/`form`/`deck`/`device_map`, plus what the digest resolved: `circuit` (the digested circuit's name), `device_count`, `net_count`. |
 | `pdk` | object | The plan's `variant`/`root`, echoed (`null` when unset). Not resolved against an installed PDK at Phase B. |
-| `device_groups[]` | array\<object\> | Per group: `id`, `generator`, `topology` (`null` when undeclared), `devices` (**fully qualified** — see "Device references are per-class"), `encloses`. |
+| `device_groups[]` | array\<object\> | Per group: `id`, `generator`, `topology` (`null` when undeclared), `devices` (**fully qualified** — see "Device references are per-class"), `encloses`, `orientation` (`"none"` when undeclared, #1166). |
 | `rows[]` / `abutment[]` / `options` | — | The plan's own values, normalized with defaults applied (`spacing_um`/`gap_um` as floats, `align` defaulted to `"bottom"`). |
 | `unmapped_devices[]` | array\<object\> | Every digest device (`{name, device_class}`) that no `device_groups[]` entry claims — always present, empty when the plan covers the whole netlist. This is *not* an error: a plan may deliberately cover part of a circuit. It is the "always report the array, never silently drop" discipline `klt gen-compose`'s `unrouted_nets[]` already applies. |
 | `warnings[]` | array\<string\> | Always present. Empty at Phase B — the divergence classes the spike names as warning-worthy (e.g. a `params` override contradicting the schematic's own device sizing) are only detectable once Phase C resolves netlist-derived parameters. |

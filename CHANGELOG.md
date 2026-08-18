@@ -865,6 +865,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   internals; the response shape is unchanged. See `docs/cli/gen-compose.md`'s
   "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)"
   section.
+- 2026-08-18 — `klt gen-compose`'s `blocks[]` (and
+  `klt.layout_plan.request/1`'s `device_groups[]`) accept an optional
+  `orientation` field -- `"none"` (default), `"mirror_x"`, `"mirror_y"`, or
+  `"rotate_180"` (issue #1166, root cause #1 of #1164's friction report) --
+  a per-block mirror/rotation applied about that block's own local origin
+  before placement translates it, orthogonal to (composes with) every
+  `placement.strategy`. Unblocks the minimal "CMOS inverter" case a
+  translation-only placement model could not route: two same-facing ports
+  (e.g. two `mos_array` blocks' drains, both drawn on their own right edge)
+  cannot be wired without one being mirrored to face the other.
+  `bbox_um`/`ports[]` (position and `direction_deg`) and the actual drawn
+  GDS geometry are all transformed identically -- see `docs/cli/gen-compose.md`'s
+  new "Block orientation (mirror/rotate, #1166)" section for the exact
+  transform table. Omitting `orientation` leaves every existing request's
+  behavior unchanged (defaults to `"none"`, today's translation-only
+  placement). No `schema_version` bump -- additive on both contracts.
 - 2026-08-18 — `klt signoff --manifest` gains an opt-in **generic evidence
   envelope** (`"kind": "generic"`, issue #1152) as the ingestion path for T1
   item 8 ("Characterization report"), the one T1 checklist item naming no

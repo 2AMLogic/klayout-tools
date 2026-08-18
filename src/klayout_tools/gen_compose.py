@@ -29,13 +29,21 @@ Scope (phase 2, this module's current state):
   instantiated as a translated sub-cell instance under one new top cell (an
   ``"array"``-placed block instead gets one hierarchical
   ``kdb.CellInstArray`` row/column-vector instance covering every tile, never
-  ``rows*cols`` separate inserts). ``"explicit"`` placement supports no
-  orientation (rotation) and performs no overlap validation of its own -- see
-  :func:`resolve_explicit_offsets`'s docstring. ``"array"`` placement also
-  supports no orientation, takes exactly one ``blocks[]`` entry (the block
-  repeated at every tile), and leaves per-tile ``connectivity[]``/``pins[]``
-  routing as a follow-on question this module does not answer -- see
-  :func:`_parse_array_placement`'s docstring.
+  ``rows*cols`` separate inserts). Each ``blocks[]`` entry also carries an
+  optional ``orientation`` (``"none"`` (default) / ``"mirror_x"`` /
+  ``"mirror_y"`` / ``"rotate_180"``, #1166) applied about that block's own
+  local origin *before* ``offset_um`` translates it -- this is what lets two
+  same-facing blocks (e.g. a CMOS inverter's nfet/pfet pair, both drawn with
+  their drain on the same edge) be mirrored to face each other so their
+  shared net can route at all; see :func:`_apply_orientation_um` and
+  :data:`_ORIENTATION_KDB_ARGS`. It composes with every placement strategy
+  identically (a per-block attribute, not a placement-strategy one) --
+  ``"explicit"`` still performs no overlap validation of its own (see
+  :func:`resolve_explicit_offsets`'s docstring), and ``"array"`` still takes
+  exactly one ``blocks[]`` entry and applies that one entry's orientation
+  uniformly to every tile (no *per-tile* override), and leaves per-tile
+  ``connectivity[]``/``pins[]`` routing as a follow-on question this module
+  does not answer -- see :func:`_parse_array_placement`'s docstring.
 * **Routing** (new this phase): for every 2-pin ``connectivity[]`` net, draw
   a Manhattan metal path (backbone -> corner bends -> straight fill; see
   :func:`manhattan_backbone`) between the two named ports on the resolved
@@ -164,6 +172,67 @@ _DIRECTION_VECTORS: dict[int, tuple[int, int]] = {
     180: (-1, 0),
     270: (0, -1),
 }
+
+#: Supported ``blocks[].orientation`` values (#1166) -- a block's own
+#: mirror/rotation, applied about that block's own local (pre-translation)
+#: origin *before* ``offset_um`` translates it into the composed frame.
+#: ``"mirror_x"`` negates local ``x`` (a horizontal flip -- a block's
+#: right-edge port moves to its left edge, and vice versa; this is the
+#: minimum case that unblocks a CMOS inverter's shared-drain net, per
+#: #1164's root cause #1), ``"mirror_y"`` negates local ``y`` (a vertical
+#: flip), ``"rotate_180"`` negates both. See :func:`_apply_orientation_um`
+#: for the point transform and :data:`_ORIENTATION_KDB_ARGS` for the
+#: equivalent ``kdb.Trans`` construction every geometry-writing consumer
+#: (:func:`_write_composed_gds`, :func:`read_block_layer_geometry`) applies
+#: to actually-drawn shapes, so a block's reported metadata (``bbox_um``,
+#: ``ports[]``) never disagrees with its drawn geometry.
+_ORIENTATIONS = frozenset({"none", "mirror_x", "mirror_y", "rotate_180"})
+
+#: ``kdb.Trans(rot, mirrx, x, y)`` arguments -- ``rot`` a 0..3 count of
+#: 90-degree CCW rotation steps, ``mirrx`` whether to mirror at the x-axis
+#: *before* that rotation is applied -- producing the identical point
+#: transform as :func:`_apply_orientation_um` for each orientation. Verified
+#: against ``klayout.db.Trans``'s own semantics: ``rot=0, mirrx=True`` maps
+#: ``(x, y) -> (x, -y)`` (``"mirror_y"``), ``rot=2, mirrx=True`` maps
+#: ``(x, y) -> (-x, y)`` (``"mirror_x"``), and ``rot=2, mirrx=False`` maps
+#: ``(x, y) -> (-x, -y)`` (``"rotate_180"``).
+_ORIENTATION_KDB_ARGS: dict[str, tuple[int, bool]] = {
+    "none": (0, False),
+    "mirror_x": (2, True),
+    "mirror_y": (0, True),
+    "rotate_180": (2, False),
+}
+
+#: ``direction_deg`` -> ``direction_deg`` remap for each orientation
+#: (#1166): a mirrored/rotated block's ports face a different absolute
+#: direction even though the port's own name/role is unchanged (e.g. a
+#: ``mirror_x``'d block's drain, still named ``D``, now faces ``-x`` instead
+#: of ``+x``). Applied once, in :func:`_parse_blocks`, to every port's own
+#: ``direction_deg`` -- every downstream consumer (:func:`_DIRECTION_VECTORS`
+#: lookups, ring-side classification, stub-widen) then reads an
+#: already-correct direction without repeating this remap itself.
+_ORIENTATION_DIRECTION_MAP: dict[str, dict[int, int]] = {
+    "none": {0: 0, 90: 90, 180: 180, 270: 270},
+    "mirror_x": {0: 180, 90: 90, 180: 0, 270: 270},
+    "mirror_y": {0: 0, 90: 270, 180: 180, 270: 90},
+    "rotate_180": {0: 180, 90: 270, 180: 0, 270: 90},
+}
+
+
+def _apply_orientation_um(x: float, y: float, orientation: str) -> tuple[float, float]:
+    """Transform one local-frame point per a block's own ``orientation``
+    (#1166), applied about that block's own origin -- *before* ``offset_um``
+    translates it into the composed frame. See :data:`_ORIENTATIONS`'s
+    docstring for the exact per-value semantics.
+    """
+    if orientation == "mirror_x":
+        return -x, y
+    if orientation == "mirror_y":
+        return x, -y
+    if orientation == "rotate_180":
+        return -x, -y
+    return x, y
+
 
 #: Via-drop square side (um, issue #454) -- the same drawn contact/via size
 #: every `klt gen` generator's own unit devices already use (`gen.CONTACT_SIZE_UM`),
@@ -451,6 +520,54 @@ def _require_bbox(value: Any, where: str) -> dict[str, float]:
         ) from exc
 
 
+def _orient_bbox_um(bbox_um: dict[str, float], orientation: str) -> dict[str, float]:
+    """``bbox_um``, transformed by a block's own ``orientation`` (#1166),
+    still pre-translation (in the block's own local frame).
+
+    Every supported orientation is an axis-aligned flip (never a diagonal
+    rotation), so transforming the two opposite corners
+    ``(x0, y0)``/``(x1, y1)`` and re-sorting into ``min``/``max`` is enough
+    to get the new axis-aligned bbox -- e.g. ``"mirror_x"`` negates both
+    corners' ``x``, which swaps which one is now the smaller (``x0``).
+    """
+    x0, y0 = _apply_orientation_um(bbox_um["x0"], bbox_um["y0"], orientation)
+    x1, y1 = _apply_orientation_um(bbox_um["x1"], bbox_um["y1"], orientation)
+    return {
+        "x0": min(x0, x1),
+        "y0": min(y0, y1),
+        "x1": max(x0, x1),
+        "y1": max(y0, y1),
+    }
+
+
+def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
+    """One ``ports[]`` entry, transformed by a block's own ``orientation``
+    (#1166): its ``x_um``/``y_um`` (if both are usable numbers -- mirrors
+    :func:`_port_has_geometry`'s own tolerance for a port that reports none)
+    via :func:`_apply_orientation_um`, and its ``direction_deg`` (if present)
+    via :data:`_ORIENTATION_DIRECTION_MAP`. Every other field (``name``,
+    ``width_um``, ``layer``, ...) is copied unchanged -- orientation moves a
+    port's *position*, it never changes its *identity* or contact size.
+    """
+    oriented = dict(port)
+    x_um, y_um = port.get("x_um"), port.get("y_um")
+    if (
+        not isinstance(x_um, bool)
+        and isinstance(x_um, (int, float))
+        and not isinstance(y_um, bool)
+        and isinstance(y_um, (int, float))
+    ):
+        oriented["x_um"], oriented["y_um"] = _apply_orientation_um(
+            float(x_um), float(y_um), orientation
+        )
+    direction_deg = port.get("direction_deg")
+    if not isinstance(direction_deg, bool) and isinstance(direction_deg, int):
+        oriented["direction_deg"] = _ORIENTATION_DIRECTION_MAP[orientation].get(
+            direction_deg, direction_deg
+        )
+    return oriented
+
+
 def _parse_blocks(
     raw_blocks: Any, request_dir: str | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -500,6 +617,28 @@ def _parse_blocks(
             if isinstance(p, dict) and isinstance(p.get("name"), str)
         }
 
+        # blocks[].orientation (#1166) -- a placement decision, so it lives
+        # on the request-level blocks[] entry, not inside generator_report
+        # (which is immutable klt gen output). Defaults to "none" (today's
+        # translation-only behaviour, unchanged). Applied here, once, to
+        # this block's own bbox_um/ports[] -- every downstream consumer
+        # (placement math, routing, GDS write) then reads already-oriented
+        # (but still pre-translation) metadata and never repeats this
+        # transform itself; see _ORIENTATIONS's docstring.
+        orientation = raw_block.get("orientation", "none")
+        if orientation not in _ORIENTATIONS:
+            allowed = ", ".join(sorted(_ORIENTATIONS))
+            raise GenComposeError(
+                f"blocks[{index}] (id '{block_id}').orientation "
+                f"'{orientation}' is not supported -- allowed: {allowed}"
+            )
+        if orientation != "none":
+            bbox_um = _orient_bbox_um(bbox_um, orientation)
+            ports_by_name = {
+                name: _orient_port(port, orientation)
+                for name, port in ports_by_name.items()
+            }
+
         drc_hints = report.get("drc_hints")
         matched_group_id = None
         # The block's own minimum same-layer spacing, used as the clearance a
@@ -525,6 +664,7 @@ def _parse_blocks(
             "ports": ports_by_name,
             "matched_group_id": matched_group_id,
             "min_spacing_um": min_spacing_um,
+            "orientation": orientation,
         }
 
     return blocks
@@ -1730,9 +1870,13 @@ def read_block_layer_geometry(
     """Read ``block``'s **drawn** shapes on ``layer`` into the composed frame.
 
     Returns ``{"region": kdb.Region, "dbu": float}`` -- the block's own GDS
-    geometry on the ``(layer, datatype)`` pair the route is drawn on, merged
-    and translated by the block's placed ``offset_um``, in integer database
-    units -- or ``None`` when the block draws nothing there.
+    geometry on the ``(layer, datatype)`` pair the route is drawn on, mirrored/
+    rotated per the block's own ``orientation`` (#1166) and translated by the
+    block's placed ``offset_um``, in integer database units -- or ``None``
+    when the block draws nothing there. The same ``kdb.Trans`` (mirror-then-
+    translate) is applied here as :func:`_write_composed_gds` applies to this
+    block's actual cell instance, so this obstacle geometry always agrees
+    with what the composed GDS actually draws.
 
     This is the one place this module looks at a block's *shapes* rather than
     at its ``generator_report``. It exists because a ``klt gen`` port's
@@ -1774,8 +1918,11 @@ def read_block_layer_geometry(
     region.merge()
     if region.is_empty():
         return None
+    rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
     region.transform(
         kdb.Trans(
+            rot,
+            mirrx,
             int(round(offset_um["x"] / dbu)),
             int(round(offset_um["y"] / dbu)),
         )
@@ -3490,6 +3637,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "generator": blocks[block_id]["generator"],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
+            "orientation": blocks[block_id].get("orientation", "none"),
         }
         for block_id in order
     ]
@@ -3674,18 +3822,29 @@ def _write_composed_gds(
         offset = offsets_um[block_id]
         ox = int(round(offset["x"] / dbu))
         oy = int(round(offset["y"] / dbu))
+        # blocks[].orientation (#1166): the same kdb.Trans(rot, mirrx, x, y)
+        # this block's own bbox_um/ports[] were already conceptually
+        # transformed by (_orient_bbox_um/_orient_port, in _parse_blocks) --
+        # applying it to the actual cell instance here is what keeps the
+        # drawn geometry consistent with that reported metadata.
+        rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
         if array_placement is not None and array_placement["block_id"] == block_id:
             # "array" placement (#1053): one hierarchical instance covering
             # every rows*cols tile, not one insert per tile -- the row-0/
             # col-0 tile sits at this block's own offset_um (`ox`/`oy`
             # above), and every other tile is expressed purely through the
-            # array's own a/b vectors and counts.
+            # array's own a/b vectors and counts. The block's own
+            # orientation (#1166) is shared by every tile -- verified by
+            # klayout.db.CellInstArray's own semantics: its a/b step vectors
+            # are added in the *parent* frame, after the instance's own
+            # rot/mirrx is applied, exactly like this array's own bbox math
+            # (array_placement_bbox_um) already assumes.
             a_vector = kdb.Vector(int(round(array_placement["col_pitch_um"] / dbu)), 0)
             b_vector = kdb.Vector(0, int(round(array_placement["row_pitch_um"] / dbu)))
             top.insert(
                 kdb.CellInstArray(
                     sub_cell.cell_index(),
-                    kdb.Trans(ox, oy),
+                    kdb.Trans(rot, mirrx, ox, oy),
                     a_vector,
                     b_vector,
                     array_placement["cols"],
@@ -3693,7 +3852,9 @@ def _write_composed_gds(
                 )
             )
         else:
-            top.insert(kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(ox, oy)))
+            top.insert(
+                kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(rot, mirrx, ox, oy))
+            )
 
     if routed_geometry and route_layer is not None:
         if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)

@@ -18,9 +18,14 @@ from klayout_tools.cli import main
 from klayout_tools.decks import get_extraction_deck
 from klayout_tools.drc import run_drc
 from klayout_tools.gen_compose import (
+    _ORIENTATION_KDB_ARGS,
     GenComposeError,
+    _apply_orientation_um,
     _cleanup_points,
+    _orient_bbox_um,
+    _orient_port,
     _parse_array_placement,
+    _parse_blocks,
     _pin_ref,
     _polyline_midpoint_um,
     _resolve_label_layer,
@@ -359,6 +364,98 @@ def test_parse_array_placement_rejects_non_object_origin():
 
 
 # --------------------------------------------------------------------------- #
+# _apply_orientation_um()/_orient_bbox_um()/_orient_port() -- block
+# orientation (mirror/rotate) transform math, #1166
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_orientation_um_none_is_identity():
+    assert _apply_orientation_um(10.0, 3.0, "none") == (10.0, 3.0)
+
+
+def test_apply_orientation_um_mirror_x_negates_x_only():
+    assert _apply_orientation_um(10.0, 3.0, "mirror_x") == (-10.0, 3.0)
+
+
+def test_apply_orientation_um_mirror_y_negates_y_only():
+    assert _apply_orientation_um(10.0, 3.0, "mirror_y") == (10.0, -3.0)
+
+
+def test_apply_orientation_um_rotate_180_negates_both():
+    assert _apply_orientation_um(10.0, 3.0, "rotate_180") == (-10.0, -3.0)
+
+
+@pytest.mark.parametrize("orientation", ["none", "mirror_x", "mirror_y", "rotate_180"])
+def test_orientation_kdb_trans_matches_apply_orientation_um(orientation):
+    # The kdb.Trans(rot, mirrx, x, y) construction _write_composed_gds/
+    # read_block_layer_geometry use for the actual drawn geometry must
+    # transform a point identically to _apply_orientation_um's own math --
+    # otherwise a block's reported metadata (bbox_um/ports[]) would disagree
+    # with what is actually drawn (the core correctness requirement #1166's
+    # acceptance criteria calls out).
+    import klayout.db as kdb
+
+    rot, mirrx = _ORIENTATION_KDB_ARGS[orientation]
+    trans = kdb.Trans(rot, mirrx, 0, 0)
+    px, py = 1200, 700  # arbitrary dbu-space point
+    got = trans * kdb.Point(px, py)
+    want_x, want_y = _apply_orientation_um(px, py, orientation)
+    assert (got.x, got.y) == (want_x, want_y)
+
+
+def test_orient_bbox_um_none_is_unchanged():
+    bbox = {"x0": -1.0, "y0": -2.0, "x1": 5.0, "y1": 3.0}
+    assert _orient_bbox_um(bbox, "none") == bbox
+
+
+def test_orient_bbox_um_mirror_x_negates_x_and_resorts():
+    bbox = {"x0": -1.0, "y0": -2.0, "x1": 5.0, "y1": 3.0}
+    oriented = _orient_bbox_um(bbox, "mirror_x")
+    assert oriented == {"x0": -5.0, "y0": -2.0, "x1": 1.0, "y1": 3.0}
+    # width/height are invariant under a mirror.
+    assert oriented["x1"] - oriented["x0"] == pytest.approx(bbox["x1"] - bbox["x0"])
+    assert oriented["y1"] - oriented["y0"] == pytest.approx(bbox["y1"] - bbox["y0"])
+
+
+def test_orient_bbox_um_mirror_y_negates_y_and_resorts():
+    bbox = {"x0": -1.0, "y0": -2.0, "x1": 5.0, "y1": 3.0}
+    oriented = _orient_bbox_um(bbox, "mirror_y")
+    assert oriented == {"x0": -1.0, "y0": -3.0, "x1": 5.0, "y1": 2.0}
+
+
+def test_orient_bbox_um_rotate_180_negates_both_and_resorts():
+    bbox = {"x0": -1.0, "y0": -2.0, "x1": 5.0, "y1": 3.0}
+    oriented = _orient_bbox_um(bbox, "rotate_180")
+    assert oriented == {"x0": -5.0, "y0": -3.0, "x1": 1.0, "y1": 2.0}
+
+
+def test_orient_port_mirror_x_negates_x_and_flips_east_west_direction():
+    port = {"name": "D", "x_um": 3.0, "y_um": 1.5, "direction_deg": 0, "width_um": 0.22}
+    oriented = _orient_port(port, "mirror_x")
+    assert oriented["x_um"] == -3.0
+    assert oriented["y_um"] == 1.5
+    assert oriented["direction_deg"] == 180
+    # Identity/contact-size fields are untouched.
+    assert oriented["name"] == "D"
+    assert oriented["width_um"] == 0.22
+
+
+def test_orient_port_mirror_y_flips_north_south_direction_only():
+    port = {"name": "G", "x_um": 3.0, "y_um": 1.5, "direction_deg": 90}
+    oriented = _orient_port(port, "mirror_y")
+    assert oriented["x_um"] == 3.0
+    assert oriented["y_um"] == -1.5
+    assert oriented["direction_deg"] == 270
+
+
+def test_orient_port_leaves_missing_geometry_untouched():
+    # A port with no x_um/y_um (klt draw's own ports[] can omit geometry
+    # entirely) must not raise or fabricate a position.
+    port = {"name": "N1"}
+    assert _orient_port(port, "mirror_x") == {"name": "N1"}
+
+
+# --------------------------------------------------------------------------- #
 # load_generator_report_arg() -- path-or-inline duality
 # --------------------------------------------------------------------------- #
 
@@ -416,6 +513,119 @@ def test_load_generator_report_arg_absolute_path_unaffected_by_request_dir(tmp_p
     other_dir.mkdir()
 
     assert load_generator_report_arg(str(path), str(other_dir)) == report
+
+
+# --------------------------------------------------------------------------- #
+# _parse_blocks() -- blocks[].orientation (#1166)
+# --------------------------------------------------------------------------- #
+
+
+def _fake_mos_block_report():
+    """A hand-built report shaped like `mos_array`'s own (rows=1, cols=1) --
+    enough to exercise blocks[].orientation parsing without a PDK/klt gen
+    call: a bbox and S (left, 180deg)/D (right, 0deg)/G (top, 90deg) ports."""
+    return {
+        "generator": "mos_array",
+        "cell_name": "m0",
+        "gds_path": "m0.gds",
+        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0},
+        "ports": [
+            {
+                "name": "U0_S",
+                "x_um": 0.1,
+                "y_um": 0.5,
+                "direction_deg": 180,
+                "width_um": 0.22,
+                "layer": {"layer": 68, "datatype": 20},
+            },
+            {
+                "name": "U0_D",
+                "x_um": 1.9,
+                "y_um": 0.5,
+                "direction_deg": 0,
+                "width_um": 0.22,
+                "layer": {"layer": 68, "datatype": 20},
+            },
+            {
+                "name": "U0_G",
+                "x_um": 1.0,
+                "y_um": 0.9,
+                "direction_deg": 90,
+                "width_um": 0.15,
+                "layer": {"layer": 66, "datatype": 20},
+            },
+        ],
+    }
+
+
+def test_parse_blocks_defaults_orientation_to_none_unchanged():
+    blocks = _parse_blocks([{"id": "a", "generator_report": _fake_mos_block_report()}])
+    block = blocks["a"]
+    assert block["orientation"] == "none"
+    assert block["bbox_um"] == {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0}
+    assert block["ports"]["U0_D"]["x_um"] == 1.9
+    assert block["ports"]["U0_D"]["direction_deg"] == 0
+
+
+def test_parse_blocks_mirror_x_transforms_bbox_and_ports_consistently():
+    blocks = _parse_blocks(
+        [
+            {
+                "id": "a",
+                "generator_report": _fake_mos_block_report(),
+                "orientation": "mirror_x",
+            }
+        ]
+    )
+    block = blocks["a"]
+    assert block["orientation"] == "mirror_x"
+    # bbox: x negated and re-sorted, width unchanged, y untouched.
+    assert block["bbox_um"] == {"x0": -2.0, "y0": 0.0, "x1": 0.0, "y1": 1.0}
+    # U0_D (was on the right edge, facing +x/0deg) now sits on the left
+    # (negated x) and faces -x/180deg -- the exact transform that lets it
+    # face a same-facing neighbour's own drain (#1164's root cause #1).
+    assert block["ports"]["U0_D"]["x_um"] == -1.9
+    assert block["ports"]["U0_D"]["y_um"] == 0.5
+    assert block["ports"]["U0_D"]["direction_deg"] == 180
+    # U0_S mirrors symmetrically to the right, now facing +x.
+    assert block["ports"]["U0_S"]["x_um"] == -0.1
+    assert block["ports"]["U0_S"]["direction_deg"] == 0
+    # U0_G's direction (90, north) is unaffected by a left-right mirror.
+    assert block["ports"]["U0_G"]["x_um"] == -1.0
+    assert block["ports"]["U0_G"]["direction_deg"] == 90
+    # Non-geometric fields (name, width_um, layer) are untouched.
+    assert block["ports"]["U0_D"]["width_um"] == 0.22
+    assert block["ports"]["U0_D"]["layer"] == {"layer": 68, "datatype": 20}
+
+
+def test_parse_blocks_orientation_is_per_block_independent():
+    blocks = _parse_blocks(
+        [
+            {"id": "a", "generator_report": _fake_mos_block_report()},
+            {
+                "id": "b",
+                "generator_report": _fake_mos_block_report(),
+                "orientation": "mirror_x",
+            },
+        ]
+    )
+    assert blocks["a"]["orientation"] == "none"
+    assert blocks["a"]["ports"]["U0_D"]["x_um"] == 1.9
+    assert blocks["b"]["orientation"] == "mirror_x"
+    assert blocks["b"]["ports"]["U0_D"]["x_um"] == -1.9
+
+
+def test_parse_blocks_rejects_unsupported_orientation():
+    with pytest.raises(GenComposeError, match="orientation"):
+        _parse_blocks(
+            [
+                {
+                    "id": "a",
+                    "generator_report": _fake_mos_block_report(),
+                    "orientation": "flip",
+                }
+            ]
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -5816,3 +6026,165 @@ def test_endpoint_stub_widen_um_requires_a_route_layer():
         gen_compose._endpoint_stub_widen_um(port, (1.0, 2.0), 90, 0.3, 0.17, None)
         is None
     )
+
+
+# --------------------------------------------------------------------------- #
+# blocks[].orientation (#1166): mirroring unblocks a same-facing shared net --
+# the parent friction report's minimal two-`mos_array` "CMOS inverter" case
+# (#1164 root cause #1): "source-left/drain-right in a fixed orientation, so
+# two blocks that need to face each other to route their shared net ... cannot
+# be made to face each other." `mos_array` (rows=1, cols=1) reports `U0_S` on
+# its own left edge (180deg) and `U0_D` on its own right edge (0deg) -- see
+# gen.py's `_mos_array_describe` -- so two such blocks placed side by side in
+# a row have their drains on the *same* absolute side (both facing +x, away
+# from each other on the far block), reproducing the report's root cause.
+# --------------------------------------------------------------------------- #
+
+
+def _same_facing_drain_request(m1, m2, pdk_root, output, p_orientation=None):
+    p_block = {"id": "p", "generator_report": m2}
+    if p_orientation is not None:
+        p_block["orientation"] = p_orientation
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [{"id": "n", "generator_report": m1}, p_block],
+        "placement": {"strategy": "row", "order": ["n", "p"], "spacing_um": 1.0},
+        "connectivity": [
+            {
+                "net": "VOUT",
+                "pins": [
+                    {"block": "n", "port": "U0_D"},
+                    {"block": "p", "port": "U0_D"},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {"cell_name": "inverter_0", "output": str(output)},
+    }
+
+
+def test_compose_same_facing_drain_net_is_unrouted_without_orientation(
+    tmp_path, pdk_root
+):
+    # Baseline (pre-#1166, reproducing #1164's root cause #1): "p"'s own D is
+    # on p's *far* side from "n" -- wiring n.D to p.D forces the backbone
+    # through p's own body, which route_two_pin's obstacle-overlap check
+    # (check 5) rejects.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "nfet_like", rows=1, cols=1)
+    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "pfet_like", rows=1, cols=1)
+    output = tmp_path / "inverter_unrouted.gds"
+    report = compose(_same_facing_drain_request(m1, m2, pdk_root, output))
+
+    assert report["unrouted_nets"] == ["VOUT"]
+    assert report["nets"][0]["routed"] is False
+
+
+def test_compose_mirrored_block_routes_same_facing_drain_net_and_is_drc_clean(
+    tmp_path, pdk_root
+):
+    # #1166 fix: mirroring "p" ("mirror_x") moves its own U0_D from its right
+    # edge (facing +x, away from "n") to its left edge (facing -x, toward
+    # "n") -- the two drains now face each other directly across the row's
+    # spacing_um channel, and the net routes as a plain straight backbone.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "nfet_like2", rows=1, cols=1)
+    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "pfet_like2", rows=1, cols=1)
+    output = tmp_path / "inverter_mirrored.gds"
+    report = compose(
+        _same_facing_drain_request(m1, m2, pdk_root, output, p_orientation="mirror_x")
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["blocks"][0]["orientation"] == "none"
+    assert report["blocks"][1]["orientation"] == "mirror_x"
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Loop closure: klt extract still sees VOUT as one named net joining
+    # both blocks' drains, not two disconnected pins.
+    result = extract.run_extract(str(output), "sky130", top="inverter_0")
+    vout_pin_nets = {net["name"] for net in result["nets"] if net.get("pin")}
+    assert "VOUT" in vout_pin_nets
+
+
+def test_compose_mirrored_block_drawn_geometry_matches_reported_bbox(
+    tmp_path, pdk_root
+):
+    # #1166 acceptance criteria: a mirrored block's *drawn* geometry (the
+    # actual GDS shapes _write_composed_gds inserts) must land exactly where
+    # its reported bbox_um says -- no metadata/geometry mismatch.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "geom_mirrored", rows=1, cols=1)
+    output = tmp_path / "geom_mirrored.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "a", "generator_report": m1, "orientation": "mirror_x"}],
+            "placement": {"strategy": "row", "order": ["a"], "spacing_um": 1.0},
+            "options": {"cell_name": "geom_mirrored_0", "output": str(output)},
+        }
+    )
+    reported_bbox = report["blocks"][0]["bbox_um"]
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("geom_mirrored_0")
+    drawn_bbox = top.bbox()
+    dbu = layout.dbu
+    assert drawn_bbox.left * dbu == pytest.approx(reported_bbox["x0"], abs=2 * dbu)
+    assert drawn_bbox.bottom * dbu == pytest.approx(reported_bbox["y0"], abs=2 * dbu)
+    assert drawn_bbox.right * dbu == pytest.approx(reported_bbox["x1"], abs=2 * dbu)
+    assert drawn_bbox.top * dbu == pytest.approx(reported_bbox["y1"], abs=2 * dbu)
+
+
+def test_compose_orientation_combines_with_explicit_placement_offset(
+    tmp_path, pdk_root
+):
+    # Edge case (#1166 test plan): orientation composes with an explicit
+    # per-block offset_um -- the block is mirrored about its own local origin
+    # first, then translated by the declared origin (never the other way
+    # round), exactly as _apply_orientation_um's docstring states.
+    m1 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "explicit_mirrored", rows=1, cols=1
+    )
+    output = tmp_path / "explicit_mirrored.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "a", "generator_report": m1, "orientation": "mirror_x"}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["a"],
+                "origins_um": {"a": {"x": 10.0, "y": 20.0}},
+            },
+            "options": {"cell_name": "explicit_mirrored_0", "output": str(output)},
+        }
+    )
+
+    orig_bbox = m1["bbox_um"]
+    placed = report["blocks"][0]["bbox_um"]
+    assert placed["x1"] - placed["x0"] == pytest.approx(
+        orig_bbox["x1"] - orig_bbox["x0"]
+    )
+    assert placed["y1"] - placed["y0"] == pytest.approx(
+        orig_bbox["y1"] - orig_bbox["y0"]
+    )
+    mirrored_local = _orient_bbox_um(orig_bbox, "mirror_x")
+    assert placed["x0"] == pytest.approx(mirrored_local["x0"] + 10.0)
+    assert placed["y0"] == pytest.approx(mirrored_local["y0"] + 20.0)
+
+
+def test_compose_rejects_unsupported_block_orientation(tmp_path, pdk_root):
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    with pytest.raises(GenComposeError, match="orientation"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "r", "generator_report": block, "orientation": "upside_down"}
+                ],
+                "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            }
+        )

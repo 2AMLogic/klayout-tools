@@ -330,6 +330,33 @@ def test_supported_topology_passes(bandgap_digest):
     assert result["valid"] is True
 
 
+# -- device_groups[].orientation (#1166) ----------------------------------
+
+
+def test_orientation_defaults_to_none_when_omitted(bandgap_digest):
+    result = validate_layout_plan(_valid_plan(), bandgap_digest)
+    assert all(g["orientation"] == "none" for g in result["device_groups"])
+
+
+@pytest.mark.parametrize("orientation", ["none", "mirror_x", "mirror_y", "rotate_180"])
+def test_supported_orientation_is_echoed_verbatim(bandgap_digest, orientation):
+    plan = _valid_plan()
+    plan["device_groups"][0]["orientation"] = orientation
+
+    result = validate_layout_plan(plan, bandgap_digest)
+    by_id = {g["id"]: g for g in result["device_groups"]}
+    assert by_id["diffpair"]["orientation"] == orientation
+
+
+def test_invalid_orientation_literal_is_usage_error(bandgap_digest):
+    plan = _valid_plan()
+    plan["device_groups"][0]["orientation"] = "sideways"
+
+    with pytest.raises(LayoutPlanUsageError) as excinfo:
+        validate_layout_plan(plan, bandgap_digest)
+    assert exit_code_for(excinfo.value) == 2
+
+
 # -- Malformed request document (usage error, exit 2) --------------------
 
 
@@ -650,6 +677,10 @@ def test_class_qualified_device_reference_conforms_to_published_schema():
         pytest.param(
             lambda p: p["device_groups"][0].update(topology="not_a_topology"),
             id="unknown-topology",
+        ),
+        pytest.param(
+            lambda p: p["device_groups"][0].update(orientation="flip"),
+            id="unknown-orientation",
         ),
         pytest.param(
             lambda p: p["abutment"][0].update(edge="diagonal"),
