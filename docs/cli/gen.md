@@ -297,6 +297,40 @@ marker, no curated *DRC* deck checks these masks, so they never affect
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
 | `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu) or, on sky130 only, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`) for the higher-sheet-rho flavours. Must be a flavour the resolved PDK family exposes. |
 
+### `cap_array` (MiM capacitor array, issue #1117)
+
+A row of `num` matched unit MiM (Metal-Insulator-Metal) capacitor cells, each
+a top-plate-metal-over-bottom-plate-metal stack (sky130's `capm` top-plate
+mark over a `met3` bottom-plate conductor) with a `via3`/`met4` top-plate via
+and local-metal landing pad, so the top terminal is directly routable — the
+capacitor sibling of `res_array`, drawing the *same* layer/datatype numbers
+`klayout_tools.decks.sky130`'s `EXTRACTION_DECK.capacitors[0]` entry
+(`sky130_fd_pr__model__cap_mim`) declares, never a second, private layer map.
+Each unit gets two ports: `C<i>_BOT` on the bottom-plate conductor's local-left
+edge, and `C<i>_TOP` on the top-plate via/landing-pad centre (an interior
+point, so — like `mos_array`'s gate-contact port — it reports a fixed
+`direction_deg` rather than a geometrically-derived one). `device_count` is
+`num`. `drc_hints.matched_group_id` is `"cap_array:<num>"`.
+
+Only `sky130` is supported today — gf180mcu's own MiM stack (`FuseTop` top
+plate over an oversized "virtual" `Metal4` bottom plate, per
+`CapacitorDevice.bottom_plate_oversize_um`) needs an additional sizing
+derivation this generator does not yet implement; requesting `cap_array` for
+any other PDK family raises a clear application error (exit code `1`) rather
+than silently drawing sky130's layer numbers onto the wrong stack. Neither
+`rows` folding (`res_array`'s own boustrophedon fold, issue #415) nor `dummy`
+padding elements are implemented yet either — both are natural `res_array`-
+parity follow-ups, not correctness gaps for a first `cap_array` `num`-only
+generator. There is also no `flavor` param (`res_array`'s own #463) — sky130's
+second MiM stack (`capm2`/`met4`) is out of this generator's initial scope.
+
+| `params` field | Type   | Default | Description |
+| -------------- | ------ | ------- | ----------- |
+| `plate_w_um`   | double | `5.0`   | Unit top-plate width (µm). Must be `>= 0.42`. |
+| `plate_h_um`   | double | `5.0`   | Unit top-plate height (µm). Must be `>= 0.42`. |
+| `spacing_um`   | double | `0.5`   | Spacing between unit capacitors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). |
+| `num`          | int    | `4`     | Number of matched unit capacitors. Must be `>= 1`. |
+
 ### `guard_ring` (family 3: substrate/well tap ring)
 
 A tap ring (drawn as a single unbroken outer-box-minus-inner-box polygon, so
@@ -752,7 +786,7 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, etc). |
+| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, `C<i>_TOP`/`_BOT` for `cap_array`, etc). |
 | `net` | string \| null | Caller-supplied net label; always `null` — no request field feeds it yet. |
 | `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
@@ -764,7 +798,7 @@ family/variant split the resolver doesn't have. The response's
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (or its own safe-margin constant, for a generator with no single caller-supplied spacing param — see each generator's section above). |
-| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip`, `guard_ring`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
+| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`, `cap_array`); always `null` for `resistor_strip`, `guard_ring`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 | `voltage_flavor` | string \| null | `mos_array`/`diff_pair` only (issue #1054): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |

@@ -542,6 +542,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "bjt_array",
         "bond_pad",
         "esd_device",
+        "cap_array",
     }
 
 
@@ -602,12 +603,15 @@ def test_phase2_generator_default_params_are_drc_clean(
         }
 
 
-@pytest.mark.parametrize("generator_name", ("mos_array", "res_array", "diff_pair"))
+@pytest.mark.parametrize(
+    "generator_name", ("mos_array", "res_array", "diff_pair", "cap_array")
+)
 def test_matched_group_id_populated_for_matched_device_generators(
     generator_name, tmp_path, pdk_root
 ):
     """`drc_hints.matched_group_id` must be non-null for the array/matched-
-    device generators -- families 1, 2, 4 (acceptance criterion #4)."""
+    device generators -- families 1, 2, 4 (acceptance criterion #4), plus
+    `cap_array` (issue #1117)."""
     output = tmp_path / f"{generator_name}.gds"
     report = generate(
         {
@@ -2107,6 +2111,179 @@ def test_res_array_higher_sheet_rho_flavor_extracts_as_matching_class(
 
     assert report["device_counts"].get(device_class, 0) > 0
     assert report["device_counts"].get("res_generic_po", 0) == 0
+
+
+# --- cap_array (issue #1117) --------------------------------------------------- #
+
+_SKY130_CAP_TOP_PLATE_LAYER = (89, 44)  # capm.drawing
+_SKY130_CAP_BOTTOM_PLATE_LAYER = (70, 20)  # met3.drawing
+_SKY130_CAP_TOP_VIA_LAYER = (70, 44)  # via3.drawing
+_SKY130_CAP_TOP_VIA_METAL_LAYER = (71, 20)  # met4.drawing
+
+
+def test_cap_array_device_count_and_ports(tmp_path, pdk_root):
+    output = tmp_path / "cap_array.gds"
+    report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 3
+    assert len(report["ports"]) == 6
+    port_names = [p["name"] for p in report["ports"]]
+    assert port_names == [
+        "C0_BOT",
+        "C0_TOP",
+        "C1_BOT",
+        "C1_TOP",
+        "C2_BOT",
+        "C2_TOP",
+    ]
+    assert report["drc_hints"]["matched_group_id"] == "cap_array:3"
+
+
+def test_cap_array_num_1_boundary(tmp_path, pdk_root):
+    output = tmp_path / "cap_array_1.gds"
+    report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 1},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    assert len(report["ports"]) == 2
+
+
+def test_cap_array_tight_spacing_is_advisory_not_rejected(tmp_path, pdk_root):
+    """A `spacing_um` below the safe margin is legal (not a structural
+    error) -- it is surfaced via `drc_hints.notes` instead of a hard
+    rejection, mirroring `res_array`'s own advisory-not-authoritative
+    semantics."""
+    output = tmp_path / "cap_array_tight.gds"
+    report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"spacing_um": 0.05},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["notes"]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"plate_w_um": 0.1},
+        {"plate_h_um": 0.1},
+        {"spacing_um": -0.1},
+        {"num": 0},
+    ],
+)
+def test_cap_array_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_cap_array_list_includes_generator():
+    """`klt gen --list` includes `cap_array` alongside the other
+    device-generator family members."""
+    report = list_generators()
+    names = [g["name"] for g in report["generators"]]
+    assert "cap_array" in names
+
+
+def test_cap_array_draws_sky130_mim_stack_layers(tmp_path, pdk_root):
+    """The generator must draw sky130's `capm`/`met3` MiM plate pair plus
+    the `via3`/`met4` top-plate via/landing pad -- the same layer/datatype
+    numbers `klayout_tools.decks.sky130`'s `EXTRACTION_DECK.capacitors[0]`
+    entry (`sky130_fd_pr__model__cap_mim`) declares (issue #1117)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "cap_array_layers.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_CAP_TOP_PLATE_LAYER in present
+    assert _SKY130_CAP_BOTTOM_PLATE_LAYER in present
+    assert _SKY130_CAP_TOP_VIA_LAYER in present
+    assert _SKY130_CAP_TOP_VIA_METAL_LAYER in present
+
+
+def test_cap_array_gf180mcu_is_not_yet_supported(tmp_path, both_pdk_root):
+    """gf180mcu's MiM stack (`FuseTop`/`Metal4`, with a "virtual bottom
+    plate" oversize derivation) is out of this generator's initial scope
+    (issue #1117) -- requesting it raises a clear, actionable error rather
+    than silently drawing sky130's layer numbers onto a gf180mcu cell."""
+    with pytest.raises(GenError, match="sky130"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_cap_array_extracts_as_capacitor_device(tmp_path, pdk_root):
+    """The end-to-end acceptance bar from the issue: `cap_array`'s own
+    output, run through (unmodified) `klt extract`, must be recognised as
+    the sky130 `sky130_fd_pr__model__cap_mim` `CapacitorDevice` -- proving
+    the generator's plate layer numbers agree with the extractor's, not
+    just that the geometry looks plausible."""
+    gds_path = tmp_path / "cap_array_extract.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), "sky130")
+
+    assert report["device_counts"].get("sky130_fd_pr__model__cap_mim", 0) == 3
+
+
+def test_cap_array_drc_clean_on_sky130(tmp_path, pdk_root):
+    """The default `cap_array` output is DRC-clean against the curated
+    sky130 deck -- the edge-case test plan's "DRC-clean output" bar."""
+    gds_path = tmp_path / "cap_array_drc.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_drc(str(gds_path), "sky130")
+
+    assert report["status"] == "clean", report["violations"]
 
 
 # --- guard_ring --------------------------------------------------------------- #

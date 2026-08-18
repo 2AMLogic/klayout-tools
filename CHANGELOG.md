@@ -765,6 +765,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-18 — `klt gen` gains a new **`cap_array`** generator (issue
+  #1117): a row of matched unit MiM (Metal-Insulator-Metal) capacitor
+  cells, each a top-plate-metal-over-bottom-plate-metal stack (sky130's
+  `capm` top-plate mark over a `met3` bottom-plate conductor) with a
+  `via3`/`met4` top-plate via and local-metal landing pad, the capacitor
+  sibling of `res_array` (analogous to how `mos_array`/`res_array`/
+  `bjt_array` already cover the MOS/resistor/bipolar device classes `klt
+  extract` recognizes). Draws the *same* layer/datatype numbers
+  `klayout_tools.decks.sky130`'s `EXTRACTION_DECK.capacitors[0]` entry
+  (`sky130_fd_pr__model__cap_mim`) already declares, so its output
+  round-trips through `klt extract` to that exact device class. Two ports
+  per unit (`C<i>_BOT`/`C<i>_TOP`); `drc_hints.matched_group_id` is
+  `"cap_array:<num>"`. Only `sky130` is supported for now — gf180mcu's own
+  MiM stack needs an additional "virtual bottom plate" oversize derivation
+  that is out of this generator's initial scope; requesting `cap_array` for
+  any other PDK family raises a clear application error. See
+  `docs/cli/gen.md`'s new "`cap_array`" section.
 - 2026-08-18 — `klt drc`/`klt lvs` gain **`--check <report.json>`** (issue
   #1106): verify a previously committed `--format json` report still
   reproduces, instead of hand-rolling a normalize-and-diff. Cheap mode
