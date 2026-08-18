@@ -60,11 +60,13 @@ Scope (phase 2, this module's current state):
   through :func:`route_two_pin` unchanged, so all of its routability checks
   apply per leg; a leg one of them rejects is skipped in favour of the next
   candidate that would join the same two parts of the net. ``nets[].legs[]``
-  reports every drawn leg (and, for a net that could not be connected, every
-  attempted one with its own rejection reason). Nothing is drawn for a net
-  whose pins cannot all be joined -- a half-wired net is worse than an
-  unwired one, since the caller has to build the rest of its interconnect
-  around whatever the router already drew (#1073's own framing).
+  reports every drawn leg (and, for a net that could not be fully connected,
+  every attempted one with its own rejection reason). A net whose pins cannot
+  all be joined still gets every leg the search *did* accept drawn (issue
+  #1169) -- only the stranded pins (and any rejected candidate reaching them)
+  are left undrawn; ``nets[].status`` (``"routed"``/``"partial"``/
+  ``"unrouted"``) tells the caller which case it is, since both a partial and
+  a fully-unrouted net report ``routed: false``.
 * **Via-drop routing** (issue #454, re-raising #433's Ask options 1/2): a
   family whose curated extraction deck declares a second routing-metal level
   (e.g. sky130's ``"metal2"``/met1) can be selected as ``routing.layer_role``
@@ -2559,15 +2561,27 @@ def route_bundle(
     is tried -- so an N-pin net routes around an individually unroutable pair
     whenever another spanning tree exists, rather than failing outright.
 
-    **All-or-nothing per net.** When no spanning tree exists, *nothing* is
-    drawn for the net: the caller gets it back in ``unrouted_nets[]`` and
-    wires it themselves. Drawing the legs that did route would leave a
-    half-wired net whose remaining interconnect the caller has to build
-    *around* the router's own geometry -- the exact friction issue #1073
-    reports ("Routing only the handful of genuinely two-pin nets is worse than
-    routing none of them"). Every returned leg therefore reports
-    ``routed: true`` **iff its metal is drawn**, so no leg is ever reported as
-    routed when nothing was drawn for it.
+    **Partial routing when no spanning tree exists (issue #1169).** A net
+    whose pins cannot all be joined into one component still gets every leg
+    the spanning-tree search *did* accept drawn -- only the pins left
+    stranded (and any candidate leg the router tried and rejected on the way
+    to reaching them) are left undrawn. The caller gets the net back in
+    ``unrouted_nets[]`` (it is still not *fully* connected) but is not left
+    building routable geometry around a fully-blank net -- discarding metal
+    that already passed every one of :func:`route_two_pin`'s per-leg checks
+    (plus the route-vs-route collision check, #1057) made a real composition
+    failure harder to debug than necessary, for no benefit: an individually
+    routable leg's metal never introduces a short or a DRC violation just
+    because a *different* leg of the same net failed. (Before this, the net
+    was all-or-nothing: any spanning-tree failure reset every leg's
+    ``routed`` back to ``false``, discarding metal for legs that were
+    individually routable -- see issue #1073's original rationale, now
+    superseded.) Every returned leg still reports ``routed: true`` **iff its
+    metal is drawn** -- so no leg is ever reported as routed when nothing was
+    drawn for it -- and the top-level ``status`` field (below) tells the
+    caller whether the net ended up fully routed, partially routed, or not
+    routed at all, so partial routing is never mistaken for full routing (or
+    vice versa) by counting ``legs[]`` alone.
 
     ``block_geometry_for`` is an optional callable taking a block ``id`` and
     returning the ``{block_id: geometry}`` mapping :func:`route_two_pin`
@@ -2588,12 +2602,17 @@ def route_bundle(
     time).
 
     Returns ``{"routed": bool, "route_length_um": float | None, "legs": [...],
-    "reason": str | None}``, where ``route_length_um`` is the summed length of
-    every drawn leg and each ``legs[]`` entry is ``{"pins": [pin_a, pin_b],
-    "routed": bool, "route_length_um": float | None, "reason": str | None,
-    "points_um": list | None, "via_drops": list, "stub_widen": list}`` --
-    ``points_um``/``via_drops``/``stub_widen`` being the same per-leg drawing
-    payload :func:`route_two_pin` returns, consumed by ``compose()``.
+    "reason": str | None, "status": str}``, where ``routed`` is ``True`` only
+    when *every* pin joined one component (unchanged from before #1169),
+    ``route_length_um`` is the summed length of every *drawn* leg (``None``
+    only when zero legs were drawn), ``status`` is one of ``"routed"`` (every
+    pin connected), ``"partial"`` (at least one leg drawn, but the net is not
+    fully connected), or ``"unrouted"`` (no leg was ever accepted) -- and each
+    ``legs[]`` entry is ``{"pins": [pin_a, pin_b], "routed": bool,
+    "route_length_um": float | None, "reason": str | None, "points_um": list
+    | None, "via_drops": list, "stub_widen": list}`` -- ``points_um``/
+    ``via_drops``/``stub_widen`` being the same per-leg drawing payload
+    :func:`route_two_pin` returns, consumed by ``compose()``.
     """
     if len(pins) < 2:
         raise GenComposeError("route_bundle() needs at least 2 pins")
@@ -2711,6 +2730,7 @@ def route_bundle(
             # way to a working spanning tree is not part of the result.
             "legs": [leg for leg in legs if leg["routed"]],
             "reason": None,
+            "status": "routed",
         }
 
     # --- Unroutable: report which pins were stranded and why ----------------
@@ -2755,27 +2775,27 @@ def route_bundle(
                 f"'{_pin_ref(blocker['pins'][1])}'): {blocker_reason}"
             )
 
-    # Nothing is drawn for a net that could not be fully connected, so every
-    # leg -- including the ones that were individually routable -- reports
-    # routed: false. `legs[].routed` therefore means exactly "this leg's metal
-    # is in the composed output", at both the leg and the net level.
-    for leg in legs:
-        if leg["routed"]:
-            leg["routed"] = False
-            leg["route_length_um"] = None
-            leg["points_um"] = None
-            leg["via_drops"] = []
-            leg["stub_widen"] = []
-            leg["reason"] = (
-                "routable on its own, but the net as a whole could not be "
-                "connected, so no geometry was drawn for any of its legs"
-            )
+    # Partial routing (issue #1169): a net that could not be fully connected
+    # keeps every leg the spanning-tree search *did* accept -- their geometry
+    # is real, DRC-checked (route_two_pin's checks 1-6, plus the route-vs-route
+    # collision check #1057 via `leg_conflict`) metal, drawn exactly as it
+    # would be for a fully-routed net, so `legs[].routed` still means "this
+    # leg's metal is in the composed output" at the leg level. Only the pins
+    # that ended up stranded -- and any leg the router tried and rejected on
+    # the way to reaching them -- are left undrawn. `status` distinguishes the
+    # two ways a net can be incomplete: "partial" (some legs drawn) vs.
+    # "unrouted" (no leg was ever accepted) -- the caller must not have to
+    # infer this by counting `legs[].routed`, since a zero-leg net and a
+    # not-fully-spanned net both report `routed: false` at the net level.
+    drawn_leg_count = sum(1 for leg in legs if leg["routed"])
+    status = "partial" if drawn_leg_count > 0 else "unrouted"
 
     return {
         "routed": False,
-        "route_length_um": None,
+        "route_length_um": total_length_um if drawn_leg_count > 0 else None,
         "legs": legs,
         "reason": reason,
+        "status": status,
     }
 
 
@@ -3074,6 +3094,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 "pins": pins,
                 "routed": result["routed"],
                 "route_length_um": result["route_length_um"],
+                # "routed"/"partial"/"unrouted" -- distinguishes a net that
+                # drew some but not all of its legs from one that drew none
+                # at all, since both report `routed: false` above (#1169).
+                "status": result["status"],
                 "legs": [
                     {
                         "pins": leg["pins"],
@@ -3085,28 +3109,39 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 ],
             }
         )
-        if result["routed"]:
-            for leg_index, leg in enumerate(result["legs"]):
-                accepted_route_regions.append(
-                    (
-                        net_label,
-                        net_pin_set,
-                        _drawn_route_region(leg["points_um"], width_um, _route_dbu()),
-                    )
+        # Draw every leg the router actually accepted, whether or not the net
+        # ended up fully connected (#1169) -- a partially-routed net's drawn
+        # legs are real, checked metal (route_two_pin's checks 1-6 plus the
+        # route-vs-route collision check #1057 already passed), so they must
+        # also feed `accepted_route_regions` the same as a fully-routed net's
+        # legs do, or a later net's own collision check would miss them.
+        drawn_legs = [leg for leg in result["legs"] if leg["routed"]]
+        for leg_index, leg in enumerate(drawn_legs):
+            accepted_route_regions.append(
+                (
+                    net_label,
+                    net_pin_set,
+                    _drawn_route_region(leg["points_um"], width_um, _route_dbu()),
                 )
-                routed_geometry.append(
-                    {
-                        "net": net_label,
-                        "points_um": leg["points_um"],
-                        "width_um": width_um,
-                        "via_drops": leg["via_drops"],
-                        "stub_widen": leg["stub_widen"],
-                        # One kdb.Text per *net*, not per leg: a bundle net's
-                        # legs are one conductor (#1073).
-                        "label": leg_index == 0,
-                    }
-                )
-        else:
+            )
+            routed_geometry.append(
+                {
+                    "net": net_label,
+                    "points_um": leg["points_um"],
+                    "width_um": width_um,
+                    "via_drops": leg["via_drops"],
+                    "stub_widen": leg["stub_widen"],
+                    # One kdb.Text per *net*, not per leg: the drawn legs of
+                    # one net are one conductor (#1073) -- even when only a
+                    # subset of the net's legs drew (#1169), the label lands
+                    # on the first drawn leg's island only; any other drawn
+                    # island of the same partially-routed net is left
+                    # unlabelled, exactly as an individually-unroutable
+                    # candidate leg always was.
+                    "label": leg_index == 0,
+                }
+            )
+        if not result["routed"]:
             unrouted_nets.append(net_label)
             notes.append(f"net '{net_label}' could not be routed: {result['reason']}")
 
