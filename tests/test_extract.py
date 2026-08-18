@@ -3200,11 +3200,21 @@ def test_cli_missing_file_exits_one_text_format(tmp_path, capsys):
     assert err.startswith("klt extract:")
 
 
-def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
+def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
+    """`--deck` is no longer `required=True` at the argparse level (issue
+    #1149: it must be optional for `--check`, which reads its deck from the
+    committed report instead) -- so an omitted `--deck` alongside a
+    positional `file` is now an application-level error (exit 1, a clean
+    `emit_error` envelope), not an argparse usage error (exit 2). Mirrors
+    `klt drc`'s own runtime `--deck` check (`drc_cmd.py`, "argument --deck
+    is required for --engine curated")."""
     path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
-    with pytest.raises(SystemExit) as exc_info:
-        main(["extract", path])
-    assert exc_info.value.code == 2
+    capsys.readouterr()
+
+    assert main(["extract", path, "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "--deck" in err["error"]["message"]
+    assert "required" in err["error"]["message"]
 
 
 @pytest.mark.parametrize(
@@ -11621,3 +11631,301 @@ def test_cli_matched_group_single_instance_is_a_clean_error(tmp_path, capsys):
     assert exit_code == 1
     err = json.loads(capsys.readouterr().err)
     assert "at least two" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# `klt extract --check` / `--rerun` (issue #1149): verify a committed report
+# still reproduces -- wires `klt extract` up to the same shared
+# `_report_verify.py` machinery `klt drc`/`klt lvs` already use (issue
+# #1106), closing the one remaining verb without a drift-detection path.
+# Mirrors `tests/test_drc.py`'s "`klt drc --check` / `--rerun`" block.
+# --------------------------------------------------------------------------- #
+
+from klayout_tools.extract import (  # noqa: E402
+    check_extract_report,
+    rerun_extract_report,
+)
+
+
+def _write_report(path: Path, report: dict) -> str:
+    path.write_text(json.dumps(report))
+    return str(path)
+
+
+def test_check_extract_report_clean_pass(tmp_path):
+    """Cheap mode: an unmutated input/deck re-hashes to the same values the
+    committed report already recorded -- `status: "match"`, every check
+    `match: True`."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path, run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    )
+
+    result = check_extract_report(str(report_path))
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["report"] == str(report_path)
+    assert result["status"] == "match"
+    assert len(result["checks"]) == 2
+    assert all(check["match"] for check in result["checks"])
+
+
+def test_check_extract_report_detects_moved_input_hash(tmp_path):
+    """A layout mutated after the report was committed is caught -- only the
+    `provenance.input.content_hash` check fails, `deck` still matches."""
+    path = tmp_path / "inv.gds"
+    _write_gds(_make_inverter_layout(), path)
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(str(path), "sky130", output=str(tmp_path / "inv.spice")),
+    )
+
+    _write_gds(_make_inverter_layout(top_name="OTHER"), path)  # overwrite in place
+
+    result = check_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.deck.content_hash"]["match"] is True
+
+
+def test_check_extract_report_with_gf180mcu_deck_detects_deck_hash_drift(tmp_path):
+    """Issue #1149's actual repro shape: a gf180mcu extraction whose
+    substrate/well-tap recognition (issue #1084) is exercised by a drawn
+    substrate tie, committed as evidence, then re-checked after the deck
+    itself changed underneath it (simulated here the same way a real deck
+    rebuild would surface -- a different `provenance.deck.content_hash`,
+    without touching the input GDS at all). `--check` must report `status:
+    "drifted"`, naming `provenance.deck.content_hash` as the field that
+    moved -- the tool-gap issue #1149 describes as silently unsignalled
+    before this fix."""
+    path = _write_gds(
+        _make_gf180mcu_inverter_layout(substrate_tap_label="STIE"),
+        tmp_path / "inv.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "inv.spice"))
+    assert report["provenance"]["deck"]["content_hash"].startswith("sha256:")
+
+    # Hand-edit the recorded deck content_hash to a bogus value -- exactly
+    # `docs/cli/extract.md`'s documented "did the deck change underneath
+    # this committed report" scenario, without needing an actual second
+    # deck build to reproduce it deterministically in a test.
+    report["provenance"]["deck"]["content_hash"] = "sha256:" + "0" * 64
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(report_path, report)
+
+    result = check_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.deck.content_hash"]["match"] is False
+    assert by_field["provenance.deck.content_hash"]["expected"] == (
+        "sha256:" + "0" * 64
+    )
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_extract_report_missing_recorded_hash_is_never_a_false_pass(tmp_path):
+    """A report predating `provenance.input`/`deck.content_hash` renders
+    `"drifted"`, never a false `"match"` -- mirrors `klt signoff`'s
+    `_grade_evidence()` "never a false pass" discipline (see
+    `_report_verify.hash_check`'s docstring)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report["provenance"]["input"] = None
+    report_path = tmp_path / "old.extract.json"
+    _write_report(report_path, report)
+
+    result = check_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["expected"] is None
+
+
+def test_check_extract_report_missing_file_raises(tmp_path):
+    with pytest.raises(ExtractError, match="not found"):
+        check_extract_report(str(tmp_path / "nope.extract.json"))
+
+
+def test_check_extract_report_malformed_json_raises(tmp_path):
+    report_path = tmp_path / "bad.extract.json"
+    report_path.write_text("not json")
+    with pytest.raises(ExtractError, match="not valid JSON"):
+        check_extract_report(str(report_path))
+
+
+def test_rerun_extract_report_clean_pass(tmp_path):
+    """Full mode: re-running an unchanged input/deck produces an
+    identical-modulo-volatile-fields report -- `status: "match"`, empty
+    `drift`."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path, run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    )
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["status"] == "extracted"
+
+
+def test_rerun_extract_report_detects_device_recognition_change(tmp_path):
+    """A layout mutated to add a drawn substrate tie after the report was
+    committed changes the NMOS body terminal's resolved net (issue #1084's
+    tap-derivation path) -- this is the shape of change issue #1149 reports
+    a deck rebuild can silently introduce. Full-mode `--rerun` re-runs the
+    extraction at the same path and catches it, naming each device's
+    changed `nets.b` terminal among the drifted fields."""
+    path = tmp_path / "inv.gds"
+    _write_gds(_make_gf180mcu_inverter_layout(), path)
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(str(path), "gf180mcu", output=str(tmp_path / "inv.spice")),
+    )
+
+    # Overwrite in place with a substrate tie added -- same file path, same
+    # deck, different device-recognition outcome for the NMOS body net.
+    _write_gds(_make_gf180mcu_inverter_layout(substrate_tap_label="STIE"), path)
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    drifted_fields = {entry["field"] for entry in result["drift"]}
+    assert any(
+        field.startswith("devices.") and field.endswith(".nets.b")
+        for field in drifted_fields
+    )
+
+
+def test_rerun_extract_report_excludes_volatile_provenance_fields(tmp_path):
+    """`provenance.klt_version`/`klayout_version` legitimately vary between
+    runs -- forging different values into the committed report must not
+    show up in `drift` when nothing else changed."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report["provenance"]["klt_version"] = "0.0.1-forged"
+    report["provenance"]["klayout_version"] = "0.0.1-forged"
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(report_path, report)
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_extract_report_missing_deck_field_raises(tmp_path):
+    report_path = tmp_path / "bad.extract.json"
+    _write_report(report_path, {"file": "x.gds"})
+    with pytest.raises(ExtractError, match="deck"):
+        rerun_extract_report(str(report_path))
+
+
+def test_rerun_extract_report_missing_file_field_raises(tmp_path):
+    report_path = tmp_path / "bad.extract.json"
+    _write_report(report_path, {"deck": "sky130"})
+    with pytest.raises(ExtractError, match="file"):
+        rerun_extract_report(str(report_path))
+
+
+def test_cli_extract_check_clean_exits_zero(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path, run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    )
+    capsys.readouterr()
+
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "check"
+    assert data["status"] == "match"
+
+
+def test_cli_extract_check_drifted_exits_three(tmp_path, capsys):
+    path = tmp_path / "inv.gds"
+    _write_gds(_make_inverter_layout(), path)
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(str(path), "sky130", output=str(tmp_path / "inv.spice")),
+    )
+    _write_gds(_make_inverter_layout(top_name="OTHER"), path)
+    capsys.readouterr()
+
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 3
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "drifted"
+
+
+def test_cli_extract_check_rerun_exits_three_on_drift(tmp_path, capsys):
+    path = tmp_path / "inv.gds"
+    _write_gds(_make_gf180mcu_inverter_layout(), path)
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(str(path), "gf180mcu", output=str(tmp_path / "inv.spice")),
+    )
+    _write_gds(_make_gf180mcu_inverter_layout(substrate_tap_label="STIE"), path)
+    capsys.readouterr()
+
+    assert (
+        main(["extract", "--check", str(report_path), "--rerun", "--format", "json"])
+        == 3
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "rerun"
+    assert data["status"] == "drifted"
+
+
+def test_cli_extract_check_with_file_argument_is_a_usage_error(tmp_path):
+    """`file` and `--check` are a required, mutually exclusive argparse
+    group (issue #1149) -- combining them is a usage error (exit 2), the
+    same as any other mutually exclusive argparse pair, not an
+    application-level (`--format json` error envelope) one."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path, run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["extract", path, "--check", str(report_path), "--format", "json"])
+    assert exc_info.value.code == 2
+
+
+def test_cli_extract_rerun_without_check_is_rejected(tmp_path, capsys):
+    """`--rerun` alongside `file` (no `--check`) passes argparse's
+    mutually-exclusive-group check (`file` alone already satisfies "one of
+    file/--check required") but is still a semantic error at the
+    application level (exit 1) -- `--rerun` only means something for
+    `--check`."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    capsys.readouterr()
+
+    assert (
+        main(["extract", path, "--deck", "sky130", "--rerun", "--format", "json"]) == 1
+    )
+    err = json.loads(capsys.readouterr().err)
+    assert "requires --check" in err["error"]["message"]
+
+
+def test_cli_extract_no_file_no_check_is_a_usage_error():
+    """Omitting both `file` and `--check` is a usage error (exit 2) --
+    unchanged from the pre-#1149 "`file` is a required positional"
+    contract, now enforced via a required mutually exclusive group instead
+    of a plain required positional (see `parser.py`'s
+    `extract_input_group`)."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["extract", "--format", "json"])
+    assert exc_info.value.code == 2

@@ -4,20 +4,48 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/extract.md`` for the full table):
-    0 - extraction succeeded, netlist written
+    0 - extraction succeeded, netlist written (or, under --check, the
+        report still holds)
     1 - failed to run (bad file, unknown deck, unresolvable PDK, missing/
         ambiguous top cell, engine error) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
+    3 - under --check, the committed report drifted from the current deck/
+        input
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. There is no "ran but found problems" outcome for extraction --
-it either produces a netlist or it fails -- so, unlike ``klt drc``/``klt
-lvs``, there is no exit code 3; see docs/cli/extract.md.)
+subcommand. A fresh (non-``--check``) extraction still has no "ran but
+found problems" outcome -- it either produces a netlist or it fails -- so
+exit code 3 is only ever reached via --check; see docs/cli/extract.md.)
+
+``--check <report>`` (issue #1149) switches ``klt extract`` from running a
+fresh extraction into *verifying a previously committed* ``--format json``
+report still reproduces -- see ``docs/cli/extract.md``, "--check" -- and is
+mutually exclusive with the positional ``file`` argument (the input path is
+read from the committed report itself). Cheap mode (default): re-hash the
+input/deck named in the report and compare against its own recorded
+``content_hash`` values, no extraction engine re-run. Full mode (``--check
+<report> --rerun``): actually re-run the extraction the report describes
+and diff verdict-bearing fields. Both reuse ``status: "match"`` /
+``"drifted"`` and the same 0/3 exit-code split described above (see
+``klayout_tools._report_verify``).
 """
 
 import argparse
 
-from ..extract import ExtractError, def_net_instance_pins, run_extract
+from ..extract import (
+    ExtractError,
+    check_extract_report,
+    def_net_instance_pins,
+    rerun_extract_report,
+    run_extract,
+)
 from .output import emit_error, emit_success
+
+EXIT_OK = 0
+EXIT_DRIFTED = 3
+#: Alias for the --check/--rerun "still consistent" outcome (issue #1149) --
+#: same numeric value as a normal run's success exit, just named for the
+#: "match"/"drifted" vocabulary those modes report under.
+EXIT_MATCH = EXIT_OK
 
 
 def _parse_deck_options(raw: list[str] | None) -> dict[str, str] | None:
@@ -129,7 +157,18 @@ def _parse_def_net_connections(
 
 
 def run(args: argparse.Namespace) -> int:
+    # `file` and `--check` are a required, mutually exclusive argparse group
+    # (parser.py) -- omitting both, or giving both, is already a usage error
+    # (exit 2) by the time `run()` is ever called.
+    if args.check is not None:
+        return _run_check(args)
+
+    if args.rerun:
+        return emit_error("extract", "--rerun requires --check <report>", args.format)
+
     try:
+        if not args.deck:
+            raise ExtractError("argument --deck is required")
         declared_pins = _parse_declared_pins(args.pins)
         deck_options = _parse_deck_options(args.deck_options)
         def_net_connections = _parse_def_net_connections(
@@ -212,7 +251,22 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
 
-    return 0
+    return EXIT_OK
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    try:
+        if args.rerun:
+            result = rerun_extract_report(args.check)
+        else:
+            result = check_extract_report(args.check)
+    except ExtractError as exc:
+        return emit_error("extract", str(exc), args.format)
+
+    text_renderer = _print_rerun_text if args.rerun else _print_check_text
+    emit_success(result, args.format, text_renderer)
+
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
 def _print_text(report: dict) -> None:
@@ -338,3 +392,28 @@ def _print_text(report: dict) -> None:
         print("warnings:")
         for warning in warnings:
             print(f"  {warning}")
+
+
+def _print_check_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            print(f"      actual:   {check['actual']}")
+
+
+def _print_rerun_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    drift = result["drift"]
+    if not drift:
+        return
+    print()
+    print("drift:")
+    for entry in drift:
+        print(f"  {entry['field']}:")
+        print(f"      committed: {entry['committed']!r}")
+        print(f"      fresh:     {entry['fresh']!r}")

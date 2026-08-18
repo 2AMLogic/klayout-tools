@@ -880,15 +880,31 @@ def create_parser() -> argparse.ArgumentParser:
             "docs/cli/extract.md's 'Anonymous net numbering' section."
         ),
     )
-    extract_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    # `file` (positional) and `--check` (issue #1149) are mutually exclusive
+    # input sources -- exactly one is required. See the matching
+    # `drc_input_group` comment in this file's `drc` subparser for why this
+    # is a required mutually-exclusive group rather than a manual runtime
+    # check.
+    extract_input_group = extract_parser.add_mutually_exclusive_group(required=True)
+    extract_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a GDSII or OASIS layout file. Omit when using --check "
+            "(the input path is read from the committed report instead)"
+        ),
+    )
     extract_parser.add_argument(
         "--deck",
-        required=True,
+        default=None,
         help=(
-            "extraction deck to run (currently: sky130, gf180mcu, sg13g2). Not "
-            "validated by argparse -- an unknown deck name exits 1 with a "
-            "clean error, per docs/cli/extract.md's exit-code contract, "
-            "rather than argparse's usage-error exit 2."
+            "extraction deck to run (currently: sky130, gf180mcu, sg13g2). "
+            "Required unless --check is given (an omitted --deck with "
+            "positional 'file' is an application error, exit 1, not an "
+            "argparse usage error -- see docs/cli/extract.md's exit-code "
+            "contract). Not validated by argparse -- an unknown deck name "
+            "also exits 1 with a clean error."
         ),
     )
     extract_parser.add_argument(
@@ -1249,6 +1265,37 @@ def create_parser() -> argparse.ArgumentParser:
             "instance names in one entry, is an error. Off by default -- "
             "byte-identical to today's behavior. See docs/cli/extract.md's "
             "'Matched-device geometry check' section."
+        ),
+    )
+    extract_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt extract --format json' "
+            "report (REPORT) instead of running a fresh extraction: "
+            "mutually exclusive with the positional 'file' argument, since "
+            "the input path is read from REPORT itself (issue #1149). "
+            "Cheap mode (default): re-hash the input layout and deck named "
+            "in REPORT's provenance block and compare against the "
+            "recorded content_hash values, no extraction engine re-run. "
+            "Combine with --rerun for full mode (re-run the extraction and "
+            "diff verdict-bearing fields). Exits 0 if still consistent, 3 "
+            "if drifted -- see docs/cli/extract.md, '--check'"
+        ),
+    )
+    extract_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1149): re-run the extraction "
+            "named in REPORT (best-effort -- reconstructs only file/deck/"
+            "top/deck_options; see docs/cli/extract.md, '--check', for "
+            "reconstruction limits) and diff verdict-bearing fields "
+            "against the committed report, excluding "
+            "provenance.klt_version/klayout_version/pdk.version (fields "
+            "that legitimately vary between runs of identical inputs). "
+            "Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     _add_format_arg(extract_parser)
