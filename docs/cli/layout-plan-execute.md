@@ -60,15 +60,15 @@ every one already existed in `gen_compose.py`.
 from klayout_tools.layout_plan_execute import (
     LayoutPlanExecuteError,
     exit_code_for,
-    execute_layout_plan,             # plan + an already-built digest
-    execute_layout_plan_document,    # plan; builds the digest itself
+    execute_layout_plan,  # plan + an already-built digest
+    execute_layout_plan_document,  # plan; builds the digest itself
     partial_success,
 )
 from klayout_tools.layout_plan import LayoutPlanError  # Phase B's own errors
 
 try:
     response = execute_layout_plan_document(request, request_dir=".")
-except LayoutPlanError as exc:      # Phase B validation failure
+except LayoutPlanError as exc:  # Phase B validation failure
     raise SystemExit(1)
 except LayoutPlanExecuteError as exc:  # Phase C execution failure
     raise SystemExit(1)
