@@ -16,6 +16,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-18 — `klt functional-verification`'s `options.sdf` transcript gate no
+  longer fails a run on a *corrupted* transcript line (issue #1136). Icarus's
+  C-level SDF diagnostic output and cocotb's Python logging share one stdout
+  file descriptor, so under a non-tty capture (a caller piping `klt`'s output
+  without `PYTHONUNBUFFERED=1`) a flush from one can land mid-line inside a
+  not-yet-flushed line from the other. Observed live: the tail of a benign
+  `SDF WARNING: …: TIMINGCHECK not supported.` line was overwritten by an
+  unrelated cocotb log line, taking the `TIMINGCHECK` substring the benign
+  exemption keys on with it — so a fully-correct SDF annotation was reported
+  as `did not fully apply: 1 diagnostic(s)`. `_scan_sdf_diagnostics` now
+  classifies a marker-bearing line only once it also matches Icarus's own
+  diagnostic shape (`SDF WARNING:`/`SDF ERROR:` plus a `<file>:<line>:`
+  locator); a line carrying the marker without that shape is a splice, not
+  evidence, and is counted as neither actionable nor benign. No JSON shape
+  change. This cannot mask a real failure: Icarus emits one diagnostic per
+  failing SDF entry, so a genuine failure arrives in volume while a splice
+  corrupts only the single line the interleaved flush landed in.
 - 2026-08-18 — `klt extract`'s NMOS body ("W") terminal is no longer always
   tied to one hardcoded, deck-wide `substrate_net` global regardless of
   physical isolation (issue #1128). `ExtractionDeck.substrate_isolation`

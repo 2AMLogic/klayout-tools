@@ -313,6 +313,20 @@ class is exempt: `TIMINGCHECK not supported`, which fires on *correct* input
 delays but not SDF timing checks) and does not affect the delays it does
 apply.
 
+Only a **well-formed** diagnostic counts — one shaped
+`SDF WARNING:`/`SDF ERROR:` followed by Icarus's own `<file>:<line>:`
+locator. A marker-bearing line without that shape is a *corrupted* line, not
+a diagnostic, and is ignored: Icarus's C-level diagnostic output and cocotb's
+Python logging share one stdout file descriptor, so under a non-tty capture
+(a caller piping this verb's output without `PYTHONUNBUFFERED=1`) a flush
+from one can land mid-line inside a not-yet-flushed line from the other and
+splice them together. Before this check, such a splice could eat the
+`TIMINGCHECK` substring off a benign warning and fail a run whose annotation
+had applied perfectly. Ignoring the spliced line cannot hide a real problem:
+Icarus emits one diagnostic *per failing SDF entry*, so a real failure
+arrives in volume while a splice corrupts only the single line the
+interleaved flush landed in.
+
 **Known limitation, inherited from Icarus**: no setup/hold violation
 *reporting* on this path — it models delays only, so `$setuphold`-driven `X`
 propagation on a violated flop does not happen and this path is *less*
