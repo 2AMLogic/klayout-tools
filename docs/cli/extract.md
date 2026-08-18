@@ -301,13 +301,22 @@ follow-up.
 ### Anonymous net numbering (`$N`) is NOT a stable cross-platform contract (issue #1063)
 
 A net with no drawn label writes as `Net.expanded_name()`'s own
-placeholder, `"$" + cluster_id` (e.g. `$171`) — both in the written
-`.spice` netlist's instance/node syntax and in the JSON `nets[].name`
-field (`net_id` is the same underlying `cluster_id`, as an integer — see
-"`nets[]` entries" below). `cluster_id` is assigned once, internally,
-inside the native `l2n.extract_netlist()` call — a single opaque
-KLayout/`kdb` (compiled C++) routine. This repo only *reads* that string;
-it never assigns, sorts, or otherwise influences it.
+placeholder, `"$" + cluster_id` (e.g. `$171`) — a *device instance* name
+built off it (e.g. `M$171`, or an unlabelled net's synthesized `Device`
+name generally) keeps this bare spelling verbatim, but the written
+`.spice` netlist's *node* syntax (an `M`/`X`/`R`/`C` card's own net
+references, and the `.SUBCKT` pin list) backslash-escapes the leading `$`
+(`\$171`, never bare `$171` — issue #1162, "Anonymous nets are
+backslash-escaped" above) since ngspice treats a token that *starts with*
+`$` as an inline-comment marker. The JSON `nets[].name` field (and
+`devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/
+`.terminals[].leg_net`) carries this same escaped `\$171` node spelling,
+not the bare instance-name form (`net_id` is the same underlying
+`cluster_id`, as an integer — see "`nets[]` entries" below). `cluster_id`
+is assigned once, internally, inside the native `l2n.extract_netlist()`
+call — a single opaque KLayout/`kdb` (compiled C++) routine. This repo
+only *reads* that string; it never assigns, sorts, or otherwise influences
+it.
 
 **This numbering is deterministic within one run and one environment
 (re-running extraction on the same machine against the same pinned
@@ -2210,6 +2219,12 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net VOUT --critical-n
   a `--critical-net` name that matches nothing in this particular layout is
   reported in `warnings` rather than raised — a caller may legitimately name
   several candidate nets across several blocks/runs.
+- **Naming an anonymous net.** `--critical-net`/`--distributed-rc` match
+  against the same spelling `nets[].name`/`parasitics.nets[].net` report
+  (see "Anonymous nets are backslash-escaped" below) — an unlabelled net's
+  KLayout-synthesized placeholder must be given backslash-escaped (e.g.
+  `--critical-net '\$2'`), not bare (`--critical-net '$2'` matches no net,
+  issue #1162).
 
 Output, additive:
 
@@ -2314,6 +2329,11 @@ klt extract cell.gds --deck sky130 --parasitics --mom-net Y --format json
 
 - **Requires `--parasitics`.** There is nothing to cross-check against
   otherwise; given alone, `--mom-net` is a clean error.
+- **Naming an anonymous net.** `--mom-net` matches against the same
+  spelling `nets[].name`/`parasitics.nets[].net` report (see "Anonymous
+  nets are backslash-escaped" below) — an unlabelled net's KLayout-
+  synthesized placeholder must be given backslash-escaped (e.g. `--mom-net
+  '\$2'`), not bare (issue #1162).
 - **Requires the `klt_mom_native` extension** to be built — see
   [`docs/cli/mom.md#building-the-native-extension`](mom.md#building-the-native-extension).
   An unbuilt extension, a `<net>` matching no net with ground-eligible
@@ -2465,6 +2485,11 @@ klt extract cell.gds --deck sky130 --parasitics \
   follows, not `--critical-net`'s tolerant `warnings`-only convention (a
   caller supplying a real measured value for a specific net expects it
   applied).
+- **Naming an anonymous net.** `--mom-rlc-net` matches against the same
+  spelling `nets[].name`/`parasitics.nets[].net` report (see "Anonymous
+  nets are backslash-escaped" below) — an unlabelled net's KLayout-
+  synthesized placeholder must be given backslash-escaped (e.g.
+  `--mom-rlc-net '\$2'`), not bare (issue #1162).
 - **Mutually exclusive with `--distributed-rc` naming the same net** (via
   `--critical-net`) — a caller-supplied lumped R/L/C total and a
   multi-segment ladder derived from the deck's own coefficient table cannot
@@ -2814,7 +2839,8 @@ SPICE body for a `$`-prefixed node: it is surfaced structurally in the JSON
 response two ways —
 
 - Every affected PMOS device's `devices[].nets["b"]` already carries the
-  exact net name (e.g. `"$5"`), same as any other terminal.
+  exact net name (e.g. `"\$5"`, backslash-escaped per "Anonymous nets are
+  backslash-escaped" above, issue #1162), same as any other terminal.
 - The top-level `unbiased_pmos_body_nets[]` array (see "JSON schema" below)
   flags it explicitly, one `{"device", "net"}` entry per affected PMOS
   device, plus a single aggregate prose `warnings[]` entry with the affected
@@ -3271,10 +3297,34 @@ nothing downstream keys off of. The `net` field in the `parasitics.nets[]`
 JSON above, the `hub_net` / `terminals[].leg_net` node names, and the
 `.SUBCKT` pin interface are all unaffected and already carry the literal net
 identity as the written netlist itself spells it (the same `\|`-joined form
-KLayout's own `NetlistSpiceWriter` writes for node syntax, issue #696 — see
-"Merged net labels" above). If you need to map an emitted `R`/`C` card back
-to the net it parasitizes, use `parasitics.nets[].net` (or the netlist's own
-node names on that card), not the sanitized instance name.
+KLayout's own `NetlistSpiceWriter` writes for merged-label node syntax, issue
+#696, and the same backslash-escaped `\$N` form it writes for an anonymous
+net's node syntax, issue #1162 — see "Merged net labels" above and
+"Anonymous nets are backslash-escaped" below, respectively). If you need to
+map an emitted `R`/`C` card back to the net it parasitizes, use
+`parasitics.nets[].net` (or the netlist's own node names on that card), not
+the sanitized instance name.
+
+### Anonymous nets are backslash-escaped
+
+KLayout's own `NetlistSpiceWriter` backslash-escapes a leading `$` (`\$2`,
+never a bare `$2`) wherever it writes an anonymous, unlabelled net's
+`Net.expanded_name()` placeholder as an actual SPICE node reference — a
+node token that merely *starts with* `$` is inline-comment syntax to ngspice
+(and the wider SPICE3/HSPICE-descended dialect family), so a bare `$2` would
+silently truncate the rest of its card. `nets[].name`, `devices[].nets[...]`,
+and `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net` all carry this
+same escaped `\$N` spelling for an anonymous net (issue #1162) — matching
+the written netlist byte-for-byte, exactly like the `\|`-joined spelling
+"Merged net labels" above already carries for a label-merged net. **Before
+this fix, these JSON fields reported the *bare*, unescaped `$N` form** — a
+caller that copied one of these fields verbatim into a hand-authored SPICE
+card (a testbench, a `.save`/probe directive, a manual instantiation)
+reproduced the exact silent-truncation hazard `NetlistSpiceWriter` itself
+already avoids internally. A `--critical-net`/`--distributed-rc`/
+`--mom-rlc-net`/`--mom-net` argument naming an anonymous net must use this
+same escaped `\$N` spelling (matching what these fields now report) — an
+unescaped `$N` argument matches no net.
 
 **Disambiguated across same-labelled nets (issue #765).** Since `net` is not
 guaranteed unique (see `net_id` above), two entries can sanitize to the
@@ -3445,7 +3495,7 @@ consume.
 
 | Field          | Type    | Description                                                                 |
 | -------------- | ------- | ------------------------------------------------------------------------------ |
-| `name`         | string  | The net's name, byte-identical to how the written netlist's `.SUBCKT`/instance lines reference it (a labelled name, or an anonymous `$N`) — a net two labels merged is `\|`-joined (e.g. `"Y\|Y2"`), not KLayout's own un-escaped, comma-joined `Net.expanded_name()` form (issue #696 — see "Merged net labels" below). |
+| `name`         | string  | The net's name, byte-identical to how the written netlist's `.SUBCKT`/instance lines reference it as a node — a labelled name, or an anonymous net's KLayout-synthesized `$N` placeholder backslash-escaped to `\$N` (issue #1162 — see "Anonymous nets are backslash-escaped" below) — a net two labels merged is `\|`-joined (e.g. `"Y\|Y2"`), not KLayout's own un-escaped, comma-joined `Net.expanded_name()` form (issue #696 — see "Merged net labels" below). |
 | `pin`          | boolean | Whether this net is promoted to a top-cell pin (a named net at the top level). |
 | `device_count` | integer | Number of device terminals connected to this net.                             |
 

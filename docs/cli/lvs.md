@@ -605,16 +605,19 @@ internally (that is what makes `counts.nets.matched` meaningful), but until
 this field existed the report never surfaced it — a caller could not attach
 anything to a *named* schematic node without re-deriving the pairing itself.
 An extracted netlist's net names are mostly not the schematic's: extraction
-names a net after a drawn label if there is one and positionally (`$5`,
-`$12`, …) otherwise, so for every internal node the schematic name exists
-only on the reference side and the extracted name only on the layout side.
+names a net after a drawn label if there is one and positionally (KLayout's
+own `$5`, `$12`, … placeholder, reported here backslash-escaped to `\$5`,
+`\$12`, … — issue #1162, see `klt extract`'s docs, "Anonymous nets are
+backslash-escaped") otherwise, so for every internal node the schematic name
+exists only on the reference side and the extracted name only on the layout
+side.
 `net_correspondence` closes that gap directly from the comparer's own
 `match_nets`/`match_ambiguous_nets` callbacks — no re-derivation, no graph
 isomorphism reimplemented downstream.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
+| `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
 | `reference` | string | The paired reference net's name, same convention. |
 | `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
 
