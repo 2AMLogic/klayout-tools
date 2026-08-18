@@ -3302,6 +3302,298 @@ def test_route_two_pin_waypoints_do_not_disable_the_self_net_pad_check():
     assert "'B0'" in result["reason"]
 
 
+# --------------------------------------------------------------------------- #
+# route_two_pin() bounded detour search (#1167) -- a backbone rejected *only*
+# for crossing unrelated blocks' bboxes now retries around them on up to two
+# alternate lanes before the net is reported unroutable. Hand-built block/port
+# dicts again (no generator/gds involved): route_two_pin() reads nothing but
+# the reported bbox/ports for a cross-block net.
+# --------------------------------------------------------------------------- #
+
+
+def _row_obstacle_fixture(obstacles=None, extra_bboxes=None):
+    """Blocks in a row: the outer two carry the net's ports (facing each
+    other), everything in between is an unrelated obstacle sitting squarely on
+    the straight-line path between them.
+
+    This is #1164's root cause #2 in miniature -- the shape that made *every*
+    net except one between immediately-adjacent blocks unroutable, since the
+    fixed one-jog backbone runs straight through whatever the row puts in
+    between.
+    """
+    obstacles = obstacles or {"m": {"x0": 12.0, "y0": 0.0, "x1": 22.0, "y1": 10.0}}
+    blocks = {
+        "a": {
+            "id": "a",
+            "port_names": {"Y"},
+            "ports": {"Y": {"x_um": 10.0, "y_um": 5.0, "direction_deg": 0}},
+        },
+        "b": {
+            "id": "b",
+            "port_names": {"A"},
+            "ports": {"A": {"x_um": 24.0, "y_um": 5.0, "direction_deg": 180}},
+        },
+    }
+    bboxes = {
+        "a": {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0},
+        "b": {"x0": 24.0, "y0": 0.0, "x1": 34.0, "y1": 10.0},
+        **obstacles,
+        **(extra_bboxes or {}),
+    }
+    for block_id in (*obstacles, *(extra_bboxes or {})):
+        blocks[block_id] = {"id": block_id, "port_names": set(), "ports": {}}
+    offsets = {block_id: {"x": 0.0, "y": 0.0} for block_id in blocks}
+    pin_a = {"block": "a", "port": "Y"}
+    pin_b = {"block": "b", "port": "A"}
+    return blocks, offsets, bboxes, pin_a, pin_b
+
+
+def _crossing_um(points, bbox_um, width_um):
+    """How much of ``points`` runs inside ``bbox_um`` -- inflated by half the
+    route width, exactly as route_two_pin's own obstacle check inflates it."""
+    half = width_um / 2.0
+    inflated = {
+        "x0": bbox_um["x0"] - half,
+        "y0": bbox_um["y0"] - half,
+        "x1": bbox_um["x1"] + half,
+        "y1": bbox_um["y1"] + half,
+    }
+    return sum(
+        gen_compose._segment_bbox_interior_overlap_um(p0, p1, inflated)
+        for p0, p1 in zip(points, points[1:], strict=False)
+    )
+
+
+def test_route_two_pin_detours_around_an_unrelated_block_in_the_row():
+    # #1167: the two ports are not immediate row-neighbours -- block 'm' sits
+    # between them -- so the fixed one-jog backbone plows straight through
+    # m's bbox and used to be rejected outright ("crosses ... through
+    # unrelated block 'm''s bbox"). The router now jogs around m instead.
+    blocks, offsets, bboxes, pin_a, pin_b = _row_obstacle_fixture()
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is True, result["reason"]
+    assert result["reason"] is None
+    points = result["points_um"]
+    # Endpoints are still the two ports themselves...
+    assert points[0] == (10.0, 5.0)
+    assert points[-1] == (24.0, 5.0)
+    # ...and no part of the drawn path enters the obstacle (the same
+    # width-inflated measure the check itself applies).
+    assert _crossing_um(points, bboxes["m"], 0.3) == pytest.approx(0.0)
+    # The detour lane clears the obstacle by more than the width_um / 2 the
+    # overlap check bottoms out at -- it is drawn clear, not legal-by-a-hair.
+    lane_y = max(y for _, y in points)
+    assert lane_y >= bboxes["m"]["y1"] + 0.3
+    # It is a detour, not a shortcut: longer than the straight-line distance.
+    assert result["route_length_um"] > 14.0
+
+
+def test_route_two_pin_detour_takes_the_shorter_of_the_two_lanes():
+    # The obstacle is tall (y1 = 30) but its bottom is level with the row, so
+    # going *under* it is much shorter than going over -- the bounded search
+    # tries the cheaper lane first, and its result is what gets drawn.
+    blocks, offsets, bboxes, pin_a, pin_b = _row_obstacle_fixture(
+        obstacles={"m": {"x0": 12.0, "y0": 0.0, "x1": 22.0, "y1": 30.0}}
+    )
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is True, result["reason"]
+    assert _crossing_um(result["points_um"], bboxes["m"], 0.3) == pytest.approx(0.0)
+    assert min(y for _, y in result["points_um"]) <= bboxes["m"]["y0"] - 0.3
+
+
+def test_route_two_pin_detours_around_two_obstacles_on_one_lane():
+    # Documented depth limit (#1167): what the search bounds is the number of
+    # *lanes* it tries (two), not the number of blocks in the way -- one lane
+    # is placed clear of every block it spans, so a pair of obstacles between
+    # the pins routes on the same single detour.
+    blocks, offsets, bboxes, pin_a, pin_b = _row_obstacle_fixture(
+        obstacles={
+            "m1": {"x0": 12.0, "y0": 0.0, "x1": 16.0, "y1": 10.0},
+            "m2": {"x0": 18.0, "y0": -1.0, "x1": 22.0, "y1": 12.0},
+        }
+    )
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is True, result["reason"]
+    for obstacle in ("m1", "m2"):
+        assert _crossing_um(
+            result["points_um"], bboxes[obstacle], 0.3
+        ) == pytest.approx(0.0)
+    # The lane it takes (under, the shorter side here) is placed clear of the
+    # *union* of both obstacles -- m2's deeper y0, not just the first one's.
+    assert min(y for _, y in result["points_um"]) == pytest.approx(-1.6)
+
+
+def test_route_two_pin_still_rejects_when_both_detour_lanes_are_blocked():
+    # Edge case from the issue's test plan: an obstacle the bounded search
+    # cannot get around -- here two further blocks straddle the lane's own
+    # exit column, above and below the row -- still reports the net
+    # unroutable, naming the crossed block and the detour that was tried.
+    blocks, offsets, bboxes, pin_a, pin_b = _row_obstacle_fixture(
+        extra_bboxes={
+            "north": {"x0": 10.5, "y0": 12.0, "x1": 10.7, "y1": 14.0},
+            "south": {"x0": 10.5, "y0": -5.0, "x1": 10.7, "y1": -2.0},
+        }
+    )
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "block 'm'" in result["reason"]
+    assert "detour" in result["reason"]
+
+
+def test_route_two_pin_does_not_detour_around_its_own_pin_s_block():
+    # Scope guard: the detour search fires only for *unrelated* blocks. A
+    # backbone that plows through one of its own two pins' blocks (the
+    # same-facing port pair #634 exists for) is still rejected, and still
+    # points the caller at waypoints_um rather than silently rerouting.
+    blocks, offsets, bboxes, pin_a, pin_b = _same_facing_pair_fixture()
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is False
+    assert "block 'a'" in result["reason"]
+    assert "detour" not in result["reason"]
+
+
+def test_route_two_pin_caller_waypoints_are_never_second_guessed():
+    # A caller who supplies waypoints_um owns the path: a supplied path that
+    # crosses an unrelated block is reported unroutable exactly as before
+    # #1167, rather than being silently replaced by a detour of the router's
+    # own choosing.
+    blocks, offsets, bboxes, pin_a, pin_b = _row_obstacle_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        waypoints_um=[(17.0, 5.0)],
+    )
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "block 'm'" in result["reason"]
+    assert "detour" not in result["reason"]
+
+
+def test_compose_routes_around_the_middle_block_of_a_three_block_row(
+    tmp_path, pdk_root
+):
+    # End-to-end (#1167): three resistor strips in a row, wiring the *outer*
+    # two together. Their ports face each other across the whole row, so the
+    # straight-line backbone runs through the middle block -- the case that
+    # used to land in unrouted_nets[]. The composed output must both route and
+    # stay DRC-clean, and the drawn metal must not touch the middle block.
+    reports = [
+        _gen_block(tmp_path, pdk_root, "resistor_strip", f"r{index}")
+        for index in range(3)
+    ]
+    output = tmp_path / "detour.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": f"b{index + 1}", "generator_report": block}
+                for index, block in enumerate(reports)
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2", "b3"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b3", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "detour_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+
+    # The metal actually written: one li1 path, jogged around the middle
+    # block rather than straight through it.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("detour_0")
+    paths = [s.path for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    assert len(paths) == 1
+    drawn = [(p.x * layout.dbu, p.y * layout.dbu) for p in paths[0].each_point()]
+    assert len(drawn) > 2  # a straight span would be two points
+    middle_bbox = report["blocks"][1]["bbox_um"]
+    assert _crossing_um(drawn, middle_bbox, 0.17) == pytest.approx(0.0)
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # The loop closes: extraction sees the two outer resistors on one net.
+    result = extract.run_extract(str(output), "sky130", top="detour_0")
+    assert "N1" in {net["name"] for net in result["nets"] if net["pin"]}
+
+
+def test_compose_gf180mcu_row_routes_a_non_adjacent_device_pair(
+    tmp_path, both_pdk_root
+):
+    # Approximates #1164's own exercise (root cause #2): a row of one-device
+    # `mos_array` groups on gf180mcu, wiring a *non-adjacent* pair -- b1's
+    # drain (right edge) to b3's source (left edge), with b2 sitting squarely
+    # in between. Every such net in that report came back unrouted with
+    # "crosses N um through unrelated block X's bbox"; here it routes, on the
+    # second deck, and `klt drc --deck gf180mcu` stays clean.
+    reports = [
+        _gen_block_variant(
+            tmp_path,
+            both_pdk_root,
+            "gf180mcuD",
+            "mos_array",
+            f"row_m{index}",
+            rows=1,
+            cols=1,
+            dummy=0,
+            gate_contact=True,
+        )
+        for index in range(3)
+    ]
+    output = tmp_path / "row_detour_gf180.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [
+                {"id": f"b{index + 1}", "generator_report": block}
+                for index, block in enumerate(reports)
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2", "b3"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "MID",
+                    "pins": [
+                        {"block": "b1", "port": "U0_D"},
+                        {"block": "b3", "port": "U0_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.38},
+            "options": {"cell_name": "row_detour", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 def test_compose_route_two_pin_waypoints_um_rejects_malformed_entries(
     tmp_path, pdk_root
 ):

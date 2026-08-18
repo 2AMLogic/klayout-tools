@@ -33,6 +33,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Bundle (>2-pin)
   routing" section and its `nets[]`/`nets[].legs[]`/`unrouted_nets[]` field
   descriptions.
+- 2026-08-18 — `klt gen-compose` now **routes around** a placed block sitting
+  between a net's two pins instead of reporting the net unroutable (issue
+  #1167). `route_two_pin()`'s obstacle-overlap check rejected any backbone
+  crossing an unrelated block's bbox, so in a placement row only
+  *immediately adjacent* blocks could be wired at all — a real block's
+  netlist is not a Hamiltonian path over its devices, so most nets never had
+  a chance (issue #1164 measured 0/8, 0/9 and 0/9 nets routed across three
+  real gf180mcu blocks). When a backbone is rejected **solely** for crossing
+  blocks neither pin sits on, the router now retries the pair on up to two
+  alternate *lanes* — a straight run over/under (or left/right of) every
+  block in the way, shortest detour first — each routed exactly as a
+  caller-supplied `waypoints_um` path is, so all six routability checks
+  apply to it unchanged and nothing is waived to make a detour fit. The
+  search is bounded on both sides: a lane clears every block it spans (two
+  obstacles between the pins cost one lane, not two nested detours) and a
+  lane is never itself detoured (one level of recursion, at most two extra
+  attempts per net). A backbone crossing one of its own two pins' blocks
+  (the same-facing port pair) is still rejected rather than detoured — its
+  remedy stays `waypoints_um` (#634) — and a caller-supplied `waypoints_um`
+  path is never replaced by a detour. When neither lane is clear the net is
+  still reported in `unrouted_nets[]`, with the same reason as before plus a
+  note that a detour was tried. No `schema_version` bump: no field changes,
+  only which nets come back `routed: true` (with a longer
+  `route_length_um`). See `docs/cli/gen-compose.md`'s "Routing around an
+  unrelated block" section.
 - 2026-08-18 — An anonymous (unlabelled, KLayout-synthesized `$N`
   placeholder) net's name is now backslash-escaped (`\$N`) everywhere `klt
   extract`/`klt lvs` report it — `nets[].name`, `devices[].nets[...]`,
