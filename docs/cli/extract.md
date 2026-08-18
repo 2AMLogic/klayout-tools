@@ -716,12 +716,30 @@ Two consequences worth knowing:
     via still ties the top plate to `top_plate_via_metal` as described above
     without also being read as an ordinary via onto the bottom plate
     beneath it.
-- **gf180mcu's stack models only the default of three selectable
-  densities.** The DRM/LVS deck's MiM cap supports 1.0/1.5/2.0 fF/µm²
-  dielectric-thickness options selected as a foundry-side runset option, not
-  something a drawn layout's own geometry can distinguish; this deck models
-  only the LVS runset's own default (2.0 fF/µm²) — see
-  `decks/gf180mcu.py`'s provenance note.
+- **gf180mcu's stack recognizes only one density by default; all three
+  selectable densities are now caller-selectable (issue #1151).** The
+  DRM/LVS deck's MiM cap supports 1.0/1.5/2.0 fF/µm² dielectric-thickness
+  options selected as a foundry-side runset option, not something a drawn
+  layout's own geometry can distinguish — the three densities share
+  **byte-identical drawn mask geometry** per metal pair (same `Metal4`
+  bottom plate, same `FuseTop` top-plate inset, same `CAP_MK`/`MIM_L_MK`
+  markers, same `Via4`/`Metal5` up-hop). Before issue #1151, a design
+  drawing a DRM-legal MiM cap for the 1.0/1.5 fF/µm² options had no way to
+  get an accurate extraction — worse, drawing that cap's top-plate via
+  exactly per the PDK's own minimum-overlap rule (which requires the bottom
+  plate to *enclose/overlap* the via, not clear it) is silently read as an
+  **ordinary routing via**, merging the bottom-plate net and top-plate net
+  into one false short in the extracted netlist, with no diagnostic — not
+  merely "unrecognized," a wrong result that can still pass DRC. This deck
+  still models only the LVS runset's own default (2.0 fF/µm²,
+  `cap_mim_2f0_m4m5_noshield`) when `--deck-option mim_cap=...` is omitted —
+  see `decks/gf180mcu.py`'s provenance note — but a design that has
+  deliberately committed to the 1.0/1.5 fF/µm² option can now select it
+  explicitly via `--deck-option mim_cap=cap_mim_1f0_m4m5_noshield` (or
+  `...1f5...`), getting an accurately-valued extraction (right
+  `area_cap_f_um2`/`perim_cap_f_um`, right reported device name) and no
+  false short. See "Selecting a shared-geometry MiM capacitor density
+  flavour" below.
 - **gf180mcu models only Option B, not Option A, of the DRM's two
   mutually-exclusive MiM stacks.** The DRM's "10.4 MIM Capacitor" section
   defines Option A (`MIM.*`, bottom plate `Metal2`, for a 3-metal-layer
@@ -925,9 +943,10 @@ still extracted, but as the wrong device (a 2x/3x-off resistance), or (if the
 default entry were narrowed away for any reason) as an unmodelled short.
 
 `--deck-option <key>=<value>` (repeatable) picks the flavour explicitly for
-this run. Today's one wired case is gf180mcu's `poly_res`, the curated-deck
+this run. Today's resistor case is gf180mcu's `poly_res`, the curated-deck
 counterpart of the upstream `POLY_RES` deck variable cited in
-`decks/gf180mcu.py`'s own `ppolyf_u_1k` provenance note:
+`decks/gf180mcu.py`'s own `ppolyf_u_1k` provenance note (a second,
+capacitor-shaped case, `mim_cap`, is documented separately below):
 
 | Deck | Key | Values | Selects |
 | ---- | --- | ------ | ------- |
@@ -967,6 +986,65 @@ Rules of thumb:
   layout-side extraction is resolved with the matching flavour instead of
   silently falling back to the deck's default. See
   [`docs/cli/lvs.md`](lvs.md)'s `layout.deck_options` field.
+
+#### Selecting a shared-geometry MiM capacitor density flavour (`--deck-option`, issue #1151)
+
+gf180mcu's MiM cap has the same "one drawn geometry, several PDK-offered
+electrical variants" shape as the resistor flavours above, one level up in
+consequence: the 1.0/1.5/2.0 fF/µm² density options share **byte-identical
+drawn mask geometry** on the same `Metal4`/`FuseTop`/`Metal5` stack (see "MiM
+capacitor device recognition" above), disambiguated only by the upstream PDK
+LVS deck's build-time `MIM_CAP` variable, not by any drawn layer. Before this
+option existed, a design drawn against the 1.0/1.5 fF/µm² options had no way
+to select it: the cap still extracted as `cap_mim_2f0_m4m5_noshield`
+regardless, and — because the density options' `Via4` top-plate-via geometry
+is DRM-legal for all three, not just the recognized one — a correctly-drawn
+1.0/1.5 fF/µm² cap's top-plate via is silently read by the deck's generic
+per-layer connectivity loop as an ordinary routing via, **shorting the
+bottom-plate and top-plate nets together** in the extracted netlist with no
+diagnostic — the top-plate-via/`vias[]`-overlap exclusion issue #364 gives
+the *recognized* density (see "MiM capacitor device recognition" above)
+never fired for a density this deck could not yet recognize as a capacitor
+at all.
+
+| Deck | Key | Values | Selects |
+| ---- | --- | ------ | ------- |
+| `gf180mcu` | `mim_cap` | `cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, `cap_mim_2f0_m4m5_noshield` (default) | Which of the three densities (1.0/1.5/2.0 fF/µm² area, plus the matching perimeter/fringe coefficient) a marked `FuseTop`-over-`Metal4` MiM cap extracts as. |
+
+```sh
+# A design drawn against gf180mcu's 1.0 fF/um^2 MIM_CAP='1' flavour:
+klt extract cell.gds --deck gf180mcu --deck-option mim_cap=cap_mim_1f0_m4m5_noshield -o cell.spice --format json
+```
+
+Rules of thumb:
+
+- Unlike `poly_res`'s short `1k`/`2k`/`3k` spelling, `mim_cap`'s values are
+  the PDK's own full LVS device-class names (there is no equally short
+  upstream token for a density option to mirror) — `cap_mim_1f0_m4m5_noshield`,
+  `cap_mim_1f5_m4m5_noshield`, `cap_mim_2f0_m4m5_noshield`.
+- Selecting the flavour that already matches the deck's default
+  (`mim_cap=cap_mim_2f0_m4m5_noshield` today) is byte-for-byte identical to
+  omitting `--deck-option` entirely, other than the additive
+  `provenance.deck.options` echo below.
+- An unrecognised key or an unrecognised value is an application error (exit
+  1), never a silently-kept default and never a guessed capacitance — the
+  same discipline `poly_res` above already applies. A `deck_options` mapping
+  that names both `poly_res` and `mim_cap` together resolves both
+  independently in the same call.
+- The resolved mapping is echoed verbatim as `provenance.deck.options` in the
+  JSON response, exactly as for `poly_res` above.
+- This changes only *which* device class/area-and-perimeter coefficients a
+  matched MiM overlap is reported as — never *whether* it is recognised, and
+  never how many devices a drawn overlap produces (still exactly one,
+  whichever flavour is selected).
+- **Unlike `poly_res`, combining `--deck-option mim_cap=...` with `--pdk`
+  does not yet bind a curated simulation subcircuit for the two
+  non-default flavours** (`cap_mim_1f0_m4m5_noshield`/
+  `cap_mim_1f5_m4m5_noshield` have no `_CAPACITOR_MODEL_TABLE` entry as of
+  this option's introduction) — the extracted `C` card is written unbound
+  (the same documented carve-out an unbound device class anywhere else in
+  this deck gets, e.g. gf180mcu's `bjt`), not a wrong subcircuit call. See
+  "SPICE model binding" below.
 
 ### Junction diodes (issue #542)
 

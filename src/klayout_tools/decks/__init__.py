@@ -15,8 +15,9 @@ this module only aggregates them into a name -> deck registry.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -1299,6 +1300,44 @@ class CapacitorDevice:
     subset, not the full metal stack" scope guard the rest of this deck
     already carries (see ``docs/cli/extract.md`` -> "Coverage").
 
+    ``flavour_option``/``flavours`` (issue #1151) declare an optional,
+    caller-selectable **area/perimeter-coefficient flavour set** for a
+    capacitor family whose members share *identical* recognition geometry --
+    the same ``top_plate``/``bottom_plate``/requires/excludes region,
+    disambiguated only by a build-time deck variable in the official PDK LVS
+    deck this is transcribed from (e.g. gf180mcu's ``MIM_CAP``, which selects
+    one of ``'1'``/``'1.5'``/``'2'`` -- 1.0/1.5/2.0 fF/um² dielectric
+    densities -- for the *same* drawn ``FuseTop``-over-``Metal4`` region: the
+    density options share byte-identical drawn mask geometry, so no
+    ``requires``/``excludes`` split could ever tell them apart). This is the
+    capacitor sibling of :class:`ResistorDevice`'s own
+    ``flavour_option``/``flavours`` (see that docstring for the full
+    rationale -- the two fields exist for the same reason, one per device
+    family): the deck itself keeps recognising and wiring exactly one entry
+    -- this entry's own ``name``/``area_cap_f_um2``/``perim_cap_f_um`` are
+    simply *which* flavour that is -- and a caller who knows their design
+    draws a different flavour of the same geometry selects it via
+    :func:`get_extraction_deck`'s ``deck_options`` (``klt extract
+    --deck-option <flavour_option>=<value>``).
+
+    ``flavour_option`` is the deck-option key this entry's flavour is chosen
+    by (``None``, the default, means this entry has no caller-selectable
+    flavour -- today's behaviour, unaffected either way). ``flavours`` is the
+    tuple of every :class:`CapacitorFlavour` selectable through that key,
+    typically including one entry that matches this ``CapacitorDevice``'s
+    own default ``name``/``area_cap_f_um2``/``perim_cap_f_um`` (the value
+    used when no ``deck_options`` override is given) plus the
+    previously-unmodelled siblings. :func:`get_extraction_deck` validates a
+    given ``deck_options`` value against this list and raises
+    :class:`InvalidDeckOptionError` for an unrecognised key or value rather
+    than silently keeping the default or guessing -- the same
+    "known-unmodelled short beats a silently wrong value" discipline
+    ``excludes`` already applies, and the same validation
+    :class:`ResistorDevice.flavours` already gets. A deck entry that leaves
+    ``flavours`` at its empty default has no selectable flavour: passing
+    ``deck_options`` naming a key no entry (resistor or capacitor) declares
+    is itself an :class:`InvalidDeckOptionError`, not a silent no-op.
+
     ``provenance`` (issue #868) is a machine-readable citation of the exact
     upstream PDK-LVS-deck source this entry's ``area_cap_f_um2`` (and, when
     set, ``perim_cap_f_um``) was transcribed from -- the device-recognition
@@ -1321,7 +1360,40 @@ class CapacitorDevice:
     top_plate_via: tuple[int, int] | None = None
     top_plate_via_metal: tuple[int, int] | None = None
     perim_cap_f_um: float = 0.0
+    flavour_option: str | None = None
+    flavours: tuple[CapacitorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
+
+
+@dataclass(frozen=True)
+class CapacitorFlavour:
+    """One caller-selectable ``(value, name, area_cap_f_um2,
+    perim_cap_f_um)`` choice for a :class:`CapacitorDevice` whose
+    ``flavours`` field declares more than one area/perimeter-coefficient
+    interpretation of the *same* recognised geometry (issue #1151) -- the
+    capacitor sibling of :class:`ResistorFlavour` (issue #595).
+
+    ``value`` is the string a caller passes via ``deck_options`` (e.g.
+    gf180mcu's ``"cap_mim_1f0_m4m5_noshield"`` / ``"cap_mim_1f5_m4m5_noshield"``
+    / ``"cap_mim_2f0_m4m5_noshield"``, matching the PDK's own official LVS
+    device-class name for each density option so a record can cite it
+    directly -- unlike :class:`ResistorFlavour`'s short ``"1k"``/``"2k"``/
+    ``"3k"`` spelling, there is no shorter upstream token for a MiM density
+    option to mirror; the LVS device-class name itself is the PDK's own
+    per-flavour identifier). ``name``/``area_cap_f_um2``/``perim_cap_f_um``
+    are the ``CapacitorDevice.name``/``area_cap_f_um2``/``perim_cap_f_um``
+    the owning entry is rewritten to when this flavour is selected --
+    everything else about the entry (``top_plate``, ``bottom_plate``, every
+    requires/excludes field, ``bottom_plate_oversize_um``,
+    ``top_plate_via``/``top_plate_via_metal``) is unchanged, since flavour
+    selection never changes *which* geometry is recognised, only what device
+    it is reported as and what capacitance it reports.
+    """
+
+    value: str
+    name: str
+    area_cap_f_um2: float
+    perim_cap_f_um: float
 
 
 @dataclass(frozen=True)
@@ -1733,15 +1805,18 @@ def get_extraction_deck(
 
     ``deck_options`` (``klt extract --deck-option <key>=<value>``, repeatable)
     selects, per key, which caller-visible flavour of a
-    :class:`ResistorDevice` whose ``flavour_option`` matches that key is
-    wired for this call -- see :class:`ResistorDevice`'s own
-    ``flavour_option``/``flavours`` docstring for why this exists (a
-    shared-geometry sheet-rho family the upstream PDK LVS deck selects with a
-    build-time variable, e.g. gf180mcu's ``POLY_RES``). ``None`` or an empty
+    :class:`ResistorDevice` or :class:`CapacitorDevice` whose
+    ``flavour_option`` matches that key is wired for this call -- see
+    :class:`ResistorDevice`'s own ``flavour_option``/``flavours`` docstring
+    (issue #595) and :class:`CapacitorDevice`'s (issue #1151) for why this
+    exists (a shared-geometry device family the upstream PDK LVS deck
+    selects with a build-time variable, e.g. gf180mcu's ``POLY_RES`` sheet-
+    rho variable or its ``MIM_CAP`` density variable). ``None`` or an empty
     mapping (the default) returns the registered deck completely unchanged --
     byte-identical to every call site that predates this parameter. A
-    non-empty mapping naming a key no resistor entry declares, or a value not
-    among a matched entry's declared :class:`ResistorFlavour.value` set,
+    non-empty mapping naming a key no resistor or capacitor entry declares,
+    or a value not among a matched entry's declared
+    :class:`ResistorFlavour.value`/:class:`CapacitorFlavour.value` set,
     raises :class:`InvalidDeckOptionError` rather than silently keeping the
     default or ignoring the override.
     """
@@ -1755,19 +1830,29 @@ def get_extraction_deck(
         ) from None
     if not deck_options:
         return deck
-    return _resolve_resistor_flavours(name, deck, deck_options)
+    return _resolve_device_flavours(name, deck, deck_options)
 
 
-def _resolve_resistor_flavours(
+def _resolve_device_flavours(
     name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
 ) -> ExtractionDeck:
-    """Apply ``deck_options`` to ``deck``'s ``resistors`` (issue #595) --
-    see :func:`get_extraction_deck` for the contract.
+    """Apply ``deck_options`` to ``deck``'s ``resistors`` (issue #595) and
+    ``capacitors`` (issue #1151) -- see :func:`get_extraction_deck` for the
+    contract.
+
+    A single combined validation pass runs first, over every
+    ``flavour_option`` declared across *both* device families, so a key
+    that is only valid for a capacitor (say) is never misreported as
+    "unknown" while resolving the unrelated resistor family, or vice versa
+    -- :func:`_resolve_resistor_flavours` (issue #595's original,
+    single-family resolver this generalises) validated only against
+    ``deck.resistors``, which was correct back when capacitors had no
+    ``flavour_option`` field to collide with.
     """
     selectable_keys = {
-        resistor.flavour_option
-        for resistor in deck.resistors
-        if resistor.flavour_option is not None
+        device.flavour_option
+        for device in (*deck.resistors, *deck.capacitors)
+        if device.flavour_option is not None
     }
     unknown_keys = sorted(set(deck_options) - selectable_keys)
     if unknown_keys:
@@ -1777,27 +1862,71 @@ def _resolve_resistor_flavours(
             f"{', '.join(unknown_keys)} (available: {available})"
         )
 
-    resolved_resistors = []
-    for resistor in deck.resistors:
-        option_key = resistor.flavour_option
-        if option_key is None or option_key not in deck_options:
-            resolved_resistors.append(resistor)
-            continue
-        value = deck_options[option_key]
-        flavour = next((f for f in resistor.flavours if f.value == value), None)
-        if flavour is None:
-            available = ", ".join(f.value for f in resistor.flavours) or "none"
-            raise InvalidDeckOptionError(
-                f"deck '{name}' option '{option_key}={value}' is not one of "
-                f"this deck's declared flavours for '{resistor.name}' "
-                f"(available: {available})"
-            )
-        resolved_resistors.append(
-            dataclasses.replace(
-                resistor, name=flavour.name, sheet_rho_ohm_sq=flavour.sheet_rho_ohm_sq
-            )
+    resolved_resistors = tuple(
+        _resolve_flavour(
+            name,
+            resistor,
+            deck_options,
+            lambda flavour: {
+                "name": flavour.name,
+                "sheet_rho_ohm_sq": flavour.sheet_rho_ohm_sq,
+            },
         )
-    return dataclasses.replace(deck, resistors=tuple(resolved_resistors))
+        for resistor in deck.resistors
+    )
+    resolved_capacitors = tuple(
+        _resolve_flavour(
+            name,
+            capacitor,
+            deck_options,
+            lambda flavour: {
+                "name": flavour.name,
+                "area_cap_f_um2": flavour.area_cap_f_um2,
+                "perim_cap_f_um": flavour.perim_cap_f_um,
+            },
+        )
+        for capacitor in deck.capacitors
+    )
+    return dataclasses.replace(
+        deck, resistors=resolved_resistors, capacitors=resolved_capacitors
+    )
+
+
+def _resolve_flavour(
+    name: str,
+    device: ResistorDevice | CapacitorDevice,
+    deck_options: Mapping[str, str],
+    replace_fields: Callable[[Any], dict[str, Any]],
+) -> Any:
+    """Resolve one flavour-capable ``device`` (a :class:`ResistorDevice` or
+    :class:`CapacitorDevice`) against ``deck_options``, or return it
+    unchanged when this entry has no ``flavour_option`` or its key was not
+    given (issues #595, #1151).
+
+    ``replace_fields`` maps the matched flavour object
+    (:class:`ResistorFlavour`/:class:`CapacitorFlavour`) to the
+    ``dataclasses.replace`` kwargs for ``device``'s own dataclass shape --
+    the one piece the two device families do not share, so this stays a
+    small per-call closure rather than a third dataclass field both families
+    would need to carry. The raised :class:`InvalidDeckOptionError` still
+    names the *matched entry itself* (``device.name``), not a generic
+    "device", preserving the per-device-kind clarity
+    :func:`_resolve_resistor_flavours` (issue #595's original single-family
+    version of this function) had before this generalisation.
+    """
+    option_key = device.flavour_option
+    if option_key is None or option_key not in deck_options:
+        return device
+    value = deck_options[option_key]
+    flavour = next((f for f in device.flavours if f.value == value), None)
+    if flavour is None:
+        available = ", ".join(f.value for f in device.flavours) or "none"
+        raise InvalidDeckOptionError(
+            f"deck '{name}' option '{option_key}={value}' is not one of "
+            f"this deck's declared flavours for '{device.name}' "
+            f"(available: {available})"
+        )
+    return dataclasses.replace(device, **replace_fields(flavour))
 
 
 def _parasitics_registry() -> dict[str, ParasiticsDeck]:
