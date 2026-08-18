@@ -6516,6 +6516,107 @@ def test_abstract_cells_lef_fallback_prefers_metal_over_parent_nwell(tmp_path):
     assert "VNWSTRAP" not in x_line
 
 
+def test_abstract_cells_lef_fallback_resolves_disjoint_pin_rects_to_routed_net(
+    tmp_path,
+):
+    """Issue #1181: a LEF ``PIN`` declared as two disjoint same-layer
+    ``PORT`` rectangles must resolve to whichever rectangle is actually
+    externally routed -- not silently commit to the first rectangle in LEF
+    source order (``boxes[0]``) regardless of whether *that* one is routed.
+
+    Pin ``A``'s LEF source order deliberately puts the *unrouted* rectangle
+    first and the *routed* one second, reproducing the exact failure shape
+    from the issue: before the fix, ``_resolve_abstract_cell_pins`` only
+    ever looked at ``boxes[0]``, so ``A`` would resolve onto the first
+    rectangle's isolated, unnamed island net (an auto-generated ``$<n>``
+    name) instead of the routed ``ROUTED_A`` net.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LEF_SPLIT_PIN")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Y pin: a single li1 pad, same shape every other lef_abstract fixture
+    # in this file uses.
+    draw(leaf, 67, 20, kdb.Box(0, 200, 400, 800))
+
+    # A pin: two disjoint li1 pads for one logical pin. LEF source order:
+    # box 0 (1600,200)-(2000,800) first, box 1 (2200,200)-(2600,800)
+    # second. Only box 1 receives external routing below.
+    draw(leaf, 67, 20, kdb.Box(1600, 200, 2000, 800))  # A box 0 -- left unrouted
+    draw(leaf, 67, 20, kdb.Box(2200, 200, 2600, 800))  # A box 1 -- externally routed
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+
+    # Route Y out normally: mcon + met1 + net-name label landing directly on
+    # its li1 pad.
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(0, 200, 400, 800))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(0, 200, 400, 800))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("OUT", kdb.Trans(200, 500)))
+
+    # Route only A's *second* LEF-source-order box -- its first box is left
+    # as bare, unrouted li1 with nothing landing on it (an isolated net).
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(2200, 200, 2600, 800))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2200, 200, 2600, 800))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("ROUTED_A", kdb.Trans(2400, 500)))
+
+    path = _write_gds(layout, tmp_path / "lef_split_pin.gds")
+
+    lef_path = tmp_path / "lef_split_pin.lef"
+    lef_path.write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO LEF_SPLIT_PIN\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 2.600 BY 1.000 ;\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.000 0.200 0.400 0.800 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 1.600 0.200 2.000 0.800 ;\n"
+        "    END\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 2.200 0.200 2.600 0.800 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END LEF_SPLIT_PIN\n"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lef_split_pin.spice"),
+        abstract_cell_patterns=("LEF_SPLIT_PIN",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "LEF_SPLIT_PIN"
+    assert entry["instance_count"] == 1
+    assert entry["pin_count"] == 2
+    assert entry["resolution_source"] == "lef_abstract"
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    # Exact-token check (not substring): pins are emitted in sorted order
+    # (A, then Y), so the second and third tokens are A's and Y's resolved
+    # nets, respectively. A substring check would false-pass here, since
+    # "ROUTED_A"/an auto `$<n>` island name is not a substring collision
+    # risk, but the *un*fixed pin should never land on `ROUTED_A` at all.
+    tokens = x_line.split()
+    assert tokens[1] == "ROUTED_A", x_line
+    assert tokens[2] == "OUT", x_line
+
+
 def test_abstract_cells_present_in_cli_json(tmp_path, capsys):
     """`abstracted_cells` is part of the JSON contract and is emitted by the
     CLI, via the repeatable `--abstract-cells` flag."""
