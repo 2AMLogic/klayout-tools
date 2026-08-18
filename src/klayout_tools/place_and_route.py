@@ -445,6 +445,27 @@ behaviour, and both can be added later as additive request/response fields
 without a contract-shape change -- the same precedent every other v1
 exclusion in this module's docstring already follows.
 
+``straps[].spacing_um`` and ``connects[]`` (issue #1133) close a further gap:
+sourcing strap geometry from a real platform's own PDN config (e.g. gf180's
+``flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg``) previously
+had no way to express that config's ``add_pdn_stripe -spacing`` (the paired
+power/ground stripe spacing on one layer) or its ``add_pdn_connect`` via-stack
+tuning (``-max_columns``/``-ongrid``/``-split_cuts``) -- both silently
+dropped, with nothing in the request or response recording that a deviation
+from the cited platform config was taken. ``straps[].spacing_um`` (optional,
+per-strap) drives ``-spacing`` on that strap's own ``add_pdn_stripe`` call.
+``connects[]`` (optional; each entry: ``layers`` naming one of ``straps[]``'s
+own consecutive pairs, plus optional ``max_columns``/``ongrid``/
+``split_cuts``) drives the matching pair's ``add_pdn_connect`` call; a pair
+with no matching ``connects[]`` entry keeps this module's prior bare
+``add_pdn_connect -grid {grid} -layers {lower upper}`` call, unchanged. Both
+fields are purely additive -- a request omitting them produces byte-identical
+Tcl to before this field existed -- and the response's own ``power`` field
+echoes exactly what was applied (``power.straps[].spacing_um``,
+``power.connects[]``), for every consecutive pair, not just the ones a
+caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
+:func:`_pdn_connects_applied`).
+
 ``request.power`` omitted (the default) is byte-for-byte today's exact prior
 behavior: no ``tapcell``/``add_global_connection``/``global_connect``/
 ``pdngen``/``filler_placement`` line is emitted anywhere, and the response's
@@ -1257,7 +1278,16 @@ def run_place_and_route(
     # docstring's own "Scope deliberately excluded" note). `filler_masters`
     # is `[]` unless this run actually reached the `"route"` stage (the
     # `"floorplan"`-stage `tapcell`/PDN Tcl always runs first, but
-    # `filler_placement` is a `"route"`-stage-only call).
+    # `filler_placement` is a `"route"`-stage-only call). `straps`/`connects`
+    # (issue #1133) echo exactly what `_power_delivery_lines` actually put on
+    # each `add_pdn_stripe`/`add_pdn_connect` call -- so a caller citing a
+    # real platform PDN config (e.g. gf180's own
+    # `pdn_grid_strategy_9t_6M.cfg`) can tell whether its request reproduced
+    # that config's `-spacing`/`-max_columns`/`-ongrid`/`-split_cuts` or
+    # silently fell back to this module's plain defaults, without re-deriving
+    # it from the request document itself. `connects` always lists one entry
+    # per consecutive strap pair (built via :func:`_pdn_connects_applied`),
+    # whether or not the caller supplied `power.connects[]` tuning for it.
     if power is None:
         power_info: dict[str, Any] = {
             "pdn": False,
@@ -1267,6 +1297,8 @@ def run_place_and_route(
             "tapcell_master": None,
             "endcap_master": None,
             "filler_masters": [],
+            "straps": [],
+            "connects": [],
         }
     else:
         tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
@@ -1280,6 +1312,11 @@ def run_place_and_route(
             "filler_masters": (
                 list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
             ),
+            "straps": [
+                {"layer": strap["layer"], "spacing_um": strap["spacing_um"]}
+                for strap in power["straps"]
+            ],
+            "connects": _pdn_connects_applied(power),
         }
 
     last_stage = stages[-1]
@@ -1529,6 +1566,28 @@ def _validate_power(power: Any) -> dict[str, Any] | None:
                 f"request.power.straps[{i}].offset_um must be a number when given"
             )
 
+        # `spacing_um` (issue #1133) -> `add_pdn_stripe -spacing` -- the
+        # paired power/ground stripe spacing on this strap's own layer, used
+        # when a grid draws power and ground as an adjacent pair on a single
+        # layer rather than on a single pitch (e.g. gf180's own
+        # `pdn_grid_strategy_9t_6M.cfg`: `add_pdn_stripe -layer {Metal4}
+        # -width {4.480} -spacing {0.56} -pitch {44.8} -offset {22.4}`).
+        # Optional, `None` by default -- omitted entirely from the emitted
+        # `add_pdn_stripe` call rather than defaulted, preserving this
+        # module's prior Tcl byte-for-byte when not given. Deliberately not
+        # required to have >= 2 straps: it describes this stripe's own
+        # power/ground pairing, independent of any other strap.
+        spacing_um = strap.get("spacing_um")
+        if spacing_um is not None and (
+            not isinstance(spacing_um, (int, float))
+            or isinstance(spacing_um, bool)
+            or spacing_um <= 0
+        ):
+            raise PlaceAndRouteError(
+                f"request.power.straps[{i}].spacing_um must be a positive "
+                "number when given"
+            )
+
         followpins = strap.get("followpins", False)
         if not isinstance(followpins, bool):
             raise PlaceAndRouteError(
@@ -1541,14 +1600,125 @@ def _validate_power(power: Any) -> dict[str, Any] | None:
                 "width_um": float(width_um),
                 "pitch_um": float(pitch_um),
                 "offset_um": float(offset_um),
+                "spacing_um": float(spacing_um) if spacing_um is not None else None,
                 "followpins": followpins,
             }
         )
+
+    # `connects[]` (issue #1133) -> per-pair `add_pdn_connect` via-stack
+    # tuning (`-max_columns`/`-ongrid`/`-split_cuts`) -- the platform's own
+    # answer to a DRC question (cut splitting, on-grid landing, column
+    # count) for the via stack between two strap layers. Optional; omitted
+    # (the default, `[]`) preserves this module's prior bare
+    # `add_pdn_connect -grid {grid} -layers {lower upper}` call for every
+    # consecutive strap pair, byte-for-byte. Each entry's `layers` must name
+    # one of `straps[]`'s own consecutive pairs, in that pair's own order --
+    # this rejects a typo'd/nonexistent layer pair at validation time rather
+    # than silently emitting a call this module never intended.
+    connects = power.get("connects")
+    validated_connects: list[dict[str, Any]] = []
+    if connects is not None:
+        if not isinstance(connects, list):
+            raise PlaceAndRouteError("request.power.connects must be a list when given")
+
+        strap_pairs = {
+            (lower["layer"], upper["layer"])
+            for lower, upper in zip(
+                validated_straps, validated_straps[1:], strict=False
+            )
+        }
+        seen_pairs: set[tuple[str, str]] = set()
+
+        for i, connect in enumerate(connects):
+            if not isinstance(connect, dict):
+                raise PlaceAndRouteError(
+                    f"request.power.connects[{i}] must be an object"
+                )
+
+            layers = connect.get("layers")
+            if (
+                not isinstance(layers, list)
+                or len(layers) != 2
+                or not all(isinstance(entry, str) and entry for entry in layers)
+            ):
+                raise PlaceAndRouteError(
+                    f"request.power.connects[{i}].layers is required and must "
+                    "be a 2-element list of non-empty strings"
+                )
+            pair = (layers[0], layers[1])
+            if pair not in strap_pairs:
+                raise PlaceAndRouteError(
+                    f"request.power.connects[{i}].layers {list(pair)} does not "
+                    "match any consecutive pair in request.power.straps"
+                )
+            if pair in seen_pairs:
+                raise PlaceAndRouteError(
+                    f"request.power.connects[{i}].layers {list(pair)} "
+                    "duplicates an earlier request.power.connects entry"
+                )
+            seen_pairs.add(pair)
+
+            max_columns = connect.get("max_columns")
+            if max_columns is not None and (
+                not isinstance(max_columns, int)
+                or isinstance(max_columns, bool)
+                or max_columns <= 0
+            ):
+                raise PlaceAndRouteError(
+                    f"request.power.connects[{i}].max_columns must be a "
+                    "positive integer when given"
+                )
+
+            ongrid = connect.get("ongrid")
+            if ongrid is not None and (
+                not isinstance(ongrid, list)
+                or not ongrid
+                or not all(isinstance(entry, str) and entry for entry in ongrid)
+            ):
+                raise PlaceAndRouteError(
+                    f"request.power.connects[{i}].ongrid must be a non-empty "
+                    "list of non-empty strings when given"
+                )
+
+            split_cuts = connect.get("split_cuts")
+            if split_cuts is not None:
+                if not isinstance(split_cuts, dict):
+                    raise PlaceAndRouteError(
+                        f"request.power.connects[{i}].split_cuts must be an "
+                        "object when given"
+                    )
+                sc_layer = split_cuts.get("layer")
+                if not isinstance(sc_layer, str) or not sc_layer:
+                    raise PlaceAndRouteError(
+                        f"request.power.connects[{i}].split_cuts.layer is "
+                        "required and must be a non-empty string"
+                    )
+                sc_width_um = split_cuts.get("width_um")
+                if (
+                    not isinstance(sc_width_um, (int, float))
+                    or isinstance(sc_width_um, bool)
+                    or sc_width_um <= 0
+                ):
+                    raise PlaceAndRouteError(
+                        f"request.power.connects[{i}].split_cuts.width_um is "
+                        "required and must be a positive number"
+                    )
+                split_cuts = {"layer": sc_layer, "width_um": float(sc_width_um)}
+
+            validated_connects.append(
+                {
+                    "layers": [pair[0], pair[1]],
+                    "max_columns": max_columns,
+                    "ongrid": list(ongrid) if ongrid is not None else None,
+                    "split_cuts": split_cuts,
+                }
+            )
 
     return {
         "power_net": power_net,
         "ground_net": ground_net,
         "straps": validated_straps,
+        "connects": validated_connects,
     }
 
 
@@ -2230,6 +2400,40 @@ def _antenna_check_lines() -> list[str]:
     ]
 
 
+def _pdn_connect_spec(
+    power: dict[str, Any], lower_layer: str, upper_layer: str
+) -> dict[str, Any]:
+    """Returns the via-stack tuning actually applied to the
+    ``add_pdn_connect`` between ``lower_layer`` and ``upper_layer`` (issue
+    #1133): the caller's own ``power["connects"]`` entry for that pair when
+    one was given (already validated by :func:`_validate_power`), or the
+    default "no tuning" shape otherwise. Both :func:`_power_delivery_lines`
+    (Tcl generation) and the response's own ``power.connects`` echo (see
+    :func:`run_place_and_route`) build from this single lookup, so the two
+    can never drift apart."""
+    for connect in power.get("connects", []):
+        if tuple(connect["layers"]) == (lower_layer, upper_layer):
+            return connect
+    return {
+        "layers": [lower_layer, upper_layer],
+        "max_columns": None,
+        "ongrid": None,
+        "split_cuts": None,
+    }
+
+
+def _pdn_connects_applied(power: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ``add_pdn_connect`` tuning actually applied for every consecutive
+    strap pair (issue #1133) -- one entry per pair, in the same order
+    :func:`_power_delivery_lines` emits them. Used to build the response's
+    ``power.connects`` echo."""
+    straps = power["straps"]
+    return [
+        _pdn_connect_spec(power, lower["layer"], upper["layer"])
+        for lower, upper in zip(straps, straps[1:], strict=False)
+    ]
+
+
 def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]:
     """Tcl for the optional ``request.power`` PDN stage (issue #1091):
     ``tapcell`` well/substrate ties, ``add_global_connection``/
@@ -2244,14 +2448,18 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
 
     Builds a single flat standard-cell PDN grid from ``power["straps"]``
     (already validated/normalized by :func:`_validate_power`): one
-    ``add_pdn_stripe`` per strap, ``add_pdn_connect`` between each
-    consecutive pair (in the order the request lists them -- matching every
-    real ORFS platform's own pdn config, whose stripes are always listed
-    bottom-to-top with each pair connected to its immediate neighbor only),
-    and a ``define_pdn_grid -pins`` naming the *last* (topmost) strap's own
-    layer -- the layer a block-level caller's own P/G pins land on.
-    Macro-specific PDN grids (``define_pdn_grid -macro``) are deliberately
-    out of scope for this v1 -- see the module docstring.
+    ``add_pdn_stripe`` per strap (with ``-spacing`` when ``strap["spacing_um"]``
+    was given -- issue #1133), ``add_pdn_connect`` between each consecutive
+    pair (in the order the request lists them -- matching every real ORFS
+    platform's own pdn config, whose stripes are always listed bottom-to-top
+    with each pair connected to its immediate neighbor only; via-stack
+    tuning -- ``-max_columns``/``-ongrid``/``-split_cuts`` -- comes from
+    ``power["connects"]`` via :func:`_pdn_connect_spec` when the caller gave
+    a matching entry, issue #1133), and a ``define_pdn_grid -pins`` naming
+    the *last* (topmost) strap's own layer -- the layer a block-level
+    caller's own P/G pins land on. Macro-specific PDN grids
+    (``define_pdn_grid -macro``) are deliberately out of scope for this v1
+    -- see the module docstring.
     """
     power_net = power["power_net"]
     ground_net = power["ground_net"]
@@ -2284,19 +2492,39 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
         f"-pins {{{top_layer}}}"
     )
     for strap in straps:
+        # Flag order (`-width` -> `-spacing` -> `-pitch` -> `-offset`)
+        # matches real platform PDN configs verbatim -- e.g. gf180's own
+        # `pdn_grid_strategy_9t_6M.cfg`: `add_pdn_stripe -layer {Metal4}
+        # -width {4.480} -spacing {0.56} -pitch {44.8} -offset {22.4}`
+        # (issue #1133).
         stripe_call = (
             f"add_pdn_stripe -grid {{grid}} -layer {{{strap['layer']}}} "
-            f"-width {{{strap['width_um']}}} -pitch {{{strap['pitch_um']}}} "
-            f"-offset {{{strap['offset_um']}}}"
+            f"-width {{{strap['width_um']}}}"
+        )
+        if strap["spacing_um"] is not None:
+            stripe_call += f" -spacing {{{strap['spacing_um']}}}"
+        stripe_call += (
+            f" -pitch {{{strap['pitch_um']}}} -offset {{{strap['offset_um']}}}"
         )
         if strap["followpins"]:
             stripe_call += " -followpins"
         lines.append(stripe_call)
     for lower, upper in zip(straps, straps[1:], strict=False):
-        lines.append(
+        connect_spec = _pdn_connect_spec(power, lower["layer"], upper["layer"])
+        connect_call = (
             f"add_pdn_connect -grid {{grid}} "
             f"-layers {{{lower['layer']} {upper['layer']}}}"
         )
+        if connect_spec["max_columns"] is not None:
+            connect_call += f" -max_columns {{{connect_spec['max_columns']}}}"
+        if connect_spec["ongrid"]:
+            connect_call += f" -ongrid {{{' '.join(connect_spec['ongrid'])}}}"
+        if connect_spec["split_cuts"] is not None:
+            split_cuts = connect_spec["split_cuts"]
+            connect_call += (
+                f" -split_cuts {{{split_cuts['layer']} {split_cuts['width_um']}}}"
+            )
+        lines.append(connect_call)
     lines.append("pdngen")
     return lines
 

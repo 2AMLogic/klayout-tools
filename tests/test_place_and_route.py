@@ -967,8 +967,225 @@ def test_power_normalizes_strap_numbers_and_defaults():
         "width_um": 1.0,
         "pitch_um": 5.0,
         "offset_um": 0.0,
+        "spacing_um": None,
         "followpins": False,
     }
+    assert validated["connects"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `request.power.straps[].spacing_um` validation (issue #1133).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", [0, -1.0, "0.56", True])
+def test_power_strap_spacing_um_must_be_a_positive_number_when_given(value):
+    with pytest.raises(
+        PlaceAndRouteError, match="spacing_um must be a positive number"
+    ):
+        place_and_route._validate_power(
+            {
+                "straps": [
+                    {
+                        "layer": "met1",
+                        "width_um": 1.0,
+                        "pitch_um": 5.0,
+                        "spacing_um": value,
+                    }
+                ]
+            }
+        )
+
+
+def test_power_strap_spacing_um_normalizes_when_given():
+    validated = place_and_route._validate_power(
+        {"straps": [{"layer": "met1", "width_um": 1, "pitch_um": 5, "spacing_um": 1}]}
+    )
+    assert validated["straps"][0]["spacing_um"] == 1.0
+
+
+def test_power_strap_spacing_um_omitted_defaults_to_none():
+    validated = place_and_route._validate_power(
+        {"straps": [{"layer": "met1", "width_um": 1, "pitch_um": 5}]}
+    )
+    assert validated["straps"][0]["spacing_um"] is None
+
+
+def test_power_strap_spacing_um_valid_with_only_one_strap():
+    """issue #1133: `spacing_um` describes a stripe's own paired power/ground
+    spacing on its own layer -- it does not require an adjacent strap, so a
+    single-strap request with `spacing_um` set validates fine."""
+    validated = place_and_route._validate_power(
+        {"straps": [{"layer": "met1", "width_um": 1, "pitch_um": 5, "spacing_um": 0.5}]}
+    )
+    assert validated["straps"][0]["spacing_um"] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# `request.power.connects[]` validation (issue #1133).
+# --------------------------------------------------------------------------- #
+
+
+def test_power_connects_omitted_defaults_to_empty_list():
+    validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
+    assert validated["connects"] == []
+
+
+def test_power_connects_must_be_a_list():
+    with pytest.raises(
+        PlaceAndRouteError, match="request.power.connects must be a list"
+    ):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "connects": "not a list"}
+        )
+
+
+def test_power_connects_entry_must_be_an_object():
+    with pytest.raises(
+        PlaceAndRouteError, match=r"request\.power\.connects\[0\] must be an object"
+    ):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "connects": ["not an object"]}
+        )
+
+
+@pytest.mark.parametrize(
+    "layers",
+    [None, "met1", ["met1"], ["met1", "met4", "met5"], ["met1", ""], [1, "met4"]],
+)
+def test_power_connects_layers_must_be_a_2element_list_of_strings(layers):
+    with pytest.raises(PlaceAndRouteError, match=r"connects\[0\]\.layers is required"):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "connects": [{"layers": layers}]}
+        )
+
+
+def test_power_connects_layers_must_match_a_consecutive_strap_pair():
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=r"does not match any consecutive pair in request\.power\.straps",
+    ):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "connects": [{"layers": ["met1", "met5"]}]}
+        )
+
+
+def test_power_connects_rejects_duplicate_pair():
+    with pytest.raises(PlaceAndRouteError, match="duplicates an earlier"):
+        place_and_route._validate_power(
+            {
+                "straps": _BASE_STRAPS,
+                "connects": [
+                    {"layers": ["met1", "met4"]},
+                    {"layers": ["met1", "met4"], "max_columns": 5},
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "5", True])
+def test_power_connects_max_columns_must_be_a_positive_integer_when_given(value):
+    with pytest.raises(
+        PlaceAndRouteError, match="max_columns must be a positive integer"
+    ):
+        place_and_route._validate_power(
+            {
+                "straps": _BASE_STRAPS,
+                "connects": [{"layers": ["met1", "met4"], "max_columns": value}],
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [[], "met2", [1, "met3"], [""]])
+def test_power_connects_ongrid_must_be_a_non_empty_list_of_strings_when_given(value):
+    with pytest.raises(PlaceAndRouteError, match="ongrid must be a non-empty list"):
+        place_and_route._validate_power(
+            {
+                "straps": _BASE_STRAPS,
+                "connects": [{"layers": ["met1", "met4"], "ongrid": value}],
+            }
+        )
+
+
+def test_power_connects_split_cuts_must_be_an_object_when_given():
+    with pytest.raises(PlaceAndRouteError, match="split_cuts must be an object"):
+        place_and_route._validate_power(
+            {
+                "straps": _BASE_STRAPS,
+                "connects": [
+                    {"layers": ["met1", "met4"], "split_cuts": "not an object"}
+                ],
+            }
+        )
+
+
+def test_power_connects_split_cuts_layer_required():
+    with pytest.raises(PlaceAndRouteError, match="split_cuts.layer is required"):
+        place_and_route._validate_power(
+            {
+                "straps": _BASE_STRAPS,
+                "connects": [
+                    {
+                        "layers": ["met1", "met4"],
+                        "split_cuts": {"width_um": 0.128},
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1.0, "0.128", None, True])
+def test_power_connects_split_cuts_width_um_must_be_a_positive_number(value):
+    with pytest.raises(PlaceAndRouteError, match="split_cuts.width_um is required"):
+        place_and_route._validate_power(
+            {
+                "straps": _BASE_STRAPS,
+                "connects": [
+                    {
+                        "layers": ["met1", "met4"],
+                        "split_cuts": {"layer": "met3", "width_um": value},
+                    }
+                ],
+            }
+        )
+
+
+def test_power_connects_normalizes_full_entry():
+    validated = place_and_route._validate_power(
+        {
+            "straps": _BASE_STRAPS,
+            "connects": [
+                {
+                    "layers": ["met1", "met4"],
+                    "max_columns": 5,
+                    "ongrid": ["met2", "met3", "met4"],
+                    "split_cuts": {"layer": "met3", "width_um": 0.128},
+                }
+            ],
+        }
+    )
+    assert validated["connects"] == [
+        {
+            "layers": ["met1", "met4"],
+            "max_columns": 5,
+            "ongrid": ["met2", "met3", "met4"],
+            "split_cuts": {"layer": "met3", "width_um": 0.128},
+        }
+    ]
+
+
+def test_power_connects_entry_omitting_all_tuning_normalizes_to_none_fields():
+    validated = place_and_route._validate_power(
+        {"straps": _BASE_STRAPS, "connects": [{"layers": ["met1", "met4"]}]}
+    )
+    assert validated["connects"] == [
+        {
+            "layers": ["met1", "met4"],
+            "max_columns": None,
+            "ongrid": None,
+            "split_cuts": None,
+        }
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -1572,6 +1789,8 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "tapcell_master": None,
         "endcap_master": None,
         "filler_masters": [],
+        "straps": [],
+        "connects": [],
     }
     floorplan_script = os.path.join(
         os.path.dirname(request_path),
@@ -1746,6 +1965,28 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
             "sky130_fd_sc_hd__fill_4",
             "sky130_fd_sc_hd__fill_8",
         ],
+        # issue #1133: no `spacing_um`/`connects[]` given -- echoed back as
+        # `None`/no-tuning for every strap/pair, confirming the additive
+        # fields don't fabricate anything when omitted.
+        "straps": [
+            {"layer": "met1", "spacing_um": None},
+            {"layer": "met4", "spacing_um": None},
+            {"layer": "met5", "spacing_um": None},
+        ],
+        "connects": [
+            {
+                "layers": ["met1", "met4"],
+                "max_columns": None,
+                "ongrid": None,
+                "split_cuts": None,
+            },
+            {
+                "layers": ["met4", "met5"],
+                "max_columns": None,
+                "ongrid": None,
+                "split_cuts": None,
+            },
+        ],
     }
 
     floorplan_script = os.path.join(
@@ -1829,6 +2070,104 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     )
     assert "-remove_cells {sky130_fd_sc_hd__tapvpwrvgnd_1" in write_verilog_line
     assert "sky130_fd_sc_hd__fill_1" in write_verilog_line
+
+
+def test_stubbed_floorplan_with_spacing_and_connect_tuning_reproduces_platform_pdn(
+    tmp_path, monkeypatch
+):
+    """Issue #1133: `straps[].spacing_um` -> `add_pdn_stripe -spacing`, and
+    `power.connects[]` -> `add_pdn_connect -max_columns`/`-ongrid`/
+    `-split_cuts` -- reproducing gf180's own
+    `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` (cited
+    verbatim in the issue):
+
+        add_pdn_stripe  -grid {block} -layer {Metal4} -width {4.480}
+            -spacing {0.56} -pitch {44.8} -offset {22.4}
+        add_pdn_connect -grid {block} -layers {Metal1 Metal4}
+            -max_columns {5} -ongrid {Metal2 Metal3 Metal4}
+            -split_cuts {Metal3 0.128}
+        add_pdn_connect -grid {block} -layers {Metal4 Metal5}
+    """
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={
+            "power_net": "VDD",
+            "ground_net": "VSS",
+            "straps": [
+                {
+                    "layer": "met1",
+                    "width_um": 0.48,
+                    "pitch_um": 5.44,
+                    "followpins": True,
+                },
+                {
+                    "layer": "met4",
+                    "width_um": 4.480,
+                    "pitch_um": 44.8,
+                    "offset_um": 22.4,
+                    "spacing_um": 0.56,
+                },
+                {"layer": "met5", "width_um": 1.6, "pitch_um": 27.2, "offset_um": 13.6},
+            ],
+            "connects": [
+                {
+                    "layers": ["met1", "met4"],
+                    "max_columns": 5,
+                    "ongrid": ["met2", "met3", "met4"],
+                    "split_cuts": {"layer": "met3", "width_um": 0.128},
+                }
+                # `met4`/`met5` deliberately left untuned -- must fall back
+                # to a plain `add_pdn_connect`, matching the platform
+                # config's own `add_pdn_connect -grid {block} -layers
+                # {Metal4 Metal5}` line (no via-stack flags).
+            ],
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["power"]["straps"] == [
+        {"layer": "met1", "spacing_um": None},
+        {"layer": "met4", "spacing_um": 0.56},
+        {"layer": "met5", "spacing_um": None},
+    ]
+    assert report["power"]["connects"] == [
+        {
+            "layers": ["met1", "met4"],
+            "max_columns": 5,
+            "ongrid": ["met2", "met3", "met4"],
+            "split_cuts": {"layer": "met3", "width_um": 0.128},
+        },
+        {
+            "layers": ["met4", "met5"],
+            "max_columns": None,
+            "ongrid": None,
+            "split_cuts": None,
+        },
+    ]
+
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    floorplan_lines = _script_lines(floorplan_script)
+    assert (
+        "add_pdn_stripe -grid {grid} -layer {met4} -width {4.48} "
+        "-spacing {0.56} -pitch {44.8} -offset {22.4}" in floorplan_lines
+    )
+    assert (
+        "add_pdn_connect -grid {grid} -layers {met1 met4} -max_columns {5} "
+        "-ongrid {met2 met3 met4} -split_cuts {met3 0.128}" in floorplan_lines
+    )
+    # No tuning given for met4/met5 -- falls back to the plain call, matching
+    # this module's prior (and the platform config's own) untuned pair.
+    assert "add_pdn_connect -grid {grid} -layers {met4 met5}" in floorplan_lines
 
 
 def test_stubbed_full_route_reports_nonzero_antenna_violation_count(

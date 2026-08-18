@@ -1042,8 +1042,16 @@ live re-measurement above.
     "ground_net": "VSS",
     "straps": [
       { "layer": "met1", "width_um": 0.48, "pitch_um": 5.44, "followpins": true },
-      { "layer": "met4", "width_um": 1.6, "pitch_um": 27.14, "offset_um": 13.57 },
+      { "layer": "met4", "width_um": 4.48, "pitch_um": 44.8, "offset_um": 22.4, "spacing_um": 0.56 },
       { "layer": "met5", "width_um": 1.6, "pitch_um": 27.2, "offset_um": 13.6 }
+    ],
+    "connects": [
+      {
+        "layers": ["met1", "met4"],
+        "max_columns": 5,
+        "ongrid": ["met2", "met3", "met4"],
+        "split_cuts": { "layer": "met3", "width_um": 0.128 }
+      }
     ]
   },
   "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
@@ -1067,7 +1075,13 @@ live re-measurement above.
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly: no `SPECIALNETS`, no tapcells/fillers. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.straps` | array\<object\> | Required when `power` is given, non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
+| `power.straps` | array\<object\> | Required when `power` is given, non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
+| `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
+| `power.connects` | array\<object\> \| omitted | Additive field (issue #1133). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
+| `power.connects[].layers` | array\<string\> | Required, exactly 2 entries: `[lower_layer, upper_layer]`. Must name one of `power.straps`'s own consecutive pairs, in that pair's own order — an unmatched or duplicated pair is a validation error. |
+| `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
+| `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
+| `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
@@ -1150,6 +1164,25 @@ live re-measurement above.
       "sky130_fd_sc_hd__fill_2",
       "sky130_fd_sc_hd__fill_4",
       "sky130_fd_sc_hd__fill_8"
+    ],
+    "straps": [
+      { "layer": "met1", "spacing_um": null },
+      { "layer": "met4", "spacing_um": 0.56 },
+      { "layer": "met5", "spacing_um": null }
+    ],
+    "connects": [
+      {
+        "layers": ["met1", "met4"],
+        "max_columns": 5,
+        "ongrid": ["met2", "met3", "met4"],
+        "split_cuts": { "layer": "met3", "width_um": 0.128 }
+      },
+      {
+        "layers": ["met4", "met5"],
+        "max_columns": null,
+        "ongrid": null,
+        "split_cuts": null
+      }
     ]
   },
   "provenance": {
@@ -1189,7 +1222,7 @@ live re-measurement above.
 | `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
-| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. |
+| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 
 ## As-built netlist (`verilog_path`, issue #996)
@@ -1261,9 +1294,9 @@ all need power delivery first.
 The optional `request.power` block closes this gap. Net names for the
 power/ground rails (`power_net`/`ground_net`, default `"VDD"`/`"VSS"`) plus
 the PDN strap geometry (`straps[]` — `layer`/`width_um`/`pitch_um`, plus
-optional `offset_um`/`followpins`, listed bottom-to-top) drive, at the end
-of the `"floorplan"` stage (immediately after `place_macro`/`make_tracks`,
-before that stage's own `write_db`):
+optional `offset_um`/`spacing_um`/`followpins`, listed bottom-to-top) drive,
+at the end of the `"floorplan"` stage (immediately after
+`place_macro`/`make_tracks`, before that stage's own `write_db`):
 
 1. `tapcell` — well/substrate ties, using the per-library master + distance
    this command already knows (sourced the same verified-not-guessed way as
@@ -1273,8 +1306,11 @@ before that stage's own `write_db`):
    `global_connect` — wiring every standard cell's PG pin to the named
    power/ground net.
 3. `set_voltage_domain` + `define_pdn_grid` + `add_pdn_stripe` (one per
-   requested strap) + `add_pdn_connect` (between each consecutive strap
-   pair) + `pdngen` — the strap/rail grid itself.
+   requested strap, plus `-spacing` when that strap's own `spacing_um` was
+   given) + `add_pdn_connect` (between each consecutive strap pair, plus
+   `-max_columns`/`-ongrid`/`-split_cuts` for any pair named in
+   `power.connects[]` — see "Strap spacing and via-stack tuning" below) +
+   `pdngen` — the strap/rail grid itself.
 
 ...and, at the end of the `"route"` stage (immediately after the
 antenna-repair loop, before `write_def`):
@@ -1293,6 +1329,33 @@ exactly (`flow/scripts/tapcell.tcl` → `pdn.tcl` → global placement;
 `request.power` omitted (the default) preserves prior behavior exactly — no
 `SPECIALNETS`, no tapcells/fillers, and the response's `power` field reports
 that nothing ran.
+
+**Strap spacing and via-stack tuning (issue #1133).** Sourcing strap geometry
+from a real platform's own PDN config is only useful if the request can
+actually reproduce that config — and two pieces of it previously had no
+expressible field: the paired power/ground stripe spacing on a single layer,
+and the via-stack tuning between two strap layers. Concretely, gf180's own
+`flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` reads:
+
+```tcl
+add_pdn_stripe  -grid {block} -layer {Metal4} -width {4.480} -spacing {0.56} -pitch {44.8} -offset {22.4}
+add_pdn_connect -grid {block} -layers {Metal1 Metal4} -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3 0.128}
+add_pdn_connect -grid {block} -layers {Metal4 Metal5}
+```
+
+`power.straps[].spacing_um` closes the first gap (→ `-spacing`), and
+`power.connects[]` closes the second: each entry names one of `straps[]`'s
+own consecutive pairs (`layers: [lower, upper]`) plus any of
+`max_columns`/`ongrid`/`split_cuts` — the platform's own answer to a *DRC*
+question (cut splitting, on-grid landing, column count) for that pair's via
+stack. A pair with no matching `power.connects[]` entry keeps this command's
+prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call — both
+fields are additive; a request that omits them produces byte-identical Tcl
+to before this field existed. The response's own `power.straps`/
+`power.connects` echo exactly what was applied (see the response field table
+above), so a caller citing a platform config can confirm its request
+actually reproduced it, rather than silently falling back to this command's
+plain defaults.
 
 **Response `power` field: what it reports, and what it doesn't.** `pdn`/
 `global_connect`/`power_net`/`ground_net`/`tapcell_master`/`endcap_master`
