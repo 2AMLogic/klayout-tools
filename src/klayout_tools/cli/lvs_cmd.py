@@ -89,6 +89,10 @@ def _print_text(report: dict) -> None:
         print(f"parameter_tolerance: {report['parameter_tolerance']}")
     print(f"status: {report['status']}")
     print(f"mismatches: {report['mismatch_count']}")
+    # Issue #1132: printed unconditionally (like `mismatches` above), even
+    # when 0, so a caller skimming text output can tell "0 mismatches" and
+    # "N mismatches, 0 of them errors" apart from "no report at all".
+    print(f"errors: {report['error_count']}")
 
     counts = report["counts"]
     for kind in ("nets", "devices", "pins"):

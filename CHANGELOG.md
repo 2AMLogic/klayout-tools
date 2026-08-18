@@ -48,6 +48,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   identity. Additive: gf180mcu's own existing (non-isolated) corpus fixtures
   are unaffected, since none of them draw `DNWELL`, and every other deck
   leaves the new field unset.
+- 2026-08-17 — `klt lvs`'s unmatched-circuit/unmatched-subcircuit-instance
+  `mismatches[]` entries (`category: "topology"`) now name what failed to
+  pair (issue #1132). Previously both carried neither `net` nor `device` —
+  the only two identifier slots the shape had — so an anonymous `topology`
+  finding could not be attributed to a circuit or instance without a
+  side-channel netlist diff, especially at macro scale (thousands of
+  instances across dozens of cell types). Two new optional-object fields,
+  additive and `null` off their own categories, mirror `net`/`device`'s own
+  convention: `circuit` (`{"layout": <name|null>, "reference": <name|null>}`
+  — the circuit itself for an unmatched-circuit entry, or the circuit
+  *containing* the instance for an unmatched-subcircuit-instance entry) and,
+  for the instance case only, `instance` (the subcircuit instance's own
+  name) and `subcircuit` (the name of the circuit it instantiates, its "cell
+  type"). All three keys are present on *every* `mismatches[]` entry
+  (`null` off their own categories, never omitted) — including the generic
+  safety-net entry emitted when the comparer reports a mismatch this module
+  could not classify, which is now built through the same entry constructor
+  as every other finding rather than as its own literal. Also adds
+  `error_count` (total `severity: "error"` entries) and
+  `category_error_counts` (`category_counts`, split to `error`-only) so a
+  caller can gate on "any real defect present" without re-reading and
+  re-filtering `mismatches[]` itself — a nonzero `category_counts` entry can
+  otherwise be entirely `severity: "warning"`.
 - 2026-08-17 — `klt functional-verification`'s `environment.sdf` (`options.sdf`
   runs) gains `partial` and `dropped` fields alongside the existing
   `file`/`corner`/`annotated` (issue #1102). Previously `annotated: true`

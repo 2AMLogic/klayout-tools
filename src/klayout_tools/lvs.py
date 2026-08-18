@@ -730,20 +730,22 @@ def run_lvs(request: str) -> dict[str, Any]:
             # nothing (a gap in event coverage, not a clean run), never let the
             # response silently look like a match -- report a generic, honest
             # finding instead of dropping the verdict.
+            #
+            # Built through `_mismatch()` like every other classification site
+            # (issue #1132 review): a hand-rolled dict literal here silently
+            # drifts out of the entry shape whenever a field is added -- it
+            # went missing `circuit`/`instance`/`subcircuit` entirely (absent
+            # keys, not `null`), breaking the "every entry carries the key,
+            # never omitted" invariant `_mismatch`'s docstring and
+            # docs/cli/lvs.md's field table both state.
             mismatches = [
-                {
-                    "category": CATEGORY_TOPOLOGY,
-                    "severity": "error",
-                    "description": (
-                        "netlists do not match (no further detail available "
-                        "from the comparer's event log)"
-                    ),
-                    "side": "both",
-                    "net": None,
-                    "device": None,
-                    "property": None,
-                    "details": None,
-                }
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "error",
+                    "netlists do not match (no further detail available "
+                    "from the comparer's event log)",
+                    "both",
+                )
             ]
         status = "match" if compare_result else "mismatch"
         engine_version = _engine_version()
@@ -934,10 +936,25 @@ def run_lvs(request: str) -> dict[str, Any]:
         mismatches.sort(key=_sort_key)
 
     category_counts: dict[str, int] = {}
+    # Issue #1132: `category_counts` alone collapses `error`/`warning`
+    # entries of the same category into one number (e.g. `"topology": 8`
+    # could be six warnings and two errors), so a caller cannot gate on
+    # "any error present" without re-reading every `mismatches[]` entry.
+    # `category_error_counts` mirrors `category_counts`'s shape (same keys,
+    # sorted, additive) but counts only `severity: "error"` entries per
+    # category -- a category with zero errors (e.g. an all-`warning`
+    # `topology.flattened`) is simply absent, matching `category_counts`'s
+    # own "no entries of this category at all" convention of omitting the
+    # key rather than reporting 0.
+    category_error_counts: dict[str, int] = {}
     for mismatch in mismatches:
         category_counts[mismatch["category"]] = (
             category_counts.get(mismatch["category"], 0) + 1
         )
+        if mismatch["severity"] == "error":
+            category_error_counts[mismatch["category"]] = (
+                category_error_counts.get(mismatch["category"], 0) + 1
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -952,7 +969,9 @@ def run_lvs(request: str) -> dict[str, Any]:
         "parameter_tolerance": parameter_tolerance,
         "status": status,
         "mismatch_count": len(mismatches),
+        "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
+        "category_error_counts": dict(sorted(category_error_counts.items())),
         "counts": counts,
         "device_classes": device_classes,
         "environment": {
@@ -1964,6 +1983,40 @@ def _name_or_none(obj: Any) -> str | None:
     return None
 
 
+def _subcircuit_parent_name(obj: Any) -> str | None:
+    """The name of the ``kdb.Circuit`` that contains subcircuit instance
+    ``obj`` (a ``kdb.SubCircuit``, or ``None`` for a missing side), i.e.
+    ``obj.circuit()`` -- **not** the circuit ``obj`` refers to (that is
+    :func:`_subcircuit_ref_name`). Used to populate an unmatched-subcircuit
+    ``mismatches[]`` entry's ``circuit`` field (issue #1132) so the finding
+    names which module the missing instance lives in. ``getattr``-guarded so
+    a stand-in test double that only implements ``expanded_name()`` (like
+    the rest of this module's ``_FakeLogger`` fixtures) degrades to ``None``
+    rather than raising.
+    """
+    if obj is None:
+        return None
+    method = getattr(obj, "circuit", None)
+    if not callable(method):
+        return None
+    return _name_or_none(method())
+
+
+def _subcircuit_ref_name(obj: Any) -> str | None:
+    """The name of the ``kdb.Circuit`` subcircuit instance ``obj`` refers to
+    (``obj.circuit_ref()``) -- its "cell type", as opposed to
+    :func:`_subcircuit_parent_name`'s containing circuit. Populates an
+    unmatched-subcircuit ``mismatches[]`` entry's ``subcircuit`` field (issue
+    #1132). ``getattr``-guarded for the same reason as
+    :func:`_subcircuit_parent_name`."""
+    if obj is None:
+        return None
+    method = getattr(obj, "circuit_ref", None)
+    if not callable(method):
+        return None
+    return _name_or_none(method())
+
+
 def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     """Turn ``logger.net_matches`` (every successful net pairing the
     comparer produced -- unambiguous and ambiguous alike) into the
@@ -2173,6 +2226,9 @@ def _mismatch(
     device: dict[str, Any] | None = None,
     property_: dict[str, Any] | None = None,
     details: dict[str, Any] | None = None,
+    circuit: dict[str, Any] | None = None,
+    instance: dict[str, Any] | None = None,
+    subcircuit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one ``mismatches[]`` entry.
 
@@ -2185,6 +2241,18 @@ def _mismatch(
     so every entry carries the key (``null`` when unused, never omitted,
     matching this contract's existing null-not-omitted convention) rather
     than only the netgen-engine ones.
+
+    ``circuit``/``instance``/``subcircuit`` (issue #1132) name the module and
+    instance an unmatched-circuit/unmatched-subcircuit-instance ``topology``
+    finding could not pair -- ``{"layout": <name|None>, "reference":
+    <name|None>}``, same optional-object convention as ``net``/``device``.
+    ``circuit`` is the circuit (module) name for a whole-circuit mismatch, or
+    the *containing* circuit for a subcircuit-instance mismatch; ``instance``
+    is the subcircuit instance's own name; ``subcircuit`` is the name of the
+    circuit the instance refers to (its "cell type"). All three are ``null``
+    for every mismatch category that is not itself naming a circuit/instance
+    (mirroring ``net``/``device``/``property`` being ``null`` off their own
+    categories).
     """
     return {
         "category": category,
@@ -2195,6 +2263,9 @@ def _mismatch(
         "device": device,
         "property": property_,
         "details": details,
+        "circuit": circuit,
+        "instance": instance,
+        "subcircuit": subcircuit,
     }
 
 
@@ -2495,6 +2566,11 @@ def _build_mismatches(
                 "error",
                 "circuit could not be matched to a counterpart",
                 side,
+                # Issue #1132: `a`/`b` are the `kdb.Circuit` objects
+                # themselves (one side `None`) -- name the circuit (module)
+                # that failed to pair so an anonymous `topology` finding is
+                # attributable without a side-channel netlist diff.
+                circuit={"layout": _name_or_none(a), "reference": _name_or_none(b)},
             )
         )
 
@@ -2506,6 +2582,23 @@ def _build_mismatches(
                 "error",
                 "subcircuit instance could not be matched to a counterpart",
                 side,
+                # Issue #1132: `a`/`b` are `kdb.SubCircuit` instances (one
+                # side `None`) -- name the containing circuit, the
+                # instance's own name, and the circuit it instantiates
+                # (its "cell type") so this finding is attributable at
+                # macro scale, matching the shape the issue proposes.
+                circuit={
+                    "layout": _subcircuit_parent_name(a),
+                    "reference": _subcircuit_parent_name(b),
+                },
+                instance={
+                    "layout": _name_or_none(a),
+                    "reference": _name_or_none(b),
+                },
+                subcircuit={
+                    "layout": _subcircuit_ref_name(a),
+                    "reference": _subcircuit_ref_name(b),
+                },
             )
         )
 
