@@ -1651,22 +1651,43 @@ def _detour_escape_um(
     port facing ``+x`` pushes toward the bbox's east edge regardless of
     which side of the block it actually sits on. The resulting entry/exit
     leg (drawn at the port's own coordinate on the lane's cross-axis, from
-    the stub straight out to that far escape point) can then run back across
-    whatever sits between the two ports at their own level, instead of
-    clearing it -- rather than the short hop past the near edge a caller
-    would expect. This was suspected to still fail safe rather than draw a
-    silently bad path, and that has been confirmed: the far-edge push always
-    makes the entry/exit leg a superset of the region the original
-    (rejected) straight backbone ran through, so any obstacle that made the
-    unrouted backbone crossable is also crossed by the malformed leg, and
-    :func:`route_two_pin`'s obstacle-overlap check (run in full against the
-    detour's actual drawn points, exactly as for any other candidate path)
-    rejects it the same way -- verified with a targeted fixture
-    (``test_route_two_pin_self_net_opposite_facing_detour_rejects_cleanly``
-    in ``tests/test_gen_compose.py``) and a 30k-trial randomized sweep over
-    same-block port/obstacle geometries that found zero cases of a wrongly
-    accepted path. No fix is needed here; "reported unroutable" is the
-    accepted terminal behaviour for this narrow case.
+    the stub straight out to that far escape point) can then run differently
+    from the short hop past the near edge a caller would expect, depending on
+    which way the two ports face relative to each other:
+
+    - **Facing each other** (e.g. the west port facing ``+x``, the east port
+      facing ``-x``) -- each escape point is pushed *past* the other port,
+      so the entry/exit leg runs back across whatever sits between the two
+      ports at their own level. This leg is always a superset of the region
+      the original (rejected) straight backbone ran through, so any obstacle
+      that made the unrouted backbone crossable is also crossed by the
+      malformed leg, and :func:`route_two_pin`'s obstacle-overlap check (run
+      in full against the detour's actual drawn points, exactly as for any
+      other candidate path) rejects it the same way -- "reported unroutable"
+      is the accepted terminal behaviour for this sub-case. Verified with a
+      targeted fixture
+      (``test_route_two_pin_self_net_opposite_facing_detour_rejects_cleanly``
+      in ``tests/test_gen_compose.py``) and a 30k-trial randomized sweep
+      restricted to this orientation that found zero wrongly-accepted paths.
+    - **Facing away from each other** (e.g. the west port facing ``-x``, the
+      east port facing ``+x``) -- each escape point is instead pushed *away*
+      from the other port, past the bbox's own far edge on its own side, so
+      neither entry/exit leg overlaps the original backbone's range at all
+      (disjoint, not a superset). The detour lane then draws a full loop
+      around the entire block rather than being rejected -- a valid,
+      non-crossing (if very indirect) path, not a silently bad one. Verified
+      with a targeted fixture
+      (``test_route_two_pin_self_net_away_facing_detour_loops_around_cleanly``
+      in ``tests/test_gen_compose.py``) and a ~2.8k-trial randomized sweep
+      restricted to this orientation that found zero wrongly-crossing paths,
+      with about a quarter of trials routing successfully via the loop-around
+      rather than being rejected.
+
+    Both outcomes were suspected to still fail safe rather than draw a
+    silently bad path, and that has been confirmed for each: no fix is
+    needed here, but "reported unroutable" is *not* the terminal behaviour
+    for every same-block opposite-facing self-net -- only for the
+    facing-each-other sub-case above.
     """
     if axis == "x":
         if vec[0] > 0:

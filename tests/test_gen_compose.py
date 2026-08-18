@@ -10,6 +10,7 @@ installed on the machine running the suite.
 """
 
 import json
+from itertools import pairwise
 
 import pytest
 
@@ -3545,6 +3546,84 @@ def test_route_two_pin_self_net_opposite_facing_detour_rejects_cleanly():
     assert result["points_um"] is None
     assert "block 'm'" in result["reason"]
     assert "detour" in result["reason"]
+
+
+def _self_net_away_facing_ports_with_obstacle_fixture():
+    """A same-block self-net (#1179) whose two ports face *away* from each
+    other -- ``L`` at x=8 facing west (``-x``), ``R`` at x=12 facing east
+    (``+x``) -- with an unrelated block ``m`` sitting on the straight path
+    between them. This is the same geometry as
+    :func:`_self_net_opposite_facing_ports_with_obstacle_fixture`, with only
+    the two ports' ``direction_deg`` swapped.
+
+    Here the bbox-edge push (see :func:`_detour_escape_um`'s docstring)
+    sends each escape point *away* from the other port instead of past it,
+    so the entry/exit legs never overlap the original backbone's range --
+    the detour lane draws a full loop around the whole block and the net
+    routes successfully, rather than being rejected as in the
+    facing-each-other orientation.
+    """
+    layer = {"layer": 68, "datatype": 20}
+    blocks = {
+        "u": {
+            "id": "u",
+            "port_names": {"L", "R"},
+            "ports": {
+                "L": {
+                    "x_um": 8.0,
+                    "y_um": 5.0,
+                    "direction_deg": 180,
+                    "width_um": 0.3,
+                    "layer": layer,
+                },
+                "R": {
+                    "x_um": 12.0,
+                    "y_um": 5.0,
+                    "direction_deg": 0,
+                    "width_um": 0.3,
+                    "layer": layer,
+                },
+            },
+        },
+        "m": {"id": "m", "port_names": set(), "ports": {}},
+    }
+    offsets = {"u": {"x": 0.0, "y": 0.0}, "m": {"x": 0.0, "y": 0.0}}
+    bboxes = {
+        "u": {"x0": 0.0, "y0": 0.0, "x1": 20.0, "y1": 10.0},
+        "m": {"x0": 9.0, "y0": 4.0, "x1": 11.0, "y1": 6.0},
+    }
+    pin_a = {"block": "u", "port": "L"}
+    pin_b = {"block": "u", "port": "R"}
+    return blocks, offsets, bboxes, pin_a, pin_b
+
+
+def test_route_two_pin_self_net_away_facing_detour_loops_around_cleanly():
+    # #1179 follow-up: swapping the two ports' facing direction from "toward
+    # each other" to "away from each other" flips the bbox-edge push from
+    # "past the other port" to "past the block's own far edge on its own
+    # side" -- the escape legs no longer overlap the original backbone's
+    # range at all, so the detour lane draws a full loop around the whole
+    # block instead of being rejected. Confirms this is a valid, non-crossing
+    # (if indirect) path rather than a silently bad one.
+    blocks, offsets, bboxes, pin_a, pin_b = (
+        _self_net_away_facing_ports_with_obstacle_fixture()
+    )
+    result = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.3, route_layer=(68, 20)
+    )
+    assert result["routed"] is True
+    points = result["points_um"]
+    assert points is not None
+    # The loop-around never enters the obstacle's x-range (9..11) at the
+    # obstacle's own y-range (4..6): every segment either sits outside
+    # x=[9, 11] or outside y=[4, 6].
+    obstacle = bboxes["m"]
+    for (x0, y0), (x1, y1) in pairwise(points):
+        seg_x0, seg_x1 = sorted((x0, x1))
+        seg_y0, seg_y1 = sorted((y0, y1))
+        crosses_x = seg_x1 > obstacle["x0"] and seg_x0 < obstacle["x1"]
+        crosses_y = seg_y1 > obstacle["y0"] and seg_y0 < obstacle["y1"]
+        assert not (crosses_x and crosses_y)
 
 
 def test_compose_routes_around_the_middle_block_of_a_three_block_row(
