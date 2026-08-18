@@ -193,6 +193,9 @@ survives extraction as a named pin, and `klt lvs` no longer logs a spurious
 `severity: "error"` mismatch for an unused device class — but the router
 still cannot *route around* the two obstacle cases below; both remain
 workarounds a caller must apply, exactly as the worked example below does.
+(An unrelated block sitting between the two pins — the *third*-block case,
+as opposed to these two — is no longer among them: #1167 routes around it,
+see "Routing around an unrelated block" below.)
 (#434 adds one way *through* rather than around: a ring generated with a
 declared opening — see "Routing through a ring opening" below — so a matched
 group no longer has to choose between keeping its guard ring and being wired
@@ -252,11 +255,12 @@ into the circuit.)
   (#434) already apply; each own-pin's edge-margin allowance is bumped by
   the same amount so a normal approach into that pin's own block is not
   penalized by the inflation. As with #199, this widens what the router
-  **detects** -- it still reports the net unroutable rather than routing
-  around the obstacle, so the same workarounds (an `add_guard_ring: false`
-  parameter, opposite-facing port pairs, or `waypoints_um` with several
-  microns of clearance from every block) still apply whenever a near-miss
-  like this is rejected.
+  **detects**; what it does with a detection depends on *which* block was
+  clipped — an unrelated one is now routed around (#1167, below), while a
+  near-miss against one of the net's own two blocks still reports the net
+  unroutable, so the same workarounds (an `add_guard_ring: false` parameter,
+  opposite-facing port pairs, or `waypoints_um` with several microns of
+  clearance from every block) still apply there.
 - **Routing same-facing port pairs with `waypoints_um` (#634, fixed).** Case
   **(1)** above has no remedy when the caller cannot choose which ports get
   wired — e.g. a hand-drawn cell that legitimately puts its input and output
@@ -285,6 +289,43 @@ into the circuit.)
     "waypoints_um": [[-0.17, 1.0], [11.09, 1.0]]
   }
   ```
+- **Routing around an unrelated block, not just detecting it (#1167,
+  fixed).** The obstacle-overlap check above used to reject *any* backbone
+  crossing a third block's bbox, so in a row only **immediately adjacent**
+  blocks could be wired at all — a real block's netlist is not a Hamiltonian
+  path over its devices, so most of its nets never had a chance (issue #1164
+  measured 0/8, 0/9 and 0/9 nets routed across three real gf180mcu blocks).
+  When the fixed-shape backbone is rejected **solely** for crossing blocks
+  neither pin sits on, the router now retries the same pin pair around them:
+  up to **two alternate lanes** (a straight run over/under, or left/right of,
+  every block in the way, shortest detour tried first) are routed exactly as
+  if the caller had supplied them as `waypoints_um`, and the first that
+  passes every check is drawn. Consequences worth knowing:
+  - **Nothing is waived to make a detour fit.** A lane goes through the same
+    six routability checks as any other path, so a detour that would cross a
+    ring, a pad, a block's drawn geometry — or another block's bbox — is
+    rejected like any other backbone. The check that used to reject these
+    nets still rejects them; it just no longer gets the last word.
+  - **The search is bounded, and its limit is on *lanes*, not obstacles.** A
+    lane is placed clear of every block it spans, so two blocks between the
+    pins cost one lane, not two nested detours; and a lane is never itself
+    detoured around (one level, at most two extra attempts per net). When
+    neither lane is clear, the net is still reported in `unrouted_nets[]`,
+    with the same reason as before plus a note that a detour was tried — so
+    "there was no way around" is distinguishable from "no attempt was made".
+  - **A route that crosses one of its own two pins' blocks is still
+    rejected**, not detoured: that is a statement about which way the two
+    ports face (the same-facing pair above), whose remedy stays
+    `waypoints_um`.
+  - **A caller-supplied `waypoints_um` path is never second-guessed.** The
+    caller owns that path; a supplied path that crosses a block is reported
+    unroutable exactly as before, never silently replaced by a detour of the
+    router's own choosing.
+  - **Detoured routes are longer**, and their `route_length_um` reflects it —
+    a lane clears each block it passes by `2 × routing.width_um` from that
+    block's bbox edge, comfortably more than the `width_um / 2` the overlap
+    check itself demands, so the drawn metal keeps a real spacing margin from
+    whatever the block draws at its edge rather than being legal by a hair.
 - **Routing through a ring opening (#434, fixed).** A closed ring left
   `add_guard_ring: false` as the only way to wire a matched group into the
   rest of a circuit — i.e. a block could have its ring or its connectivity,

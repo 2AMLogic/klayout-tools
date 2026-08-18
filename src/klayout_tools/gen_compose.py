@@ -45,9 +45,12 @@ Scope (phase 2, this module's current state):
   inter-block channel narrower than ``routing.width_um``, or a route that
   would cross a guard/collector ring's own tap loop or plow through a
   block's interior (e.g. a same-facing port pair reaching a pin on a block's
-  far side, or an unrelated third block in a longer row --
-  :func:`route_two_pin`, #199) -- is reported in ``unrouted_nets[]`` rather
-  than failing the whole request or silently drawing a short. A non-empty
+  far side -- :func:`route_two_pin`, #199) -- is reported in
+  ``unrouted_nets[]`` rather than failing the whole request or silently
+  drawing a short. Unrelated blocks sitting between the two pins in a longer
+  row are *routed around* rather than reported: the backbone retries on up
+  to two alternate lanes clear of them before the net is called unroutable
+  (#1167, see :func:`route_two_pin`'s "Bounded detour search"). A non-empty
   ``unrouted_nets[]`` with every block placed is a *partial success* (exit
   code 3; see ``cli/gen_compose_cmd.py`` and the spike's "Proposed exit
   codes").
@@ -1455,6 +1458,166 @@ def _block_gap_um(
     return hi["y0"] - lo["y1"]
 
 
+#: How far past a bbox edge a detour lane (:func:`_detour_lane_waypoints_um`)
+#: is placed, as a multiple of the route width. The obstacle-overlap check
+#: itself only demands ``width_um / 2`` (half the drawn conductor), so a lane
+#: at ``2 * width_um`` leaves ``1.5 * width_um`` of clear space between the
+#: drawn metal's edge and the block it routes around -- clear by a comfortable
+#: margin rather than legal-by-a-hair, which is what keeps ``klt drc``'s
+#: same-layer spacing rule satisfied against whatever that block draws at its
+#: own bbox edge.
+_DETOUR_CLEARANCE_WIDTHS = 2.0
+
+#: How many alternate lanes the bounded detour search tries before reporting
+#: the net unroutable (#1167). Two -- one on each side of the obstacles -- is
+#: the "1-2 alternate jog points" bound the issue asks for, and is what keeps
+#: this a *bounded* search rather than a general maze router: there is no
+#: recursion (a lane is never itself detoured around) and no per-obstacle
+#: growth (see :func:`_detour_lane_waypoints_um`).
+_MAX_DETOUR_LANES = 2
+
+
+def _detour_escape_um(
+    pos: tuple[float, float],
+    vec: tuple[int, int],
+    bbox_um: dict[str, float],
+    width_um: float,
+    axis: str,
+) -> float:
+    """Where one endpoint leaves its own block on its way to a detour lane.
+
+    ``axis`` is the axis the *lane* runs along (``"x"`` for a horizontal lane
+    over/under a row, ``"y"`` for a vertical lane left/right of a column), so
+    this returns the coordinate of the leg that carries the route from the
+    port out to that lane -- the lane's entry column for a horizontal lane,
+    its entry row for a vertical one.
+
+    A port facing *along* the lane's own axis leaves sideways past its own
+    block's bbox edge, by ``_DETOUR_CLEARANCE_WIDTHS * width_um`` (at least as
+    far as its own stub end). Clearing the **bbox** rather than the stub is
+    what keeps the turn DRC-clean: a port's own pad is routinely wider than
+    ``width_um`` (a ``resistor_strip`` end pad is 0.42um for a 0.17um route),
+    so a leg turning at the stub end leaves a slot between the pad's far
+    corner and the leg -- same net, but still a ``li1.space``-class spacing
+    violation, exactly the sub-spacing slit issue #496 fixes for a north/
+    south-facing stub. A port facing *across* the lane leaves straight out
+    along its own facing direction instead (its stub already points at the
+    lane), where the #496 stub-widen handles the same pad-vs-trace step.
+    """
+    if axis == "x":
+        if vec[0] > 0:
+            return max(
+                pos[0] + width_um, bbox_um["x1"] + _DETOUR_CLEARANCE_WIDTHS * width_um
+            )
+        if vec[0] < 0:
+            return min(
+                pos[0] - width_um, bbox_um["x0"] - _DETOUR_CLEARANCE_WIDTHS * width_um
+            )
+        return pos[0]
+    if vec[1] > 0:
+        return max(
+            pos[1] + width_um, bbox_um["y1"] + _DETOUR_CLEARANCE_WIDTHS * width_um
+        )
+    if vec[1] < 0:
+        return min(
+            pos[1] - width_um, bbox_um["y0"] - _DETOUR_CLEARANCE_WIDTHS * width_um
+        )
+    return pos[1]
+
+
+def _detour_lane_waypoints_um(
+    end_a: tuple[tuple[float, float], tuple[int, int], dict[str, float]],
+    end_b: tuple[tuple[float, float], tuple[int, int], dict[str, float]],
+    obstacle_bboxes_um: list[dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    width_um: float,
+) -> list[list[tuple[float, float]]]:
+    """Alternate waypoint paths that route *around* one or more obstacles.
+
+    ``end_a``/``end_b`` are the two endpoints as ``(position, direction
+    vector, own placed bbox)``, and ``obstacle_bboxes_um`` are the placed
+    bboxes the fixed-shape backbone was rejected for crossing. Each returned
+    candidate is a ``waypoints`` list for :func:`manhattan_backbone`
+    describing one **lane**: a single straight run, perpendicular to the axis
+    the two endpoints are mostly separated along, placed clear of every block
+    in the way, reached from each port by one leg out to it
+    (:func:`_detour_escape_um`). So the drawn path is ``a -> stub -> out to
+    the lane -> along the lane -> back in -> b`` -- every consecutive pair of
+    points shares an x or a y, so ``manhattan_backbone`` inserts no elbows of
+    its own and the result is exactly the hand-supplied ``waypoints_um``
+    shape a caller writes today for the same job (#634).
+
+    The lane is placed past the extreme edge of **every** block whose extent
+    the run spans (plus the obstacles themselves, which is what makes the
+    result actually clear them), offset by ``_DETOUR_CLEARANCE_WIDTHS *
+    width_um``. That single union is why the number of obstacles between the
+    pins costs nothing: one lane over the top of the row clears two blocks
+    exactly as it clears one. What *is* bounded is the number of candidates --
+    at most ``_MAX_DETOUR_LANES``, the two sides of the row -- ordered
+    shortest-detour first, with a stable tie-break (over before under, right
+    before left) so the composed GDS stays byte-reproducible (#320).
+
+    Returns candidates in try-order; the caller re-runs every routability
+    check against each drawn path and keeps the first that passes.
+    """
+    (a, va, bbox_a), (b, vb, bbox_b) = end_a, end_b
+    clearance_um = _DETOUR_CLEARANCE_WIDTHS * width_um
+    sa = (a[0] + va[0] * width_um, a[1] + va[1] * width_um)
+    sb = (b[0] + vb[0] * width_um, b[1] + vb[1] * width_um)
+
+    if abs(sb[0] - sa[0]) >= abs(sb[1] - sa[1]):
+        # Endpoints mostly separated in x -> the connecting run travels in x,
+        # so the two ways around are a horizontal lane over or under the row.
+        enter = _detour_escape_um(a, va, bbox_a, width_um, "x")
+        leave = _detour_escape_um(b, vb, bbox_b, width_um, "x")
+        lo, hi = sorted((enter, leave))
+        boxes = [
+            *obstacle_bboxes_um,
+            *(
+                bbox
+                for bbox in placed_bboxes_um.values()
+                if bbox["x0"] <= hi and bbox["x1"] >= lo
+            ),
+        ]
+        over_y = max(bbox["y1"] for bbox in boxes) + clearance_um
+        under_y = min(bbox["y0"] for bbox in boxes) - clearance_um
+        lanes = [
+            [
+                (enter, sa[1]),
+                (enter, lane_y),
+                (leave, lane_y),
+                (leave, sb[1]),
+            ]
+            for lane_y in (over_y, under_y)
+        ]
+        lanes.sort(key=lambda wp: abs(wp[1][1] - sa[1]) + abs(wp[2][1] - sb[1]))
+    else:
+        enter = _detour_escape_um(a, va, bbox_a, width_um, "y")
+        leave = _detour_escape_um(b, vb, bbox_b, width_um, "y")
+        lo, hi = sorted((enter, leave))
+        boxes = [
+            *obstacle_bboxes_um,
+            *(
+                bbox
+                for bbox in placed_bboxes_um.values()
+                if bbox["y0"] <= hi and bbox["y1"] >= lo
+            ),
+        ]
+        right_x = max(bbox["x1"] for bbox in boxes) + clearance_um
+        left_x = min(bbox["x0"] for bbox in boxes) - clearance_um
+        lanes = [
+            [
+                (sa[0], enter),
+                (lane_x, enter),
+                (lane_x, leave),
+                (sb[0], leave),
+            ]
+            for lane_x in (right_x, left_x)
+        ]
+        lanes.sort(key=lambda wp: abs(wp[1][0] - sa[0]) + abs(wp[2][0] - sb[0]))
+    return lanes[:_MAX_DETOUR_LANES]
+
+
 #: Port-name prefixes a ``klt gen`` generator uses for a guard/collector ring's
 #: own tap ports (``diff_pair``'s ``add_guard_ring``, ``bjt_array``'s
 #: ``add_collector_ring``, and the standalone ``guard_ring`` generator itself
@@ -1948,7 +2111,11 @@ def route_two_pin(
        crosses the zero-width centerline through the block's true interior;
        each own-pin's allowance is bumped by the same ``width_um / 2`` so a
        normal approach into that pin's own block is not penalized by the
-       inflation.
+       inflation. A crossing this check finds is not automatically fatal
+       (#1167): when the *only* blocks crossed are ones neither pin sits on,
+       the net is retried around them first -- see "Bounded detour search"
+       below -- and reported unroutable only if no alternate lane clears
+       them either.
     6. **Via-drop resolution** (#454): when ``route_layer`` and a pin's own
        reported layer differ, :func:`_resolve_via_drop_layer` looks up
        whether ``extraction_deck`` connects the two with a single via hop
@@ -2025,6 +2192,35 @@ def route_two_pin(
     checks 3/4 on the primary layer, or that trips them with no cross-block
     layer configured, is entirely unaffected -- this is an additive fallback,
     not a change to any existing single-layer behaviour.
+
+    **Bounded detour search (#1167).** Rejecting every backbone that crosses
+    a third block's bbox means only *immediately adjacent* blocks in a row
+    can ever be wired -- a real block's netlist is not a Hamiltonian path
+    over its devices, so most of its nets never had a chance (issue #1164
+    measured 0/8, 0/9 and 0/9 nets routed across three real gf180mcu
+    blocks). So when check 5 rejects a path **solely** because of blocks
+    neither pin sits on, this function retries the same pin pair around them
+    before giving up: :func:`_detour_lane_waypoints_um` proposes up to
+    ``_MAX_DETOUR_LANES`` alternate *lanes* (a straight run over/under, or
+    left/right of, every block in the way, ordered shortest-detour first),
+    and each is routed by a recursive call to this same function with the
+    lane as ``waypoints_um``. That is the whole mechanism -- a detour is
+    just a route this function generated for itself instead of the caller
+    generating it, so **every check above applies to it unchanged**; nothing
+    is waived to make a detour fit, and a lane that would cross a block's
+    drawn geometry, a ring, or another pad is rejected exactly as a
+    caller-supplied path would be. The search is bounded on both sides: the
+    retry supplies ``waypoints_um``, and a waypoint-supplied path is never
+    itself detoured (one level of recursion, at most two extra attempts per
+    net); and the lane is placed clear of *every* block it spans, so two
+    obstacles between the pins cost exactly one lane, not two nested
+    detours. What is deliberately **not** detoured is a backbone crossing
+    one of its own two pins' blocks (the same-facing port pair): that is a
+    statement about which way the ports face, and its remedy stays the
+    caller-supplied ``waypoints_um`` of #634. When no lane works, the
+    reported ``reason`` is check 5's original wording plus a note that the
+    detour was tried, so a caller can tell "there was no way around" from
+    "no attempt was made".
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list,
@@ -2549,10 +2745,66 @@ def route_two_pin(
                     overlap_by_block_um.get(other_id, 0.0) + length
                 )
 
-    for other_id, crossed_um in overlap_by_block_um.items():
+    blocking_um = {
+        other_id: crossed_um
+        for other_id, crossed_um in overlap_by_block_um.items()
+        if crossed_um > allowances_um.get(other_id, 0.0) + margin_eps_um
+    }
+
+    # Bounded detour search (#1167): a backbone rejected *only* for crossing
+    # blocks neither of its two pins sits on is not a routing failure -- it is
+    # the fixed one-jog shape being the wrong shape. Before reporting the net
+    # unroutable, retry it around those obstacles on up to _MAX_DETOUR_LANES
+    # alternate lanes (_detour_lane_waypoints_um), shortest first, and keep the
+    # first that passes. Each retry goes back through *this same function* with
+    # the lane as waypoints_um, so every routability check above -- rings, pad
+    # crossings, drawn-metal shorts, this very obstacle check, via drops --
+    # applies to the detour exactly as it does to any other path; nothing is
+    # waived to make a detour fit. Recursion is bounded at one level by
+    # construction: the retry supplies waypoints_um, and a waypoint-supplied
+    # path is never itself detoured (a caller who supplies a path owns it --
+    # #634 -- and the detour retry is such a caller).
+    #
+    # Scoped to *unrelated* blocks on purpose. A backbone that plows through
+    # one of its own two pins' blocks (the same-facing port pair) is a
+    # statement about which port faces which way, not about something sitting
+    # in the channel; the remedy there stays the caller-supplied waypoints_um
+    # of #634, whose routability the caller -- not this heuristic -- vouches
+    # for.
+    detour_note = ""
+    if blocking_um and waypoints_um is None and not ({own_a, own_b} & set(blocking_um)):
+        lanes = _detour_lane_waypoints_um(
+            (a, va, placed_bboxes_um[own_a]),
+            (b, vb, placed_bboxes_um[own_b]),
+            [placed_bboxes_um[other_id] for other_id in blocking_um],
+            placed_bboxes_um,
+            width_um,
+        )
+        for lane in lanes:
+            retry = route_two_pin(
+                pin_a,
+                pin_b,
+                blocks,
+                offsets_um,
+                placed_bboxes_um,
+                width_um,
+                route_layer,
+                extraction_deck,
+                block_geometry,
+                waypoints_um=lane,
+            )
+            if retry["routed"]:
+                return retry
+        if lanes:
+            detour_note = (
+                f" -- a bounded detour around it ({len(lanes)} alternate "
+                f"lane{'' if len(lanes) == 1 else 's'} placed clear of every "
+                "block between the two pins) was tried first, and each one "
+                "still crossed a placed block"
+            )
+
+    for other_id, crossed_um in blocking_um.items():
         allowed_um = allowances_um.get(other_id, 0.0)
-        if crossed_um <= allowed_um + margin_eps_um:
-            continue
         if other_id in (own_a, own_b):
             reason = (
                 f"backbone's {width_um}um-wide drawn path crosses "
@@ -2578,7 +2830,7 @@ def route_two_pin(
             "routed": False,
             "route_length_um": None,
             "points_um": None,
-            "reason": reason,
+            "reason": reason + detour_note,
         }
 
     # Via-drop resolution (#454, check 5 -- see docstring): only consulted
