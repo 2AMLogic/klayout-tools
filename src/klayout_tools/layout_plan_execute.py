@@ -761,6 +761,7 @@ def execute_layout_plan(
         raise LayoutPlanExecuteError(
             "request.device_groups is empty -- nothing to generate or place"
         )
+    groups_by_id = {group["id"]: group for group in device_groups}
 
     routing_spec = _resolve_routing_spec(request.get("routing"))
     options = validated["options"]
@@ -826,7 +827,11 @@ def execute_layout_plan(
         compose_request: dict[str, Any] = {
             "pdk": pdk_spec,
             "blocks": [
-                {"id": group_id, "generator_report": generated[group_id]}
+                {
+                    "id": group_id,
+                    "generator_report": generated[group_id],
+                    "orientation": groups_by_id[group_id].get("orientation", "none"),
+                }
                 for group_id in order
             ],
             "placement": {
