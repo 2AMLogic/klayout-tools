@@ -737,6 +737,37 @@ class ExtractionDeck:
     -- see the family deck's docstring for the tap/nwell-containment split
     that makes this possible.
 
+    ``substrate_isolation`` (issue #1128) is an optional isolation/deep-well
+    layer (e.g. gf180mcu's ``DNWELL``) that, when declared, splits the NMOS
+    body/``substrate_net`` identity above into more than one synthesized
+    net. An NMOS device's recognised active-diffusion island, or a
+    substrate-tie tap's slice of geometry (drawn or derived -- ``tap``/
+    ``tap_nplus``/``tap_pplus`` above), that overlaps a connected component
+    of this layer resolves to a *per-island* identity (named
+    ``f"{substrate_net}_iso{n}"``, with ``n`` assigned in deterministic
+    bounding-box order, not raw ``Region`` iteration order -- see
+    :func:`~klayout_tools.extract._partition_region_by_islands`) instead of
+    the single, deck-wide ``substrate_net`` global -- letting two physically
+    separate, isolated NMOS domains (e.g. deep-nwell/isolated-p-well tubs)
+    extract as two genuinely distinct nets rather than always collapsing
+    onto one. Geometry that does not overlap any component of this layer at
+    all keeps today's single shared ``substrate_net`` identity, matching
+    real silicon (an un-isolated p-substrate genuinely is one continuous
+    node) -- this is a per-*isolated-region* split, not a full per-instance
+    one. ``None`` (the default -- every deck as of this field's
+    introduction, until gf180mcu's own module sets it) disables this
+    scoping entirely: a deck that declares no ``substrate_isolation``
+    extracts exactly as it did before this field existed, with every NMOS
+    body/substrate-tie sharing one identity regardless of any well/deep-well
+    geometry drawn in the layout. Applies only to this deck's *default*
+    (non-``mos_flavours``) NMOS device recognition and to the ``tap``/
+    derived-tap substrate-tie slice -- a flavoured NMOS device
+    (``mos_flavours``), a ``bulk_to_substrate`` resistor's ``W`` terminal, or
+    a collector-less :class:`BipolarDevice`'s collector, whose own geometry
+    happens to sit inside an isolated region, still resolves to the single
+    global ``substrate_net`` identity: a known, documented residual gap left
+    for a follow-up rather than this issue's scope.
+
     ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
     by default) declaring this deck's drawn vertical-BJT device-recognition
     layers -- the resistor/bipolar/capacitor extension point #221's own
@@ -807,6 +838,7 @@ class ExtractionDeck:
     nfet_class: str = "nfet"
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
+    substrate_isolation: tuple[int, int] | None = None
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()

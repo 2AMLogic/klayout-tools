@@ -1614,6 +1614,12 @@ EXTRACTION_DECK = ExtractionDeck(
     # docstring note above this deck's definition for the full derivation).
     tap_nplus=(32, 0),  # Nplus -- well-tie implant (n+ diffusion inside Nwell)
     tap_pplus=(31, 0),  # Pplus -- substrate-tie implant (p+ diffusion outside Nwell)
+    # DNWELL (issue #1128): NMOS active/substrate-tie geometry inside a
+    # connected DNWELL island resolves to that island's own synthesized
+    # substrate identity instead of the single deck-wide `vsubs` global --
+    # see `ExtractionDeck.substrate_isolation`'s docstring for the full
+    # derivation. Geometry outside every DNWELL island is unaffected.
+    substrate_isolation=(12, 0),  # DNWELL
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
     # Full Metal1-Metal5 routing stack (#220). Before this, `metals` stopped
     # at Metal1, so anything drawn above it was invisible to the connectivity

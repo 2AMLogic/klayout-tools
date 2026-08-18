@@ -255,6 +255,49 @@ shorts every transistor terminal inside the well together. See
 `ExtractionDeck`'s docstring in `src/klayout_tools/decks/__init__.py` for
 the full reasoning.
 
+### Per-isolated-region NMOS substrate scoping (issue #1128)
+
+Before this feature, **every** recognised NMOS body (and any substrate-tie
+tap geometry, drawn or derived) in a layout shared the *one* deck-wide
+`substrate_net` global (`vsubs` by default) unconditionally — even when a
+layout drew two physically separate, deep-nwell/isolated-p-well NMOS
+domains intended to be tied to two different real nets. The PMOS side of
+this problem does not exist: a PMOS's own body ("W") terminal is the drawn
+`nwell` region itself, which is already naturally scoped per physically
+disjoint well island; NMOS had no equivalent mechanism (see issue #1084's
+`tap_nplus`/`tap_pplus` above, which fixes tap-layer *existence* for
+gf180mcu but not this per-region-scoping gap).
+
+`ExtractionDeck.substrate_isolation` is an optional isolation/deep-well
+layer (gf180mcu declares `DNWELL`, 12/0). When set, an NMOS device's
+recognised active-diffusion island — or a substrate-tie tap's slice of
+geometry — that overlaps a connected component of this layer resolves to a
+*per-island* synthesized identity (`f"{substrate_net}_iso{n}"`, `n`
+assigned in deterministic bounding-box order) instead of the single
+deck-wide `substrate_net` global. Geometry that does not overlap any
+component of this layer at all keeps today's single shared identity,
+matching real silicon (an un-isolated p-substrate genuinely is one
+continuous node) — this is a per-*isolated-region* split, not a full
+per-instance one. A real, drawn/derived substrate-tie tap inside one
+isolated region absorbs that region's synthesized identity exactly the way
+a tap absorbs the single global identity today (issue #490/#1084) — so two
+distinct, correctly-tied ties on two DNWELL islands extract as two
+genuinely distinct nets, letting `klt lvs` match a reference netlist that
+names them separately.
+
+`None` (the default — every deck as of this field's introduction until
+gf180mcu's own module sets it) disables this scoping entirely: a deck that
+declares no `substrate_isolation` extracts exactly as it did before this
+field existed, and gf180mcu's own existing (non-isolated) corpus fixtures
+are unaffected either way, since none of them draw `DNWELL`. Applies only
+to a deck's *default* (non-`mos_flavours`) NMOS device recognition and to
+the `tap`/derived-tap substrate-tie slice — a flavoured NMOS device
+(`mos_flavours`), a `bulk_to_substrate` resistor's `W` terminal, or a
+collector-less bipolar's collector, whose own geometry happens to sit
+inside an isolated region, still resolves to the single global
+`substrate_net` identity: a known, documented residual gap left for a
+follow-up.
+
 ### Anonymous net numbering (`$N`) is NOT a stable cross-platform contract (issue #1063)
 
 A net with no drawn label writes as `Net.expanded_name()`'s own

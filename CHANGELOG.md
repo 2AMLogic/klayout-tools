@@ -16,6 +16,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-18 — `klt extract`'s NMOS body ("W") terminal is no longer always
+  tied to one hardcoded, deck-wide `substrate_net` global regardless of
+  physical isolation (issue #1128). `ExtractionDeck.substrate_isolation`
+  (unset/`None` by default — every deck as of this field's introduction) is
+  an optional isolation/deep-well layer; gf180mcu now declares its `DNWELL`
+  (12/0). When set, an NMOS device's active-diffusion island — or a
+  substrate-tie tap's slice of geometry (drawn or derived, issue #1084) —
+  inside a connected component of that layer resolves to a *per-island*
+  synthesized identity instead of the single deck-wide global, letting two
+  physically separate, DNWELL-isolated NMOS domains, each with its own real
+  substrate tap tied to a distinct net, extract as two genuinely distinct
+  nets. Geometry outside every isolation island keeps today's single shared
+  identity. Additive: gf180mcu's own existing (non-isolated) corpus fixtures
+  are unaffected, since none of them draw `DNWELL`, and every other deck
+  leaves the new field unset.
 - 2026-08-17 — `klt functional-verification`'s `environment.sdf` (`options.sdf`
   runs) gains `partial` and `dropped` fields alongside the existing
   `file`/`corner`/`annotated` (issue #1102). Previously `annotated: true`
