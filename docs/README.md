@@ -36,6 +36,7 @@ docs/
     layers.md
     layout-metrics.md
     layout-plan.md
+    layout-plan-execute.md
     lef-abstract.md
     lvs.md
     mom.md
