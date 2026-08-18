@@ -2,6 +2,35 @@
 form) into the *schematic-equivalent, plain-element* form ``klt lvs`` requires
 on its reference side (issue #280).
 
+**Device family coverage (issue #1130).** The original (#280) scope was
+MOS-only. This module now also recognises resistor, capacitor, and bipolar
+subcircuit calls, resolving every family through the *same* curated
+``pdk_models.py`` table :func:`~klayout_tools.pdk_models.create_model_binding_delegate`
+already maintains for the opposite (plain-element -> subckt-call) direction
+(issue #341) -- via :func:`~klayout_tools.pdk_models.known_device_subckt_names`/
+:func:`~klayout_tools.pdk_models.build_device_binding_map`, never a second,
+independent device-name mapping. A resistor/capacitor call is carried onto a
+plain-element ``R``/``C`` card the same way a MOS call is carried onto ``M``
+-- its own subcircuit's length/width call-site parameters (``l``/``w`` for
+sky130, ``r_length``/``r_width`` or ``c_length``/``c_width`` for gf180mcu,
+see ``pdk_models.py``'s module docstring) converted to explicit
+micrometre-suffixed ``L=``/``W=`` (resistor) or a derived ``A=``/``P=``
+plate area/perimeter (capacitor, ``area = L*W``, ``perimeter = 2*(L+W)`` --
+elementary geometry, not a PDK-specific coefficient, so no deck-object
+dependency is introduced). A bipolar call carries no length/width-style
+parameter at all (sky130's fixed-geometry ``pnp_05v5`` cells are selected
+purely by subcircuit name -- see ``pdk_models.py``'s bipolar section) and is
+therefore recognised by a positive subcircuit-name match alone, not a
+carried-parameter heuristic; its only carried call-site parameter is an
+optional ``mult``, mapped onto the plain-element ``Q`` card's ``NE``
+(KLayout's own ``DeviceClassBJT3Transistor`` natively represents multiple
+parallel emitters via ``NE`` -- unlike MOS/resistor's ``nf``/``m``/``mult``,
+which the curated plain-element form cannot represent at all and rejects,
+see below, ``mult`` on a bipolar call is carried, not rejected).
+Resistor/capacitor still reject ``nf``/``m``/``mult`` > 1 exactly like MOS
+(neither ``DeviceClassResistor`` nor ``DeviceClassCapacitor`` has an
+``NE``-equivalent multiplicity parameter to carry it onto).
+
 **The gap this closes.** ``klt lvs``'s reference netlist must use the
 plain-element device form ``klt extract`` writes -- a bare element line whose
 leading letter names the device class and whose parameters are geometric
@@ -29,22 +58,30 @@ independent device-name mapping.
 wrong parameter/unit mapping here would not fail loudly -- it could produce a
 plausible netlist that compares clean when it shouldn't). So:
 
-- Only ``X`` cards that *look like a MOS device* (carry an ``l``/``w``
-  parameter) are candidates for conversion; any other ``X`` card (a genuine
-  hierarchical subcircuit instance) passes through untouched.
+- An ``X`` card is a candidate for conversion when its subcircuit name
+  resolves against the curated table (any family, including bipolar, which
+  carries no distinguishing parameter -- see "Device family coverage"
+  above), or -- for MOS/resistor/capacitor only -- when it carries an
+  ``l``/``w``-style geometry parameter even though the name did not resolve
+  (the original #280 heuristic, now shared across those three families).
+  Anything else (a genuine hierarchical subcircuit instance) passes through
+  untouched.
 - A device-like ``X`` card whose subcircuit name is **not** in the resolved
   device map is a hard error (:class:`NormalizeError`), never a silent
   pass-through -- an unrecognised device name is exactly the confusing-failure
   case this module exists to replace.
-- ``L``/``W`` are carried, converted to explicit micrometre-suffixed literals
-  (``0.5u`` -> ``L=0.5U``; SI metres ``1.5e-6`` -> ``W=1.5U``). Every other
-  parameter is dropped -- ``ad``/``as``/``pd``/``ps``/``nrd``/``nrs``/``sa``/
-  ``sb``/``sd`` (parasitic-only, not carried by ``klt extract`` either) and any
-  other model parameter -- matching the plain-element form's geometric-only
-  scope.
-- ``nf``/``m`` > 1 (a multi-finger / multiplied device the curated plain-element
-  decks cannot represent) is **rejected** with a specific error naming the
-  device and value, never silently dropped or misinterpreted.
+- ``L``/``W`` (MOS/resistor) or the ``A``/``P`` derived from them (capacitor)
+  are carried, converted to explicit micrometre-suffixed literals (``0.5u``
+  -> ``L=0.5U``; SI metres ``1.5e-6`` -> ``W=1.5U``). Every other parameter is
+  dropped -- ``ad``/``as``/``pd``/``ps``/``nrd``/``nrs``/``sa``/``sb``/``sd``
+  (parasitic-only, not carried by ``klt extract`` either) and any other model
+  parameter -- matching the plain-element form's geometric-only scope.
+- ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied device the curated
+  plain-element MOS/resistor/capacitor forms cannot represent) is
+  **rejected** with a specific error naming the device and value, never
+  silently dropped or misinterpreted. Bipolar's ``mult`` is the one
+  exception -- carried onto ``NE``, not rejected (see "Device family
+  coverage" above).
 
 Text-level (not KLayout-object-level) on purpose: the input is *not* readable
 by ``NetlistSpiceReader`` in the first place (that is the whole problem), so
@@ -57,18 +94,50 @@ from __future__ import annotations
 import re
 
 from .pdk_models import (
+    DeviceLookup,
     ModelBindingError,
     _format_um,
-    build_subckt_to_class_map,
-    known_mos_subckt_names,
+    _format_um2,
+    build_device_binding_map,
+    known_device_subckt_names,
 )
 
-#: Subcircuit-call parameters carried onto the plain-element ``M`` card.
+#: Subcircuit-call parameters carried onto the plain-element ``M`` card
+#: (MOS only -- also doubles as the "does this X card look like a MOS
+#: device" detection gate, issue #280's original discipline, unchanged).
 _CARRIED_PARAMS = ("l", "w")
+
+#: The superset of every geometry-carrying family's own length/width
+#: call-site parameter spellings (issue #1130) -- used only to decide
+#: whether an ``X`` card whose subcircuit name does *not* resolve should be
+#: a hard error (looks like a device call gone wrong) or a silent
+#: passthrough (a genuine hierarchical subcircuit instance). Deliberately
+#: excludes bipolar's ``mult`` -- unlike a geometry parameter, ``mult`` is a
+#: plausible parameter name for an ordinary (non-device) parameterized
+#: subcircuit too, so it is not a safe passthrough-vs-error signal on its
+#: own; bipolar is recognised by a positive subcircuit-name match only (see
+#: the module docstring).
+_DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_width")
 
 #: Parameters that select a multi-finger / multiplied device the curated
 #: plain-element decks cannot represent -- rejected (not dropped) when > 1.
-_MULTIPLICITY_PARAMS = ("nf", "m", "mult")
+#: Shared by MOS/resistor/capacitor (issue #1130, ``mf`` is sky130's own
+#: capacitor multiplier spelling, e.g. ``sky130_fd_pr__cap_mim_m3_1 c0 c1
+#: w=1 l=1 mf=1`` -- see ``pdk_models.py``'s module docstring); bipolar's
+#: ``mult`` is handled separately (carried onto ``NE``, see
+#: :func:`_convert_bipolar_card`).
+_MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
+
+#: Terminal count of the curated capacitor/bipolar primitives, used the same
+#: way :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a
+#: mismatched node count rather than a confusing downstream failure. Not
+#: validated for resistor: a real curated resistor subcircuit is legitimately
+#: either 2-terminal (``r0 r1``) or 3-terminal (bulk-tied ``r0 r1 b`` --
+#: sky130's ``res_high_po``/``res_xhigh_po``, see ``pdk_models.py``'s module
+#: docstring), and which applies is not encoded in this module's
+#: deck-object-free static tables.
+_CAPACITOR_TERMINALS = 2
+_BIPOLAR_TERMINALS = 3
 
 #: SPICE engineering-notation multiplier suffixes, longest-match first so
 #: ``meg`` is not shadowed by ``m``. The base unit for a MOS ``W``/``L`` is
@@ -214,13 +283,18 @@ def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     return positional, params
 
 
-def _convert_x_card(line: str, subckt_to_class: dict[str, str] | None) -> str:
-    """Convert one ``X`` subcircuit-call line to a plain-element ``M`` line,
-    or return it unchanged if it is not a MOS device call.
+def _convert_x_card(
+    line: str, subckt_to_binding: dict[str, DeviceLookup] | None
+) -> str:
+    """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
+    ``C``/``Q`` line, or return it unchanged if it is not a recognised device
+    call (issue #1130 extends the original #280 MOS-only conversion to
+    resistor, capacitor, and bipolar).
 
-    ``subckt_to_class`` maps a device subcircuit name to its curated
-    device-class label. When ``None`` (no deck / no explicit map given), the
-    device class is resolved per-name against the whole curated table.
+    ``subckt_to_binding`` maps a device subcircuit name to its curated
+    :class:`~klayout_tools.pdk_models.DeviceLookup`. When ``None`` (no deck /
+    no explicit map given), the binding is resolved per-name against the
+    whole curated table.
     """
     tokens = _tokenize(line)
     if not tokens:
@@ -229,21 +303,48 @@ def _convert_x_card(line: str, subckt_to_class: dict[str, str] | None) -> str:
     name_token = tokens[0]
     rest = tokens[1:]
     positional, params = _split_params(rest)
-
-    # A MOS device call is identified by carrying an l/w parameter. Anything
-    # else is a genuine hierarchical subcircuit instance -- pass it through so
-    # the reader treats it as a subcircuit, unchanged.
-    if not any(key in params for key in _CARRIED_PARAMS):
-        return line
     if not positional:
         return line
 
     subckt_name = positional[-1]
     nodes = positional[:-1]
 
-    device_class = _resolve_device_class(subckt_name, subckt_to_class)
-    instance = _instance_name(name_token)
+    # A device call is recognised either by its subcircuit name resolving
+    # against the curated table (covers every family, including bipolar,
+    # which carries no geometry-style parameter at all -- see the module
+    # docstring), or, when the name does not resolve, by carrying a
+    # geometry-style parameter that *looks* like a device call gone wrong
+    # (the original #280 MOS-only heuristic, now shared with
+    # resistor/capacitor). Neither signal present means a genuine
+    # hierarchical subcircuit instance -- pass it through untouched.
+    if not _binding_known(subckt_name, subckt_to_binding) and not any(
+        key in params for key in _DEVICE_LIKE_PARAMS
+    ):
+        return line
 
+    lookup = _resolve_binding(subckt_name, subckt_to_binding)
+    instance = _instance_name(name_token, lookup.kind)
+
+    if lookup.kind == "mos":
+        return _convert_mos_card(instance, nodes, subckt_name, lookup, params)
+    if lookup.kind == "resistor":
+        return _convert_geometry_card("R", instance, nodes, subckt_name, lookup, params)
+    if lookup.kind == "capacitor":
+        return _convert_capacitor_card(instance, nodes, subckt_name, lookup, params)
+    return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
+
+
+def _convert_mos_card(
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """The original #280 MOS conversion (``d g s b`` -> plain ``M`` card),
+    unchanged in behaviour -- only its resolved-binding plumbing moved to
+    share the new multi-family dispatch in :func:`_convert_x_card`.
+    """
     if len(nodes) != _MOS_TERMINALS:
         raise NormalizeError(
             f"device '{instance}' (subcircuit '{subckt_name}'): expected "
@@ -251,6 +352,191 @@ def _convert_x_card(line: str, subckt_to_class: dict[str, str] | None) -> str:
             f"({' '.join(nodes) or '<none>'})"
         )
 
+    _reject_multiplicity(instance, subckt_name, params)
+
+    for required in ("l", "w"):
+        if required not in params:
+            raise NormalizeError(
+                f"device '{instance}' (subcircuit '{subckt_name}'): missing "
+                f"required parameter '{required.upper()}' -- a MOS device "
+                "call must supply both L and W"
+            )
+
+    l_um = _parse_um(params["l"], device=instance, param="l")
+    w_um = _parse_um(params["w"], device=instance, param="w")
+
+    return (
+        f"{instance} {' '.join(nodes)} {lookup.device_class} "
+        f"L={_format_um(l_um)} W={_format_um(w_um)}"
+    )
+
+
+def _convert_geometry_card(
+    card_letter: str,
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """Convert a resistor call to a plain-element ``R`` card.
+
+    KLayout's native ``DeviceClassResistor`` requires a positional value
+    token before the model name (``R<name> n1 n2 [n3] <value> <model>``, the
+    standard SPICE resistor shape); this module has no PDK sheet-resistance
+    data to compute that value from geometry (that lives in
+    ``klayout_tools.decks``, deliberately not a dependency of this module --
+    see the module docstring), so it writes a placeholder ``0`` there and
+    carries the call's own length/width geometry onto ``L=``/``W=`` instead
+    -- ``DeviceClassResistor`` natively accepts both (confirmed against the
+    installed ``klayout.db`` module), the same way the MOS path carries
+    ``L=``/``W=``. Geometry is carried only when the call actually supplies
+    it (the subcircuit's own default otherwise applies); a real curated
+    resistor subcircuit is legitimately 2- or 3-terminal (see
+    :data:`_CAPACITOR_TERMINALS`'s docstring note), so the terminal count is
+    not validated here -- nodes pass through positionally, unchanged.
+    """
+    _reject_multiplicity(instance, subckt_name, params)
+    extra = _geometry_suffix(instance, subckt_name, lookup, params)
+    return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+
+
+def _convert_capacitor_card(
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """Convert a capacitor call to a plain-element ``C`` card.
+
+    ``DeviceClassCapacitor`` has no ``L``/``W`` parameter at all (only ``C``
+    -- capacitance -- plus secondary ``A``/``P``, plate area/perimeter,
+    confirmed against the installed ``klayout.db`` module); this mirrors
+    ``pdk_models.py``'s own *forward*-direction capacitor binding, which
+    solves ``equivalent_rectangle_um`` to recover ``L``/``W`` from a
+    device's measured ``A``/``P``. This is the inverse, elementary
+    computation -- ``area = L * W``, ``perimeter = 2 * (L + W)`` -- not a
+    PDK-specific coefficient, so it introduces no deck-object dependency.
+    Same ``0``-placeholder-value convention as :func:`_convert_geometry_card`
+    (this module has no farad-per-area coefficient to compute a real
+    capacitance from either -- that also lives in ``klayout_tools.decks``).
+    """
+    if len(nodes) != _CAPACITOR_TERMINALS:
+        raise NormalizeError(
+            f"device '{instance}' (subcircuit '{subckt_name}'): expected "
+            f"{_CAPACITOR_TERMINALS} terminals (A B), found {len(nodes)} "
+            f"({' '.join(nodes) or '<none>'})"
+        )
+    _reject_multiplicity(instance, subckt_name, params)
+
+    has_length = lookup.length_param in params
+    has_width = lookup.width_param in params
+    extra = ""
+    if has_length or has_width:
+        _require_both(instance, subckt_name, lookup, has_length, has_width)
+        l_um = _parse_um(
+            params[lookup.length_param], device=instance, param=lookup.length_param
+        )
+        w_um = _parse_um(
+            params[lookup.width_param], device=instance, param=lookup.width_param
+        )
+        area_um2 = l_um * w_um
+        perimeter_um = 2.0 * (l_um + w_um)
+        extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
+
+    return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+
+
+def _convert_bipolar_card(
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """Convert a bipolar call to a plain-element ``Q`` card.
+
+    ``DeviceClassBJT3Transistor``'s native card shape puts the model name
+    directly after the three nodes (``Q<name> c b e <model> [key=value
+    ...]``, confirmed against the installed ``klayout.db`` module) -- unlike
+    ``R``/``C``, no positional value token is needed at all. The real
+    sky130 ``pnp_05v5`` subcircuits carry no length/width-style geometry
+    parameter (fixed-geometry cells selected by name, see the module
+    docstring); their only real call-site parameter is an optional
+    ``mult``, carried onto the plain-element card's ``NE`` (number of
+    parallel emitters), which ``DeviceClassBJT3Transistor`` natively
+    supports -- so, unlike MOS/resistor/capacitor, ``mult`` here is carried,
+    not rejected.
+    """
+    if len(nodes) != _BIPOLAR_TERMINALS:
+        raise NormalizeError(
+            f"device '{instance}' (subcircuit '{subckt_name}'): expected "
+            f"{_BIPOLAR_TERMINALS} terminals (c b e), found {len(nodes)} "
+            f"({' '.join(nodes) or '<none>'})"
+        )
+
+    extra = ""
+    if "mult" in params:
+        try:
+            mult = float(params["mult"])
+        except ValueError as exc:
+            raise NormalizeError(
+                f"device '{instance}' (subcircuit '{subckt_name}'): "
+                f"parameter 'mult' value '{params['mult']}' is not numeric"
+            ) from exc
+        extra = f" NE={mult:g}"
+
+    return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
+
+
+def _geometry_suffix(
+    instance: str,
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """The ``" L=...U W=...U"`` suffix carried from ``lookup``'s own
+    length/width call-site parameters, or ``""`` when the call supplies
+    neither (the subcircuit's own default geometry then applies)."""
+    has_length = lookup.length_param in params
+    has_width = lookup.width_param in params
+    if not (has_length or has_width):
+        return ""
+    _require_both(instance, subckt_name, lookup, has_length, has_width)
+    l_um = _parse_um(
+        params[lookup.length_param], device=instance, param=lookup.length_param
+    )
+    w_um = _parse_um(
+        params[lookup.width_param], device=instance, param=lookup.width_param
+    )
+    return f" L={_format_um(l_um)} W={_format_um(w_um)}"
+
+
+def _require_both(
+    instance: str,
+    subckt_name: str,
+    lookup: DeviceLookup,
+    has_length: bool,
+    has_width: bool,
+) -> None:
+    if has_length and has_width:
+        return
+    raise NormalizeError(
+        f"device '{instance}' (subcircuit '{subckt_name}'): both "
+        f"'{(lookup.length_param or '').upper()}' and "
+        f"'{(lookup.width_param or '').upper()}' must be given together"
+    )
+
+
+def _reject_multiplicity(
+    instance: str, subckt_name: str, params: dict[str, str]
+) -> None:
+    """Reject an X card whose ``nf``/``m``/``mult`` describes more than one
+    device folded into a single call -- shared by MOS, resistor, and
+    capacitor (issue #1130 generalises #280's original MOS-only check;
+    bipolar's ``mult`` is handled separately, see
+    :func:`_convert_bipolar_card`)."""
     for param in _MULTIPLICITY_PARAMS:
         if param not in params:
             continue
@@ -270,30 +556,33 @@ def _convert_x_card(line: str, subckt_to_class: dict[str, str] | None) -> str:
                 "gate) before comparing"
             )
 
-    l_um = _parse_um(params["l"], device=instance, param="l")
-    w_um = _parse_um(params["w"], device=instance, param="w")
 
-    return (
-        f"{instance} {' '.join(nodes)} {device_class} "
-        f"L={_format_um(l_um)} W={_format_um(w_um)}"
-    )
+def _binding_known(
+    subckt_name: str, subckt_to_binding: dict[str, DeviceLookup] | None
+) -> bool:
+    """Whether ``subckt_name`` resolves in the applicable curated table,
+    without raising -- the passthrough-vs-error decision in
+    :func:`_convert_x_card`."""
+    if subckt_to_binding is not None:
+        return subckt_name in subckt_to_binding
+    return subckt_name in known_device_subckt_names()
 
 
-def _resolve_device_class(
-    subckt_name: str, subckt_to_class: dict[str, str] | None
-) -> str:
-    if subckt_to_class is not None:
-        device_class = subckt_to_class.get(subckt_name)
-        if device_class is None:
-            available = ", ".join(sorted(subckt_to_class)) or "<none>"
+def _resolve_binding(
+    subckt_name: str, subckt_to_binding: dict[str, DeviceLookup] | None
+) -> DeviceLookup:
+    if subckt_to_binding is not None:
+        lookup = subckt_to_binding.get(subckt_name)
+        if lookup is None:
+            available = ", ".join(sorted(subckt_to_binding)) or "<none>"
             raise NormalizeError(
                 f"subcircuit '{subckt_name}' is not a known device for the "
                 f"requested deck (known: {available}); if it is a real device, "
                 "pass reference.device_map to map it explicitly"
             )
-        return device_class
+        return lookup
 
-    known = known_mos_subckt_names()
+    known = known_device_subckt_names()
     entry = known.get(subckt_name)
     if entry is None:
         available = ", ".join(sorted(known)) or "<none>"
@@ -302,42 +591,58 @@ def _resolve_device_class(
             f"(known: {available}); pass reference.deck or "
             "reference.device_map to map it explicitly"
         )
-    return entry[1]
+    _deck_name, lookup = entry
+    return lookup
 
 
-def _instance_name(name_token: str) -> str:
-    """Turn a subckt-call instance token into a plain MOS element name.
+def _instance_name(name_token: str, kind: str = "mos") -> str:
+    """Turn a subckt-call instance token into a plain element name.
 
-    Idiomatically a MOS instance is emitted as ``XM1`` -- the ``X``
-    subcircuit-call letter plus the ``M1`` device name -- so dropping the
-    leading ``X`` recovers the natural ``M1``. When the remainder is not
-    already an ``M``-element name (e.g. ``X5``), an ``M`` is prepended
-    (``M5``) so the result is always a valid MOS element line.
+    Idiomatically a device instance is emitted as e.g. ``XM1`` -- the ``X``
+    subcircuit-call letter plus the device's own natural element name -- so
+    dropping the leading ``X`` recovers ``M1``. When the remainder does not
+    already start with the target kind's element letter (e.g. ``X5`` for a
+    MOS device), that letter is prepended (``M5``) so the result is always a
+    valid plain-element line. ``kind`` selects the letter (issue #1130:
+    ``"R"``/``"C"``/``"Q"`` for resistor/capacitor/bipolar, ``"M"`` -- the
+    original #280 default -- for MOS).
     """
+    letter = {"mos": "M", "resistor": "R", "capacitor": "C", "bipolar": "Q"}[kind]
     rest = name_token[1:]  # drop the leading X/x
     if not rest:
         return name_token  # malformed; leave as-is for the reader to reject
-    if rest[0] in "Mm":
+    if rest[0].upper() == letter:
         return rest
-    return f"M{rest}"
+    return f"{letter}{rest}"
 
 
 def _build_subckt_map(
     deck: str | None, device_map: dict[str, str] | None
-) -> dict[str, str] | None:
-    """Resolve the ``<subckt-name> -> <device-class>`` map for a conversion
+) -> dict[str, DeviceLookup] | None:
+    """Resolve the ``<subckt-name> -> DeviceLookup`` map for a conversion
     request from an optional deck name and/or an optional explicit override
     map. Returns ``None`` when neither is given (per-name auto-resolution
     against the whole curated table).
+
+    ``device_map`` (issue #280's caller-supplied override) is always treated
+    as a MOS ``l``/``w`` binding -- unchanged from before this issue's
+    device-family extension; a non-MOS override is not yet supported (a
+    caller needing one should use ``deck`` instead, whose curated table
+    already covers every family).
     """
-    resolved: dict[str, str] = {}
+    resolved: dict[str, DeviceLookup] = {}
     if deck is not None:
         try:
-            resolved.update(build_subckt_to_class_map(deck))
+            resolved.update(build_device_binding_map(deck))
         except ModelBindingError as exc:
             raise NormalizeError(str(exc)) from exc
     if device_map:
-        resolved.update(device_map)
+        resolved.update(
+            {
+                name: DeviceLookup("mos", device_class, "l", "w")
+                for name, device_class in device_map.items()
+            }
+        )
     return resolved or None
 
 
@@ -360,7 +665,7 @@ def normalize_reference_netlist(
     device lines converts correctly. Raises :class:`NormalizeError` for any
     device card that cannot be converted correctly and unambiguously.
     """
-    subckt_to_class = _build_subckt_map(deck, device_map)
+    subckt_to_binding = _build_subckt_map(deck, device_map)
     logical_lines = _merge_continuations(text.splitlines())
 
     out: list[str] = []
@@ -371,7 +676,7 @@ def normalize_reference_netlist(
             continue
         first = stripped.split(None, 1)[0]
         if first and first[0] in "Xx":
-            out.append(_convert_x_card(line, subckt_to_class))
+            out.append(_convert_x_card(line, subckt_to_binding))
         else:
             out.append(line)
     return "\n".join(out) + "\n"
@@ -388,8 +693,13 @@ def detect_subckt_call_devices(text: str) -> list[str]:
     device subcircuit that *is* defined in the file is not reported -- the
     reader can at least read it as a subcircuit, a different (out-of-scope)
     case.
+
+    Covers every curated device family (issue #1130: MOS, resistor,
+    capacitor, bipolar), not just MOS -- a reference netlist whose only
+    subckt-call devices are e.g. resistors is now detected the same way a
+    MOS-only one always was.
     """
-    known = known_mos_subckt_names()
+    known = known_device_subckt_names()
     defined: set[str] = set()
     used: list[str] = []
     seen: set[str] = set()
