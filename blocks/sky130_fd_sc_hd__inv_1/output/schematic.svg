@@ -10,22 +10,17 @@
     Theme-aware convention (site/README.md "Schematic section"): this file
     is staged and loaded via a plain <img> tag, so `currentColor` would NOT
     inherit the host page's text color (an <img>-loaded SVG is its own
-    document, not inlined into the page DOM). Instead this stylesheet
-    defaults to a dark-on-transparent palette that reads on a light
-    background (e.g. GitHub's raw SVG viewer) and switches to a light-on-
-    transparent palette under `prefers-color-scheme: dark` (matching this
-    site's always-dark theme for most visitors) -- never a single baked-in
-    black-on-white pairing.
+    document, not inlined into the page DOM), and `prefers-color-scheme`
+    tracks the visitor's OS rather than this site's own (always-dark, no
+    light mode) theme -- so this stylesheet uses a single mid-tone palette
+    that clears the WCAG 3:1 non-text contrast threshold against both this
+    site's dark background and a light background (e.g. GitHub's raw SVG
+    viewer), with no media query and no baked-in light/dark pairing.
   -->
   <style>
-    .wire, .body { stroke: #1f2430; fill: none; stroke-width: 2; stroke-linecap: round; }
-    .dot { fill: #1f2430; }
-    .label { fill: #1f2430; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
-    @media (prefers-color-scheme: dark) {
-      .wire, .body { stroke: #c6cdd6; }
-      .dot { fill: #c6cdd6; }
-      .label { fill: #c6cdd6; }
-    }
+    .wire, .body { stroke: #6b7280; fill: none; stroke-width: 2; stroke-linecap: round; }
+    .dot { fill: #6b7280; }
+    .label { fill: #6b7280; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
   </style>
 
   <!-- VDD rail -->

@@ -110,8 +110,10 @@ alongside every other artifact; `DetailPage.tsx` renders it in a
 "Schematic" section above the layer renders when present (omitted entirely
 otherwise). See [`../site/README.md`](../site/README.md#schematic-section-issue-1121)
 for the full staging convention, including the theme rule diagrams must
-follow (self-contained light/dark styling — the file is loaded via `<img>`,
-so it cannot inherit the host page's CSS). `sky130_fd_sc_hd__inv_1` carries
+follow (a single self-contained mid-tone palette, no `prefers-color-scheme`
+— the file is loaded via `<img>`, so it cannot inherit the host page's CSS,
+and the OS-tracked media query doesn't match this always-dark site's own
+theme). `sky130_fd_sc_hd__inv_1` carries
 the seed diagram — a hand-drawn 2-transistor CMOS inverter topology; the
 content-production issues for analog (xschem export, #1122) and
 standard-cell (PDK-netlist-derived, #1123) diagrams stage into this same

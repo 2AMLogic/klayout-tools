@@ -219,14 +219,20 @@ from an external tool/repo) or "drawn from `<PDK>` netlist `<file>@<hash>`"
 so **`currentColor` in the SVG does NOT inherit the host page's text
 color** — an `<img>`-loaded SVG renders as its own document, not inlined
 into the page DOM, so page CSS custom properties/`currentColor` never reach
-it. Diagrams MUST therefore be self-contained and readable on both a light
-background (e.g. GitHub's raw SVG viewer, other embeds) and this site's own
-dark theme, using an inline `<style>` block with a
-`@media (prefers-color-scheme: dark)` override — never a single baked-in
-black-on-white (or white-on-black) color pairing. See
+it. `prefers-color-scheme` is **not** a substitute: it tracks the visitor's
+OS/browser setting, not this site's own theme, and this site is always dark
+with no `prefers-color-scheme`/`color-scheme` switching of its own — a
+diagram that keys its palette to that media query goes invisible for any
+visitor whose OS is set to light (or has no preference), which is the
+common case, not an edge case. Diagrams MUST therefore use a single
+mid-tone, self-contained palette (no media query) that clears the WCAG 3:1
+non-text contrast threshold against both this site's dark background and a
+light background (e.g. GitHub's raw SVG viewer, other embeds) — never a
+light/dark pairing switched by `prefers-color-scheme`, and never a single
+baked-in black-on-white (or white-on-black) color pairing. See
 `blocks/sky130_fd_sc_hd__inv_1/output/schematic.svg` for a worked example
-(the seed diagram, an inverter's 2-transistor CMOS topology) and its
-in-file comment explaining the convention in full.
+(the seed diagram, an inverter's 2-transistor CMOS topology, using `#6b7280`)
+and its in-file comment explaining the convention in full.
 
 ### SPICE model decks (playground, phase A)
 
