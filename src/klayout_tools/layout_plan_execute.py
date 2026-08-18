@@ -546,16 +546,46 @@ def _abutment_target_offset(
     return offset
 
 
+def _group_min_spacing_um(generator_report: dict[str, Any]) -> float:
+    """Extract a generated group's own declared minimum same-layer spacing
+    (``generator_report.drc_hints.min_spacing_um``) -- mirrors
+    ``gen_compose._parse_blocks``'s identical parsing so both modules treat
+    an absent/unusable value the same way: "no clearance claimed" (``0.0``),
+    never an error.
+    """
+    drc_hints = generator_report.get("drc_hints")
+    if not isinstance(drc_hints, dict):
+        return 0.0
+    spacing = drc_hints.get("min_spacing_um")
+    if isinstance(spacing, bool) or not isinstance(spacing, (int, float)):
+        return 0.0
+    return max(0.0, float(spacing))
+
+
 def _resolve_placement(
     rows: list[dict[str, Any]],
     abutment: list[dict[str, Any]],
     bboxes_um: dict[str, dict[str, float]],
     group_ids: set[str],
+    min_spacing_um_by_group: dict[str, float],
 ) -> tuple[dict[str, dict[str, float]], list[str]]:
     """Row-of-rows placement (compiled onto ``gen_compose.compute_row_offsets``
     per row, then stacked vertically by each preceding row's tallest group),
     followed by ``abutment[]`` applied as a final constraint pass -- see the
     module docstring's "core idea" and scope decision 4.
+
+    **Inter-row margin (issue #1170).** Before stacking a row on top of the
+    previous one, an inter-row margin is added to ``cumulative_y``: a row's
+    own explicit ``rows[].margin_um`` (parsed by
+    :func:`klayout_tools.layout_plan._parse_rows`) wins when set (``0.0`` is
+    a legitimate, explicit "stack flush" choice, distinct from "unset");
+    otherwise it defaults to the tallest ``min_spacing_um_by_group`` value
+    declared by any group in either the previous row or this row, so a
+    default (no explicit ``margin_um``) multi-row plan no longer stacks
+    vertically-adjacent groups at exactly ``0.00um`` and trips
+    ``gen_compose``'s own "closer than declared drc_hints.min_spacing_um"
+    clearance warning. The first row has no predecessor, so no margin is
+    added before it.
 
     Raises :class:`LayoutPlanExecuteError` if any ``group_ids`` entry is
     unreachable from ``rows[]``/``abutment[]`` (scope decision 2).
@@ -564,8 +594,20 @@ def _resolve_placement(
     offsets_um: dict[str, dict[str, float]] = {}
 
     cumulative_y = 0.0
+    previous_row_order: list[str] | None = None
     for row in rows:
         order = row["order"]
+        if previous_row_order is not None:
+            margin_um = row.get("margin_um")
+            if margin_um is None:
+                margin_um = max(
+                    (
+                        min_spacing_um_by_group.get(group_id, 0.0)
+                        for group_id in (*previous_row_order, *order)
+                    ),
+                    default=0.0,
+                )
+            cumulative_y += margin_um
         x_offsets = compute_row_offsets(order, bboxes_um, row["spacing_um"])
         row_height = max(
             bboxes_um[group_id]["y1"] - bboxes_um[group_id]["y0"] for group_id in order
@@ -581,6 +623,7 @@ def _resolve_placement(
                 y = (cumulative_y + row_height / 2) - (bbox["y0"] + bbox["y1"]) / 2
             offsets_um[group_id] = {"x": x_offsets[group_id]["x"], "y": y}
         cumulative_y += row_height
+        previous_row_order = order
 
     pending = list(abutment)
     made_progress = True
@@ -720,8 +763,16 @@ def execute_layout_plan(
             group["id"]: generated[group["id"]]["bbox_um"] for group in device_groups
         }
         group_ids = {group["id"] for group in device_groups}
+        min_spacing_um_by_group = {
+            group_id: _group_min_spacing_um(generated[group_id])
+            for group_id in group_ids
+        }
         offsets_um, placement_warnings = _resolve_placement(
-            validated["rows"], validated["abutment"], bboxes_um, group_ids
+            validated["rows"],
+            validated["abutment"],
+            bboxes_um,
+            group_ids,
+            min_spacing_um_by_group,
         )
         warnings.extend(placement_warnings)
 

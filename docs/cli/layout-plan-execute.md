@@ -37,7 +37,10 @@ machinery:
    vertically) onto [`klt gen-compose`](gen-compose.md)'s existing
    `"explicit"` placement strategy: each row's horizontal offsets reuse
    `compute_row_offsets` unchanged; rows stack vertically by each
-   preceding row's tallest group, with no additional inter-row margin.
+   preceding row's tallest group, plus an inter-row margin (`rows[].margin_um`,
+   or a declared-spacing default — see "Row-of-rows placement and abutment"
+   below) so vertically-adjacent groups no longer default to `0.00um`
+   separation (issue #1170).
 3. **Abutment as a placement constraint** — `abutment[]` (edge-to-edge,
    with a declared `gap_um`) is solved entirely in this module, as a
    translation applied on top of the row-of-rows result, before
@@ -212,11 +215,21 @@ unconditionally; see "Response" below.
 `rows[]` compiles onto `gen-compose`'s `"explicit"` placement strategy
 exactly as the spike's section 3 describes: per row,
 `compute_row_offsets()` computes horizontal offsets unchanged; rows then
-stack vertically, each row's baseline sitting exactly at the running total
-of every preceding row's tallest group's height (no additional inter-row
-margin — the spike names none). `rows[].align` (`"bottom"`/`"top"`/
-`"center"`) positions each group within its own row's vertical band
-relative to the row's tallest member.
+stack vertically, each row's baseline sitting at the running total of
+every preceding row's tallest group's height, **plus an inter-row
+margin** (issue #1170) added before every row after the first.
+`rows[].margin_um`, when set explicitly (including `0.0`, a caller's
+deliberate flush-stack choice), always wins; when left unset (the
+default), the margin defaults to the larger of the two adjacent rows'
+groups' own declared `drc_hints.min_spacing_um` (the same value `klt gen`
+generators already report, and the same field `gen-compose`'s own
+`"explicit"`-placement clearance advisory reads — see
+[`gen-compose.md`](gen-compose.md)). This is why a default (no explicit
+`margin_um`) multi-row plan no longer stacks vertically-adjacent groups at
+exactly `0.00um` separation, and no longer trips that advisory's "closer
+than declared `drc_hints.min_spacing_um`" warning by default. `rows[].align`
+(`"bottom"`/`"top"`/`"center"`) positions each group within its own row's
+vertical band relative to the row's tallest member.
 
 `abutment[]` is resolved as a final constraint pass, once every `rows[]`-
 listed group has an offset: for a pair `{a, b, edge, gap_um}`, the side that
