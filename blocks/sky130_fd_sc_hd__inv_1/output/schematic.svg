@@ -12,16 +12,30 @@
     inherit the host page's text color (an <img>-loaded SVG is its own
     document, not inlined into the page DOM), and `prefers-color-scheme`
     tracks the visitor's OS rather than this site's own (always-dark, no
-    light mode) theme -- so this stylesheet uses a single mid-tone palette
-    that clears the WCAG 3:1 non-text contrast threshold against both this
-    site's dark background and a light background (e.g. GitHub's raw SVG
-    viewer), with no media query and no baked-in light/dark pairing.
+    light mode) theme, so this diagram paints a self-contained background
+    `<rect>` (#0b0e13, the site's own night background) covering the full
+    viewBox. Once the diagram supplies its own backdrop, contrast no longer
+    depends on the host page at all: the SAME two foreground colors clear
+    WCAG AA against that fixed background everywhere the SVG is viewed
+    (this site, GitHub's raw SVG viewer, any future embed), with no media
+    query and no light/dark pairing. A flat palette with no background rect
+    cannot do this: clearing WCAG AA text contrast (4.5:1) against both
+    `#0b0e13` and white simultaneously is mathematically impossible (the
+    best any single flat color can do across both is 4.40:1); painting
+    a fixed background removes the "both" requirement entirely. Computed
+    against this rect's #0b0e13 (relative luminance 0.00432):
+      - `.label` text (#8d97a5, 15px) -> relative luminance 0.30513 ->
+        contrast 6.537:1, clears the 4.5:1 AA text threshold.
+      - `.wire`/`.body`/`.dot` (#6b7280) -> relative luminance 0.16719 ->
+        contrast 3.998:1, clears the 3:1 AA non-text threshold.
   -->
   <style>
     .wire, .body { stroke: #6b7280; fill: none; stroke-width: 2; stroke-linecap: round; }
     .dot { fill: #6b7280; }
-    .label { fill: #6b7280; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+    .label { fill: #8d97a5; font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
   </style>
+
+  <rect class="bg" x="0" y="0" width="260" height="380" fill="#0b0e13" />
 
   <!-- VDD rail -->
   <line class="wire" x1="50" y1="40" x2="210" y2="40" />

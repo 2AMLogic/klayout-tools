@@ -224,15 +224,30 @@ OS/browser setting, not this site's own theme, and this site is always dark
 with no `prefers-color-scheme`/`color-scheme` switching of its own — a
 diagram that keys its palette to that media query goes invisible for any
 visitor whose OS is set to light (or has no preference), which is the
-common case, not an edge case. Diagrams MUST therefore use a single
-mid-tone, self-contained palette (no media query) that clears the WCAG 3:1
-non-text contrast threshold against both this site's dark background and a
-light background (e.g. GitHub's raw SVG viewer, other embeds) — never a
-light/dark pairing switched by `prefers-color-scheme`, and never a single
-baked-in black-on-white (or white-on-black) color pairing. See
+common case, not an edge case. Diagrams MUST therefore paint their own
+**self-contained background `<rect>`** covering the full `viewBox`, rather
+than relying on a single flat palette to clear contrast against whatever
+backdrop the host happens to provide. This isn't a style preference: WCAG
+AA text contrast (4.5:1) against both `#0b0e13` (this site) and white
+(GitHub's raw SVG viewer) simultaneously requires a relative luminance
+that is at once `>= 0.1944` and `<= 0.1833` — no color satisfies both, so
+the best any single flat foreground color can achieve across both
+backdrops is a 4.40:1 ceiling, under the AA text threshold. A
+self-contained background rect removes the "clears both backdrops"
+requirement entirely — once the diagram paints its own backdrop, contrast
+is fixed and no longer depends on the host page, identically on this site,
+in GitHub's raw viewer, or in any future embed. Diagrams MUST therefore use
+a background `<rect>` plus a small self-contained palette (no media query,
+no light/dark pairing) picked to clear WCAG AA against *that rect*: >= 4.5:1
+for text, >= 3:1 for wires/bodies/other non-text strokes. See
 `blocks/sky130_fd_sc_hd__inv_1/output/schematic.svg` for a worked example
-(the seed diagram, an inverter's 2-transistor CMOS topology, using `#6b7280`)
-and its in-file comment explaining the convention in full.
+(the seed diagram, an inverter's 2-transistor CMOS topology): a `#0b0e13`
+background rect (this site's own night background, relative luminance
+0.00432), `#8d97a5` label text (relative luminance 0.30513, 6.537:1 against
+the rect — clears the 4.5:1 AA text threshold), and `#6b7280` wires/bodies/
+dots (relative luminance 0.16719, 3.998:1 against the rect — clears the 3:1
+AA non-text threshold). See that file's in-file comment for the full
+convention and the computed contrast ratios.
 
 ### SPICE model decks (playground, phase A)
 
