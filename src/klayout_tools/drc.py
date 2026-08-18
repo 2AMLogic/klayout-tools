@@ -45,7 +45,9 @@ from typing import Any
 
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
-from ._provenance import build_provenance
+from ._provenance import _content_hash, build_provenance
+from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
     DrcRule,
     UnknownDeckError,
@@ -761,6 +763,114 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
             input_path=path,
         ),
     }
+
+
+def _deck_path_for_report(committed: dict[str, Any]) -> str | None:
+    """The on-disk deck path a committed ``klt drc`` report's own ``deck``
+    field names, for re-hashing (issue #1106).
+
+    ``--engine curated`` reports store the deck *name* (``"sky130"``, ...)
+    under ``deck`` -- resolved to a source-module path via
+    :func:`deck_source_path`, exactly as :func:`run_drc` itself does when it
+    first builds ``provenance.deck.content_hash``. ``--engine klayout``
+    reports (``committed["engine"] == "klayout"``) instead store the deck
+    *script's own path* directly under ``deck`` (see
+    :func:`run_drc_klayout_engine`'s docstring -- there is no separate short
+    name for an arbitrary PDK-native script), so it is used as-is.
+    """
+    deck = committed.get("deck")
+    if deck is None:
+        return None
+    if committed.get("engine") == "klayout":
+        return deck
+    return deck_source_path(deck)
+
+
+def check_drc_report(report_path: str) -> dict[str, Any]:
+    """``klt drc --check`` (cheap mode, issue #1106): verify a previously
+    committed ``klt drc --format json`` report at ``report_path`` still
+    reproduces, without re-running the DRC engine at all.
+
+    Re-hashes the input layout stream (``committed["file"]``) and the deck
+    (:func:`_deck_path_for_report`) named in the committed report and
+    compares each against the ``sha256:``-prefixed digest already recorded
+    in its own ``provenance.input.content_hash``/``provenance.deck
+    .content_hash`` -- reusing :func:`klayout_tools._provenance
+    .sha256_file`/its internal ``sha256:``-prefixing convention, never
+    reimplementing hashing (see ``_provenance.py``). Returns the shared
+    ``--check`` payload built by
+    :func:`klayout_tools._report_verify.build_check_result`: ``status:
+    "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
+    otherwise. A recorded hash that is itself ``None`` (a report predating
+    issue #331, before ``provenance.input``/``deck.content_hash`` existed)
+    never counts as a match -- see
+    :func:`klayout_tools._report_verify.hash_check`'s docstring.
+
+    Raises :class:`DrcError` for a missing/unparseable committed report
+    (:func:`klayout_tools._report_verify.load_committed_report`) -- never a
+    traceback.
+    """
+    committed = _load_committed_report(report_path, DrcError)
+    checks = [
+        hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            _content_hash(committed.get("file")),
+        ),
+        hash_check(
+            "provenance.deck.content_hash",
+            get_path(committed, ("provenance", "deck", "content_hash")),
+            _content_hash(_deck_path_for_report(committed)),
+        ),
+    ]
+    return build_check_result(report_path=report_path, checks=checks)
+
+
+def rerun_drc_report(report_path: str) -> dict[str, Any]:
+    """``klt drc --check <report> --rerun`` (full mode, issue #1106):
+    verify a previously committed ``klt drc --format json`` report at
+    ``report_path`` by actually re-running the DRC deck it names and
+    diffing the fresh report against the committed one.
+
+    Re-runs against exactly the ``file``/``deck``/``engine`` the committed
+    report itself names -- :func:`run_drc_klayout_engine` when
+    ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
+    engine) otherwise. **Known limitation**: neither the curated nor the
+    ``klayout`` engine's report records which ``--top`` (if any) the
+    original run used, so ``--rerun`` always re-checks every top cell
+    (``top=None``) -- a report originally scoped to one top cell via
+    ``--top`` will legitimately drift under ``--rerun`` if the stream has
+    others. Use ``--check`` (cheap mode) to avoid this if that matters.
+
+    Diffs the fresh report against the committed one via
+    :func:`klayout_tools._report_verify.diff_verdict_fields`, excluding
+    :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
+    fields that legitimately vary between runs of identical inputs).
+    ``status: "drifted"`` names every other field that changed, including a
+    changed ``violation_count``/``violations`` (the DRC-outcome-changed
+    case) as well as a changed ``provenance.input.content_hash`` (the
+    input-moved case ``--check`` also catches, redundantly but harmlessly
+    here since this mode always re-hashes as a side effect of re-running).
+
+    Raises :class:`DrcError` for a missing/unparseable committed report, a
+    report missing ``file``/``deck`` to rerun, or any error the rerun itself
+    raises (bad file, unknown deck, engine error) -- never a traceback.
+    """
+    committed = _load_committed_report(report_path, DrcError)
+    file_path = committed.get("file")
+    if not file_path:
+        raise DrcError(f"committed report has no 'file' field to rerun: {report_path}")
+    deck = committed.get("deck")
+    if not deck:
+        raise DrcError(f"committed report has no 'deck' field to rerun: {report_path}")
+
+    if committed.get("engine") == "klayout":
+        fresh = run_drc_klayout_engine(file_path, deck, top=None)
+    else:
+        fresh = run_drc(file_path, deck, top=None)
+
+    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 
 
 def _attribute_to_instance(

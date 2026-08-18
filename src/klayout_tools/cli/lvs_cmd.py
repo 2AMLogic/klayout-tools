@@ -4,27 +4,54 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/lvs.md`` for the full table):
-    0 - LVS clean, layout matches reference (``status: "match"``)
+    0 - LVS clean, layout matches reference (``status: "match"``), or under
+        --check, the committed report still holds (``status: "match"``)
     1 - failed to run (bad request, unresolvable layout/reference input,
         unknown deck, unsupported engine, engine error) -- returned by
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
-    3 - ran successfully, mismatches found (``status: "mismatch"``)
+    3 - ran successfully, mismatches found (``status: "mismatch"``), or
+        under --check, drifted (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. This is the same 0/1/2/3 split as ``klt drc``, not ``klt sim``'s
 3/4 split -- LVS is a clean/dirty verdict like DRC, with no third "ran but
 untrustworthy" outcome; see docs/cli/lvs.md's "Exit codes" section.)
+
+``--check <report>`` (issue #1106) switches ``klt lvs`` from running a fresh
+compare into *verifying a previously committed* ``--format json`` report
+still reproduces -- see ``docs/cli/lvs.md``, "--check" -- and is mutually
+exclusive with the positional ``request`` argument (inputs are read from the
+committed report itself). Cheap mode (default): re-hash the layout/
+reference netlists (and extraction deck, when one was used) named in the
+report and compare against its own recorded hash values, no compare engine
+re-run. Full mode (``--check <report> --rerun``): best-effort re-run of the
+compare the report describes and diff verdict-bearing fields. Both reuse
+``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
+normal run (see ``klayout_tools._report_verify``).
 """
 
 import argparse
 
-from ..lvs import LvsError, run_lvs
+from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 from .output import emit_error, emit_success
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 3
+#: Aliases for the --check/--rerun outcome (issue #1106) -- same numeric
+#: values as a normal run's 0/3 split (see this module's docstring), just
+#: named for the "match"/"drifted" vocabulary those modes report under.
+EXIT_DRIFTED = EXIT_MISMATCH
 
 
 def run(args: argparse.Namespace) -> int:
+    # `request` and `--check` are a required, mutually exclusive argparse
+    # group (parser.py) -- omitting both, or giving both, is already a usage
+    # error (exit 2) by the time `run()` is ever called.
+    if args.check is not None:
+        return _run_check(args)
+
+    if args.rerun:
+        return emit_error("lvs", "--rerun requires --check <report>", args.format)
+
     try:
         report = run_lvs(args.request)
     except LvsError as exc:
@@ -33,6 +60,21 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     return EXIT_MISMATCH if report["status"] == "mismatch" else EXIT_MATCH
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    try:
+        if args.rerun:
+            result = rerun_lvs_report(args.check)
+        else:
+            result = check_lvs_report(args.check)
+    except LvsError as exc:
+        return emit_error("lvs", str(exc), args.format)
+
+    text_renderer = _print_rerun_text if args.rerun else _print_check_text
+    emit_success(result, args.format, text_renderer)
+
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
 def _print_text(report: dict) -> None:
@@ -73,3 +115,28 @@ def _print_text(report: dict) -> None:
             f"[{entry['severity']}] {entry['category']}  ({entry['side']})  "
             f"{entry['description']}"
         )
+
+
+def _print_check_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            print(f"      actual:   {check['actual']}")
+
+
+def _print_rerun_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    drift = result["drift"]
+    if not drift:
+        return
+    print()
+    print("drift:")
+    for entry in drift:
+        print(f"  {entry['field']}:")
+        print(f"      committed: {entry['committed']!r}")
+        print(f"      fresh:     {entry['fresh']!r}")

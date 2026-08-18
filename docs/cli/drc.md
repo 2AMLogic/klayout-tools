@@ -6,6 +6,7 @@ report violations as structured data.
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2 [--top <cell>] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
+klt drc --check <report.json> [--rerun] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -28,6 +29,12 @@ klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-roo
   `klt lef-abstract`'s `--pdk`/`--pdk-root`, see [`klt pdk`](pdk.md)).
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
+- `--check` — verify a previously committed `--format json` report instead
+  of running a fresh check (issue #1106). Mutually exclusive with `<file>`
+  (the input path is read from the report itself) — see "`--check` /
+  `--rerun`" below.
+- `--rerun` — full mode for `--check`: actually re-run the DRC deck the
+  report names, instead of only re-hashing its inputs. Requires `--check`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -1142,14 +1149,112 @@ directly-runnable native deck instead — a DRC/LVS split, not a contradiction
 — see [`docs/cli/extract.md`](extract.md)'s "gf180mcu native-deck LVS
 device-extraction cross-check" section.
 
+## `--check` / `--rerun`
+
+A `klt drc --format json` report is often committed as evidence alongside a
+design (e.g. as a `klt signoff` manifest citation), but nothing previously
+let a consumer *verify* that a committed report still reproduces against the
+current input/deck/tool version without hand-rolling a normalize-and-diff
+(issue #1106). `klt drc --check <report.json>` closes that gap:
+
+```
+klt drc --check design.drc.json                  # cheap mode (default)
+klt drc --check design.drc.json --rerun           # full mode
+```
+
+`--check` is mutually exclusive with the positional `<file>` argument (and
+with `--deck`/`--top`/`--engine`/etc., which are ignored) — the input path,
+deck, and engine are all read from `<report.json>` itself, not given again
+on the command line.
+
+### Cheap mode (default)
+
+Re-hashes the input layout stream and the deck named in the committed
+report's own `provenance` block (reusing
+`klayout_tools._provenance.sha256_file`, never reimplementing hashing) and
+compares each against the `sha256:`-prefixed digest the report already
+recorded — **no DRC engine re-run**. Response shape:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "report": "design.drc.json",
+  "status": "match",
+  "checks": [
+    {
+      "field": "provenance.input.content_hash",
+      "expected": "sha256:<hex>",
+      "actual": "sha256:<hex>",
+      "match": true
+    },
+    {
+      "field": "provenance.deck.content_hash",
+      "expected": "sha256:<hex>",
+      "actual": "sha256:<hex>",
+      "match": true
+    }
+  ]
+}
+```
+
+`status` is `"match"` only when every `checks[]` entry's `match` is `true`.
+A report with no recorded hash to compare against (e.g. one produced before
+issue #331 added `provenance.input`) always renders that check
+`match: false` — a missing baseline is never treated as a pass (mirrors
+`klt signoff`'s `_grade_evidence()` "never a false pass" discipline).
+
+### Full mode (`--rerun`)
+
+Actually re-runs the DRC deck the committed report names (the curated engine
+via `run_drc`, or `run_drc_klayout_engine` when the report's own `engine`
+field is `"klayout"`) and diffs the fresh report against the committed one,
+field by field. `provenance.klt_version`/`provenance.klayout_version`/
+`provenance.pdk.version` are excluded from the diff — these legitimately
+vary between two runs of identical inputs on different tool
+installs/PDK snapshots; every other field (including `status`,
+`violation_count`, `violations`, and the hashes cheap mode also checks) is
+load-bearing. Response shape:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "rerun",
+  "report": "design.drc.json",
+  "status": "drifted",
+  "drift": [
+    { "field": "status", "committed": "clean", "fresh": "violations" },
+    { "field": "violation_count", "committed": 0, "fresh": 1 }
+  ],
+  "fresh": { "...": "the freshly produced klt drc report, full shape" }
+}
+```
+
+`status` is `"match"` only when `drift` is empty. `fresh` embeds the
+complete report `--rerun` just produced, so a consumer can inspect the
+current state without a second invocation.
+
+**Known limitation**: neither engine's report records which `--top` (if
+any) the original run used, so `--rerun` always re-checks every top cell —
+a report originally scoped to one top cell via `--top` can legitimately
+drift under `--rerun` if the stream has others. Use cheap mode if that
+matters.
+
+### Exit codes for `--check` / `--rerun`
+
+Both modes reuse the same 0/3 split a normal run uses: `0` when `status` is
+`"match"`, `3` when it is `"drifted"` (see "Exit codes" below). A missing or
+unparseable `<report.json>` exits `1` with a clean error message, same as
+any other application-level failure.
+
 ## Exit codes
 
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
-| `0`  | Ran clean — no violations.                                   |
-| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error. |
-| `2`  | Usage error (missing argument, bad `--format` value) — from argparse. |
-| `3`  | Ran successfully, violations found.                          |
+| `0`  | Ran clean — no violations. Under `--check`: the committed report still holds (`status: "match"`). |
+| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error. Under `--check`: a missing/unparseable committed report. |
+| `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
+| `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 
 `2` is deliberately **not** reused for "violations found" even though some
 DRC tools use a 2-way error/warning split on that code: `2` is already

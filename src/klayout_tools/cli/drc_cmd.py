@@ -4,10 +4,10 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand — see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/drc.md`` for the full table):
-    0 - ran clean, no violations
+    0 - ran clean, no violations (or, under --check, the report still holds)
     1 - failed to run (bad file, unknown deck, engine error) — returned by
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
-    3 - ran successfully, violations found
+    3 - ran successfully, violations found (or, under --check, drifted)
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 
 ``--engine`` (issue #565) selects between the default curated engine
@@ -17,19 +17,50 @@ the standalone ``klayout`` application binary running a PDK-native DRC-DSL
 script) -- see ``docs/cli/drc.md``, "Engine". Unlike ``klt lvs``'s
 request-body ``engine`` field, ``klt drc`` has no request-document
 precedent (its flags are argv-only), so this is a CLI flag instead.
+
+``--check <report>`` (issue #1106) switches ``klt drc`` from running a fresh
+DRC into *verifying a previously committed* ``--format json`` report still
+reproduces -- see ``docs/cli/drc.md``, "--check" -- and is mutually exclusive
+with the positional ``file`` argument (the input path is read from the
+committed report itself). Cheap mode (default): re-hash the input/deck named
+in the report and compare against its own recorded ``content_hash`` values,
+no DRC engine re-run. Full mode (``--check <report> --rerun``): actually
+re-run the deck the report names and diff verdict-bearing fields. Both reuse
+``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
+normal run (see ``klayout_tools._report_verify``).
 """
 
 import argparse
 
 from .. import pdk as pdk_module
-from ..drc import DrcError, run_drc, run_drc_klayout_engine
+from ..drc import (
+    DrcError,
+    check_drc_report,
+    rerun_drc_report,
+    run_drc,
+    run_drc_klayout_engine,
+)
 from .output import emit_error, emit_success
 
 EXIT_CLEAN = 0
 EXIT_VIOLATIONS = 3
+#: Aliases for the --check/--rerun outcome (issue #1106) -- same numeric
+#: values as a normal run's 0/3 split (see this module's docstring), just
+#: named for the "match"/"drifted" vocabulary those modes report under.
+EXIT_MATCH = EXIT_CLEAN
+EXIT_DRIFTED = EXIT_VIOLATIONS
 
 
 def run(args: argparse.Namespace) -> int:
+    # `file` and `--check` are a required, mutually exclusive argparse group
+    # (parser.py) -- omitting both, or giving both, is already a usage error
+    # (exit 2) by the time `run()` is ever called.
+    if args.check is not None:
+        return _run_check(args)
+
+    if args.rerun:
+        return emit_error("drc", "--rerun requires --check <report>", args.format)
+
     try:
         report = _run(args)
     except DrcError as exc:
@@ -40,6 +71,23 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     return EXIT_VIOLATIONS if report["status"] == "violations" else EXIT_CLEAN
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    try:
+        if args.rerun:
+            result = rerun_drc_report(args.check)
+        else:
+            result = check_drc_report(args.check)
+    except DrcError as exc:
+        return emit_error("drc", str(exc), args.format)
+    except pdk_module.PdkNotFoundError as exc:
+        return emit_error("drc", str(exc), args.format)
+
+    text_renderer = _print_rerun_text if args.rerun else _print_check_text
+    emit_success(result, args.format, text_renderer)
+
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
 def _run(args: argparse.Namespace) -> dict:
@@ -94,3 +142,28 @@ def _print_text(report: dict) -> None:
             f"({bbox['left']},{bbox['bottom']})-({bbox['right']},{bbox['top']})  "
             f"{entry['description']}"
         )
+
+
+def _print_check_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            print(f"      actual:   {check['actual']}")
+
+
+def _print_rerun_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    drift = result["drift"]
+    if not drift:
+        return
+    print()
+    print("drift:")
+    for entry in drift:
+        print(f"  {entry['field']}:")
+        print(f"      committed: {entry['committed']!r}")
+        print(f"      fresh:     {entry['fresh']!r}")

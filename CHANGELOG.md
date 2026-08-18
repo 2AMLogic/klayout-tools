@@ -750,6 +750,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-18 — `klt drc`/`klt lvs` gain **`--check <report.json>`** (issue
+  #1106): verify a previously committed `--format json` report still
+  reproduces, instead of hand-rolling a normalize-and-diff. Cheap mode
+  (default) re-hashes the input(s)/deck the committed report names
+  (`provenance.input.content_hash`/`provenance.deck.content_hash` for
+  `drc`; `environment.layout_sha256`/`environment.reference_sha256`/
+  `provenance.deck.content_hash` for `lvs`) and compares against the
+  values the report already recorded — no engine re-run. Combine with
+  `--rerun` for full mode: actually re-run the analysis and diff every
+  verdict-bearing field between the fresh and committed reports, excluding
+  `provenance.klt_version`/`klayout_version`/`pdk.version` (fields that
+  legitimately vary between runs of identical inputs). Both modes report
+  `status: "match"` (exit `0`) or `"drifted"` (exit `3`, naming which
+  field(s) moved) through the standard envelope. `--check` is mutually
+  exclusive with the normal positional input (`klt drc`'s `<file>`, `klt
+  lvs`'s `<request>`) — a required, mutually exclusive argparse group, so
+  omitting or combining both remains a usage error (exit `2`), unchanged
+  from the pre-#1106 contract. Purely additive: no existing field or exit
+  code changes meaning for a normal (non-`--check`) run. See
+  `docs/cli/drc.md`/`docs/cli/lvs.md`, "`--check` / `--rerun`".
 - 2026-08-17 — New verb **`klt sta`** (issue #1099): standalone timing/power
   analysis of an already-implemented (placed & routed) design, independent
   of `klt place-and-route`'s own in-flow STA. Previously the only way to

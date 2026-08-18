@@ -102,6 +102,7 @@ indistinguishable from one where the numbers actually agreed.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -112,7 +113,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import build_provenance, sha256_file
+from ._provenance import _content_hash, build_provenance, sha256_file
+from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -973,6 +976,160 @@ def run_lvs(request: str) -> dict[str, Any]:
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,
     }
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #1106)
+# --------------------------------------------------------------------------- #
+
+
+def check_lvs_report(report_path: str) -> dict[str, Any]:
+    """``klt lvs --check`` (cheap mode, issue #1106): verify a previously
+    committed ``klt lvs --format json`` report at ``report_path`` still
+    reproduces, without re-running the compare engine at all.
+
+    Reconciles all three hashes LVS's own envelope carries (unlike ``klt
+    drc``'s single input hash -- see this module's ``environment``/
+    ``provenance.deck`` docstrings): re-hashes ``committed["layout"]`` and
+    ``committed["reference"]`` (the paths exactly as echoed back by the
+    original run) via :func:`klayout_tools._provenance.sha256_file` and
+    compares each against ``environment.layout_sha256``/
+    ``environment.reference_sha256``; when the committed report used an
+    extraction deck (``provenance.deck`` is non-``null``), also re-hashes
+    that deck's source (:func:`~klayout_tools.decks.deck_source_path`) and
+    compares against ``provenance.deck.content_hash``. Each mismatch names
+    which of the (up to three) inputs moved -- never a single pass/fail bit.
+
+    **Known limitation**: ``committed["layout"]``/``["reference"]`` are
+    echoed *exactly as given* in the original request document (see
+    :func:`run_lvs`'s docstring on ``layout_echo``/``reference_echo``),
+    which may have been relative to that request *file's own directory* --
+    not necessarily the current working directory. This re-hashes them
+    relative to the current working directory (the same convention ``klt
+    drc --check``'s ``file`` field uses); if the original request used
+    request-file-relative paths, invoke ``--check`` from that same
+    directory, or commit reports whose ``layout``/``reference`` are already
+    absolute paths.
+
+    Raises :class:`LvsError` for a missing/unparseable committed report --
+    never a traceback.
+    """
+    committed = _load_committed_report(report_path, LvsError)
+    checks = [
+        hash_check(
+            "environment.layout_sha256",
+            get_path(committed, ("environment", "layout_sha256")),
+            sha256_file(committed.get("layout")),
+        ),
+        hash_check(
+            "environment.reference_sha256",
+            get_path(committed, ("environment", "reference_sha256")),
+            sha256_file(committed.get("reference")),
+        ),
+    ]
+    deck = get_path(committed, ("provenance", "deck"))
+    if isinstance(deck, dict) and deck.get("name") is not None:
+        checks.append(
+            hash_check(
+                "provenance.deck.content_hash",
+                deck.get("content_hash"),
+                _content_hash(deck_source_path(deck["name"])),
+            )
+        )
+    return build_check_result(report_path=report_path, checks=checks)
+
+
+def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort reconstruction of a ``klt lvs`` request document from a
+    previously committed report, for :func:`rerun_lvs_report`.
+
+    Reconstructs the fields the response actually echoes: ``engine``,
+    ``layout`` (``file``+``deck``[+``deck_options``] when
+    ``provenance.deck`` is populated, else ``netlist`` -- the pre-extracted
+    ``layout.netlist`` shape is unambiguous *without* a deck, since only
+    ``layout.file`` and the ``layout.netlist``+``layout.deck`` combo, issue
+    #585, populate ``provenance.deck`` at all), ``reference.netlist``,
+    ``top`` (applied to both sides -- the response only ever records the
+    one resolved circuit name actually shared by both, ``report["top"]``),
+    and ``options.parameter_tolerance`` (echoed verbatim as the response's
+    own ``parameter_tolerance`` field).
+
+    **Known limitations** (not reconstructible from the response alone, so
+    silently omitted -- ``--rerun`` is best-effort, not a byte-exact
+    replay): the ``layout.netlist``+``layout.deck`` combo (issue #585) is
+    indistinguishable from plain ``layout.file`` inline extraction here --
+    both populate ``provenance.deck`` -- so this always reconstructs
+    ``layout.file``; that combo will fail loudly (a clean
+    :class:`LvsError` from the layout loader, not a silent wrong answer)
+    since ``committed["layout"]`` is actually a SPICE netlist, not a
+    layout stream, in that case. ``reference.form`` (a non-default
+    ``"subckt-call"`` reference), ``options.combine_devices``/
+    ``flatten_reference``/``flatten_layout``, ``layout.top_cell_pins``/
+    ``declared_pins``/``device_bulk`` are never echoed anywhere in the
+    response and are always omitted (reconstructed as each option's own
+    default). Use ``--check`` (cheap mode) instead when any of these apply.
+    """
+    deck = get_path(committed, ("provenance", "deck"))
+    has_deck = isinstance(deck, dict) and deck.get("name") is not None
+    top = committed.get("top")
+
+    layout_spec: dict[str, Any] = {"top": top} if top else {}
+    if has_deck:
+        layout_spec["file"] = committed.get("layout")
+        layout_spec["deck"] = deck["name"]
+        options = deck.get("options")
+        if options:
+            layout_spec["deck_options"] = options
+    else:
+        layout_spec["netlist"] = committed.get("layout")
+
+    reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
+    if top:
+        reference_spec["top"] = top
+
+    request: dict[str, Any] = {
+        "engine": committed.get("engine", "klayout"),
+        "layout": layout_spec,
+        "reference": reference_spec,
+    }
+    parameter_tolerance = committed.get("parameter_tolerance")
+    if parameter_tolerance is not None:
+        request["options"] = {"parameter_tolerance": parameter_tolerance}
+    return request
+
+
+def rerun_lvs_report(report_path: str) -> dict[str, Any]:
+    """``klt lvs --check <report> --rerun`` (full mode, issue #1106):
+    verify a previously committed ``klt lvs --format json`` report at
+    ``report_path`` by best-effort re-running the compare it describes
+    (:func:`_reconstruct_lvs_request` -- see its docstring for exactly
+    what is and isn't reconstructible from the response alone) and diffing
+    the fresh report against the committed one.
+
+    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
+    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
+    ``pdk`` is always ``null`` for LVS, so only the first two ever apply in
+    practice). ``status: "drifted"`` names every other changed field,
+    including a changed ``status``/``mismatch_count``/``mismatches`` (the
+    LVS-outcome-changed case) as well as changed
+    ``environment.layout_sha256``/``reference_sha256`` (the input-moved
+    case ``--check`` also catches, redundantly but harmlessly here since
+    this mode always re-hashes as a side effect of re-running).
+
+    Raises :class:`LvsError` for a missing/unparseable committed report, a
+    report missing ``layout``/``reference`` to rerun, or any error the
+    rerun itself raises -- never a traceback.
+    """
+    committed = _load_committed_report(report_path, LvsError)
+    if committed.get("layout") is None or committed.get("reference") is None:
+        raise LvsError(
+            f"committed report has no 'layout'/'reference' field to rerun: "
+            f"{report_path}"
+        )
+    request = _reconstruct_lvs_request(committed)
+    fresh = run_lvs(json.dumps(request))
+    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 
 
 # --------------------------------------------------------------------------- #

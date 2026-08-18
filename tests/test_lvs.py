@@ -6177,3 +6177,295 @@ def test_netgen_engine_real_binary_against_sg13g2_shaped_install(tmp_path):
 
     assert report["status"] == "match"
     assert report["mismatches"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `klt lvs --check` / `--rerun` (issue #1106): verify a committed report
+# --------------------------------------------------------------------------- #
+
+from klayout_tools.lvs import check_lvs_report, rerun_lvs_report  # noqa: E402
+
+
+def _write_report(path: Path, report: dict) -> str:
+    path.write_text(json.dumps(report))
+    return str(path)
+
+
+def _matching_netlist_request(tmp_path: Path) -> tuple[str, str]:
+    """A minimal pre-extracted-netlist (no deck) `klt lvs` request whose
+    layout/reference are byte-identical -- `status: "match"`, no deck
+    involved (mirrors `test_load_request_arg_inline_json_matches_file_form`).
+    Returns ``(layout_path, reference_path)``."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    return layout_path, reference_path
+
+
+def test_check_lvs_report_clean_pass(tmp_path):
+    """Cheap mode, pre-extracted-netlist form (no deck): unmutated
+    layout/reference re-hash to the recorded `environment.*_sha256` values
+    -- `status: "match"`, both checks `match: True`."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["status"] == "match"
+    fields = {check["field"] for check in result["checks"]}
+    assert fields == {"environment.layout_sha256", "environment.reference_sha256"}
+    assert all(check["match"] for check in result["checks"])
+
+
+def test_check_lvs_report_detects_moved_reference_hash(tmp_path):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    _write(Path(reference_path), _INVERTER_SPICE + "* mutated\n")
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["environment.reference_sha256"]["match"] is False
+    assert by_field["environment.layout_sha256"]["match"] is True
+
+
+def test_check_lvs_report_detects_moved_layout_hash(tmp_path):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    _write(Path(layout_path), _INVERTER_SPICE + "* mutated\n")
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["environment.layout_sha256"]["match"] is False
+
+
+def test_check_lvs_report_with_deck_checks_deck_hash(tmp_path):
+    """Inline extraction (`layout.file` + `layout.deck`) also reconciles
+    `provenance.deck.content_hash` -- the third hash issue #1106's design
+    question #2 calls out, beyond the two `environment.*_sha256` fields the
+    pre-extracted-netlist form alone exercises."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+    request = {
+        "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+        "reference": {"netlist": reference_path, "top": extracted["top"]},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    result = check_lvs_report(str(report_path))
+
+    fields = {check["field"] for check in result["checks"]}
+    assert "provenance.deck.content_hash" in fields
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.deck.content_hash"]["match"] is True
+
+
+def test_check_lvs_report_missing_file_raises(tmp_path):
+    with pytest.raises(LvsError, match="not found"):
+        check_lvs_report(str(tmp_path / "nope.json"))
+
+
+def test_check_lvs_report_malformed_json_raises(tmp_path):
+    report_path = tmp_path / "bad.json"
+    report_path.write_text("not json")
+    with pytest.raises(LvsError, match="not valid JSON"):
+        check_lvs_report(str(report_path))
+
+
+def test_rerun_lvs_report_clean_pass(tmp_path):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["status"] == "match"
+
+
+def test_rerun_lvs_report_detects_mismatch(tmp_path):
+    """A reference netlist mutated (a real parameter change, not a no-op
+    comment) after the report was committed drifts under full-mode
+    `--rerun`, naming `status`/`mismatch_count`/`mismatches` among the
+    drifted fields."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    _write(
+        Path(reference_path),
+        _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"),
+    )
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    drifted_fields = {entry["field"] for entry in result["drift"]}
+    assert "status" in drifted_fields
+    assert "mismatch_count" in drifted_fields
+    assert result["fresh"]["status"] == "mismatch"
+
+
+def test_rerun_lvs_report_excludes_volatile_provenance_fields(tmp_path):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    report["provenance"]["klt_version"] = "0.0.1-forged"
+    report["provenance"]["klayout_version"] = "0.0.1-forged"
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_lvs_report_missing_layout_reference_raises(tmp_path):
+    report_path = tmp_path / "bad.json"
+    _write_report(report_path, {"engine": "klayout"})
+    with pytest.raises(LvsError, match="layout.*reference"):
+        rerun_lvs_report(str(report_path))
+
+
+def test_cli_lvs_check_clean_exits_zero(tmp_path, capsys):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+    capsys.readouterr()
+
+    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "check"
+    assert data["status"] == "match"
+
+
+def test_cli_lvs_check_drifted_exits_three(tmp_path, capsys):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+    _write(Path(reference_path), _INVERTER_SPICE + "* mutated\n")
+    capsys.readouterr()
+
+    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 3
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "drifted"
+
+
+def test_cli_lvs_check_rerun_exits_three_on_drift(tmp_path, capsys):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+    _write(Path(reference_path), _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
+    capsys.readouterr()
+
+    assert (
+        main(["lvs", "--check", str(report_path), "--rerun", "--format", "json"]) == 3
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "rerun"
+    assert data["status"] == "drifted"
+
+
+def test_cli_lvs_check_with_request_argument_is_a_usage_error(tmp_path):
+    """`request` and `--check` are a required, mutually exclusive argparse
+    group (issue #1106) -- combining them is a usage error (exit 2), the
+    same as any other mutually exclusive argparse pair, not an
+    application-level (`--format json` error envelope) one."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "lvs",
+                json.dumps(request),
+                "--check",
+                str(report_path),
+                "--format",
+                "json",
+            ]
+        )
+    assert exc_info.value.code == 2
+
+
+def test_cli_lvs_rerun_without_check_is_rejected(tmp_path, capsys):
+    """`--rerun` alongside `request` (no `--check`) passes argparse's
+    mutually-exclusive-group check but is still a semantic error at the
+    application level (exit 1) -- `--rerun` only means something for
+    `--check`."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    capsys.readouterr()
+
+    assert main(["lvs", json.dumps(request), "--rerun", "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "requires --check" in err["error"]["message"]
+
+
+def test_cli_lvs_no_request_no_check_is_a_usage_error():
+    """Omitting both `request` and `--check` is a usage error (exit 2) --
+    unchanged from the pre-#1106 "`request` is a required positional"
+    contract (`test_cli_missing_request_arg_is_usage_error` above), now
+    enforced via a required mutually exclusive group instead of a plain
+    required positional (see `parser.py`'s `lvs_input_group`)."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["lvs", "--format", "json"])
+    assert exc_info.value.code == 2

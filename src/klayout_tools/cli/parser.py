@@ -396,7 +396,23 @@ def create_parser() -> argparse.ArgumentParser:
             "instead (issue #565)."
         ),
     )
-    drc_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    # `file` (positional) and `--check` (issue #1106) are mutually exclusive
+    # input sources -- exactly one is required. Grouping them this way lets
+    # argparse itself enforce both "one is required" and "not both at once"
+    # as usage errors (exit 2), preserving the pre-#1106 contract that
+    # omitting `file` entirely is a usage error, not an application-level
+    # one (see `test_cli_missing_request_arg_is_usage_error`'s `klt lvs`
+    # sibling in tests/test_lvs.py).
+    drc_input_group = drc_parser.add_mutually_exclusive_group(required=True)
+    drc_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a GDSII or OASIS layout file. Omit when using --check "
+            "(the input path is read from the committed report instead)"
+        ),
+    )
     drc_parser.add_argument(
         "--deck",
         default=None,
@@ -452,6 +468,35 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "wall-clock budget in seconds for the klayout subprocess "
             "(--engine klayout only)"
+        ),
+    )
+    drc_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt drc --format json' report "
+            "(REPORT) instead of running a fresh check: mutually exclusive "
+            "with the positional 'file' argument, since the input path is "
+            "read from REPORT itself (issue #1106). Cheap mode (default): "
+            "re-hash the input layout and deck named in REPORT's "
+            "provenance block and compare against the recorded "
+            "content_hash values, no DRC engine re-run. Combine with "
+            "--rerun for full mode (re-run the deck and diff "
+            "verdict-bearing fields). Exits 0 if still consistent, 3 if "
+            "drifted -- see docs/cli/drc.md, '--check'"
+        ),
+    )
+    drc_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1106): re-run the DRC deck "
+            "named in REPORT and diff verdict-bearing fields against the "
+            "committed report, excluding provenance.klt_version/"
+            "klayout_version/pdk.version (fields that legitimately vary "
+            "between runs of identical inputs). Requires --check; a clean "
+            "error (exit 1) otherwise"
         ),
     )
     _add_format_arg(drc_parser)
@@ -1224,11 +1269,52 @@ def create_parser() -> argparse.ArgumentParser:
             "positional netlist file args."
         ),
     )
-    lvs_parser.add_argument(
+    # `request` (positional) and `--check` (issue #1106) are mutually
+    # exclusive input sources -- exactly one is required. See the matching
+    # `drc_input_group` comment above for why this is a required
+    # mutually-exclusive group rather than a manual runtime check.
+    lvs_input_group = lvs_parser.add_mutually_exclusive_group(required=True)
+    lvs_input_group.add_argument(
         "request",
+        nargs="?",
+        default=None,
         help=(
             "klt lvs request: a path to a JSON file, '-' to read the "
-            "request from stdin, or an inline JSON object string"
+            "request from stdin, or an inline JSON object string. Omit "
+            "when using --check (inputs are read from the committed "
+            "report instead)"
+        ),
+    )
+    lvs_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt lvs --format json' report "
+            "(REPORT) instead of running a fresh compare: mutually "
+            "exclusive with the positional 'request' argument, since "
+            "inputs are read from REPORT itself (issue #1106). Cheap mode "
+            "(default): re-hash REPORT's layout/reference netlists (and "
+            "extraction deck, when one was used) and compare against the "
+            "recorded environment.layout_sha256/reference_sha256/"
+            "provenance.deck.content_hash values, no compare engine "
+            "re-run. Combine with --rerun for full mode (re-run the "
+            "compare and diff verdict-bearing fields). Exits 0 if still "
+            "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1106): best-effort re-run of "
+            "the compare REPORT names (reconstructed from REPORT's own "
+            "echoed layout/reference/engine/deck/parameter_tolerance "
+            "fields -- see docs/cli/lvs.md, '--check', for reconstruction "
+            "limits) and diff verdict-bearing fields against the "
+            "committed report, excluding provenance.klt_version/"
+            "klayout_version/pdk.version. Requires --check; a clean error "
+            "(exit 1) otherwise"
         ),
     )
     _add_format_arg(lvs_parser)
