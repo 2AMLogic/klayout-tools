@@ -830,6 +830,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   *execution* is Phase C, not yet built. See the new
   `docs/cli/layout-plan.md` and
   `docs/schemas/layout-plan-request.schema.json`.
+- 2026-08-18 — `klt extract --deck-option mim_cap=<value>` selects which of
+  gf180mcu's three PDK-offered MiM-capacitor densities
+  (`cap_mim_1f0_m4m5_noshield`/`cap_mim_1f5_m4m5_noshield`/
+  `cap_mim_2f0_m4m5_noshield`, 1.0/1.5/2.0 fF/µm² respectively) a marked
+  `FuseTop`-over-`Metal4` overlap extracts as (issue #1151), mirroring the
+  `poly_res` resistor-flavour mechanism issue #595 already shipped. The
+  three densities share byte-identical drawn mask geometry, so before this
+  option the deck could only ever recognize the default 2.0 fF/µm² density
+  — a design drawn against the 1.0/1.5 fF/µm² options had no way to get an
+  accurate extraction, and (worse) its DRM-legal top-plate via was silently
+  read as an ordinary routing via, shorting the two plate nets together in
+  the extracted netlist with no diagnostic. `CapacitorDevice` gains
+  `flavour_option`/`flavours` fields (a new `CapacitorFlavour` dataclass)
+  analogous to `ResistorDevice`'s own; `get_extraction_deck`'s
+  `deck_options` resolution now applies to both device families through one
+  shared, generalized resolver. Omitting `--deck-option mim_cap=...` keeps
+  today's `cap_mim_2f0_m4m5_noshield` default, byte-for-byte. `--pdk`
+  model-binding for the two new flavours is not yet curated (their
+  extracted `C` card is written unbound, the same documented carve-out an
+  unbound device class elsewhere in this deck already gets) — see
+  `docs/cli/extract.md`'s "Selecting a shared-geometry MiM capacitor density
+  flavour" section.
 - 2026-08-18 — `klt gen` gains a new **`cap_array`** generator (issue
   #1117): a row of matched unit MiM (Metal-Insulator-Metal) capacitor
   cells, each a top-plate-metal-over-bottom-plate-metal stack (sky130's

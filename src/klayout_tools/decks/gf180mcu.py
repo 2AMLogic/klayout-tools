@@ -173,6 +173,48 @@ LVS-extraction script's separately-rounded restatement of them -- keeps
 ``klt extract``'s reported ``c_f`` consistent with what the same drawn
 geometry simulates as.
 
+The other two selectable MiM densities cited above -- ``cap_mim_1f0fF``
+(1.0 fF/um²) and ``cap_mim_1f5fF`` (1.5 fF/um²) -- are now caller-selectable
+via ``EXTRACTION_DECK.capacitors``' ``flavour_option="mim_cap"``/``flavours``
+(issue #1151), the capacitor sibling of ``ppolyf_u_1k``'s own
+``flavour_option="poly_res"`` below: all three densities are drawn as the
+*exact same* ``FuseTop``-over-``Metal4`` geometry (``mimcap_extraction.lvs``'s
+``case MIM_CAP`` selects among them purely by a build-time deck variable, not
+by any additional drawn layer), so a design that legitimately commits to the
+1.0/1.5 fF/um² option has no geometric marker this deck could key off --
+before #1151 it either failed DRC (routing the top-plate via around the
+bottom plate to dodge the resulting false short) or passed DRC while
+silently shorting its two plate nets together, exactly the way a `ppolyf_u`
+segment marked for an unmodelled sheet-rho flavour would extract as a short
+before #299/#595. ``klt extract --deck-option
+mim_cap=cap_mim_1f0_m4m5_noshield`` (or ``...=cap_mim_1f5_m4m5_noshield``)
+now selects the matching flavour explicitly instead. Their coefficients are
+the same ``sm141064.ngspice`` file's ``.subckt cap_mim_1f0fF``/
+``cap_mim_1f5fF``, at the library's own ``.LIB mimcap_typical``
+corner (``mim_corner_1p0fF=1``/``mim_corner_1p5fF=1``, i.e. no corner
+scaling -- the same "typical" corner ``cap_mim_2f0fF`` above is read at):
+``cap_mim_1f0fF``'s ``c_cox = 0.987e-3`` F/m² = ``9.87e-16`` F/um² /
+``c_capsw = 3.3e-10`` F/m = ``3.3e-16`` F/um (LVS deck's own rounded
+``1.0e-15`` nominal-density label, ``cap_mim_1f0_m4m5_noshield``), and
+``cap_mim_1f5fF``'s ``c_cox = 1.47e-3`` F/m² = ``1.47e-15`` F/um² /
+``c_capsw = 3.79e-10`` F/m = ``3.79e-16`` F/um (LVS deck's own rounded
+``1.5e-15`` nominal-density label, ``cap_mim_1f5_m4m5_noshield``) -- both
+confirmed directly against a real fetched
+``volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`` install's
+``libs.tech/ngspice/sm141064.ngspice``, and against that same install's
+``libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs``, whose ``MIM_OPTION
+'B'``/``METAL_LEVEL '5LM'`` branch names ``cap_mim_1f0_m4m5_noshield``
+(``MIM_CAP == '1'``) and ``cap_mim_1f5_m4m5_noshield`` (``MIM_CAP == '1.5'``)
+as the sibling device-class names on the exact same ``Metal4``/``Via4``/
+``Metal5`` stack the deck's default ``cap_mim_2f0_m4m5_noshield`` entry
+already models -- the same ``mimtm_virtual``/``fuse_cap`` terminal pair, only
+the ``extract_devices(capacitor(name, area_cap, class), ...)`` call's own
+``name``/``area_cap`` arguments differ per density. Like every other
+declared flavour in this deck, selecting ``mim_cap`` never changes *which*
+geometry is recognised (still exactly one drawn ``FuseTop``-over-``Metal4``
+overlap, never duplicated) -- only what device it is reported as and what
+capacitance it reports.
+
 Nineteen rules below approximate the official DRM rule in some way (each is
 called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
@@ -373,6 +415,7 @@ from __future__ import annotations
 from . import (
     BipolarDevice,
     CapacitorDevice,
+    CapacitorFlavour,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
@@ -1700,7 +1743,12 @@ EXTRACTION_DECK = ExtractionDeck(
             bottom_plate_oversize_um=1.06,
             # sm141064.ngspice's cap_mim_2f0fF: c_cox=1.99e-3 F/m^2 (area) /
             # c_capsw=2.383e-10 F/m (perimeter/fringe), see the module
-            # docstring's provenance note (issue #512) above.
+            # docstring's provenance note (issue #512) above. This is the
+            # PDK's own default density absent an override (confirmed by
+            # open_pdks' `gf180mcu.json` variant string, "...2fF MiM..." --
+            # see the module docstring) and therefore also `flavours`' own
+            # `"cap_mim_2f0_m4m5_noshield"` entry below, used whenever a
+            # caller passes no `mim_cap` `deck_options` override.
             area_cap_f_um2=1.99e-15,
             perim_cap_f_um=2.383e-16,
             # Top-plate connectivity (issue #314): `main.drc`'s own
@@ -1709,6 +1757,36 @@ EXTRACTION_DECK = ExtractionDeck(
             # stack -- see the module docstring's "10.4 MIM Capacitor" note.
             top_plate_via=(41, 0),  # Via4
             top_plate_via_metal=(81, 0),  # Metal5
+            # Caller-selectable MiM density (issue #1151), the capacitor
+            # sibling of `ppolyf_u_1k`'s own `flavour_option="poly_res"`
+            # below -- see the module docstring's note above this entry for
+            # the full derivation of the three `flavours` coefficients and
+            # why one drawn geometry has three PDK-offered density
+            # interpretations here. `klt extract --deck-option
+            # mim_cap=cap_mim_1f0_m4m5_noshield` (or `...1f5...`) selects a
+            # sibling density explicitly; omitting `--deck-option` keeps
+            # today's `cap_mim_2f0_m4m5_noshield` default, byte-for-byte.
+            flavour_option="mim_cap",
+            flavours=(
+                CapacitorFlavour(
+                    value="cap_mim_1f0_m4m5_noshield",
+                    name="cap_mim_1f0_m4m5_noshield",
+                    area_cap_f_um2=9.87e-16,
+                    perim_cap_f_um=3.3e-16,
+                ),
+                CapacitorFlavour(
+                    value="cap_mim_1f5_m4m5_noshield",
+                    name="cap_mim_1f5_m4m5_noshield",
+                    area_cap_f_um2=1.47e-15,
+                    perim_cap_f_um=3.79e-16,
+                ),
+                CapacitorFlavour(
+                    value="cap_mim_2f0_m4m5_noshield",
+                    name="cap_mim_2f0_m4m5_noshield",
+                    area_cap_f_um2=1.99e-15,
+                    perim_cap_f_um=2.383e-16,
+                ),
+            ),
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
                 "cap_mim_2f0_m4m5_noshield",

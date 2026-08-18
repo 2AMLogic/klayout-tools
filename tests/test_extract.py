@@ -3511,12 +3511,128 @@ def test_gf180mcu_poly_res_deck_option_invalid_value_is_extract_error(tmp_path):
         )
 
 
+# --------------------------------------------------------------------------- #
+# Caller-selectable MiM capacitor density flavour (issue #1151): the
+# `1f0`/`1f5` siblings `cap_mim_2f0_m4m5_noshield` shares *identical*
+# recognition geometry with -- the three density options are a foundry-side
+# runset option, not something any drawn layer could distinguish -- were
+# previously unselectable, so a design drawn against `1f0`/`1f5` either
+# failed DRC (routing the top-plate via around the bottom plate to dodge the
+# resulting false short) or passed DRC while silently shorting the two plate
+# nets together.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("value", "area_cap_f_um2", "perim_cap_f_um"),
+    [
+        ("cap_mim_1f0_m4m5_noshield", 9.87e-16, 3.3e-16),
+        ("cap_mim_1f5_m4m5_noshield", 1.47e-15, 3.79e-16),
+        ("cap_mim_2f0_m4m5_noshield", 1.99e-15, 2.383e-16),
+    ],
+)
+def test_gf180mcu_mim_cap_deck_option_selects_flavour(
+    tmp_path, value, area_cap_f_um2, perim_cap_f_um
+):
+    """`klt extract`'s `deck_options={"mim_cap": <value>}` (`--deck-option
+    mim_cap=<value>` on the CLI) selects which of the identically-drawn
+    `cap_mim_{1f0,1f5,2f0}_m4m5_noshield` density interpretations a marked
+    `FuseTop`-over-`Metal4` MiM cap extracts as -- still exactly one
+    recognised device per drawn overlap, never a duplicate, and never a
+    false short (issue #1151). Coefficients/expected `c_f` mirror
+    `test_gf180mcu_synthetic_mim_extracts_one_capacitor_device`'s own
+    100um^2-area/40um-perimeter layout."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{value}.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / f"{value}.spice"),
+        deck_options={"mim_cap": value},
+    )
+
+    assert report["device_counts"] == {value: 1}
+    (device,) = report["devices"]
+    assert device["class"] == value
+    expected_c_f = 100.0 * area_cap_f_um2 + 40.0 * perim_cap_f_um
+    assert device["params"]["c_f"] == pytest.approx(expected_c_f)
+    assert device["params"]["area_um2"] == pytest.approx(100.0)
+    assert device["params"]["perimeter_um"] == pytest.approx(40.0)
+    assert report["provenance"]["deck"]["options"] == {"mim_cap": value}
+
+
+def test_gf180mcu_mim_cap_deck_option_2f0_matches_omitted_default(tmp_path):
+    """Selecting `mim_cap=cap_mim_2f0_m4m5_noshield` explicitly reproduces
+    the PDK's own default -- the same netlist `run_extract` writes when
+    `deck_options` is omitted entirely, byte-for-byte (issue #1151's
+    backward-compatibility guarantee, mirroring #595's for `poly_res`)."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim.gds")
+    baseline = run_extract(path, "gf180mcu", output=str(tmp_path / "baseline.spice"))
+    explicit = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "explicit.spice"),
+        deck_options={"mim_cap": "cap_mim_2f0_m4m5_noshield"},
+    )
+
+    assert baseline["netlist_sha256"] == explicit["netlist_sha256"]
+    assert baseline["device_counts"] == explicit["device_counts"]
+    # The only difference is the additive `provenance.deck.options` echo.
+    assert "options" not in baseline["provenance"]["deck"]
+    assert explicit["provenance"]["deck"]["options"] == {
+        "mim_cap": "cap_mim_2f0_m4m5_noshield"
+    }
+
+
+def test_gf180mcu_mim_cap_deck_option_invalid_value_is_extract_error(tmp_path):
+    """An unrecognised `mim_cap` value is a loud `ExtractError`, not a
+    silently-kept default or a guessed capacitance (issue #1151)."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim_bad.gds")
+    with pytest.raises(ExtractError, match="mim_cap=cap_mim_3f0_m4m5_noshield"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "bad.spice"),
+            deck_options={"mim_cap": "cap_mim_3f0_m4m5_noshield"},
+        )
+
+
+def test_cli_deck_option_selects_mim_cap_flavour(tmp_path, capsys):
+    """`klt extract --deck-option mim_cap=cap_mim_1f5_m4m5_noshield`
+    end-to-end: parsed by the CLI, forwarded to `run_extract`, and echoed in
+    `provenance.deck.options` (issue #1151)."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim_1f5.gds")
+    netlist_path = tmp_path / "mim1f5.spice"
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "gf180mcu",
+            "-o",
+            str(netlist_path),
+            "--deck-option",
+            "mim_cap=cap_mim_1f5_m4m5_noshield",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["device_counts"] == {"cap_mim_1f5_m4m5_noshield": 1}
+    assert out["provenance"]["deck"]["options"] == {
+        "mim_cap": "cap_mim_1f5_m4m5_noshield"
+    }
+
+
 @pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
 def test_deck_option_unrecognised_key_is_extract_error(tmp_path, deck_name):
-    """A `deck_options` key no `ResistorDevice.flavour_option` matches is an
-    error -- both for a deck that declares no selectable flavour at all
-    (sky130) and for gf180mcu, which declares `poly_res` but not this key
-    (issue #595)."""
+    """A `deck_options` key no `ResistorDevice.flavour_option`/
+    `CapacitorDevice.flavour_option` matches is an error -- both for a deck
+    that declares no selectable flavour at all (sky130) and for gf180mcu,
+    which declares `poly_res`/`mim_cap` but not this key (issue #595, and
+    #1151 for the now-real `mim_cap` key this test previously used as its
+    own unrecognised-key example)."""
     path = _write_gds(
         _make_poly_resistor_layout(deck_name), tmp_path / f"{deck_name}_res.gds"
     )
@@ -3525,7 +3641,7 @@ def test_deck_option_unrecognised_key_is_extract_error(tmp_path, deck_name):
             path,
             deck_name,
             output=str(tmp_path / "bad.spice"),
-            deck_options={"mim_cap": "x"},
+            deck_options={"not_a_real_deck_option": "x"},
         )
 
 

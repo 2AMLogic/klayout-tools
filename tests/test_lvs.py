@@ -3134,8 +3134,11 @@ def test_deck_options_unrecognised_value_raises_lvs_error(tmp_path):
 
 
 def test_deck_options_unrecognised_key_raises_lvs_error(tmp_path):
-    """A `deck_options` key no `ResistorDevice.flavour_option` matches is a
-    clean `LvsError` (issue #600)."""
+    """A `deck_options` key no `ResistorDevice.flavour_option`/
+    `CapacitorDevice.flavour_option` matches is a clean `LvsError` (issue
+    #600; `mim_cap` -- this test's own unrecognised-key example before
+    issue #1151 made it a real, recognised gf180mcu key -- can no longer be
+    used here)."""
     gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
     path = _write_request(
@@ -3144,7 +3147,7 @@ def test_deck_options_unrecognised_key_raises_lvs_error(tmp_path):
             "layout": {
                 "file": gds,
                 "deck": "gf180mcu",
-                "deck_options": {"mim_cap": "x"},
+                "deck_options": {"not_a_real_deck_option": "x"},
             },
             "reference": {"netlist": reference_path},
         },
