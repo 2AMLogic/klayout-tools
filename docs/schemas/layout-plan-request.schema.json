@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/layout-plan-request.schema.json",
+  "title": "klayout-tools netlist-driven layout plan request",
+  "description": "klt.layout_plan.request/1 (issue #1131, Phase B of docs/design/netlist-driven-layout-spike.md section 2). A plan does not describe geometry -- it describes intent: which netlist devices form a matched group, what topology that group uses, what order groups occupy in a row, and which groups must abut. See docs/cli/layout-plan.md and src/klayout_tools/layout_plan.py (validate_layout_plan) for the reference validator this schema documents. Executing a plan (generation) is a separate, not-yet-built follow-up (spike section 4, Phase C).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "netlist",
+    "device_groups"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "klt.layout_plan.request/1",
+      "description": "Contract identifier + major version. Not enforced by the reference validator (see layout_plan.py) -- present here for documentation/tooling that wants to check it."
+    },
+    "netlist": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "path"
+      ],
+      "description": "The same path/top/form/deck shape klt lvs's reference-side request already accepts (docs/cli/lvs.md) -- a plan resolves its netlist through the identical ingestion path.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to the netlist SPICE file, parsed via klt lvs's own reference-netlist reader."
+        },
+        "top": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The circuit to digest. Omit when the netlist has exactly one top-level circuit."
+        },
+        "form": {
+          "type": "string",
+          "enum": [
+            "plain-element",
+            "subckt-call"
+          ],
+          "default": "plain-element",
+          "description": "\"plain-element\" (default) reads the file as-is. \"subckt-call\" converts a real PDK schematic flow's simulation-form netlist first (klayout_tools.netlist_normalize)."
+        },
+        "deck": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Only used with form: \"subckt-call\". \"sky130\"/\"gf180mcu\" -- selects that deck's curated device-name map for the conversion."
+        }
+      }
+    },
+    "pdk": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The exact fields klt gen/klt gen-compose already accept -- one resolver, no exception for plans. Validated for shape only at Phase B; resolution against an installed PDK is deferred to plan execution (Phase C).",
+      "properties": {
+        "variant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "device_groups": {
+      "type": "array",
+      "description": "One entry per matched/placed unit. May be empty (no groups declared yet).",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "id",
+          "generator"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Caller-chosen label, addressed elsewhere in rows/abutment/encloses -- mirrors klt gen-compose's blocks[].id. Unique within device_groups."
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "A bare netlist device instance name (the ingestion digest's devices[].name). Valid only when that name is unambiguous across device classes in the digest; a name carried by two or more classes must use the qualified object form instead."
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name"],
+                  "description": "A class-qualified device reference -- the same name + class pairing klt lvs's mismatches[].device already uses.",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The digest's devices[].name for this device."
+                    },
+                    "device_class": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The digest's devices[].device_class for this device (e.g. \"PFET\", \"RES\"). Omit to resolve by name alone, which requires that name to be unambiguous."
+                    }
+                  }
+                }
+              ]
+            },
+            "default": [],
+            "description": "Netlist device instances (from the ingestion digest, klayout_tools.netlist_digest) this group is generated from. A digest device name is per-class, not circuit-global -- NetlistSpiceReader strips the leading SPICE element-type letter (\"M1\" -> \"1\", \"R1\" -> \"1\"), so \"1\" can name a MOS device and a resistor in the same circuit. Each entry is therefore either a bare name string or a {name, device_class} object; an unresolvable reference, a device_class that does not exist for that name, and a bare name that is ambiguous across classes are all application errors, exit code 1. Empty for a group like a guard ring that encloses other groups rather than wrapping specific devices."
+          },
+          "generator": {
+            "type": "string",
+            "description": "Which existing klt gen generator produces this group's geometry (docs/cli/gen.md's existing set -- resistor_strip, mos_array, res_array, cap_array, guard_ring, diff_pair, bjt_array, bond_pad, esd_device). A plan invents no new generator; naming one klt gen does not have is an application error, exit code 1."
+          },
+          "topology": {
+            "type": "string",
+            "enum": [
+              "array",
+              "common_centroid",
+              "interdigitated",
+              "single"
+            ],
+            "description": "The matching pattern for this group. \"array\"/\"common_centroid\" map onto the topology param mos_array/bjt_array already accept; diff_pair always lays out \"common_centroid\". \"interdigitated\"/\"single\" are proposed values no generator supports yet -- declaring either (on any generator) is flagged as an application error, exit code 1, not silently accepted. See docs/cli/layout-plan.md."
+          },
+          "dummy": {
+            "type": "object",
+            "description": "Leading/trailing or row/col dummy-element counts -- routed to the named generator's own dummy_rows/dummy_cols-style param at execution time (Phase C). Not deeply validated at Phase B."
+          },
+          "encloses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": [],
+            "description": "For an enclosure-shaped generator (guard_ring): which other device_groups[].id values it must surround. Each id must resolve to a declared device_groups[].id (other than its own); an unresolvable id is an application error, exit code 1."
+          },
+          "params": {
+            "type": "object",
+            "description": "Generator-specific overrides layered on top of parameters plan execution (Phase C) resolves automatically from the ingested netlist's own device sizing. Not deeply validated at Phase B."
+          }
+        }
+      }
+    },
+    "rows": {
+      "type": "array",
+      "default": [],
+      "description": "Ordered rows, stacked vertically.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "order"
+        ],
+        "properties": {
+          "order": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "device_groups[].id values placed left-to-right in this row. Each id must resolve to a declared device_groups[].id -- an unresolvable id is an application error, exit code 1."
+          },
+          "spacing_um": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Horizontal gap between adjacent groups in this row -- same semantics as klt gen-compose's placement.spacing_um."
+          },
+          "align": {
+            "type": "string",
+            "enum": [
+              "bottom",
+              "center",
+              "top"
+            ],
+            "default": "bottom",
+            "description": "Vertical alignment of this row's groups relative to each other."
+          }
+        }
+      }
+    },
+    "abutment": {
+      "type": "array",
+      "default": [],
+      "description": "Pairs of groups that must share an edge with a caller-declared gap_um rather than being connected by a routed net.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "a",
+          "b",
+          "edge"
+        ],
+        "properties": {
+          "a": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A device_groups[].id. Must resolve to a declared id, and must differ from b -- an unresolvable id or a==b is an application error, exit code 1."
+          },
+          "b": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A device_groups[].id. Must resolve to a declared id, and must differ from a -- an unresolvable id or a==b is an application error, exit code 1."
+          },
+          "edge": {
+            "type": "string",
+            "enum": [
+              "top",
+              "bottom",
+              "left",
+              "right"
+            ],
+            "description": "Which edge of a touches b."
+          },
+          "gap_um": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Gap between the two groups' declared edge, typically 0.0 for a true abutment."
+          }
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Same semantics as klt gen-compose's own options fields.",
+      "properties": {
+        "cell_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "output": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
