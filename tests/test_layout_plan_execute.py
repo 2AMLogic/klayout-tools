@@ -257,10 +257,15 @@ def test_diff_pair_group_with_declared_topology_executes_successfully(
     every group's `params` unconditionally, so this exact plan reached
     `klt gen` with an unknown `params.topology` and died with
     `LayoutPlanExecuteError` in Phase C despite passing Phase B validation.
+
+    `W=1U` (rather than the PDK's minimum-size `0.42U`) is deliberate: with
+    the default `splits=2`, the netlist-derived `w_um` is auto-divided
+    (issue #1165) to `0.5`, which must still clear `diff_pair`'s own
+    `UNIT_MIN_W_UM=0.42` structural floor.
     """
     netlist = """
 .subckt one_fet D G
-M1 D G VSS VSS nfet L=0.28U W=0.42U
+M1 D G VSS VSS nfet L=0.28U W=1U
 .ends
 """
     netlist_path = _write(tmp_path, "one_fet.spice", netlist)
@@ -291,6 +296,87 @@ M1 D G VSS VSS nfet L=0.28U W=0.42U
     # `klt gen` to accept.
     assert "topology" not in group["resolved_params"]
     assert not any("topology" in warning for warning in response["warnings"])
+
+
+def _one_fet_diff_pair_request(tmp_path, pdk_root, w_spice: str, params: dict) -> dict:
+    netlist = f"""
+.subckt one_fet D G
+M1 D G VSS VSS nfet L=0.28U {w_spice}
+.ends
+"""
+    netlist_path = _write(tmp_path, "one_fet.spice", netlist)
+    return {
+        "netlist": {"path": netlist_path, "top": "one_fet"},
+        "pdk": _pdk_spec(pdk_root),
+        "device_groups": [
+            {
+                "id": "dp",
+                "devices": ["1"],
+                "generator": "diff_pair",
+                "params": params,
+            }
+        ],
+        "rows": [{"order": ["dp"], "spacing_um": 0.0}],
+        "options": {"output": str(tmp_path / "diff_pair_0.gds")},
+    }
+
+
+def test_diff_pair_w_um_auto_divided_by_default_splits(tmp_path, pdk_root):
+    """`diff_pair`'s `w_um` is a *unit* sub-instance width -- the generator
+    draws each matched device as `splits` (default 2) unit instances wide.
+    A netlist device with `W=20U` must resolve `w_um=10.0`, not `20.0`, so
+    the drawn device (both unit instances together) reproduces the netlist
+    `W` -- and the auto-division must always be reported in `warnings[]`.
+    """
+    request = _one_fet_diff_pair_request(tmp_path, pdk_root, "W=20U", {})
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert group["resolved_params"]["w_um"] == pytest.approx(10.0)
+    assert group["resolved_params"]["l_um"] == pytest.approx(0.28)
+    assert any(
+        "dp" in warning and "splits" in warning and "10.0" in warning
+        for warning in response["warnings"]
+    )
+
+
+def test_diff_pair_w_um_auto_divided_by_overridden_splits(tmp_path, pdk_root):
+    """An explicit `params.splits` override changes the divisor used to
+    derive `w_um` from the netlist `W`."""
+    request = _one_fet_diff_pair_request(tmp_path, pdk_root, "W=20U", {"splits": 4})
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert group["resolved_params"]["w_um"] == pytest.approx(5.0)
+    assert any(
+        "dp" in warning and "splits" in warning and "5.0" in warning
+        for warning in response["warnings"]
+    )
+
+
+def test_diff_pair_splits_of_one_is_a_silent_no_op(tmp_path, pdk_root):
+    """`params.splits: 1` makes the division a no-op (`w_um` unchanged from
+    the netlist `W`) -- and since nothing was actually auto-divided, no
+    `warnings[]` entry is expected."""
+    request = _one_fet_diff_pair_request(tmp_path, pdk_root, "W=20U", {"splits": 1})
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert group["resolved_params"]["w_um"] == pytest.approx(20.0)
+    assert not any("splits" in warning for warning in response["warnings"])
+
+
+def test_diff_pair_zero_netlist_w_falls_back_to_generator_default(tmp_path, pdk_root):
+    """A netlist `W == 0.0` (KLayout's structural default for an unset
+    device-class param) is "the netlist did not specify a geometric size,"
+    not a real value to divide -- it must fall through to `diff_pair`'s own
+    default `w_um`, untouched by the split-division logic."""
+    request = _one_fet_diff_pair_request(tmp_path, pdk_root, "W=0", {})
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert "w_um" not in group["resolved_params"]
+    assert not any("splits" in warning for warning in response["warnings"])
 
 
 # ---------------------------------------------------------------------------
