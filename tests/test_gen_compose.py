@@ -3474,6 +3474,79 @@ def test_route_two_pin_caller_waypoints_are_never_second_guessed():
     assert "detour" not in result["reason"]
 
 
+def _self_net_opposite_facing_ports_with_obstacle_fixture():
+    """A same-block self-net (#1179) whose two ports face *toward* each
+    other -- ``L`` at x=8 facing east (``+x``), ``R`` at x=12 facing west
+    (``-x``) -- with an unrelated block ``m`` sitting on the straight path
+    between them.
+
+    Because both ports belong to the same block ``u``, ``_detour_escape_um``
+    receives the *same* ``bbox_um`` for both endpoints; each port's own
+    facing direction then pushes its escape point toward the *opposite*
+    edge of that shared bbox (``L`` toward ``u``'s east edge at x=20, ``R``
+    toward ``u``'s west edge at x=0) rather than toward the near edge past
+    the obstacle. This is the suspected-cause shape from the issue: distinct
+    from ``_self_net_same_row_fixture`` (:func:`_self_net_same_row_fixture`),
+    whose ports face north (perpendicular to the row) and so never exercise
+    the bbox-edge push at all.
+    """
+    layer = {"layer": 68, "datatype": 20}
+    blocks = {
+        "u": {
+            "id": "u",
+            "port_names": {"L", "R"},
+            "ports": {
+                "L": {
+                    "x_um": 8.0,
+                    "y_um": 5.0,
+                    "direction_deg": 0,
+                    "width_um": 0.3,
+                    "layer": layer,
+                },
+                "R": {
+                    "x_um": 12.0,
+                    "y_um": 5.0,
+                    "direction_deg": 180,
+                    "width_um": 0.3,
+                    "layer": layer,
+                },
+            },
+        },
+        "m": {"id": "m", "port_names": set(), "ports": {}},
+    }
+    offsets = {"u": {"x": 0.0, "y": 0.0}, "m": {"x": 0.0, "y": 0.0}}
+    bboxes = {
+        "u": {"x0": 0.0, "y0": 0.0, "x1": 20.0, "y1": 10.0},
+        "m": {"x0": 9.0, "y0": 4.0, "x1": 11.0, "y1": 6.0},
+    }
+    pin_a = {"block": "u", "port": "L"}
+    pin_b = {"block": "u", "port": "R"}
+    return blocks, offsets, bboxes, pin_a, pin_b
+
+
+def test_route_two_pin_self_net_opposite_facing_detour_rejects_cleanly():
+    # #1179: a same-block self-net whose two ports face toward each other
+    # triggers the bounded detour search (an unrelated block sits between
+    # them), but the mis-derived escape points (both computed from the one
+    # shared bbox, pushed to opposite edges of it -- see the fixture
+    # docstring) make each candidate lane's own entry/exit leg run straight
+    # back across the obstacle at the ports' own y-level instead of clearing
+    # it. Confirms the "fails safe" hypothesis: the malformed lane is still
+    # caught by the same obstacle-overlap check every other path goes
+    # through, so the net is reported unroutable with no shapes drawn --
+    # never a silently bad path.
+    blocks, offsets, bboxes, pin_a, pin_b = (
+        _self_net_opposite_facing_ports_with_obstacle_fixture()
+    )
+    result = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.3, route_layer=(68, 20)
+    )
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "block 'm'" in result["reason"]
+    assert "detour" in result["reason"]
+
+
 def test_compose_routes_around_the_middle_block_of_a_three_block_row(
     tmp_path, pdk_root
 ):

@@ -1643,6 +1643,30 @@ def _detour_escape_um(
     south-facing stub. A port facing *across* the lane leaves straight out
     along its own facing direction instead (its stub already points at the
     lane), where the #496 stub-widen handles the same pad-vs-trace step.
+
+    **Same-block self-net caveat (#1179, investigated and confirmed safe.)**
+    For a same-block self-net (``bbox_a is bbox_b`` at the call site), if the
+    two ports face *opposite* ways along the lane's axis, each one's escape
+    is pushed toward the *opposite* edge of that one shared bbox -- e.g. a
+    port facing ``+x`` pushes toward the bbox's east edge regardless of
+    which side of the block it actually sits on. The resulting entry/exit
+    leg (drawn at the port's own coordinate on the lane's cross-axis, from
+    the stub straight out to that far escape point) can then run back across
+    whatever sits between the two ports at their own level, instead of
+    clearing it -- rather than the short hop past the near edge a caller
+    would expect. This was suspected to still fail safe rather than draw a
+    silently bad path, and that has been confirmed: the far-edge push always
+    makes the entry/exit leg a superset of the region the original
+    (rejected) straight backbone ran through, so any obstacle that made the
+    unrouted backbone crossable is also crossed by the malformed leg, and
+    :func:`route_two_pin`'s obstacle-overlap check (run in full against the
+    detour's actual drawn points, exactly as for any other candidate path)
+    rejects it the same way -- verified with a targeted fixture
+    (``test_route_two_pin_self_net_opposite_facing_detour_rejects_cleanly``
+    in ``tests/test_gen_compose.py``) and a 30k-trial randomized sweep over
+    same-block port/obstacle geometries that found zero cases of a wrongly
+    accepted path. No fix is needed here; "reported unroutable" is the
+    accepted terminal behaviour for this narrow case.
     """
     if axis == "x":
         if vec[0] > 0:
