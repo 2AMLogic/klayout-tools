@@ -100,6 +100,19 @@ implemented deliberately rather than rediscovered:
    coverage) is unaffected: the wrapper is only generated when
    ``request.options.sdf`` is present.
 
+8. **The transcript the SDF gate reads can itself be corrupted** (issue
+   #1136). Icarus's C-level diagnostic ``printf``s and cocotb's Python
+   logging share one stdout file descriptor; under a non-tty capture both
+   are commonly fully- rather than line-buffered, so a flush from one lands
+   *mid-line* inside a not-yet-flushed line from the other. The observed
+   splice ate the tail of a benign ``TIMINGCHECK`` warning -- including the
+   substring finding 6's exemption keys on -- and a fully-applied
+   annotation was reported as failed. :func:`_scan_sdf_diagnostics`
+   therefore classifies a line only once it matches
+   :data:`SDF_DIAGNOSTIC_LINE_RE` (the marker *plus* Icarus's own
+   ``<file>:<line>:`` locator); a marker-bearing line without that shape is
+   a splice, not evidence, and counts as neither actionable nor benign.
+
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
 *optional* runtime dependency, deliberately not in ``pyproject.toml``'s
@@ -208,6 +221,15 @@ SDF_DIAGNOSTIC_MARKERS = ("SDF WARNING", "SDF ERROR")
 #: - ``NEGATIVE_CONSTRAINT``/``PATHPULSE`` &c. are **not** exempted: only the
 #:   timing-check family is, because only it is both benign and unavoidable.
 SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
+
+#: The shape Icarus gives *every* SDF diagnostic it emits: the marker, then
+#: a ``<file>:<line-number>:`` locator, then the message -- true of all four
+#: failure modes the spike captured live (§3.3) and of the ``$sdf_annotate``
+#: argument warning (§3.6). A marker-bearing transcript line that does *not*
+#: have this shape is not a diagnostic Icarus wrote; it is a corrupted one
+#: (issue #1136 -- see :func:`_scan_sdf_diagnostics`), so the classification
+#: below is applied only to lines that match.
+SDF_DIAGNOSTIC_LINE_RE = re.compile(r"^SDF (?:WARNING|ERROR): .+?:\d+: .+$")
 
 #: A human-readable reason per benign class (:data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS`,
 #: lowercased), surfaced in ``environment.sdf.dropped`` (issue #1102) so a
@@ -932,6 +954,28 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     applied and every TIMINGCHECK was dropped" -- both of which otherwise
     report ``annotated: true`` identically.
 
+    A marker-bearing line is classified at all only once it matches
+    :data:`SDF_DIAGNOSTIC_LINE_RE` -- the ``SDF WARNING:``/``SDF ERROR:``
+    ``<file>:<line>:`` shape Icarus gives every diagnostic it writes. One
+    that carries the marker but not the shape is a *corrupted* line, not a
+    diagnostic (issue #1136): Icarus's own C-level ``printf`` output and
+    cocotb's Python logging share one stdout fd, and under a non-tty capture
+    both are commonly fully- rather than line-buffered, so a flush from one
+    can land mid-line inside a not-yet-flushed line from the other. The
+    observed splice ate the tail of a benign ``TIMINGCHECK`` warning -- and
+    with it the very substring the benign exemption keys on -- turning a
+    fully-applied annotation into a reported failure.
+
+    Such a line is dropped from *both* buckets rather than counted in
+    either: nothing after the marker survived the splice, so it is no more
+    evidence of a real problem than of a benign one. That cannot mask a real
+    failure in practice, because Icarus emits one diagnostic **per failing
+    SDF entry** -- the failure modes this gate exists to catch arrive in the
+    dozens-to-hundreds (spike §3.3's 50-flop netlist annotated 0 flops and
+    logged 50 ``SDF ERROR`` lines), while a splice corrupts only the single
+    line an interleaved flush lands in, leaving every sibling intact and the
+    gate firing on those.
+
     Never raises: a missing/unreadable transcript contributes nothing, the
     same posture :func:`_log_tail` takes.
     """
@@ -949,6 +993,11 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
                 actionable.append(stripped)
                 continue
             if not any(marker in stripped for marker in SDF_DIAGNOSTIC_MARKERS):
+                continue
+            if not SDF_DIAGNOSTIC_LINE_RE.match(stripped):
+                # Marker present, Icarus's own shape absent: a stdout splice,
+                # not a diagnostic (issue #1136). Untrustworthy in both
+                # directions, so it is counted in neither.
                 continue
             benign_class = next(
                 (

@@ -1919,6 +1919,128 @@ def test_stubbed_sdf_counts_timingcheck_drops_across_both_transcripts(
     assert dropped["timingcheck"]["count"] == 3
 
 
+# --------------------------------------------------------------------------- #
+# `_scan_sdf_diagnostics` well-formedness check (issue #1136): Icarus's own
+# C-level SDF diagnostic `printf`s and cocotb's Python regression logging
+# share one stdout fd, so under a non-tty capture a flush from one can land
+# *mid-line* inside a not-yet-flushed line from the other -- splicing two
+# unrelated lines into one that keeps its `SDF WARNING:` marker but loses
+# both its `<file>:<line>:` locator and (as observed live) the `TIMINGCHECK`
+# substring the benign exemption keys on.
+# --------------------------------------------------------------------------- #
+
+#: The exact corruption observed live in issue #1136: a benign `TIMINGCHECK`
+#: warning whose tail was overwritten by an interleaved cocotb log line
+#: before its own newline, followed by the rest of that cocotb line.
+_SPLICED_TIMINGCHECK_TRANSCRIPT = (
+    "SDF WARNING: /path/to/design.sdf:1: TIMINGCHECK not supported.\n"
+    "SDF WARNING: /path/to/design.sd   695.00ns INFO     "
+    "cocotb.regression   some_test passed\n"
+    "   695.00ns INFO     cocotb.regression   running next_test (2/8)\n"
+)
+
+
+def test_scan_sdf_diagnostics_drops_a_stdio_spliced_line(tmp_path):
+    """A spliced line is untrustworthy evidence in *both* directions: it must
+    not be reported as an actionable diagnostic (the false negative issue
+    #1136 reports), and it must not be counted as a benign drop either --
+    whatever it said after the marker was overwritten."""
+    log = _write(tmp_path / "test_icarus.log", _SPLICED_TIMINGCHECK_TRANSCRIPT)
+
+    actionable, dropped = fv._scan_sdf_diagnostics(log)
+
+    assert actionable == []
+    # The intact first line still counts; the spliced second one counts
+    # nowhere at all.
+    assert dropped == {"timingcheck": 1}
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'SDF WARNING: shim.v:2: Unable to open SDF file "route.sdf". '
+        "Skipping this annotation.",
+        "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q in gcd._647_",
+        "SDF ERROR: design_ic.sdf:9: Could not find intermodpath!",
+        "SDF WARNING: tbm.v:5: $sdf_annotate currently only uses the first "
+        "two argument.",
+        # A path with a space in it is still well-formed -- the locator is
+        # the `:<line>:` suffix, not the absence of whitespace.
+        "SDF ERROR: /my designs/route.sdf:9: Could not find intermodpath!",
+    ],
+)
+def test_scan_sdf_diagnostics_still_catches_wellformed_diagnostics(tmp_path, line):
+    """The well-formedness check must not widen the benign filter: every
+    non-benign diagnostic shape the spike captured live
+    (`docs/design/sdf-annotate-feasibility-spike.md` section 3.3) is still
+    actionable."""
+    log = _write(tmp_path / "test_icarus.log", line + "\n")
+
+    actionable, dropped = fv._scan_sdf_diagnostics(log)
+
+    assert actionable == [line]
+    assert dropped == {}
+
+
+def test_scan_sdf_diagnostics_on_an_all_spliced_transcript_reports_clean(tmp_path):
+    """A transcript whose only marker-bearing lines are spliced reports no
+    diagnostics at all rather than one per corruption."""
+    log = _write(
+        tmp_path / "test_icarus.log",
+        "SDF WARNING: /path/to/design.sd   695.00ns INFO cocotb.regression x\n"
+        "SDF ERROR: /path/to/desi   700.00ns INFO cocotb.regression y\n",
+    )
+
+    assert fv._scan_sdf_diagnostics(log) == ([], {})
+
+
+def test_stubbed_sdf_tolerates_a_stdio_spliced_transcript_line(tmp_path, monkeypatch):
+    """End-to-end regression for issue #1136: a run whose SDF annotation
+    applied cleanly must not be failed by a spliced transcript line, and the
+    splice must not inflate the benign `dropped` count either."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=_SPLICED_TIMINGCHECK_TRANSCRIPT,
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+    assert sdf["dropped"]["timingcheck"]["count"] == 1
+
+
+def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_splice(
+    tmp_path, monkeypatch
+):
+    """The stricter check must not become an escape hatch: a genuine,
+    structurally intact `SDF ERROR` in the same transcript as a splice still
+    fails the run."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=(
+                _SPLICED_TIMINGCHECK_TRANSCRIPT
+                + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
+                "in gcd._647_\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply: 1 diagnostic.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+
 def test_sdf_diagnostics_are_only_scanned_on_annotated_runs(tmp_path, monkeypatch):
     """Regression guard: a request with no `options.sdf` behaves exactly as
     it did before this feature existed -- no shim, no build args, no
