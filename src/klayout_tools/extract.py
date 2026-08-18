@@ -3171,6 +3171,7 @@ def extract_netlist_from_layout(
     # `_wire_abstract_cells`.
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] = []
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] = {}
+    abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] = {}
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3180,6 +3181,21 @@ def extract_netlist_from_layout(
             matched_cell_indices = dict.fromkeys(
                 cell_index for cell_index, _trans in abstract_instances
             )
+            # Computed *before* erasure (issue #1183): once
+            # `_erase_abstracted_cell_geometry` clears each matched cell
+            # type's own device-recognition geometry below, the
+            # poly/diffusion/contact connectivity that could tie a
+            # disjoint-but-electrically-equivalent metal fragment to an
+            # in-cell pin label is gone for good -- see
+            # `_local_pin_candidate_points`'s docstring for the full
+            # derivation (confirmed against the real gf180-trng `clkload13`
+            # case this issue reports).
+            abstract_cell_local_candidates = {
+                cell_index: _local_pin_candidate_points(
+                    layout, layout.cell(cell_index), deck
+                )
+                for cell_index in matched_cell_indices
+            }
             _erase_abstracted_cell_geometry(layout, matched_cell_indices, mask_layers)
         if abstract_cell_lef_paths:
             lef_macros = _load_abstract_cell_lefs(abstract_cell_lef_paths)
@@ -3205,6 +3221,7 @@ def extract_netlist_from_layout(
         abstract_cell_patterns=abstract_cell_patterns,
         abstract_instances=abstract_instances,
         lef_macros=lef_macros,
+        abstract_cell_local_candidates=abstract_cell_local_candidates,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -4154,11 +4171,128 @@ def _load_abstract_cell_lefs(
     return macros
 
 
+def _local_pin_candidate_points(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    deck: ExtractionDeck,
+) -> dict[str, list[kdb.Point]]:
+    """Extra local (cell-frame) candidate access points for every in-cell
+    metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
+    internal routing -- issue #1183.
+
+    Must run *before* :func:`_erase_abstracted_cell_geometry` mutates
+    ``layout`` (the caller -- :func:`extract_netlist_from_layout` -- already
+    guarantees this: it calls this function first, over every matched cell
+    type, then erases). :func:`_resolve_abstract_cell_pins`'s
+    ``"in_cell_labels"`` path resolves a pin to exactly the one point where
+    its name label sits -- but a real standard cell's pin can legally carry
+    *several* geometrically disjoint metal shapes for one electrical node
+    (the same "one LEF pin, several PORT rectangles" shape #1181/#1182
+    already fixed for the ``"lef_abstract"`` path), and nothing guarantees
+    the label sits on the specific rectangle that ends up externally routed
+    -- the label is drawn once, at design-library time, long before any
+    particular instance's place-and-route decides which rectangle a via
+    actually lands on. When the label's own rectangle is a different,
+    internally-isolated fragment (tied to the routed one only through the
+    cell's own poly/diffusion -- exactly the connectivity
+    :func:`_erase_abstracted_cell_geometry` deliberately severs for
+    black-box abstraction), the label-only point resolves onto that isolated
+    island instead of the routed net (this issue's reported failure,
+    confirmed against the real ``gf180-trng`` ``clkload13``/``I`` case this
+    issue cites: the label's own local point resolves to an isolated net
+    while a probe at the DEF-verified via location resolves to the correctly
+    merged, externally-routed net).
+
+    This computes a *local*, cell-scoped ``LayoutToNetlist`` connectivity
+    pass -- deliberately narrower than :func:`_extract_netlist`'s full
+    connectivity graph -- restricted to ordinary-conductor connectivity only:
+    ``active``/``poly`` split into gate (``active & poly``) and source/drain
+    (``active - poly``) regions exactly as :func:`_extract_netlist` computes
+    its own default (unflavoured) split, then ``contact``/``metals``/
+    ``vias``, using the same per-level connect chain. Deliberately omits
+    ``nwell``/``tap``/``mos_flavours``/``substrate_isolation``/dummy-marker
+    handling -- none of those affect *signal*-pin metal connectivity (they
+    scope device recognition and well/substrate-tie nets, which this
+    function is not concerned with), so skipping them only ever
+    *under*-connects relative to :func:`_extract_netlist`'s full graph, never
+    over-connects: every extra candidate point this discovers is reachable
+    through a connectivity subset :func:`_extract_netlist` itself already
+    honours, so it can never introduce a false merge that the real
+    extraction pass would not also recognise.
+
+    Returns ``{<pin label text>: [<extra local dbu point>, ...]}`` -- built
+    only from labels drawn on one of ``deck.metal_labels`` (the
+    overwhelmingly common case for a standard cell's signal pins);
+    ``well_label``/``poly_label`` pins are left with their original
+    single-point resolution, unchanged. A label whose own point resolves to
+    no net at all (nothing drawn there) or to a net with no other shapes on
+    its own metal layer contributes no extra points -- the caller merges
+    these into (never replaces) the original label point, so this is
+    strictly additive: a design with no disjoint-metal-fragment pins is
+    unaffected (every label's own point was already the sole candidate, and
+    still is).
+    """
+    import klayout.db as kdb
+
+    active = _region(layout, cell, deck.active)
+    poly = _region(layout, cell, deck.poly)
+    contact = _region(layout, cell, deck.contact)
+    metals = [_region(layout, cell, layer) for layer in deck.metals]
+    vias = [_region(layout, cell, layer) for layer in deck.vias]
+
+    gate = active & poly
+    source_drain = active - poly
+
+    l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, cell, []))
+    l2n.connect(source_drain)
+    l2n.connect(gate)
+    l2n.connect(poly)
+    l2n.connect(gate, poly)
+    l2n.connect(contact)
+    l2n.connect(source_drain, contact)
+    l2n.connect(poly, contact)
+    if metals:
+        l2n.connect(contact, metals[0])
+        l2n.connect(metals[0])
+        for index in range(len(vias)):
+            l2n.connect(metals[index], vias[index])
+            l2n.connect(vias[index])
+            l2n.connect(vias[index], metals[index + 1])
+            l2n.connect(metals[index + 1])
+    l2n.extract_netlist()
+
+    extra_points: dict[str, list[kdb.Point]] = {}
+    for metal_index, layer in enumerate(deck.metal_labels):
+        if layer is None or metal_index >= len(metals):
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        target_region = metals[metal_index]
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            point = kdb.Point(text.x, text.y)
+            net = l2n.probe_net(target_region, point)
+            if net is None:
+                continue
+            shapes = kdb.Shapes()
+            l2n.shapes_of_net(net, target_region, True, shapes)
+            points = extra_points.setdefault(text.string, [])
+            for polygon in kdb.Region(shapes).merged().each():
+                box = polygon.bbox()
+                candidate = kdb.Point(
+                    (box.left + box.right) // 2, (box.bottom + box.top) // 2
+                )
+                if candidate not in points:
+                    points.append(candidate)
+    return extra_points
+
+
 def _resolve_abstract_cell_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
+    local_candidates: dict[str, list[kdb.Point]] | None = None,
 ) -> tuple[
     list[tuple[str, list[kdb.Point], str | None]], str | None, str | None, list[str]
 ]:
@@ -4222,6 +4356,19 @@ def _resolve_abstract_cell_pins(
     ``"in_cell_labels"``/``None`` paths, where every resolved pin always
     carries at least one concrete point (an in-cell label is never
     geometry-less).
+
+    ``local_candidates`` (issue #1183) is
+    :func:`_local_pin_candidate_points`'s ``{<pin name>: [<extra local
+    point>, ...]}`` result, computed by the caller *before* this cell type's
+    device-recognition geometry was erased for abstraction -- ``None`` (the
+    default) or an empty dict behaves exactly as before this issue's fix.
+    Only consulted on the ``"in_cell_labels"`` path (a ``"lef_abstract"``
+    pin's points come from an external LEF file, not this cell's own
+    drawing, so there is no matching pre-erasure geometry to have computed
+    this from): each named pin's extra points are appended to its label-only
+    point list, deduplicated, so :func:`_probe_abstract_pin_net` can probe
+    every candidate exactly as it already does for a multi-rectangle LEF pin
+    (#1181/#1182) and pick whichever one actually lands on routed geometry.
     """
     import klayout.db as kdb
 
@@ -4257,6 +4404,10 @@ def _resolve_abstract_cell_pins(
             points.append(kdb.Point(text.x, text.y))
 
     if in_cell:
+        for name, (points, _role) in in_cell.items():
+            for extra_point in (local_candidates or {}).get(name, []):
+                if extra_point not in points:
+                    points.append(extra_point)
         pins = [(name, points, role) for name, (points, role) in in_cell.items()]
         pins.sort(key=lambda entry: entry[0])
         return pins, "in_cell_labels", None, []
@@ -4526,6 +4677,7 @@ def _wire_abstract_cells(
     instances: list[tuple[int, kdb.ICplxTrans]],
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
     probe_layers: list[tuple[str, kdb.Region]],
+    local_candidates_by_cell: dict[int, dict[str, list[kdb.Point]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
@@ -4579,6 +4731,13 @@ def _wire_abstract_cells(
     :func:`_collect_abstract_instances`); each occurrence is named
     ``"<cell type>_<n>"`` (0-based, per cell type), sanitized for SPICE via
     :func:`_sanitize_instance_name`.
+
+    ``local_candidates_by_cell`` (issue #1183) is ``{<cell index>:
+    <_local_pin_candidate_points() result>}`` for every matched cell type,
+    computed by the caller *before* :func:`_erase_abstracted_cell_geometry`
+    ran -- ``None`` (the default) disables the extra-candidate lookup
+    entirely, matching this function's pre-#1183 behaviour exactly. Passed
+    straight through to :func:`_resolve_abstract_cell_pins` per cell type.
     """
     import klayout.db as kdb
 
@@ -4591,8 +4750,9 @@ def _wire_abstract_cells(
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
+        local_candidates = (local_candidates_by_cell or {}).get(cell_index)
         pins, source, lef_path, pin_warnings = _resolve_abstract_cell_pins(
-            layout, cell, deck, lef_macros
+            layout, cell, deck, lef_macros, local_candidates
         )
         warnings.extend(pin_warnings)
         if source is None:
@@ -5251,6 +5411,7 @@ def _extract_netlist(
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] | None = None,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
+    abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -5365,6 +5526,11 @@ def _extract_netlist(
     ``kdb.SubCircuit`` (:func:`_wire_abstract_cells`). ``abstracted_cells``
     is the JSON response's field -- always a list, empty when
     ``abstract_cell_patterns`` is empty (the default).
+    ``abstract_cell_local_candidates`` (issue #1183) is
+    :func:`_local_pin_candidate_points`'s per-matched-cell-type result,
+    computed by the same caller from the *pre*-erasure geometry -- passed
+    straight through to :func:`_wire_abstract_cells`; ``None`` (the default)
+    disables the extra-candidate lookup entirely.
     """
     import klayout.db as kdb
 
@@ -6415,6 +6581,7 @@ def _extract_netlist(
             abstract_instances,
             lef_macros or {},
             probe_layers,
+            abstract_cell_local_candidates,
         )
         warnings = warnings + abstract_cell_warnings
 
