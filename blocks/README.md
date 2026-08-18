@@ -106,11 +106,14 @@ driven through the staged agent design pipeline
 ([`docs/design/design-pipeline.md`](../docs/design/design-pipeline.md)) from
 proposal through schematic-level simulation. It is outside the #4 test
 corpus (it has no source GDS at all — layout generation, S7, has no `klt`
-verb yet, #104), so like `clkinv_1` above it deliberately has no
-`output/layout.json`, explained in its own
-[`sky130-ota-5t/NOTE.md`](sky130-ota-5t/NOTE.md). The full run — every
-pipeline artifact, the stage-by-stage status, and a provisional pre-layout
-signoff comparison — lives at
+verb yet, #104), so like `clkinv_1` above it has no layout data
+(`layer_count`/`cell_count`/`renders`/etc.) — `status: "no_artifacts"`,
+explained in its own [`sky130-ota-5t/NOTE.md`](sky130-ota-5t/NOTE.md). As
+of issue #1122 it does carry a minimal `output/layout.json` (still
+`status: "no_artifacts"`, no fabricated layout data) solely to attach a
+hand-drawn `schematic` diagram — see that NOTE.md's "`schematic.svg`"
+section. The full run — every pipeline artifact, the stage-by-stage
+status, and a provisional pre-layout signoff comparison — lives at
 [`../examples/design-pipeline/README.md`](../examples/design-pipeline/README.md).
 
 ## Canary blocks (issue #62)

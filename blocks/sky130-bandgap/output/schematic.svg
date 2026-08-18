@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="11.34 -35.78 946.70 766.90" color="currentColor" version="1.1">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="11.34 -35.78 946.70 766.90" version="1.1" role="img">
 <!--
   schematic.svg for the sky130-bandgap gallery block (klayout-tools issue #1122).
 
@@ -6,13 +6,16 @@
     design/bandgap_core.sch
   in the public canary repo 2AMLogic/sky130-bandgap @ 31d8167d37d021ed0c54681f39d058770f29f0db
   (https://github.com/2AMLogic/sky130-bandgap/blob/31d8167d37d021ed0c54681f39d058770f29f0db/design/bandgap_core.sch),
-  via xschem's SVG batch export ('svg' plot mode, '-x -q' headless/quit)
-  against design/bandgap_core.sch (no GUI). Post-processed only to: strip the two embedded
-  `code_shown.sym` documentation/parameter-listing text blocks and the sheet
-  header comment (decorative, not circuit elements), recolor every layer to
-  `currentColor` and drop the fixed dark-canvas background so the diagram
-  reads in both the site's light and dark themes, and crop the viewBox to
-  the drawn content. No symbol, wire, or label was added, removed, or moved.
+  via xschem's SVG batch export ('svg' plot mode, '-x -q' headless/quit,
+  no GUI). Post-processed only to: strip the two embedded `code_shown.sym`
+  documentation/parameter-listing text blocks and the sheet header comment
+  (decorative, not circuit elements), collapse every xschem layer color to
+  one ink color, crop the viewBox to the drawn content, and add the
+  self-contained light/dark `<style>` block the site's staging convention
+  requires (site/README.md "Schematic section", issue #1121) — this file
+  is loaded via a plain <img> tag, so it cannot inherit the host page's
+  CSS/`currentColor`. No symbol, wire, or label was added, removed, or
+  moved.
 
   Device-count spot-check (recorded in klayout-tools PR for issue #1122):
   8 instances in this diagram == 8 non-pin/non-comment `C {...}` component
@@ -24,160 +27,166 @@
 -->
 <style type="text/css">
 .l0{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l1{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l2{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l3{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l4{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l5{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l6{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l7{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l8{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l9{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l10{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l11{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l12{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l13{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l14{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l15{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l16{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l17{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l18{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l19{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l20{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 .l21{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.33885;
 }
 text {font-family: Sans-Serif;}
+text { fill: #1f2430; }
+text { fill: #c6cdd6; }
+@media (prefers-color-scheme: dark) {
+  text { fill: #c6cdd6; }
+  .l0, .l1, .l2, .l3, .l4, .l5, .l6, .l7, .l8, .l9, .l10, .l11, .l12, .l13, .l14, .l15, .l16, .l17, .l18, .l19, .l20, .l21 { fill: #c6cdd6; stroke: #c6cdd6; }
+}
 </style>
 <path class="l4" d="M280.764 19.1777L280.764 31.5744"/>
 <path class="l4" d="M280.764 66.2853L280.764 78.682"/>

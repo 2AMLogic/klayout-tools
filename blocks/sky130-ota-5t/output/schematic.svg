@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="-35.78 -16.71 1001.99 728.00" color="currentColor" version="1.1">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="-35.78 -16.71 1001.99 728.00" version="1.1" role="img">
 <!--
   schematic.svg for the sky130-ota-5t gallery block (klayout-tools issue #1122).
 
@@ -15,9 +15,9 @@
   AC-analysis-only testbench scaffolding in that file (Vdd/Vcm/Vin supplies,
   the CL load cap, and the Lfb/Cfb DC-feedback network used only to bias the
   open-loop-gain measurement) is intentionally omitted; it is test fixture,
-  not part of the OTA circuit itself. Colors use `currentColor` and the
-  viewBox is cropped to the drawn content, matching the other two staged
-  schematics' theme convention.
+  not part of the OTA circuit itself. Uses the same self-contained
+  light/dark `<style>` convention as the two exported bandgap diagrams
+  (site/README.md "Schematic section", issue #1121).
 
   Device-count spot-check (recorded in klayout-tools PR for issue #1122): 6
   transistors (M1, M2 input pair; M3, M4 mirror load; M5 tail; M5b diode
@@ -27,160 +27,166 @@
 -->
 <style type="text/css">
 .l0{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l1{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l2{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l3{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l4{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l5{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l6{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l7{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l8{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l9{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l10{
-  fill: currentColor;
-  stroke: currentColor;
+  fill: #1f2430;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l11{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l12{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l13{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l14{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l15{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l16{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l17{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l18{
-  fill: currentColor; fill-opacity: 0.5;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.5;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l19{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l20{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 .l21{
-  fill: currentColor; fill-opacity: 0.2;
-  stroke: currentColor;
+  fill: #1f2430; fill-opacity: 0.2;
+  stroke: #1f2430;
   stroke-linecap:round;
   stroke-linejoin:round;
   stroke-width: 1.79445;
 }
 text {font-family: Sans-Serif;}
+text { fill: #1f2430; }
+text { fill: #c6cdd6; }
+@media (prefers-color-scheme: dark) {
+  text { fill: #c6cdd6; }
+  .l0, .l1, .l2, .l3, .l4, .l5, .l6, .l7, .l8, .l9, .l10, .l11, .l12, .l13, .l14, .l15, .l16, .l17, .l18, .l19, .l20, .l21 { fill: #c6cdd6; stroke: #c6cdd6; }
+}
 </style>
 <path class="l4" d="M220.033 49.9073L220.033 109.722"/>
 <path class="l4" d="M236.648 39.9381L236.648 56.5534"/>

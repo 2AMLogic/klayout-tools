@@ -30,16 +30,29 @@ Re-running `python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap`
 refreshes this file from the source repo's current state (still gated on
 that repo staying public) — as its layout advances, this is the repeatable
 way to pick it up; no separate refresh mechanism exists or is needed.
+**Caveat (issue #1122):** `ingest-canary.py` rewrites `layout.json` from
+scratch on every run and does not know about the `schematic` field below —
+re-running the ingest will silently drop it, and it needs to be re-added
+by hand (or by a future enhancement to `ingest-canary.py` that isn't in
+scope here) after any refresh.
 
-## `schematic.svg` (issue #1122)
+## `schematic.svg` (issue #1122 / #1121)
 
-`schematic.svg` is a headless `xschem --svg` export of
+`output/schematic.svg` is a headless `xschem --svg` export of
 `design/bandgap_core.sch` in
 [`2AMLogic/gf180-bandgap`](https://github.com/2AMLogic/gf180-bandgap) @
-`04c59f1103504e824fdcb224eaa7e070ef8e2b82`, post-processed to the site's
-theme convention (`currentColor` ink, no baked dark-canvas background,
-cropped `viewBox`) — full provenance and the post-processing diff are
-recorded in the SVG's own leading `<!-- ... -->` comment. `bandgap_core.sch`
+`04c59f1103504e824fdcb224eaa7e070ef8e2b82`, staged per issue #1121's
+convention (`layout.json`'s `schematic.path`/`schematic.provenance`,
+picked up by `site/scripts/copy-renders.mjs` and rendered by
+`DetailPage.tsx`'s "Schematic" section). Since the file is loaded via a
+plain `<img>` tag (not inlined into the page), it cannot inherit the host
+page's CSS/`currentColor` — it is self-contained instead: one ink color by
+default (reads on a light background, e.g. GitHub's raw SVG viewer) that
+switches to a light-on-dark palette under `@media
+(prefers-color-scheme: dark)`. Full export provenance and the
+post-processing diff are recorded in the SVG's own leading `<!-- ... -->`
+comment; the short caption shown on the site itself is `layout.json`'s
+`schematic.provenance` string. `bandgap_core.sch`
 (the actual Brokaw-core topology) was chosen over the literal hierarchy
 root `design/bandgap_top.sch`, which is a pure black-box interconnect of
 `bandgap_core`/`bandgap_amp`/`bandgap_startup` with no devices of its own —

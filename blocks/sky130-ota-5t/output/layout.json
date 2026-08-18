@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-18T02:01:28.662402+00:00",
+  "slug": "sky130-ota-5t",
+  "name": "Sky130 Ota 5t",
+  "description": "5T OTA reference buffer — klayout-tools design-pipeline worked example (Epic #105 Phase 3)",
+  "schematic": {
+    "path": "schematic.svg",
+    "provenance": "Drawn from examples/design-pipeline/ota_5t.spice @ 7c8f43a."
+  },
+  "status": "no_artifacts"
+}

@@ -8,6 +8,10 @@
   "cell_count": 27,
   "instance_count": 26,
   "layout_file": "bandgap_core_routed.gds",
+  "schematic": {
+    "path": "schematic.svg",
+    "provenance": "Source: 2AMLogic/sky130-bandgap @ 31d8167 (design/bandgap_core.sch)."
+  },
   "renders": {
     "overview": "renders/overview.png",
     "layer_64_20": "renders/64_20.png",
