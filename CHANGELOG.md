@@ -44,7 +44,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   *containing* the instance for an unmatched-subcircuit-instance entry) and,
   for the instance case only, `instance` (the subcircuit instance's own
   name) and `subcircuit` (the name of the circuit it instantiates, its "cell
-  type"). Also adds `error_count` (total `severity: "error"` entries) and
+  type"). All three keys are present on *every* `mismatches[]` entry
+  (`null` off their own categories, never omitted) — including the generic
+  safety-net entry emitted when the comparer reports a mismatch this module
+  could not classify, which is now built through the same entry constructor
+  as every other finding rather than as its own literal. Also adds
+  `error_count` (total `severity: "error"` entries) and
   `category_error_counts` (`category_counts`, split to `error`-only) so a
   caller can gate on "any real defect present" without re-reading and
   re-filtering `mismatches[]` itself — a nonzero `category_counts` entry can

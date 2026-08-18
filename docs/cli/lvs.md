@@ -1043,7 +1043,10 @@ produced any structured entry (a gap in this module's own event coverage,
 not a clean run), `klt lvs` reports one generic `severity: "error"`,
 `side: "both"` `topology` entry rather than silently reporting
 `status: "match"` — see this module's docstring on the "`compare()` is
-always authoritative" invariant.
+always authoritative" invariant. It is built through the same entry
+constructor as every classification site above, so it carries the full field
+set in the table — `net`/`device`/`property`/`details` and
+`circuit`/`instance`/`subcircuit` all present and `null`, never omitted.
 
 #### `hints.rejected`: a declared `hints.same_nets` pairing the comparer refused
 

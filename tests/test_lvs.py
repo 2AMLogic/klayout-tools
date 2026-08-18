@@ -1832,6 +1832,64 @@ def test_subcircuit_instance_mismatch_names_the_instance_and_its_type(tmp_path):
     assert report["error_count"] == 3
 
 
+def test_unclassified_mismatch_safety_net_entry_carries_every_field(
+    tmp_path, monkeypatch
+):
+    """The safety-net entry `run_lvs` synthesises when `compare()` reports a
+    mismatch but this module's own event classification produced nothing (see
+    docs/cli/lvs.md -> "A seventh entry") must carry the *same* key set as
+    every classification site's entry -- `circuit`/`instance`/`subcircuit`
+    included, `null` rather than absent.
+
+    It was hand-rolled as a dict literal before issue #1132's review, so it
+    silently went missing the three keys that issue added and a consumer
+    subscripting `mismatch["circuit"]` hit a `KeyError` on this one path. It
+    now goes through `_mismatch()` like every other site; this test pins that
+    (and would fail again on the next field added out of band).
+
+    Forcing the branch takes a monkeypatch: by construction it only fires on a
+    gap in the module's own event coverage, which no real fixture can produce
+    on demand. `_build_mismatches` is stubbed to the empty classification it
+    would return in such a gap, over a genuinely mismatching compare so
+    `compare()` itself still returns the "mismatch" verdict the safety net
+    exists to honour.
+    """
+    monkeypatch.setattr(lvs, "_build_mismatches", lambda *a, **k: [])
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice", _INVERTER_SPICE.replace("W=1.0U", "W=2.0U")
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+
+    # The verdict is still the engine's, never re-derived from the (now
+    # empty) classification -- the invariant the safety net protects.
+    assert report["status"] == "mismatch"
+    (entry,) = report["mismatches"]
+    assert entry["category"] == "topology"
+    assert entry["severity"] == "error"
+    assert entry["side"] == "both"
+    assert "no further detail available" in entry["description"]
+
+    # Key set identical to a `_mismatch()`-built entry's, with every optional
+    # object present-and-null rather than omitted.
+    assert set(entry) == set(lvs._mismatch("topology", "error", "d", "both"))
+    for field in ("net", "device", "property", "details"):
+        assert entry[field] is None
+    for field in ("circuit", "instance", "subcircuit"):
+        assert field in entry, f"{field} omitted, not null"
+        assert entry[field] is None
+
+    assert report["error_count"] == 1
+    assert report["category_error_counts"] == {"topology": 1}
+
+
 def test_flatten_reference_turns_the_topology_mismatch_into_a_match(tmp_path):
     """`options.flatten_reference: true` collapses the reference's two
     subcircuit-call circuits into its top circuit before comparing, so it

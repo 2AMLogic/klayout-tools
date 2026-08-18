@@ -730,20 +730,22 @@ def run_lvs(request: str) -> dict[str, Any]:
             # nothing (a gap in event coverage, not a clean run), never let the
             # response silently look like a match -- report a generic, honest
             # finding instead of dropping the verdict.
+            #
+            # Built through `_mismatch()` like every other classification site
+            # (issue #1132 review): a hand-rolled dict literal here silently
+            # drifts out of the entry shape whenever a field is added -- it
+            # went missing `circuit`/`instance`/`subcircuit` entirely (absent
+            # keys, not `null`), breaking the "every entry carries the key,
+            # never omitted" invariant `_mismatch`'s docstring and
+            # docs/cli/lvs.md's field table both state.
             mismatches = [
-                {
-                    "category": CATEGORY_TOPOLOGY,
-                    "severity": "error",
-                    "description": (
-                        "netlists do not match (no further detail available "
-                        "from the comparer's event log)"
-                    ),
-                    "side": "both",
-                    "net": None,
-                    "device": None,
-                    "property": None,
-                    "details": None,
-                }
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "error",
+                    "netlists do not match (no further detail available "
+                    "from the comparer's event log)",
+                    "both",
+                )
             ]
         status = "match" if compare_result else "mismatch"
         engine_version = _engine_version()
