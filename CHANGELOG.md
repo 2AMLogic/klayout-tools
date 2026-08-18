@@ -805,6 +805,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-18 — new **`klt.layout_plan.request/1`** contract plus a
+  library-level reference validator (issue #1131, Phase B of
+  `docs/design/netlist-driven-layout-spike.md`): a declarative plan
+  document describing how a netlist's devices are grouped, matched,
+  ordered (`rows[]`), and abutted (`abutment[]`) into one layout —
+  placement *intent*, sitting between an ingested netlist digest (issue
+  #1130) and existing `klt gen`/`klt gen-compose` calls.
+  `klayout_tools.layout_plan.validate_layout_plan()` is a pure function
+  with no generation side effects: it checks structure, resolves every
+  `device_groups[].devices` reference against the netlist digest, checks
+  `device_groups[].generator`/`topology` against what `docs/cli/gen.md`'s
+  generators actually support, and checks every intra-plan
+  `encloses`/`rows[].order`/`abutment[]` group-id reference. Notably, a
+  device reference resolves on `(name, device_class)`, never `name` alone
+  — a digest device name is per-class (`M1`/`R1` both digest to `"1"`), so
+  a bare name carried by two classes is an ambiguity **error** naming the
+  classes to choose between, and `{"name", "device_class"}` is accepted to
+  disambiguate. Exit-code trichotomy: `0` valid, `1` application error
+  (unresolvable reference; includes `topology: "interdigitated"`/`"single"`,
+  which no generator supports yet and which are flagged rather than
+  silently accepted), `2` usage error (malformed document). **No `klt`
+  subcommand is added** — Phase B is contract + validation only; plan
+  *execution* is Phase C, not yet built. See the new
+  `docs/cli/layout-plan.md` and
+  `docs/schemas/layout-plan-request.schema.json`.
 - 2026-08-18 — `klt gen` gains a new **`cap_array`** generator (issue
   #1117): a row of matched unit MiM (Metal-Insulator-Metal) capacitor
   cells, each a top-plate-metal-over-bottom-plate-metal stack (sky130's

@@ -35,6 +35,7 @@ docs/
     kb.md
     layers.md
     layout-metrics.md
+    layout-plan.md
     lef-abstract.md
     lvs.md
     mom.md
@@ -93,6 +94,7 @@ docs/
     README.md
   schemas/               # published JSON Schemas
     em-site-export.schema.json
+    layout-plan-request.schema.json
     remote-sim-ami-manifest.schema.json
     socket.schema.json
     synth-generic-netlist.schema.json
