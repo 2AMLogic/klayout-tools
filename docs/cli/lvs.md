@@ -474,7 +474,15 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
   "layout": "design.gds",
   "reference": "ota_5t.schematic.spice",
   "top": "ota_5t",
+  "reference_top": "ota_5t",
   "parameter_tolerance": null,
+  "options": {
+    "combine_devices": false,
+    "flatten_layout": false,
+    "flatten_reference": false,
+    "netgen_setup": null,
+    "parameter_tolerance": null
+  },
   "status": "match",
   "mismatch_count": 0,
   "error_count": 0,
@@ -559,7 +567,9 @@ section this engine buckets rather than fully structures:
 | `layout` | string | Echo of `layout.file` or `layout.netlist`, exactly as provided. |
 | `reference` | string | Echo of `reference.netlist`, exactly as provided. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
+| `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
+| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices`, `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), and `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view). Every key is always present with its effective value, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input). |
 | `status` | `"match"` \| `"mismatch"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `error_count` | integer | Issue #1132: the number of `mismatches[]` entries with `severity: "error"` — `sum(category_error_counts.values())`. `mismatch_count` alone cannot tell a caller this without re-reading every entry, since a nonzero `mismatch_count` can be entirely `severity: "warning"` (e.g. a report whose only finding is a `device.bulk_reconciled` disclosure). `0` on a `status: "match"` report exactly (a `"match"` verdict never carries an `error` entry). |
@@ -1186,11 +1196,12 @@ reports whose `layout`/`reference` are already absolute paths.
 
 Best-effort re-run of the compare the committed report describes,
 reconstructed from the fields the response actually echoes (`engine`,
-`layout`/`reference`, `top`, the deck name/options under `provenance.deck`,
-and `parameter_tolerance`), then diffs the fresh report against the
-committed one field by field — same volatile-field exclusions as `klt drc
---rerun` (`provenance.klt_version`/`klayout_version`/`pdk.version`; `pdk` is
-always `null` for LVS, so only the first two ever apply in practice).
+`layout`/`reference`, each side's own top — `top` and `reference_top` — the
+deck name/options under `provenance.deck`, and the whole `options` block),
+then diffs the fresh report against the committed one field by field — same
+volatile-field exclusions as `klt drc --rerun`
+(`provenance.klt_version`/`klayout_version`/`pdk.version`; `pdk` is always
+`null` for LVS, so only the first two ever apply in practice).
 Response shape mirrors `klt drc --rerun`'s:
 
 ```json
@@ -1214,11 +1225,21 @@ inline extraction from the response alone — both populate `provenance.deck`
 — so `--rerun` always reconstructs `layout.file`; in that specific combo it
 fails loudly (a clean error, not a silent wrong answer) since the named path
 is actually a SPICE netlist, not a layout stream. A non-default
-`reference.form` (`"subckt-call"`), `options.combine_devices`/
-`flatten_reference`/`flatten_layout`, and `layout.top_cell_pins`/
-`declared_pins`/`device_bulk` are never echoed anywhere in the response and
-are always reconstructed as each option's own default. Use cheap mode
-instead when any of these apply to the original request.
+`reference.form` (`"subckt-call"`), `reference.device_map`/`device_bulk`, and
+`layout.top_cell_pins`/`declared_pins` are never echoed anywhere in the
+response and are always reconstructed as each option's own default. Use cheap
+mode instead when any of these apply to the original request.
+
+A **report committed before issue #1205** added `reference_top` and the
+`options` echo is reconstructed the way it always was: the single recorded
+`top` is applied to both sides, and `options` is rebuilt from the top-level
+`parameter_tolerance` alone. Both newly-added fields are excluded from the
+drift diff for such a report (a field the committed report never carried
+cannot itself have drifted), so re-running one is exactly as accurate — and
+exactly as best-effort — as it was before. If that older report came from a
+request with an asymmetric `reference.top` or any `options` entry, full mode
+still cannot reconstruct it; use cheap mode, or re-commit the report with a
+current `klt`.
 
 ### Exit codes for `--check` / `--rerun`
 

@@ -7004,6 +7004,205 @@ def test_rerun_lvs_report_missing_layout_reference_raises(tmp_path):
         rerun_lvs_report(str(report_path))
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1205: the committed report must record enough to reconstruct the
+# request `--rerun` re-runs -- the reference-side top (which differs from the
+# layout-side top by construction for an LVS negative control) and the
+# compare-shaping `options` block (whose loss made a `combine_devices: true`
+# report re-run as an un-folded compare and call the difference "drift").
+# --------------------------------------------------------------------------- #
+
+#: A deliberately-broken copy of `_INVERTER_SPICE`'s cell -- the PMOS gate is
+#: shorted to the output -- under its own `<cell>_shorted` circuit name. This
+#: is the shape of an LVS negative control: the *layout* top is
+#: `inv_shorted`, but it is compared against the *intact* cell's reference
+#: netlist, whose top is `inv`, so the two tops differ by construction.
+_SHORTED_INVERTER_LAYOUT_SPICE = """
+.subckt inv_shorted A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.65U L=0.15U
+M2 Y Y VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+"""
+
+
+def _negative_control_request(tmp_path: Path) -> dict:
+    """The issue's own reproduction, in the pre-extracted-netlist form: a
+    `<cell>_shorted` layout compared against the intact cell's reference
+    netlist, so `layout.top` != `reference.top`."""
+    layout_path = _write(tmp_path / "shorted.spice", _SHORTED_INVERTER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    return {
+        "layout": {"netlist": layout_path, "top": "inv_shorted"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+
+
+def _folded_request(tmp_path: Path) -> dict:
+    """A folded/multi-finger layout compared against the single-lumped-device
+    reference it is electrically identical to, which only reaches
+    `status: "match"` with `options.combine_devices` set."""
+    layout_path = _write(tmp_path / "folded.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    return {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+        "options": {"combine_devices": True},
+    }
+
+
+def test_run_lvs_echoes_reference_top_and_options(tmp_path):
+    """The report records each side's own resolved top and the whole
+    compare-shaping `options` block as used -- the fields `--rerun`
+    reconstructs from (issue #1205)."""
+    request = _negative_control_request(tmp_path)
+    request["options"] = {"combine_devices": True}
+
+    report = run_lvs(json.dumps(request))
+
+    # `NetlistSpiceReader` upper-cases circuit names; the request's own
+    # lower-case `top` still selects them (see `_select_circuit`).
+    assert report["top"] == "INV_SHORTED"
+    assert report["reference_top"] == "INV"
+    assert report["options"] == {
+        "combine_devices": True,
+        "flatten_layout": False,
+        "flatten_reference": False,
+        "netgen_setup": None,
+        "parameter_tolerance": None,
+    }
+    # The pre-#1205 fields are untouched -- this is an additive change, so no
+    # `schema_version` bump (docs/json-contract.md, "additive envelope").
+    assert report["schema_version"] == 1
+    assert report["parameter_tolerance"] is None
+
+
+def test_rerun_lvs_report_reconstructs_asymmetric_reference_top(tmp_path):
+    """Issue #1205's first reproduction: a negative-control report (layout
+    top `inv_shorted` vs. reference top `inv`) re-runs cleanly instead of
+    exiting 1 with "top cell/subcircuit 'inv_shorted' not found in reference
+    netlist", and reproduces the committed verdict without drift."""
+    request = _negative_control_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    assert committed["status"] == "mismatch"  # it is a negative control
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["status"] == "mismatch"
+    assert result["fresh"]["top"] == "INV_SHORTED"
+    assert result["fresh"]["reference_top"] == "INV"
+
+
+def test_rerun_lvs_report_preserves_combine_devices_option(tmp_path):
+    """Issue #1205's second reproduction: a clean `status: "match"` report
+    from a `combine_devices: true` request no longer re-runs as an un-folded
+    compare and reports the resulting fresh mismatch list as drift."""
+    request = _folded_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    assert committed["status"] == "match"
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["status"] == "match"
+    assert result["fresh"]["options"]["combine_devices"] is True
+
+
+def test_rerun_lvs_report_without_combine_devices_still_drifts_on_real_change(
+    tmp_path,
+):
+    """The `combine_devices` round-trip must not paper over a *real* change:
+    the same folded report drifts when the reference netlist actually moves
+    after the report was committed."""
+    request = _folded_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    _write(tmp_path / "ref.spice", _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "status" in {entry["field"] for entry in result["drift"]}
+    assert result["fresh"]["status"] == "mismatch"
+
+
+def test_rerun_lvs_report_preserves_parameter_tolerance_in_options_block(tmp_path):
+    """`options.parameter_tolerance` is echoed both at the top level (issue
+    #589) and inside the new `options` block (#1205); the reconstruction
+    reads one value, never two conflicting ones."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+        "options": {"parameter_tolerance": 0.01},
+    }
+    committed = run_lvs(json.dumps(request))
+    assert committed["parameter_tolerance"] == 0.01
+    assert committed["options"]["parameter_tolerance"] == 0.01
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_lvs_report_legacy_report_without_request_echo_fields(tmp_path):
+    """A report committed *before* issue #1205 added `reference_top`/
+    `options` re-runs exactly as it used to: the reference top falls back to
+    the single recorded `top`, the tolerance falls back to the top-level
+    echo, and neither newly-added field is reported as drift (a field the
+    committed report never carried cannot have drifted)."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+        "options": {"parameter_tolerance": 0.01},
+    }
+    committed = run_lvs(json.dumps(request))
+    committed.pop("reference_top")
+    committed.pop("options")
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    # The fresh report still carries the new fields -- they are simply not
+    # diffed against a committed report that predates them.
+    assert result["fresh"]["reference_top"] == "INV"
+    assert result["fresh"]["options"]["parameter_tolerance"] == 0.01
+
+
+def test_check_lvs_report_cheap_mode_unaffected_by_asymmetric_top(tmp_path):
+    """Cheap mode (`--check` without `--rerun`) reconstructs no request at
+    all, so it keeps working unchanged on exactly the reports full mode used
+    to choke on (issue #1205's "cheap mode is unaffected either way and must
+    stay working")."""
+    request = _negative_control_request(tmp_path)
+    request["options"] = {"combine_devices": True}
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["mode"] == "check"
+    assert result["status"] == "match"
+    fields = {check["field"] for check in result["checks"]}
+    assert fields == {"environment.layout_sha256", "environment.reference_sha256"}
+    assert all(check["match"] for check in result["checks"])
+
+
 def test_cli_lvs_check_clean_exits_zero(tmp_path, capsys):
     layout_path, reference_path = _matching_netlist_request(tmp_path)
     request = {
