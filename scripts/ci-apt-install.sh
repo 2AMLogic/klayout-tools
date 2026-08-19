@@ -28,9 +28,11 @@
 # check* rather than a green build. This script is the layer that actually
 # gets past the stall:
 #
-#   - Rewrites `azure.archive.ubuntu.com` out of apt's sources (both the
-#     classic `sources.list` and Ubuntu 24.04's deb822 `.sources` layout)
-#     so the job only ever talks to the mirror that stayed healthy.
+#   - Rewrites `azure.archive.ubuntu.com` out of apt's sources (the classic
+#     `sources.list`, Ubuntu 24.04's deb822 `.sources` layout, and the
+#     `mirror+file:` mirror-list file GitHub's real runner images actually
+#     use -- see the "Update" note below) so the job only ever talks to the
+#     mirror that stayed healthy.
 #   - Passes short `Acquire::*::Timeout` / bounded `Acquire::Retries`
 #     options so a stalled connection errors in seconds instead of hanging
 #     near the whole step budget.
@@ -41,6 +43,32 @@
 # A genuine packaging failure (typo'd/nonexistent package) is NOT retried
 # and NOT masked: it is detected and fails immediately, non-zero.
 #
+# Update (issue #1224, post-#1226): the rewrite above was a silent no-op on
+# real GitHub-hosted `ubuntu-24.04` runners -- confirmed by pulling raw job
+# logs (runs 32291907647 / 32292729034) and finding the "rewriting ..." log
+# line never printed, with every apt line still hitting
+# `azure.archive.ubuntu.com`. Root cause: those runner images do not put the
+# mirror hostname directly in `/etc/apt/sources.list.d/*.sources` -- the
+# `URIs:` line there is `mirror+file:/etc/apt/apt-mirrors.txt` (apt's
+# "mirror" method), and the *actual* candidate mirror URL(s), including
+# `azure.archive.ubuntu.com`, live in that separate plain-text mirror-list
+# file instead (visible in CI logs as `Get:1 file:/etc/apt/apt-mirrors.txt
+# Mirrorlist [144 B]` on every `apt-get update`). `grep`-ing only the
+# `sources.list(.d)` files for the mirror hostname string can never match in
+# that layout. `sanitize_sources` below now also rewrites
+# `/etc/apt/apt-mirrors.txt` (configurable via `CI_APT_MIRROR_LIST_FILES`),
+# and logs an explicit warning -- not just silence -- when nothing it
+# checked referenced the flaky mirror, so a future runner-image layout
+# change is visible in the CI log instead of silently doing nothing again.
+#
+# Separately (same investigation): even a retry against the *same* degraded
+# host is not always enough for a large package. `cmake` (11.2 MB, part of
+# the Yosys build-deps step) was repeatedly killed mid-download by the fixed
+# per-command timeout while smaller packages (e.g. `ngspice`, 4.4 MB)
+# completed under the same budget -- see `CI_APT_DEADLINE` /
+# `CI_APT_PER_CMD_TIMEOUT` overrides on that step in
+# `.github/workflows/ci.yml`.
+#
 # Knobs (all optional; defaults are tuned for `timeout-minutes: 5`):
 #   CI_APT_DEADLINE          total wall-clock budget, seconds (default 250)
 #   CI_APT_PER_CMD_TIMEOUT   per apt-get invocation cap, seconds (default 90)
@@ -48,6 +76,10 @@
 #   CI_APT_BACKOFF           seconds slept between attempts (default 5)
 #   CI_APT_SOURCE_FILES      space-separated apt source files to sanitize
 #                            (default: the standard system locations)
+#   CI_APT_MIRROR_LIST_FILES space-separated apt "mirror+file:" mirror-list
+#                            files to sanitize (default:
+#                            /etc/apt/apt-mirrors.txt -- see the Update note
+#                            above)
 #   CI_APT_NO_SUDO           set to any value to invoke apt-get directly
 #                            (already root, or under test)
 
@@ -101,6 +133,15 @@ remaining() {
 # deleting the entry) keeps every suite/component the stanza declares --
 # apt's "configured multiple times" warning on a resulting duplicate is
 # harmless and does not fail the update.
+#
+# GitHub's real `ubuntu-24.04` runner images do not reference the mirror
+# hostname in *.sources/*.list at all: their `URIs:` line is
+# `mirror+file:/etc/apt/apt-mirrors.txt`, and that separate plain-text file
+# is where `azure.archive.ubuntu.com` actually appears (issue #1224). It is
+# just a list of candidate mirror URLs, so the same substring rewrite
+# applies to it unmodified -- it is checked alongside the classic/deb822
+# source files below, not instead of them, since a non-GitHub or future
+# runner layout may still reference the mirror directly.
 sanitize_sources() {
     local files=()
     if [[ -n "${CI_APT_SOURCE_FILES:-}" ]]; then
@@ -113,14 +154,31 @@ sanitize_sources() {
         )
     fi
 
-    local file
-    for file in "${files[@]}"; do
+    local mirror_files=()
+    if [[ -n "${CI_APT_MIRROR_LIST_FILES:-}" ]]; then
+        read -r -a mirror_files <<<"${CI_APT_MIRROR_LIST_FILES}"
+    else
+        mirror_files=(/etc/apt/apt-mirrors.txt)
+    fi
+
+    local file matched=0
+    for file in "${files[@]}" "${mirror_files[@]}"; do
         # Unmatched globs stay literal; -f skips them.
         [[ -f "$file" ]] || continue
         grep -q "${FLAKY_MIRROR}" "$file" 2>/dev/null || continue
+        matched=1
         log "rewriting ${FLAKY_MIRROR} -> ${GOOD_MIRROR} in $file"
         as_root sed -i "s#${FLAKY_MIRROR//./\\.}#${GOOD_MIRROR}#g" "$file"
     done
+
+    if ((matched == 0)); then
+        log "WARNING: no candidate apt source/mirror-list file referenced" \
+            "${FLAKY_MIRROR} verbatim -- the mirror rewrite was a no-op this" \
+            "run (checked: ${files[*]} ${mirror_files[*]}); if" \
+            "${FLAKY_MIRROR} still shows up in apt-get output below, the" \
+            "runner's real file/format has drifted from these paths and" \
+            "CI_APT_SOURCE_FILES/CI_APT_MIRROR_LIST_FILES needs updating"
+    fi
 }
 
 # Run one apt-get invocation under a hard cap that never exceeds the script's

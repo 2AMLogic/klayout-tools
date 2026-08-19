@@ -313,6 +313,78 @@ def test_missing_source_files_are_tolerated(tmp_path: Path):
     assert proc.returncode == 0
 
 
+def test_rewrites_the_azure_mirror_in_the_real_runner_mirror_list_file(
+    tmp_path: Path,
+):
+    """Reproduces the real GitHub-hosted `ubuntu-24.04` runner layout (issue
+    #1224, post-#1226): the deb822 `.sources` file does NOT contain the
+    mirror hostname at all -- its `URIs:` line is
+    `mirror+file:/etc/apt/apt-mirrors.txt`, apt's "mirror" method, and the
+    actual candidate mirror URL lives in that separate plain-text file. The
+    previous version of this script only sanitized `*.list`/`*.sources`
+    files, so this exact layout made `sanitize_sources` a silent no-op on
+    the real runner even though every synthetic-fixture test above passed.
+    """
+    sources = tmp_path / "ubuntu.sources"
+    sources.write_text(
+        "Types: deb\n"
+        "URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+        "Suites: noble noble-updates noble-backports noble-security\n"
+        "Components: main universe restricted multiverse\n"
+        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+    )
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://azure.archive.ubuntu.com/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    # The rewrite has to happen in the mirror-list file -- the deb822 source
+    # file legitimately never contains the hostname in this layout, so
+    # asserting on it (as the two tests above do for the layouts where it
+    # *is* present) would be testing the wrong file.
+    assert "azure.archive.ubuntu.com" not in mirror_list.read_text()
+    assert "http://archive.ubuntu.com/ubuntu/" in mirror_list.read_text()
+    # sources.list.d's own URIs line (the mirror+file indirection) is
+    # untouched -- only the mirror-list file's contents change.
+    assert "mirror+file:/etc/apt/apt-mirrors.txt" in sources.read_text()
+    assert "rewriting azure.archive.ubuntu.com -> archive.ubuntu.com" in proc.stdout
+
+
+def test_default_mirror_list_file_knob_points_at_the_real_runner_path():
+    """The default (no `CI_APT_MIRROR_LIST_FILES` override) must cover the
+    real runner's path -- pinning this here means a future edit can't
+    accidentally rename/drop the default and pass every other test purely
+    because they all set the env var explicitly."""
+    text = SCRIPT.read_text()
+    assert "/etc/apt/apt-mirrors.txt" in text
+
+
+def test_warns_explicitly_when_nothing_matches_the_flaky_mirror(tmp_path: Path):
+    """A silent no-op is exactly what let issue #1224 slip past #1226's own
+    16/16-passing test suite -- the script must say so out loud instead."""
+    sources = tmp_path / "sources.list"
+    sources.write_text("deb http://archive.ubuntu.com/ubuntu/ noble main\n")
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://archive.ubuntu.com/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+    )
+    assert proc.returncode == 0
+    assert "WARNING" in proc.stdout
+    assert "no candidate apt source/mirror-list file referenced" in proc.stdout
+    assert "rewriting" not in proc.stdout
+
+
 # --------------------------------------------------------------------------- #
 # Workflow wiring
 # --------------------------------------------------------------------------- #
@@ -345,7 +417,7 @@ def test_apt_steps_keep_their_timeout_backstop():
     text = WORKFLOW.read_text(encoding="utf-8")
     for name in _APT_STEP_NAMES:
         start = text.index(f"name: {name}")
-        step = text[start : start + 2000]
+        step = text[start : start + 3000]
         # Stop at the next step in the same job.
         end = step.find("\n      - name:", 1)
         if end != -1:
@@ -354,3 +426,48 @@ def test_apt_steps_keep_their_timeout_backstop():
         assert "DEBIAN_FRONTEND: noninteractive" in step, (
             f"'{name}' lost its noninteractive apt env"
         )
+
+
+def _step_text(workflow_text: str, name: str) -> str:
+    start = workflow_text.index(f"name: {name}")
+    step = workflow_text[start : start + 3000]
+    end = step.find("\n      - name:", 1)
+    if end != -1:
+        step = step[:end]
+    return step
+
+
+def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
+    """Issue #1224 (post-#1226): `cmake` (11.2 MB) repeatedly got killed
+    mid-download by the script's shared default budget, sized for the much
+    smaller `ngspice`/Icarus payloads, while those two steps' installs
+    completed fine under the same numbers. The Yosys step gets a wider
+    per-step budget via the script's existing `CI_APT_*` env knobs; the
+    other two steps keep the (smaller, still-adequate) script defaults."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    yosys_step = _step_text(text, "Install Yosys build dependencies")
+
+    assert 'CI_APT_DEADLINE: "270"' in yosys_step
+    assert 'CI_APT_PER_CMD_TIMEOUT: "150"' in yosys_step
+    # Both larger than the script's own un-overridden defaults (250 / 90),
+    # per the header comment in scripts/ci-apt-install.sh.
+    deadline = int(re.search(r'CI_APT_DEADLINE: "(\d+)"', yosys_step).group(1))
+    per_cmd = int(re.search(r'CI_APT_PER_CMD_TIMEOUT: "(\d+)"', yosys_step).group(1))
+    assert deadline > 250
+    assert per_cmd > 90
+
+    # Still has to fit -- with margin -- inside the outer `timeout-minutes: 5`
+    # (300s) backstop from #1204; a bigger DEADLINE than the step's own
+    # outer bound would turn the fail-fast guard back into a long hang.
+    assert deadline < 300
+
+    # The other two steps are not observed stalling in the same way (their
+    # payloads are an order of magnitude smaller) and keep the script's own
+    # defaults -- no override needed/expected.
+    for name in (
+        "Install ngspice",
+        "Install Icarus Verilog + Verilator build dependencies",
+    ):
+        step = _step_text(text, name)
+        assert "CI_APT_DEADLINE" not in step
+        assert "CI_APT_PER_CMD_TIMEOUT" not in step
