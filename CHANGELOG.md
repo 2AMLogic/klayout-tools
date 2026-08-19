@@ -16,6 +16,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-19 — `klt lvs --check <report> --rerun` can now reconstruct the
+  compare a committed report describes instead of guessing at it (issue
+  #1205). The report echoed a single `top` and no `options`, so full mode
+  applied that one top to *both* sides and dropped every compare-shaping
+  option: a report from an LVS negative control (a `<cell>_shorted` layout
+  compared against the intact `<cell>`'s reference netlist, whose two tops
+  differ by construction) exited `1` with "top cell/subcircuit not found in
+  reference netlist", and a clean `status: "match"` report from a
+  `combine_devices: true` request re-ran *un-folded* and reported the
+  resulting fresh mismatch list as `status: "drifted"` — a spurious "your
+  evidence drifted" verdict about a compare the consumer never asked for.
+  The report now additionally carries `reference_top` (the reference side's
+  own resolved top circuit) and an `options` block echoing
+  `combine_devices`/`flatten_layout`/`flatten_reference`/`netgen_setup`/
+  `parameter_tolerance` as resolved, and `--rerun` reconstructs from both.
+  Purely additive — no `schema_version` bump (`klt lvs` stays at `1`), the
+  pre-existing `top`/`parameter_tolerance` fields are unchanged, and a report
+  committed before these fields existed re-runs exactly as it did before
+  (each missing field falls back to the old behavior and is excluded from the
+  drift diff, since a field a report never carried cannot have drifted).
+  Cheap mode (`--check` without `--rerun`) reconstructs no request at all and
+  is unaffected. Documented in [`docs/cli/lvs.md`](docs/cli/lvs.md) →
+  "Response" and "`--check` / `--rerun`".
 - 2026-08-19 — `klt extract` no longer silently substitutes a deck's
   synthesized `substrate_net` name for a real drawn one on a diode's
   substrate-formed terminal (issue #1196). A `diode_nd2ps_06v0`-class device's

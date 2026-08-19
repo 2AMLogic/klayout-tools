@@ -81,6 +81,12 @@ def _print_text(report: dict) -> None:
     print(f"layout: {report['layout']}")
     print(f"reference: {report['reference']}")
     print(f"top: {report['top']}")
+    # Issue #1205: only printed when the two sides resolved to different top
+    # circuits -- the ordinary compare's output is unchanged, but a negative
+    # control (a `<cell>_shorted` layout compared against the intact
+    # `<cell>`'s reference netlist) says which cell each side actually used.
+    if report.get("reference_top") not in (None, report["top"]):
+        print(f"reference top: {report['reference_top']}")
     print(f"engine: {report['engine']}")
     # Issue #589: only printed when opted in, so the default human output is
     # unchanged -- but a verdict reached under a caller-supplied design

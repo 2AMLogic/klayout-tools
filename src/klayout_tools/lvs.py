@@ -114,7 +114,13 @@ from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, build_provenance, sha256_file
-from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import (
+    VOLATILE_PROVENANCE_PATHS,
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+)
 from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
     InvalidDeckOptionError,
@@ -382,6 +388,18 @@ def run_lvs(request: str) -> dict[str, Any]:
     alongside it (issue #585). ``null`` only when no ``layout.deck`` was given
     (the bare ``layout.netlist`` form).
 
+    The response echoes back enough of the request to reconstruct the
+    compare it describes (issue #1205): ``top`` and ``reference_top`` are
+    each side's own resolved top circuit (they differ by construction for an
+    LVS negative control -- a ``<cell>_shorted`` layout compared against the
+    intact ``<cell>``'s reference netlist), and the ``options`` block echoes
+    every compare-shaping option as resolved (``combine_devices``,
+    ``flatten_layout``, ``flatten_reference``, ``netgen_setup``,
+    ``parameter_tolerance``). That is what lets ``klt lvs --check <report>
+    --rerun`` re-run *this* compare rather than a differently-shaped one
+    whose difference it would then report as drift -- see
+    :func:`_reconstruct_lvs_request`.
+
     The response also carries the shared ``provenance`` block (see
     :func:`klayout_tools._provenance.build_provenance`); its ``deck`` is the
     layout-side extraction deck (``null`` only when no ``layout.deck`` was
@@ -501,6 +519,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     # layout netlist otherwise can never structurally match it).
     flatten_reference = bool(options.get("flatten_reference", False))
     flatten_layout = bool(options.get("flatten_layout", False))
+    # Issue #1205: echoed verbatim (not resolved against `request_dir`), the
+    # same convention `layout`/`reference` are echoed under -- so the
+    # response's `options` block round-trips back into a request document
+    # exactly as it was given. `null` for every `"klayout"`-engine run (and
+    # for a netgen run that let netgen use its own trivial default setup).
+    netgen_setup_echo = options.get("netgen_setup")
 
     import klayout.db as kdb
 
@@ -1022,11 +1046,43 @@ def run_lvs(request: str) -> dict[str, Any]:
         "layout": layout_echo,
         "reference": reference_echo,
         "top": layout_circuit.name,
+        # Issue #1205: the *reference* side's resolved top circuit name,
+        # alongside the layout side's `top` above. The two are equal for the
+        # ordinary compare, but differ by construction for an LVS negative
+        # control (a deliberately-broken `<cell>_shorted` layout compared
+        # against the intact `<cell>`'s reference netlist). Recording only
+        # one of them made such a report unreconstructable by `--check
+        # --rerun`, which applied the single `top` to both sides and failed
+        # with "top cell/subcircuit not found in reference netlist" -- see
+        # `_reconstruct_lvs_request`.
+        "reference_top": reference_circuit.name,
         # Issue #589: the effective `options.parameter_tolerance`, echoed so a
         # consumer reading only the response can tell whether a `"match"` was
         # reached under a caller-supplied design tolerance at all. `null` when
         # the option was omitted (today's exact-compare behaviour).
         "parameter_tolerance": parameter_tolerance,
+        # Issue #1205: every request option that shapes *what was compared*,
+        # echoed as resolved, so a committed report round-trips back into the
+        # request it came from (`_reconstruct_lvs_request`) instead of being
+        # re-run as a differently-shaped compare whose difference is then
+        # reported as drift. Keys are always present with their effective
+        # values (never omitted), matching `parameter_tolerance`'s own
+        # always-present discipline -- `parameter_tolerance` is repeated here
+        # so this block is a complete request-side view, while the top-level
+        # field above stays exactly where it has always been.
+        #
+        # Deliberately *not* echoed here: `options.keep_extracted` (an
+        # output-side flag -- it only controls whether the intermediate
+        # netlist is also written to disk, and is already visible as
+        # `environment.extracted_netlist`) and `options.netgen_timeout_s` (a
+        # runtime guard, not a compare input). Neither can change a verdict.
+        "options": {
+            "combine_devices": combine_devices,
+            "flatten_layout": flatten_layout,
+            "flatten_reference": flatten_reference,
+            "netgen_setup": netgen_setup_echo,
+            "parameter_tolerance": parameter_tolerance,
+        },
         "status": status,
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
@@ -1128,52 +1184,98 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     ``layout.netlist`` shape is unambiguous *without* a deck, since only
     ``layout.file`` and the ``layout.netlist``+``layout.deck`` combo, issue
     #585, populate ``provenance.deck`` at all), ``reference.netlist``,
-    ``top`` (applied to both sides -- the response only ever records the
-    one resolved circuit name actually shared by both, ``report["top"]``),
-    and ``options.parameter_tolerance`` (echoed verbatim as the response's
-    own ``parameter_tolerance`` field).
+    each side's own resolved top (``layout.top`` from ``report["top"]``,
+    ``reference.top`` from ``report["reference_top"]``), and the whole
+    compare-shaping ``options`` block (``combine_devices``/
+    ``flatten_layout``/``flatten_reference``/``netgen_setup``/
+    ``parameter_tolerance``, from ``report["options"]``).
 
-    **Known limitations** (not reconstructible from the response alone, so
-    silently omitted -- ``--rerun`` is best-effort, not a byte-exact
-    replay): the ``layout.netlist``+``layout.deck`` combo (issue #585) is
-    indistinguishable from plain ``layout.file`` inline extraction here --
-    both populate ``provenance.deck`` -- so this always reconstructs
+    Issue #1205: the last two used to be lossy. The response recorded a
+    single ``top`` applied to *both* sides here, so a report whose request
+    set a ``reference.top`` different from the layout top -- an LVS negative
+    control (``<cell>_shorted`` layout vs. the intact ``<cell>``'s reference
+    netlist) has two different tops by construction -- could not be
+    reconstructed at all and errored out with "top cell/subcircuit not found
+    in reference netlist". And ``options`` was rebuilt from
+    ``parameter_tolerance`` alone, so a report from a
+    ``combine_devices: true`` request silently re-ran the compare *without*
+    folding, then reported the resulting fresh mismatch list as drift. Both
+    fields are now echoed by :func:`run_lvs` and consumed here.
+
+    Reports predating those two fields (written before issue #1205) still
+    reconstruct exactly as they used to: ``reference_top`` falls back to the
+    committed ``top``, and ``options`` falls back to the top-level
+    ``parameter_tolerance`` echo. :func:`rerun_lvs_report` additionally
+    excludes both fields from the drift diff for such a report, since a
+    field the committed report never carried cannot itself have drifted.
+
+    **Known limitations** (still not reconstructible from the response
+    alone, so silently omitted -- ``--rerun`` is best-effort, not a
+    byte-exact replay): the ``layout.netlist``+``layout.deck`` combo (issue
+    #585) is indistinguishable from plain ``layout.file`` inline extraction
+    here -- both populate ``provenance.deck`` -- so this always reconstructs
     ``layout.file``; that combo will fail loudly (a clean
     :class:`LvsError` from the layout loader, not a silent wrong answer)
     since ``committed["layout"]`` is actually a SPICE netlist, not a
     layout stream, in that case. ``reference.form`` (a non-default
-    ``"subckt-call"`` reference), ``options.combine_devices``/
-    ``flatten_reference``/``flatten_layout``, ``layout.top_cell_pins``/
-    ``declared_pins``/``device_bulk`` are never echoed anywhere in the
-    response and are always omitted (reconstructed as each option's own
-    default). Use ``--check`` (cheap mode) instead when any of these apply.
+    ``"subckt-call"`` reference), ``reference.device_map``/``device_bulk``
+    and ``layout.top_cell_pins``/``declared_pins`` are never echoed anywhere
+    in the response and are always omitted (reconstructed as each option's
+    own default). Use ``--check`` (cheap mode) instead when any of these
+    apply.
     """
     deck = get_path(committed, ("provenance", "deck"))
     has_deck = isinstance(deck, dict) and deck.get("name") is not None
     top = committed.get("top")
+    # Issue #1205: each side's own top. `reference_top` is additive -- a
+    # report predating it only ever recorded the one `top`, which is exactly
+    # the (symmetric-top) assumption this used to make unconditionally, so
+    # falling back to it reconstructs such a report the same way as before.
+    reference_top = committed.get("reference_top") or top
 
     layout_spec: dict[str, Any] = {"top": top} if top else {}
     if has_deck:
         layout_spec["file"] = committed.get("layout")
         layout_spec["deck"] = deck["name"]
-        options = deck.get("options")
-        if options:
-            layout_spec["deck_options"] = options
+        deck_options = deck.get("options")
+        if deck_options:
+            layout_spec["deck_options"] = deck_options
     else:
         layout_spec["netlist"] = committed.get("layout")
 
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
-    if top:
-        reference_spec["top"] = top
+    if reference_top:
+        reference_spec["top"] = reference_top
 
     request: dict[str, Any] = {
         "engine": committed.get("engine", "klayout"),
         "layout": layout_spec,
         "reference": reference_spec,
     }
-    parameter_tolerance = committed.get("parameter_tolerance")
+
+    echoed = committed.get("options")
+    echoed = echoed if isinstance(echoed, dict) else {}
+    options: dict[str, Any] = {}
+    for flag in ("combine_devices", "flatten_layout", "flatten_reference"):
+        # Only re-assert an option that was actually on: a `false` entry is
+        # every option's own default, and omitting it keeps the
+        # reconstructed request document as close to the original as the
+        # echo allows.
+        if echoed.get(flag):
+            options[flag] = True
+    netgen_setup = echoed.get("netgen_setup")
+    if netgen_setup is not None:
+        options["netgen_setup"] = netgen_setup
+    # `options.parameter_tolerance` is echoed twice (top-level since issue
+    # #589, inside `options` since #1205); prefer the block, fall back to the
+    # top-level field so a report predating the block still round-trips.
+    parameter_tolerance = echoed.get("parameter_tolerance")
+    if parameter_tolerance is None:
+        parameter_tolerance = committed.get("parameter_tolerance")
     if parameter_tolerance is not None:
-        request["options"] = {"parameter_tolerance": parameter_tolerance}
+        options["parameter_tolerance"] = parameter_tolerance
+    if options:
+        request["options"] = options
     return request
 
 
@@ -1196,6 +1298,16 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     case ``--check`` also catches, redundantly but harmlessly here since
     this mode always re-hashes as a side effect of re-running).
 
+    Additionally excludes any of the request-echo fields issue #1205 added
+    (``reference_top``, ``options``) that the *committed* report predates:
+    a field a report never carried cannot itself have drifted, so a report
+    written before those fields existed keeps re-running exactly as it did
+    before rather than reporting the current build's richer echo as drift.
+    (Such a report is still only best-effort reconstructible -- it records
+    no reference-side top and no ``options``, which is the very gap #1205
+    closed going forward. Use cheap ``--check`` on reports that predate it
+    when the original request used either.)
+
     Raises :class:`LvsError` for a missing/unparseable committed report, a
     report missing ``layout``/``reference`` to rerun, or any error the
     rerun itself raises -- never a traceback.
@@ -1208,7 +1320,16 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
         )
     request = _reconstruct_lvs_request(committed)
     fresh = run_lvs(json.dumps(request))
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    exclude = set(VOLATILE_PROVENANCE_PATHS)
+    exclude.update(
+        (field,) for field in ("reference_top", "options") if field not in committed
+    )
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=frozenset(exclude),
+    )
 
 
 # --------------------------------------------------------------------------- #
