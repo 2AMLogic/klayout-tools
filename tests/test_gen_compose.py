@@ -2715,6 +2715,220 @@ def test_compose_requires_routing_spec_when_connectivity_present(tmp_path, pdk_r
         )
 
 
+def test_compose_declare_only_when_routing_absent(tmp_path, pdk_root):
+    # #1188: a non-empty connectivity[] with no `routing` key at all is a
+    # declare-only request -- validated (the pins reference real ports, as
+    # the unknown-block/unknown-port tests above already exercise without a
+    # `routing` key), but not routed: no GenComposeError, no metal drawn.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    output = tmp_path / "declare.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b2", "port": "P1"},
+                    ],
+                }
+            ],
+            "options": {"cell_name": "declare_0", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == ["N1"]
+    net = report["nets"][0]
+    assert net["net"] == "N1"
+    assert net["routed"] is False
+    assert net["status"] == "unrouted"
+    assert net["route_length_um"] is None
+    assert len(net["legs"]) == 1
+    leg = net["legs"][0]
+    assert leg["routed"] is False
+    assert leg["route_length_um"] is None
+    assert leg["reason"] == "routing not requested"
+    assert any(
+        "N1" in note and "routing not requested" in note
+        for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_declare_only_when_routing_is_empty_object(tmp_path, pdk_root):
+    # Same as above, but `routing: {}` explicitly rather than omitted --
+    # both spellings of "no routing requested" behave identically (#1188).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    output = tmp_path / "declare_empty.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b2", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {},
+            "options": {"cell_name": "declare_empty_0", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == ["N1"]
+    net = report["nets"][0]
+    assert net["status"] == "unrouted"
+    assert net["legs"][0]["reason"] == "routing not requested"
+
+
+def test_compose_declare_only_still_validates_connectivity_pins(tmp_path, pdk_root):
+    # Declare-only does not relax the {block, port} check -- a typo'd/stale
+    # port name is still a hard failure (exit 1), the whole point of keeping
+    # validation independent of routing (#1188).
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    with pytest.raises(GenComposeError, match="unknown port"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "r", "generator_report": block}],
+                "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+                "connectivity": [
+                    {
+                        "net": "N1",
+                        "pins": [
+                            {"block": "r", "port": "NOPE"},
+                            {"block": "r", "port": "P2"},
+                        ],
+                    }
+                ],
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_declare_only_reports_every_leg_of_bundle_net(tmp_path, pdk_root):
+    # A >2-pin net still spans as a minimal tree of pin-pairs (#1073's shape),
+    # but declare-only reports every one of those legs unrouted -- uniformly,
+    # not just the legs that would have failed geometrically under routing.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    output = tmp_path / "declare_bundle.gds"
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+        output,
+        "declare_bundle_0",
+    )
+    del request["routing"]
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["VBIAS"]
+    net = report["nets"][0]
+    assert net["status"] == "unrouted"
+    assert net["routed"] is False
+    assert net["route_length_um"] is None
+    assert len(net["legs"]) == 2  # 3 pins span with 2 legs, same as #1073
+    assert all(leg["routed"] is False for leg in net["legs"])
+    assert all(leg["reason"] == "routing not requested" for leg in net["legs"])
+    assert all(leg["route_length_um"] is None for leg in net["legs"])
+
+
+def test_compose_declare_only_reports_geometrically_routable_net_unrouted_too(
+    tmp_path, pdk_root
+):
+    # Edge case from #1188's test plan: a net that *would* route cleanly if
+    # `routing` were supplied still lands in unrouted_nets[] uniformly under
+    # declare-only, with the "not requested" reason rather than a routed
+    # result -- declare-only is never "route what's easy, skip what isn't".
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    output = tmp_path / "declare_routable.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "EASY",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b2", "port": "P1"},
+                    ],
+                }
+            ],
+            "options": {"cell_name": "declare_routable_0", "output": str(output)},
+        }
+    )
+
+    # Confirm this same net *would* route cleanly with routing supplied, to
+    # make the "declare-only never routes it anyway" assertion meaningful.
+    routed_output = tmp_path / "declare_routable_control.gds"
+    control = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "EASY",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b2", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {
+                "cell_name": "declare_routable_1",
+                "output": str(routed_output),
+            },
+        }
+    )
+    assert control["unrouted_nets"] == []
+
+    assert report["unrouted_nets"] == ["EASY"]
+    assert report["nets"][0]["status"] == "unrouted"
+    assert report["nets"][0]["legs"][0]["reason"] == "routing not requested"
+
+
 def test_compose_reports_matched_groups_from_input_blocks(tmp_path, pdk_root):
     # mos_array carries a matched_group_id; resistor_strip does not. The
     # composition echoes only the distinct non-null ids it saw.
@@ -5603,6 +5817,53 @@ def test_cli_gen_compose_partial_success_exit_3(tmp_path, pdk_root, capsys):
     assert exit_code == 3
     data = json.loads(capsys.readouterr().out)
     assert data["unrouted_nets"] == ["BUS"]
+    assert output.is_file()
+
+
+def test_cli_gen_compose_declare_only_partial_success_exit_3(
+    tmp_path, pdk_root, capsys
+):
+    # #1188: connectivity[] with no `routing` key at all still succeeds (not
+    # exit 1), and reports through the same "partial success" exit code (3)
+    # a geometrically-unroutable net does -- never exit 0 (which would
+    # misreport "fully routed").
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    request_path = tmp_path / "request.json"
+    output = tmp_path / "declare_cli.gds"
+    request_path.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": r1},
+                    {"id": "b2", "generator_report": r2},
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["b1", "b2"],
+                    "spacing_um": 1.0,
+                },
+                "connectivity": [
+                    {
+                        "net": "N1",
+                        "pins": [
+                            {"block": "b1", "port": "P2"},
+                            {"block": "b2", "port": "P1"},
+                        ],
+                    }
+                ],
+                "options": {"cell_name": "declare_cli_0", "output": str(output)},
+            }
+        )
+    )
+
+    exit_code = main(["gen-compose", str(request_path), "--format", "json"])
+    assert exit_code == 3
+    data = json.loads(capsys.readouterr().out)
+    assert data["unrouted_nets"] == ["N1"]
+    assert data["nets"][0]["status"] == "unrouted"
+    assert data["nets"][0]["legs"][0]["reason"] == "routing not requested"
     assert output.is_file()
 
 
