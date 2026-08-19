@@ -163,6 +163,60 @@ def test_missing_history_table_raises(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# library: is_deck_hash_released (issue #1193)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_deck_hash_released_true_for_known_hash(_history_table):
+    assert history.is_deck_hash_released("sky130", "sha256:" + "a" * 64) is True
+
+
+def test_is_deck_hash_released_true_without_deck_narrowing(_history_table):
+    assert history.is_deck_hash_released(None, "sha256:" + "a" * 64) is True
+
+
+def test_is_deck_hash_released_false_for_unknown_hash(_history_table):
+    # The table loaded fine and confirms this hash shipped in no release --
+    # a definite `False`, not `None`.
+    assert history.is_deck_hash_released("sky130", "sha256:" + "f" * 64) is False
+
+
+def test_is_deck_hash_released_false_when_deck_name_mismatches(_history_table):
+    # The hash is known, but not for this deck -- narrowing by `deck` must
+    # still report a confirmed `False`, mirroring `resolve_deck`'s
+    # deck-mismatch-not-found behavior.
+    assert history.is_deck_hash_released("gf180mcu", "sha256:" + "a" * 64) is False
+
+
+def test_is_deck_hash_released_none_for_falsy_hash(_history_table):
+    assert history.is_deck_hash_released("sky130", None) is None
+    assert history.is_deck_hash_released("sky130", "") is None
+
+
+def test_is_deck_hash_released_none_when_history_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "_HISTORY_PATH", tmp_path / "does-not-exist.json")
+
+    # Must degrade gracefully -- unknown, never a fabricated `False`.
+    assert history.is_deck_hash_released("sky130", "sha256:" + "a" * 64) is None
+
+
+def test_is_deck_hash_released_none_when_history_malformed(tmp_path, monkeypatch):
+    path = tmp_path / "_history.json"
+    path.write_text("not json")
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    assert history.is_deck_hash_released("sky130", "sha256:" + "a" * 64) is None
+
+
+def test_is_deck_hash_released_none_when_entries_key_missing(tmp_path, monkeypatch):
+    path = tmp_path / "_history.json"
+    path.write_text(json.dumps({"note": "no entries key"}))
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    assert history.is_deck_hash_released("sky130", "sha256:" + "a" * 64) is None
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 

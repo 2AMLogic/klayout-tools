@@ -869,7 +869,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "klt_version": "0.4.2",
     "klayout_version": "0.29.8",
     "pdk": null,
-    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
     "input": { "content_hash": "sha256:<hex>" }
   }
 }
@@ -932,7 +932,7 @@ On a run with findings:
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
-| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (`klt drc` resolves no PDK); `deck` pins the selected rule deck by name and `sha256:` content hash; `input` pins the input layout file (`path`) by `sha256:` content hash. |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (`klt drc` resolves no PDK); `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. |
 
 ### `violations[]` entries
 

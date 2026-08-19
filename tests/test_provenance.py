@@ -11,6 +11,7 @@ documented edge cases (missing files -> `null`, content hash tracks content).
 from __future__ import annotations
 
 import hashlib
+import json
 
 from klayout_tools import _provenance
 from klayout_tools.decks import deck_source_path
@@ -83,10 +84,103 @@ def test_build_provenance_deck_hash_is_sha256_prefixed(tmp_path):
 
 
 def test_build_provenance_deck_name_without_resolvable_path():
-    # A deck name whose file can't be hashed keeps the name but nulls the hash
-    # rather than fabricating one or dropping the field.
+    # A deck name whose file can't be hashed keeps the name but nulls the
+    # hash rather than fabricating one or dropping the field. `released` is
+    # also null: with no hash to look up, "is this released" is unanswerable
+    # -- not `False`, which would falsely claim a confirmed non-release.
     prov = _provenance.build_provenance(deck_name="ghost", deck_path=None)
-    assert prov["deck"] == {"name": "ghost", "content_hash": None}
+    assert prov["deck"] == {"name": "ghost", "content_hash": None, "released": None}
+
+
+# --------------------------------------------------------------------------- #
+# deck.released (issue #1193)
+# --------------------------------------------------------------------------- #
+#
+# `_deck_block` delegates the actual lookup to
+# `klayout_tools.decks.history.is_deck_hash_released`, already covered end to
+# end (including the missing/malformed-table degradation modes) in
+# `test_deck_history.py`. These tests just confirm `build_provenance` wires
+# that tri-state answer into `provenance.deck.released` correctly, via a
+# synthetic history table so they don't depend on real deck content.
+
+
+def test_build_provenance_deck_released_true_for_known_hash(tmp_path, monkeypatch):
+    from klayout_tools.decks import history
+
+    deck_file = tmp_path / "mydeck.txt"
+    deck_file.write_bytes(b"rules\n")
+    digest = hashlib.sha256(b"rules\n").hexdigest()
+    content_hash = f"sha256:{digest}"
+
+    history_path = tmp_path / "_history.json"
+    history_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "deck": "mydeck",
+                        "content_hash": content_hash,
+                        "git_tag": "v0.1.0",
+                        "git_commit": "0" * 40,
+                        "package_version": "0.1.0",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(history, "_HISTORY_PATH", history_path)
+
+    prov = _provenance.build_provenance(deck_name="mydeck", deck_path=str(deck_file))
+    assert prov["deck"]["content_hash"] == content_hash
+    assert prov["deck"]["released"] is True
+
+
+def test_build_provenance_deck_released_false_for_unreleased_hash(
+    tmp_path, monkeypatch
+):
+    from klayout_tools.decks import history
+
+    deck_file = tmp_path / "mydeck.txt"
+    deck_file.write_bytes(b"a dev edit not in any release\n")
+
+    history_path = tmp_path / "_history.json"
+    history_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "deck": "mydeck",
+                        "content_hash": "sha256:" + "a" * 64,
+                        "git_tag": "v0.1.0",
+                        "git_commit": "0" * 40,
+                        "package_version": "0.1.0",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(history, "_HISTORY_PATH", history_path)
+
+    prov = _provenance.build_provenance(deck_name="mydeck", deck_path=str(deck_file))
+    # Deck content doesn't match the single entry in the fixture table -- a
+    # confirmed non-release, not merely "unknown".
+    assert prov["deck"]["released"] is False
+
+
+def test_build_provenance_deck_released_none_when_history_missing(
+    tmp_path, monkeypatch
+):
+    from klayout_tools.decks import history
+
+    deck_file = tmp_path / "mydeck.txt"
+    deck_file.write_bytes(b"rules\n")
+    monkeypatch.setattr(history, "_HISTORY_PATH", tmp_path / "does-not-exist.json")
+
+    prov = _provenance.build_provenance(deck_name="mydeck", deck_path=str(deck_file))
+    # A missing/unreadable history table must degrade to "unknown", never a
+    # false "confirmed unresolvable" (`False`) claim.
+    assert prov["deck"]["content_hash"] is not None
+    assert prov["deck"]["released"] is None
 
 
 def test_build_provenance_pdk_maps_find_pdk_shape():

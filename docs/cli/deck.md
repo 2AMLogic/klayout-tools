@@ -36,6 +36,16 @@ Exactly one query shape per invocation: give either `--content-hash` (with
 an optional `--deck` narrower), or `--deck` **and** `--version` together.
 Neither, or only one of `--deck`/`--version`, is a documented error (exit 1).
 
+**This same lookup now also runs automatically, at generation time** (issue
+#1193): every command that emits a shared `provenance.deck` block
+(`klt drc`, `klt extract`, `klt lvs`, and others) includes a `released`
+field alongside `content_hash` — `false` when the deck in use is not one
+`klt deck resolve` can name a release for, `null` when the table itself
+can't be checked. See `docs/json-contract.md`'s "Shared `provenance` block"
+section. Running `klt deck resolve --content-hash <hash>` by hand is still
+useful to find out *which* release a hash belongs to once `released: true`
+confirms one exists.
+
 ## Resolve-only, not fetch-or-build
 
 `klt deck resolve` looks the query up in a **generated table** — it never

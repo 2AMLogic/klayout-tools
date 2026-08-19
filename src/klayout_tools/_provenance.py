@@ -12,7 +12,7 @@ this module builds:
         "klt_version": "0.4.2",
         "klayout_version": "0.29.8",
         "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
-        "deck": {"name": "sky130", "content_hash": "sha256:..."},
+        "deck": {"name": "sky130", "content_hash": "sha256:...", "released": true},
         "input": {"content_hash": "sha256:..."}
     }
 
@@ -36,6 +36,8 @@ import re
 import subprocess
 from collections.abc import Mapping
 from typing import Any
+
+from .decks.history import is_deck_hash_released
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
 
@@ -149,9 +151,28 @@ def _deck_block(
     path: str | None,
     deck_options: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    """The provenance ``deck`` shape ``{name, content_hash}``; ``None`` when
-    no rule/model deck was involved (e.g. LVS against a pre-extracted
-    netlist).
+    """The provenance ``deck`` shape ``{name, content_hash, released}``;
+    ``None`` when no rule/model deck was involved (e.g. LVS against a
+    pre-extracted netlist).
+
+    ``released`` (issue #1193) is the generation-time answer to "does any
+    released ``klayout-tools`` version ship this exact deck content hash" --
+    the same question ``klt deck resolve --content-hash`` answers on demand,
+    asked automatically so a project doesn't accumulate committed evidence
+    against an unreproducible deck without ever being told. It is a tri-state
+    signal, not a plain boolean, via
+    :func:`klayout_tools.decks.history.is_deck_hash_released`:
+
+    - ``True`` -- the hash matches a released version; nothing to warn about.
+    - ``False`` -- the deck history table loaded fine and confirms this hash
+      shipped in no release (a dev checkout, an uncommitted deck edit, or a
+      deck added after the last tag -- e.g. ``sg13g2`` before its first
+      tagged release).
+    - ``None`` -- the answer is unknown, either because ``content_hash``
+      itself couldn't be computed, or the history table
+      (``decks/_history.json``) is missing, unreadable, or malformed.
+      Deliberately distinct from ``False``: a broken/missing history table
+      must never be reported as a confirmed "this deck is unreleased" claim.
 
     ``deck_options`` (issue #595, ``klt extract --deck-option``) is echoed
     verbatim as an additional ``options`` key when non-empty -- e.g. gf180mcu's
@@ -163,7 +184,12 @@ def _deck_block(
     """
     if name is None:
         return None
-    block: dict[str, Any] = {"name": name, "content_hash": _content_hash(path)}
+    content_hash = _content_hash(path)
+    block: dict[str, Any] = {
+        "name": name,
+        "content_hash": content_hash,
+        "released": is_deck_hash_released(name, content_hash),
+    }
     if deck_options:
         block["options"] = dict(deck_options)
     return block

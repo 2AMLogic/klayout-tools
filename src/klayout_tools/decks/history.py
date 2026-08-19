@@ -140,6 +140,46 @@ def resolve_deck(
     }
 
 
+def is_deck_hash_released(deck: str | None, content_hash: str | None) -> bool | None:
+    """Whether ``content_hash`` (optionally narrowed to ``deck``) appears in
+    the generated deck history table -- the release-tracking half of the
+    ``provenance.deck.released`` signal (issue #1193).
+
+    A "clean" report against a deck content hash with no released
+    counterpart is unreproducible evidence the moment it's committed, but
+    nothing said so at generation time -- this turns that into a checkable
+    fact alongside ``provenance.deck.content_hash`` itself, without making a
+    generation-time run *fail* over it (the deck still ran; a dev checkout,
+    an uncommitted deck edit, or a deck added after the last tag are all
+    ordinary, not errors).
+
+    Returns:
+        ``True`` -- ``content_hash`` matches at least one history entry
+            (narrowed to ``deck`` when given).
+        ``False`` -- the history table loaded fine but no entry matches; the
+            hash is confirmed *not* released (predates the table, an
+            unreleased/dev build, or a deck added after the last tag).
+        ``None`` -- the answer can't be determined: ``content_hash`` is
+            falsy (nothing to look up), or the history table itself is
+            missing, unreadable, or malformed. Deliberately distinct from
+            ``False`` -- callers must never turn "couldn't check" into a
+            "confirmed unresolvable" claim (see this function's docstring
+            and issue #1193's edge-case requirement that a missing/broken
+            history table degrade gracefully rather than fabricate a
+            warning).
+    """
+    if not content_hash:
+        return None
+    try:
+        entries = _load_history()["entries"]
+    except DeckHistoryError:
+        return None
+    candidates = [e for e in entries if e.get("content_hash") == content_hash]
+    if deck is not None:
+        candidates = [e for e in candidates if e.get("deck") == deck]
+    return bool(candidates)
+
+
 def _not_found_message(
     *,
     content_hash: str | None = None,

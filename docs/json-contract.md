@@ -86,7 +86,7 @@ above): adopting it required no `schema_version` bump on any verb.
   "klt_version": "0.4.2",
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
-  "deck": {"name": "sky130", "content_hash": "sha256:<hex>"},
+  "deck": {"name": "sky130", "content_hash": "sha256:<hex>", "released": true},
   "input": {"content_hash": "sha256:<hex>"}
 }
 ```
@@ -98,15 +98,16 @@ above): adopting it required no `schema_version` bump on any verb.
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK (e.g. `klt drc`, which resolves none, or
   a `lvs` compare, which is topological).
-- `deck` — the rule (or model) deck the run used, as `{name, content_hash}`.
-  `content_hash` is a `sha256:`-prefixed hex digest of the deck file actually
-  used, so "clean against *this exact* rule set" is a checkable claim. `null`
-  when no deck was involved (e.g. `lvs` against a pre-extracted netlist). `klt
-  extract` additionally carries an `options` key (issue #595) when
-  `--deck-option` selected a non-default flavour of a shared-geometry device
-  family (e.g. gf180mcu's `{"poly_res": "2k"}`) — omitted entirely when no
-  such option was given, so the block is otherwise unchanged. See
-  `docs/cli/extract.md`'s "Selecting a shared-geometry resistor flavour".
+- `deck` — the rule (or model) deck the run used, as
+  `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
+  hex digest of the deck file actually used, so "clean against *this exact*
+  rule set" is a checkable claim. The whole block is `null` when no deck was
+  involved (e.g. `lvs` against a pre-extracted netlist). `klt extract`
+  additionally carries an `options` key (issue #595) when `--deck-option`
+  selected a non-default flavour of a shared-geometry device family (e.g.
+  gf180mcu's `{"poly_res": "2k"}`) — omitted entirely when no such option was
+  given, so the block is otherwise unchanged. See `docs/cli/extract.md`'s
+  "Selecting a shared-geometry resistor flavour".
   A pinned `content_hash` can be turned back into the klayout-tools git
   tag/PyPI version that shipped it with `klt deck resolve --content-hash
   <hash>` (issue #623) — a resolve-only lookup against a generated
@@ -115,6 +116,22 @@ above): adopting it required no `schema_version` bump on any verb.
   alone is *not* sufficient to confirm two runs used the same rule set (a
   rebuild of the same version can carry a different deck) — `content_hash`
   is the field that actually pins the rule set.
+  - `released` (issue #1193) is that same `klt deck resolve` lookup run
+    automatically, at generation time, so a "clean" report doesn't silently
+    accumulate evidence against a deck revision no release ever ships. A
+    tri-state signal, not a plain boolean: `true` when `content_hash` matches
+    a released `klayout-tools` version; `false` when the deck history table
+    loaded fine but confirms no release ships this hash (an unreleased dev
+    checkout, an uncommitted deck edit, or a deck added after the last tag);
+    `null` when the question is unanswerable — `content_hash` itself is
+    `null`, or the generated history table
+    (`src/klayout_tools/decks/_history.json`) is missing, unreadable, or
+    malformed. `null` is deliberately distinct from `false`: a broken or
+    absent history table must never be reported as a confirmed
+    "this deck is unreleased" claim. `false` is a **non-fatal** signal — it
+    never fails the run; it only makes an otherwise-invisible reproducibility
+    gap visible in the output. No warning (`released: true`) is emitted for
+    an ordinary run against a deck unchanged since its last release.
 - `input` — the input layout stream the run was made against, as
   `{content_hash}` (same shape as `deck`). `content_hash` is a
   `sha256:`-prefixed hex digest of the file, so a stale committed report is a
