@@ -577,7 +577,7 @@ section this engine buckets rather than fully structures:
 | `category_error_counts` | object\<string, int\> | Issue #1132: `category_counts`, but counting only `severity: "error"` entries per category — lets a caller gate on "does category X have any real defect" without re-reading `mismatches[]` and re-filtering by `severity` itself. Same sorted-keys convention as `category_counts`; a category with zero `error` entries (all `warning`, e.g. an all-`warning` `topology.flattened` run) is simply absent from this object rather than reported as `0`, matching `category_counts`'s own "no entries of this category" convention. `sum(category_error_counts.values()) == error_count`. |
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. For `"engine": "netgen"`, `matched` is exact on a `"match"` verdict and `0` on a `"mismatch"` verdict (a known limitation — see "Engine" -> `"netgen"` above). |
 | `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Present (currently `["nfet", "pfet", "resistor"]` for both registered decks — MOS plus one drawn precision resistor, see `klt extract`'s "Drawn resistors") whenever a `layout.deck` is given — always for `layout.file` (inline extraction, where the deck is required), and also for the pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it (issue #585). `null` only when no `layout.deck` was given (the bare `{"netlist": ..., "top": ...}` shape). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise — excluded from `klt lvs --check --rerun`'s drift diff, see "Full mode (`--rerun`)" below). |
 | `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (LVS is topological and resolves no PDK); `deck` pins the layout-side extraction deck by name and `sha256:` content hash whenever a `layout.deck` is given (both the `layout.file` and the pre-extracted `layout.netlist` shapes), and is `null` only when no `layout.deck` was given (matching `device_classes`). `deck.released` (issue #1193) is a non-fatal tri-state signal for whether that content hash ships in any released `klayout-tools` version — `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing). `deck.options` (issue #600) echoes the resolved `layout.deck_options` mapping — present only when non-empty, matching `klt extract`'s own `provenance.deck.options` shape exactly. `klayout_version` is populated the same way for both engines (it is this process's own `klayout` package build, used for netlist parsing/writing either way, not the comparator). |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
 | `net_correspondence` | array\<object\> | The layout↔reference net pairing `NetlistComparer` produced — see "`net_correspondence[]` entries" below. `len(net_correspondence) == counts.nets.matched` (the example above is illustrative, not exhaustive, for a 7-net compare). Always `[]` for `"engine": "netgen"` (see "Engine" -> `"netgen"` above). |
@@ -1201,8 +1201,18 @@ deck name/options under `provenance.deck`, and the whole `options` block),
 then diffs the fresh report against the committed one field by field — same
 volatile-field exclusions as `klt drc --rerun`
 (`provenance.klt_version`/`klayout_version`/`pdk.version`; `pdk` is always
-`null` for LVS, so only the first two ever apply in practice).
-Response shape mirrors `klt drc --rerun`'s:
+`null` for LVS, so only the first two ever apply in practice), plus one
+LVS-only exclusion (issue #1223): `environment.extracted_netlist`. That
+field is populated only when the *original* request set
+`options.keep_extracted: true`, and its value is a path anchored to the
+original request document's own directory — `--rerun` never re-asserts
+`keep_extracted` (an output-side flag that cannot change a verdict, and
+re-running it would write files as a side effect), so a fresh rerun always
+reports it as `null` even when nothing else about the compare changed. This
+exclusion is scoped to `klt lvs --rerun` only; `klt drc --rerun` has no
+analogous output-path field. (A report committed before issue #1205 also has
+`reference_top`/`options` excluded — see below.) Response shape mirrors `klt
+drc --rerun`'s:
 
 ```json
 {

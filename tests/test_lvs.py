@@ -6997,6 +6997,39 @@ def test_rerun_lvs_report_excludes_volatile_provenance_fields(tmp_path):
     assert result["drift"] == []
 
 
+def test_rerun_lvs_report_excludes_extracted_netlist_path(tmp_path):
+    """A report committed from an `options.keep_extracted: true` request
+    (issue #1223) records `environment.extracted_netlist` as a path anchored
+    to the *original* request document's directory. `_reconstruct_lvs_request`
+    never re-asserts `keep_extracted`, so a fresh `--rerun` always reports
+    that field as `null` -- a false drift, not a real one, when nothing else
+    about the compare changed."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+            "options": {"keep_extracted": True},
+        },
+    )
+    report = run_lvs(request_path)
+    assert report["environment"]["extracted_netlist"] is not None
+
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["environment"]["extracted_netlist"] is None
+
+
 def test_rerun_lvs_report_missing_layout_reference_raises(tmp_path):
     report_path = tmp_path / "bad.json"
     _write_report(report_path, {"engine": "klayout"})
