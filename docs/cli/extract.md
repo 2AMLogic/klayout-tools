@@ -1097,11 +1097,37 @@ Points worth knowing:
   as a diode. A layout with no `diode_mk` drawn anywhere extracts
   bit-for-bit as it did before this feature existed (the diode extractor is
   never even invoked for an entry whose terminal regions come out empty).
-- **The substrate-side anode inherits the "NMOS body" limitation above.**
+- **The substrate-side anode inherits the "NMOS body" resolution above.**
   gf180mcu draws no p-substrate mask, so `diode_nd2ps_06v0`'s anode is tied
-  to the deck's `substrate_net` global (`vsubs` by default) rather than to a
-  drawn, routable tie — the same wiring the NMOS body and the collector-less
-  bipolar collector already use.
+  to the deck's `substrate_net` global (`vsubs` by default) — the same
+  wiring the NMOS body and the collector-less bipolar collector already use.
+  As with the NMOS body, a layout that *does* draw a substrate tie the
+  deck's tap derivation claims (a `Pplus`-covered `Comp` shape outside every
+  `Nwell`, contacted up to a named net — issue #1084) resolves the anode to
+  that real, drawn net instead: `connect_global` merges the tie into the
+  same node and KLayout names the result from the drawn label.
+- **A drawn tie the tap derivation does *not* claim is now reported, not
+  silently dropped (issue #1196).** When contacted, labelled geometry sits
+  inside the diode's own device-mark footprint — physically the same region
+  the substrate-formed terminal is derived from — but is not covered by the
+  deck's tap mechanism (e.g. the tie carries no `Pplus` implant), nothing
+  joins the two: the terminal keeps the synthesized `substrate_net` name
+  while the drawn net exists beside it in the netlist. `warnings[]` now
+  carries one aggregate entry per (diode class, terminal) naming the device
+  class, the terminal, the drawn label(s) that did **not** name it, and the
+  synthesized net substituted for them, e.g.:
+
+  ```
+  1 diode_nd2ps_06v0 'a' terminal(s) resolved to the deck-synthesized
+  'vsubs' substrate net, but drawn, labelled tie geometry inside the same
+  device footprint resolves to a different net (VSS) -- ...
+  ```
+
+  Connectivity is unchanged (this is a disclosure, not a re-wiring). No
+  warning fires for the common case of a diode with no drawn tie at all —
+  landing on the synthesized global is the documented fallback there — nor
+  when the tie is unlabelled, nor when its label happens to be spelled
+  exactly like the deck's own `substrate_net`.
 - **The `Nwell`-side cathode inherits the "PMOS body (gf180mcu only)"
   limitation above.** `diode_pd2nw_06v0`'s cathode shares the deck's own
   `nwell` connectivity node, and gf180mcu's curated deck declares neither
