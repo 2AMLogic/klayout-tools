@@ -308,7 +308,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
     "klt_version": "0.4.2",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "volare", "version": "<stamp>" },
-    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
     "input": { "content_hash": "sha256:<hex>" }
   }
 }

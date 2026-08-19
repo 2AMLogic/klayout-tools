@@ -3432,7 +3432,7 @@ exit codes).
     "klt_version": "0.4.2",
     "klayout_version": "0.29.8",
     "pdk": null,
-    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
     "input": { "content_hash": "sha256:<hex>" }
   }
 }
@@ -3473,7 +3473,7 @@ exit codes).
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `spef_path`        | string \| `null`           | Additive field (issue #948). Resolved path of the written SPEF file when `--spef` was given; `null` otherwise. See "SPEF export".                       |
-| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
+| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193, non-fatal) for whether that hash ships in any released `klayout-tools` version -- `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing) -- and an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want
 structure without re-parsing SPICE; the **netlist file at `netlist_path` is

@@ -928,6 +928,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-19 — The shared `provenance.deck` block (`klt drc`, `klt extract`,
+  `klt lvs`, and every other verb whose report carries a `provenance.deck`)
+  now includes a `released` field (issue #1193): a non-fatal, generation-time
+  answer to whether `provenance.deck.content_hash` matches a deck that has
+  actually shipped in a released `klayout-tools` version, per
+  `klt deck resolve`'s own generated history table
+  (`src/klayout_tools/decks/_history.json`, issue #623). `true` when the hash
+  matches a release; `false` (still `status: "clean"`/`"match"` — this never
+  fails the run) when the table loaded fine but confirms no release ships
+  this hash — an unreleased dev checkout, an uncommitted deck edit, or a deck
+  added after the last tag (the `sg13g2` deck is a live example of this
+  today); `null` when the answer can't be determined at all (no
+  `content_hash` to check, or the history table itself is missing,
+  unreadable, or malformed — deliberately never conflated with a confirmed
+  `false`). Closes the gap where a project could accumulate months of
+  committed DRC/LVS evidence against a deck revision no release ever shipped,
+  with nothing surfacing that fact until someone later tried
+  `klt deck resolve` on the orphaned hash. No `schema_version` bump —
+  additive to `provenance.deck`, built once in
+  `klayout_tools._provenance._deck_block` /
+  `klayout_tools.decks.history.is_deck_hash_released`. See
+  `docs/json-contract.md`'s "Shared `provenance` block" section.
 - 2026-08-19 — `klt gen-compose` can now consume a cell it did not generate
   (issue #1189), in both of the two ways that were previously impossible
   without hand-forging a `generator_report` object with a fake `generator`
