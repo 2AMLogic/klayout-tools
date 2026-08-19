@@ -389,6 +389,21 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.IGNORECASE | re.MULTILINE,
         ),
     ),
+    (
+        # ngspice's own diagnostic when a BSIM model card's per-instance
+        # width *bin range* is exceeded, e.g. gf180mcu's undocumented
+        # ~100 um ceiling on `nfet_06v0`/`pfet_06v0` (issue #1214). The raw
+        # message says nothing about width or even that a model was
+        # matched by name at all -- on its own it reads as "wrong device
+        # name" or "model library did not load", pointing away from the
+        # actual cause. `_diagnose_modelname_error` inspects the netlist's
+        # own device instances to name a likely culprit before falling
+        # back to ngspice's raw line.
+        "model_bin_range",
+        re.compile(
+            r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
+        ),
+    ),
 )
 
 
@@ -2790,7 +2805,7 @@ def _run_corner(
             }
         )
     else:
-        diagnostics.extend(_classify_diagnostics(log_text))
+        diagnostics.extend(_classify_diagnostics(log_text, netlist_path))
 
     measurement_values = _parse_measurements(log_text)
     measurement_results: list[dict[str, Any]] = []
@@ -2974,16 +2989,194 @@ def _extract_engine_version(stdout: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _classify_diagnostics(log_text: str) -> list[dict[str, str]]:
+def _classify_diagnostics(
+    log_text: str, netlist_path: str = ""
+) -> list[dict[str, str]]:
     """Classify structured diagnostics from ``log_text``, per this module's
-    ordered ``_DIAGNOSTIC_PATTERNS`` (most specific first, one match per code)."""
+    ordered ``_DIAGNOSTIC_PATTERNS`` (most specific first, one match per
+    code). ``netlist_path``, when provided, lets the ``model_bin_range``
+    code replace ngspice's own uninformative message with one naming a
+    likely culprit instance (see :func:`_diagnose_modelname_error`); omitted
+    (the default -- also what every pre-#1214 caller/test still passes) it
+    falls back to ngspice's raw log line, same as every other code.
+    """
     diagnostics: list[dict[str, str]] = []
     for code, pattern in _DIAGNOSTIC_PATTERNS:
         match = pattern.search(log_text)
-        if match:
-            line = _line_containing(log_text, match.start())
-            diagnostics.append({"severity": "error", "code": code, "message": line})
+        if match is None:
+            continue
+        message = _line_containing(log_text, match.start())
+        if code == "model_bin_range":
+            message = _diagnose_modelname_error(netlist_path) or message
+        diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
+
+
+#: Width, in micrometres, above which a single MOS instance's total width
+#: (``w``, or ``w * nf`` when fingered) is a plausible culprit for ngspice's
+#: "could not find a valid modelname" failure. The true per-instance bin
+#: range is a property of each PDK's own BSIM model cards and cannot be
+#: derived from the netlist alone -- this is a conservative empirical floor
+#: from the gf180mcu `nfet_06v0` case (observed ceiling ~100-110 um,
+#: undocumented in the model file, see issue #1214), used only to pick a
+#: plausible culprit instance for the diagnostic message below, never to
+#: reject a netlist outright.
+_MODEL_WIDTH_CEILING_UM = 100.0
+
+#: An ``M`` (plain-element) or ``X`` (subcircuit-call) MOS-shaped instance
+#: line: ``<name> node node node node <model-or-subckt> [params...]``. Both
+#: card kinds share this 4-terminal-then-model shape -- gf180mcu's own
+#: netlists instantiate library cells like ``nfet_06v0`` via the ``X`` form
+#: (see ``decks/gf180mcu.py``), while a normalized reference netlist uses
+#: the plain ``M`` form (``netlist_normalize.py``). Best-effort: a 5+
+#: terminal subckt call can still match (the trailing text is just parsed
+#: as params, harmlessly), since this diagnostic only ever *suggests* a
+#: culprit, it never rejects a netlist.
+_MOS_INSTANCE_RE = re.compile(r"^\s*([MX]\S+)\s+(?:\S+\s+){4}(\S+)(.*)$", re.IGNORECASE)
+
+_PARAM_ASSIGN_RE = re.compile(r"(\w+)\s*=\s*(\S+)")
+
+#: SPICE engineering-notation multiplier suffixes for a bare geometry value
+#: (metres is the implicit base unit for W/L), longest-match first so
+#: ``meg`` is not shadowed by ``m``. Deliberately duplicated from (not
+#: imported from) ``netlist_normalize._SPICE_SUFFIXES``: that helper is
+#: private to a module with a different error-reporting contract
+#: (``NormalizeError``), and this diagnostic's parsing is best-effort
+#: (degrades to "no culprit found" on anything it cannot parse), not a
+#: netlist correctness check.
+_WIDTH_UNIT_SUFFIXES: tuple[tuple[str, float], ...] = (
+    ("meg", 1e6),
+    ("t", 1e12),
+    ("g", 1e9),
+    ("k", 1e3),
+    ("m", 1e-3),
+    ("u", 1e-6),
+    ("n", 1e-9),
+    ("p", 1e-12),
+    ("f", 1e-15),
+    ("a", 1e-18),
+)
+_WIDTH_NUMBER_RE = re.compile(
+    r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]*)$"
+)
+
+
+def _parse_plain_number(raw: str) -> float | None:
+    """Parse a bare, dimensionless SPICE numeric literal (e.g. an ``nf=``
+    or ``m=`` instance-multiplier value). Returns ``None`` for anything
+    that is not a plain number -- an expression like ``{n*2}`` this
+    diagnostic cannot evaluate.
+    """
+    match = _WIDTH_NUMBER_RE.match(raw.strip().strip("'\""))
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def _parse_width_um(raw: str) -> float | None:
+    """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
+    ``100n``) to micrometres. Returns ``None`` for anything that is not a
+    plain numeric literal.
+    """
+    match = _WIDTH_NUMBER_RE.match(raw.strip().strip("'\""))
+    if match is None:
+        return None
+    mantissa = float(match.group(1))
+    suffix = match.group(2).lower()
+    multiplier = 1.0
+    for name, value in _WIDTH_UNIT_SUFFIXES:
+        if suffix.startswith(name):
+            multiplier = value
+            break
+    return mantissa * multiplier * 1e6
+
+
+def _find_width_ceiling_culprit(
+    netlist_text: str,
+) -> tuple[str, str, float, float] | None:
+    """Scan ``netlist_text`` for the MOS instance most likely to have
+    tripped a model card's undocumented per-instance width bin range: the
+    largest total width (``w``, or ``w * nf`` when fingered) among
+    instances that do not already use ``m=`` to parallel it -- ``m=``
+    parallels whole instances *outside* the model-card width check, so an
+    instance already using ``m=`` (with its own ``w=`` inside the bin
+    range) is never the failure's cause (issue #1214).
+
+    Returns ``(instance_name, model_name, w_um, nf)`` for the worst
+    offender at or above :data:`_MODEL_WIDTH_CEILING_UM`, or ``None`` if no
+    instance meets that bar (ngspice's failure has some other cause this
+    heuristic cannot identify).
+    """
+    worst: tuple[str, str, float, float] | None = None
+    worst_effective_um = -1.0
+    for line in netlist_text.splitlines():
+        match = _MOS_INSTANCE_RE.match(line)
+        if match is None:
+            continue
+        inst_name, model_name = match.group(1), match.group(2)
+        params = dict(_PARAM_ASSIGN_RE.findall(match.group(3)))
+        w_raw = params.get("w") or params.get("W")
+        if w_raw is None:
+            continue
+        w_um = _parse_width_um(w_raw)
+        if w_um is None:
+            continue
+        m_raw = params.get("m") or params.get("M")
+        m_count = _parse_plain_number(m_raw) if m_raw is not None else 1.0
+        if m_count is None:
+            m_count = 1.0
+        if m_count > 1.0:
+            continue  # already parallelized outside the width-bin check
+        nf_raw = params.get("nf") or params.get("NF")
+        nf_count = _parse_plain_number(nf_raw) if nf_raw is not None else 1.0
+        if nf_count is None:
+            nf_count = 1.0
+        effective_um = w_um * nf_count
+        if (
+            effective_um >= _MODEL_WIDTH_CEILING_UM
+            and effective_um > worst_effective_um
+        ):
+            worst_effective_um = effective_um
+            worst = (inst_name, model_name, w_um, nf_count)
+    return worst
+
+
+def _diagnose_modelname_error(netlist_path: str) -> str | None:
+    """Build an actionable message for ngspice's own uninformative
+    ``could not find a valid modelname`` failure by naming the netlist
+    instance most likely responsible (see
+    :func:`_find_width_ceiling_culprit`) -- e.g. gf180mcu's undocumented
+    ~100 um per-instance width bin range, which fails identically whether
+    exceeded via a raw large ``w=`` or via ``nf=`` (issue #1214).
+
+    Returns ``None`` (never raises) when ``netlist_path`` is empty/unreadable
+    or no culprit instance is found; the caller falls back to ngspice's raw
+    log line in that case.
+    """
+    if not netlist_path:
+        return None
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            netlist_text = handle.read()
+    except OSError:
+        return None
+    culprit = _find_width_ceiling_culprit(netlist_text)
+    if culprit is None:
+        return None
+    inst_name, model_name, w_um, nf_count = culprit
+    if nf_count > 1:
+        effective_um = w_um * nf_count
+        cause = f"w={w_um:g}u nf={nf_count:g} ({effective_um:g} um effective width)"
+    else:
+        cause = f"w={w_um:g}u"
+    return (
+        f'ngspice reported "could not find a valid modelname" -- likely '
+        f"cause: instance '{inst_name}' ({model_name}) with {cause} exceeds "
+        f"the model card's per-instance width bin range (undocumented, "
+        f"~{_MODEL_WIDTH_CEILING_UM:g} um on gf180mcu); use m= to parallel "
+        "multiple smaller-width instances instead of a single large w= or "
+        "nf= (see issue #1214)"
+    )
 
 
 #: ngspice's own terminal trailer when an analysis never actually completed

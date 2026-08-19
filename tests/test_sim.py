@@ -818,6 +818,134 @@ def test_classify_diagnostics_does_not_false_positive_on_title_text():
 
 
 # --------------------------------------------------------------------------- #
+# Model bin-range diagnostic (`model_bin_range`, issue #1214)
+# --------------------------------------------------------------------------- #
+
+_MODELNAME_LOG = "Error: could not find a valid modelname\n"
+
+
+def test_classify_diagnostics_modelname_without_netlist_falls_back_to_raw_line():
+    # No netlist_path provided (matches every pre-#1214 caller/test) --
+    # falls back to ngspice's own raw, uninformative line.
+    codes = [d["code"] for d in sim._classify_diagnostics(_MODELNAME_LOG)]
+    assert codes == ["model_bin_range"]
+    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG)
+    assert diag["message"] == "Error: could not find a valid modelname"
+    assert diag["severity"] == "error"
+
+
+def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
+    netlist = tmp_path / "netlist.spice"
+    netlist.write_text("X5 d g s b nfet_06v0 w=150u l=0.6u nf=1 m=1\n")
+
+    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+
+    assert diag["code"] == "model_bin_range"
+    assert diag["severity"] == "error"
+    assert "X5" in diag["message"]
+    assert "nfet_06v0" in diag["message"]
+    assert "150" in diag["message"]
+    assert "m=" in diag["message"]
+
+
+def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
+    # nf= hits the identical bin-range check w= does (issue #1214) -- the
+    # diagnostic must report the *effective* width (w * nf), not just w.
+    netlist = tmp_path / "netlist.spice"
+    netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u nf=450 m=1\n")
+
+    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+
+    assert diag["code"] == "model_bin_range"
+    assert "nf=450" in diag["message"]
+    assert "22500" in diag["message"]  # 50 um * 450 fingers
+
+
+def test_classify_diagnostics_modelname_with_m_workaround_finds_no_culprit(tmp_path):
+    # Each instance's own w= is inside the bin range and m= parallels
+    # outside the width check -- not a plausible culprit, so this must fall
+    # back to the raw ngspice line rather than misidentify it.
+    netlist = tmp_path / "netlist.spice"
+    netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u m=450\n")
+
+    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+
+    assert diag["code"] == "model_bin_range"
+    assert diag["message"] == "Error: could not find a valid modelname"
+
+
+def test_classify_diagnostics_modelname_narrow_width_finds_no_culprit(tmp_path):
+    netlist = tmp_path / "netlist.spice"
+    netlist.write_text("M1 d g s b nfet_06v0 w=5u l=0.6u\n")
+
+    (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
+
+    assert diag["message"] == "Error: could not find a valid modelname"
+
+
+def test_classify_diagnostics_modelname_missing_netlist_file_falls_back(tmp_path):
+    (diag,) = sim._classify_diagnostics(
+        _MODELNAME_LOG, str(tmp_path / "does-not-exist.spice")
+    )
+    assert diag["message"] == "Error: could not find a valid modelname"
+
+
+def test_find_width_ceiling_culprit_picks_worst_offender(tmp_path):
+    netlist_text = (
+        "M1 d g s b nfet_06v0 w=20u l=0.6u\n"
+        "X2 d g s b nfet_06v0 w=200u l=0.6u nf=1\n"
+        "X3 d g s b nfet_06v0 w=50u l=0.6u m=10\n"
+    )
+    culprit = sim._find_width_ceiling_culprit(netlist_text)
+    assert culprit is not None
+    inst_name, model_name, w_um, nf_count = culprit
+    assert (inst_name, model_name) == ("X2", "nfet_06v0")
+    assert w_um == pytest.approx(200.0)
+    assert nf_count == pytest.approx(1.0)
+
+
+def test_find_width_ceiling_culprit_none_when_all_under_ceiling():
+    netlist_text = "M1 d g s b nfet_06v0 w=5u l=0.6u nf=4\n"
+    assert sim._find_width_ceiling_culprit(netlist_text) is None
+
+
+def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
+    tmp_path, monkeypatch
+):
+    # End-to-end: the full `run_sim` pipeline, with ngspice stubbed to fail
+    # exactly the way it does on gf180mcu's undocumented width ceiling
+    # (issue #1214), must surface the actionable diagnostic in the report,
+    # not just ngspice's raw "could not find a valid modelname" line.
+    body = tmp_path / "body.spice"
+    body.write_text(
+        ".param vdd=1.0\n"
+        "Vdd vdd 0 DC {vdd}\n"
+        "X5 vdd g out 0 nfet_06v0 w=50u l=0.6u nf=450 m=1\n"
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_MODELNAME_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "error"
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    (diag,) = [d for d in corner["diagnostics"] if d["code"] == "model_bin_range"]
+    assert "X5" in diag["message"]
+    assert "nf=450" in diag["message"]
+    assert "m=" in diag["message"]
+
+
+# --------------------------------------------------------------------------- #
 # Recovered singular_matrix/nonconvergence classification (#205)
 # --------------------------------------------------------------------------- #
 

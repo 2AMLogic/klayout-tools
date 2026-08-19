@@ -1037,6 +1037,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   build and a from-source checkout reported `klt --version` as `0.2.0`, and
   nothing short of a live extraction diff or hand-inspecting `provenance`
   distinguished them. See `docs/cli/deck.md`.
+- 2026-08-19 — `klt sim` now classifies ngspice's own uninformative
+  `Error: could not find a valid modelname` failure as a new
+  `model_bin_range` diagnostic code (issue #1214). Some PDKs' BSIM model
+  cards enforce an undocumented per-instance width bin range — gf180mcu's
+  `nfet_06v0`/`pfet_06v0` fail this way at roughly 100-110 um of total
+  instance width, identically whether the width comes from a raw `w=` or
+  from fingering it via `nf=` (only `m=`, which parallels outside the
+  check, reliably works around it) — and the raw ngspice message names
+  neither the width nor even the offending instance. `klt sim` re-scans the
+  corner's own netlist for the MOS instance with the largest total width
+  (`w`, or `w * nf` when fingered) not already using `m=`, and reports it by
+  name in the diagnostic's `message`; when no such instance is found it
+  falls back to ngspice's raw log line, same as every other code. See
+  [`docs/cli/sim.md`](docs/cli/sim.md) → "Model bin-range diagnostic".
 - 2026-08-19 — The shared `provenance.deck` block (`klt drc`, `klt extract`,
   `klt lvs`, and every other verb whose report carries a `provenance.deck`)
   now includes a `released` field (issue #1193): a non-fatal, generation-time
