@@ -539,9 +539,25 @@ jobs:
         # incident evidence and rationale. This step was itself observed
         # stalling (run 32275002277, 3.11), so it gets the same treatment,
         # not just ngspice.
+        #
+        # CI_APT_DEADLINE / CI_APT_PER_CMD_TIMEOUT overrides (issue #1224):
+        # this is the only one of the three apt-get steps that pulls a
+        # package an order of magnitude larger than the others -- `cmake`
+        # alone is 11.2 MB, vs. 4.4 MB for the whole `ngspice` step. Real job
+        # logs (runs 32291907647 / 32292729034, both post-#1226) showed the
+        # script's shared 90s-per-command / 250s-total default budget
+        # repeatedly killing the `cmake` fetch mid-download even after
+        # retrying, while the smaller steps completed fine under the same
+        # numbers. Widening both knobs just for this step gives one attempt
+        # enough contiguous time to land the large package instead of
+        # restarting it piecemeal; 270s still leaves 30s of margin inside
+        # the 300s (`timeout-minutes: 5`) backstop above, same proportion of
+        # slack the script's own un-overridden defaults use (250s of 300s).
         timeout-minutes: 5
         env:
           DEBIAN_FRONTEND: noninteractive
+          CI_APT_DEADLINE: "270"
+          CI_APT_PER_CMD_TIMEOUT: "150"
         run: |
           scripts/ci-apt-install.sh \
             cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
