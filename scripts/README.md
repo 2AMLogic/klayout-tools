@@ -15,6 +15,7 @@ scripts/
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
+  ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
   gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
   ingest-canary.py               # ingest a public canary block repo (issue #62) into blocks/<slug>/output/layout.json
@@ -128,6 +129,38 @@ scripts/install-verilator.sh
 uv sync --extra dev --extra functional-verification
 uv run pytest tests/test_functional_verification_toolchain_pins.py
 ```
+
+## `ci-apt-install.sh`
+
+The `apt-get` front end for all three package-install steps in
+`.github/workflows/ci.yml`'s `test` job (`Install ngspice`, `Install Yosys
+build dependencies`, `Install Icarus Verilog + Verilator build
+dependencies`). Not an operator tool — CI calls it, and it exists because a
+plain `sudo apt-get update && sudo apt-get install -y ...` is not resilient
+to GitHub's runner-local Azure apt mirror stalling (issue #1219: on
+2026-08-19 that mirror blackholed connections, and every apt step in the job
+started dying at the step's own 5-minute `timeout-minutes` guard, blocking
+merges on unrelated PRs).
+
+It rewrites `azure.archive.ubuntu.com` -> `archive.ubuntu.com` in apt's
+sources (classic *and* Ubuntu 24.04 deb822 layouts), passes bounded
+`Acquire::Retries` / `Acquire::*::Timeout` options so a blackholed
+connection errors in seconds rather than hanging, and retries the whole
+`update && install` pair — the pair, because the stall was also observed
+*after* a successful `update` — under a hard per-command `timeout(1)` cap
+and an overall budget sized to fit inside the workflow step's 5-minute
+backstop. A genuine packaging error (missing package, unsatisfiable
+dependency) is detected and fails immediately, unretried and unmasked.
+
+```
+scripts/ci-apt-install.sh ngspice
+CI_APT_MAX_ATTEMPTS=2 CI_APT_DEADLINE=120 scripts/ci-apt-install.sh bison flex
+```
+
+See the script's header comment for the full knob list and the incident log
+evidence; [`tests/test_ci_apt_install.py`](../tests/test_ci_apt_install.py)
+exercises every retry/timeout/fatal path against a fake `apt-get` and pins
+the workflow wiring.
 
 ## `gallery_signals.py` / `bootstrap-gallery-blocks.py`
 
