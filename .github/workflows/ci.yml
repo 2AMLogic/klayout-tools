@@ -482,6 +482,17 @@ jobs:
         # Package-manager install per the spike's "trivially CI-installable"
         # finding; tests skip gracefully (with a clear reason) if this binary
         # is ever absent, but CI always has it.
+        #
+        # Per-step timeout (issue #1204): this used to share the job's
+        # 45-minute budget (#1009) with every other step, so an apt-mirror
+        # stall could silently burn the whole job timeout before anything
+        # failed -- confirmed on main and PR #1194 (multiple ~45min hangs on
+        # this exact step, 2026-08-19). 5 minutes is generous for a normal
+        # `apt-get update && apt-get install` of one package, while still
+        # failing fast relative to the 45-minute job budget.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: sudo apt-get update && sudo apt-get install -y ngspice
 
       - name: Verify KLayout imports headlessly
@@ -511,6 +522,13 @@ jobs:
         # from-source build's own prerequisites (CMake >= 3.28 already
         # ships on ubuntu-latest/noble); package-manager install, same
         # posture as the ngspice step above.
+        #
+        # Per-step timeout + noninteractive apt (issue #1204): same
+        # apt-mirror-stall exposure as the ngspice step -- see its comment
+        # above for the incident evidence and rationale.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -565,6 +583,13 @@ jobs:
         # build specifically (its source tarball ships `configure.ac`, not a
         # pre-generated `configure`); `gperf` backs Icarus's own lexer
         # generation.
+        #
+        # Per-step timeout + noninteractive apt (issue #1204): same
+        # apt-mirror-stall exposure as the ngspice step -- see its comment
+        # above for the incident evidence and rationale.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y \
