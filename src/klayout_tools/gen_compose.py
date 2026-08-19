@@ -4464,16 +4464,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     matched_groups = _collect_matched_groups(blocks, order)
 
     min_spacing_um: float | None = None
-    if connectivity and strategy == "row":
+    if routed_geometry and strategy == "row":
         # "row" placement always applies spacing_um between adjacent blocks;
         # routing adds no spacing tighter than that at this phase (routes run
         # through the placed channels), so the tightest spacing actually used
         # is the placement gap. Left null when nothing was routed (phase-1
-        # behaviour), and also left null for "explicit" (#321) and "array"
-        # (#1053) placement -- neither has a single shared spacing value to
-        # report ("explicit"'s per-pair separation is exactly what a
-        # caller-declared origin expresses; "array" has two independent
-        # pitches, row_pitch_um/col_pitch_um, not one).
+        # behaviour) -- checked via `routed_geometry` (populated only by legs
+        # that actually drew metal, #1198), not mere `connectivity[]`
+        # presence: a declare-only request (`routing` absent/{}, #1188) or an
+        # all-unroutable `connectivity[]` populates `connectivity[]` without
+        # ever drawing anything, and must still report `null` here. Also
+        # left null for "explicit" (#321) and "array" (#1053) placement --
+        # neither has a single shared spacing value to report ("explicit"'s
+        # per-pair separation is exactly what a caller-declared origin
+        # expresses; "array" has two independent pitches,
+        # row_pitch_um/col_pitch_um, not one).
         min_spacing_um = spacing_um
 
     response_blocks = [
