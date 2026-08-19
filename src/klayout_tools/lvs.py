@@ -1279,6 +1279,27 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     return request
 
 
+#: `rerun_lvs_report`'s own exclusion set (issue #1223), layered on top of
+#: the shared `VOLATILE_PROVENANCE_PATHS`: `environment.extracted_netlist`
+#: is populated only when the *original* request set
+#: `options.keep_extracted: true`, and its value is
+#: `<request_dir>/.klt/lvs/<top>.spice` -- a path anchored to the original
+#: request document's own directory. `_reconstruct_lvs_request` deliberately
+#: never re-asserts `keep_extracted` (it is an output-side flag that cannot
+#: change a verdict, and re-running it would write files as a side effect),
+#: and even if it did, the reconstructed request is passed to `run_lvs` as an
+#: inline JSON string whose `request_dir` is the current working directory --
+#: so a fresh path would still differ from the committed one whenever
+#: `--rerun` runs from a different directory than the original request did.
+#: This is verb-local (not folded into the shared `VOLATILE_PROVENANCE_PATHS`
+#: in `_report_verify.py`): `klt drc --rerun` has no analogous output-path
+#: field to exclude, so widening the shared constant would be correct for LVS
+#: but dead configuration for DRC.
+_LVS_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
+    ("environment", "extracted_netlist")
+}
+
+
 def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     """``klt lvs --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt lvs --format json`` report at
@@ -1288,15 +1309,24 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     the fresh report against the committed one.
 
     Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
-    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
+    excluding :data:`_LVS_RERUN_EXCLUDE_PATHS` --
+    :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
     (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
     ``pdk`` is always ``null`` for LVS, so only the first two ever apply in
-    practice). ``status: "drifted"`` names every other changed field,
-    including a changed ``status``/``mismatch_count``/``mismatches`` (the
-    LVS-outcome-changed case) as well as changed
-    ``environment.layout_sha256``/``reference_sha256`` (the input-moved
-    case ``--check`` also catches, redundantly but harmlessly here since
-    this mode always re-hashes as a side effect of re-running).
+    practice) plus ``environment.extracted_netlist`` (issue #1223): that
+    field is populated only when the *original* request set
+    ``options.keep_extracted: true``, its value is an absolute path anchored
+    to the original request document's own directory, and
+    ``_reconstruct_lvs_request`` never re-asserts ``keep_extracted`` -- so a
+    fresh rerun always reports it as ``null`` even when nothing else about
+    the compare changed, which is a false drift, not a real one, on a
+    report committed from a ``keep_extracted: true`` request. ``status:
+    "drifted"`` names every other changed field, including a changed
+    ``status``/``mismatch_count``/``mismatches`` (the LVS-outcome-changed
+    case) as well as changed ``environment.layout_sha256``/
+    ``reference_sha256`` (the input-moved case ``--check`` also catches,
+    redundantly but harmlessly here since this mode always re-hashes as a
+    side effect of re-running).
 
     Additionally excludes any of the request-echo fields issue #1205 added
     (``reference_top``, ``options``) that the *committed* report predates:
@@ -1320,7 +1350,7 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
         )
     request = _reconstruct_lvs_request(committed)
     fresh = run_lvs(json.dumps(request))
-    exclude = set(VOLATILE_PROVENANCE_PATHS)
+    exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(
         (field,) for field in ("reference_top", "options") if field not in committed
     )
