@@ -815,6 +815,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `singular_matrix`  | A `Warning: singular matrix` line.                                          |
 | `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text. |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
+| `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
@@ -851,6 +852,41 @@ measurement to search over the way DC/AC/TRAN/SP do — so a `.meas op` card
 an actionable `SimError` instead of failing deep inside an ngspice parse
 error. Use `analysis.kind: "tran"` with a short single-step transient and
 `.meas tran ... at=<t>` to read back an operating-point-like value instead.
+
+### Model bin-range diagnostic (`model_bin_range`)
+
+Some PDKs' BSIM model cards enforce an undocumented per-instance width *bin
+range* — a device sized past it fails ngspice with a generic
+`Error: could not find a valid modelname`, which says nothing about width
+and reads like the device name is wrong or the model library never loaded.
+gf180mcu's `nfet_06v0`/`pfet_06v0` hit this at roughly 100–110 µm of total
+instance width, and the failure is identical whether the width comes from a
+single large `w=` or from fingering it via `nf=` — `nf=` parallels *inside*
+the same model-card instance the width check applies to, so it trips the
+same ceiling `w=` alone does. Only `m=` (the parallel-*instance* multiplier,
+applied outside that check, with each instance's own `w=` kept under the
+ceiling) reliably works around it (issue #1214).
+
+When ngspice's log matches this failure, `klt sim` re-scans the corner's own
+netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with
+the largest total width (`w`, or `w * nf` when fingered) that does not
+already use `m=` — the most likely culprit — and reports it by name in the
+`model_bin_range` diagnostic's `message`, e.g.:
+
+```
+ngspice reported "could not find a valid modelname" -- likely cause:
+instance 'X5' (nfet_06v0) with w=50u nf=450 (22500 um effective width)
+exceeds the model card's per-instance width bin range (undocumented,
+~100 um on gf180mcu); use m= to parallel multiple smaller-width instances
+instead of a single large w= or nf= (see issue #1214)
+```
+
+This is a heuristic over the netlist text, not a validated PDK limit: the
+100 µm figure is an empirical floor observed on gf180mcu, not a value this
+tool derives from the model file itself (the root cause — the PDK's model
+cards not documenting their own bin ranges — is upstream, not something this
+repo can fix). When no such instance is found, `message` falls back to
+ngspice's raw log line, same as every other `code`.
 
 ## Waveform artifact (optional, first-class)
 
