@@ -2467,7 +2467,7 @@ def test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected(
         gate = blocks[block_id]["ports"]["U0_G"]
         return round(gate["x_um"] + offsets[block_id]["x"], 6)
 
-    def _reject_b1_b2(points_um):
+    def _reject_b1_b2(points_um, via_drops=None, stub_widen=None):
         endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
         if endpoints == {_gate_x("b1"), _gate_x("b2")}:
             return "simulated collision with an already-routed net"
@@ -2553,7 +2553,7 @@ def test_route_bundle_draws_the_routable_legs_of_a_4_pin_net_when_the_bridge_fai
     def _block_of(x):
         return next(block_id for block_id in ids if _gate_x(block_id) == x)
 
-    def _reject_cross_half_bridge(points_um):
+    def _reject_cross_half_bridge(points_um, via_drops=None, stub_widen=None):
         endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
         blocks_touched = {_block_of(x) for x in endpoints}
         if any(blocks_touched <= half for half in halves):
@@ -2602,7 +2602,7 @@ def test_route_bundle_reports_unrouted_not_partial_when_zero_legs_drawn(
         _route_bundle_row_fixture(tmp_path, pdk_root, 3)
     )
 
-    def _reject_everything(points_um):
+    def _reject_everything(points_um, via_drops=None, stub_widen=None):
         return "simulated collision with an already-routed net"
 
     result = gen_compose.route_bundle(
@@ -4571,6 +4571,88 @@ def test_compose_route_vs_route_collision_is_order_dependent(tmp_path, pdk_root)
     assert any(
         "NET_H" in note and "crosses" in note and "NET_V" in note
         for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_rejects_same_block_self_net_pair_whose_via_landing_pads_cross(
+    tmp_path, pdk_root
+):
+    # Issue #1197: two same-block self-nets (#439/#453's territory) whose
+    # *bare backbones* never touch each other could still compose
+    # `routed: true` for both while shorting on the composed layer -- not
+    # because the backbones themselves cross, but because the via-drop
+    # landing pad `_write_composed_gds` draws at one net's own endpoint
+    # (`_VIA_LANDING_SIZE_UM`, independent of and wider than the route's own
+    # `width_um`) lands on top of the *other* net's already-accepted
+    # backbone. #1057's route-vs-route collision check compared only the
+    # bare backbone points, so it never saw this -- exactly the reproduction
+    # from the issue: a common-centroid 3x6 nfet `mos_array`, self-net NA
+    # bussing two drains (U10_D, U11_D) and self-net NB bussing two sources
+    # (U4_S, U12_S), on the very same block, whose via landing pads cross
+    # each other's backbone without either backbone crossing the other.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "arr",
+        w_um=1.0,
+        l_um=0.15,
+        rows=3,
+        cols=6,
+        dummy=0,
+        flavor="nfet",
+        topology="common_centroid",
+    )
+    output = tmp_path / "self_net_pair.gds"
+    request = {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [{"id": "arr", "generator_report": arr}],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["arr"],
+            "origins_um": {"arr": {"x": 0.0, "y": 0.0}},
+        },
+        "connectivity": [
+            {
+                "net": "NA",
+                "pins": [
+                    {"block": "arr", "port": "U10_D"},
+                    {"block": "arr", "port": "U11_D"},
+                ],
+            },
+            {
+                "net": "NB",
+                "pins": [
+                    {"block": "arr", "port": "U4_S"},
+                    {"block": "arr", "port": "U12_S"},
+                ],
+            },
+        ],
+        "routing": {"layer_role": "metal2", "width_um": 0.3},
+        "options": {"cell_name": "self_net_pair", "output": str(output)},
+    }
+    report = compose(request)
+
+    # The two nets must never both compose `routed: true` when their drawn
+    # footprints (backbone + via landing pads) actually collide -- the
+    # second one processed is rejected with a `legs[].reason` naming the
+    # first, mirroring #439/#1057's fail-visible pattern, rather than both
+    # silently drawing a short certified `routed: true`.
+    assert not all(net["routed"] for net in report["nets"])
+    rejected = [net for net in report["nets"] if not net["routed"]]
+    assert len(rejected) == 1
+    accepted_name = "NA" if rejected[0]["net"] == "NB" else "NB"
+    blocker_leg = next(leg for leg in rejected[0]["legs"] if leg["reason"] is not None)
+    assert "crosses already-routed net" in blocker_leg["reason"]
+    assert accepted_name in blocker_leg["reason"]
+    assert report["unrouted_nets"] == [rejected[0]["net"]]
+
+    # Whatever gen-compose reported, the composed layout itself must never
+    # show the two declared net names merged onto one electrical node.
+    result = extract.run_extract(str(output), "sky130", top="self_net_pair")
+    assert result["merged_net_labels"] == []
+    assert not any(
+        "NA" in net["name"] and "NB" in net["name"] for net in result["nets"]
     )
 
 

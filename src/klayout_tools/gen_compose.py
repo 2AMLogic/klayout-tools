@@ -2420,6 +2420,75 @@ def _drawn_route_region(
     return kdb.Region(path.polygon())
 
 
+def _drawn_leg_footprint_region(
+    points_um: list[tuple[float, float]],
+    width_um: float,
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    dbu: float,
+):
+    """The full metal one routed leg draws on its own route layer, as a
+    ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
+    every via-drop landing pad and stub-widen box :func:`_write_composed_gds`
+    *also* draws on that same layer (issue #1197).
+
+    The route-vs-route collision check (#1057) originally built its
+    comparison region from the bare backbone path alone. That misses two
+    kinds of metal :func:`_write_composed_gds` draws wider than the
+    backbone itself, on the identical layer:
+
+    * a via-drop's landing pad (``_VIA_LANDING_SIZE_UM``, sized from the
+      PDK's own contact-enclosure convention, independent of the route's own
+      ``width_um``) -- drawn centered on the leg's own endpoint whenever
+      that endpoint's pin sits on a different physical layer than the route;
+    * a stub-widen box (:func:`_endpoint_stub_widen_um`, #496) -- drawn
+      re-covering the backbone's own first segment at the pin's wider pad
+      width, when that pad is wider than the route.
+
+    Either can extend past the bare backbone far enough to land on a
+    *different* net's already-accepted route while the two backbones
+    themselves never touch -- exactly what two same-block self-nets whose
+    via-drop landing pads cross each other's backbones produce: each leg
+    individually passes every one of :func:`route_two_pin`'s own checks
+    (which only ever compare a leg against its *own* block's geometry), and
+    the bare-backbone-only version of this check found no overlap either, so
+    both compose ``routed: true`` while `klt extract` merges the two nets
+    onto one node through the landing pad's silent overlap. Building this
+    region from the *same* drawing primitives :func:`_write_composed_gds`
+    actually inserts -- just as :func:`_drawn_route_region` already does for
+    the bare path -- is what keeps this check and the composed output from
+    ever disagreeing about a leg's real footprint.
+    """
+    import klayout.db as kdb
+
+    region = _drawn_route_region(points_um, width_um, dbu)
+
+    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
+    for drop in via_drops:
+        cx = int(round(drop["x_um"] / dbu))
+        cy = int(round(drop["y_um"] / dbu))
+        region.insert(
+            kdb.Box(
+                cx - landing_half_dbu,
+                cy - landing_half_dbu,
+                cx + landing_half_dbu,
+                cy + landing_half_dbu,
+            )
+        )
+
+    for widen in stub_widen:
+        cx = int(round(widen["x_um"] / dbu))
+        cy = int(round(widen["y_um"] / dbu))
+        half_dbu = int(round((widen["width_um"] / 2.0) / dbu))
+        length_dbu = int(round(widen["length_um"] / dbu))
+        if widen["direction_deg"] == 90:
+            region.insert(kdb.Box(cx - half_dbu, cy, cx + half_dbu, cy + length_dbu))
+        else:  # 270
+            region.insert(kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy))
+
+    return region
+
+
 def _self_net_drawn_short(
     points_um: list[tuple[float, float]],
     geometry: dict[str, Any],
@@ -3465,11 +3534,16 @@ def route_bundle(
     per-block cache); it is consulted only for a leg whose two pins sit on the
     same block, exactly as ``compose()`` did for a two-pin self-net before
     this function existed. ``leg_conflict`` is an optional callable taking a
-    candidate leg's drawn ``points_um`` and returning a rejection reason (or
-    ``None`` to accept) -- ``compose()`` passes its route-vs-route collision
-    check (#1057) here, so a leg colliding with an *already-routed other net*
-    is rejected as a candidate and an alternative leg is tried, rather than
-    failing the whole net.
+    candidate leg's drawn ``points_um``, ``via_drops``, and ``stub_widen``
+    (the same three fields :func:`route_two_pin` returns for it -- issue
+    #1197 widened this from ``points_um`` alone, since a leg's via-drop
+    landing pad or stub-widen box can extend past its bare backbone far
+    enough to collide with another net even when the two backbones never
+    touch) and returning a rejection reason (or ``None`` to accept) --
+    ``compose()`` passes its route-vs-route collision check (#1057) here, so
+    a leg colliding with an *already-routed other net* is rejected as a
+    candidate and an alternative leg is tried, rather than failing the whole
+    net.
 
     ``cross_block_route_layer``/``cross_block_geometry_for`` (issue #1168)
     mirror ``route_layer``/``block_geometry_for`` for an optional second,
@@ -3586,7 +3660,11 @@ def route_bundle(
         )
         reason = None if result["routed"] else result["reason"]
         if result["routed"] and leg_conflict is not None:
-            reason = leg_conflict(result["points_um"])
+            reason = leg_conflict(
+                result["points_um"],
+                result.get("via_drops", []),
+                result.get("stub_widen", []),
+            )
 
         if reason is None and result["routed"]:
             _union(i, j)
@@ -4154,6 +4232,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
         def _leg_conflict(
             points_um: list[tuple[float, float]],
+            via_drops: list[dict[str, Any]],
+            stub_widen: list[dict[str, Any]],
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
         ) -> str | None:
             """Route-vs-route collision check (#1057) for one candidate leg.
@@ -4171,8 +4251,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             once every one of its legs is accepted -- so two legs of one
             bundle net converging on their shared node are never compared
             against each other either.
+
+            The compared region is built by :func:`_drawn_leg_footprint_region`,
+            not the bare backbone alone (issue #1197): a via-drop's landing
+            pad or a stub-widen box can extend past the backbone far enough
+            to land on another net's already-accepted route even when the
+            two backbones themselves never touch -- exactly the shape two
+            same-block self-nets whose via-drop landing pads cross each
+            other's backbones take. Leaving those out of both sides of this
+            comparison (candidate and ``accepted_route_regions`` alike) is
+            what let that pair compose ``routed: true`` while `klt extract`
+            silently merged them onto one node.
             """
-            region = _drawn_route_region(points_um, width_um, _route_dbu())
+            region = _drawn_leg_footprint_region(
+                points_um, width_um, via_drops, stub_widen, _route_dbu()
+            )
             for other_net, other_pins, other_region in accepted_route_regions:
                 if _net_pin_set & other_pins:
                     continue  # shared pin -- an intended merge, not a short
@@ -4236,7 +4329,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 (
                     net_label,
                     net_pin_set,
-                    _drawn_route_region(leg["points_um"], width_um, _route_dbu()),
+                    _drawn_leg_footprint_region(
+                        leg["points_um"],
+                        width_um,
+                        leg["via_drops"],
+                        leg["stub_widen"],
+                        _route_dbu(),
+                    ),
                 )
             )
             # route_layer (#1168): the effective layer this leg actually
