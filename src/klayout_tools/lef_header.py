@@ -91,6 +91,20 @@ _WIDTH_RE = re.compile(r"\bWIDTH\s+([0-9.eE+-]+)\s*;")
 _PITCH_RE = re.compile(r"\bPITCH\s+([0-9.eE+-]+)(?:\s+([0-9.eE+-]+))?\s*;")
 _OFFSET_RE = re.compile(r"\bOFFSET\s+([0-9.eE+-]+)(?:\s+([0-9.eE+-]+))?\s*;")
 
+# Electromigration-adjacent LAYER attributes (issue #1215's `klt pdk
+# em-limits`). Real gf180mcu/sky130 tech LEFs state these as a single scalar
+# statement -- ``DCCURRENTDENSITY AVERAGE <value> ;`` -- rather than LEF's
+# more elaborate ``WIDTH``-indexed current-density table form; only that
+# scalar ``AVERAGE`` form is parsed here (matching this module's "declarative
+# header attributes only" scope -- a table would need its own multi-row
+# reader, which no shipped install this repo has seen actually uses). A
+# layer that declares the table form instead is simply not extracted, same
+# as any other statement shape this best-effort reader does not recognise.
+_THICKNESS_RE = re.compile(r"\bTHICKNESS\s+([0-9.eE+-]+)\s*;")
+_DCCURRENTDENSITY_RE = re.compile(r"\bDCCURRENTDENSITY\s+AVERAGE\s+([0-9.eE+-]+)\s*;")
+_ACCURRENTDENSITY_RE = re.compile(r"\bACCURRENTDENSITY\s+AVERAGE\s+([0-9.eE+-]+)\s*;")
+_RESISTANCE_RPERSQ_RE = re.compile(r"\bRESISTANCE\s+RPERSQ\s+([0-9.eE+-]+)\s*;")
+
 _USE_RE = re.compile(r"\bUSE\s+(\S+)\s*;")
 
 #: Presence (not geometry) of a nested ``PORT`` block inside a ``PIN`` body --
@@ -150,6 +164,10 @@ def _parse_layer(name: str, body: str) -> dict[str, Any]:
     width_match = _WIDTH_RE.search(body)
     pitch_match = _PITCH_RE.search(body)
     offset_match = _OFFSET_RE.search(body)
+    thickness_match = _THICKNESS_RE.search(body)
+    dc_current_density_match = _DCCURRENTDENSITY_RE.search(body)
+    ac_current_density_match = _ACCURRENTDENSITY_RE.search(body)
+    resistance_match = _RESISTANCE_RPERSQ_RE.search(body)
 
     pitch_x = _float(pitch_match.group(1)) if pitch_match else None
     pitch_y = (
@@ -173,6 +191,27 @@ def _parse_layer(name: str, body: str) -> dict[str, Any]:
         "pitch_y_um": pitch_y,
         "offset_x_um": offset_x,
         "offset_y_um": offset_y,
+        "thickness_um": _float(thickness_match.group(1)) if thickness_match else None,
+        # Unit is layer-``TYPE``-dependent per the LEF spec, not normalised
+        # here: for a ``ROUTING`` layer this is a per-unit-width current (mA
+        # per micron of wire width); for a ``CUT`` layer (a via/contact) it
+        # is a flat per-cut current (mA per cut) -- callers that care about
+        # the distinction (e.g. `klt pdk em-limits`) key off the sibling
+        # ``type`` field, matching how the shipped LEF text itself carries no
+        # separate unit statement for either.
+        "dc_current_density": (
+            _float(dc_current_density_match.group(1))
+            if dc_current_density_match
+            else None
+        ),
+        "ac_current_density": (
+            _float(ac_current_density_match.group(1))
+            if ac_current_density_match
+            else None
+        ),
+        "resistance_rpersq": (
+            _float(resistance_match.group(1)) if resistance_match else None
+        ),
     }
 
 
@@ -228,7 +267,9 @@ def parse_lef_header(text: str) -> dict[str, Any]:
             ],
             "layers": [
                 {"name", "type", "direction", "width_um",
-                 "pitch_x_um", "pitch_y_um", "offset_x_um", "offset_y_um"},
+                 "pitch_x_um", "pitch_y_um", "offset_x_um", "offset_y_um",
+                 "thickness_um", "dc_current_density", "ac_current_density",
+                 "resistance_rpersq"},
                 ...
             ],
             "macros": [

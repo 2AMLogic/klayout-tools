@@ -81,6 +81,8 @@ import os
 import re
 from typing import Any
 
+from .lef_header import parse_lef_header
+
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
 #: the search space hermetically.
@@ -584,6 +586,275 @@ def lef_files(
     return {
         "tech_lef": tech_lef if os.path.isfile(tech_lef) else None,
         "cell_lef": cell_lef if os.path.isfile(cell_lef) else None,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# `klt pdk em-limits` -- electromigration current-density limits declared
+# across every tech LEF an install ships (issue #1215).
+# --------------------------------------------------------------------------- #
+
+#: Layer ``TYPE``s a current-carrying design actually sizes an EM budget
+#: against -- routing metal and cut/via (including the diffusion/poly
+#: contact, ``CON``). Excludes non-current-carrying declarative layers a
+#: tech LEF also declares (``MASTERSLICE`` wells/poly, ``OVERLAP``,
+#: ``PR_bndry``, ...), keeping the report scoped to what issue #1215 asks
+#: for -- "the layers a current-carrying design must size" -- rather than
+#: echoing every ``LAYER`` block a tech LEF happens to declare.
+_CURRENT_CARRYING_LAYER_TYPES = frozenset({"ROUTING", "CUT"})
+
+#: Tolerance for deciding two tech LEFs' EM-adjacent values "agree" --
+#: generous enough to absorb float round-trip noise, tight enough that the
+#: issue's own 1.19 vs. 0.99 µm / 1.5 vs. 1.21 mA/µm disagreements are never
+#: mistaken for agreement.
+_EM_VALUE_ABS_TOL = 1e-6
+
+
+def _em_values_agree(values: list[float]) -> bool:
+    """``True`` when every value in non-empty ``values`` matches the first,
+    within :data:`_EM_VALUE_ABS_TOL`."""
+    first = values[0]
+    return all(
+        math.isclose(value, first, abs_tol=_EM_VALUE_ABS_TOL) for value in values
+    )
+
+
+def _summarize_em_field(
+    entries: list[dict[str, Any]], field: str, *, conservative: bool
+) -> dict[str, Any]:
+    """Summarize one EM-adjacent field (``dc_current_density``,
+    ``ac_current_density``, ``thickness_um``, ``resistance_rpersq``) across
+    every source ``entries`` that parsed a value for it.
+
+    Returns::
+
+        {
+            "shipped": bool,               # any source declared this field?
+            "agrees": bool | None,         # None when "shipped" is False
+            "values": [
+                {"cell_library", "corner", "tech_lef", "value"}, ...
+            ],
+            "conservative": float | None,  # only present when conservative=True
+        }
+
+    ``shipped: False`` (with ``values: []``) is itself the answer for a
+    layer/field with nothing declared anywhere -- e.g. ``CON``'s DC/AC
+    current density -- an explicit "no limit shipped" result rather than a
+    silently omitted field (issue #1215's own suggested handling).
+
+    ``conservative`` is the minimum (more restrictive) value across sources
+    when they disagree, per issue #1215's "returns the conservative value by
+    default" -- only meaningful for a current-density budget (lower is
+    always safer), so it is only computed when the caller asks for it.
+    """
+    present = [entry for entry in entries if entry[field] is not None]
+    result: dict[str, Any] = {
+        "shipped": bool(present),
+        "agrees": _em_values_agree([e[field] for e in present]) if present else None,
+        "values": [
+            {
+                "cell_library": e["cell_library"],
+                "corner": e["corner"],
+                "tech_lef": e["tech_lef"],
+                "value": e[field],
+            }
+            for e in present
+        ],
+    }
+    if conservative:
+        result["conservative"] = min((e[field] for e in present), default=None)
+    return result
+
+
+def _discover_tech_lefs(libs_ref: str) -> list[dict[str, str]]:
+    """Enumerate every tech LEF under ``libs_ref``, naming-convention-
+    independently: every ``<libs_ref>/<lib>/techlef/<lib>__<corner>.tlef``
+    file, for every immediate ``libs_ref`` entry that ships a ``techlef/``
+    subdirectory at all.
+
+    Deliberately does **not** reuse :func:`_scan_cell_libraries`'s
+    `_fd_sc_`-name filter (:data:`_STD_CELL_LIB_MARKER`): issue #1215's own
+    reported disagreement is precisely *between* an `_fd_sc_`-named family
+    (`gf180mcu_fd_sc_mcu9t5v0`/`mcu7t5v0`) and an `_osu_sc_`-named one
+    (`gf180mcu_osu_sc_gp9t3v3`/`gp12t3v3`) -- a name filter tuned for `klt
+    pdk cells`'s different purpose (only digital timing-view libraries)
+    would silently drop half of exactly the disagreement this query exists
+    to surface. A `libs_ref` entry with no `techlef/` subdirectory
+    (primitive-device, I/O-pad, hard-macro IP libraries -- verified against
+    real sky130/gf180mcu installs) is naturally excluded without a name
+    filter at all: it ships no tech LEF to parse.
+
+    Returns ``[{"cell_library", "corner", "tech_lef"}, ...]``, sorted by
+    ``(cell_library, corner)``. ``corner`` is derived from the filename
+    (stripping the ``<cell_library>__`` prefix and ``.tlef`` suffix) rather
+    than assumed to be one of `min`/`nom`/`max` -- an install shipping only
+    `nom` (issue #1215's own `osu_sc_gp*t3v3` example), or a corner name
+    this reader does not otherwise recognise, is still reported verbatim.
+    """
+    sources: list[dict[str, str]] = []
+    if not os.path.isdir(libs_ref):
+        return sources
+    for name in sorted(os.listdir(libs_ref)):
+        techlef_dir = os.path.join(libs_ref, name, "techlef")
+        if not os.path.isdir(techlef_dir):
+            continue
+        prefix = f"{name}__"
+        for filename in sorted(os.listdir(techlef_dir)):
+            if not filename.endswith(".tlef"):
+                continue
+            if filename.startswith(prefix):
+                corner = filename[len(prefix) : -len(".tlef")]
+            else:
+                corner = filename[: -len(".tlef")]
+            sources.append(
+                {
+                    "cell_library": name,
+                    "corner": corner,
+                    "tech_lef": os.path.join(techlef_dir, filename),
+                }
+            )
+    return sources
+
+
+def em_limits(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+    """Report electromigration current-density limits declared across every
+    tech LEF a resolved PDK variant ships (issue #1215).
+
+    Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
+    ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
+    then discovers every tech LEF under its ``libs_ref`` asset via
+    :func:`_discover_tech_lefs` -- every `libs_ref/<lib>/techlef/*.tlef`
+    file, independent of the library's naming convention (**not** filtered
+    to `_fd_sc_`-named standard-cell libraries the way
+    :func:`list_cell_libraries` is -- see :func:`_discover_tech_lefs`'s own
+    docstring for why). Each resolved tech LEF is parsed with
+    :func:`klayout_tools.lef_header.parse_lef_header`.
+
+    For every ``ROUTING``/``CUT`` layer (:data:`_CURRENT_CARRYING_LAYER_TYPES`
+    -- the layers a current-carrying design actually sizes against, per the
+    issue's own framing) seen in **any** parsed tech LEF, reports the
+    per-source ``dc_current_density``/``ac_current_density`` values plus
+    ``thickness_um``/``resistance_rpersq`` for context, and whether they
+    agree across every source that declared them. A layer present in one
+    tech LEF but not another (e.g. an osu library shipping only ``nom``) is
+    still reported using whichever sources did declare it -- a smaller
+    source set is not itself a disagreement.
+
+    Design choice -- **live-parses** the shipped tech LEFs at call time
+    rather than owning a curated table, matching :func:`list_cell_libraries`'s
+    own rationale (docs/cli/pdk.md): the install's own files are the only
+    place this data is stated, and a curated copy would silently drift on a
+    PDK upgrade instead of reflecting what is actually installed.
+
+    Returns a dict matching the documented JSON schema (see
+    ``docs/cli/pdk.md``)::
+
+        {
+            "schema_version": 1,
+            "pdk": <variant name>,
+            "root": <absolute install root>,
+            "sources": [
+                {"cell_library": str, "corner": str, "tech_lef": <abs path>},
+                ...
+            ],
+            "layers": [
+                {
+                    "name": str,
+                    "type": "ROUTING" | "CUT",
+                    "dc_current_density": {
+                        "shipped": bool, "agrees": bool | None,
+                        "conservative": float | None,
+                        "values": [
+                            {"cell_library", "corner", "tech_lef", "value"}, ...
+                        ],
+                    },
+                    "ac_current_density": {... same shape ...},
+                    "thickness_um": {
+                        "shipped": bool, "agrees": bool | None,
+                        "values": [...],
+                    },
+                    "resistance_rpersq": {... same shape as thickness_um ...},
+                },
+                ...
+            ],
+            "disagreements": [<layer name>, ...],  # dc/ac current density only
+        }
+
+    ``layers`` is name-sorted; a variant shipping no `libs_ref` asset (or one
+    whose libraries ship no `techlef/` directory at all) reports
+    ``"sources": []``, ``"layers": []`` -- a successful, empty result, not an
+    error. ``disagreements`` lists every layer name where
+    ``dc_current_density`` or ``ac_current_density`` is ``shipped`` but not
+    ``agrees`` (``thickness_um``/``resistance_rpersq`` disagreement is
+    visible per-layer but does not, by itself, add a layer to this list -- it
+    is context for *why* a current-density disagreement might exist, per the
+    issue's own "same resistance, different thickness" observation, not a
+    second disagreement axis this query adjudicates).
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves at all.
+    """
+    info = find_pdk(variant=variant, root=root)
+    libs_ref = info["assets"]["libs_ref"]
+    sources = _discover_tech_lefs(libs_ref) if libs_ref is not None else []
+
+    layer_entries: dict[str, list[dict[str, Any]]] = {}
+    layer_types: dict[str, str | None] = {}
+
+    for source in sources:
+        text = _read_text(source["tech_lef"])
+        if text is None:
+            continue
+        header = parse_lef_header(text)
+        for layer in header["layers"]:
+            if layer["type"] not in _CURRENT_CARRYING_LAYER_TYPES:
+                continue
+            layer_entries.setdefault(layer["name"], []).append(
+                {
+                    "cell_library": source["cell_library"],
+                    "corner": source["corner"],
+                    "tech_lef": source["tech_lef"],
+                    "thickness_um": layer["thickness_um"],
+                    "resistance_rpersq": layer["resistance_rpersq"],
+                    "dc_current_density": layer["dc_current_density"],
+                    "ac_current_density": layer["ac_current_density"],
+                }
+            )
+            layer_types.setdefault(layer["name"], layer["type"])
+
+    layers: list[dict[str, Any]] = []
+    disagreements: list[str] = []
+    for name in sorted(layer_entries):
+        entries = layer_entries[name]
+        dc = _summarize_em_field(entries, "dc_current_density", conservative=True)
+        ac = _summarize_em_field(entries, "ac_current_density", conservative=True)
+        thickness = _summarize_em_field(entries, "thickness_um", conservative=False)
+        resistance = _summarize_em_field(
+            entries, "resistance_rpersq", conservative=False
+        )
+
+        if dc["shipped"] and not dc["agrees"]:
+            disagreements.append(name)
+        elif ac["shipped"] and not ac["agrees"]:
+            disagreements.append(name)
+
+        layers.append(
+            {
+                "name": name,
+                "type": layer_types[name],
+                "dc_current_density": dc,
+                "ac_current_density": ac,
+                "thickness_um": thickness,
+                "resistance_rpersq": resistance,
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "pdk": info["variant"],
+        "root": info["root"],
+        "sources": sources,
+        "layers": layers,
+        "disagreements": disagreements,
     }
 
 

@@ -1,6 +1,6 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Six subcommands, all emitting through the shared envelope helpers in
+Seven subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
@@ -10,6 +10,9 @@ Six subcommands, all emitting through the shared envelope helpers in
 - ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
 - ``corners`` — per SPICE process corner, which device families skew vs.
   resolve to typical.
+- ``em-limits`` — per-layer electromigration current-density limits declared
+  across every tech LEF the variant ships, flagging cross-file disagreements
+  (issue #1215).
 
 The discovery logic itself lives in :mod:`klayout_tools.pdk`; these handlers
 only translate flags into library calls and render the result.
@@ -21,6 +24,7 @@ import shlex
 
 from ..pdk import (
     PdkNotFoundError,
+    em_limits,
     find_pdk,
     list_cell_libraries,
     list_corners,
@@ -97,6 +101,16 @@ def run_corners(args: argparse.Namespace) -> int:
         return emit_error("pdk corners", str(exc), args.format)
 
     emit_success(report, args.format, _print_corners_text)
+    return 0
+
+
+def run_em_limits(args: argparse.Namespace) -> int:
+    try:
+        report = em_limits(variant=args.pdk, root=args.pdk_root)
+    except PdkNotFoundError as exc:
+        return emit_error("pdk em-limits", str(exc), args.format)
+
+    emit_success(report, args.format, _print_em_limits_text)
     return 0
 
 
@@ -202,6 +216,49 @@ def _print_macros_text(report: dict) -> None:
         rows.append((macro["name"], "/".join(present) or "-"))
 
     render_table(headers, rows, left_aligned={0, 1})
+
+
+def _format_em_field(field: dict) -> str:
+    """Render one ``dc_current_density``/``ac_current_density`` summary
+    (see :func:`klayout_tools.pdk.em_limits`) as a single text-table cell:
+    ``"not shipped"``, the agreed value, or the conservative pick flagged
+    with every distinct value sources disagreed on."""
+    if not field["shipped"]:
+        return "not shipped"
+    conservative = field["conservative"]
+    if field["agrees"]:
+        return f"{conservative:g}"
+    distinct = sorted({entry["value"] for entry in field["values"]})
+    return f"{conservative:g} (DISAGREE: {', '.join(f'{v:g}' for v in distinct)})"
+
+
+def _print_em_limits_text(report: dict) -> None:
+    print(f"pdk: {report['pdk']}")
+    print(f"tech_lef_count: {len(report['sources'])}")
+
+    layers = report["layers"]
+    if not layers:
+        print("no ROUTING/CUT layers found in any resolved tech LEF")
+        return
+
+    headers = ("layer", "type", "dc_current_density", "ac_current_density")
+    rows = [
+        (
+            layer["name"],
+            layer["type"] or "-",
+            _format_em_field(layer["dc_current_density"]),
+            _format_em_field(layer["ac_current_density"]),
+        )
+        for layer in layers
+    ]
+    render_table(headers, rows, left_aligned={0, 1, 2, 3})
+
+    if report["disagreements"]:
+        print()
+        print(
+            "disagreements (conservative value shown above): "
+            + ", ".join(report["disagreements"])
+        )
 
 
 def _print_corners_text(report: dict) -> None:
