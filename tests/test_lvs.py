@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import lvs, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
@@ -6154,13 +6155,6 @@ Final result: Top level cell failed pin matching.
 """
 
 
-class _FakeNetgenCompleted:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = stdout
-        self.stderr = ""
-        self.returncode = 0
-
-
 def _stub_netgen_subprocess(
     monkeypatch,
     *,
@@ -6187,7 +6181,7 @@ def _stub_netgen_subprocess(
             log_path = cmd[-1]
             with open(log_path, "w", encoding="utf-8") as handle:
                 handle.write(log_text)
-        return _FakeNetgenCompleted(stdout)
+        return fake_completed(stdout)
 
     monkeypatch.setattr(lvs.subprocess, "run", fake_run)
 

@@ -22,6 +22,7 @@ import klayout.db as kdb
 import pytest
 
 import klayout_tools.drc as drc_module
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import DrcError, run_drc_klayout_engine
@@ -160,13 +161,6 @@ _TWO_VIOLATIONS_SAME_RULE_RDB = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-class _FakeCompleted:
-    def __init__(self, stdout: str = "", stderr: str = "") -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = 0
-
-
 def _stub_klayout_drc_subprocess(
     monkeypatch,
     *,
@@ -196,7 +190,7 @@ def _stub_klayout_drc_subprocess(
             report_path = report_arg.split("=", 1)[1]
             with open(report_path, "w", encoding="utf-8") as handle:
                 handle.write(rdb_xml)
-        return _FakeCompleted(stdout=stdout, stderr=stderr)
+        return fake_completed(stdout=stdout, stderr=stderr)
 
     monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
 

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
 from klayout_tools.cli import main
 from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
@@ -1258,7 +1259,7 @@ def test_command_evidence_yield_hashes_samples_relative_to_command_cwd(
 
     def fake_run(command, **kwargs):
         assert kwargs.get("cwd") == str(tmp_path)
-        return _FakeCompletedProcess(0, stdout=json.dumps(envelope))
+        return fake_completed(returncode=0, stdout=json.dumps(envelope))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1381,7 +1382,7 @@ def test_command_evidence_pex_wrong_kind_renders_unmet(monkeypatch):
     renders "unmet", even though `klt sim` itself passed."""
 
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout=json.dumps(SIM_PASS_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(SIM_PASS_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1498,7 +1499,7 @@ def test_command_evidence_generic_wrong_kind_renders_unmet(monkeypatch):
     file-backed evidence."""
 
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout=json.dumps(GENERIC_PASS_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(GENERIC_PASS_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1689,19 +1690,12 @@ def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _FakeCompletedProcess:
-    def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def test_command_evidence_runs_and_grades_met(monkeypatch):
     calls: list[dict] = []
 
     def fake_run(command, **kwargs):
         calls.append({"command": command, **kwargs})
-        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1740,7 +1734,7 @@ def test_command_evidence_passes_cwd_through_to_subprocess(monkeypatch):
 
     def fake_run(command, **kwargs):
         seen_cwd.append(kwargs.get("cwd"))
-        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1760,7 +1754,7 @@ def test_command_evidence_nonzero_exit_renders_unmet_command_failed(monkeypatch)
     # error (exit 1) writes its error envelope to stderr and leaves stdout
     # empty -- there is genuinely no evidence on stdout to grade.
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(1, stdout="")
+        return fake_completed(returncode=1, stdout="")
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1802,7 +1796,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
 def test_command_evidence_unparsable_stdout_renders_unreadable_evidence(monkeypatch):
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout="not valid json")
+        return fake_completed(returncode=0, stdout="not valid json")
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1816,7 +1810,7 @@ def test_command_evidence_unparsable_stdout_renders_unreadable_evidence(monkeypa
 
 def test_command_evidence_error_envelope_renders_check_errored(monkeypatch):
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_ERROR_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(DRC_ERROR_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1832,7 +1826,7 @@ def test_command_evidence_failing_check_renders_check_failed(monkeypatch):
     # Real `klt drc` exits 3 (EXIT_VIOLATIONS), never 0, when it finds
     # violations -- exercise that real exit code, not an unrealistic zero.
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(3, stdout=json.dumps(DRC_VIOLATIONS_ENVELOPE))
+        return fake_completed(returncode=3, stdout=json.dumps(DRC_VIOLATIONS_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1846,7 +1840,7 @@ def test_command_evidence_failing_check_renders_check_failed(monkeypatch):
 
 def test_command_evidence_stale_content_hash_renders_unmet(monkeypatch):
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1869,7 +1863,7 @@ def test_command_evidence_stale_content_hash_renders_unmet(monkeypatch):
 
 def test_command_evidence_matching_content_hash_renders_met(monkeypatch):
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+        return fake_completed(returncode=0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1911,8 +1905,8 @@ def test_command_takes_precedence_over_file_when_both_given(monkeypatch, tmp_pat
     )  # would render unmet
 
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(
-            0, stdout=json.dumps(DRC_CLEAN_ENVELOPE)
+        return fake_completed(
+            returncode=0, stdout=json.dumps(DRC_CLEAN_ENVELOPE)
         )  # would render met
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)

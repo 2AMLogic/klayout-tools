@@ -41,6 +41,7 @@ from pathlib import Path
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import functional_verification as fv
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
@@ -1263,21 +1264,14 @@ Coverage Summary:
 """
 
 
-class _FakeCompleted:
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def _stub_verilator_coverage(monkeypatch, *, summary=_COVERAGE_SUMMARY, returncode=0):
     def fake_run(cmd, **kwargs):
         assert cmd[0] == "verilator_coverage"
         if cmd[1] == "--write-info":
             with open(cmd[2], "w", encoding="utf-8") as handle:
                 handle.write("TN:verilator_coverage\nSF:gcd.v\nDA:15,538\n")
-            return _FakeCompleted(returncode=returncode)
-        return _FakeCompleted(returncode=returncode, stdout=summary)
+            return fake_completed(returncode=returncode)
+        return fake_completed(returncode=returncode, stdout=summary)
 
     monkeypatch.setattr(fv.subprocess, "run", fake_run)
 

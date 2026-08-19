@@ -54,6 +54,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
@@ -1414,13 +1415,6 @@ _WRITE_VERILOG_RE = re.compile(r"^write_verilog (\S+)$")
 _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 
-class _FakeCompleted:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def _script_lines(script_path: str) -> list[str]:
     with open(script_path, encoding="utf-8") as handle:
         return [line.rstrip("\n") for line in handle]
@@ -1566,7 +1560,7 @@ def _stub_openroad_success(
             # example -- distinct from the `OpenROAD <version>` banner a
             # script invocation prints; see `_openroad_version`'s own
             # docstring.
-            return _FakeCompleted(stdout=f"{version} \n")
+            return fake_completed(stdout=f"{version} \n")
         assert cmd[0] == "openroad"
         metrics_path = cmd[4]
         script_path = cmd[5]
@@ -1579,7 +1573,7 @@ def _stub_openroad_success(
             # fake, no violation-marker stdout to emit.
             with open(metrics_path, "w", encoding="utf-8") as handle:
                 json.dump(corner_sweep_metrics, handle)
-            return _FakeCompleted(returncode=0, stdout="")
+            return fake_completed(returncode=0, stdout="")
         corner_script_match = re.match(
             r".*_route_corner_(?P<name>.+)\.tcl$", os.path.basename(script_path)
         )
@@ -1595,7 +1589,7 @@ def _stub_openroad_success(
                     per_corner_sweep_metrics.get(corner_name, corner_sweep_metrics),
                     handle,
                 )
-            return _FakeCompleted(returncode=0, stdout="")
+            return fake_completed(returncode=0, stdout="")
         stage = _stage_from_script_path(script_path)
         assert stage in stages
 
@@ -1655,7 +1649,7 @@ def _stub_openroad_success(
         if verilog_path is not None:
             Path(verilog_path).write_text("// fake as-built netlist\n")
 
-        return _FakeCompleted(returncode=0, stdout="\n".join(stdout_lines))
+        return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
 
@@ -2314,7 +2308,7 @@ def _stub_openroad_success_with_post_route_spef(
         stdout_lines.append(place_and_route._HOLD_VIOLATIONS_BEGIN)
         stdout_lines += [f"pin_{i} (VIOLATED)" for i in range(hold_violation_count)]
         stdout_lines.append(place_and_route._HOLD_VIOLATIONS_END)
-        return _FakeCompleted(returncode=0, stdout="\n".join(stdout_lines))
+        return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
 
@@ -3090,7 +3084,7 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
-            return _FakeCompleted(stdout="26Q3-771-gdeadbeef \n")
+            return fake_completed(stdout="26Q3-771-gdeadbeef \n")
         script_path = cmd[5]
         stage = _stage_from_script_path(script_path)
         if stage == "floorplan":
@@ -3098,8 +3092,8 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
             Path(checkpoint_out).write_text("fake odb\n")
             with open(cmd[4], "w", encoding="utf-8") as handle:
                 json.dump(_STAGE_METRICS["floorplan"], handle)
-            return _FakeCompleted(returncode=0)
-        return _FakeCompleted(
+            return fake_completed(returncode=0)
+        return fake_completed(
             returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
         )
 
@@ -3132,7 +3126,7 @@ def test_engine_error_message_explains_drt_0305_constant_tie(tmp_path):
     offending net and says what to do about it, instead of surfacing only
     OpenROAD's own Tcl line-number summary (`Error: …route.tcl, 6
     DRT-0305`), which is what a caller saw before issue #854."""
-    completed = _FakeCompleted(
+    completed = fake_completed(
         returncode=1, stdout=_DRT_0305_STDOUT, stderr=_DRT_0305_STDERR
     )
 
@@ -3148,7 +3142,7 @@ def test_engine_error_message_drt_0305_names_a_one_net_too(tmp_path):
     """The tie-high half (`one_`, signal type POWER) is diagnosed the same
     way -- the net name and type both come from the matched error line, not
     from a hardcoded `zero_`."""
-    completed = _FakeCompleted(
+    completed = fake_completed(
         returncode=1,
         stdout=(
             "[ERROR DRT-0305] Net one_ of signal type POWER is not routable "
@@ -3166,7 +3160,7 @@ def test_engine_error_message_drt_0305_names_a_one_net_too(tmp_path):
 def test_engine_error_message_without_drt_0305_is_unchanged(tmp_path):
     """Every other engine failure keeps exactly its pre-#854 message -- the
     hint is appended only for the error code it explains."""
-    completed = _FakeCompleted(
+    completed = fake_completed(
         returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
     )
 
@@ -3182,7 +3176,7 @@ def test_engine_error_message_prefers_bracket_error_over_trailer(tmp_path):
     the generic `Error: <script>.tcl, <line> <code>` trailer that reliably
     follows it at `-exit` on a Tcl-level failure, even though the trailer is
     the line the pre-#1079 "last match wins" logic surfaced (issue #1079)."""
-    completed = _FakeCompleted(
+    completed = fake_completed(
         returncode=1,
         stdout="[ERROR IFP-0034] no -core_space specified.\n",
         stderr="Error: pnr_trng_top_floorplan.tcl, 7 IFP-0034\n",
@@ -3199,7 +3193,7 @@ def test_engine_error_message_falls_back_to_trailer_without_bracket_error(tmp_pa
     """When no bracketed `[ERROR ...]` diagnostic is present at all, the bare
     `Error:` trailer is still surfaced rather than dropped -- it is
     uninformative but better than nothing."""
-    completed = _FakeCompleted(
+    completed = fake_completed(
         returncode=1, stderr="Error: pnr_top_floorplan.tcl, 7 IFP-0034\n"
     )
 
@@ -3218,18 +3212,18 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
-            return _FakeCompleted(stdout="26Q3-1080-gab6fd26351 \n")
+            return fake_completed(stdout="26Q3-1080-gab6fd26351 \n")
         script_path = cmd[5]
         stage = _stage_from_script_path(script_path)
         if stage == "route":
-            return _FakeCompleted(
+            return fake_completed(
                 returncode=1, stdout=_DRT_0305_STDOUT, stderr=_DRT_0305_STDERR
             )
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
         with open(cmd[4], "w", encoding="utf-8") as handle:
             json.dump(_STAGE_METRICS[stage], handle)
-        return _FakeCompleted(returncode=0)
+        return fake_completed(returncode=0)
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
 
@@ -3244,11 +3238,11 @@ def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
-            return _FakeCompleted(stdout="26Q3-771-gdeadbeef \n")
+            return fake_completed(stdout="26Q3-771-gdeadbeef \n")
         script_path = cmd[5]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        return _FakeCompleted(returncode=0)  # no metrics file written
+        return fake_completed(returncode=0)  # no metrics file written
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
 
@@ -3283,7 +3277,7 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
         Path(checkpoint_out).write_text("fake odb\n")
         with open(cmd[4], "w", encoding="utf-8") as handle:
             json.dump(_STAGE_METRICS["floorplan"], handle)
-        return _FakeCompleted(returncode=0)
+        return fake_completed(returncode=0)
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
 
