@@ -5854,6 +5854,45 @@ def test_run_lvs_subckt_call_reference_resistor_family_converts_and_reads(tmp_pa
 
 _NETGEN_STDOUT_BANNER = "Netgen 1.5.323 compiled on Sun Aug  2 18:51:46 PDT 2026\n"
 
+# Issue #1192: at least one still-current *packaged* netgen build
+# (Debian/Ubuntu's `netgen-lvs` 1.5.133, built 2022-12-01) never writes its
+# verdict line into the log file at all -- only to the process's own stdout
+# -- and uses "Result:" rather than "Final result:" for that line. This log
+# text mirrors `_NETGEN_MATCH_LOG` but with the trailing "Final result:"
+# section (and its blank-line separator) stripped, matching the reporter's
+# own reproduction transcript for this issue.
+_NETGEN_MATCH_LOG_NO_VERDICT_IN_FILE = """
+Subcircuit summary:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+pmos (1)                                   |pmos (1)
+nmos (1)                                   |nmos (1)
+Number of devices: 2                       |Number of devices: 2
+Number of nets: 4                          |Number of nets: 4
+---------------------------------------------------------------------------------------
+Netlists match uniquely.
+
+Subcircuit pins:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+Y                                          |Y
+A                                          |A
+VDD                                        |VDD
+VSS                                        |VSS
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes inv and inv are equivalent.
+"""
+
+#: The older packaged build's own stdout for this same run: the startup
+#: banner plus a trailing "Result: ..." verdict line that never made it into
+#: the log file above.
+_NETGEN_OLD_BUILD_STDOUT = (
+    "Netgen 1.5.133 compiled on Thu Dec  1 12:00:00 UTC 2022\n"
+    "...\n"
+    "Result: Circuits match uniquely.\n"
+)
+
 _NETGEN_MATCH_LOG = """
 Subcircuit summary:
 Circuit 1: inv                             |Circuit 2: inv
@@ -6458,6 +6497,63 @@ def test_netgen_engine_unrecognised_verdict_text_raises(tmp_path, monkeypatch):
 
     with pytest.raises(LvsError, match="could not classify netgen's LVS verdict"):
         run_lvs(path)
+
+
+def test_netgen_engine_falls_back_to_stdout_for_result_verdict(tmp_path, monkeypatch):
+    """Issue #1192: some still-current packaged netgen builds (e.g. Debian's
+    `netgen-lvs` 1.5.133) never write their verdict line into the log file
+    at all, only to the process's own stdout, and word it "Result:" rather
+    than "Final result:". `run_lvs` must recover the verdict from `stdout`
+    rather than unconditionally raising when the log file has no recognised
+    marker."""
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG_NO_VERDICT_IN_FILE,
+        stdout=_NETGEN_OLD_BUILD_STDOUT,
+    )
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert report["environment"]["engine_version"] == "1.5.133"
+
+
+def test_netgen_engine_log_verdict_takes_precedence_over_stdout(tmp_path, monkeypatch):
+    """When the log file *does* have a recognised verdict marker, it is used
+    even if `stdout` also has a (possibly differently-worded) one -- the log
+    is the artifact a caller can inspect after the run, so it stays the
+    trusted source whenever it is available."""
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_TOPOLOGY_LOG,
+        stdout=_NETGEN_STDOUT_BANNER + "Result: Circuits match uniquely.\n",
+    )
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+
+
+def test_netgen_engine_no_verdict_in_log_or_stdout_still_raises(tmp_path, monkeypatch):
+    """Neither source has a recognised verdict marker at all -- still fails
+    loud, and the raised message includes the detected netgen version to
+    distinguish a version-skew report-format gap from a genuinely malformed
+    netlist (issue #1192)."""
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text="some garbage netgen never actually writes\n",
+        stdout=_NETGEN_STDOUT_BANNER,
+    )
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(
+        LvsError, match="could not parse netgen's LVS report"
+    ) as excinfo:
+        run_lvs(path)
+    assert "1.5.323" in str(excinfo.value)
 
 
 def test_netgen_engine_hints_unsupported_raises(tmp_path, monkeypatch):
