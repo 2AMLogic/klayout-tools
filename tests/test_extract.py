@@ -11033,7 +11033,7 @@ def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     network with a zero-ohm `*RES` leg from the net's own primary node --
     the fix for issue #961's own root defect (every internal net's `*CONN`
     section was empty, so OpenSTA had nothing to attach the RC network to)."""
-    from klayout_tools.extract import _write_spef
+    from klayout_tools.extract_spef import _write_spef
 
     report = {
         "nets": [
@@ -11085,7 +11085,7 @@ def test_spef_conn_skips_duplicate_named_nets(tmp_path):
     has a subset of those connections in reality. `net_instance_pins`
     correlation is skipped entirely for a duplicated name; a single-island
     name is unaffected."""
-    from klayout_tools.extract import _write_spef
+    from klayout_tools.extract_spef import _write_spef
 
     report = {
         "nets": [
@@ -11135,7 +11135,7 @@ def test_spef_coupling_cap_references_coupled_net_hub_not_bare_name(tmp_path):
     self-capacitance node is its synthesized `hub_net`, not its bare `net`
     name -- referencing the bare name from a *different* `*D_NET` block's
     coupling `*CAP` line would name a node that block never declares."""
-    from klayout_tools.extract import _write_spef
+    from klayout_tools.extract_spef import _write_spef
 
     report = {
         "nets": [
@@ -11244,7 +11244,7 @@ def test_spef_name_escapes_every_reserved_character():
     """SPEF's own (IEEE 1481-1999) identifier grammar admits only
     `[A-Za-z0-9_]` bare; every other character is a *special character* that
     must be backslash-escaped."""
-    from klayout_tools.extract import _spef_name
+    from klayout_tools.extract_spef import _spef_name
 
     assert _spef_name("$1009") == r"\$1009"
     assert _spef_name("A|A2|Y") == r"A\|A2\|Y"
@@ -11262,7 +11262,7 @@ def test_spef_escapes_reserved_characters_in_every_identifier_position(tmp_path)
     the routed `gcd` corpus fixture. Every identifier position -- `*PORTS`,
     `*D_NET`, `*CONN`/`*P`, and each `*CAP`/`*RES` node -- must be escaped,
     and consistently, so a name and its references agree on spelling."""
-    from klayout_tools.extract import _write_spef
+    from klayout_tools.extract_spef import _write_spef
 
     report = {
         "nets": [
