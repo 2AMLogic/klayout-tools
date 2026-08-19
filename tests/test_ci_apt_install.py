@@ -367,8 +367,39 @@ def test_default_mirror_list_file_knob_points_at_the_real_runner_path():
 
 def test_warns_explicitly_when_nothing_matches_the_flaky_mirror(tmp_path: Path):
     """A silent no-op is exactly what let issue #1224 slip past #1226's own
-    16/16-passing test suite -- the script must say so out loud instead."""
+    16/16-passing test suite -- the script must say so out loud instead, but
+    only for genuine drift (neither mirror referenced anywhere), not for the
+    already-fixed case covered by the test below."""
     sources = tmp_path / "sources.list"
+    # Neither the flaky mirror nor its healthy replacement -- a layout the
+    # script genuinely doesn't recognize (e.g. an enterprise apt proxy).
+    sources.write_text("deb http://apt-proxy.example.internal/ubuntu/ noble main\n")
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://apt-proxy.example.internal/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+    )
+    assert proc.returncode == 0
+    assert "WARNING" in proc.stdout
+    assert "no candidate apt source/mirror-list file referenced" in proc.stdout
+    assert "rewriting" not in proc.stdout
+
+
+def test_no_false_warning_when_a_prior_call_already_rewrote_the_file(
+    tmp_path: Path,
+):
+    """Real CI evidence (PR #1228, run 32295025496, Python 3.11 job): the
+    ngspice step's rewrite persists on the shared runner filesystem, so by
+    the time the Yosys/Icarus steps' own `ci-apt-install.sh` invocations run
+    later in the same job, the flaky mirror is legitimately already gone.
+    That must read as success, not trigger the drift warning above."""
+    sources = tmp_path / "sources.list"
+    # Already references only the healthy mirror -- e.g. a previous
+    # `ci-apt-install.sh` call in the same job already rewrote it.
     sources.write_text("deb http://archive.ubuntu.com/ubuntu/ noble main\n")
     mirror_list = tmp_path / "apt-mirrors.txt"
     mirror_list.write_text("http://archive.ubuntu.com/ubuntu/\n")
@@ -380,8 +411,7 @@ def test_warns_explicitly_when_nothing_matches_the_flaky_mirror(tmp_path: Path):
         CI_APT_MIRROR_LIST_FILES=str(mirror_list),
     )
     assert proc.returncode == 0
-    assert "WARNING" in proc.stdout
-    assert "no candidate apt source/mirror-list file referenced" in proc.stdout
+    assert "WARNING" not in proc.stdout
     assert "rewriting" not in proc.stdout
 
 

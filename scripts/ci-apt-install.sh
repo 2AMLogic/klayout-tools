@@ -161,20 +161,28 @@ sanitize_sources() {
         mirror_files=(/etc/apt/apt-mirrors.txt)
     fi
 
-    local file matched=0
+    # This step's own apt-get calls in this workflow job may not be the
+    # first: `install-yosys.sh`'s Yosys step comes after the ngspice step
+    # already ran this same rewrite in-place on the shared runner, so by the
+    # time this call runs, the flaky mirror may genuinely already be gone --
+    # that is success, not the drift/no-op case the warning below is for.
+    local file matched=0 already_clean=0
     for file in "${files[@]}" "${mirror_files[@]}"; do
         # Unmatched globs stay literal; -f skips them.
         [[ -f "$file" ]] || continue
-        grep -q "${FLAKY_MIRROR}" "$file" 2>/dev/null || continue
-        matched=1
-        log "rewriting ${FLAKY_MIRROR} -> ${GOOD_MIRROR} in $file"
-        as_root sed -i "s#${FLAKY_MIRROR//./\\.}#${GOOD_MIRROR}#g" "$file"
+        if grep -q "${FLAKY_MIRROR}" "$file" 2>/dev/null; then
+            matched=1
+            log "rewriting ${FLAKY_MIRROR} -> ${GOOD_MIRROR} in $file"
+            as_root sed -i "s#${FLAKY_MIRROR//./\\.}#${GOOD_MIRROR}#g" "$file"
+        elif grep -q "${GOOD_MIRROR}" "$file" 2>/dev/null; then
+            already_clean=1
+        fi
     done
 
-    if ((matched == 0)); then
+    if ((matched == 0 && already_clean == 0)); then
         log "WARNING: no candidate apt source/mirror-list file referenced" \
-            "${FLAKY_MIRROR} verbatim -- the mirror rewrite was a no-op this" \
-            "run (checked: ${files[*]} ${mirror_files[*]}); if" \
+            "${FLAKY_MIRROR} or ${GOOD_MIRROR} -- the mirror rewrite was a" \
+            "no-op this run (checked: ${files[*]} ${mirror_files[*]}); if" \
             "${FLAKY_MIRROR} still shows up in apt-get output below, the" \
             "runner's real file/format has drifted from these paths and" \
             "CI_APT_SOURCE_FILES/CI_APT_MIRROR_LIST_FILES needs updating"
