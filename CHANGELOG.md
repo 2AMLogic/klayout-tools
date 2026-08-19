@@ -946,6 +946,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-19 — `klt --version` now reports a **build identity**, and the new
+  `klt version` verb exposes it as JSON (issue #1202). A build made from a
+  commit after a release tag used to report that tag's version verbatim, so a
+  PyPI `0.2.0` install and a later `pip install git+…@<sha>` — shipping
+  different rule decks — were indistinguishable on the CLI surface. A build
+  that is not a confirmed tagged release now reports a PEP 440 local-version
+  segment: `0.2.0+g<sha>`, `0.2.0+g<sha>.dirty`, or `0.2.0+unknown` when the
+  identity is unrecoverable. **A real tagged release still reports the bare
+  `klt X.Y.Z` it always did**, so consumers parsing that string are
+  unaffected. `klt version --format json` carries
+  `{schema_version, version, package_version, git_commit, git_tag, dirty,
+  is_release}`, with `is_release` tri-state (`true`/`false`/`null`) exactly
+  like `provenance.deck.released`. The identity is captured at build time by
+  a new `hatch_build.py` hatchling hook (an installed wheel has no `.git` to
+  probe); the package version in `pyproject.toml` stays static. Reports'
+  `provenance.klt_version` is unchanged — still the plain package version.
+  See [`docs/cli/version.md`](docs/cli/version.md).
+- 2026-08-19 — New `klt deck hash --deck <name>` reports the
+  `provenance.deck.content_hash` the running build resolves for a built-in
+  deck, with **no layout file and no check run** (issue #1202). Obtaining
+  that hash previously meant running a throwaway `klt drc` on whatever layout
+  happened to be around purely as a version probe — and was impossible for a
+  consumer with no layout at all (a CI preflight, a container smoke test).
+  The payload is `{schema_version, deck, content_hash, released}`, computed
+  through the same code path a real run records, so it cannot drift from what
+  a report carries; an unknown deck name is a clean exit-1 error envelope
+  naming the available decks. Pairs with the existing
+  `klt deck resolve --content-hash <hash>` (which release shipped this?).
+  See [`docs/cli/deck.md`](docs/cli/deck.md).
 - 2026-08-19 — The shared `provenance.deck` block (`klt drc`, `klt extract`,
   `klt lvs`, and every other verb whose report carries a `provenance.deck`)
   now includes a `released` field (issue #1193): a non-fatal, generation-time

@@ -163,7 +163,11 @@ runs:
           pip install "$ACTION_PATH"
         fi
         klt --help > /dev/null
-        echo "klt installed: $(python -c 'import klayout_tools; print(klayout_tools.__version__)' 2>/dev/null || echo unknown)"
+        # `klt --version` (not `klayout_tools.__version__`) so the log
+        # distinguishes a real PyPI release from a build of this action's own
+        # source checkout, which declares the same package version: a
+        # non-release build reports `klt X.Y.Z+g<sha>` (issue #1202).
+        echo "klt installed: $(klt --version 2>/dev/null || echo unknown)"
 
     - name: Determine pinned lambdapdk version
       id: pdk-version

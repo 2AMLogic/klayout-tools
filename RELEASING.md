@@ -110,6 +110,29 @@ track it separately if it hasn't happened yet.
 (`importlib.metadata.version("klayout-tools")`) — there is no second bump
 site to keep in sync.
 
+### Build identity (issue #1202)
+
+Beside that static version, every built distribution carries the git identity
+of the checkout it was built from: `hatch_build.py` writes
+`klayout_tools/_build_info.py` (commit, exact-match tag, dirty flag) into the
+wheel and sdist, and `klt version` / `klt --version` derive the reported
+string from it. The practical rules for a release manager:
+
+- A distribution built from a **clean checkout sitting exactly on `vX.Y.Z`**
+  (where `X.Y.Z` matches `pyproject.toml`'s `version`) reports a bare
+  `klt X.Y.Z` — that is what a PyPI release must look like, and what
+  `publish.yml` produces because it is triggered by the tag push.
+- Anything else — a post-tag commit, a dirty tree, a mismatched tag —
+  reports `klt X.Y.Z+g<sha>` (plus `.dirty`). That is the point: a
+  `pip install git+…@<sha>` build must not be mistakable for the release.
+- `publish.yml` checks out with `fetch-depth: 0` so the tag is visible to
+  `git describe` at build time. If a release ever ships reporting
+  `X.Y.Z+g<sha>` or `X.Y.Z+unknown`, that checkout/tag visibility is the
+  first thing to look at.
+
+Nothing here needs a manual step during a release; it is recorded
+automatically at build time.
+
 ## The release sequence
 
 Let `X.Y.Z` be the new version.
