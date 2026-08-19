@@ -3432,6 +3432,89 @@ def route_bundle(
     }
 
 
+#: Reason string every declare-only net/leg (#1188) reports -- distinct from
+#: any geometry-based rejection reason :func:`route_bundle`/:func:`route_two_pin`
+#: produce, so a caller can tell "not requested" apart from "tried and failed"
+#: by string alone as well as by ``routing`` being empty in the echoed request.
+_DECLARE_ONLY_REASON = "routing not requested"
+
+
+def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a :func:`route_bundle`-shaped result for a declare-only net (#1188).
+
+    Used by :func:`compose` in place of :func:`route_bundle` when
+    ``request.routing`` is absent/``{}``: the net's ``{block, port}`` pins
+    were already validated by :func:`_parse_connectivity`, but no routing was
+    requested, so nothing is drawn. Reports the same spanning-tree shape a
+    routed net would (one leg per pair needed to span every pin, matching a
+    repeated ``{block, port}`` pin needing no leg of its own -- see
+    :func:`route_bundle`'s docstring), except every leg is ``routed: False``
+    with :data:`_DECLARE_ONLY_REASON`, so ``nets[]``/``unrouted_nets[]``
+    report a declare-only net exactly like an unroutable one, distinguished
+    only by the reason string. Candidate pairs are picked in pin-index order
+    (not the nearest-first geometric order :func:`route_bundle` uses) --
+    positions play no role here since nothing is drawn, so there is no
+    geometry to order by; this still yields the same deterministic,
+    byte-reproducible leg list run to run.
+    """
+    pin_count = len(pins)
+    parent = list(range(pin_count))
+
+    def _find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def _union(left: int, right: int) -> bool:
+        root_left, root_right = _find(left), _find(right)
+        if root_left == root_right:
+            return False
+        parent[max(root_left, root_right)] = min(root_left, root_right)
+        return True
+
+    components = pin_count
+    first_seen: dict[tuple[str, str], int] = {}
+    for index, pin in enumerate(pins):
+        key = (pin["block"], pin["port"])
+        if key in first_seen:
+            if _union(first_seen[key], index):
+                components -= 1
+        else:
+            first_seen[key] = index
+
+    legs: list[dict[str, Any]] = []
+    for i in range(pin_count):
+        if components == 1:
+            break
+        for j in range(i + 1, pin_count):
+            if components == 1:
+                break
+            if _find(i) == _find(j):
+                continue
+            _union(i, j)
+            components -= 1
+            legs.append(
+                {
+                    "pins": [pins[i], pins[j]],
+                    "routed": False,
+                    "route_length_um": None,
+                    "reason": _DECLARE_ONLY_REASON,
+                    "points_um": None,
+                    "via_drops": [],
+                    "stub_widen": [],
+                }
+            )
+
+    return {
+        "routed": False,
+        "route_length_um": None,
+        "legs": legs,
+        "reason": _DECLARE_ONLY_REASON,
+        "status": "unrouted",
+    }
+
+
 #: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
 #: application error rather than a silent fallback -- see #328: a typo such
 #: as ``{"pdk": {"name": "gf180mcuD"}}`` (``name`` being what ``klt gen``'s
@@ -3468,11 +3551,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     ``request.pdk`` only accepts ``variant``/``root`` (:data:`_ALLOWED_PDK_KEYS`)
     -- an unrecognised key (e.g. ``name``, a plausible typo for ``variant``)
     is an application error, not a silent fallback to ``$PDK``/the default
-    search order (#328). ``connectivity[]`` is validated (every referenced
-    block ``id``/port must exist) but not yet routed -- ``routing`` is
-    accepted and otherwise ignored this phase (phase 2 implements
-    point-to-point routing; see the module docstring). Returns a dict
-    matching the documented response schema (see ``docs/cli/gen-compose.md``).
+    search order (#328). ``connectivity[]`` is always validated (every
+    referenced block ``id``/port must exist). Whether it is also *routed*
+    depends on ``routing`` (#1188): when ``routing`` is absent or ``{}``, this
+    is a **declare-only** request -- every net lands in the response with
+    ``status: "unrouted"``/``reason: "routing not requested"`` and no metal is
+    drawn, which still exercises the ``{block, port}`` validation and reports
+    the intended net list without requiring the caller to also draw routing
+    metal. Supplying ``routing.layer_role``/``routing.width_um`` opts into
+    point-to-point routing instead -- both become required once any key of
+    ``routing`` is given at all. Returns a dict matching the documented
+    response schema (see ``docs/cli/gen-compose.md``).
 
     ``request_dir`` is the directory a relative ``blocks[].generator_report``
     path string resolves against (mirrors ``klt lvs``'s
@@ -3574,8 +3663,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     # --- Routing (phase 2) --------------------------------------------------
     # A connectivity[] net is routed only when routing.layer_role/width_um are
-    # given; if the caller supplied nets to wire but no routing spec, that's an
-    # application error (there is nothing to draw the metal on).
+    # given. #1188: routing being entirely absent/{} is *not* an error -- it
+    # is a declare-only request (every net still validated against blocks'
+    # ports, none of it drawn; see declare_only below). Supplying routing
+    # with only *some* keys set is still an application error (there is no
+    # unambiguous "partial" routing spec) -- unchanged from before #1188.
+    declare_only = connectivity and not routing
     route_layer: tuple[int, int] | None = None
     label_layer: tuple[int, int] | None = None
     extraction_deck: ExtractionDeck | None = None
@@ -3588,7 +3681,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # (and every leg behaves exactly as before #1168) in that case.
     cross_route_layer: tuple[int, int] | None = None
     cross_label_layer: tuple[int, int] | None = None
-    if connectivity:
+    if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
         if not isinstance(layer_role, str) or not layer_role:
             raise GenComposeError(
@@ -3750,21 +3843,27 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
         # (#1073); a 2-pin net is the degenerate one-leg case of exactly the
-        # same path, so both go through route_bundle().
-        result = route_bundle(
-            pins,
-            blocks,
-            offsets_um,
-            placed_bboxes_um,
-            width_um,
-            route_layer,
-            extraction_deck,
-            block_geometry_for=_block_geometry_for,
-            leg_conflict=_leg_conflict,
-            waypoints_um=entry.get("waypoints_um"),
-            cross_block_route_layer=cross_route_layer,
-            cross_block_geometry_for=_cross_block_geometry_for,
-        )
+        # same path, so both go through route_bundle() -- unless this is a
+        # declare-only request (#1188: routing absent/{}), in which case no
+        # metal is drawn for any net and _declare_only_bundle_result() reports
+        # every net "unrouted"/"routing not requested" instead.
+        if declare_only:
+            result = _declare_only_bundle_result(pins)
+        else:
+            result = route_bundle(
+                pins,
+                blocks,
+                offsets_um,
+                placed_bboxes_um,
+                width_um,
+                route_layer,
+                extraction_deck,
+                block_geometry_for=_block_geometry_for,
+                leg_conflict=_leg_conflict,
+                waypoints_um=entry.get("waypoints_um"),
+                cross_block_route_layer=cross_route_layer,
+                cross_block_geometry_for=_cross_block_geometry_for,
+            )
         nets.append(
             {
                 "net": net_label,

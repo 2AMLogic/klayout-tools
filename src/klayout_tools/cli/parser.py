@@ -1846,7 +1846,9 @@ def create_parser() -> argparse.ArgumentParser:
             '"explicit" (each block at its own declared origin), and "array" '
             "(one block repeated on a regular rows x cols grid, emitted as a "
             "single hierarchical instance); "
-            "connectivity[] is validated and routed. A distinct top-level "
+            "connectivity[] is always validated, and routed when `routing` "
+            "is supplied (omitting/emptying `routing` is a declare-only "
+            "validate-without-drawing request, #1188). A distinct top-level "
             "verb (not a "
             "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
             "'CLI shape' note for why. Runs fully headless via KLayout's "

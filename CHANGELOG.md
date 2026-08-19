@@ -16,6 +16,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-19 — `klt gen-compose` no longer requires `routing.layer_role`/
+  `routing.width_um` whenever `connectivity[]` is non-empty (issue #1188).
+  Omitting `routing` entirely (or passing `routing: {}`) is now a
+  **declare-only** request: every `connectivity[]` net's `{block, port}`
+  pins are still validated against the referenced blocks' own reported
+  ports (an unknown block/port is still an application error, exit 1), but
+  no metal is drawn. Every net comes back in `nets[]` with
+  `status: "unrouted"`, `route_length_um: null`, and each leg's
+  `reason: "routing not requested"` — distinct from a geometry-based
+  rejection reason — and its label lands in `unrouted_nets[]` (the existing
+  partial-success exit code `3`, not `0` or `1`). Supplying **any** key of
+  `routing` still opts into routing exactly as before, and both
+  `layer_role`/`width_um` remain required at that point — no behavior
+  change to the routed path. No `schema_version` bump — additive use of
+  existing `nets[].status`/`legs[].reason`/`unrouted_nets[]` fields, not a
+  new shape.
 - 2026-08-19 — `klt lvs`'s `options.combine_devices: true` path no longer
   flakes between `status: "match"` and `status: "mismatch"` across repeated
   runs against byte-identical inputs anywhere near as often as before (issue
