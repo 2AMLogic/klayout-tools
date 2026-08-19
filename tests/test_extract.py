@@ -1945,6 +1945,157 @@ def test_gf180mcu_diode_free_layout_extracts_no_diodes(tmp_path):
     assert report["device_counts"] == {"bjt": 1}
 
 
+# --------------------------------------------------------------------------- #
+# Diode substrate-terminal label divergence (issue #1196)
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_diode_with_substrate_tie(
+    *,
+    pplus: bool = True,
+    label: str | None = "VSS",
+) -> kdb.Layout:
+    """A single `diode_nd2ps_06v0` whose `diode_mk` mark also spans a drawn,
+    contacted, metal-routed substrate tie -- geometry physically inside the
+    very footprint the device's substrate-formed anode terminal is derived
+    from (issue #1196).
+
+    ``pplus`` draws the tie's `Pplus` (31/0) implant, which is what this
+    deck's derived substrate-tap mechanism keys on (`tap_pplus`, issue
+    #1084): with it, the tie and the anode land on one net and the drawn
+    label names the terminal; without it, the deck's tap derivation does not
+    claim the shape at all, so the anode falls back to the synthesized
+    `vsubs` global while the tie keeps its own labelled net -- the silent
+    substitution this issue reports.
+
+    ``label`` is the text drawn on the tie's Metal1 pin layer (``None``
+    leaves the tie unlabelled, so it earns only an anonymous net name).
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # `diode_mk`/`Dualgate` span the junction *and* the tie to its left, so
+    # the anode's marker footprint physically contains the tie.
+    draw(115, 5, kdb.Box(-2500, -300, 1200, 1200))  # diode_mk
+    draw(55, 0, kdb.Box(-2500, -300, 1200, 1200))  # Dualgate (6V flavour)
+
+    # The junction itself: n+ `Comp` cathode contacted up to a labelled net.
+    draw(22, 0, kdb.Box(0, 0, 1000, 1000))  # Comp (cathode)
+    draw(32, 0, kdb.Box(0, 0, 1000, 1000))  # Nplus (n+ doped)
+    draw(33, 0, kdb.Box(300, 300, 700, 700))  # Contact
+    draw(34, 0, kdb.Box(200, 200, 800, 800))  # Metal1
+    top.shapes(layout.layer(34, 10)).insert(kdb.Text("CATH", kdb.Trans(500, 500)))
+
+    # The substrate tie: diffusion contacted up to its own Metal1 net.
+    draw(22, 0, kdb.Box(-2000, 0, -1000, 1000))  # Comp
+    if pplus:
+        draw(31, 0, kdb.Box(-2000, 0, -1000, 1000))  # Pplus (substrate tie)
+    draw(33, 0, kdb.Box(-1700, 300, -1300, 700))  # Contact
+    draw(34, 0, kdb.Box(-1800, 200, -1200, 800))  # Metal1
+    if label is not None:
+        top.shapes(layout.layer(34, 10)).insert(kdb.Text(label, kdb.Trans(-1500, 500)))
+
+    return layout
+
+
+def _diode_substrate_warnings(report: dict) -> list[str]:
+    return [w for w in report["warnings"] if "deck-synthesized" in w]
+
+
+def test_gf180mcu_diode_substrate_terminal_warns_when_a_drawn_label_is_discarded(
+    tmp_path,
+):
+    """Issue #1196: a drawn, contacted, `VSS`-labelled substrate tie sitting
+    inside the diode's own mark footprint -- but *not* claimed by this deck's
+    substrate-tap derivation (no `Pplus` implant) -- leaves the device's
+    substrate-formed anode on the synthesized `vsubs` global while the real
+    labelled net exists beside it in the same netlist.
+
+    The extraction still reports `vsubs` (this fix does not change
+    connectivity), but no longer does so silently: `warnings[]` now names the
+    device class, the terminal, the drawn label that did not name it, and the
+    synthesized net that was substituted."""
+    path = _write_gds(
+        _make_gf180mcu_diode_with_substrate_tie(pplus=False),
+        tmp_path / "diode_tie.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode_tie.spice"))
+
+    nd2ps = next(d for d in report["devices"] if d["class"] == "diode_nd2ps_06v0")
+    assert nd2ps["nets"]["a"] == "vsubs"
+
+    diverged = _diode_substrate_warnings(report)
+    assert len(diverged) == 1
+    assert "diode_nd2ps_06v0" in diverged[0]
+    assert "'a'" in diverged[0]
+    assert "VSS" in diverged[0]
+    assert "'vsubs'" in diverged[0]
+
+
+def test_gf180mcu_diode_substrate_tie_claimed_by_the_tap_derivation_warns_nothing(
+    tmp_path,
+):
+    """The same layout with the tie's `Pplus` implant drawn: the deck's
+    derived substrate tap (issue #1084) claims the shape, `connect_global`
+    merges it with the anode terminal, and KLayout names the merged net from
+    the drawn label -- so the anode resolves to `VSS`, there is nothing to
+    substitute, and no divergence warning fires (issue #1196)."""
+    path = _write_gds(
+        _make_gf180mcu_diode_with_substrate_tie(pplus=True),
+        tmp_path / "diode_tap.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode_tap.spice"))
+
+    nd2ps = next(d for d in report["devices"] if d["class"] == "diode_nd2ps_06v0")
+    assert nd2ps["nets"]["a"] == "VSS"
+    assert _diode_substrate_warnings(report) == []
+
+
+def test_gf180mcu_diode_with_no_drawn_substrate_tie_warns_nothing(tmp_path):
+    """The common, no-divergence case (issue #1196): the baseline dual-diode
+    clamp draws no substrate tie at all, so its anode legitimately resolves
+    to the deck's synthesized `vsubs` global -- the documented fallback for a
+    PDK that draws no p-substrate mask -- and no new warning fires."""
+    path = _write_gds(_make_gf180mcu_diode_layout(), tmp_path / "diode.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode.spice"))
+
+    nd2ps = next(d for d in report["devices"] if d["class"] == "diode_nd2ps_06v0")
+    assert nd2ps["nets"]["a"] == "vsubs"
+    assert _diode_substrate_warnings(report) == []
+
+
+def test_gf180mcu_diode_substrate_tie_labelled_like_the_deck_global_warns_nothing(
+    tmp_path,
+):
+    """No false positive when the unclaimed tie's own label happens to be
+    spelled exactly like the deck's synthesized substrate net (`vsubs`):
+    nothing distinguishable was substituted, so nothing is reported (issue
+    #1196)."""
+    path = _write_gds(
+        _make_gf180mcu_diode_with_substrate_tie(pplus=False, label="vsubs"),
+        tmp_path / "diode_vsubs.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode_vsubs.spice"))
+
+    assert _diode_substrate_warnings(report) == []
+
+
+def test_gf180mcu_diode_unlabelled_substrate_tie_warns_nothing(tmp_path):
+    """An unclaimed tie carrying no label at all earns only an anonymous
+    (`$n`) net name -- there is no *drawn name* to have been discarded, so
+    the divergence warning stays silent (issue #1196)."""
+    path = _write_gds(
+        _make_gf180mcu_diode_with_substrate_tie(pplus=False, label=None),
+        tmp_path / "diode_bare.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode_bare.spice"))
+
+    assert _diode_substrate_warnings(report) == []
+
+
 def test_diodes_field_defaults_empty_and_is_a_no_op():
     """The `diodes` field is additive/optional (issue #542): a deck declaring
     none reports its pre-#542 `device_classes` unchanged, exactly as

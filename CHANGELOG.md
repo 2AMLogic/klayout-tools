@@ -16,6 +16,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-19 — `klt extract` no longer silently substitutes a deck's
+  synthesized `substrate_net` name for a real drawn one on a diode's
+  substrate-formed terminal (issue #1196). A `diode_nd2ps_06v0`-class device's
+  anode is tied to that global (`vsubs` by default) because gf180mcu draws no
+  p-substrate mask; when a layout draws a substrate tie the deck's own tap
+  mechanism claims (`Pplus`-covered `Comp` outside every `Nwell`, contacted —
+  issue #1084), `connect_global` merges the two and the drawn label names the
+  terminal, as it already did. When the drawn, contacted, **labelled** tie
+  sits inside the diode's own device-mark footprint but the deck's tap
+  derivation does *not* claim it (e.g. no `Pplus` implant), the two stay
+  apart: the terminal keeps `vsubs` while the drawn net exists beside it. That
+  case now emits one aggregate `warnings[]` entry per (diode class, terminal)
+  naming the class, the terminal, the drawn label(s) that did not name it, and
+  the synthesized net substituted for them. Connectivity is unchanged (a
+  disclosure, not a re-wiring); no warning fires for a diode with no drawn tie
+  at all, for an unlabelled tie, or when the tie's label is spelled exactly
+  like the deck's own `substrate_net`. Documented in
+  [`docs/cli/extract.md`](docs/cli/extract.md) → "Junction diodes".
 - 2026-08-19 — `klt gen mos_array`, `diff_pair`, and `esd_device` can now draw
   a minimum-gate-length unit device DRC-clean (issue #1187). Each unit
   device's S/D local-metal pads abutted the poly gate directly, so the

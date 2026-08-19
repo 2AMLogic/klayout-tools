@@ -1467,6 +1467,17 @@ class DiodeDevice:
     ``DeviceExtractorDiode`` forms the device from the *overlap* of its two
     inputs, so an empty input yields no device at all.
 
+    Joining the ``substrate_net`` global does **not** discard a real drawn
+    net: ``connect_global`` unifies every region tied to that name into one
+    node, so a layout that draws a substrate tie the deck's own tap
+    mechanism claims (``tap``, or the derived ``tap_nplus``/``tap_pplus``
+    pair -- issues #490/#1084) lands the tie and this terminal on one net,
+    and KLayout names that net from the tie's own drawn label. A contacted,
+    labelled tie inside the same device-mark footprint that the deck's tap
+    mechanism does *not* claim is the one case where the two stay apart --
+    ``extract.py`` reports that divergence in ``warnings[]`` rather than
+    substituting the synthesized name silently (issue #1196).
+
     Terminal connectivity is derived from the declared layers rather than
     configured separately: a terminal whose layer is the owning deck's own
     ``nwell`` joins that well's connectivity node (so a well tap/label names
