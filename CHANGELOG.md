@@ -903,6 +903,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-19 — `klt gen-compose` can now consume a cell it did not generate
+  (issue #1189), in both of the two ways that were previously impossible
+  without hand-forging a `generator_report` object with a fake `generator`
+  field. **(1) Hierarchical composition**: the response now reports
+  `generator: "gen-compose"` plus a `ports[]` array promoted from the
+  request's own `pins[]` entries (in the composed, post-placement coordinate
+  frame, using `klt gen`'s own port shape, named after each pin's `net` so
+  the port name, its drawn `kdb.Text` label, and the name `klt extract`
+  recovers all agree). A composition therefore feeds straight back into a
+  further composition as a `blocks[].generator_report`, and its top-level
+  nets are addressable by name from the level above — where before there was
+  only one flat level. **(2) `blocks[].cell`**, a new block kind naming an
+  **existing** cell in a GDS/OASIS stream — a PDK standard cell, a vendor
+  macro, any pre-drawn library cell — as
+  `{gds_path, cell_name, ports[], bbox_um}`. `ports[]` (validated, since
+  these are hand-declared rather than tool-produced) is what lets a library
+  cell participate in `connectivity[]`/`pins[]`; `bbox_um` is optional and,
+  when omitted, is read straight off the cell (`kdb.Cell.dbbox()`), so a
+  caller no longer has to re-key `klt cells`' `{left, bottom, right, top}`
+  report into this command's `{x0, y0, x1, y1}` convention. Exactly one of
+  `generator_report`/`cell` per `blocks[]` entry; a `generator_report`
+  missing its `generator` now fails with a message that points at
+  `blocks[].cell` instead. A `cell` block is otherwise ordinary — it takes
+  `blocks[].orientation` (#1166), works under every `placement.strategy`,
+  and mixes freely with generated blocks in one request. Response
+  `blocks[]` entries gain `source` (`"generator_report"`/`"cell"`) and
+  `cell_name`, and `blocks[].generator` is `null` for a `cell` block. No
+  `schema_version` bump — the request additions are optional and the
+  response additions are new fields (`generator`, `ports[]`,
+  `blocks[].source`, `blocks[].cell_name`); `blocks[].generator` widens to
+  `string | null` only for the new block kind, which no pre-existing request
+  can produce. Per-block *rotation* beyond `orientation`'s four
+  mirror/rotate values (what a mirrored standard-cell row pair needs) stays
+  out of scope — tracked by #1166. See `docs/cli/gen-compose.md`'s
+  "Hierarchical composition and library cells (#1189)" section.
 - 2026-08-18 — `klt gen-compose`'s `routing` gains an optional
   `cross_block_layer_role` (issue #1168): a second, higher metal role a
   same-block self-net leg falls back to when it would otherwise draw a

@@ -1834,10 +1834,13 @@ def create_parser() -> argparse.ArgumentParser:
 
     gen_compose_parser = subparsers.add_parser(
         "gen-compose",
-        help="place already-generated `klt gen` blocks into one composed cell",
+        help="place already-generated blocks and library cells into one composed cell",
         description=(
             "Place a set of already-generated `klt gen` blocks (each block's "
-            "own JSON response, read from a file path or embedded inline) into "
+            "own JSON response, read from a file path or embedded inline) "
+            "and/or existing library cells (blocks[].cell -- an existing cell "
+            "in a stream, named by gds_path/cell_name, with its bbox read from "
+            "the stream when not declared) into "
             "one composed GDS/OASIS stream, per a request document's "
             "blocks[]/placement/connectivity[]/routing/options shape -- see "
             "docs/design/gen-composition-spike.md section 2 for the contract "
@@ -1848,7 +1851,10 @@ def create_parser() -> argparse.ArgumentParser:
             "single hierarchical instance); "
             "connectivity[] is always validated, and routed when `routing` "
             "is supplied (omitting/emptying `routing` is a declare-only "
-            "validate-without-drawing request, #1188). A distinct top-level "
+            "validate-without-drawing request, #1188). Its own response is a "
+            "valid blocks[].generator_report for a further run (generator: "
+            "'gen-compose', plus a ports[] promoted from pins[]), so "
+            "compositions nest. A distinct top-level "
             "verb (not a "
             "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
             "'CLI shape' note for why. Runs fully headless via KLayout's "

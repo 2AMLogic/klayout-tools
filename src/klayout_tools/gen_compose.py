@@ -98,6 +98,19 @@ Scope (phase 2, this module's current state):
   :func:`_resolve_cross_block_route_layer`, and applied per leg by
   :func:`route_two_pin`'s same-drawing-layer-short retry. Every other net in
   the same request keeps drawing on ``routing.layer_role`` unchanged.
+* **Blocks this command did not generate** (issue #1189): a ``blocks[]``
+  entry names its geometry source in exactly one of two ways. ``generator_report``
+  is a ``klt`` verb's own JSON response (``klt gen``, ``klt draw``, or -- since
+  #1189 -- ``klt gen-compose`` itself, whose response now reports
+  ``generator: "gen-compose"`` and a ``ports[]`` promoted from its own
+  ``pins[]``, which is what makes composition *nest* rather than being one
+  flat level; see :func:`promote_composed_ports`). ``cell`` instead names a
+  cell that **already exists** in a stream -- a PDK standard cell, a
+  hand-drawn library cell -- as ``{"gds_path", "cell_name", "ports": [...],
+  "bbox_um": {...}}``, with ``bbox_um`` read straight from the stream when
+  omitted (:func:`read_cell_bbox_um`, the one deliberate exception to the
+  "never re-derive placement math from the stream" rule below: a cell nobody
+  generated never *reported* a bbox to copy). See :func:`_parse_cell_block`.
 * **``drc_hints``** (new this phase): ``matched_groups[]`` reports every
   distinct ``matched_group_id`` seen among the input blocks' own
   ``generator_report.drc_hints.matched_group_id`` (read-only echo,
@@ -123,7 +136,13 @@ reported ``width_um`` is its contact size rather than the extent of the pad
 metal drawn around it (see :func:`read_block_layer_geometry`). That is the
 one place this module looks at a block's *shapes* rather than at its
 ``generator_report`` -- it reads obstacle geometry only, for a self-net's own
-block, and never touches placement.
+block, and never touches placement. A ``blocks[].cell`` entry (#1189) is the
+one narrow exception on the placement side: when (and only when) it declares
+no ``bbox_um`` of its own, its bbox is read from the stream's own cell
+(:func:`read_cell_bbox_um`) -- there is no report to consume for a cell no
+``klt`` verb generated, and requiring the caller to hand-transcribe one is
+exactly the ergonomics gap #1189 filed. A ``generator_report`` block's bbox is
+still never read from its stream.
 """
 
 from __future__ import annotations
@@ -571,6 +590,209 @@ def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
     return oriented
 
 
+def _block_cell_name_source(block: dict[str, Any]) -> str:
+    """Which request field a block's ``cell_name`` came from (#1189) -- used
+    only to make a "no such cell in that stream" error name the field the
+    caller actually wrote."""
+    if block.get("source") == "cell":
+        return "cell.cell_name"
+    return "generator_report.cell_name"
+
+
+def read_cell_bbox_um(gds_path: str, cell_name: str, where: str) -> dict[str, float]:
+    """Read one existing cell's bounding box straight out of its stream (#1189).
+
+    Returns ``{"x0", "y0", "x1", "y1"}`` -- this module's (and ``klt gen``'s)
+    own bbox convention -- from ``kdb.Cell.dbbox()``, which reports the same
+    box ``klt cells`` does under its ``{left, bottom, right, top}`` field
+    names. Doing the translation *here* is the point: a caller placing a PDK
+    library cell should never have to re-key one tool's bbox report into
+    another tool's field names by hand.
+
+    Used only for a ``blocks[].cell`` entry that declares no ``bbox_um`` of
+    its own. A ``generator_report`` block's placement math is still never
+    re-derived from its stream (see the module docstring) -- an
+    already-generated block *reported* its bbox, so there is nothing to read;
+    a pre-existing library cell never reported one to anybody, so the stream
+    is the only source there is.
+
+    Raises :class:`GenComposeError` (prefixed with ``where``) when the stream
+    cannot be read, holds no cell of that name, or that cell is empty (an
+    empty cell has no bounding box to read, so the caller must declare one).
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    try:
+        layout.read(gds_path)
+    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
+        raise GenComposeError(
+            f"{where}: could not read cell.gds_path '{gds_path}': {exc}"
+        ) from exc
+
+    cell = layout.cell(cell_name)
+    if cell is None:
+        available = sorted(c.name for c in layout.each_cell())
+        shown = ", ".join(available[:10]) or "(none)"
+        suffix = f" (and {len(available) - 10} more)" if len(available) > 10 else ""
+        raise GenComposeError(
+            f"{where}: stream '{gds_path}' has no cell named '{cell_name}' -- "
+            f"available: {shown}{suffix}"
+        )
+
+    dbbox = cell.dbbox()
+    if dbbox.empty():
+        raise GenComposeError(
+            f"{where}: cell '{cell_name}' in '{gds_path}' draws no geometry, so "
+            "its bounding box cannot be read from the stream -- declare "
+            "cell.bbox_um explicitly"
+        )
+    return {
+        "x0": dbbox.left,
+        "y0": dbbox.bottom,
+        "x1": dbbox.right,
+        "y1": dbbox.top,
+    }
+
+
+def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
+    """Validate a ``blocks[].cell.ports[]`` array (#1189).
+
+    A ``generator_report`` block's ``ports[]`` came out of a ``klt`` verb and
+    is trusted as-is (:func:`_parse_blocks` only filters for a string
+    ``name``); a ``cell`` block's ports are **hand-declared** by the caller,
+    who has no tool checking them, so they are validated here against the
+    exact same shape ``klt gen`` emits (``docs/cli/gen.md``, "``ports[]``
+    entries"): ``name`` (required, unique), and optional ``x_um``/``y_um``
+    (both or neither), ``width_um`` (> 0), ``direction_deg`` (an orthogonal
+    0/90/180/270 -- every consumer in this module assumes an axis-facing
+    port), ``layer`` (``{layer, datatype}`` integers), ``net``.
+
+    A port may legitimately carry no geometry at all (name only): that port
+    simply cannot be routed to or labelled, exactly as an under-reported
+    ``klt gen`` port cannot (see :func:`_port_has_geometry`). Returns the
+    parsed port dicts in declaration order, with ``direction_deg`` normalised
+    to ``int`` so :data:`_ORIENTATION_DIRECTION_MAP` can remap it.
+    """
+    if raw_ports is None:
+        return []
+    if not isinstance(raw_ports, list):
+        raise GenComposeError(f"{where}.ports must be an array")
+
+    parsed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw_port in enumerate(raw_ports):
+        at = f"{where}.ports[{index}]"
+        if not isinstance(raw_port, dict):
+            raise GenComposeError(f"{at} must be a JSON object")
+        name = raw_port.get("name")
+        if not isinstance(name, str) or not name:
+            raise GenComposeError(f"{at}.name is required (a non-empty string)")
+        if name in seen:
+            raise GenComposeError(f"{where}.ports contains duplicate name '{name}'")
+        seen.add(name)
+
+        port = dict(raw_port)
+        x_um, y_um = raw_port.get("x_um"), raw_port.get("y_um")
+        has_x = not isinstance(x_um, bool) and isinstance(x_um, (int, float))
+        has_y = not isinstance(y_um, bool) and isinstance(y_um, (int, float))
+        if (x_um is not None or y_um is not None) and not (has_x and has_y):
+            raise GenComposeError(
+                f"{at} (name '{name}') must declare both x_um and y_um as "
+                "numbers, or neither"
+            )
+        if has_x and has_y:
+            port["x_um"], port["y_um"] = float(x_um), float(y_um)
+
+        width_um = raw_port.get("width_um")
+        if width_um is not None:
+            if (
+                isinstance(width_um, bool)
+                or not isinstance(width_um, (int, float))
+                or width_um <= 0
+            ):
+                raise GenComposeError(
+                    f"{at} (name '{name}').width_um must be a number > 0"
+                )
+            port["width_um"] = float(width_um)
+
+        direction_deg = raw_port.get("direction_deg")
+        if direction_deg is not None:
+            if (
+                isinstance(direction_deg, bool)
+                or not isinstance(direction_deg, (int, float))
+                or float(direction_deg) not in (0.0, 90.0, 180.0, 270.0)
+            ):
+                raise GenComposeError(
+                    f"{at} (name '{name}').direction_deg must be one of 0, 90, "
+                    "180, 270 (a port faces an axis, never a diagonal)"
+                )
+            port["direction_deg"] = int(direction_deg)
+
+        layer = raw_port.get("layer")
+        if layer is not None:
+            if (
+                not isinstance(layer, dict)
+                or isinstance(layer.get("layer"), bool)
+                or not isinstance(layer.get("layer"), int)
+                or isinstance(layer.get("datatype"), bool)
+                or not isinstance(layer.get("datatype"), int)
+            ):
+                raise GenComposeError(
+                    f"{at} (name '{name}').layer must be a JSON object with "
+                    "integer 'layer'/'datatype' fields (the same shape "
+                    "`klt gen` and `klt layers` report)"
+                )
+
+        parsed.append(port)
+    return parsed
+
+
+def _parse_cell_block(
+    raw_cell: Any, where: str, request_dir: str | None
+) -> dict[str, Any]:
+    """Parse one ``blocks[].cell`` entry -- an **existing** cell in a stream
+    this command did not generate (#1189).
+
+    ``{"gds_path": ..., "cell_name": ..., "ports": [...], "bbox_um": {...}}``.
+    ``gds_path``/``cell_name`` are required; a relative ``gds_path`` resolves
+    against ``request_dir`` exactly like a ``generator_report`` *path string*
+    does. ``ports[]`` (:func:`_parse_cell_ports`) is optional and defaults to
+    ``[]`` -- a cell with no declared ports can be placed but not wired.
+    ``bbox_um`` is optional: when omitted it is read from the stream
+    (:func:`read_cell_bbox_um`), which is the whole point of this block kind
+    -- a PDK library cell never produced a ``klt gen`` report to copy a bbox
+    out of.
+
+    Returns ``{"cell_name", "gds_path", "bbox_um", "ports"}``.
+    """
+    if not isinstance(raw_cell, dict):
+        raise GenComposeError(f"{where} must be a JSON object")
+
+    cell_name = raw_cell.get("cell_name")
+    if not isinstance(cell_name, str) or not cell_name:
+        raise GenComposeError(f"{where}.cell_name is required")
+    gds_path = raw_cell.get("gds_path")
+    if not isinstance(gds_path, str) or not gds_path:
+        raise GenComposeError(f"{where}.gds_path is required")
+    gds_path = _resolve_relative(gds_path, request_dir or os.getcwd())
+
+    ports = _parse_cell_ports(raw_cell.get("ports"), where)
+
+    raw_bbox = raw_cell.get("bbox_um")
+    if raw_bbox is None:
+        bbox_um = read_cell_bbox_um(gds_path, cell_name, where)
+    else:
+        bbox_um = _require_bbox(raw_bbox, where=where)
+
+    return {
+        "cell_name": cell_name,
+        "gds_path": gds_path,
+        "bbox_um": bbox_um,
+        "ports": ports,
+    }
+
+
 def _parse_blocks(
     raw_blocks: Any, request_dir: str | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -588,32 +810,73 @@ def _parse_blocks(
         if block_id in blocks:
             raise GenComposeError(f"request.blocks contains duplicate id '{block_id}'")
 
-        report = load_generator_report_arg(
-            raw_block.get("generator_report"), request_dir
-        )
-        generator = report.get("generator")
-        cell_name = report.get("cell_name")
-        gds_path = report.get("gds_path")
-        if not isinstance(generator, str) or not generator:
+        # A block is sourced *either* from a klt verb's own response
+        # (`generator_report` -- klt gen / klt draw / this command's own
+        # output, #1189) *or* from a cell that already exists in a stream
+        # (`cell` -- a PDK library cell, #1189). Exactly one, never both:
+        # they answer the same question (where does this block's geometry
+        # come from) two different ways, so accepting both would leave the
+        # winner undefined.
+        raw_report = raw_block.get("generator_report")
+        raw_cell = raw_block.get("cell")
+        if raw_report is not None and raw_cell is not None:
             raise GenComposeError(
-                f"blocks[{index}] (id '{block_id}'): generator_report.generator "
-                "is required"
+                f"request.blocks[{index}] (id '{block_id}') declares both "
+                "'generator_report' and 'cell' -- a block has exactly one "
+                "source of geometry, name one or the other"
             )
-        if not isinstance(cell_name, str) or not cell_name:
+        if raw_report is None and raw_cell is None:
             raise GenComposeError(
-                f"blocks[{index}] (id '{block_id}'): generator_report.cell_name "
-                "is required"
+                f"request.blocks[{index}] (id '{block_id}') must declare either "
+                "'generator_report' (a klt gen / klt draw / klt gen-compose "
+                "JSON response, inline or as a path) or 'cell' (an existing "
+                "cell in a GDS/OASIS stream: {gds_path, cell_name, ports})"
             )
-        if not isinstance(gds_path, str) or not gds_path:
-            raise GenComposeError(
-                f"blocks[{index}] (id '{block_id}'): generator_report.gds_path "
-                "is required"
+
+        if raw_cell is not None:
+            source = "cell"
+            generator: str | None = None
+            parsed_cell = _parse_cell_block(
+                raw_cell,
+                f"blocks[{index}] (id '{block_id}').cell",
+                request_dir,
             )
-        bbox_um = _require_bbox(
-            report.get("bbox_um"),
-            where=f"blocks[{index}] (id '{block_id}').generator_report",
-        )
-        ports = report.get("ports") or []
+            cell_name = parsed_cell["cell_name"]
+            gds_path = parsed_cell["gds_path"]
+            bbox_um = parsed_cell["bbox_um"]
+            ports = parsed_cell["ports"]
+            report: dict[str, Any] = {}
+        else:
+            source = "generator_report"
+            report = load_generator_report_arg(raw_report, request_dir)
+            raw_generator = report.get("generator")
+            cell_name = report.get("cell_name")
+            gds_path = report.get("gds_path")
+            if not isinstance(raw_generator, str) or not raw_generator:
+                raise GenComposeError(
+                    f"blocks[{index}] (id '{block_id}'): generator_report.generator "
+                    "is required -- a generator_report is a klt verb's own JSON "
+                    "response (klt gen, klt draw, or klt gen-compose itself, which "
+                    "reports generator: 'gen-compose'). To place a cell no klt verb "
+                    "generated (e.g. a PDK library cell), use blocks[].cell "
+                    "instead of hand-forging a report"
+                )
+            generator = raw_generator
+            if not isinstance(cell_name, str) or not cell_name:
+                raise GenComposeError(
+                    f"blocks[{index}] (id '{block_id}'): generator_report.cell_name "
+                    "is required"
+                )
+            if not isinstance(gds_path, str) or not gds_path:
+                raise GenComposeError(
+                    f"blocks[{index}] (id '{block_id}'): generator_report.gds_path "
+                    "is required"
+                )
+            bbox_um = _require_bbox(
+                report.get("bbox_um"),
+                where=f"blocks[{index}] (id '{block_id}').generator_report",
+            )
+            ports = report.get("ports") or []
         ports_by_name: dict[str, dict[str, Any]] = {
             p["name"]: p
             for p in ports
@@ -659,6 +922,7 @@ def _parse_blocks(
 
         blocks[block_id] = {
             "id": block_id,
+            "source": source,
             "generator": generator,
             "cell_name": cell_name,
             "gds_path": gds_path,
@@ -2114,7 +2378,7 @@ def read_block_layer_geometry(
     if src_cell is None:
         raise GenComposeError(
             f"block '{block_id}': gds '{gds_path}' has no cell named "
-            f"'{src_cell_name}' (from its generator_report.cell_name)"
+            f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
         )
 
     dbu = src_layout.dbu
@@ -3523,6 +3787,81 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
 #: order picks, with no indication the request's own value was never read.
 _ALLOWED_PDK_KEYS = {"variant", "root"}
 
+#: The value this command reports as its response's own ``generator`` field
+#: (#1189) -- the marker that makes a ``klt gen-compose`` response a valid
+#: ``blocks[].generator_report`` input to *another* ``klt gen-compose`` run,
+#: i.e. what makes composition nest. Named after the verb, exactly as
+#: ``klt draw`` reports ``generator: "draw"`` for the same reason.
+COMPOSE_GENERATOR = "gen-compose"
+
+
+def promote_composed_ports(
+    promoted_pins: list[dict[str, str]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build the composed cell's own ``ports[]`` from the request's ``pins[]``
+    (#1189), in the composed (post-placement) coordinate frame.
+
+    ``pins[]`` (#210) is already exactly the statement "promote this
+    sub-block port to a top-level pin of the composed cell" -- it is what
+    writes the port's ``kdb.Text`` net label into the composed GDS. So it is
+    also the right, *declared* source for the composed cell's own ports: a
+    port a caller named in ``pins[]`` is addressable by name from the level
+    above (``connectivity[].pins[].port``), and nothing else is silently
+    exposed. Auto-promoting every sub-block port instead would both flood the
+    parent with internal terminals and collide names across blocks (two
+    ``mos_array`` blocks both report ``U0_D``).
+
+    Each promoted port carries the port's own ``layer``/``width_um``/
+    ``direction_deg`` (already orientation-corrected by :func:`_parse_blocks`)
+    with its ``x_um``/``y_um`` translated by its block's ``offset_um``, so the
+    shape matches ``klt gen``'s own ``ports[]`` entries exactly and needs no
+    translation to be consumed as a block one level up. ``name`` (and ``net``)
+    is the ``pins[]`` entry's own ``net`` -- the same string labelled into the
+    GDS, so the composed cell's port name, its drawn label, and the name
+    ``klt extract`` recovers all agree. ``block``/``port`` additionally record
+    which sub-block port each one came from.
+
+    A port with no reported ``{x_um, y_um, layer}`` geometry
+    (:func:`_port_has_geometry`) cannot be promoted -- there is no position to
+    report -- and is skipped with a note; the same note the label path already
+    emits covers why. Returns ``(ports, notes)``.
+    """
+    ports: list[dict[str, Any]] = []
+    notes: list[str] = []
+    seen: set[str] = set()
+    for entry in promoted_pins:
+        net_label = entry["net"]
+        block_id = entry["block"]
+        port_name = entry["port"]
+        port = blocks[block_id]["ports"].get(port_name)
+        if not _port_has_geometry(port):
+            continue  # the pins[] label path already noted the missing geometry
+        if net_label in seen:
+            notes.append(
+                f"pin '{net_label}' (block '{block_id}' port '{port_name}') "
+                "repeats a net name already promoted into the composed cell's "
+                "own ports[] -- only the first is addressable by name if this "
+                "response is reused as a blocks[].generator_report"
+            )
+        seen.add(net_label)
+        offset = offsets_um[block_id]
+        ports.append(
+            {
+                "name": net_label,
+                "net": net_label,
+                "layer": port["layer"],
+                "x_um": port["x_um"] + offset["x"],
+                "y_um": port["y_um"] + offset["y"],
+                "width_um": port.get("width_um"),
+                "direction_deg": port.get("direction_deg"),
+                "block": block_id,
+                "port": port_name,
+            }
+        )
+    return ports, notes
+
 
 def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str, Any]:
     """Run one composition request end-to-end and return the response envelope.
@@ -3989,6 +4328,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             }
         )
 
+    # The composed cell's own ports[] (#1189) -- promoted from the pins[]
+    # entries above, in the composed frame, so this whole response can be fed
+    # straight back into another gen-compose run's blocks[].generator_report
+    # and its top-level nets addressed by name from the level above.
+    composed_ports, promote_notes = promote_composed_ports(
+        promoted_pins, blocks, offsets_um
+    )
+    notes.extend(promote_notes)
+
     array_placement_gds = (
         {
             "block_id": order[0],
@@ -4032,7 +4380,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     response_blocks = [
         {
             "id": block_id,
+            # "generator_report" (a klt verb's own response) or "cell" (an
+            # existing cell in a stream, #1189) -- which of the two request
+            # forms sourced this block's geometry.
+            "source": blocks[block_id]["source"],
             "generator": blocks[block_id]["generator"],
+            "cell_name": blocks[block_id]["cell_name"],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
             "orientation": blocks[block_id].get("orientation", "none"),
@@ -4042,6 +4395,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     return {
         "schema_version": SCHEMA_VERSION,
+        # #1189: this response is itself a valid blocks[].generator_report for
+        # another gen-compose run -- `generator` is the required marker that
+        # says so (mirroring `klt draw`'s own `generator: "draw"`), and
+        # `ports[]` below is what lets the composed cell's top-level nets be
+        # addressed by name from the level above.
+        "generator": COMPOSE_GENERATOR,
         "cell_name": cell_name,
         "gds_path": output_path,
         "pdk": {
@@ -4050,6 +4409,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "version": pdk_info["version"],
         },
         "bbox_um": composed_bbox_um,
+        "ports": composed_ports,
         "blocks": response_blocks,
         "nets": nets,
         "pins": response_pins,
@@ -4211,7 +4571,7 @@ def _write_composed_gds(
         if src_cell is None:
             raise GenComposeError(
                 f"block '{block_id}': gds '{gds_path}' has no cell named "
-                f"'{src_cell_name}' (from its generator_report.cell_name)"
+                f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
             )
 
         sub_cell = layout.create_cell(f"{block_id}__{src_cell_name}")
