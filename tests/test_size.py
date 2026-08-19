@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import size
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
@@ -79,12 +80,6 @@ _SKIP_NO_SKY130_NGSPICE = pytest.mark.skipif(
 )
 
 
-class _FakeCompleted:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = stdout
-        self.stderr = ""
-
-
 def _stub_subprocess_run(monkeypatch, *, log_text: str = "", side_effect=None):
     def fake_run(cmd, capture_output, text, timeout):
         log_path = cmd[cmd.index("-o") + 1]
@@ -92,7 +87,7 @@ def _stub_subprocess_run(monkeypatch, *, log_text: str = "", side_effect=None):
             raise side_effect
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(size.subprocess, "run", fake_run)
 
@@ -192,7 +187,7 @@ def _install_synthetic_ngspice_stub(
         Path(log_path).write_text(
             "** ngspice-99\n" + "\n".join(lines) + "\n", encoding="utf-8"
         )
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(size.subprocess, "run", fake_run)
 

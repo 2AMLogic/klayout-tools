@@ -30,17 +30,11 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk as pdk_module
 from klayout_tools import post_route_sta
 from klayout_tools.cli import main
 from klayout_tools.post_route_sta import PostRouteStaError, load_request, run_sta
-
-
-class _FakeCompleted:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
 
 
 def _write(path: Path, text: str) -> str:
@@ -395,7 +389,7 @@ def _stub_openroad_success(
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
-            return _FakeCompleted(stdout=f"{version} \n")
+            return fake_completed(stdout=f"{version} \n")
         assert cmd[0] == "openroad"
         metrics_path = cmd[4]
         with open(metrics_path, "w", encoding="utf-8") as handle:
@@ -418,7 +412,7 @@ def _stub_openroad_success(
                 post_route_sta._SPEF_NET_CHECK_END,
                 *stdout_lines,
             ]
-        return _FakeCompleted(returncode=0, stdout="\n".join(stdout_lines))
+        return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
     monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
 
@@ -487,8 +481,8 @@ def test_run_sta_engine_failure_raises(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
-            return _FakeCompleted(stdout="26Q3-771-gdeadbeef\n")
-        return _FakeCompleted(
+            return fake_completed(stdout="26Q3-771-gdeadbeef\n")
+        return fake_completed(
             returncode=1,
             stderr="[ERROR STA-1234] something went wrong",
         )

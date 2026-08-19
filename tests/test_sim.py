@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk, remote_transport, sim
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
@@ -1012,13 +1013,6 @@ def test_parse_ascii_rawfile_missing_file_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _FakeCompleted:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = stdout
-        self.stderr = ""
-        self.returncode = 0
-
-
 def _stub_subprocess_run(
     monkeypatch,
     *,
@@ -1032,7 +1026,7 @@ def _stub_subprocess_run(
             raise side_effect
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
-        return _FakeCompleted(stdout)
+        return fake_completed(stdout)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
@@ -1775,7 +1769,7 @@ def _stub_subprocess_values(monkeypatch, name: str, values: list[float | None]) 
                 handle.write(f".meas tran {name} find v(out) at=1u failed!\n")
             else:
                 handle.write(f"{name} = {value!r}\n")
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
@@ -2214,7 +2208,7 @@ def test_run_sim_local_parallel_backend_is_order_identical_to_local(
                 "  Measurements for Transient Analysis\n\n"
                 "vout                =  1.00000e+00\n"
             )
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
@@ -2271,7 +2265,7 @@ def test_run_sim_local_parallel_failing_corner_does_not_abort_siblings(
                 "  Measurements for Transient Analysis\n\n"
                 "vout                =  1.00000e+00\n"
             )
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
@@ -2395,7 +2389,7 @@ def _fake_run_sleeping(run_calls: list, sleep_s: float = 0.1):
         time.sleep(sleep_s)
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write("")
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     return fake_run
 
@@ -2980,7 +2974,7 @@ def test_run_sim_monte_carlo_statistics_over_sharded_run_equal_unsharded(
                 "  Measurements for Transient Analysis\n\n"
                 f"vout                =  {value:.5e}\n"
             )
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 

@@ -38,12 +38,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import types
 from pathlib import Path
 
 import klayout.db as kdb
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route, synthesize
@@ -254,13 +256,6 @@ _ABC_HELP_WITH_DONT_USE = """
 """
 
 
-class _FakeCompleted:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def _script_output_paths(script_path: str) -> tuple[str, str]:
     stats_path = None
     netlist_path = None
@@ -277,11 +272,11 @@ def _script_output_paths(script_path: str) -> tuple[str, str]:
     return stats_path, netlist_path
 
 
-def _fake_yosys_run(cmd, **kwargs) -> _FakeCompleted:
+def _fake_yosys_run(cmd, **kwargs) -> subprocess.CompletedProcess:
     if cmd[:2] == ["yosys", "-V"]:
-        return _FakeCompleted(stdout="Yosys 0.67+post (git sha1 deadbeef)\n")
+        return fake_completed(stdout="Yosys 0.67+post (git sha1 deadbeef)\n")
     if cmd[:3] == ["yosys", "-p", "help abc"]:
-        return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
+        return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
     assert cmd[:2] == ["yosys", "-s"]
     stats_path, netlist_path = _script_output_paths(cmd[2])
     with open(stats_path, "w", encoding="utf-8") as handle:
@@ -293,7 +288,7 @@ def _fake_yosys_run(cmd, **kwargs) -> _FakeCompleted:
         if match:
             with open(match.group(1), "w", encoding="utf-8") as handle:
                 handle.write(_ABC_STIME_LINE + "\n")
-    return _FakeCompleted(returncode=0)
+    return fake_completed(returncode=0)
 
 
 # --------------------------------------------------------------------------- #
@@ -324,9 +319,9 @@ def _stage_from_script_path(script_path: str) -> str:
     raise AssertionError(f"could not determine stage from {script_path}")
 
 
-def _fake_openroad_run(cmd, **kwargs) -> _FakeCompleted:
+def _fake_openroad_run(cmd, **kwargs) -> subprocess.CompletedProcess:
     if cmd[:2] == ["openroad", "-version"]:
-        return _FakeCompleted(stdout="26Q3-771-gdeadbeef \n")
+        return fake_completed(stdout="26Q3-771-gdeadbeef \n")
     assert cmd[0] == "openroad"
     metrics_path = cmd[4]
     script_path = cmd[5]
@@ -342,7 +337,7 @@ def _fake_openroad_run(cmd, **kwargs) -> _FakeCompleted:
                 {"timing__setup__ws": -2.18828, "timing__hold__ws": 0.05},
                 handle,
             )
-        return _FakeCompleted(returncode=0, stdout="")
+        return fake_completed(returncode=0, stdout="")
     stage = _stage_from_script_path(script_path)
 
     Path(_script_write_db_path(script_path)).write_text("fake odb checkpoint\n")
@@ -353,7 +348,7 @@ def _fake_openroad_run(cmd, **kwargs) -> _FakeCompleted:
         def_path = os.path.join(os.path.dirname(script_path), "gcd.def")
         Path(def_path).write_text("fake def\n")
 
-    return _FakeCompleted(returncode=0, stdout="")
+    return fake_completed(returncode=0, stdout="")
 
 
 def _stub_engines(monkeypatch, *, engines: tuple[str, ...]) -> None:

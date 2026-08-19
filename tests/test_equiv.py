@@ -68,6 +68,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import equiv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize as synthesize_module
@@ -501,13 +502,6 @@ def test_confirm_counterexample_degrades_when_iverilog_missing(tmp_path, monkeyp
 # one with no `yosys`/`iverilog` install.
 
 
-class _FakeCompleted:
-    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
 def _mock_yosys_run(*, run_stdout: str | None = None, raise_timeout: bool = False):
     """Build a `subprocess.run` stand-in answering the two calls a real
     `yosys` binary would receive from `run_equiv` -- the main
@@ -526,9 +520,9 @@ def _mock_yosys_run(*, run_stdout: str | None = None, raise_timeout: bool = Fals
         if cmd[:2] == ["yosys", "-s"]:
             if raise_timeout:
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
-            return _FakeCompleted(stdout=run_stdout or "", returncode=0)
+            return fake_completed(stdout=run_stdout or "", returncode=0)
         if cmd == ["yosys", "-V"]:
-            return _FakeCompleted(stdout="Yosys 0.67 (git sha1 deadbeef)\n")
+            return fake_completed(stdout="Yosys 0.67 (git sha1 deadbeef)\n")
         raise AssertionError(f"unexpected subprocess.run call in mock: {cmd!r}")
 
     return _run

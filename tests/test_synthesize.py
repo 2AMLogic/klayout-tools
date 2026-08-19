@@ -48,6 +48,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize
 from klayout_tools.cli import main
@@ -495,13 +496,6 @@ def _script_abc_line(script_path: str) -> str:
     raise AssertionError("generated .ys script has no `abc` line")
 
 
-class _FakeCompleted:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def _stub_yosys_success(
     monkeypatch,
     *,
@@ -516,11 +510,11 @@ def _stub_yosys_success(
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-V"]:
-            return _FakeCompleted(
+            return fake_completed(
                 stdout=f"Yosys {version} (git sha1 deadbeef, Release)\n"
             )
         if cmd[:3] == ["yosys", "-p", "help abc"]:
-            return _FakeCompleted(
+            return fake_completed(
                 stdout=_ABC_HELP_WITH_DONT_USE
                 if supports_dont_use
                 else _ABC_HELP_WITHOUT_DONT_USE
@@ -536,7 +530,7 @@ def _stub_yosys_success(
         if abc_log_path is not None:
             with open(abc_log_path, "w", encoding="utf-8") as handle:
                 handle.write(abc_log + "\n")
-        return _FakeCompleted(returncode=0)
+        return fake_completed(returncode=0)
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 
@@ -675,9 +669,9 @@ def test_run_synthesize_stubbed_elaboration_error(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:3] == ["yosys", "-p", "help abc"]:
-            return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
-        return _FakeCompleted(
+        return fake_completed(
             returncode=1, stderr="ERROR: Module `not_a_module' not found!\n"
         )
 
@@ -692,9 +686,9 @@ def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:3] == ["yosys", "-p", "help abc"]:
-            return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
-        return _FakeCompleted(returncode=2, stdout="something went wrong\n")
+        return fake_completed(returncode=2, stdout="something went wrong\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 
@@ -722,8 +716,8 @@ def test_run_synthesize_stubbed_missing_netlist_output(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
-            return _FakeCompleted(returncode=0)
-        return _FakeCompleted(stdout="Yosys 0.67+post\n")
+            return fake_completed(returncode=0)
+        return fake_completed(stdout="Yosys 0.67+post\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 
@@ -740,8 +734,8 @@ def test_run_synthesize_stubbed_missing_stats_output(tmp_path, monkeypatch):
             _, netlist_path = _script_output_paths(script_path)
             with open(netlist_path, "w", encoding="utf-8") as handle:
                 handle.write("// fake netlist, no stats written\n")
-            return _FakeCompleted(returncode=0)
-        return _FakeCompleted(stdout="Yosys 0.67+post\n")
+            return fake_completed(returncode=0)
+        return fake_completed(stdout="Yosys 0.67+post\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 
@@ -762,8 +756,8 @@ def test_run_synthesize_stubbed_stats_missing_top_module(tmp_path, monkeypatch):
                 )
             with open(netlist_path, "w", encoding="utf-8") as handle:
                 handle.write("// fake netlist\n")
-            return _FakeCompleted(returncode=0)
-        return _FakeCompleted(stdout="Yosys 0.67+post\n")
+            return fake_completed(returncode=0)
+        return fake_completed(stdout="Yosys 0.67+post\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 
@@ -785,7 +779,7 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
                 json.dump({"modules": {"\\gcd": _GCD_MODULE_STATS}}, handle)
             with open(netlist_path, "w", encoding="utf-8") as handle:
                 handle.write("// fake netlist\n")
-            return _FakeCompleted(returncode=0)
+            return fake_completed(returncode=0)
         raise FileNotFoundError("no yosys")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
@@ -861,11 +855,11 @@ def _stub_hierarchical_yosys(
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-V"]:
-            return _FakeCompleted(
+            return fake_completed(
                 stdout=f"Yosys {version} (git sha1 deadbeef, Release)\n"
             )
         if cmd[:3] == ["yosys", "-p", "help abc"]:
-            return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
         stats_path, netlist_path = _script_output_paths(script_path)
@@ -877,7 +871,7 @@ def _stub_hierarchical_yosys(
         if abc_log_path is not None:
             with open(abc_log_path, "w", encoding="utf-8") as handle:
                 handle.write(_ABC_STIME_LINE + "\n")
-        return _FakeCompleted(returncode=0)
+        return fake_completed(returncode=0)
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 

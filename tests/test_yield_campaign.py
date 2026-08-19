@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim, yield_campaign
 from klayout_tools.yield_campaign import CampaignError, run_campaign
 
@@ -73,19 +74,12 @@ def _base_spec(**overrides) -> dict:
     return spec
 
 
-class _FakeCompleted:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = stdout
-        self.stderr = ""
-        self.returncode = 0
-
-
 def _stub_subprocess_run(monkeypatch, *, log_text: str) -> None:
     def fake_run(cmd, capture_output, text, timeout):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
-        return _FakeCompleted("** ngspice-99\n")
+        return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
