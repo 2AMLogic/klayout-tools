@@ -16,6 +16,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-19 — `klt gen mos_array`, `diff_pair`, and `esd_device` can now draw
+  a minimum-gate-length unit device DRC-clean (issue #1187). Each unit
+  device's S/D local-metal pads abutted the poly gate directly, so the
+  S-pad-to-D-pad gap was exactly the requested `l_um` — below a curated deck's
+  own same-layer metal-spacing rule that made a short-gate device impossible
+  to draw cleanly through any combination of params (on sky130A every `l_um`
+  in the 0.15–0.17um band, *including* the PDK's own `poly.width.1` minimum,
+  failed `li1.space.1` on every unit device). `_mos_finger_positions` now
+  inserts `max(0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2)` of clearance on each
+  side of every gate stripe, where the new `SD_PAD_GATE_GAP_MIN_UM` (0.25um)
+  exceeds both curated decks' binding rule (gf180mcu `metal1.space.1`: 0.23um;
+  sky130 `li1.space.1`: 0.17um) with margin. That padding grows the unit
+  device's own **pitch**, never the gate — `params.l_um` is still drawn
+  exactly as requested — so the target PDK's poly minimum-width rule is
+  neither helped nor hurt by it, and remains unchecked here. **Geometry
+  changes only below `l_um` 0.28um**: at or above `GATE_LENGTH_SAFE_MIN_UM`
+  (0.28um, all three generators' own default) the offset is exactly zero and
+  the generated GDS is byte-for-byte identical to before, so a caller who
+  never lowers `l_um` sees no change at all. `klt gen mos_array`'s
+  `drc_hints.notes` advisory for a below-default `l_um` is reworded to match:
+  it no longer warns about S/D metal spacing (now handled automatically), only
+  about the still-real, still-unchecked poly minimum-width risk. No
+  `schema_version` bump — `drc_hints.notes[]` is an existing free-text field
+  and no payload changes shape. See [`docs/cli/gen.md`](docs/cli/gen.md)'s
+  `mos_array` and `diff_pair` `l_um` parameter rows.
 - 2026-08-19 — `klt gen-compose` no longer requires `routing.layer_role`/
   `routing.width_um` whenever `connectivity[]` is non-empty (issue #1188).
   Omitting `routing` entirely (or passing `routing: {}`) is now a
