@@ -41,6 +41,8 @@ import json
 import os
 from typing import Any
 
+from ._native import _load_native_extension
+
 #: Mirrors ``native/yield/src/contract.rs``'s ``SENSITIVITY_SCHEMA_VERSION``
 #: -- kept in sync manually, the same convention ``yield_analysis.py`` uses
 #: for the constants it shares with the same crate.
@@ -58,16 +60,13 @@ class SensitivityError(Exception):
 
 
 def _load_native() -> Any:
-    try:
-        import klt_yield_native
-    except ImportError as exc:
-        raise SensitivityError(
-            "the klt_yield_native extension is not installed -- from a repo "
-            "checkout, run `maturin develop --release` inside native/yield/ "
-            "(or `uv sync --group yield`); see "
-            "docs/cli/yield-sensitivity.md#building-the-native-extension"
-        ) from exc
-    return klt_yield_native
+    return _load_native_extension(
+        "klt_yield_native",
+        SensitivityError,
+        "native/yield/",
+        "uv sync --group yield",
+        docs_link="docs/cli/yield-sensitivity.md#building-the-native-extension",
+    )
 
 
 def _load_json(path: str) -> Any:

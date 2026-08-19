@@ -43,6 +43,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ._native import _load_native_extension
+
 SCHEMA_VERSION = 1
 
 
@@ -54,15 +56,12 @@ class CongestionError(Exception):
 
 
 def _load_native() -> Any:
-    try:
-        import klt_congestion_native
-    except ImportError as exc:
-        raise CongestionError(
-            "the klt_congestion_native extension is not installed -- from a "
-            "repo checkout, run `maturin develop --release` inside "
-            "native/congestion/ (or `uv sync --group congestion`)"
-        ) from exc
-    return klt_congestion_native
+    return _load_native_extension(
+        "klt_congestion_native",
+        CongestionError,
+        "native/congestion/",
+        "uv sync --group congestion",
+    )
 
 
 def estimate_congestion(
