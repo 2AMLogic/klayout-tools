@@ -1075,6 +1075,59 @@ a check it never actually ran — only item 8 accepts `"generic"`; items 3-7
 still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
 evidence, unloosened by this feature.
 
+## Worked example: a full-custom digital partition, graded like the analog column (no RTL/synthesis evidence)
+
+Issue #1190: [`../design-evidence-tiers.md`](../design-evidence-tiers.md)'s
+"Full-custom digital sub-case" documents a digital partition hand-captured
+as a schematic and verified via SPICE + PVT sweep — no RTL, no synthesis
+step, e.g. because no compatible open standard-cell library exists for the
+PDK/voltage combination — as a **sub-case of the Digital column**, not a new
+column or a new manifest `kind`. Grading needs no code change either: items
+1, 2, and 5 already accept *any* recognised evidence kind (only item 7 is
+kind-restricted, to `pex` — see "Item 7 is kind-restricted" above), so a
+full-custom partition's `klt lvs`/`klt drc`/`klt sim`/`klt pex` evidence
+grades exactly like an RTL/synthesis-flow digital block's would, under the
+same `kind: "digital"` manifest:
+
+```json
+{
+  "block": "my-full-custom-divider",
+  "kind": "digital",
+  "evidence": {
+    "1": "lvs.json",
+    "2": "drc.json",
+    "5": "sim.json",
+    "7": "pex.json"
+  }
+}
+```
+
+```
+$ klt signoff --manifest manifest.json --format json | jq -c '.items[] | select(.id == 1 or .id == 2 or .id == 5 or .id == 7) | {id, status, reason, citation: {kind: .citation.kind, check_status: .citation.check_status}}'
+{"id":1,"status":"met","reason":null,"citation":{"kind":"lvs","check_status":"match"}}
+{"id":2,"status":"met","reason":null,"citation":{"kind":"drc","check_status":"clean"}}
+{"id":5,"status":"met","reason":null,"citation":{"kind":"sim","check_status":"pass"}}
+{"id":7,"status":"met","reason":null,"citation":{"kind":"pex","check_status":"pass"}}
+```
+
+Every item resolves to `"met"` from ordinary `klt` evidence: an LVS report
+proving the regenerated netlist matches the hand-drawn layout (item 1), a
+clean DRC report proving the drawn layout exists (item 2), a PVT
+corner-matrix `klt sim` run standing in for the STA-based digital
+requirement while also carrying the per-corner timing-margin metric the
+doc's full-custom sub-case calls for (item 5), and a `klt pex` report — the
+only kind item 7 accepts, regardless of column — proving the netlist
+extracted from the partition's own drawn layout was re-simulated (item 7).
+Each item's `text` field (omitted above for brevity) still renders the full
+Digital-column prose — both the RTL/synthesis-flow guidance and the
+full-custom substitute, in one string — since `klt signoff` does not track
+*which* sub-case a given manifest represents; a human reviewer reads which
+sentence the cited evidence actually satisfies. Item 7's `text` is
+unchanged from the RTL/synthesis-flow wording (the doc adds no full-custom
+text there — see "Full-custom digital sub-case" in
+[`../design-evidence-tiers.md`](../design-evidence-tiers.md)), since its
+grading already does not depend on which flow produced the evidence.
+
 ## Worked example: fleet roll-up across four canaries
 
 Issue #827 (Phase 1c of epic #706): grade `sky130-bandgap`'s,
