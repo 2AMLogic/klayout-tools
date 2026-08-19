@@ -199,6 +199,50 @@ CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
 #: ``RuntimeError`` some other code path might raise.
 _COMBINE_DEVICES_ERROR_MARKER = "Netlist.combine_devices"
 
+#: Bounded retry budget for :func:`_combine_devices_safely` (issue #1185).
+#:
+#: KLayout's own ``Netlist.combine_devices()``/``Circuit.combine_devices()``
+#: groups combination candidates internally in a C++ ``std::map`` keyed on
+#: raw ``db::Net *`` pointer values (see ``Circuit::combine_parallel_devices``
+#: in KLayout's ``dbCircuit.cc``), and then repeats its parallel/serial
+#: combination passes to a fixed point (``Circuit::combine_devices()``'s own
+#: ``while (any) { ... }`` loop). Neither the grouping order nor that
+#: fixed-point iteration is exposed to, or overridable from, Python -- there
+#: is no argument, hook, or per-device-class ordering control on
+#: ``combine_devices()``, and the primitives that actually perform a merge
+#: (``join_device``/``join_terminals``) are internal-only, never exposed via
+#: the ``klayout.db`` GSI bindings (verified against ``klayout==0.30.10``).
+#: Because the grouping key depends on each ``db::Net`` object's *process*
+#: heap address (which varies run to run, e.g. via ASLR) rather than any
+#: property of the netlist's content, two runs against the byte-identical
+#: layout GDS + reference netlist can walk a "partial-match device group"
+#: (instances sharing only some, not all, of their matching terminals) in a
+#: different candidate order and land on a different outcome -- one run
+#: combines cleanly, the next hits the internal-consistency ``RuntimeError``
+#: this module already degrades gracefully (issue #466). This is a genuine
+#: KLayout-internal limitation this module cannot deterministically avoid
+#: (confirmed empirically: neither ``PYTHONHASHSEED`` pinning nor
+#: reconstructing the reported partial-match shape from Python reproduces or
+#: eliminates it on demand -- see the "combine_devices() partial-match
+#: RuntimeError" section of ``tests/test_lvs.py`` for the prior, unsuccessful
+#: reproduction attempts).
+#:
+#: What *is* controllable from Python: each retry below runs against an
+#: independent ``Netlist.dup()`` copy, so it samples a fresh instance of
+#: KLayout's address-dependent ordering rather than reusing whatever ordering
+#: the first attempt happened to get. Retrying trades a bounded amount of
+#: extra work (at most this many ``combine_devices()`` calls, each on its own
+#: full netlist copy) for a large cut in the *observed* flake rate: at the
+#: issue's own reported ~1-in-5 (20%) single-attempt failure rate, 5
+#: independent attempts fail together only ~0.2**5 = 0.0032% of the time.
+#: This does not make the outcome *provably* deterministic -- it cannot, per
+#: the paragraph above -- but it converts a caller-visible ~20% flake rate
+#: into one small enough that a stable `klt lvs` "match" is once again a
+#: practical automation gate. See ``docs/cli/lvs.md``'s
+#: `options.combine_devices` and `device.combine_incomplete` sections for the
+#: caller-facing disclosure.
+_COMBINE_DEVICES_MAX_ATTEMPTS = 5
+
 #: Parameter-name -> reported-property-name map, mirroring ``extract.py``'s
 #: own ``w_um``/``l_um`` convention for the two parameters every consumer
 #: cares about; every other declared parameter is reported under its own
@@ -582,12 +626,28 @@ def run_lvs(request: str) -> dict[str, Any]:
         # whatever `combine_devices()` already merged before hitting the
         # error stays merged, the rest are left as individual devices, and a
         # `device.combine_incomplete` warning is added to `mismatches[]`.
+        #
+        # Issue #1185: `_combine_devices_safely` retries against independent
+        # `Netlist.dup()` copies to counter `combine_devices()`'s run-to-run
+        # nondeterminism (see its docstring and `_COMBINE_DEVICES_MAX_
+        # ATTEMPTS`'s), adopting a clean copy's result via `Netlist.assign()`
+        # the moment one succeeds. `assign()` replaces the netlist's circuits
+        # in place, which invalidates any `kdb.Circuit` object a caller took
+        # from it beforehand -- so `layout_circuit`/`reference_circuit`
+        # (selected above, before this block, at line ~515) must be
+        # re-fetched by name immediately after, before anything below uses
+        # them again. Captured here, before the calls that may invalidate
+        # them.
+        layout_circuit_name = layout_circuit.name
+        reference_circuit_name = reference_circuit.name
         layout_warning = _combine_devices_safely(layout_netlist, "layout")
         if layout_warning is not None:
             combine_warnings.append(layout_warning)
         reference_warning = _combine_devices_safely(reference_netlist, "reference")
         if reference_warning is not None:
             combine_warnings.append(reference_warning)
+        layout_circuit = layout_netlist.circuit_by_name(layout_circuit_name)
+        reference_circuit = reference_netlist.circuit_by_name(reference_circuit_name)
 
         # combine_devices() folds matched device arrays but leaves the
         # interior nets it emptied (0 terminals, 0 pins) behind in the
@@ -1467,10 +1527,16 @@ def _read_reference_netlist(
     return netlist
 
 
-def _combine_devices_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
-    """Call ``netlist.combine_devices()``, degrading gracefully instead of
-    letting KLayout's internal-consistency ``RuntimeError`` abort the whole
-    ``klt lvs`` run (issue #466).
+def _combine_devices_safely(
+    netlist: kdb.Netlist,
+    side: str,
+    max_attempts: int = _COMBINE_DEVICES_MAX_ATTEMPTS,
+) -> dict[str, Any] | None:
+    """Call ``netlist.combine_devices()``, retrying against independent
+    netlist copies to counter its run-to-run nondeterminism, and degrading
+    gracefully instead of letting KLayout's internal-consistency
+    ``RuntimeError`` abort the whole ``klt lvs`` run when every attempt is
+    unlucky (issues #466, #1185).
 
     KLayout's own ``Netlist.combine_devices()`` can raise::
 
@@ -1490,41 +1556,84 @@ def _combine_devices_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     internal exception from breaking this command's JSON-envelope contract
     (``docs/json-contract.md``, CLAUDE.md's "JSON is the contract").
 
-    Whatever ``combine_devices()`` already merged before hitting the error
-    stays merged (KLayout raises only once it discovers the invariant
-    violation while removing an already-combined device -- earlier,
-    unrelated combines in the same call are not undone); this netlist's
-    remaining, not-yet-combined devices are simply left as individual
-    devices for the rest of this run, exactly as they would be with
-    ``options.combine_devices: false``.
+    **Why this retries (issue #1185):** the same layout GDS + reference
+    netlist pair can flip between a clean combine and this exact
+    ``RuntimeError`` across separate ``klt lvs`` invocations, even though
+    nothing about the inputs changed. The root cause is internal to
+    KLayout's C++ implementation, not this module or Python's own hashing
+    (:data:`_COMBINE_DEVICES_MAX_ATTEMPTS`'s docstring has the full
+    investigation) -- and it is not something this module can override or
+    reorder from the Python API. What it *can* do is resample: each retry
+    below runs ``combine_devices()`` against its own ``Netlist.dup()`` copy
+    of the untouched, not-yet-combined netlist, so a failure on one attempt
+    does not poison the next -- every attempt is an independent trial of
+    KLayout's internal (address-dependent) ordering. The first attempt that
+    completes without raising is adopted (via ``Netlist.assign()``) as this
+    function's result; note this **replaces** ``netlist``'s circuits in
+    place, so any ``kdb.Circuit`` reference a caller took from ``netlist``
+    *before* calling this function is invalidated the moment a retry
+    succeeds and must be re-fetched afterwards (e.g. via
+    ``netlist.circuit_by_name(name)``) -- ``run_lvs`` does this immediately
+    after both sides' calls to this function.
+
+    Only the *last* attempt (``max_attempts`` reached) runs directly against
+    ``netlist`` itself rather than a throwaway copy, so the graceful-degrade
+    result in that case is byte-for-byte the same shape issue #466
+    originally shipped: whatever ``combine_devices()`` managed to merge
+    before hitting the error on that final attempt stays merged; this
+    netlist's remaining, not-yet-combined devices are simply left as
+    individual devices for the rest of this run, exactly as they would be
+    with ``options.combine_devices: false``.
 
     Returns a ``severity: "warning"`` ``mismatches[]`` entry
     (``category: "device.combine_incomplete"``) to append to the report when
-    this happened, or ``None`` when ``combine_devices()`` completed cleanly.
-    Only catches this one KLayout-internal error shape (matched narrowly on
-    ``_COMBINE_DEVICES_ERROR_MARKER``, the ``"...in Netlist.combine_devices"``
-    suffix every instance of it carries) -- any other ``RuntimeError``
-    propagates unchanged, so an unrelated failure is never silently
-    swallowed.
+    every attempt hit the error, or ``None`` when some attempt (usually the
+    first) completed cleanly. Only catches this one KLayout-internal error
+    shape (matched narrowly on ``_COMBINE_DEVICES_ERROR_MARKER``, the
+    ``"...in Netlist.combine_devices"`` suffix every instance of it
+    carries) -- any other ``RuntimeError``, on any attempt, propagates
+    unchanged immediately (no retry), so an unrelated failure is never
+    silently swallowed or masked as this issue's shape.
     """
-    try:
-        netlist.combine_devices()
-    except RuntimeError as exc:
-        if _COMBINE_DEVICES_ERROR_MARKER not in str(exc):
-            raise
-        return _mismatch(
-            CATEGORY_DEVICE_COMBINE_INCOMPLETE,
-            "warning",
-            "options.combine_devices could not fully combine devices on "
-            f"the {side} netlist: KLayout's Netlist.combine_devices() hit "
-            "an internal-consistency error on a partial-match device group "
-            "(instances sharing only some, not all, of their matching "
-            "terminals) and stopped -- devices it had already combined "
-            "before the error remain combined, but the rest of this "
-            f"netlist's devices were left uncombined ({exc})",
-            side,
-        )
-    return None
+    for attempt in range(max_attempts):
+        is_last_attempt = attempt == max_attempts - 1
+        # Every attempt but the last runs against a fresh, independent copy
+        # -- `netlist` itself is never mutated until either a copy succeeds
+        # (assigned back below) or the last attempt runs directly against it,
+        # so each non-final attempt is a genuinely independent trial of
+        # KLayout's internal ordering, not a retry-from-partial-damage.
+        candidate = netlist if is_last_attempt else netlist.dup()
+        try:
+            candidate.combine_devices()
+        except RuntimeError as exc:
+            if _COMBINE_DEVICES_ERROR_MARKER not in str(exc):
+                raise
+            if not is_last_attempt:
+                continue
+            attempts_disclosure = (
+                f" after {max_attempts} attempts against independent netlist "
+                "copies (issue #1185)"
+                if max_attempts > 1
+                else ""
+            )
+            return _mismatch(
+                CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+                "warning",
+                "options.combine_devices could not fully combine devices on "
+                f"the {side} netlist{attempts_disclosure}: KLayout's "
+                "Netlist.combine_devices() hit an internal-consistency error "
+                "on a partial-match device group (instances sharing only "
+                "some, not all, of their matching terminals) and stopped -- "
+                "devices it had already combined before the error remain "
+                "combined, but the rest of this netlist's devices were left "
+                f"uncombined ({exc})",
+                side,
+            )
+        else:
+            if candidate is not netlist:
+                netlist.assign(candidate)
+            return None
+    return None  # pragma: no cover -- loop always returns (max_attempts >= 1)
 
 
 def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
