@@ -118,6 +118,13 @@ def _run(
             "CI_APT_BACKOFF": "0",
             # No real source files unless a test opts in.
             "CI_APT_SOURCE_FILES": str(tmp_path / "no-such-sources.list"),
+            # Likewise for the mirror-list file the deb822 `mirror+file:`
+            # indirection points at: without this default, every test that
+            # doesn't override it falls through to the script's real default
+            # (`/etc/apt/apt-mirrors.txt`), so running this file standalone on
+            # a real Ubuntu host would `sed -i` the live system apt config as a
+            # side effect of unrelated unit tests.
+            "CI_APT_MIRROR_LIST_FILES": str(tmp_path / "no-such-mirrors.txt"),
         }
     )
     env.update(extra_env)
