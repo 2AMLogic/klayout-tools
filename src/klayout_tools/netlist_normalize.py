@@ -343,7 +343,7 @@ def _convert_x_card(
             from_device_map=subckt_name in device_map_names,
         )
     if lookup.kind == "resistor":
-        return _convert_geometry_card("R", instance, nodes, subckt_name, lookup, params)
+        return _convert_geometry_card(instance, nodes, subckt_name, lookup, params)
     if lookup.kind == "capacitor":
         return _convert_capacitor_card(instance, nodes, subckt_name, lookup, params)
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
@@ -408,7 +408,6 @@ def _convert_mos_card(
 
 
 def _convert_geometry_card(
-    card_letter: str,
     instance: str,
     nodes: list[str],
     subckt_name: str,
