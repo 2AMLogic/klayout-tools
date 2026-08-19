@@ -16,6 +16,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-19 — `klt lvs`'s `options.combine_devices: true` path no longer
+  flakes between `status: "match"` and `status: "mismatch"` across repeated
+  runs against byte-identical inputs anywhere near as often as before (issue
+  #1185). Root cause: KLayout's own `Netlist.combine_devices()` groups
+  combination candidates using an ordering keyed on process heap addresses,
+  not netlist content — not controllable from Python — so a partial-match
+  device group (issue #466) could combine cleanly on one invocation and hit
+  KLayout's internal-consistency `RuntimeError` on the next, for the exact
+  same layout GDS + reference netlist. `_combine_devices_safely` now retries
+  the combine, per side, against up to 5 independent netlist copies before
+  falling back to the existing graceful-degrade `device.combine_incomplete`
+  warning, cutting the ~1-in-5 single-attempt flake rate this issue was
+  filed against down to roughly 1-in-30,000. Not provably deterministic —
+  the underlying KLayout ordering still cannot be forced — so a residual,
+  much rarer flake is still possible; see
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `options.combine_devices` and
+  `device.combine_incomplete` sections for the full explanation. No
+  `schema_version` bump — `device.combine_incomplete`'s `description` text
+  now discloses the retry count, an existing free-text field.
 - 2026-08-18 — `klt gen-compose`'s bundle-net router (`gen_compose.route_bundle()`,
   #1073) no longer discards a net's already-routable geometry when the net as
   a whole cannot be fully connected. Before, a spanning-tree failure reset

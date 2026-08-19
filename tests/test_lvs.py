@@ -3819,6 +3819,153 @@ def test_combine_devices_safely_returns_none_on_clean_combine():
     assert lvs._combine_devices_safely(kdb.Netlist(), "layout") is None
 
 
+def test_combine_devices_safely_retries_and_recovers_from_intermittent_failure(
+    tmp_path, monkeypatch
+):
+    """Issue #1185: a `combine_devices()` that fails on its first call(s) but
+    succeeds on a later one -- the shape of the reported run-to-run
+    nondeterminism -- is retried against fresh `Netlist.dup()` copies rather
+    than degrading on the very first failure. The real (non-monkeypatched)
+    `Netlist.combine_devices` runs underneath; only its *outcome* is forced
+    to fail twice before "succeeding" (via `call_count`), so this exercises
+    the real merge logic, not a fully-faked return value."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+    call_count = 0
+
+    def _flaky(self):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+        return real_combine_devices(self)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _flaky)
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+    circuit = next(iter(netlist.each_circuit()))
+    devices_before = sum(1 for _ in circuit.each_device())
+
+    warning = lvs._combine_devices_safely(netlist, "layout")
+
+    # Recovered on the third attempt -- no warning, and the *original*
+    # `netlist` object (not a throwaway copy) now carries the combined
+    # result, adopted via `Netlist.assign()`.
+    assert warning is None
+    assert call_count == 3
+    combined_circuit = next(iter(netlist.each_circuit()))
+    devices_after = sum(1 for _ in combined_circuit.each_device())
+    assert devices_after < devices_before
+
+
+def test_combine_devices_safely_exhausts_bounded_retry_budget(monkeypatch):
+    """When every attempt hits the partial-match error, `_combine_devices_
+    safely` retries up to (and no more than) `max_attempts` times -- exactly
+    `_COMBINE_DEVICES_MAX_ATTEMPTS` calls to `combine_devices()`, not an
+    unbounded loop -- before degrading gracefully, and the resulting warning
+    discloses the attempt count (issue #1185)."""
+    import klayout.db as kdb
+
+    call_count = 0
+
+    def _always_raise(self):
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _always_raise)
+
+    warning = lvs._combine_devices_safely(kdb.Netlist(), "layout")
+
+    assert warning is not None
+    assert call_count == lvs._COMBINE_DEVICES_MAX_ATTEMPTS
+    assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_INCOMPLETE
+    assert warning["severity"] == "warning"
+    assert str(lvs._COMBINE_DEVICES_MAX_ATTEMPTS) in warning["description"]
+    assert "attempts" in warning["description"]
+
+
+def test_combine_devices_safely_max_attempts_is_configurable(monkeypatch):
+    """`max_attempts` is a real parameter, not a hardcoded loop bound --
+    passing `1` reproduces the pre-#1185 single-shot behaviour exactly (no
+    retry at all), the smallest possible regression check that the retry
+    budget is honored precisely rather than approximately."""
+    import klayout.db as kdb
+
+    call_count = 0
+
+    def _always_raise(self):
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _always_raise)
+
+    warning = lvs._combine_devices_safely(kdb.Netlist(), "layout", max_attempts=1)
+
+    assert call_count == 1
+    assert warning is not None
+    assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_INCOMPLETE
+
+
+def test_combine_devices_safely_never_retries_unrelated_runtimeerror(monkeypatch):
+    """An unrelated `RuntimeError` (not this issue's marked shape) must not
+    be retried either -- it propagates on the very first attempt, exactly as
+    `test_combine_devices_safely_reraises_unrelated_runtimeerror` already
+    checks for the un-retried code path, confirmed here by call count so a
+    future change cannot silently start retrying (and thus swallowing) an
+    unrelated failure."""
+    import klayout.db as kdb
+
+    call_count = 0
+
+    def _raise(self):
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("some unrelated klayout.db internal error")
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    with pytest.raises(RuntimeError, match="unrelated"):
+        lvs._combine_devices_safely(kdb.Netlist(), "layout")
+
+    assert call_count == 1
+
+
+def test_lvs_end_to_end_survives_combine_devices_circuit_reference_invalidation(
+    tmp_path,
+):
+    """Issue #1185: a successful (non-monkeypatched) retry-path combine
+    replaces the netlist's circuits in place via `Netlist.assign()`, which
+    invalidates the `kdb.Circuit` object `run_lvs` selected *before* calling
+    `_combine_devices_safely`. This end-to-end run exercises that exact path
+    with the real multi-finger layout (three fingers combine into one on the
+    very first attempt, the common case) -- if `run_lvs` used a stale
+    circuit reference afterwards this would raise a SWIG "already destroyed"
+    error instead of completing normally."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+
+    report = run_lvs(path)  # must not raise "Object has been destroyed already"
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"]["layout"] == 2
+    assert report["counts"]["nets"]["layout"] == 4
+
+
 def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
     tmp_path, monkeypatch
 ):
