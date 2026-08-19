@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ._native import _load_native_extension
+
 #: Matches the standalone ``klt-statime critical-path`` CLI's own defaults
 #: (``native/statime/src/main.rs``) and the boundary condition
 #: ``native/statime/README.md``'s accuracy comparison ran with -- see this
@@ -61,15 +63,12 @@ class StaError(Exception):
 
 
 def _load_native() -> Any:
-    try:
-        import klt_statime_native
-    except ImportError as exc:
-        raise StaError(
-            "the klt_statime_native extension is not installed -- from a "
-            "repo checkout, run `maturin develop --release` inside "
-            "native/statime/ (or `pip install ./native/statime`)"
-        ) from exc
-    return klt_statime_native
+    return _load_native_extension(
+        "klt_statime_native",
+        StaError,
+        "native/statime/",
+        "pip install ./native/statime",
+    )
 
 
 def compute_critical_path(

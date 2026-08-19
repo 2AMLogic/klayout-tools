@@ -25,6 +25,7 @@ import json
 from typing import Any
 
 from ._layout import load_layout, select_top_cells
+from ._native import _load_native_extension
 from ._paths import _load_spec_json, _parse_layer_datatype
 
 #: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_PANEL_SIZE_UM`` -- kept
@@ -77,16 +78,13 @@ class MomError(Exception):
 
 
 def _load_native() -> Any:
-    try:
-        import klt_mom_native
-    except ImportError as exc:
-        raise MomError(
-            "the klt_mom_native extension is not installed -- from a repo "
-            "checkout, run `maturin develop --release` inside native/mom/ "
-            "(or `pip install ./native/mom`); see "
-            "docs/cli/mom.md#building-the-native-extension"
-        ) from exc
-    return klt_mom_native
+    return _load_native_extension(
+        "klt_mom_native",
+        MomError,
+        "native/mom/",
+        "pip install ./native/mom",
+        docs_link="docs/cli/mom.md#building-the-native-extension",
+    )
 
 
 def _stackup_boxes(
