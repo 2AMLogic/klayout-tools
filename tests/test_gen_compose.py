@@ -2105,6 +2105,10 @@ def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
     assert report["nets"][0]["status"] == "unrouted"  # 0 of 1 legs drawn, #1169
     assert report["nets"][0]["route_length_um"] is None
     assert any("BADNET" in note for note in report["drc_hints"]["notes"])
+    # #1198: routing was requested (not declare-only) but every net's every
+    # leg failed to route -- zero metal drawn -- so `min_spacing_um` must
+    # still be null, not the row's own (here 0.0) spacing_um.
+    assert report["drc_hints"]["min_spacing_um"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -2336,6 +2340,10 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
     assert net["routed"] is False
     assert net["status"] == "partial"
     assert net["route_length_um"] is not None  # the one drawn leg's length
+    # #1198: one leg of BUS actually drew metal through the row's placement
+    # gap, so min_spacing_um reports it -- "partial" is still "something was
+    # routed", unlike the declare-only/all-unroutable cases above.
+    assert report["drc_hints"]["min_spacing_um"] == pytest.approx(1.0)
 
     legs = {tuple(_pin_ref(pin) for pin in leg["pins"]): leg for leg in net["legs"]}
     # The b1.P1 leg across b1's own body is rejected by the self-net
@@ -2764,6 +2772,10 @@ def test_compose_declare_only_when_routing_absent(tmp_path, pdk_root):
         "N1" in note and "routing not requested" in note
         for note in report["drc_hints"]["notes"]
     )
+    # #1198: a declare-only request never draws metal, so `min_spacing_um`
+    # must stay null (not the row's own spacing_um) even though
+    # `connectivity[]` is non-empty and placement is "row".
+    assert report["drc_hints"]["min_spacing_um"] is None
 
 
 def test_compose_declare_only_when_routing_is_empty_object(tmp_path, pdk_root):
@@ -2802,6 +2814,9 @@ def test_compose_declare_only_when_routing_is_empty_object(tmp_path, pdk_root):
     net = report["nets"][0]
     assert net["status"] == "unrouted"
     assert net["legs"][0]["reason"] == "routing not requested"
+    # #1198: same null-min_spacing_um requirement as the `routing` omitted
+    # form above -- `routing: {}` is the same "nothing routed" case.
+    assert report["drc_hints"]["min_spacing_um"] is None
 
 
 def test_compose_declare_only_still_validates_connectivity_pins(tmp_path, pdk_root):
