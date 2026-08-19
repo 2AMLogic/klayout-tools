@@ -928,6 +928,123 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+@pytest.mark.parametrize("l_um", [0.05, 0.1, gen.SD_PAD_GATE_GAP_MIN_UM - 1e-6])
+def test_sd_pad_gate_offset_grows_the_gap_to_the_minimum(l_um):
+    """`_sd_pad_gate_offset_um` (issue #1187) must pad each side of the gate
+    enough that the resulting S/D-pad-to-pad gap reaches
+    `SD_PAD_GATE_GAP_MIN_UM` exactly, regardless of how small `l_um` is."""
+    offset = gen._sd_pad_gate_offset_um(l_um)
+    assert offset >= 0.0
+    assert l_um + 2 * offset == pytest.approx(gen.SD_PAD_GATE_GAP_MIN_UM)
+
+
+@pytest.mark.parametrize(
+    "l_um", [gen.SD_PAD_GATE_GAP_MIN_UM, gen.GATE_LENGTH_SAFE_MIN_UM, 1.0]
+)
+def test_sd_pad_gate_offset_is_zero_at_or_above_the_minimum(l_um):
+    """At or above `SD_PAD_GATE_GAP_MIN_UM` the offset is exactly zero -- in
+    particular at the generators' own `GATE_LENGTH_SAFE_MIN_UM` default, so
+    no existing caller's drawn geometry shifts by even one dbu (issue
+    #1187's acceptance bar: "does not change output geometry for existing
+    callers at l_um >= GATE_LENGTH_SAFE_MIN_UM")."""
+    assert gen._sd_pad_gate_offset_um(l_um) == 0.0
+
+
+def test_mos_array_default_gate_length_pitch_unchanged():
+    """At the generator's own default gate length, the unit device's pitch
+    (`total_len_um`) must match the pre-#1187 formula exactly: two
+    contact-sized S/D segments abutting the one gate stripe, with zero pad
+    offset -- confirming the #1187 fix is a strict no-op for every existing
+    caller at or above `GATE_LENGTH_SAFE_MIN_UM`."""
+    contact_region_um = gen.CONTACT_SIZE_UM + 2 * gen.ENCLOSURE_MARGIN_UM
+    _, _, total_len_um = gen._mos_finger_positions(gen.GATE_LENGTH_SAFE_MIN_UM, 1)
+    assert total_len_um == pytest.approx(
+        2 * contact_region_um + gen.GATE_LENGTH_SAFE_MIN_UM
+    )
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "l_um"),
+    [
+        # sky130's own absolute poly-gate-length minimum (`poly.width.1`),
+        # and the issue's own repro (`l_um: 0.15` on sky130A).
+        ("sky130A", "sky130", 0.15),
+        # gf180mcu's own poly2 interconnect-width minimum (`poly2.width.1`).
+        ("gf180mcuD", "gf180mcu", 0.18),
+    ],
+)
+def test_mos_array_minimum_gate_length_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, l_um
+):
+    """Issue #1187's acceptance bar: a minimum-gate-length unit device must
+    draw DRC-clean, not report the `li1.space.1`/`metal1.space.1` S/D-pad-
+    to-pad spacing violation the un-padded geometry used to hit."""
+    output = tmp_path / f"mos_array_min_l_{deck}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"w_um": 2.0, "l_um": l_um, "rows": 1, "cols": 3, "dummy": 0},
+            "options": {"cell_name": "t0", "output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["notes"], "expected an advisory note below the default"
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert drc_report["rule_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "l_um"),
+    [
+        ("sky130A", "sky130", 0.15),
+        ("gf180mcuD", "gf180mcu", 0.18),
+    ],
+)
+def test_diff_pair_minimum_gate_length_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, l_um
+):
+    """`diff_pair` composes the same unit-device layout `mos_array` does
+    (issue #1187) -- confirm the fix propagates rather than assuming it,
+    per the issue's own guidance."""
+    output = tmp_path / f"diff_pair_min_l_{deck}.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"w_um": 2.0, "l_um": l_um},
+            "options": {"cell_name": "dp0", "output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert drc_report["rule_counts"] == {}
+
+
+def test_mos_array_below_default_gate_length_note_no_longer_claims_spacing_risk(
+    tmp_path, pdk_root
+):
+    """The `drc_hints.notes` advisory below `GATE_LENGTH_SAFE_MIN_UM` must be
+    updated to reflect that S/D metal spacing is now structurally avoided
+    (issue #1187) -- it should still flag the residual, unaddressed risk
+    (the target PDK's own poly minimum-width rule), but not claim an S/D
+    metal spacing violation may still occur."""
+    output = tmp_path / "mos_array_note.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"l_um": 0.15},
+            "options": {"output": str(output)},
+        }
+    )
+    notes = report["drc_hints"]["notes"]
+    assert any("poly minimum-width" in n for n in notes)
+    assert not any("S/D metal minimum-spacing rule" in n for n in notes)
+
+
 #: gf180mcu's `Dualgate` layer (see `klayout_tools.gen._PDK_VOLTAGE_FLAVOR_LAYERS`'s
 #: `"medium_voltage"` entry) -- the same citation `esd_device`'s own `esd_mark`
 #: role reuses (issue #1054).

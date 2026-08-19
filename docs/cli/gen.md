@@ -214,7 +214,7 @@ well and the marker with no conflict.
 | `params` field | Type   | Default            | Description |
 | -------------- | ------ | ------------------ | ----------- |
 | `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
-| `l_um`         | double | `0.28`             | Gate length (µm). Must be `> 0`; below `0.28`um risks violating a target PDK's poly-width or S/D metal-spacing rule (flagged via `drc_hints.notes`, not rejected). |
+| `l_um`         | double | `0.28`             | Gate length (µm). Must be `> 0`. Below `0.28`um the S/D local-metal pads are automatically padded away from the gate (issue #1187) so the S/D-pad-to-pad spacing stays clear of the target PDK's same-layer metal-spacing rule at any gate length, including a PDK's own minimum (e.g. sky130's `0.15`um) — `l_um` itself is drawn exactly as requested and may still violate the target PDK's own poly minimum-width rule, which is not checked here (flagged via `drc_hints.notes`, not rejected). |
 | `fingers`      | int    | `1`                | Gate fingers per unit device. Must be `>= 1`. With `finger_topology: "parallel"` (the default) the unit device is one folded transistor of width `fingers * w_um`. |
 | `finger_topology` | string | `"parallel"`    | How a `fingers > 1` unit is wired: `"parallel"` (alternating S/D segments strapped, every gate tied — one folded device) or `"series"` (bare stripes, no straps — every finger padded and every S/D/gate terminal reported as its own `U<i>_S<j>`/`U<i>_D<j>`/`U<i>_G<j>` port, `device_count` multiplied by `fingers`). Must be `"parallel"` or `"series"`. No effect when `fingers` is `1`. |
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
@@ -475,7 +475,7 @@ which cites no such marker layer) draws nothing and is reported via
 | `params` field    | Type   | Default | Description |
 | ------------------ | ------ | ------- | ----------- |
 | `w_um`             | double | `0.42`  | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
-| `l_um`             | double | `0.28`  | Gate length (µm). Must be `> 0`. |
+| `l_um`             | double | `0.28`  | Gate length (µm). Must be `> 0`. Composes `mos_array`'s unit device, so it inherits the same S/D-pad-to-gate padding (issue #1187) below `0.28`um — see `mos_array`'s own `l_um` row above. |
 | `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. |
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
 | `ring_gap_side`    | string | `""`    | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |

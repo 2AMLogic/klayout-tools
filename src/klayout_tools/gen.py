@@ -184,13 +184,36 @@ CONTACT_GAP_SAFE_UM = 0.3
 #: 0.42000000000000004``).
 UNIT_MIN_W_UM = 0.42
 
-#: Smallest gate length (um) that keeps a unit MOS device's S/D local-metal
-#: pads (see :func:`_mos_unit_layout` -- they abut the poly gate directly on
-#: both sides, so the S-D metal gap is exactly ``l_um``) clear of both
-#: curated decks' same-layer metal-spacing rule (gf180mcu ``metal1.space.1``:
-#: 0.23um is the binding one; sky130's ``li1.space.1`` is only 0.17um), with
-#: margin. `mos_array`/`diff_pair` default their ``l_um`` param to this.
+#: Smallest gate length (um) `mos_array`/`diff_pair` default their ``l_um``
+#: param to -- comfortably clear of both curated decks' rules with margin, so
+#: a caller who never touches ``l_um`` gets a device with no DRC risk at all.
+#: A request *below* this is no longer a DRC risk either (see
+#: :data:`SD_PAD_GATE_GAP_MIN_UM` -- issue #1187): :func:`_mos_finger_positions`
+#: pads the S/D local-metal pads clear of the gate whenever the requested
+#: ``l_um`` would otherwise pull them closer together than a curated deck's
+#: same-layer metal-spacing rule allows, so this constant now only picks the
+#: *default*, not a floor a caller must stay above. A gate length below the
+#: target PDK's own poly minimum-width rule (e.g. sky130's ``poly.width.1``:
+#: 0.15um) is a separate, still-real risk this constant does not cover --
+#: padding the S/D pads does not change the poly width, which stays
+#: ``l_um`` -- see :func:`_mos_array_describe`'s ``drc_hints.notes``.
 GATE_LENGTH_SAFE_MIN_UM = 0.28
+
+#: Smallest S/D-local-metal-pad-to-pad gap (um) :func:`_mos_finger_positions`
+#: guarantees across every poly gate stripe, regardless of the requested
+#: ``l_um`` (issue #1187). Exceeds both curated decks' same-layer
+#: metal-spacing rule with margin (gf180mcu ``metal1.space.1``: 0.23um is the
+#: binding one; sky130's ``li1.space.1`` is only 0.17um) -- the same pair
+#: :data:`GATE_LENGTH_SAFE_MIN_UM`'s own margin was sized against, but kept as
+#: its own named constant, strictly smaller than that default, so a caller's
+#: existing ``l_um >= GATE_LENGTH_SAFE_MIN_UM`` output never shifts by even a
+#: single dbu: at ``l_um == GATE_LENGTH_SAFE_MIN_UM`` the computed offset
+#: (below) is already zero. Below it, each side of every gate stripe is
+#: pushed out by ``max(0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2)`` -- padding
+#: the unit device's own pitch, never the requested gate length -- so the
+#: S/D pads stay legally spaced even at a PDK's absolute minimum gate length
+#: (e.g. sky130's 0.15um).
+SD_PAD_GATE_GAP_MIN_UM = 0.25
 
 #: Extra margin (um) `cap_array`'s bottom-plate conductor (sky130's `met3`)
 #: is drawn beyond its unit cell's top-plate mark (`capm`) footprint on every
@@ -997,6 +1020,22 @@ def _grid_snapped(dbu: float, *values_um: float) -> bool:
     return any(_snapped(v) for v in values_um)
 
 
+def _sd_pad_gate_offset_um(l_um: float) -> float:
+    """Extra clearance (um) :func:`_mos_finger_positions` inserts on *each*
+    side of every gate stripe, between it and the adjacent S/D segment
+    (issue #1187).
+
+    ``0.0`` whenever ``l_um >= SD_PAD_GATE_GAP_MIN_UM`` -- true for every
+    generator's own default (``GATE_LENGTH_SAFE_MIN_UM``, which is itself
+    ``> SD_PAD_GATE_GAP_MIN_UM``) -- so existing callers at or above that
+    default see byte-for-byte unchanged geometry. Below it, the offset grows
+    just enough that the S/D-pad-to-pad gap across the gate
+    (``l_um + 2 * offset``) reaches :data:`SD_PAD_GATE_GAP_MIN_UM` exactly,
+    regardless of how small ``l_um`` itself is.
+    """
+    return max(0.0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2.0)
+
+
 def _mos_finger_positions(
     l_um: float, fingers: int
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]], float]:
@@ -1009,8 +1048,19 @@ def _mos_finger_positions(
     along-the-diffusion arithmetic -- and therefore ``total_len_um``, the
     array column pitch -- is identical whether or not the fingers are
     strapped in parallel.
+
+    Each gate stripe sits :func:`_sd_pad_gate_offset_um` clear of the S/D
+    segments either side of it (issue #1187) -- ``0.0`` for any ``l_um`` at
+    or above :data:`SD_PAD_GATE_GAP_MIN_UM`, so the stripe still abuts the
+    segments exactly as before every caller's own default. Below that
+    threshold, the offset pads the unit device's *pitch* (``total_len_um``
+    grows) rather than the gate itself (``l_um`` is drawn exactly as
+    requested), so the S/D local-metal pads :func:`_mos_unit_layout` draws
+    flush to ``seg_positions`` stay a legal same-layer-metal-spacing gap
+    apart even at a PDK's absolute minimum gate length.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    pad_offset_um = _sd_pad_gate_offset_um(l_um)
     seg_positions: list[tuple[float, float]] = []
     poly_positions: list[tuple[float, float]] = []
     x = 0.0
@@ -1018,8 +1068,9 @@ def _mos_finger_positions(
         seg_positions.append((x, x + contact_region_um))
         x += contact_region_um
         if i < fingers:
+            x += pad_offset_um
             poly_positions.append((x, x + l_um))
-            x += l_um
+            x += l_um + pad_offset_um
     return seg_positions, poly_positions, x
 
 
@@ -1070,10 +1121,11 @@ def _mos_unit_layout(
     ``ENCLOSURE_MARGIN_UM`` on every side -- the same enclosure budget the
     S/D contacts use), centred on the gate ``ENCLOSURE_MARGIN_UM`` clear of
     the diffusion, and each reported gate port sits at its own pad's centre.
-    Adjacent pads end up exactly ``l_um`` apart -- the same gap the S/D
-    local-metal pads either side of a gate already have, i.e. the gap
-    ``GATE_LENGTH_SAFE_MIN_UM`` was chosen to cover -- so padding every
-    finger (not just the first) costs no new DRC risk.
+    Adjacent pads end up exactly ``l_um + 2 * `` :func:`_sd_pad_gate_offset_um`
+    ``(l_um)`` apart -- i.e. never closer than :data:`SD_PAD_GATE_GAP_MIN_UM`
+    (issue #1187), the same guarantee the S/D local-metal pads either side of
+    a gate now have -- so padding every finger (not just the first) costs no
+    new DRC risk, regardless of how small ``l_um`` is.
 
     ``gate_contact`` (issue #492) finishes that stack: it draws a contact
     **and** a local-metal pad on the landing pad, so the gate terminal is a
@@ -1123,9 +1175,11 @@ def _mos_unit_layout(
         # that is the point: the pad, not the sub-contact-width gate, is
         # what encloses the contact. It abuts its own gate at y == w_um
         # (keeping that gate's poly one connected region) and extends
-        # contact_region_um past it. Adjacent pads end up exactly l_um
-        # apart, the same gap the S/D local-metal pads either side of a gate
-        # already have, so padding every finger binds no new spacing rule.
+        # contact_region_um past it. Adjacent pads end up exactly
+        # l_um + 2 * _sd_pad_gate_offset_um(l_um) apart -- never closer than
+        # SD_PAD_GATE_GAP_MIN_UM (issue #1187), the same guarantee the S/D
+        # local-metal pads either side of a gate now have, so padding every
+        # finger binds no new spacing rule regardless of how small l_um is.
         #
         # With `gate_contact` each pad's contact region is first pushed
         # MIN_SAME_LAYER_SPACING_UM further out (the poly simply grows into a
@@ -4444,8 +4498,12 @@ def _mos_array_describe(
     notes = []
     if params["l_um"] < GATE_LENGTH_SAFE_MIN_UM:
         notes.append(
-            f"gate length below {GATE_LENGTH_SAFE_MIN_UM}um may violate the target "
-            "PDK's poly minimum-width or S/D metal minimum-spacing rule"
+            f"gate length below {GATE_LENGTH_SAFE_MIN_UM}um (this generator's own "
+            "default): the S/D local-metal pads are automatically padded clear of "
+            "the gate (issue #1187), so no S/D metal minimum-spacing violation "
+            "results from this alone -- but params.l_um itself may still violate "
+            "the target PDK's own poly minimum-width rule (e.g. sky130's "
+            "poly.width.1 floor is 0.15um), which this generator does not check"
         )
     if params["flavor"] == "pfet" and _PDK_ROLE_LAYERS[family]["well"] is None:
         notes.append(
