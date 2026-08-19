@@ -3536,14 +3536,25 @@ _NETGEN_SECTION_HEADERS: tuple[tuple[str, str, str], ...] = (
 
 #: Boundary markers used to find the end of a ``_NETGEN_SECTION_HEADERS``
 #: block: the next section (of either kind), the "Subcircuit pins:" report
-#: that always follows the mismatch tables, or the terminal "Final result:"
-#: line -- whichever appears first.
+#: that always follows the mismatch tables, or the terminal verdict line
+#: (either wording -- see :data:`_NETGEN_VERDICT_MARKERS`) -- whichever
+#: appears first.
 _NETGEN_SECTION_BOUNDARIES: tuple[str, ...] = (
     "NET mismatches:",
     "DEVICE mismatches:",
     "Subcircuit pins:",
     "Final result:",
+    "Result:",
 )
+
+#: The terminal verdict line's leading text, across observed netgen builds.
+#: ``"Final result:"`` was verified against a from-source netgen 1.5.323
+#: build (issue #343); ``"Result:"`` is the wording used by at least one
+#: still-current packaged build (Debian/Ubuntu's ``netgen-lvs`` 1.5.133,
+#: built 2022-12-01 -- issue #1192). Order matters: ``"Final result:"`` is
+#: checked first and preferred when a report happens to contain both, since
+#: it is the more specific, unambiguous marker.
+_NETGEN_VERDICT_MARKERS: tuple[str, ...] = ("Final result:", "Result:")
 
 
 def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | None:
@@ -3599,9 +3610,14 @@ def _run_netgen_lvs(
     Never trusts the subprocess's exit code alone: like ``sim.py``'s
     ``_run_corner``, netgen exits ``0`` regardless of match/mismatch/most
     errors (verified empirically for this issue) -- the log file's own
-    "Final result:" text is the only trustworthy verdict signal, parsed by
-    :func:`_parse_netgen_report`, which raises :class:`LvsError` rather than
-    guessing when that text is missing or unrecognised (the "must not
+    verdict text ("Final result:" or, on some packaged builds, "Result:" --
+    issue #1192) is the primary trustworthy verdict signal, parsed by
+    :func:`_parse_netgen_report`. The subprocess's own captured ``stdout`` is
+    passed through as a fallback source for that same parse: at least one
+    still-current netgen build only ever prints its verdict line to stdout,
+    never into the log file (issue #1192). :func:`_parse_netgen_report`
+    raises :class:`LvsError` rather than guessing when no verdict text is
+    found in either source or the text found is unrecognised (the "must not
     silently produce a false match on unparseable output" requirement this
     issue exists to satisfy).
     """
@@ -3675,7 +3691,9 @@ def _run_netgen_lvs(
         except OSError as exc:
             raise LvsError(f"could not read netgen report '{log_path}': {exc}") from exc
 
-        status, mismatches = _parse_netgen_report(log_text)
+        status, mismatches = _parse_netgen_report(
+            log_text, stdout=completed.stdout, engine_version=engine_version
+        )
         return status, mismatches, engine_version
     finally:
         _cleanup_netgen_work_dir(work_dir)
@@ -3687,7 +3705,29 @@ def _cleanup_netgen_work_dir(work_dir: str) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
+def _locate_netgen_verdict(text: str) -> tuple[str, int] | None:
+    """Return ``(marker, index)`` for the right-most recognised verdict
+    marker (:data:`_NETGEN_VERDICT_MARKERS`) in ``text``, or ``None`` if
+    neither is present.
+
+    ``"Final result:"`` is checked first and returned immediately when
+    found, even if ``"Result:"`` also occurs (e.g. as part of some other
+    line) -- it is the more specific marker and, per issue #343, the one a
+    from-source netgen 1.5.323 build is verified to emit.
+    """
+    for marker in _NETGEN_VERDICT_MARKERS:
+        idx = text.rfind(marker)
+        if idx != -1:
+            return marker, idx
+    return None
+
+
+def _parse_netgen_report(
+    log_text: str,
+    *,
+    stdout: str | None = None,
+    engine_version: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     """Classify netgen's ``comp.out`` log text into ``(status, mismatches)``.
 
     Verdict text (verified empirically against a from-source netgen 1.5.323
@@ -3709,6 +3749,19 @@ def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
       unique but with a pin-count/order disagreement; treated as a mismatch
       (never let a pin disagreement read as a clean match).
 
+    At least one still-current *packaged* netgen build (Debian/Ubuntu's
+    ``netgen-lvs`` 1.5.133, built 2022-12-01 -- issue #1192) uses ``"Result:
+    ..."`` for this same line instead of ``"Final result: ..."``, *and* only
+    ever prints it to the process's own stdout, never into the log file
+    passed on the command line. ``log_text`` is always searched first (the
+    log is the artifact a caller can inspect after the run, so it takes
+    precedence when both have a verdict); ``stdout`` is consulted only when
+    ``log_text`` has no recognised marker at all (:data:`_NETGEN_VERDICT_MARKERS`,
+    via :func:`_locate_netgen_verdict`). Structured evidence (property-error
+    blocks, NET/DEVICE mismatch tables) is always parsed from ``log_text``
+    regardless of which source supplied the verdict, since that evidence is
+    still written to the log file even on builds affected by this gap.
+
     The property-error downgrade is keyed on netgen's own declaration
     (:data:`_NETGEN_PROPERTY_ERROR_MARKERS`), not on whether the supporting
     per-parameter lines parsed: when netgen says property errors exist but no
@@ -3717,22 +3770,41 @@ def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
     still ``"mismatch"``. A recognised verdict line with unparseable *evidence*
     must never read as a clean match either (issue #343 review).
 
-    Raises :class:`LvsError` when no ``"Final result:"`` section is found at
-    all, or its text matches none of the above **and** no other structured
-    evidence (a parsed parameter-difference block) was found either -- this
-    is the "must fail loud, not soft, on unparseable output" requirement:
-    never let unrecognised report text default to ``"match"``.
+    Raises :class:`LvsError` when no recognised verdict marker is found at
+    all (in either ``log_text`` or ``stdout``), or its text matches none of
+    the above **and** no other structured evidence (a parsed
+    parameter-difference block) was found either -- this is the "must fail
+    loud, not soft, on unparseable output" requirement: never let
+    unrecognised report text default to ``"match"``. When ``engine_version``
+    is supplied (from parsing netgen's own startup banner) and no verdict was
+    found at all, it is included in the raised message: this parser's known
+    verdict wordings are verified against netgen 1.5.323 (``"Final
+    result:"``) and 1.5.133 (``"Result:"``), so a differently-worded verdict
+    on some other version is distinguishable at a glance from a genuinely
+    malformed netlist, without re-running netgen by hand.
     """
-    marker = "Final result:"
-    idx = log_text.rfind(marker)
-    if idx == -1:
-        raise LvsError(
-            "could not parse netgen's LVS report: no 'Final result:' section "
-            "found -- the report format may be unrecognised or netgen may "
-            "have exited before completing the compare. Raw report "
-            "(last 2000 chars):\n" + log_text.strip()[-2000:]
+    verdict = _locate_netgen_verdict(log_text)
+    source_text = log_text
+    if verdict is None and stdout:
+        verdict = _locate_netgen_verdict(stdout)
+        if verdict is not None:
+            source_text = stdout
+    if verdict is None:
+        version_note = (
+            f" netgen version detected: {engine_version}."
+            if engine_version
+            else " netgen version could not be detected."
         )
-    tail = log_text[idx + len(marker) :].strip()
+        raise LvsError(
+            "could not parse netgen's LVS report: no 'Final result:' or "
+            "'Result:' verdict line found in the report log or netgen's own "
+            "stdout -- the report format may be unrecognised or netgen may "
+            "have exited before completing the compare. This parser is "
+            "verified against netgen 1.5.323 and 1.5.133." + version_note + " "
+            "Raw report (last 2000 chars):\n" + log_text.strip()[-2000:]
+        )
+    marker, idx = verdict
+    tail = source_text[idx + len(marker) :].strip()
     first_line = tail.splitlines()[0] if tail else ""
 
     mismatches = _parse_netgen_property_errors(log_text)
@@ -3802,11 +3874,11 @@ def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
                 )
             )
     elif not mismatches:
-        # An unrecognised, non-empty "Final result:" text with no other
-        # structured evidence at all: never guess this is a match.
+        # An unrecognised, non-empty verdict text with no other structured
+        # evidence at all: never guess this is a match.
         raise LvsError(
-            "could not classify netgen's LVS verdict: unrecognised 'Final "
-            f"result:' text {first_line!r}. Raw report tail:\n" + tail[:2000]
+            f"could not classify netgen's LVS verdict: unrecognised {marker!r} "
+            f"text {first_line!r}. Raw report tail:\n" + tail[:2000]
         )
 
     return "mismatch", mismatches
