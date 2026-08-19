@@ -490,10 +490,20 @@ jobs:
         # this exact step, 2026-08-19). 5 minutes is generous for a normal
         # `apt-get update && apt-get install` of one package, while still
         # failing fast relative to the 45-minute job budget.
+        #
+        # The timeout alone only converts the stall into a *red check*
+        # though (issue #1219): on 2026-08-19 the runner-local
+        # `azure.archive.ubuntu.com` mirror blackholed connections and every
+        # apt step in this job started failing at the 5-minute mark.
+        # scripts/ci-apt-install.sh drops that mirror, bounds apt's own
+        # acquire timeouts, and retries the whole `update && install` pair
+        # within a budget sized to fit inside this 5-minute backstop -- see
+        # its header comment for the log evidence. A genuine missing-package
+        # failure is still surfaced immediately, non-zero.
         timeout-minutes: 5
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: sudo apt-get update && sudo apt-get install -y ngspice
+        run: scripts/ci-apt-install.sh ngspice
 
       - name: Verify KLayout imports headlessly
         run: |
@@ -523,15 +533,17 @@ jobs:
         # ships on ubuntu-latest/noble); package-manager install, same
         # posture as the ngspice step above.
         #
-        # Per-step timeout + noninteractive apt (issue #1204): same
-        # apt-mirror-stall exposure as the ngspice step -- see its comment
-        # above for the incident evidence and rationale.
+        # Per-step timeout + noninteractive apt (issue #1204) and the
+        # mirror-resilient wrapper (issue #1219): same apt-mirror-stall
+        # exposure as the ngspice step -- see its comment above for the
+        # incident evidence and rationale. This step was itself observed
+        # stalling (run 32275002277, 3.11), so it gets the same treatment,
+        # not just ngspice.
         timeout-minutes: 5
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          scripts/ci-apt-install.sh \
             cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
             libffi-dev pkg-config zlib1g-dev
 
@@ -584,15 +596,15 @@ jobs:
         # pre-generated `configure`); `gperf` backs Icarus's own lexer
         # generation.
         #
-        # Per-step timeout + noninteractive apt (issue #1204): same
-        # apt-mirror-stall exposure as the ngspice step -- see its comment
-        # above for the incident evidence and rationale.
+        # Per-step timeout + noninteractive apt (issue #1204) and the
+        # mirror-resilient wrapper (issue #1219): same apt-mirror-stall
+        # exposure as the ngspice step -- see its comment above for the
+        # incident evidence and rationale.
         timeout-minutes: 5
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          scripts/ci-apt-install.sh \
             bison flex gperf autoconf help2man
 
       - name: Cache pinned Icarus Verilog build
