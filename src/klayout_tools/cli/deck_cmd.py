@@ -8,8 +8,13 @@ to the release that shipped it.
   for a deck, with no layout file and no check run. Answers "which deck
   revision will this build use?" before doing any work; ``resolve`` answers
   the complementary "which release shipped that revision?".
+- ``info`` (issue #1209) -- report the currently-installed build's own deck
+  content hash / structural device-class coverage / release status directly,
+  for one deck or every registered deck, with no input layout needed.
+  Complements ``hash``: ``hash`` is a single deck's identity, ``info`` adds
+  device-class coverage and can report on every registered deck at once.
 
-Both emit through the shared envelope helpers in :mod:`.output` -- see
+All three emit through the shared envelope helpers in :mod:`.output` -- see
 ``docs/json-contract.md``.
 
 Exit codes:
@@ -26,7 +31,7 @@ from __future__ import annotations
 import argparse
 
 from .._provenance import UnknownProvenanceDeckError, deck_identity
-from ..decks.history import DeckHistoryError, resolve_deck
+from ..decks.history import DeckHistoryError, deck_info, resolve_deck
 from .output import emit_error, emit_success
 
 
@@ -90,3 +95,27 @@ def _print_resolve_text(report: dict) -> None:
     print(f"git_tag: {report['git_tag']}")
     print(f"git_commit: {report['git_commit']}")
     print(f"package_version: {report['package_version']}")
+
+
+def run_info(args: argparse.Namespace) -> int:
+    try:
+        report = deck_info(name=args.deck)
+    except DeckHistoryError as exc:
+        return emit_error("deck info", str(exc), args.format)
+
+    emit_success(report, args.format, _print_info_text)
+    return 0
+
+
+def _print_info_text(report: dict) -> None:
+    for entry in report["decks"]:
+        print(f"deck: {entry['deck']}")
+        print(f"  content_hash: {entry['content_hash']}")
+        print(f"  device_classes: {', '.join(entry['device_classes'])}")
+        print(f"  released: {entry['released']}")
+        release = entry["release"]
+        if release is not None:
+            print(
+                f"  release: {release['package_version']} "
+                f"({release['git_tag']}, {release['git_commit']})"
+            )

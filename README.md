@@ -124,6 +124,7 @@ klt signoff drc.json lvs.json            # aggregate drc/lvs/extract/sim JSON in
 klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone table + plot
 klt deck resolve --content-hash sha256:... # pinned deck hash -> klayout-tools tag/version that shipped it
 klt deck hash --deck sky130              # the deck content hash this build will use, no layout needed
+klt deck info --deck gf180mcu            # this install's own deck hash, device coverage, release status -- no input layout needed
 klt version --format json                # which build is this: version, commit, release or not
 ```
 

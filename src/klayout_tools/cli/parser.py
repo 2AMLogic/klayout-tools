@@ -2926,15 +2926,16 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``deck`` verb with nested ``resolve`` (issue #623) and
-    ``hash`` (issue #1202) subcommands, mirroring ``pdk``/``kb``'s
-    grouped-verb pattern (see ``_add_pdk_parser``) so future deck-identity
-    operations (e.g. listing the full table) have a natural home alongside
-    them.
+    """Register the ``deck`` verb with nested ``resolve`` (issue #623),
+    ``hash`` (issue #1202), and ``info`` (issue #1209) subcommands, mirroring
+    ``pdk``/``kb``'s grouped-verb pattern (see ``_add_pdk_parser``) so future
+    deck-identity/deck-history operations (e.g. listing the full table) have
+    a natural home alongside them.
     """
     deck_parser = subparsers.add_parser(
         "deck",
-        help="identify a built-in rule deck, or resolve one to its release",
+        help="identify a built-in rule deck, resolve one to its release, or "
+        "report the installed build's own deck coverage",
         description=(
             "Identify klt's built-in DRC/LVS rule decks (sky130, gf180mcu, "
             "sg13g2). `hash` reports the `provenance.deck.content_hash` this "
@@ -2942,12 +2943,15 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
             "-- the cheap way to gate on the deck revision a build will use "
             "before doing any work. `resolve` goes the other way: it turns a "
             "pinned `provenance.deck.content_hash` (docs/json-contract.md) "
-            "or a `deck name + version` back into the klayout-tools git "
-            "tag/commit and PyPI version that shipped it, without "
-            "hand-bisecting this repo's git history to reproduce against an "
-            "older deck revision. Resolve-only: this does not fetch, check "
-            "out, or build the historical revision -- install the reported "
-            "version yourself to reproduce against it."
+            "or a `deck name + version` can be turned back into the "
+            "klayout-tools git tag/commit and PyPI version that shipped it "
+            "-- without hand-bisecting this repo's git history to reproduce "
+            "against an older deck revision (`resolve`), or report this "
+            "install's own deck content hash, structural device-class "
+            "coverage, and release status directly, with no input layout "
+            "needed (`info`). Resolve-only: this does not fetch, check out, "
+            "or build a historical revision -- install the reported version "
+            "yourself to reproduce against it."
         ),
     )
     deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
@@ -3016,6 +3020,36 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(hash_parser)
     hash_parser.set_defaults(func=deck_cmd.run_hash)
+
+    info_parser = deck_sub.add_parser(
+        "info",
+        help="report the installed build's own deck content hash, device "
+        "coverage, and release status",
+        description=(
+            "Report this klt install's own deck content hash, structural "
+            "device-class coverage (ExtractionDeck.device_classes -- e.g. "
+            "whether diode recognition is wired up at all), and release "
+            "status -- with no input layout needed. Complements `klt deck "
+            "resolve`: `resolve` turns a hash you already have into a "
+            "release; `info` tells you your own currently-running hash and "
+            "coverage without first running an extraction (issue #1209 -- "
+            "two installs can report the identical `klt --version` string "
+            "while shipping different deck content)."
+        ),
+    )
+    info_parser.add_argument(
+        "--deck",
+        default=None,
+        help="deck name (e.g. sky130, gf180mcu) to report; omit to report "
+        "every registered deck",
+    )
+    info_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    info_parser.set_defaults(func=deck_cmd.run_info)
 
 
 def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -1,18 +1,24 @@
 # `klt deck`
 
 Identify klayout-tools' built-in DRC/LVS rule decks (`sky130`, `gf180mcu`,
-`sg13g2`): report the content hash *this* build ships for a deck, and look up
-which release shipped a given revision.
+`sg13g2`): report the content hash *this* build ships for a deck (`hash`),
+look up which release shipped a given revision (`resolve`, by content hash
+or by `(name, version)`, against klayout-tools' own generated release
+history, issue #623), or report this install's own deck content hash,
+structural device-class coverage, and release status directly, with no
+input layout needed (`info`, issue #1209).
 
 ```
 klt deck hash    --deck <name>                              [--format text|json]
 klt deck resolve --content-hash <sha256:hex> [--deck <name>] [--format text|json]
 klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
+klt deck info    [--deck <name>]                             [--format text|json]
 ```
 
-The two are complements: `hash` answers "which deck revision will this build
-use?" (issue #1202) and `resolve` answers "which release shipped that
-revision?" (issue #623).
+The three are complements: `hash` answers "which deck revision will this
+build use?" (issue #1202), `resolve` answers "which release shipped that
+revision?" (issue #623), and `info` answers "what does this install
+actually recognise, right now, with no input layout at all?" (issue #1209).
 
 ## `klt deck hash`
 
@@ -112,6 +118,16 @@ section. Running `klt deck resolve --content-hash <hash>` by hand is still
 useful to find out *which* release a hash belongs to once `released: true`
 confirms one exists.
 
+**Both `klt deck resolve` and `provenance.deck` require a hash you already
+have in hand** — normally obtained by running some verb against an actual
+input layout first and reading `provenance.deck.content_hash` out of its
+JSON report. `klt deck info` (below) closes that gap: it reports this
+*install's own* deck hash and structural device-class coverage directly,
+with no input layout needed at all — see issue #1209, where two
+`klayout-tools==0.2.0` installs (PyPI vs. a from-source checkout) shipped
+different `gf180mcu` deck content silently, because nothing surfaced the
+difference short of a live extraction diff.
+
 ## Resolve-only, not fetch-or-build
 
 `klt deck resolve` looks the query up in a **generated table** — it never
@@ -183,6 +199,52 @@ A hash that predates the table's start, was never released, or a
   }
 }
 ```
+
+## `klt deck info`
+
+```
+klt deck info                 # every registered deck (sky130, gf180mcu, sg13g2)
+klt deck info --deck gf180mcu # one deck only
+```
+
+```json
+{
+  "schema_version": 1,
+  "decks": [
+    {
+      "deck": "gf180mcu",
+      "content_hash": "sha256:79e71a1e7d84be3cfc82e4c70afbdf7b743ac1f361fb8e981f57831014d2e8b0",
+      "device_classes": [
+        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor",
+        "diode_nd2ps_06v0", "diode_pd2nw_06v0"
+      ],
+      "released": false,
+      "release": null
+    }
+  ]
+}
+```
+
+- `deck` — the deck name.
+- `content_hash` — this install's own `sha256:`-prefixed deck module hash
+  (the same computation and shape as `provenance.deck.content_hash`).
+- `device_classes` — the device-class roles this deck is *structurally
+  capable* of recognising (`ExtractionDeck.device_classes`) — independent of
+  whether a given layout actually contains any device of that class. This is
+  the field that would have caught issue #1209 directly: comparing this
+  list's contents (not just its `content_hash`) is what distinguishes a deck
+  that recognises `diode_nd2ps_06v0`/`diode_pd2nw_06v0` from one that
+  predates diode support entirely.
+- `released` / `release` — the same tri-state signal as
+  `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
+  `true`, the `{git_tag, git_commit, package_version}` of the release that
+  shipped this exact hash (the same shape `klt deck resolve` returns).
+
+Omitting `--deck` reports every registered deck in one call — useful for a
+"what does this install actually ship" sanity check right after `pip
+install klayout-tools` (or a from-source build), before running any
+extraction at all. An unrecognised `--deck` name is a clean error (exit 1),
+matching `klt extract`'s own "unknown deck" message.
 
 ## The generated history table
 

@@ -11,6 +11,7 @@ minimal sanity coverage at the bottom of this module.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -217,6 +218,83 @@ def test_is_deck_hash_released_none_when_entries_key_missing(tmp_path, monkeypat
 
 
 # --------------------------------------------------------------------------- #
+# library: deck_info (issue #1209)
+# --------------------------------------------------------------------------- #
+
+
+def _real_deck_hash(name: str) -> str:
+    """Independently reproduce the sha256 ``deck_info`` should report for
+    the real, installed deck module ``name`` -- the same "streamed SHA-256 of
+    the raw file bytes" computation ``klayout_tools._provenance.sha256_file``
+    (and ``scripts/generate_deck_history.py``) use."""
+    from klayout_tools.decks import deck_source_path
+
+    digest = hashlib.sha256()
+    with open(deck_source_path(name), "rb") as handle:
+        digest.update(handle.read())
+    return f"sha256:{digest.hexdigest()}"
+
+
+def test_deck_info_reports_content_hash_and_device_classes(_history_table):
+    report = history.deck_info(name="gf180mcu")
+
+    assert report["schema_version"] == 1
+    assert len(report["decks"]) == 1
+    entry = report["decks"][0]
+    assert entry["deck"] == "gf180mcu"
+    assert entry["content_hash"] == _real_deck_hash("gf180mcu")
+    # The real, currently-checked-out gf180mcu deck (issue #542) recognises
+    # both junction-diode flavours -- exactly the device-class coverage
+    # PyPI's stale 0.2.0 build lacked (issue #1209's reported symptom).
+    assert "diode_nd2ps_06v0" in entry["device_classes"]
+    assert "diode_pd2nw_06v0" in entry["device_classes"]
+    # The fixture's synthetic history table has no entry matching this real
+    # hash -- confirmed unreleased, not "unknown".
+    assert entry["released"] is False
+    assert entry["release"] is None
+
+
+def test_deck_info_reports_released_true_with_release_details(tmp_path, monkeypatch):
+    real_hash = _real_deck_hash("gf180mcu")
+    entries = [
+        {
+            "deck": "gf180mcu",
+            "content_hash": real_hash,
+            "git_tag": "v9.9.9",
+            "git_commit": "f" * 40,
+            "package_version": "9.9.9",
+        }
+    ]
+    path = tmp_path / "_history.json"
+    path.write_text(json.dumps({"entries": entries}))
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    entry = history.deck_info(name="gf180mcu")["decks"][0]
+
+    assert entry["content_hash"] == real_hash
+    assert entry["released"] is True
+    assert entry["release"] == {
+        "git_tag": "v9.9.9",
+        "git_commit": "f" * 40,
+        "package_version": "9.9.9",
+    }
+
+
+def test_deck_info_defaults_to_every_registered_deck(_history_table):
+    from klayout_tools.decks import known_extraction_deck_names
+
+    report = history.deck_info()
+
+    names = {entry["deck"] for entry in report["decks"]}
+    assert names == set(known_extraction_deck_names())
+
+
+def test_deck_info_unknown_deck_raises(_history_table):
+    with pytest.raises(history.DeckHistoryError, match="unknown deck 'nope'"):
+        history.deck_info(name="nope")
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 
@@ -275,6 +353,49 @@ def test_cli_deck_no_subcommand_prints_help(capsys):
 
     assert exit_code == 2
     assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_cli_info_json_reports_device_classes(capsys):
+    exit_code = main(["deck", "info", "--deck", "gf180mcu", "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    entry = payload["decks"][0]
+    assert entry["deck"] == "gf180mcu"
+    assert entry["content_hash"] == _real_deck_hash("gf180mcu")
+    assert "diode_nd2ps_06v0" in entry["device_classes"]
+
+
+def test_cli_info_text(capsys):
+    exit_code = main(["deck", "info", "--deck", "sky130"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "deck: sky130" in out
+    assert "device_classes:" in out
+    assert "released:" in out
+
+
+def test_cli_info_no_deck_reports_every_registered_deck(capsys):
+    from klayout_tools.decks import known_extraction_deck_names
+
+    exit_code = main(["deck", "info", "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    names = {entry["deck"] for entry in payload["decks"]}
+    assert names == set(known_extraction_deck_names())
+
+
+def test_cli_info_unknown_deck_error_envelope(capsys):
+    exit_code = main(["deck", "info", "--deck", "nope", "--format", "json"])
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "deck info"
+    assert "unknown deck 'nope'" in err["error"]["message"]
 
 
 # --------------------------------------------------------------------------- #
