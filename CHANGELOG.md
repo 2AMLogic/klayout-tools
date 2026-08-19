@@ -975,6 +975,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   naming the available decks. Pairs with the existing
   `klt deck resolve --content-hash <hash>` (which release shipped this?).
   See [`docs/cli/deck.md`](docs/cli/deck.md).
+- 2026-08-19 — New verb `klt pdk em-limits` (issue #1215): parses every tech
+  LEF a resolved PDK variant ships and reports, per `ROUTING`/`CUT` layer,
+  the `DCCURRENTDENSITY`/`ACCURRENTDENSITY` electromigration limits declared
+  — the only machine-readable EM data an open_pdks-layout install ships at
+  all (no dedicated EM section exists in the DRC decks or ngspice model
+  files). Flags any layer where the shipped tech LEFs disagree (a real
+  gf180mcuD install's own `_fd_sc_mcu9t5v0`/`mcu7t5v0` vs.
+  `_osu_sc_gp9t3v3`/`gp12t3v3` families report 1.19µm/1.5/2.2 mA/µm vs.
+  0.99µm/1.21/1.82 mA/µm for the same top-metal layer, despite identical
+  sheet resistance) and returns the conservative (lower) value by default;
+  a cut layer with no declared current density at all (the diffusion/poly
+  contact layer, `CON`, usually the tightest EM constraint in a
+  power-device stack) reports an explicit "not shipped" result rather than
+  omitting the layer or fabricating a number. Backed by four new fields on
+  `lef_header.parse_lef_header()`'s `layers[]` entries — `thickness_um`,
+  `dc_current_density`, `ac_current_density`, `resistance_rpersq` — and the
+  new `pdk.em_limits()` library function. Scans every `libs_ref` entry that
+  ships a `techlef/` subdirectory, independent of naming convention
+  (deliberately not the `_fd_sc_`-name-marker scan `klt pdk cells` uses),
+  so it does not miss the `_osu_sc_`-named half of the disagreement it
+  exists to surface. Documented in [`docs/cli/pdk.md`](docs/cli/pdk.md) →
+  "`klt pdk em-limits`".
 - 2026-08-19 — The shared `provenance.deck` block (`klt drc`, `klt extract`,
   `klt lvs`, and every other verb whose report carries a `provenance.deck`)
   now includes a `released` field (issue #1193): a non-fatal, generation-time

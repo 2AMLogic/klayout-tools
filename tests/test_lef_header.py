@@ -105,6 +105,10 @@ END li1
             "pitch_y_um": 0.34,
             "offset_x_um": 0.23,
             "offset_y_um": 0.17,
+            "thickness_um": None,
+            "dc_current_density": None,
+            "ac_current_density": None,
+            "resistance_rpersq": None,
         }
     ]
 
@@ -155,6 +159,67 @@ END met1
     header = parse_lef_header(text)
     assert len(header["layers"]) == 1
     assert header["layers"][0]["width_um"] == 0.14
+
+
+def test_parses_thickness_current_density_and_resistance():
+    """Real gf180mcu ``Metal4``/top-metal shape (issue #1215): a routing
+    layer's EM budget is a flat ``DCCURRENTDENSITY``/``ACCURRENTDENSITY``
+    ``AVERAGE`` scalar, alongside ``THICKNESS`` and ``RESISTANCE RPERSQ``."""
+    text = """\
+LAYER Metal4
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.9 ;
+  WIDTH 0.440 ;
+  DCCURRENTDENSITY AVERAGE 1.5 ;
+  ACCURRENTDENSITY AVERAGE 2.2 ;
+  RESISTANCE RPERSQ 0.060 ;
+  THICKNESS 1.19 ;
+END Metal4
+"""
+    header = parse_lef_header(text)
+    layer = header["layers"][0]
+    assert layer["thickness_um"] == 1.19
+    assert layer["dc_current_density"] == 1.5
+    assert layer["ac_current_density"] == 2.2
+    assert layer["resistance_rpersq"] == 0.060
+
+
+def test_via_layer_reports_per_cut_current_density():
+    """A cut/via layer's current density is a flat per-cut value (no
+    per-width unit) -- the same statement shape, just a different physical
+    meaning per the LEF spec (see `_parse_layer`'s docstring note); the
+    reader extracts it identically regardless of layer `TYPE`."""
+    text = """\
+LAYER Via1
+  TYPE CUT ;
+  RESISTANCE 4.5 ;
+  DCCURRENTDENSITY AVERAGE 0.18 ;
+  ACCURRENTDENSITY AVERAGE 0.28 ;
+END Via1
+"""
+    header = parse_lef_header(text)
+    layer = header["layers"][0]
+    assert layer["dc_current_density"] == 0.18
+    assert layer["ac_current_density"] == 0.28
+    # A via's bare `RESISTANCE <value> ;` (per-cut resistance) is a
+    # different statement from `RESISTANCE RPERSQ <value> ;` (a routing
+    # layer's sheet resistance) -- not matched here.
+    assert layer["resistance_rpersq"] is None
+
+
+def test_cut_layer_with_no_declared_current_density_reports_none():
+    """`CON` (issue #1215's own example): a `TYPE CUT` layer with no
+    `DCCURRENTDENSITY`/`ACCURRENTDENSITY` statement at all reports `None`
+    for both, explicitly -- not omitted, and not a parse error."""
+    text = "LAYER CON\n  TYPE CUT ;\nEND CON\n"
+    header = parse_lef_header(text)
+    layer = header["layers"][0]
+    assert layer["type"] == "CUT"
+    assert layer["dc_current_density"] is None
+    assert layer["ac_current_density"] is None
+    assert layer["thickness_um"] is None
+    assert layer["resistance_rpersq"] is None
 
 
 # --------------------------------------------------------------------------- #

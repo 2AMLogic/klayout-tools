@@ -2754,7 +2754,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners`` subcommands.
+    ``cells``/``macros``/``corners``/``em-limits`` subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
     verb (kicad-tools convention for multi-operation capabilities), so it uses
@@ -2899,6 +2899,30 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(corners_parser)
     corners_parser.set_defaults(func=pdk_cmd.run_corners)
+
+    em_limits_parser = pdk_sub.add_parser(
+        "em-limits",
+        help="report per-layer electromigration current-density limits",
+        description=(
+            "Parse every tech LEF the resolved variant ships (every "
+            "libs_ref entry with a techlef/ directory, whatever its naming "
+            "convention -- not just _fd_sc_-named standard-cell libraries) "
+            "and report, per ROUTING/CUT layer, the DCCURRENTDENSITY/"
+            "ACCURRENTDENSITY limits declared -- flagging any layer where "
+            "the shipped tech LEFs disagree, and returning the "
+            "conservative (lower) value by default. A cut/via layer with "
+            "no declared current density (e.g. a diffusion/poly contact "
+            "layer) is reported with an explicit 'not shipped' result "
+            "rather than being silently omitted."
+        ),
+    )
+    _add_pdk_args(
+        em_limits_parser,
+        pdk_help="variant to resolve (e.g. gf180mcuD); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(em_limits_parser)
+    em_limits_parser.set_defaults(func=pdk_cmd.run_em_limits)
 
 
 def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:

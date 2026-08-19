@@ -1997,3 +1997,255 @@ def test_cli_corners_no_install_error_envelope(tmp_path, capsys):
     assert captured.out == ""
     error = json.loads(captured.err)
     assert error["error"]["command"] == "pdk corners"
+
+
+# --------------------------------------------------------------------------- #
+# em_limits / `klt pdk em-limits` (issue #1215 -- EM current-density limits
+# declared across every tech LEF an install ships, flagging cross-file
+# disagreement and surfacing the `CON` contact layer's own missing limit).
+# Fixture values mirror the issue's own real gf180mcu report: Metal5
+# 1.19um/1.5/2.2 (the `_fd_sc_mcu9t5v0`/`mcu7t5v0` families) vs.
+# 0.99um/1.21/1.82 (the `_osu_sc_gp9t3v3`/`gp12t3v3` families), and `CON`
+# declared `TYPE CUT` with no DCCURRENTDENSITY/ACCURRENTDENSITY at all.
+# --------------------------------------------------------------------------- #
+
+
+def _write_tech_lef(variant_dir, cell_library, corner, layers_text):
+    """Write `libs.ref/<cell_library>/techlef/<cell_library>__<corner>.tlef`
+    with the given raw ``LAYER ... END`` text (caller supplies full blocks) --
+    a real, `parse_lef_header`-parseable tech LEF snippet, unlike
+    `_make_lef_library`'s placeholder-content fixture above (which exists
+    only to exercise path *resolution*, not content parsing)."""
+    techlef_dir = variant_dir / "libs.ref" / cell_library / "techlef"
+    techlef_dir.mkdir(parents=True, exist_ok=True)
+    (techlef_dir / f"{cell_library}__{corner}.tlef").write_text(
+        layers_text, encoding="utf-8"
+    )
+
+
+_METAL5_MCU_LAYER = """\
+LAYER Metal5
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.9 ;
+  WIDTH 0.440 ;
+  THICKNESS 1.19 ;
+  DCCURRENTDENSITY AVERAGE 1.5 ;
+  ACCURRENTDENSITY AVERAGE 2.2 ;
+  RESISTANCE RPERSQ 0.060 ;
+END Metal5
+"""
+
+_METAL5_OSU_LAYER = """\
+LAYER Metal5
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.9 ;
+  WIDTH 0.440 ;
+  THICKNESS 0.99 ;
+  DCCURRENTDENSITY AVERAGE 1.21 ;
+  ACCURRENTDENSITY AVERAGE 1.82 ;
+  RESISTANCE RPERSQ 0.060 ;
+END Metal5
+"""
+
+_CON_LAYER = "LAYER CON\n  TYPE CUT ;\nEND CON\n"
+
+_NWELL_LAYER = "LAYER Nwell\n  TYPE MASTERSLICE ;\nEND Nwell\n"
+
+
+def test_em_limits_reports_conservative_value_and_flags_disagreement(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    for corner in ("min", "nom", "max"):
+        _write_tech_lef(
+            variant_dir,
+            "gf180mcu_fd_sc_mcu9t5v0",
+            corner,
+            _METAL5_MCU_LAYER + _CON_LAYER,
+        )
+    _write_tech_lef(
+        variant_dir, "gf180mcu_osu_sc_gp9t3v3", "nom", _METAL5_OSU_LAYER + _CON_LAYER
+    )
+
+    report = pdk.em_limits(root=str(root))
+
+    assert report["schema_version"] == 1
+    assert len(report["sources"]) == 4
+    assert report["disagreements"] == ["Metal5"]
+
+    metal5 = next(layer for layer in report["layers"] if layer["name"] == "Metal5")
+    assert metal5["dc_current_density"]["shipped"] is True
+    assert metal5["dc_current_density"]["agrees"] is False
+    assert metal5["dc_current_density"]["conservative"] == 1.21  # the lower value
+    assert metal5["ac_current_density"]["conservative"] == 1.82
+    values = {
+        (v["cell_library"], v["value"]) for v in metal5["dc_current_density"]["values"]
+    }
+    assert ("gf180mcu_fd_sc_mcu9t5v0", 1.5) in values
+    assert ("gf180mcu_osu_sc_gp9t3v3", 1.21) in values
+
+
+def test_em_limits_cut_layer_with_no_current_density_reports_explicit_not_shipped(
+    tmp_path,
+):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir, "gf180mcu_fd_sc_mcu9t5v0", "nom", _METAL5_MCU_LAYER + _CON_LAYER
+    )
+
+    report = pdk.em_limits(root=str(root))
+
+    con = next(layer for layer in report["layers"] if layer["name"] == "CON")
+    assert con["type"] == "CUT"
+    assert con["dc_current_density"] == {
+        "shipped": False,
+        "agrees": None,
+        "values": [],
+        "conservative": None,
+    }
+    assert con["ac_current_density"]["shipped"] is False
+    assert "CON" not in report["disagreements"]
+
+
+def test_em_limits_agreeing_sources_report_agrees_true(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    for corner in ("min", "nom", "max"):
+        _write_tech_lef(
+            variant_dir,
+            "gf180mcu_fd_sc_mcu9t5v0",
+            corner,
+            _METAL5_MCU_LAYER + _CON_LAYER,
+        )
+
+    report = pdk.em_limits(root=str(root))
+
+    metal5 = next(layer for layer in report["layers"] if layer["name"] == "Metal5")
+    assert metal5["dc_current_density"]["agrees"] is True
+    assert metal5["dc_current_density"]["conservative"] == 1.5
+    assert report["disagreements"] == []
+
+
+def test_em_limits_ignores_masterslice_layers(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        "nom",
+        _METAL5_MCU_LAYER + _CON_LAYER + _NWELL_LAYER,
+    )
+
+    report = pdk.em_limits(root=str(root))
+
+    assert {layer["name"] for layer in report["layers"]} == {"Metal5", "CON"}
+
+
+def test_em_limits_excludes_library_with_no_techlef_directory(tmp_path):
+    """A library shipping no `techlef/` at all (e.g. `*_fd_pr`, a primitive-
+    device library) is excluded from `sources` -- naming-convention-
+    independent, so this is a directory-shape check, not a name filter."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir, "gf180mcu_fd_sc_mcu9t5v0", "nom", _METAL5_MCU_LAYER + _CON_LAYER
+    )
+    (variant_dir / "libs.ref" / "gf180mcu_fd_pr" / "spice").mkdir(parents=True)
+
+    report = pdk.em_limits(root=str(root))
+
+    assert {s["cell_library"] for s in report["sources"]} == {"gf180mcu_fd_sc_mcu9t5v0"}
+
+
+def test_em_limits_osu_named_library_not_dropped_by_std_cell_marker(tmp_path):
+    """Regression guard: `_STD_CELL_LIB_MARKER` (`_fd_sc_`) does not match
+    `_osu_sc_`-named libraries -- `em_limits` must not silently exclude them
+    the way a `list_cell_libraries()`-based scan would (issue #1215's own
+    disagreement is between exactly these two naming families)."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir, "gf180mcu_osu_sc_gp9t3v3", "nom", _METAL5_OSU_LAYER + _CON_LAYER
+    )
+
+    report = pdk.em_limits(root=str(root))
+
+    assert {s["cell_library"] for s in report["sources"]} == {"gf180mcu_osu_sc_gp9t3v3"}
+    metal5 = next(layer for layer in report["layers"] if layer["name"] == "Metal5")
+    assert metal5["dc_current_density"]["conservative"] == 1.21
+
+
+def test_em_limits_no_libs_ref_reports_empty(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD", assets=("ngspice",))  # no libs_ref at all
+
+    report = pdk.em_limits(root=str(root))
+
+    assert report["sources"] == []
+    assert report["layers"] == []
+    assert report["disagreements"] == []
+
+
+def test_em_limits_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.em_limits(root=str(tmp_path / "does-not-exist"))
+
+
+def test_cli_em_limits_json_on_stdout(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir, "gf180mcu_fd_sc_mcu9t5v0", "nom", _METAL5_MCU_LAYER + _CON_LAYER
+    )
+
+    exit_code = main(["pdk", "em-limits", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["schema_version"] == 1
+    assert payload["pdk"] == "gf180mcuD"
+    names = {layer["name"] for layer in payload["layers"]}
+    assert names == {"Metal5", "CON"}
+
+
+def test_cli_em_limits_text_table_flags_disagreement(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir, "gf180mcu_fd_sc_mcu9t5v0", "nom", _METAL5_MCU_LAYER + _CON_LAYER
+    )
+    _write_tech_lef(
+        variant_dir, "gf180mcu_osu_sc_gp9t3v3", "nom", _METAL5_OSU_LAYER + _CON_LAYER
+    )
+
+    exit_code = main(["pdk", "em-limits", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Metal5" in out
+    assert "DISAGREE" in out
+    assert "not shipped" in out  # CON's DC/AC current density
+    assert "disagreements" in out
+
+
+def test_cli_em_limits_no_install_error_envelope(tmp_path, capsys):
+    exit_code = main(
+        [
+            "pdk",
+            "em-limits",
+            "--pdk-root",
+            str(tmp_path / "nope"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["error"]["command"] == "pdk em-limits"

@@ -6,12 +6,13 @@ simulation, DRC, LVS, symbol lookup — imports (Python) or evaluates (shell/Tcl
 instead of re-implementing the lookup, usually twice, per repo.
 
 ```
-klt pdk find    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk list    [--pdk-root <dir>] [--format text|json]
-klt pdk env     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk cells   [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
-klt pdk macros  [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk corners [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk find      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk list      [--pdk-root <dir>] [--format text|json]
+klt pdk env       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk cells     [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
+klt pdk macros    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk corners   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk em-limits [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
@@ -23,6 +24,9 @@ klt pdk corners [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
   `*_fd_ip_*`, e.g. an SRAM/ROM compiler output), which views it ships.
 - `corners` — per SPICE process corner, which curated device families skew
   vs. resolve to typical, and whether the corner is complete.
+- `em-limits` — per routing/cut layer, the electromigration current-density
+  limits declared across every tech LEF the variant ships, flagging any
+  layer where the shipped tech LEFs disagree.
 
 The command is fully headless (pure filesystem probing — it does not load the
 KLayout database module) and safe to run in CI.
@@ -657,6 +661,146 @@ that finer, per-flavor question is the spike's own proposed `klt pdk device`/
 `klt pdk corner --pdk <variant> --corner <name>` follow-up (section 2.2), a
 natural next issue, not this command's scope.
 
+## `klt pdk em-limits`
+
+`klt pdk find` resolves an install's `libs_ref` asset but stops there — the
+only machine-readable electromigration current-density limits open_pdks-layout
+installs ship at all are the `DCCURRENTDENSITY`/`ACCURRENTDENSITY` entries in
+each standard-cell library's own tech LEF (`libs.ref/*/techlef/*.tlef`); there
+is no dedicated EM section in the DRC decks or the ngspice model files.
+Worse, a real install can ship **disagreeing** answers for the same physical
+layer across its different tech LEF files (issue #1215: a real gf180mcuD
+install's `_fd_sc_mcu9t5v0`/`mcu7t5v0` and `_osu_sc_gp9t3v3`/`gp12t3v3`
+families report 1.19µm/1.5/2.2 mA/µm vs. 0.99µm/1.21/1.82 mA/µm for the same
+top-metal layer — a 24% disagreement on the top-metal EM budget, with
+identical sheet resistance in both), and gives **no** current density at all
+for the diffusion/poly contact layer (`CON`) — usually the tightest EM
+constraint in a power-device stack. `klt pdk em-limits` parses every tech LEF
+the resolved variant ships, reports per-layer DC/AC limits, flags any layer
+where the shipped files disagree, and returns the conservative (lower) value
+by default — with an explicit "not shipped" result for a cut layer (like
+`CON`) that declares no current density at all, rather than silently omitting
+it.
+
+```
+$ klt pdk em-limits --pdk gf180mcuD
+pdk: gf180mcuD
+tech_lef_count: 8
+
+layer   type     dc_current_density              ac_current_density
+------  -------  -------------------------------  -------------------------------
+CON     CUT      not shipped                      not shipped
+Metal1  ROUTING  0.67                              1
+Metal2  ROUTING  0.67                              1
+Metal3  ROUTING  0.67                              1
+Metal4  ROUTING  0.67                              1
+Metal5  ROUTING  1.21 (DISAGREE: 1.21, 1.5)         1.82 (DISAGREE: 1.82, 2.2)
+Via1    CUT      0.18                              0.28
+Via2    CUT      0.18                              0.28
+Via3    CUT      0.18                              0.28
+Via4    CUT      0.18                              0.28
+
+disagreements (conservative value shown above): Metal5
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "gf180mcuD",
+  "root": "/usr/share/pdk",
+  "sources": [
+    {
+      "cell_library": "gf180mcu_fd_sc_mcu9t5v0",
+      "corner": "nom",
+      "tech_lef": "/usr/share/pdk/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu9t5v0/techlef/gf180mcu_fd_sc_mcu9t5v0__nom.tlef"
+    }
+  ],
+  "layers": [
+    {
+      "name": "Metal5",
+      "type": "ROUTING",
+      "dc_current_density": {
+        "shipped": true,
+        "agrees": false,
+        "conservative": 1.21,
+        "values": [
+          {
+            "cell_library": "gf180mcu_fd_sc_mcu9t5v0",
+            "corner": "nom",
+            "tech_lef": "/usr/share/pdk/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu9t5v0/techlef/gf180mcu_fd_sc_mcu9t5v0__nom.tlef",
+            "value": 1.5
+          },
+          {
+            "cell_library": "gf180mcu_osu_sc_gp9t3v3",
+            "corner": "nom",
+            "tech_lef": "/usr/share/pdk/gf180mcuD/libs.ref/gf180mcu_osu_sc_gp9t3v3/techlef/gf180mcu_osu_sc_gp9t3v3__nom.tlef",
+            "value": 1.21
+          }
+        ]
+      },
+      "ac_current_density": { "shipped": true, "agrees": false, "conservative": 1.82, "values": ["..."] },
+      "thickness_um": { "shipped": true, "agrees": false, "values": ["..."] },
+      "resistance_rpersq": { "shipped": true, "agrees": true, "values": ["..."] }
+    },
+    {
+      "name": "CON",
+      "type": "CUT",
+      "dc_current_density": { "shipped": false, "agrees": null, "conservative": null, "values": [] },
+      "ac_current_density": { "shipped": false, "agrees": null, "conservative": null, "values": [] },
+      "thickness_um": { "shipped": false, "agrees": null, "values": [] },
+      "resistance_rpersq": { "shipped": false, "agrees": null, "values": [] }
+    }
+  ],
+  "disagreements": ["Metal5"]
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `schema_version` | integer | Version of this command's JSON shape (starts at `1`). |
+| `pdk` | string | Resolved variant name (same resolution as `find`/`cells`/`corners`). |
+| `root` | string | Absolute install root. |
+| `sources` | array of `{cell_library, corner, tech_lef}` | Every tech LEF this command parsed. **Not** filtered to `_fd_sc_`-named libraries (see "Which libraries are scanned" below) — every `libs_ref/<lib>/techlef/<lib>__<corner>.tlef` file the install ships, whatever `<lib>`'s naming convention. |
+| `layers` | array | One entry per `ROUTING`/`CUT` layer seen in **any** parsed tech LEF, name-sorted. |
+| `layers[].name` | string | The LEF layer name (e.g. `Metal5`, `Via1`, `CON`). |
+| `layers[].type` | `"ROUTING"` \| `"CUT"` | The layer's declared LEF `TYPE`. |
+| `layers[].dc_current_density`, `layers[].ac_current_density` | object | `{shipped, agrees, conservative, values}` — see below. Unit is layer-`type`-dependent per the LEF spec: mA per micron of wire width for a `ROUTING` layer, a flat mA-per-cut current for a `CUT` layer (`Via*`/`CON`) — this command does not normalise between them, matching what the shipped LEF text itself states. |
+| `layers[].thickness_um`, `layers[].resistance_rpersq` | object | `{shipped, agrees, values}` (no `conservative` — see below) — context for *why* a current-density disagreement might exist (issue #1215's own observation: the two disagreeing gf180mcu families report identical `RESISTANCE RPERSQ` despite different `THICKNESS`, which is itself suspicious). |
+| `*.shipped` | boolean | `true` if **any** parsed tech LEF declared this field for this layer. `false` — with `values: []` and (for current density) `conservative: null` — is the explicit "no limit shipped for this layer" result (the `CON` case), not a silently omitted field. |
+| `*.agrees` | boolean \| null | `true` when every source that declared this field agrees (within floating-point tolerance); `false` when they disagree; `null` when `shipped` is `false` (nothing to agree or disagree about). |
+| `dc_current_density.conservative`, `ac_current_density.conservative` | float \| null | The **minimum** (more restrictive) value across every source, or the single value when they agree — the answer a consumer should use by default per this command's own "return the conservative value" contract. `null` when `shipped` is `false`. Only current-density fields carry this key — it does not apply to `thickness_um`/`resistance_rpersq` (a smaller thickness is not itself "safer"). |
+| `*.values` | array of `{cell_library, corner, tech_lef, value}` | Every source that declared a value for this field, for full attribution/provenance. |
+| `disagreements` | array of string | Every layer name where `dc_current_density` or `ac_current_density` is `shipped` but not `agrees` — the acceptance-critical field for "flag any layer where the shipped tech LEFs disagree." `thickness_um`/`resistance_rpersq` disagreement is visible per-layer but does not, by itself, add a layer here. |
+
+### Which libraries are scanned
+
+Deliberately **not** the same scan `klt pdk cells` uses (`libs_ref` entries
+matching the `_fd_sc_` naming marker): issue #1215's own reported
+disagreement is precisely *between* an `_fd_sc_`-named family
+(`gf180mcu_fd_sc_mcu9t5v0`/`mcu7t5v0`) and an `_osu_sc_`-named one
+(`gf180mcu_osu_sc_gp9t3v3`/`gp12t3v3`) — a name-marker filter tuned for `klt
+pdk cells`'s different purpose (digital timing-view libraries only) would
+silently drop half of exactly the disagreement this command exists to
+surface. Instead, `em-limits` scans every `libs_ref` entry that ships a
+`techlef/` subdirectory at all, independent of naming convention. A library
+with no `techlef/` directory (primitive-device, I/O-pad, hard-macro IP
+libraries — verified against real sky130/gf180mcu installs) is naturally
+excluded: it has no tech LEF to parse.
+
+### Design choice: live-parsed, not a curated table
+
+Same rationale as `klt pdk cells`/`klt pdk corners` above: the install's own
+tech LEF files are the only place this data is stated at all (no EM section
+exists in the DRC decks or the ngspice model files), so this command parses
+them at call time rather than owning a curated per-release table that would
+silently drift on a PDK upgrade — and, per this issue's own finding, may
+already disagree *within* a single install, which a curated table could not
+even represent without picking a side. `klt pdk em-limits` deliberately does
+not adjudicate which shipped value is correct or forward the disagreement
+upstream — see `src/klayout_tools/lef_header.py`'s `_parse_layer` docstring
+for the parser side, and issue #1215's own "Suggested handling" for why
+resolving *which* tech LEF is stale is left to the operator, not this tool.
+
 ## Library API
 
 The importable half lives in `src/klayout_tools/pdk.py` — block repos import
@@ -669,6 +813,7 @@ from klayout_tools.pdk import (
     list_cell_libraries,
     list_hard_macro_libraries,
     list_corners,
+    em_limits,
     PdkNotFoundError,
 )
 
@@ -692,6 +837,8 @@ macros = list_hard_macro_libraries(
 )  # same dict `klt pdk macros` emits
 
 corners = list_corners(variant="gf180mcuD")  # same dict `klt pdk corners` emits
+
+em = em_limits(variant="gf180mcuD")  # same dict `klt pdk em-limits` emits
 ```
 
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
@@ -708,14 +855,18 @@ root=None)` also follows the same shape and raises `PdkNotFoundError` when no
 PDK install resolves at all — but an *unsupported* PDK family, or a
 recognised one missing its `ngspice` asset or golden model deck, returns an
 empty `corners`/`corner_names` result rather than raising (see "Which
-families are curated" above).
+families are curated" above). `em_limits(variant=None, root=None)` also
+follows the same shape and raises `PdkNotFoundError` when no PDK install
+resolves at all — a variant shipping no `libs_ref` asset, or one whose
+libraries ship no `techlef/` directory at all, returns an empty
+`sources`/`layers`/`disagreements` result rather than raising.
 
 ## Exit codes and errors
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`. |
-| `1` | `find`/`env`/`cells`/`macros`/`corners` resolved no PDK install. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`. |
+| `1` | `find`/`env`/`cells`/`macros`/`corners`/`em-limits` resolved no PDK install. Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 
