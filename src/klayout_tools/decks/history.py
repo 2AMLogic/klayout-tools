@@ -180,6 +180,103 @@ def is_deck_hash_released(deck: str | None, content_hash: str | None) -> bool | 
     return bool(candidates)
 
 
+def deck_info(name: str | None = None) -> dict[str, Any]:
+    """The *currently installed* build's own deck content hash, structural
+    device-class coverage, and release status -- without running a live
+    extraction against any input layout (issue #1209).
+
+    ``klt deck resolve``/``provenance.deck.content_hash`` (issue #1193's
+    ``released`` flag) both require a caller to already *have* a content
+    hash in hand -- normally obtained by running ``klt extract``/``drc``/
+    ``lvs`` against some input layout and reading it out of the buried
+    ``provenance`` block of the JSON report. That is exactly the gap that
+    let PyPI's ``klayout-tools==0.2.0`` ship a ``gf180mcu`` deck predating
+    diode-device recognition silently: two installs reporting the identical
+    ``klt --version`` string had different device coverage, and nothing
+    short of a live extraction diff (or hand-inspecting ``provenance``) could
+    tell them apart. ``klt deck info`` answers "what does *this* install's
+    deck actually recognise, and is it even a released build" directly,
+    with no input layout needed.
+
+    ``name`` narrows to one deck (:class:`UnknownExtractionDeckError`,
+    surfaced as :class:`DeckHistoryError`, for an unregistered name); omitted
+    (the default) reports every registered deck
+    (:func:`klayout_tools.decks.known_extraction_deck_names`).
+
+    Returns a ``{"schema_version": 1, "decks": [...]}`` envelope; each entry
+    is:
+
+    - ``deck`` -- the deck name.
+    - ``content_hash`` -- this install's ``sha256:``-prefixed deck module
+      hash (the same computation and shape as
+      ``provenance.deck.content_hash``), or ``None`` if the deck's source
+      file can't be hashed.
+    - ``device_classes`` -- the device-class roles this deck is structurally
+      capable of recognising (``ExtractionDeck.device_classes``), e.g.
+      whether ``diode_nd2ps_06v0``/``diode_pd2nw_06v0`` are wired up at all --
+      independent of whether any given layout actually contains one.
+    - ``released`` -- the same tri-state signal as
+      ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
+      when this exact content hash shipped in a tagged release, ``False``
+      when the history table confirms it did not (an unreleased/dev
+      checkout, or an uncommitted local deck edit), ``None`` when the answer
+      can't be determined (hash or history table unavailable).
+    - ``release`` -- when ``released`` is ``True``, the
+      ``{git_tag, git_commit, package_version}`` of the (newest) matching
+      release, the same information :func:`resolve_deck` would return for
+      this hash; ``None`` otherwise.
+    """
+    # Imported lazily, not at module scope: `_provenance` itself imports
+    # `is_deck_hash_released` from this module, so a module-level import here
+    # would be a circular import (this module would be mid-initialization the
+    # first time anything imports `_provenance` first).
+    from .._provenance import sha256_file
+    from . import (
+        UnknownExtractionDeckError,
+        deck_source_path,
+        get_extraction_deck,
+        known_extraction_deck_names,
+    )
+
+    names = [name] if name is not None else list(known_extraction_deck_names())
+
+    decks: list[dict[str, Any]] = []
+    for deck_name in names:
+        try:
+            deck = get_extraction_deck(deck_name)
+        except UnknownExtractionDeckError as exc:
+            raise DeckHistoryError(str(exc)) from exc
+
+        digest = sha256_file(deck_source_path(deck_name))
+        content_hash = f"sha256:{digest}" if digest is not None else None
+        released = is_deck_hash_released(deck_name, content_hash)
+
+        release: dict[str, Any] | None = None
+        if released:
+            try:
+                match = resolve_deck(content_hash=content_hash, deck=deck_name)
+            except DeckHistoryError:
+                release = None
+            else:
+                release = {
+                    "git_tag": match["git_tag"],
+                    "git_commit": match["git_commit"],
+                    "package_version": match["package_version"],
+                }
+
+        decks.append(
+            {
+                "deck": deck_name,
+                "content_hash": content_hash,
+                "device_classes": list(deck.device_classes),
+                "released": released,
+                "release": release,
+            }
+        )
+
+    return {"schema_version": 1, "decks": decks}
+
+
 def _not_found_message(
     *,
     content_hash: str | None = None,

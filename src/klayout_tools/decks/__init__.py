@@ -1818,6 +1818,19 @@ def _extraction_registry() -> dict[str, ExtractionDeck]:
     }
 
 
+def known_extraction_deck_names() -> tuple[str, ...]:
+    """Every registered extraction deck name, sorted.
+
+    Distinct from :func:`klayout_tools.decks.history.known_deck_names`
+    (which only lists decks that have shipped in at least one tagged
+    release) -- this is the *currently installed* registry, so it also
+    includes a deck added since the last release (e.g. ``sg13g2`` before its
+    first tagged release). Used as the default deck set for ``klt deck
+    info`` (issue #1209) when no ``--deck`` is given.
+    """
+    return tuple(sorted(_extraction_registry()))
+
+
 def get_extraction_deck(
     name: str, deck_options: Mapping[str, str] | None = None
 ) -> ExtractionDeck:

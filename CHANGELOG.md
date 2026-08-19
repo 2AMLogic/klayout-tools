@@ -1020,6 +1020,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   so it does not miss the `_osu_sc_`-named half of the disagreement it
   exists to surface. Documented in [`docs/cli/pdk.md`](docs/cli/pdk.md) →
   "`klt pdk em-limits`".
+- 2026-08-19 — New `klt deck info [--deck <name>]` subcommand (issue #1209):
+  reports this *install's own* deck content hash, structural device-class
+  coverage (`ExtractionDeck.device_classes` — e.g. whether
+  `diode_nd2ps_06v0`/`diode_pd2nw_06v0` are wired up at all), and release
+  status (the same tri-state `released` signal as `provenance.deck.released`,
+  plus the matching release's `git_tag`/`git_commit`/`package_version` when
+  `released` is `true`) — with **no input layout needed**. Complements `klt
+  deck resolve` (issue #623), which requires a content hash already in hand
+  (normally obtained by running some verb against real input and reading it
+  out of a JSON report's `provenance` block); `klt deck info` answers "what
+  does *this* install actually recognise" directly. Motivated by a real
+  instance of the "same `klt --version` string, different deck content" gap
+  (issue #1209): PyPI's `klayout-tools==0.2.0` shipped a `gf180mcu` deck
+  built before diode-device recognition was added, silently — both the PyPI
+  build and a from-source checkout reported `klt --version` as `0.2.0`, and
+  nothing short of a live extraction diff or hand-inspecting `provenance`
+  distinguished them. See `docs/cli/deck.md`.
 - 2026-08-19 — The shared `provenance.deck` block (`klt drc`, `klt extract`,
   `klt lvs`, and every other verb whose report carries a `provenance.deck`)
   now includes a `released` field (issue #1193): a non-fatal, generation-time

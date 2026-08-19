@@ -145,6 +145,11 @@ above): adopting it required no `schema_version` bump on any verb.
     never fails the run; it only makes an otherwise-invisible reproducibility
     gap visible in the output. No warning (`released: true`) is emitted for
     an ordinary run against a deck unchanged since its last release.
+    Both `content_hash` and `released` require a run against an actual input
+    layout to see; `klt deck info` (issue #1209) reports this install's own
+    deck `content_hash` plus its structural device-class coverage
+    (`ExtractionDeck.device_classes`) directly, with no input layout needed —
+    see `docs/cli/deck.md`.
 - `input` — the input layout stream the run was made against, as
   `{content_hash}` (same shape as `deck`). `content_hash` is a
   `sha256:`-prefixed hex digest of the file, so a stale committed report is a
