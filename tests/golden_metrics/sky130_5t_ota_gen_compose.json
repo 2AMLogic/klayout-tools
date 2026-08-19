@@ -49,6 +49,7 @@
     "gen_compose.drc_hints.notes_count": 0,
     "gen_compose.nets_count": 1,
     "gen_compose.pins_count": 0,
+    "gen_compose.ports_count": 0,
     "gen_compose.schema_version": 1,
     "gen_compose.unrouted_nets_count": 0,
     "gen_compose.warnings_count": 0

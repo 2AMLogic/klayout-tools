@@ -74,8 +74,11 @@ def _print_text(report: dict) -> None:
     for block in report["blocks"]:
         offset = block["offset_um"]
         bbox = block["bbox_um"]
+        # A `blocks[].cell` block (#1189) has no generator to name -- it is an
+        # existing cell in a stream -- so name the cell itself instead.
+        origin = block["generator"] or block.get("cell_name") or "cell"
         print(
-            f"  {block['id']} ({block['generator']})  "
+            f"  {block['id']} ({origin})  "
             f"offset=({offset['x']}, {offset['y']})  "
             f"bbox=({bbox['x0']}, {bbox['y0']}) - ({bbox['x1']}, {bbox['y1']})"
         )

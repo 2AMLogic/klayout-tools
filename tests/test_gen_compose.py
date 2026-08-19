@@ -6893,3 +6893,771 @@ def test_compose_rejects_unsupported_block_orientation(tmp_path, pdk_root):
                 "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
             }
         )
+
+
+# --------------------------------------------------------------------------- #
+# blocks[].cell -- placing a cell this command did not generate (#1189)
+# --------------------------------------------------------------------------- #
+
+
+def _write_library_gds(path, cells):
+    """Fabricate a multi-cell "library" stream -- a stand-in for a PDK's own
+    standard-cell GDS, i.e. exactly the case #1189 filed: a cell no `klt` verb
+    ever generated, so there is no `generator_report` to feed `blocks[]`.
+
+    ``cells`` maps a cell name to its ``(width_um, height_um)``. Each cell
+    draws one solid li1 (67/20) rectangle with its lower-left corner at the
+    cell origin, so its `dbbox()` is exactly ``(0, 0) - (width, height)`` and
+    a caller can predict what `read_cell_bbox_um` must report.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    for name, (width_um, height_um) in cells.items():
+        cell = layout.create_cell(name)
+        cell.shapes(li1).insert(
+            kdb.Box(
+                0,
+                0,
+                int(round(width_um / layout.dbu)),
+                int(round(height_um / layout.dbu)),
+            )
+        )
+    layout.write(str(path))
+    return str(path)
+
+
+def _library_cell_ports(width_um, height_um):
+    """Two edge ports on the li1 rectangle `_write_library_gds` draws -- an
+    input on the left edge (facing 180) and an output on the right (facing 0),
+    the same shape `klt gen`'s own `ports[]` entries use."""
+    return [
+        {
+            "name": "A",
+            "layer": {"layer": 67, "datatype": 20},
+            "x_um": 0.0,
+            "y_um": height_um / 2.0,
+            "width_um": 0.2,
+            "direction_deg": 180,
+        },
+        {
+            "name": "Y",
+            "layer": {"layer": 67, "datatype": 20},
+            "x_um": width_um,
+            "y_um": height_um / 2.0,
+            "width_um": 0.2,
+            "direction_deg": 0,
+        },
+    ]
+
+
+def test_compose_cell_block_reads_bbox_from_the_stream(tmp_path, pdk_root):
+    # #1189's library-cell case: a `blocks[].cell` entry naming a cell that
+    # already exists in a stream needs no bbox_um at all -- the composer reads
+    # it off the cell itself, so the caller never re-keys `klt cells`'
+    # {left, bottom, right, top} into gen's {x0, y0, x1, y1}.
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    output = tmp_path / "lib_placed.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "u1", "cell": {"gds_path": gds, "cell_name": "lib_inv"}}],
+            "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+            "options": {"cell_name": "lib_placed_0", "output": str(output)},
+        }
+    )
+
+    assert report["blocks"][0]["source"] == "cell"
+    assert report["blocks"][0]["generator"] is None
+    assert report["blocks"][0]["cell_name"] == "lib_inv"
+    assert report["blocks"][0]["bbox_um"] == pytest.approx(
+        {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.2}
+    )
+    assert report["bbox_um"] == pytest.approx(
+        {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.2}
+    )
+
+    # The library cell's own geometry really was copied into the composed top.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("lib_placed_0")
+    assert len(list(top.each_inst())) == 1
+    assert top.dbbox().right == pytest.approx(2.0)
+
+
+def test_compose_cell_block_declared_bbox_um_is_used_verbatim(tmp_path, pdk_root):
+    # A caller who *does* know the cell's placement footprint (e.g. a standard
+    # cell whose row-abutment box is larger than its drawn shapes) may declare
+    # bbox_um; the stream is then not consulted for it at all.
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    output = tmp_path / "lib_declared.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {
+                    "id": "u1",
+                    "cell": {
+                        "gds_path": gds,
+                        "cell_name": "lib_inv",
+                        "bbox_um": {"x0": -0.5, "y0": -0.5, "x1": 3.0, "y1": 2.0},
+                    },
+                }
+            ],
+            "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+            "options": {"cell_name": "lib_declared_0", "output": str(output)},
+        }
+    )
+    assert report["blocks"][0]["bbox_um"] == pytest.approx(
+        {"x0": -0.5, "y0": -0.5, "x1": 3.0, "y1": 2.0}
+    )
+
+
+def test_compose_cell_block_ports_route_like_any_other_block(tmp_path, pdk_root):
+    # The other half of #1189's library-cell case: a `cell` block's declared
+    # ports[] participate in connectivity[] exactly as a generated block's
+    # reported ones do -- so a row of library cells can actually be wired,
+    # not merely placed.
+    gds = _write_library_gds(
+        tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2), "lib_buf": (1.5, 1.2)}
+    )
+    output = tmp_path / "lib_routed.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {
+                    "id": "u1",
+                    "cell": {
+                        "gds_path": gds,
+                        "cell_name": "lib_inv",
+                        "ports": _library_cell_ports(2.0, 1.2),
+                    },
+                },
+                {
+                    "id": "u2",
+                    "cell": {
+                        "gds_path": gds,
+                        "cell_name": "lib_buf",
+                        "ports": _library_cell_ports(1.5, 1.2),
+                    },
+                },
+            ],
+            "placement": {"strategy": "row", "order": ["u1", "u2"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "u1", "port": "Y"},
+                        {"block": "u2", "port": "A"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "lib_routed_0", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] == pytest.approx(1.0)
+    assert output.is_file()
+
+
+def test_compose_cell_block_orientation_mirrors_bbox_and_ports(tmp_path, pdk_root):
+    # blocks[].orientation (#1166) is a per-block placement attribute, so it
+    # applies to a `cell` block identically -- including to a bbox that was
+    # read from the stream rather than declared.
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    blocks = _parse_blocks(
+        [
+            {
+                "id": "u1",
+                "cell": {
+                    "gds_path": gds,
+                    "cell_name": "lib_inv",
+                    "ports": _library_cell_ports(2.0, 1.2),
+                },
+                "orientation": "mirror_x",
+            }
+        ]
+    )
+    block = blocks["u1"]
+    assert block["source"] == "cell"
+    assert block["bbox_um"] == pytest.approx(
+        {"x0": -2.0, "y0": 0.0, "x1": 0.0, "y1": 1.2}
+    )
+    assert block["ports"]["Y"]["x_um"] == pytest.approx(-2.0)
+    assert block["ports"]["Y"]["direction_deg"] == 180
+
+
+def test_compose_cell_block_relative_gds_path_resolves_against_request_dir(
+    tmp_path, pdk_root, monkeypatch
+):
+    # A relative cell.gds_path resolves against the request document's own
+    # directory, matching blocks[].generator_report's own path convention --
+    # not the process's cwd.
+    request_dir = tmp_path / "req"
+    request_dir.mkdir()
+    _write_library_gds(request_dir / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "u1", "cell": {"gds_path": "lib.gds", "cell_name": "lib_inv"}}
+            ],
+            "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": "rel_0",
+                "output": str(tmp_path / "rel_0.gds"),
+            },
+        },
+        request_dir=str(request_dir),
+    )
+    assert report["blocks"][0]["bbox_um"]["x1"] == pytest.approx(2.0)
+
+
+def test_compose_cell_block_unknown_cell_name_lists_what_is_available(tmp_path):
+    gds = _write_library_gds(
+        tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2), "lib_buf": (1.5, 1.2)}
+    )
+    with pytest.raises(GenComposeError) as excinfo:
+        _parse_blocks(
+            [{"id": "u1", "cell": {"gds_path": gds, "cell_name": "lib_nand"}}]
+        )
+    message = str(excinfo.value)
+    assert "has no cell named 'lib_nand'" in message
+    assert "lib_buf" in message and "lib_inv" in message
+
+
+def test_compose_cell_block_empty_cell_bbox_is_an_application_error(tmp_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.create_cell("hollow")
+    gds = tmp_path / "hollow.gds"
+    layout.write(str(gds))
+
+    with pytest.raises(GenComposeError, match="declare cell.bbox_um"):
+        _parse_blocks(
+            [{"id": "u1", "cell": {"gds_path": str(gds), "cell_name": "hollow"}}]
+        )
+
+
+def test_compose_cell_block_unreadable_stream_is_an_application_error(tmp_path):
+    with pytest.raises(GenComposeError, match="could not read cell.gds_path"):
+        _parse_blocks(
+            [
+                {
+                    "id": "u1",
+                    "cell": {
+                        "gds_path": str(tmp_path / "nope.gds"),
+                        "cell_name": "x",
+                    },
+                }
+            ]
+        )
+
+
+def test_parse_blocks_rejects_both_generator_report_and_cell(tmp_path):
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    with pytest.raises(GenComposeError, match="exactly one source of geometry"):
+        _parse_blocks(
+            [
+                {
+                    "id": "u1",
+                    "generator_report": _fake_mos_block_report(),
+                    "cell": {"gds_path": gds, "cell_name": "lib_inv"},
+                }
+            ]
+        )
+
+
+def test_parse_blocks_rejects_block_with_neither_source():
+    with pytest.raises(GenComposeError, match="must declare either"):
+        _parse_blocks([{"id": "u1"}])
+
+
+def test_parse_blocks_generator_missing_error_points_at_the_cell_form():
+    # The hand-forged-report workaround #1189 documents ("write a fake
+    # generator field") must be answered by the error itself, not by the docs
+    # alone: the caller is told the supported form for a cell no klt verb
+    # generated.
+    with pytest.raises(GenComposeError, match=r"use blocks\[\]\.cell"):
+        _parse_blocks(
+            [
+                {
+                    "id": "u1",
+                    "generator_report": {
+                        "cell_name": "lib_inv",
+                        "gds_path": "lib.gds",
+                        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
+                    },
+                }
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("ports", "match"),
+    [
+        ("not-an-array", "ports must be an array"),
+        ([["A"]], "must be a JSON object"),
+        ([{"x_um": 0.0}], "name is required"),
+        ([{"name": "A"}, {"name": "A"}], "duplicate name 'A'"),
+        ([{"name": "A", "x_um": 0.0}], "both x_um and y_um"),
+        ([{"name": "A", "x_um": 0.0, "y_um": 0.0, "width_um": 0}], "width_um"),
+        (
+            [{"name": "A", "x_um": 0.0, "y_um": 0.0, "direction_deg": 45}],
+            "direction_deg",
+        ),
+        ([{"name": "A", "layer": [67, 20]}], "layer must be a JSON object"),
+    ],
+)
+def test_compose_cell_block_rejects_malformed_ports(tmp_path, ports, match):
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    with pytest.raises(GenComposeError, match=match):
+        _parse_blocks(
+            [
+                {
+                    "id": "u1",
+                    "cell": {
+                        "gds_path": gds,
+                        "cell_name": "lib_inv",
+                        "ports": ports,
+                    },
+                }
+            ]
+        )
+
+
+def test_compose_cell_block_port_direction_deg_normalises_to_int(tmp_path):
+    # A JSON document may carry 180.0 where 180 was meant; the orientation
+    # remap table (_ORIENTATION_DIRECTION_MAP) is keyed on int, so the parsed
+    # port must be too.
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    blocks = _parse_blocks(
+        [
+            {
+                "id": "u1",
+                "cell": {
+                    "gds_path": gds,
+                    "cell_name": "lib_inv",
+                    "ports": [
+                        {
+                            "name": "A",
+                            "x_um": 0.0,
+                            "y_um": 0.6,
+                            "direction_deg": 180.0,
+                            "layer": {"layer": 67, "datatype": 20},
+                        }
+                    ],
+                },
+                "orientation": "mirror_x",
+            }
+        ]
+    )
+    assert blocks["u1"]["ports"]["A"]["direction_deg"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Hierarchical composition -- a gen-compose response as a block (#1189)
+# --------------------------------------------------------------------------- #
+
+
+def _compose_pair(tmp_path, pdk_root, name, spacing_um=2.0):
+    """Compose two `resistor_strip` blocks into one cell, promoting the outer
+    P1/P2 terminals to top-level `IN`/`OUT` pins -- the child composition every
+    hierarchical test below then places one level up."""
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", f"{name}_r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", f"{name}_r2")
+    return compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "r1", "generator_report": r1},
+                {"id": "r2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["r1", "r2"],
+                "spacing_um": spacing_um,
+            },
+            "connectivity": [
+                {
+                    "net": "MID",
+                    "pins": [
+                        {"block": "r1", "port": "P2"},
+                        {"block": "r2", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "pins": [
+                {"net": "IN", "block": "r1", "port": "P1"},
+                {"net": "OUT", "block": "r2", "port": "P2"},
+            ],
+            "options": {
+                "cell_name": name,
+                "output": str(tmp_path / f"{name}.gds"),
+            },
+        }
+    )
+
+
+def test_compose_response_is_itself_a_valid_generator_report(tmp_path, pdk_root):
+    # #1189 direction 1: the response carries the `generator` marker
+    # _parse_blocks requires plus a ports[] promoted from its own pins[], so
+    # feeding it straight back in needs no hand-patched fields.
+    child = _compose_pair(tmp_path, pdk_root, "child_0")
+
+    assert child["generator"] == "gen-compose"
+    assert [p["name"] for p in child["ports"]] == ["IN", "OUT"]
+    assert {p["net"] for p in child["ports"]} == {"IN", "OUT"}
+
+    # Every promoted port is in the *composed* frame: its sub-block port's own
+    # position plus that sub-block's placement offset.
+    offsets = {b["id"]: b["offset_um"] for b in child["blocks"]}
+    out_port = next(p for p in child["ports"] if p["name"] == "OUT")
+    assert out_port["block"] == "r2"
+    assert out_port["port"] == "P2"
+    assert out_port["x_um"] == pytest.approx(child["bbox_um"]["x1"])
+    assert out_port["x_um"] > offsets["r2"]["x"]
+    assert out_port["direction_deg"] == 0
+    assert out_port["layer"] == {"layer": 67, "datatype": 20, "name": None}
+
+    # The whole response satisfies _parse_blocks with nothing added.
+    blocks = _parse_blocks([{"id": "sub", "generator_report": child}])
+    assert blocks["sub"]["generator"] == "gen-compose"
+    assert blocks["sub"]["source"] == "generator_report"
+    assert set(blocks["sub"]["port_names"]) == {"IN", "OUT"}
+
+
+def test_compose_nests_a_composed_cell_and_routes_its_promoted_port(tmp_path, pdk_root):
+    # The payoff: a second level of composition places the child composition as
+    # one block and wires its promoted top-level port to a further block --
+    # what "no hierarchical composition, only one flat level" (#1189) blocked.
+    child = _compose_pair(tmp_path, pdk_root, "child_1")
+    r3 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r3")
+    output = tmp_path / "parent_1.gds"
+
+    parent = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "sub", "generator_report": child},
+                {"id": "r3", "generator_report": r3},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["sub", "r3"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "CHAIN",
+                    "pins": [
+                        {"block": "sub", "port": "OUT"},
+                        {"block": "r3", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "parent_1", "output": str(output)},
+        }
+    )
+
+    assert parent["unrouted_nets"] == []
+    assert parent["nets"][0]["routed"] is True
+    assert parent["blocks"][0]["generator"] == "gen-compose"
+    assert parent["blocks"][0]["cell_name"] == "child_1"
+    # The parent's own extent starts from the child's full composed bbox --
+    # the nested cell is placed whole, not just its first sub-block.
+    assert parent["blocks"][0]["bbox_um"] == pytest.approx(child["bbox_um"])
+
+    # Hierarchy survives: the parent top instantiates two cells, and the
+    # child's own sub-cells came along with it.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("parent_1")
+    assert len(list(top.each_inst())) == 2
+    cell_names = {cell.name for cell in layout.each_cell()}
+    assert "sub__child_1" in cell_names
+    assert any(name.startswith("r1__") for name in cell_names)
+
+
+def test_compose_nested_composition_can_re_promote_a_port(tmp_path, pdk_root):
+    # A promoted port stays promotable one level further up: the parent's own
+    # pins[] may name it, so a three-level hierarchy keeps its top-level nets.
+    child = _compose_pair(tmp_path, pdk_root, "child_2")
+    parent = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "sub", "generator_report": child}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["sub"],
+                "origins_um": {"sub": {"x": 5.0, "y": 3.0}},
+            },
+            "pins": [{"net": "TOP_IN", "block": "sub", "port": "IN"}],
+            "options": {
+                "cell_name": "parent_2",
+                "output": str(tmp_path / "parent_2.gds"),
+            },
+        }
+    )
+    child_in = next(p for p in child["ports"] if p["name"] == "IN")
+    assert parent["pins"] == [
+        {"net": "TOP_IN", "block": "sub", "port": "IN", "labelled": True}
+    ]
+    top_in = next(p for p in parent["ports"] if p["name"] == "TOP_IN")
+    assert top_in["x_um"] == pytest.approx(child_in["x_um"] + 5.0)
+    assert top_in["y_um"] == pytest.approx(child_in["y_um"] + 3.0)
+
+
+def test_compose_ports_is_empty_without_pins(tmp_path, pdk_root):
+    # Backward compatibility: a request that promotes nothing exposes nothing.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "solo_ports")
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "solo", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["solo"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": "solo_ports_0",
+                "output": str(tmp_path / "solo_ports_0.gds"),
+            },
+        }
+    )
+    assert report["generator"] == "gen-compose"
+    assert report["ports"] == []
+
+
+def test_compose_promotes_a_port_whose_layer_has_no_label_convention(
+    tmp_path, pdk_root
+):
+    # A port on a layer `klt extract` has no label convention for is reported
+    # `labelled: false` -- but it still has a position, so it is still a real
+    # port of the composed cell and must be promoted. Routing at the level
+    # above needs geometry, not a label.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "unmapped_promote")
+    r1["ports"][0]["layer"] = {"layer": 65, "datatype": 20, "name": None}
+    unmapped_port = r1["ports"][0]["name"]
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "g", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["g"], "spacing_um": 1.0},
+            "pins": [{"net": "VSUB", "block": "g", "port": unmapped_port}],
+            "options": {
+                "cell_name": "unmapped_promote_0",
+                "output": str(tmp_path / "unmapped_promote_0.gds"),
+            },
+        }
+    )
+    assert report["pins"][0]["labelled"] is False
+    assert [p["name"] for p in report["ports"]] == ["VSUB"]
+    assert report["ports"][0]["layer"] == {"layer": 65, "datatype": 20, "name": None}
+
+
+def test_compose_does_not_promote_a_port_without_geometry(tmp_path, pdk_root):
+    # A port with no reported {x_um, y_um, layer} has no composed-frame
+    # position to report, so it cannot be promoted (the pins[] label path
+    # already notes why).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "no_geom")
+    r1["ports"][0] = {"name": r1["ports"][0]["name"]}
+    bare_port = r1["ports"][0]["name"]
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "g", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["g"], "spacing_um": 1.0},
+            "pins": [{"net": "NOWHERE", "block": "g", "port": bare_port}],
+            "options": {
+                "cell_name": "no_geom_0",
+                "output": str(tmp_path / "no_geom_0.gds"),
+            },
+        }
+    )
+    assert report["ports"] == []
+    assert report["pins"][0]["labelled"] is False
+    assert any("was not labelled" in note for note in report["drc_hints"]["notes"])
+
+
+def test_compose_promoted_ports_note_a_repeated_net_name(tmp_path, pdk_root):
+    # Two pins[] entries sharing one net name are one net at two points, which
+    # collapses to a single addressable port name one level up -- reported as
+    # a note rather than silently dropping the second entry.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "dup_r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "dup_r2")
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "a", "generator_report": r1},
+                {"id": "b", "generator_report": r2},
+            ],
+            "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
+            "pins": [
+                {"net": "VDD", "block": "a", "port": "P1"},
+                {"net": "VDD", "block": "b", "port": "P2"},
+            ],
+            "options": {
+                "cell_name": "dup_pin_0",
+                "output": str(tmp_path / "dup_pin_0.gds"),
+            },
+        }
+    )
+    assert [p["name"] for p in report["ports"]] == ["VDD", "VDD"]
+    assert any(
+        "repeats a net name already promoted" in note
+        for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_mixes_a_cell_block_with_a_nested_composition(tmp_path, pdk_root):
+    # Both of #1189's cases in one request: a nested `gen-compose` response and
+    # a library cell placed side by side, wired to each other.
+    child = _compose_pair(tmp_path, pdk_root, "child_3")
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_load": (1.5, 1.2)})
+    output = tmp_path / "mixed_0.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "sub", "generator_report": child},
+                {
+                    "id": "load",
+                    "cell": {
+                        "gds_path": gds,
+                        "cell_name": "lib_load",
+                        "ports": _library_cell_ports(1.5, 1.2),
+                    },
+                },
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["sub", "load"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "OUT_TO_LOAD",
+                    "pins": [
+                        {"block": "sub", "port": "OUT"},
+                        {"block": "load", "port": "A"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "mixed_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert [b["source"] for b in report["blocks"]] == ["generator_report", "cell"]
+    assert output.is_file()
+
+
+def test_cli_gen_compose_places_a_library_cell_and_nests_its_own_output(
+    tmp_path, pdk_root, capsys
+):
+    # End-to-end through the real CLI, headless: place a library cell by name
+    # (bbox read from the stream), then feed the emitted JSON response back in
+    # as a blocks[].generator_report for a second run -- the exact two-step a
+    # caller performs, with no hand-editing between them (#1189).
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    level1_request = tmp_path / "level1.json"
+    level1_out = tmp_path / "level1.gds"
+    level1_request.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {
+                        "id": "u1",
+                        "cell": {
+                            "gds_path": gds,
+                            "cell_name": "lib_inv",
+                            "ports": _library_cell_ports(2.0, 1.2),
+                        },
+                    }
+                ],
+                "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+                "pins": [{"net": "OUT", "block": "u1", "port": "Y"}],
+                "options": {"cell_name": "level1", "output": str(level1_out)},
+            }
+        )
+    )
+
+    assert main(["gen-compose", str(level1_request), "--format", "json"]) == 0
+    level1 = json.loads(capsys.readouterr().out)
+    assert level1["generator"] == "gen-compose"
+    assert level1["blocks"][0]["source"] == "cell"
+    assert [p["name"] for p in level1["ports"]] == ["OUT"]
+    assert level1_out.is_file()
+
+    level2_request = tmp_path / "level2.json"
+    level2_out = tmp_path / "level2.gds"
+    level2_request.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "sub", "generator_report": level1}],
+                "placement": {"strategy": "row", "order": ["sub"], "spacing_um": 1.0},
+                "pins": [{"net": "TOP_OUT", "block": "sub", "port": "OUT"}],
+                "options": {"cell_name": "level2", "output": str(level2_out)},
+            }
+        )
+    )
+
+    assert main(["gen-compose", str(level2_request), "--format", "json"]) == 0
+    level2 = json.loads(capsys.readouterr().out)
+    assert level2["blocks"][0]["generator"] == "gen-compose"
+    assert level2["blocks"][0]["cell_name"] == "level1"
+    assert [p["name"] for p in level2["ports"]] == ["TOP_OUT"]
+    assert level2_out.is_file()
+
+
+def test_cli_gen_compose_text_names_a_cell_block_by_its_cell_name(
+    tmp_path, pdk_root, capsys
+):
+    # The text format is a courtesy, not the contract -- but it must not print
+    # "None" where a `cell` block has no generator to name.
+    gds = _write_library_gds(tmp_path / "lib.gds", {"lib_inv": (2.0, 1.2)})
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "u1", "cell": {"gds_path": gds, "cell_name": "lib_inv"}}
+                ],
+                "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "text_cell_0",
+                    "output": str(tmp_path / "text_cell_0.gds"),
+                },
+            }
+        )
+    )
+
+    assert main(["gen-compose", str(request_path), "--format", "text"]) == 0
+    out = capsys.readouterr().out
+    assert "u1 (lib_inv)" in out
+    assert "None" not in out

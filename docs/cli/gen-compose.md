@@ -189,6 +189,20 @@ cleanly.
   whose layer has no label convention (e.g. a `bjt_array` collector-ring
   `COLL_*` tap on the diffusion layer) is a **partial success**: the pin is
   left unlabelled with a `drc_hints.notes[]` entry, never a hard failure.
+- **Blocks this command did not generate (#1189)** — a `blocks[]` entry names
+  its geometry source in exactly one of two ways. `generator_report` is a
+  `klt` verb's own JSON response — [`klt gen`](gen.md), [`klt draw`](draw.md),
+  or **`klt gen-compose` itself**, whose response now reports
+  `generator: "gen-compose"` plus a `ports[]` promoted from its own `pins[]`,
+  which is what makes composition **nest** instead of being one flat level.
+  `cell` instead names a cell that **already exists** in a stream — a PDK
+  standard cell, a hand-drawn library cell — as
+  `{gds_path, cell_name, ports, bbox_um}`, with `bbox_um` read straight from
+  the stream when omitted. Neither case needs a hand-forged report with a fake
+  `generator` field, and neither needs the caller to re-key `klt cells`'
+  `{left, bottom, right, top}` bbox into this command's `{x0, y0, x1, y1}`.
+  See ["Hierarchical composition and library cells
+  (#1189)"](#hierarchical-composition-and-library-cells-1189) below.
 - **`drc_hints`** — `matched_groups[]` reports every distinct
   `matched_group_id` seen among the input blocks (read-only echo of
   `generator_report.drc_hints.matched_group_id`, `placement_symmetric: null` —
@@ -836,7 +850,12 @@ exit codes).
 | `pdk.variant`/`pdk.root` | string \| null | The exact fields `klt pdk find --pdk`/`--pdk-root` accept ([`docs/cli/pdk.md`](pdk.md)) — resolved through that one resolver, never a private lookup. `pdk` accepts **only** these two keys — an unrecognised key (e.g. `name`, a plausible typo for `variant`) is an application error (exit 1) naming the offending key(s), not a silent fallback to `$PDK`/the default search order. |
 | `blocks[]` | array\<object\> | Each already-generated primitive to place — see below. |
 | `blocks[].id` | string | Caller-chosen label used to address the block's ports elsewhere in this request (`placement.order`, `connectivity[].pins[].block`). Must be unique within `blocks[]`. |
-| `blocks[].generator_report` | object \| string | The block's own [`klt gen`](gen.md) JSON response — either an inline object, or a path to a file holding one (mirrors `klt gen --params`'s own path-or-inline duality). A relative path string resolves against **the request file's own directory** (not the process's current working directory), matching `klt lvs`'s request-relative path convention — an absolute path is unaffected. When `compose()` is called directly as a library (no request file at all), relative paths resolve against the process's current working directory instead. This command's only input about a block's geometry is its already-reported `bbox_um`/`ports[]`/`cell_name`/`gds_path` — never a second, private inspection of the GDS stream at request-parse time. [`klt draw`](draw.md)'s own JSON response is also accepted unmodified — its `generator: "draw"` field and `cell_name`/`gds_path`/`bbox_um` already satisfy this schema (a `draw` block has no `ports[]`, which defaults to `[]`). |
+| `blocks[].generator_report` | object \| string | The block's own [`klt gen`](gen.md) JSON response — either an inline object, or a path to a file holding one (mirrors `klt gen --params`'s own path-or-inline duality). **Exactly one** of `generator_report`/`cell` must be present per entry; declaring both, or neither, is an application error (exit 1). A relative path string resolves against **the request file's own directory** (not the process's current working directory), matching `klt lvs`'s request-relative path convention — an absolute path is unaffected. When `compose()` is called directly as a library (no request file at all), relative paths resolve against the process's current working directory instead. This command's only input about a block's geometry is its already-reported `bbox_um`/`ports[]`/`cell_name`/`gds_path` — never a second, private inspection of the GDS stream at request-parse time. [`klt draw`](draw.md)'s own JSON response is also accepted unmodified — its `generator: "draw"` field and `cell_name`/`gds_path`/`bbox_um` already satisfy this schema (a `draw` block has no `ports[]`, which defaults to `[]`). So is **this command's own response** (#1189): it reports `generator: "gen-compose"` and a composed-frame `ports[]`, so a composition nests into a further composition unmodified. `generator` is required — a report without it is an application error whose message points at `blocks[].cell` below, which is the supported way to place a cell no `klt` verb generated (rather than hand-forging a report with a fake `generator`). |
+| `blocks[].cell` | object | **Alternative to `generator_report`** (#1189) — an **existing** cell in a GDS/OASIS stream this command did not generate: a PDK standard cell, a vendor macro, any pre-drawn library cell. Placed, oriented, wired, and instantiated exactly like a generated block. Exactly one of `generator_report`/`cell` per `blocks[]` entry. |
+| `blocks[].cell.gds_path` | string | Required. The stream holding the cell. A relative path resolves against **the request file's own directory**, the same convention a `generator_report` path string uses. |
+| `blocks[].cell.cell_name` | string | Required. The cell to place, by name. A stream with no such cell is an application error (exit 1) that lists the names the stream does contain. |
+| `blocks[].cell.ports[]` | array\<object\> | Optional, defaults to `[]`. Named terminals in the **cell's own** coordinate frame, using exactly the shape [`klt gen`](gen.md) reports (`name`, and optional `x_um`/`y_um`, `width_um`, `direction_deg`, `layer: {layer, datatype}`, `net`) — this is what lets a library cell participate in `connectivity[]` and `pins[]`. Unlike a `generator_report`'s ports (which a `klt` verb produced), these are hand-declared and therefore validated: a duplicate `name`, an `x_um` without a `y_um`, a non-positive `width_um`, a non-orthogonal `direction_deg`, or a malformed `layer` is an application error (exit 1). A port may carry a `name` only — it is then placeable but neither routable nor labellable, exactly like an under-reported generated port. |
+| `blocks[].cell.bbox_um` | object | Optional. The cell's own (pre-placement) `{x0, y0, x1, y1}` footprint. **When omitted it is read from the stream** — `kdb.Cell.dbbox()`, i.e. the same box [`klt cells`](cells.md) reports under its `{left, bottom, right, top}` field names, translated here so the caller never has to. Declare it explicitly when the placement footprint should differ from the drawn extent (e.g. a standard cell's row-abutment box), or when the cell draws no geometry at all (an empty cell has no readable bbox — that is an application error, exit 1, naming this field as the fix). |
 | `blocks[].orientation` | string | Optional, default `"none"` (#1166). `"none"`, `"mirror_x"`, `"mirror_y"`, or `"rotate_180"` — this block's own mirror/rotation, applied about its own local origin *before* placement translates it. See "Block orientation (mirror/rotate, #1166)" below for the exact transform and the same-facing-port case it unblocks. An unrecognised value is an application error (exit 1). |
 | `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |
@@ -862,14 +881,30 @@ exit codes).
 ```json
 {
   "schema_version": 1,
+  "generator": "gen-compose",
   "cell_name": "ota_top_0",
   "gds_path": "ota_top_0.gds",
   "pdk": { "name": "sky130A", "variant": "sky130A", "version": "open_pdks 0fe599b" },
   "bbox_um": { "x0": -0.92, "y0": -0.92, "x1": 14.2, "y1": 2.16 },
+  "ports": [
+    {
+      "name": "VBIAS",
+      "net": "VBIAS",
+      "layer": { "layer": 66, "datatype": 20, "name": null },
+      "x_um": 11.3,
+      "y_um": 1.04,
+      "width_um": 0.15,
+      "direction_deg": 90,
+      "block": "tail",
+      "port": "U0_G"
+    }
+  ],
   "blocks": [
     {
       "id": "diffpair",
+      "source": "generator_report",
       "generator": "diff_pair",
+      "cell_name": "diff_pair_0",
       "offset_um": { "x": 0.0, "y": 0.0 },
       "bbox_um": { "x0": -0.92, "y0": -0.92, "x1": 3.56, "y1": 2.16 },
       "orientation": "none"
@@ -922,10 +957,12 @@ exit codes).
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `schema_version` | integer | Version of this command's JSON shape (starts at `1`). |
+| `generator` | string | Always `"gen-compose"` (#1189) — the marker that makes this whole response a valid `blocks[].generator_report` for another `klt gen-compose` run, mirroring [`klt draw`](draw.md)'s own `generator: "draw"`. It names the *producing verb*, not a `klt gen` generator. |
 | `cell_name` | string | Name of the top cell written into `gds_path`, containing every placed block's cell as a translated sub-cell instance plus all routed metal. |
 | `gds_path` | string | Resolved output path (echoes `options.output`, or the computed default). |
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields. |
 | `bbox_um` | object | Bounding box of the *composed* cell — the union of every placed block's own `bbox_um`, translated by its `offset_um` (computed arithmetically from each block's reported `bbox_um`, never re-derived from drawn geometry). |
+| `ports[]` | array\<object\> | The composed cell's **own** named terminals (#1189), in the composed (post-placement) coordinate frame — one per request `pins[]` entry, in request order. Same entry shape as [`klt gen`](gen.md)'s `ports[]` (`name`, `net`, `layer`, `x_um`, `y_um`, `width_um`, `direction_deg`) plus `block`/`port` recording which sub-block port it was promoted from. `name` **and** `net` are the `pins[]` entry's own `net` string — the same name written as the port's `kdb.Text` label — so the composed cell's port name, its drawn label, and the name `klt extract` recovers all agree, and the level above addresses it as `connectivity[].pins[].port`. Always present; **empty when the request supplied no `pins[]`** (backward compatible). Only `pins[]` is promoted: auto-exposing every sub-block port would both flood the parent with internal terminals and collide names across blocks (two `mos_array` blocks both report `U0_D`). A `pins[]` port with no reported `{x_um, y_um, layer}` geometry has no composed-frame position and is skipped (the same `drc_hints.notes[]` entry the label path emits explains why); two `pins[]` entries sharing one `net` name both appear, with a note that only the first is addressable by name one level up. |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
 | `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean — `true` only when *every* pin joined one component), `route_length_um` (summed wire length in um across the net's **drawn** legs, or `null` when zero legs were drawn — for a caller doing a first-order parasitic estimate before extraction), `status` (below), and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). Under a declare-only request (`routing` absent/`{}`, #1188), every net reports `routed: false`, `status: "unrouted"`, `route_length_um: null`, and every leg's `reason: "routing not requested"` — validated against the blocks' own ports, but never drawn. |
 | `nets[].status` | string | One of `"routed"` (every pin connected into one component), `"partial"` (at least one leg drawn, but the net is not fully connected), or `"unrouted"` (no leg was ever accepted, including every net under a declare-only request, #1188) — issue #1169. Distinguishes a partially-drawn net from a fully-undrawn one: both report `routed: false`, so a caller must read `status` (not just count `legs[].routed`) to tell them apart. |
@@ -948,7 +985,9 @@ exit codes).
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `id` | string | Echo of the request's `blocks[].id`. |
-| `generator` | string | Echoed from that block's own `generator_report.generator`. |
+| `source` | string | Which request form sourced this block's geometry (#1189): `"generator_report"` (a `klt` verb's own response) or `"cell"` (an existing cell in a stream). |
+| `generator` | string \| null | Echoed from that block's own `generator_report.generator`; **`null`** for a `source: "cell"` block (#1189), which no generator produced. |
+| `cell_name` | string | The source cell's own name (#1189) — from `generator_report.cell_name` or `cell.cell_name`. This is the cell copied into the composed output (instantiated there under a `"<id>__<cell_name>"` sub-cell). |
 | `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). Under `"array"` (#1053), `offset_um` is exactly `placement.origin_um` (the base, row-0/col-0 tile) — every *other* tile's own position is implied by `rows`/`cols`/`row_pitch_um`/`col_pitch_um` rather than reported as a separate `blocks[]` entry (there is still exactly one `blocks[]` entry for an `"array"`-placed block, echoing this base tile). |
 | `bbox_um` | object | That block's own `generator_report.bbox_um`, transformed by `orientation` (#1166, about the block's own local origin) then translated by `offset_um`, in the composed cell's coordinate frame — **except under `"array"`** (#1053), where `bbox_um` is instead the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. |
 | `orientation` | string | Echo of the request's `blocks[].orientation` (#1166), `"none"` when omitted. |
@@ -967,7 +1006,12 @@ bump; renaming, removing, or retyping an existing field requires one.
 **One new guarantee specific to composition:** a block's `bbox_um`/`ports[]`
 are consumed exactly as its own `generator_report` reported them — this
 command never re-derives a block's placement math from its GDS stream (see
-"Engine" above).
+"Engine" above). A `blocks[].cell` entry (#1189) is the one narrow, opt-in
+exception: when — and only when — it declares no `bbox_um` of its own, that
+one value is read from the stream's own cell. There is no report to consume
+for a cell no `klt` verb generated, and requiring the caller to transcribe one
+by hand is exactly the gap #1189 filed. A `generator_report` block's `bbox_um`
+is still never read from its stream.
 
 ## Text format
 
@@ -1245,6 +1289,133 @@ every tile, matching `kdb.CellInstArray`'s own semantics — its `a`/`b` step
 vectors are added in the *parent* frame, after the instance's own
 rotation/mirror). An unrecognised `orientation` value is an application
 error (exit 1).
+
+## Hierarchical composition and library cells (#1189)
+
+Before #1189, `blocks[].generator_report` was the only way to name a block's
+geometry, and it required a `generator` field — so the only cells this command
+could consume were the ones `klt gen` (or `klt draw`, #1059) had produced.
+Two cells a caller plainly wants to place fell outside that: **this command's
+own output** (no `generator`, no `ports[]`, so composition could not nest) and
+**a cell out of the PDK's own library** (no report at all). Both were reachable
+only by hand-forging a report object with a fake `generator` — and, for a
+library cell, by re-keying `klt cells`' `{left, bottom, right, top}` bbox into
+this command's `{x0, y0, x1, y1}` — with nowhere to put ports, so nothing about
+such a block could participate in `connectivity[]`/`pins[]`.
+
+### Nesting a composition into a further composition
+
+A `klt gen-compose` response now reports `generator: "gen-compose"` and a
+`ports[]` promoted from its own `pins[]`, in the composed coordinate frame. So
+the response feeds straight back in, unmodified:
+
+```bash
+# Level 1: compose two devices and promote the outer terminals to pins.
+klt gen-compose stage.json --format json > stage.json.out
+```
+
+```json
+{
+  "blocks": [
+    { "id": "r1", "generator_report": "r1.json" },
+    { "id": "r2", "generator_report": "r2.json" }
+  ],
+  "placement": { "strategy": "row", "order": ["r1", "r2"], "spacing_um": 2.0 },
+  "connectivity": [
+    { "net": "MID", "pins": [{ "block": "r1", "port": "P2" },
+                             { "block": "r2", "port": "P1" }] }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17 },
+  "pins": [
+    { "net": "IN", "block": "r1", "port": "P1" },
+    { "net": "OUT", "block": "r2", "port": "P2" }
+  ],
+  "options": { "cell_name": "stage_0", "output": "stage_0.gds" }
+}
+```
+
+`stage.json.out` now carries `ports[]` entries named `IN` and `OUT`. Level 2
+places that whole composed cell as one block and wires `OUT` onward — the
+promoted name is what `connectivity[].pins[].port` addresses:
+
+```json
+{
+  "blocks": [
+    { "id": "stage", "generator_report": "stage.json.out" },
+    { "id": "load", "generator_report": "load.json" }
+  ],
+  "placement": { "strategy": "row", "order": ["stage", "load"], "spacing_um": 2.0 },
+  "connectivity": [
+    { "net": "CHAIN", "pins": [{ "block": "stage", "port": "OUT" },
+                               { "block": "load", "port": "P1" }] }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17 },
+  "options": { "cell_name": "chain_0", "output": "chain_0.gds" }
+}
+```
+
+The nested cell is placed **whole** — its own `bbox_um` (union of its
+sub-blocks plus routing) is what the parent's placement math uses, and its
+hierarchy is preserved in the output (the parent's top cell instantiates
+`stage__stage_0`, which still contains the child's own `r1__…`/`r2__…`
+sub-cells). Promotion is transitive: the parent may name a promoted port in
+its *own* `pins[]` to re-promote it a level further up.
+
+Only `pins[]` entries are promoted. That is deliberate: `pins[]` already means
+"this port is a top-level pin of the composed cell", so it is the caller's own
+declaration of the module's interface. Auto-promoting every sub-block port
+would flood the parent with internal terminals and collide names across blocks
+(two `mos_array` blocks both report `U0_D`).
+
+### Placing a cell out of a library
+
+`blocks[].cell` names a cell that already exists in a stream. Nothing about it
+came from a `klt` verb, so nothing is echoed from a report: the ports are
+declared by the caller (in the cell's own frame, using `klt gen`'s port shape),
+and the bounding box is read from the cell itself unless declared.
+
+```json
+{
+  "blocks": [
+    {
+      "id": "u1",
+      "cell": {
+        "gds_path": "/pdk/sky130A/libs.ref/sky130_fd_sc_hd/gds/sky130_fd_sc_hd.gds",
+        "cell_name": "sky130_fd_sc_hd__inv_2",
+        "ports": [
+          { "name": "A", "layer": { "layer": 67, "datatype": 20 },
+            "x_um": 0.0, "y_um": 1.32, "width_um": 0.2, "direction_deg": 180 },
+          { "name": "Y", "layer": { "layer": 67, "datatype": 20 },
+            "x_um": 1.38, "y_um": 1.32, "width_um": 0.2, "direction_deg": 0 }
+        ]
+      }
+    },
+    { "id": "u2", "cell": { "gds_path": "…", "cell_name": "sky130_fd_sc_hd__buf_2",
+                            "ports": [ … ] } }
+  ],
+  "placement": { "strategy": "row", "order": ["u1", "u2"], "spacing_um": 0.0 },
+  "connectivity": [
+    { "net": "N1", "pins": [{ "block": "u1", "port": "Y" },
+                            { "block": "u2", "port": "A" }] }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17 },
+  "options": { "cell_name": "cellrow_0", "output": "cellrow_0.gds" }
+}
+```
+
+A `cell` block is otherwise an ordinary block: it takes `blocks[].orientation`
+(#1166), works under every `placement.strategy` including `"array"` (#1053),
+routes through `connectivity[]`, labels through `pins[]`, and can be mixed
+freely with `generator_report` blocks in one request. Its response entry
+reports `source: "cell"`, `generator: null`, and the `cell_name` placed.
+
+**Related limitation, not fixed here.** `placement.strategy: "explicit"` still
+supports no per-block rotation beyond `blocks[].orientation`'s four
+mirror/rotate values, and there is no *per-tile* orientation override under
+`"array"` (#1166). Standard-cell rows are conventionally built by mirroring
+alternate rows so adjacent rows share a power rail; expressing that today
+means one `blocks[]` entry per row, each with its own `orientation`, rather
+than one array. That is a placement question, tracked separately.
 
 ## Worked example
 
