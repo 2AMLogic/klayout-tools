@@ -1660,6 +1660,24 @@ def deck_source_path(name: str) -> str | None:
     return getattr(module, "__file__", None)
 
 
+def deck_names() -> list[str]:
+    """Every built-in deck name *this build* ships, sorted.
+
+    The union of the DRC registry (:func:`get_deck`) and the extraction
+    registry (:func:`get_extraction_deck`) -- deliberately separate rule
+    tables that happen to share PDK-family names, so a name registered in
+    either is a real deck a run can name. Used to validate a deck name before
+    :func:`deck_source_path` imports it (issue #1202): every deck name maps to
+    a sibling module, but not every sibling module is a deck, so an unchecked
+    name would happily hash ``history.py``.
+
+    Note this answers "what does this build ship", which is a different
+    question from :func:`klayout_tools.decks.history.known_deck_names`'s "what
+    have past releases shipped".
+    """
+    return sorted(set(_registry()) | set(_extraction_registry()))
+
+
 def _registry() -> dict[str, list[DrcRule]]:
     from . import gf180mcu, sg13g2, sky130
 

@@ -203,6 +203,38 @@ def _input_block(path: str | None) -> dict[str, Any] | None:
     return {"content_hash": _content_hash(path)}
 
 
+class UnknownProvenanceDeckError(Exception):
+    """Raised by :func:`deck_identity` for a name no built-in deck registers."""
+
+
+def deck_identity(name: str) -> dict[str, Any]:
+    """The ``provenance.deck`` block for a built-in deck, by name alone
+    (issue #1202) -- no layout file, no engine run.
+
+    ``provenance.deck.content_hash`` is the identity that actually pins a
+    run's rule set, but obtaining it used to require *running a check* (and
+    therefore having some layout handy to run it against). This is the same
+    block a report would carry for ``name``, computed the only way that can
+    stay honest: by calling :func:`_deck_block` itself, so the answer cannot
+    drift from what a real run records.
+
+    Raises :class:`UnknownProvenanceDeckError` for a name no deck registers --
+    without which :func:`~klayout_tools.decks.deck_source_path` would happily
+    import and hash any sibling module of the deck package.
+    """
+    from .decks import deck_names, deck_source_path
+
+    known = deck_names()
+    if name not in known:
+        raise UnknownProvenanceDeckError(
+            f"unknown deck '{name}' (available: {', '.join(known)})"
+        )
+    block = _deck_block(name, deck_source_path(name))
+    if block is None:  # unreachable: _deck_block is None only for name=None
+        raise UnknownProvenanceDeckError(f"unknown deck '{name}'")
+    return block
+
+
 def build_provenance(
     *,
     deck_name: str | None = None,

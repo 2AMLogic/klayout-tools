@@ -55,6 +55,7 @@ docs/
     stats.md
     synthesize.md
     trajectory.md
+    version.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
     co-simulation-approach-survey.md

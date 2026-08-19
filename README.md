@@ -123,6 +123,8 @@ klt report result.json                   # render a klt JSON report as markdown 
 klt signoff drc.json lvs.json            # aggregate drc/lvs/extract/sim JSON into one pass/fail verdict
 klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone table + plot
 klt deck resolve --content-hash sha256:... # pinned deck hash -> klayout-tools tag/version that shipped it
+klt deck hash --deck sky130              # the deck content hash this build will use, no layout needed
+klt version --format json                # which build is this: version, commit, release or not
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/), one page per verb.

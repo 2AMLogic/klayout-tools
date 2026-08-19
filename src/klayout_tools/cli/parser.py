@@ -8,7 +8,6 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import __version__
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
@@ -48,6 +47,7 @@ from . import (
     synthesize_cmd,
     techmap_cmd,
     trajectory_cmd,
+    version_cmd,
     yield_campaign_cmd,
     yield_cmd,
     yield_sensitivity_cmd,
@@ -66,6 +66,29 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
+
+
+class _BuildVersionAction(argparse.Action):
+    """``--version``, printing the *build* identity (issue #1202).
+
+    Replaces argparse's built-in ``action="version"`` for one reason: the
+    string is computed when the flag is used, not when the parser is built.
+    Resolving a source checkout's identity shells out to git, and every ``klt``
+    invocation builds this parser -- an eagerly-formatted version string would
+    put those subprocesses in front of every single command.
+    """
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, help=None):
+        super().__init__(
+            option_strings=option_strings, dest=dest, default=argparse.SUPPRESS, nargs=0
+        )
+        self.help = help
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from ..build_identity import build_version
+
+        print(f"klt {build_version()}")
+        parser.exit()
 
 
 def _no_subcommand_handler(parser: argparse.ArgumentParser):
@@ -107,7 +130,15 @@ def create_parser() -> argparse.ArgumentParser:
         prog="klt",
         description="Tools for AI agents to work with IC layout.",
     )
-    parser.add_argument("--version", action="version", version=f"klt {__version__}")
+    parser.add_argument(
+        "--version",
+        action=_BuildVersionAction,
+        help=(
+            "print the running build's identity and exit -- bare `klt X.Y.Z` "
+            "for a tagged release, `klt X.Y.Z+g<sha>` otherwise (see `klt "
+            "version --format json`)"
+        ),
+    )
     # No default handler: absence of a subcommand is handled by main().
     parser.set_defaults(func=None)
 
@@ -859,6 +890,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_pdk_parser(subparsers)
     _add_deck_parser(subparsers)
+    _add_version_parser(subparsers)
 
     extract_parser = subparsers.add_parser(
         "extract",
@@ -2870,24 +2902,28 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``deck`` verb with a nested ``resolve`` subcommand
-    (issue #623), mirroring ``pdk``/``kb``'s grouped-verb pattern (see
-    ``_add_pdk_parser``) so future deck-history operations (e.g. listing the
-    full table) have a natural home alongside ``resolve``.
+    """Register the ``deck`` verb with nested ``resolve`` (issue #623) and
+    ``hash`` (issue #1202) subcommands, mirroring ``pdk``/``kb``'s
+    grouped-verb pattern (see ``_add_pdk_parser``) so future deck-identity
+    operations (e.g. listing the full table) have a natural home alongside
+    them.
     """
     deck_parser = subparsers.add_parser(
         "deck",
-        help="resolve a built-in rule deck by content hash or version",
+        help="identify a built-in rule deck, or resolve one to its release",
         description=(
-            "Resolve one of klt's built-in DRC/LVS rule decks (sky130, "
-            "gf180mcu) against klayout-tools' own release history, so a "
+            "Identify klt's built-in DRC/LVS rule decks (sky130, gf180mcu, "
+            "sg13g2). `hash` reports the `provenance.deck.content_hash` this "
+            "build resolves for a deck, with no layout file and no check run "
+            "-- the cheap way to gate on the deck revision a build will use "
+            "before doing any work. `resolve` goes the other way: it turns a "
             "pinned `provenance.deck.content_hash` (docs/json-contract.md) "
-            "or a `deck name + version` can be turned back into the "
-            "klayout-tools git tag/commit and PyPI version that shipped it "
-            "-- without hand-bisecting this repo's git history to reproduce "
-            "against an older deck revision. Resolve-only: this does not "
-            "fetch, check out, or build the historical revision -- install "
-            "the reported version yourself to reproduce against it."
+            "or a `deck name + version` back into the klayout-tools git "
+            "tag/commit and PyPI version that shipped it, without "
+            "hand-bisecting this repo's git history to reproduce against an "
+            "older deck revision. Resolve-only: this does not fetch, check "
+            "out, or build the historical revision -- install the reported "
+            "version yourself to reproduce against it."
         ),
     )
     deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
@@ -2932,6 +2968,57 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text)",
     )
     resolve_parser.set_defaults(func=deck_cmd.run_resolve)
+
+    hash_parser = deck_sub.add_parser(
+        "hash",
+        help="report the content hash this build resolves for a deck",
+        description=(
+            "Report the `provenance.deck.content_hash` this build would "
+            "record for a built-in deck -- with no layout file and no check "
+            "run (issue #1202). The hash, not the package version, is what "
+            "pins a run's rule set, so gating on it used to mean running a "
+            "throwaway `klt drc` on whatever layout happened to be around "
+            "just to read the hash back out of the report. This answers the "
+            "same question directly, so a CI preflight or container smoke "
+            "test can check the deck it is about to use before doing any "
+            "work. Pair with `klt deck resolve --content-hash <hash>` to "
+            "turn the answer into the release that shipped it."
+        ),
+    )
+    hash_parser.add_argument(
+        "--deck",
+        required=True,
+        help="built-in deck name to identify (e.g. sky130, gf180mcu, sg13g2)",
+    )
+    _add_format_arg(hash_parser)
+    hash_parser.set_defaults(func=deck_cmd.run_hash)
+
+
+def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``version`` verb (issue #1202).
+
+    A verb rather than only a flag, because the ``--version`` flag has no
+    ``--format`` of its own: a machine consumer gating on "is this build a
+    release?" needs the structured payload, not a string to re-parse.
+    """
+    version_parser = subparsers.add_parser(
+        "version",
+        help="report the running build's identity (release vs post-tag build)",
+        description=(
+            "Report which klayout-tools build is running: its version, the "
+            "git commit it was built from, and whether that commit is this "
+            "version's release tag. The package version alone cannot answer "
+            "the last question -- a source build made after a release tag "
+            "declares the same version the release does -- so `version` "
+            "reports a PEP 440 local-version form (`X.Y.Z+g<sha>`) for any "
+            "build that is not a confirmed release, and a bare `X.Y.Z` for "
+            "one that is. Identifying the build never fails: an "
+            "unrecoverable identity is reported as `X.Y.Z+unknown` with "
+            "`is_release: null`, not as an error."
+        ),
+    )
+    _add_format_arg(version_parser)
+    version_parser.set_defaults(func=version_cmd.run)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:

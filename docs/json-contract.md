@@ -91,7 +91,15 @@ above): adopting it required no `schema_version` bump on any verb.
 }
 ```
 
-- `klt_version` — the running `klt` package version (`klayout_tools.__version__`).
+- `klt_version` — the running `klt` package version
+  (`klayout_tools.__version__`). This is the plain, static package version —
+  deliberately *not* the build-identity string (issue #1202), which a
+  post-tag source build reports as `X.Y.Z+g<sha>`; that one is available from
+  `klt version --format json` as `version`, alongside `git_commit` and the
+  tri-state `is_release`. Record it beside a report when "which build
+  produced this?" has to remain answerable later; `klt_version` alone cannot
+  tell a release from a source build made after that release's tag. See
+  `docs/cli/version.md`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
@@ -115,7 +123,12 @@ above): adopting it required no `schema_version` bump on any verb.
   deck; see `docs/cli/deck.md`. Note that `klt_version`/`klt --version`
   alone is *not* sufficient to confirm two runs used the same rule set (a
   rebuild of the same version can carry a different deck) — `content_hash`
-  is the field that actually pins the rule set.
+  is the field that actually pins the rule set. The same hash can be obtained
+  with no layout file and no check run at all from `klt deck hash --deck
+  <name>` (issue #1202), whose payload is
+  `{schema_version, deck, content_hash, released}` — the same `content_hash`
+  and `released` values this block carries, so a consumer can gate on the
+  deck a build will use *before* doing any work.
   - `released` (issue #1193) is that same `klt deck resolve` lookup run
     automatically, at generation time, so a "clean" report doesn't silently
     accumulate evidence against a deck revision no release ever ships. A
