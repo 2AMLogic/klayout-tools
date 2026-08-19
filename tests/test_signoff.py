@@ -959,7 +959,13 @@ def test_digital_manifest_uses_the_digital_column():
 
     item_1 = next(item for item in result["items"] if item["id"] == 1)
     assert "RTL" in item_1["text"]
-    assert "schematic" not in item_1["text"]
+    # The digital column's RTL/synthesis guidance stays primary; the doc's
+    # full-custom (no RTL, no synthesis) sub-case documents its substitute
+    # artifact as an explicit, named cross-reference to the Analog column's
+    # own artifact -- not by silently blending the two flows (issue #1190).
+    assert "schematic" in item_1["text"]
+    assert "full-custom digital partition" in item_1["text"]
+    assert "Analog column's artifact" in item_1["text"]
 
 
 def test_analog_manifest_uses_the_analog_column():
@@ -967,6 +973,45 @@ def test_analog_manifest_uses_the_analog_column():
 
     item_1 = next(item for item in result["items"] if item["id"] == 1)
     assert "schematic" in item_1["text"]
+
+
+def test_digital_column_documents_the_full_custom_sub_case_for_items_1_2_5():
+    """Issue #1190: a hand-captured full-custom digital partition (no RTL,
+    no synthesis) has no RTL/synthesis artifact to cite -- the doc's Digital
+    column for items 1, 2, and 5 documents a named substitute inline, as a
+    sub-case of the existing column rather than a new column or manifest
+    `kind` (grading is unaffected either way: these three items already
+    accept any recognised evidence kind, regardless of what the column text
+    says)."""
+    result = build_tier_report(_manifest(kind="digital"))
+    by_id = {item["id"]: item for item in result["items"] if item["tier"] == "T1"}
+
+    # Item 1 (Design sources): RTL/synthesis stays the primary artifact, but
+    # the full-custom substitute (schematic sources + regenerated netlist,
+    # the Analog column's own artifact) is documented too.
+    assert "RTL" in by_id[1]["text"]
+    assert "full-custom digital partition" in by_id[1]["text"]
+    assert "Analog column's artifact" in by_id[1]["text"]
+
+    # Item 2 (Layout): P&R stays primary; the full-custom substitute is
+    # hand-drawn GDS/OASIS with documented provenance.
+    assert "place-and-route" in by_id[2]["text"]
+    assert "full-custom" in by_id[2]["text"]
+    assert "hand-drawn layout" in by_id[2]["text"]
+
+    # Item 5 (Full corner verification): STA stays primary; the full-custom
+    # substitute is PVT-corner SPICE sim plus an explicit per-corner timing
+    # margin metric standing in for the STA setup/hold requirement.
+    assert "static timing analysis" in by_id[5]["text"]
+    assert "full-custom" in by_id[5]["text"]
+    assert "timing-margin metric" in by_id[5]["text"]
+    assert "PVT" in by_id[5]["text"]
+
+    # Item 7 (Post-layout verification) is deliberately untouched -- its
+    # grading is already pex-kind-restricted regardless of column text, so
+    # no full-custom-specific wording was added (see the doc's "Block kind"
+    # subsection).
+    assert "full-custom" not in by_id[7]["text"]
 
 
 def test_mixed_signal_manifest_doubles_up_kind_independent_items():

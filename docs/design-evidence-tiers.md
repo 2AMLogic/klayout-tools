@@ -74,6 +74,27 @@ every block.
   Analog column (schematic capture, PVT corner sweeps, Monte Carlo) is
   applicable or required — a digital block is not held to analog artifacts
   it has no reason to produce.
+  - **Full-custom digital sub-case.** A digital partition is not always
+    RTL/synthesis by construction: where no compatible open standard-cell
+    library exists for the PDK/voltage combination in use, every logic gate
+    may instead be hand-captured as a schematic and verified via SPICE + PVT
+    sweep, exactly like an analog partition — no RTL, no synthesis step.
+    Items 1, 2, and 5 below spell out the full-custom substitute artifact
+    inline, as a **sub-case of the Digital column** rather than a third
+    column or a new block `kind` (issue #1190) — the same choice #636
+    made for the Analog/Digital split itself stays the load-bearing
+    structure, so neither `klt signoff`'s parser
+    (`design_evidence_tiers.py`'s `_COLUMN_BULLET`, which hardcodes exactly
+    the two labels `Analog`/`Digital`) nor its manifest `kind` enum
+    (`analog`/`digital`/`mixed-signal`, `signoff.py`'s `_BLOCK_KINDS`) needs
+    to change — a full-custom digital block still declares `kind: "digital"`
+    and is graded the same way any other digital block is. Item 7 needs no
+    separate full-custom text: its grading is already restricted to a `klt
+    pex` citation regardless of column (see
+    [`docs/cli/signoff.md`](cli/signoff.md)'s "Item 7 is kind-restricted"
+    section), so a full-custom partition's own post-layout re-simulation
+    against its drawn layout satisfies it exactly like the Analog column's
+    item 7 does.
 - **Mixed-signal** blocks partition into analog and digital sub-blocks
   within the same repo and satisfy **both** columns, one per partition. The
   claim must state the partition boundary explicitly (which nets/pins/cells
@@ -84,13 +105,22 @@ every block.
    - *Analog* — committed schematic sources (or generator) plus the
      netlist derived from them, regenerated on design change.
    - *Digital* — committed RTL sources plus the synthesized gate-level
-     netlist derived from them, regenerated on design change.
+     netlist derived from them, regenerated on design change. For a
+     hand-captured full-custom digital partition (no RTL, no synthesis
+     step — see "Full-custom digital sub-case" above), this item is
+     satisfied instead by the Analog column's artifact: committed
+     schematic sources (or generator) plus the netlist derived from them,
+     regenerated on design change, with every logic gate captured as a
+     schematic exactly like an analog partition's.
 2. **Layout**
    - *Analog* — committed GDS/OASIS, reproducibly generated or with
      documented provenance.
    - *Digital* — committed routed GDS/OASIS from place-and-route,
      reproducibly generated from the gate-level netlist (P&R script/flow
-     committed, not a one-off hand edit).
+     committed, not a one-off hand edit). For the same full-custom
+     sub-case, this item is satisfied instead by the Analog column's
+     artifact: committed GDS/OASIS, reproducibly generated or with
+     documented provenance — hand-drawn layout, not P&R output.
 3. **DRC clean** — latest `klt drc` JSON report: `status: clean`, fresh,
    with the deck identified (content hash). Known deck coverage gaps
    (rule-free layers, skipped rules) must be enumerated in the claim, not
@@ -108,7 +138,13 @@ every block.
      corner recorded.
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
-     with per-corner and per-test pass/fail recorded.
+     with per-corner and per-test pass/fail recorded. For the full-custom
+     sub-case, this item is satisfied instead by PVT corner-matrix SPICE
+     simulation covering every spec row (the Analog column's artifact),
+     plus an explicit per-corner timing-margin metric measured directly in
+     that same sweep — a SPICE-measured analog of STA setup/hold margin,
+     e.g. a derived arrival-time-vs-required-time delta recorded per PVT
+     point — as the full-custom substitute for the STA requirement above.
    - Both require the spec table itself to be ratified — verdicts against
      a draft spec are provisional by construction.
 6. **Statistical claims carry Monte Carlo evidence** — any accuracy,
