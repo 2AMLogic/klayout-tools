@@ -133,28 +133,39 @@ rediscover a gap by failure.
 | PDK / tree | Layout | `klt pdk find`/`list`/`env` | `klt drc` | `klt lvs` |
 | ---------- | ------ | ---------------------------- | --------- | --------- |
 | sky130, gf180mcu (open_pdks / volare / ciel) | open_pdks-layout (nested) | ✅ | ✅ curated deck (`sky130`, `gf180mcu`) | ✅ `"klayout"` engine (curated deck) or `"netgen"` engine |
-| IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ❌ no curated deck yet — see below | ⚠️ `"netgen"` engine only, with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary; `"klayout"` engine needs a curated extraction deck that does not exist yet |
+| IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ✅ curated deck (`sg13g2`, issue #905) — a starter subset, see below | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
 
-**Why `klt drc`/`klt lvs` don't fully run against SG13G2 yet.** `klt drc`
-only runs *this repo's own* curated Python rule decks
-(`klayout_tools.decks.sky130`/`.gf180mcu`) via KLayout's native `Region`
+**How far the SG13G2 curated deck goes.** `klt drc`/`klt lvs` only ever run
+*this repo's own* curated Python rule decks via KLayout's native `Region`
 check primitives — a deliberate engine choice (see `docs/cli/drc.md`) that
-never shells out to the standalone `klayout` DRC-DSL script runner, so it
-has no mechanism to execute a foreign PDK's own `.drc` ruleset (SG13G2 ships
-`ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, a KLayout DRC-DSL
-script, not this repo's curated deck format). Porting SG13G2's rule deck
-into a curated `klayout_tools.decks` module is real, standalone follow-up
-work — a from-scratch deck port comparable in size to the existing
-sky130/gf180mcu decks, not a resolver change — tracked separately from this
-issue as #524. The same gap blocks `klt lvs`'s default `"klayout"` engine,
-whose layout-side netlist extraction needs the same kind of curated device
-deck.
-`klt lvs`'s `"netgen"` engine is the one path that does *not* need a curated
-deck (it compares two already-built SPICE netlists, layout-side extraction
-supplied separately) — it resolves and can run against a real SG13G2
-install's own `libs.tech/netgen/ihp-sg13g2_setup.tcl` via
-`netgen_setup_file()` today, gated only by a local `netgen` binary (see
+never shells out to the standalone `klayout` DRC-DSL script runner, so
+neither command can execute a foreign PDK's own `.drc`/`.lvs` ruleset
+directly (SG13G2 ships `ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc`
+and a companion `.lvs` deck, neither in this repo's curated deck format).
+Issue #905 compiled the first curated `klayout_tools.decks.sg13g2` module
+from those sources — every rule carrying a `RuleProvenance` citation — so
+both commands now run against SG13G2. It remains a **starter subset**, not a
+full transcription:
+
+| Surface | Covered today | Not covered |
+|---|---|---|
+| DRC geometric rules | one connected Activ→Metal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
+| LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1231) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`), the `sg13_hv_svaricap` varactor |
+| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq) and `rppd` (260 Ω/sq), issue #1231 | `rhigh` (ambiguous sheet rho upstream — deliberately left as a short), metal resistors, MIM capacitors (`cap_cmim`/`rfcmim`), SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`), diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
+| Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
+
+An unrecognised device class extracts as ordinary interconnect, so a design
+using one will see it as a short (LVS `device.unmatched`), never as a wrong
+device — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for each
+gap. Issue #524 (a second, independently hand-written SG13G2 deck to
+cross-check this one against) remains open and unmerged.
+
+`klt lvs`'s `"netgen"` engine is the one path that never needed a curated
+deck at all (it compares two already-built SPICE netlists, layout-side
+extraction supplied separately) — it resolves and can run against a real
+SG13G2 install's own `libs.tech/netgen/ihp-sg13g2_setup.tcl` via
+`netgen_setup_file()`, gated only by a local `netgen` binary (see
 `docs/cli/lvs.md`'s `"netgen"` engine section and
 `tests/test_lvs.py::test_netgen_engine_real_binary_against_sg13g2_shaped_install`).
 

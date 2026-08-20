@@ -21,19 +21,26 @@ per bound device instead of KLayout's default ``M`` card.
 **Scope** (deliberately narrower than the general PDK-device-metadata
 resolver ``docs/design/pdk-device-corner-metadata-spike.md`` proposes as a
 follow-up epic -- see issue #209's Curator enhancement). As of issue #339 the
-binding covers, per PDK family (``sky130``, ``gf180mcu``):
+binding covers, per PDK family (``sky130``, ``gf180mcu``, and -- MOS only, as
+of issue #1231 -- ``sg13g2``):
 
-- **MOS** (both decks) -- the deck's default voltage flavor per family, plus
-  (issue #1111, gf180mcu only) any additional marker-scoped flavor its
-  ``ExtractionDeck.mos_flavours`` declares (``nfet_06v0``/``pfet_06v0`` for a
-  transistor recognised inside ``Dualgate``) -- see :data:`MOS_FLAVOUR_PROPERTY`
-  and :data:`_MOS_MODEL_FLAVOURS` below, and ``klayout_tools.extract``'s
-  module docstring.
-- **Resistor** (both decks) -- every ``ResistorDevice`` class each deck
+- **MOS** (all three decks) -- the deck's default voltage flavor per family,
+  plus (issue #1111 for gf180mcu, issue #1231 for sg13g2) any additional
+  marker-scoped flavor its ``ExtractionDeck.mos_flavours`` declares
+  (``nfet_06v0``/``pfet_06v0`` for a transistor recognised inside
+  ``Dualgate``; ``sg13_hv_nmos``/``sg13_hv_pmos`` for one inside
+  ``ThickGateOx``) -- see :data:`MOS_FLAVOUR_PROPERTY` and
+  :data:`_MOS_MODEL_FLAVOURS` below, and ``klayout_tools.extract``'s module
+  docstring.
+- **Resistor** (sky130/gf180mcu) -- every ``ResistorDevice`` class each deck
   declares (:func:`resolve_device_bindings` reads the deck's own list).
-- **Capacitor** (both decks) -- every ``CapacitorDevice`` class each deck
+  sg13g2's two drawn poly resistors (``rsil``/``rppd``, issue #1231) have no
+  curated entry yet and keep their bare ``R``-card form -- the same
+  documented bare-primitive carve-out gf180mcu's bipolar gets below.
+- **Capacitor** (sky130/gf180mcu) -- every ``CapacitorDevice`` class each deck
   declares, with plate ``L``/``W`` derived from the extracted plate area and
-  perimeter via :func:`equivalent_rectangle_um`.
+  perimeter via :func:`equivalent_rectangle_um`. sg13g2's deck recognises no
+  capacitor device yet, so there is nothing to bind.
 - **Bipolar** -- **sky130 only** (``sky130_fd_pr__pnp_05v5``). gf180mcu's
   bipolar is deliberately left **unbound** (its recognised ``bjt`` device
   keeps KLayout's bare ``Q``-card form), because the gf180mcu deck itself has
@@ -238,6 +245,22 @@ _MOS_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "nfet": "nfet_03v3",
         "pfet": "pfet_03v3",
     },
+    # sg13g2's thin-oxide ("-LV") core devices (issue #1231). Confirmed
+    # against a real fetched IHP-Open-PDK v0.3.0 install
+    # (`scripts/fetch-ihp-sg13g2.sh`): `.subckt sg13_lv_nmos d g s b` /
+    # `.subckt sg13_lv_pmos d g s b` in
+    # `ihp-sg13g2/libs.tech/ngspice/models/sg13g2_moslv_mod.lib`, each taking
+    # `w`/`l` plus `as`/`ad`/`ps`/`pd` (all defaulting to 0) -- the same
+    # `d g s b <model> W=... L=...` call shape, and the same
+    # area/perimeter-parameter set, as gf180mcu's pair above. The PDK's own
+    # LVS deck extracts the matching layout devices under exactly these
+    # names (`mos_extraction.lvs`'s `extract_devices(mos4('sg13_lv_nmos'),
+    # ...)`), which is what `decks/sg13g2.py`'s
+    # `nfet_provenance`/`pfet_provenance` cite.
+    ("sg13g2", "sg13g2"): {
+        "nfet": "sg13_lv_nmos",
+        "pfet": "sg13_lv_pmos",
+    },
 }
 
 #: The KLayout device-property key `extract.py` sets (`kdb.Device.set_property`)
@@ -277,11 +300,27 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: no-prefix, `d g s b`-terminal, raw-metre-`w`/`l` convention (not
 #: independently re-verified in a second in-the-wild instantiation, but from
 #: the same `.subckt`-table source as `nfet_06v0`).
+#:
+#: sg13g2's thick-oxide ("-HV") pair (issue #1231) is confirmed in the same
+#: real fetched IHP-Open-PDK v0.3.0 install as its thin-oxide siblings above:
+#: `.subckt sg13_hv_nmos d g s b` / `.subckt sg13_hv_pmos d g s b` in
+#: `ihp-sg13g2/libs.tech/ngspice/models/sg13g2_moshv_mod.lib` (same terminal
+#: order and `w`/`l`/`as`/`ad`/`ps`/`pd` parameter set as the `_lv_` pair),
+#: extracted under exactly those names by the PDK's own
+#: `mos_extraction.lvs` (`extract_devices(mos4('sg13_hv_nmos'), ...)` keyed
+#: off `general_derivations.lvs`'s `ngate_hv_base = ngate.and(thickgateox_drw)`)
+#: -- the derivation `decks/sg13g2.py`'s `mos_flavours` entry transcribes.
 _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("gf180mcu", "gf180mcu"): {
         "06v0": {
             "nfet": "nfet_06v0",
             "pfet": "pfet_06v0",
+        },
+    },
+    ("sg13g2", "sg13g2"): {
+        "hv": {
+            "nfet": "sg13_hv_nmos",
+            "pfet": "sg13_hv_pmos",
         },
     },
 }
@@ -291,7 +330,17 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
 #: "gf180mcu") -- the same family prefixes `klayout_tools.decks`' registry
 #: uses as deck names. Order matters only in that no family here is a prefix
 #: of another.
-_KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu")
+_KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2")
+
+#: Resolved `--pdk` variant names whose family is *not* a prefix of the
+#: variant name, and so cannot be recovered by the prefix scan below (issue
+#: #1231). IHP-Open-PDK's SG13G2 install directory -- the variant name
+#: `klt pdk find` reports -- is `ihp-sg13g2`, while this repo's deck/family
+#: name for it is `sg13g2` (`klayout_tools.decks.sg13g2`); an explicit alias
+#: keeps families named after decks, the invariant `_KNOWN_PDK_FAMILIES`'
+#: own comment states, rather than introducing a family spelled differently
+#: from every table key around it.
+_PDK_VARIANT_FAMILY_ALIASES: dict[str, str] = {"ihp-sg13g2": "sg13g2"}
 
 
 class ModelBindingError(Exception):
@@ -309,13 +358,17 @@ class ModelBindingError(Exception):
 
 def _pdk_variant_family(variant: str) -> str:
     """The PDK-family portion of a resolved ``--pdk`` variant name (e.g.
-    ``"sky130A"`` -> ``"sky130"``, ``"gf180mcuC"`` -> ``"gf180mcu"``).
+    ``"sky130A"`` -> ``"sky130"``, ``"gf180mcuC"`` -> ``"gf180mcu"``,
+    ``"ihp-sg13g2"`` -> ``"sg13g2"``).
 
     Returns ``variant`` unchanged when it does not match any known family
     prefix -- :func:`resolve_mos_model_table` turns that into a named
     :class:`ModelBindingError` rather than this helper raising, so the
     error message can report the full attempted ``(deck, variant)`` pair.
     """
+    aliased = _PDK_VARIANT_FAMILY_ALIASES.get(variant)
+    if aliased is not None:
+        return aliased
     for family in _KNOWN_PDK_FAMILIES:
         if variant.startswith(family):
             return family

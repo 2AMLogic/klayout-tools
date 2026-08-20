@@ -624,11 +624,26 @@ class MOSFlavour:
     ``description`` is a short human-readable label for this flavour
     (currently unused by any consumer beyond documentation -- a placeholder
     for a future per-flavour JSON surface).
+
+    ``nfet_provenance``/``pfet_provenance`` (issue #1231) are machine-readable
+    citations of the upstream PDK-LVS-deck source lines *this flavour's* two
+    MOS recognition rules were transcribed from -- the per-flavour siblings of
+    :attr:`ExtractionDeck.nfet_provenance`/``pfet_provenance``, which cite the
+    deck's *default* (unflavoured) pair. A flavour genuinely is two upstream
+    device rules (an NMOS one and a PMOS one, e.g. sg13g2's ``sg13_hv_nmos``/
+    ``sg13_hv_pmos``), so it carries a pair rather than the single
+    ``provenance`` field :class:`ResistorDevice` and friends use. Both default
+    to ``None`` -- no structured provenance backfilled for this flavour, the
+    same default every other ``provenance`` field in this module carries, so a
+    deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
+    prose comment remains the record) is unaffected.
     """
 
     marker: tuple[int, int]
     flavour: str
     description: str = ""
+    nfet_provenance: RuleProvenance | None = None
+    pfet_provenance: RuleProvenance | None = None
 
 
 @dataclass(frozen=True)

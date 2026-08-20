@@ -969,6 +969,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-20 — The `sg13g2` extraction deck now recognises SG13G2's
+  **thick-oxide ("-HV") MOS** flavour and two of its **drawn poly resistors**
+  (issue #1231). Before this, geometry drawn inside `ThickGateOx` (44/0)
+  extracted as the thin-oxide device — an actively *wrong* device identity,
+  not merely an unrecognised one: under `--pdk` it bound
+  `sg13_lv_nmos`/`sg13_lv_pmos` for a transistor the PDK's own LVS deck
+  extracts as `sg13_hv_nmos`/`sg13_hv_pmos`. `EXTRACTION_DECK` now declares a
+  `mos_flavours` entry keyed on that marker (the mechanism issue #1111 added
+  for gf180mcu's `Dualgate`), so such a transistor binds the real thick-oxide
+  models and `ThickGateOx` stops firing `voltage_domain_warnings` for MOS
+  geometry (its DRC-rule residue keeps the registry entry). `sg13g2` also
+  gains its first `--pdk` MOS model-binding table entry, resolved from the
+  `ihp-sg13g2` variant name IHP-Open-PDK installs use. Separately, `rsil`
+  (7 Ω/sq) and `rppd` (260 Ω/sq) poly resistors now extract as real
+  two-terminal devices with a bulk terminal instead of shorting through the
+  poly bar; `rhigh` is deliberately still unrecognised (its sheet rho is
+  ambiguous in the PDK's own data — 1300 vs 1360 Ω/sq — and a known-unmodelled
+  short beats a silently wrong value). `devices[].class` labels for MOS are
+  unchanged (`nfet`/`pfet`, flavoured or not); `device_classes` for `sg13g2`
+  gains `"resistor"`. HBT/MIM-capacitor/diode recognition remain unbuilt —
+  see [`docs/cli/pdk.md`](docs/cli/pdk.md)'s SG13G2 coverage table and
+  [`docs/cli/extract.md`](docs/cli/extract.md).
 - 2026-08-19 — `klt --version` now reports a **build identity**, and the new
   `klt version` verb exposes it as JSON (issue #1202). A build made from a
   commit after a release tag used to report that tag's version verbatim, so a

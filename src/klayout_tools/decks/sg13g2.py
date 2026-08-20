@@ -46,6 +46,16 @@ Source (Apache-2.0, IHP-GmbH/IHP-Open-PDK, the same v0.3.0 release tag
 - ``ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/{mos_extraction,
   mos_derivations,general_derivations}.lvs`` -- the companion KLayout LVS
   deck's MOSFET device-recognition rules, for ``EXTRACTION_DECK`` below.
+  Issue #1231 adds the thick-oxide ("-HV") MOS flavour from the same files
+  and the drawn poly-resistor rules from
+  ``lvs/rule_decks/{res_derivations,res_extraction,res_connections}.lvs``.
+- ``ihp-sg13g2/libs.tech/klayout/python/sg13g2_pycell_lib/sg13g2_tech.json``
+  -- the PDK's own device-parameter table (the one its KLayout PyCell device
+  generators read), source of the poly resistors' sheet resistances
+  (``rsilG2_rspec``/``rppdG2_rspec``); its ``.lvs`` rule decks extract those
+  devices through a custom Ruby extractor that carries no sheet-rho constant
+  of its own, so the value has to come from this table (see
+  ``EXTRACTION_DECK``'s resistor note below).
 
 ## Scope guard -- curated starter subset, not a full transcription
 
@@ -88,6 +98,43 @@ arbitrary boolean/derived expression):
   ``density.drc``/``rule_decks/antenna.drc`` files) -- out of this
   DRC-deck-compiler epic's scope, the same carve-out sky130/gf180mcu make.
 
+## Device-class coverage (``EXTRACTION_DECK``)
+
+The same incremental discipline applies to LVS device recognition. Issue
+#905 curated MOS only; issue #1231 added the thick-oxide MOS flavour and two
+poly resistors. Recognised today:
+
+- **MOS** -- thin-oxide ``sg13_lv_nmos``/``sg13_lv_pmos`` (the default
+  ``active``/``nwell`` split) and thick-oxide ``sg13_hv_nmos``/
+  ``sg13_hv_pmos`` (``mos_flavours``, scoped to ``ThickGateOx`` 44/0).
+- **Drawn poly resistors** -- ``rsil`` and ``rppd``.
+
+Still unrecognised, each tracked as its own follow-on issue rather than left
+a silent gap (a device class this deck cannot recognise extracts as ordinary
+interconnect -- i.e. a *short* a ``klt lvs`` run reports as an unmatched
+device, never a wrong device with a plausible value):
+
+- ``rhigh`` (the third poly-resistor flavour) -- see ``EXTRACTION_DECK``'s
+  resistor note for why its sheet resistance is not confidently derivable
+  from the PDK's own data -- and the metal resistors ``res_metal1``..
+  ``res_topmetal2`` (their ``metals`` levels are above this deck's Metal2
+  stack). Both tracked by issue #1235.
+- SiGe HBTs (``npn13G2``/``npn13G2l``/``npn13G2v``, the lateral ``pnpMPA``)
+  -- ``bjt_derivations.lvs``/``bjt_extraction.lvs``, each extracted upstream
+  by a *custom* Ruby ``CustomBJTExtractor`` rather than KLayout's stock
+  ``bjt3``, so transcribing them is more than populating ``bipolars``
+  (issue #1232).
+- MIM capacitors (``cap_cmim``/``rfcmim``) -- ``cap_derivations.lvs``; both
+  are drawn on ``MIM``-over-``Metal5`` with a ``TopMetal1`` via, i.e. wholly
+  above this deck's curated Metal1/Metal2 stack, so recognising them also
+  needs that stack extended (issue #1233).
+- Diodes -- ``diode_extraction.lvs``'s antenna diodes (``dantenna``/
+  ``dpantenna``) and the three-terminal ``schottky_nbl1`` (extracted
+  upstream as a ``bjt3``, not a ``diode``) -- issue #1234 -- plus the
+  ``isolbox`` isolation device, the ``sg13_hv_svaricap`` varactor,
+  inductors, ESD devices, and the RF MOS/RF MIM variants, none of which is
+  tracked yet.
+
 ## No #524 cross-check
 
 Epic #711's Phase 1 (sky130, #747) and the sky130 LVS phases (#867-#869)
@@ -119,7 +166,9 @@ from __future__ import annotations
 from . import (
     DrcRule,
     ExtractionDeck,
+    MOSFlavour,
     ParasiticsDeck,
+    ResistorDevice,
     RuleProvenance,
 )
 
@@ -139,6 +188,25 @@ def _sg13g2_drc_provenance(source_path: str, rule_id: str) -> RuleProvenance:
     return RuleProvenance(
         source_repo=_IHP_OPEN_PDK_REPO,
         source_path=source_path,
+        rule_id=rule_id,
+        commit=_IHP_OPEN_PDK_COMMIT,
+    )
+
+
+_LVS_RULE_DECKS = "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks"
+
+
+def _sg13g2_lvs_provenance(source_file: str, rule_id: str) -> RuleProvenance:
+    """Build a :class:`RuleProvenance` for a sg13g2 *device-recognition*
+    rule -- `source_file` is the `.lvs` rule-deck file under
+    `libs.tech/klayout/tech/lvs/rule_decks/` whose `extract_devices(...)`
+    call defines the device, `rule_id` its official device-class name (the
+    string that call passes, e.g. `"sg13_lv_nmos"`). The LVS sibling of
+    :func:`_sg13g2_drc_provenance`, mirroring `gf180mcu.py`'s own
+    `_gf180mcu_lvs_provenance`."""
+    return RuleProvenance(
+        source_repo=_IHP_OPEN_PDK_REPO,
+        source_path=f"{_LVS_RULE_DECKS}/{source_file}",
         rule_id=rule_id,
         commit=_IHP_OPEN_PDK_COMMIT,
     )
@@ -444,32 +512,57 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (29, 0): "Via2.drawing",
     (31, 0): "NWell.drawing",
     (44, 0): "ThickGateOx.drawing",
+    # Poly-resistor recognition layers (issue #1231) -- names transcribed
+    # from the PDK's own KLayout layer-properties file
+    # (`libs.tech/klayout/tech/sg13g2.lyp`).
+    (128, 0): "PolyRes.drawing",
+    (111, 0): "EXTBlock.drawing",
+    (14, 0): "pSD.drawing",
+    (7, 0): "nSD.drawing",
+    (7, 21): "nSD.block",
+    (24, 0): "RES.drawing",
+    (28, 0): "SalBlock.drawing",
     (8, 25): "Metal1.text",
     (10, 25): "Metal2.text",
 }
 
-# Voltage-domain marker layer this deck draws but does not model the DRC/
-# extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
+# Voltage-domain marker layer this deck draws but does not *fully* model the
+# DRC/extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
 # the same mechanism gf180mcu.py registers its own `Dualgate` marker under).
 # sg13g2's `general_derivations.lvs` splits every MOS device recognition rule
 # into a "-LV" (thin, default gate oxide) and "-HV" (thick gate oxide) pair
 # keyed off `thickgateox_drw` (44/0, see `ngate_lv_base`/`ngate_hv_base` in
 # that file): `ngate_lv_base = ngate.not(thickgateox_drw)`, `ngate_hv_base =
-# ngate.and(thickgateox_drw)` (and the PMOS analogues). This curated deck's
-# DRC rules apply the general-case FEOL thresholds above regardless of
-# ThickGateOx's presence, and `EXTRACTION_DECK` below only recognises the
-# thin-oxide ("-LV") MOS devices (see `EXTRACTION_DECK`'s own comment) --
-# geometry drawn entirely inside ThickGateOx extracts with the *wrong*
-# (thin-oxide) device-class provenance rather than being recognised as the
-# real `sg13_hv_nmos`/`sg13_hv_pmos` device or rejected outright.
+# ngate.and(thickgateox_drw)` (and the PMOS analogues).
+#
+# What issue #1231 closed: `EXTRACTION_DECK` below now declares one
+# `mos_flavours` entry keyed on this same marker (see `MOSFlavour`'s own
+# docstring in `decks/__init__.py`), so a transistor drawn inside ThickGateOx
+# is recognised in its own extraction pass and binds the real
+# `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of silently
+# taking the thin-oxide ("-LV") ones -- and `extract.py`'s own MOS
+# `voltage_domain_warnings` stops firing for this marker (it only ever warned
+# about that *MOS binding* gap). This mirrors exactly what #1111 did for
+# gf180mcu's `Dualgate`.
+#
+# What is NOT modelled, and is what this entry still warns about: every DRC
+# rule in `DECK` above applies the general-case FEOL thresholds regardless of
+# ThickGateOx's presence -- sg13g2's own DRM scopes several FEOL rules to the
+# thick-oxide domain (e.g. `Gat.a1`/`Gat.a2`'s channel-length-specific GatPoly
+# widths, themselves compound `ngate`/`pgate` derivations of GatPoly, Activ,
+# NWell *and* this marker -- see the module docstring's "Scope guard"), and
+# none of that is transcribed here. So the registry entry stays, with its
+# description narrowed to the DRC-rule residue.
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (44, 0): (
         "ThickGateOx (44/0) marks sg13g2's thick-gate-oxide ('-HV') MOS "
         "voltage domain (see general_derivations.lvs's ngate_hv_base/"
-        "pgate_hv_base). This curated deck's DRC rules and EXTRACTION_DECK's "
-        "MOS device recognition both apply the thin-oxide ('-LV', "
-        "sg13_lv_nmos/sg13_lv_pmos) treatment to geometry regardless of "
-        "ThickGateOx's presence."
+        "pgate_hv_base). EXTRACTION_DECK models it for MOS device "
+        "recognition/model binding (issue #1231: sg13_hv_nmos/sg13_hv_pmos "
+        "under --pdk); this curated deck's DRC rules still apply the "
+        "general-case ('-LV') thresholds to geometry regardless of "
+        "ThickGateOx's presence (e.g. the Gat.a1/Gat.a2 channel-length-"
+        "specific GatPoly widths, not transcribed in this deck yet)."
     ),
 }
 
@@ -535,23 +628,145 @@ EXTRACTION_DECK = ExtractionDeck(
     #   extract_devices(mos4('sg13_lv_pmos'),
     #     { 'SD' => psd_fet, 'G' => pgate_lv, 'tS' => psd_fet,
     #       'tD' => psd_fet, 'tG' => poly_con, 'W' => nwell_drw })
-    # The thick-oxide ("-HV") pair (`sg13_hv_nmos`/`sg13_hv_pmos`) is not
-    # modelled -- see `UNMODELED_VOLTAGE_MARKERS` above.
-    nfet_provenance=RuleProvenance(
-        source_repo=_IHP_OPEN_PDK_REPO,
-        source_path=(
-            "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
+    # These stay the *default* pair, cited for every transistor drawn outside
+    # ThickGateOx; the thick-oxide ("-HV") pair is the `mos_flavours` entry
+    # below (issue #1231).
+    nfet_provenance=_sg13g2_lvs_provenance("mos_extraction.lvs", "sg13_lv_nmos"),
+    pfet_provenance=_sg13g2_lvs_provenance("mos_extraction.lvs", "sg13_lv_pmos"),
+    # Thick-oxide ("-HV") MOS flavour (issue #1231, the mechanism issue #1111
+    # added for gf180mcu's `Dualgate`): a transistor whose Activ island
+    # overlaps ThickGateOx (44/0) is sg13g2's thick-gate-oxide device, whose
+    # real upstream device-class names are `sg13_hv_nmos`/`sg13_hv_pmos` --
+    #   extract_devices(mos4('sg13_hv_nmos'), { ..., 'G' => ngate_hv, ... })
+    #   extract_devices(mos4('sg13_hv_pmos'), { ..., 'G' => pgate_hv, ... })
+    # in the same `mos_extraction.lvs`, keyed off `general_derivations.lvs`'s
+    # `ngate_hv_base = ngate.and(thickgateox_drw)` / `pgate_hv_base` (and,
+    # symmetrically, `ngate_lv_base = ngate.not(thickgateox_drw)` -- so the
+    # default pair above is genuinely the *complement* of this flavour, which
+    # is exactly the split `MOSFlavour` implements).
+    # `MOSFlavour.flavour="hv"` is the key `pdk_models.py`'s
+    # `_MOS_MODEL_FLAVOURS[("sg13g2", "sg13g2")]` table binds to those two
+    # real subcircuit names under `--pdk` (`.subckt sg13_hv_nmos d g s b` in
+    # `libs.tech/ngspice/models/sg13g2_moshv_mod.lib` -- see that module's
+    # own verified-provenance note).
+    mos_flavours=(
+        MOSFlavour(
+            marker=(44, 0),  # ThickGateOx.drawing
+            flavour="hv",
+            description="sg13g2 thick-gate-oxide domain (ThickGateOx 44/0)",
+            nfet_provenance=_sg13g2_lvs_provenance(
+                "mos_extraction.lvs", "sg13_hv_nmos"
+            ),
+            pfet_provenance=_sg13g2_lvs_provenance(
+                "mos_extraction.lvs", "sg13_hv_pmos"
+            ),
         ),
-        rule_id="sg13_lv_nmos",
-        commit=_IHP_OPEN_PDK_COMMIT,
     ),
-    pfet_provenance=RuleProvenance(
-        source_repo=_IHP_OPEN_PDK_REPO,
-        source_path=(
-            "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
+    # Drawn precision poly resistors (issue #1231), transcribed from
+    # `res_derivations.lvs`/`res_extraction.lvs`/`res_connections.lvs`:
+    #
+    #   polyres_mk = polyres_drw.and(extblock_drw).interacting(gatpoly)
+    #                  .not(polyres_exclude)
+    #   rsil_res   = polyres_mk.and(res_drw)
+    #                  .not(psd_drw.join(salblock_drw).join(nsd_drw)
+    #                       .join(nsd_block))
+    #   rppd_res   = polyres_mk.and(psd_drw).and(salblock_drw)
+    #                  .not(nsd_block).not(nsd_drw)
+    #   extract_devices(GeneralNTerminalExtractor.new('rsil', 2),
+    #     { 'core' => rsil_res, 'ports' => rsil_ports, ... })   (ditto rppd)
+    #
+    # Mapping onto this engine's `ResistorDevice` model (`body & marker &
+    # requires - excludes`, terminals = `body - segment`): `body` is GatPoly,
+    # `marker` is `polyres` (128/0), and each flavour's distinguishing
+    # implant/block masks become `requires`/`excludes`. This reproduces
+    # upstream's own terminal derivation exactly -- `rsil_ports`/`rppd_ports`
+    # are `gatpoly.interacting(core).not(core)`, i.e. the drawn poly heads on
+    # either side of the marked segment, which is what `terminal=None`
+    # (default: `body` minus the segment) already yields.
+    #
+    # Documented approximations, in this deck's usual "known-unmodelled beats
+    # silently wrong" style:
+    #
+    # - Upstream's `core` is the *marker* region (`polyres & extblock`, merely
+    #   `interacting` GatPoly); this engine intersects it with the body layer.
+    #   For a real device cell -- where `polyres` is drawn coincident with the
+    #   poly bar it marks -- the two are the same region.
+    # - `polyres_exclude` is a 14-layer join. Only its two members this deck
+    #   otherwise declares layers for are subtracted below (`Activ`, so a
+    #   marked *gate* is never mistaken for a resistor -- the same guard
+    #   gf180mcu's own `excludes=((22, 0), ...)` Comp term provides -- and
+    #   `ThickGateOx`); the rest (pwell_block, nBuLay, TRANS, EmWind, EmWiHV,
+    #   Activ_mask, RecogDiode, RecogESD, Ind, Ind_pin, Substrate) are layers
+    #   this curated deck does not model at all, and are not transcribed.
+    # - Upstream additionally connects each device's `*_sub` region (the
+    #   segment sized by 5 nm) to `pwell`/`iso_pwell`/`nwell_drw`
+    #   (`res_connections.lvs`), i.e. a real bulk terminal. `bulk_to_substrate`
+    #   below wires the equivalent `W` terminal to this deck's `substrate_net`
+    #   global, the same fallback its NMOS body already uses (this deck models
+    #   no drawn PWell -- see the MOS note above).
+    # - The PDK's own resistance model is more than sheet-rho: `sg13g2_tech
+    #   .json`'s `CbResCalc` composes `l/weff*(b+1)*rspec + ... + 2/w*rzspec`
+    #   with a per-flavour line-width delta (`*_lwd`) and a width-dependent
+    #   contact/transition term (`*_rzspec`). Neither is expressible in this
+    #   engine's `sheet_rho_ohm_sq` (+ optional fixed `fixed_offset_ohm`,
+    #   which is *not* width-dependent), so `R = L/W * rspec` is a
+    #   first-order transcription of the body term only -- stated here rather
+    #   than silently implied.
+    # - `rhigh` (the third poly-resistor flavour) is deliberately **not**
+    #   declared: its sheet resistance is ambiguous in the PDK's own data --
+    #   `rhigh_code.py` reads `rhigh_rspec` (1300 ohm/sq, with its `G2`-suffix
+    #   branch commented out) while the shared `CbResCalc` helper that
+    #   computes the same PyCell's default resistance hardcodes the `G2`
+    #   suffix and so reads `rhighG2_rspec` (1360 ohm/sq). A segment this deck
+    #   cannot value confidently is left as ordinary connected poly (today's
+    #   short) rather than extracted with one of two contradictory
+    #   coefficients.
+    resistors=(
+        ResistorDevice(
+            name="rsil",  # upstream LVS device-class name
+            body=(5, 0),  # GatPoly.drawing
+            marker=(128, 0),  # polyres.drawing
+            # `rsilG2_rspec` in sg13g2_tech.json (`techName == "SG13G2"`;
+            # `rsil_code.py` reads the `G2` key unconditionally, and the
+            # non-G2 key carries the same 7.0 value).
+            sheet_rho_ohm_sq=7.0,
+            requires=(
+                (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
+                (24, 0),  # Res      -- the silicided-resistor marker itself
+            ),
+            excludes=(
+                (14, 0),  # pSD       -\
+                (28, 0),  # SalBlock   |- upstream's `rsil_exc`
+                (7, 0),  # nSD        |
+                (7, 21),  # nSD_block -/
+                (1, 0),  # Activ       -\ `polyres_exclude` (a marked gate is
+                (44, 0),  # ThickGateOx -/ a transistor, not a resistor)
+            ),
+            bulk_to_substrate=True,  # upstream connects `rsil_sub` to pwell
+            provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rsil"),
         ),
-        rule_id="sg13_lv_pmos",
-        commit=_IHP_OPEN_PDK_COMMIT,
+        ResistorDevice(
+            name="rppd",  # upstream LVS device-class name
+            body=(5, 0),  # GatPoly.drawing
+            marker=(128, 0),  # polyres.drawing
+            # `rppdG2_rspec` in sg13g2_tech.json -- `rppd_code.py` selects the
+            # `G2` suffix for `techName == "SG13G2"` (260.0, vs the non-G2
+            # 250.0 of the older SG13 flavour).
+            sheet_rho_ohm_sq=260.0,
+            requires=(
+                (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
+                (14, 0),  # pSD      -- p+ doped poly
+                (28, 0),  # SalBlock -- unsalicided (vs. rsil's 7 ohm/sq)
+            ),
+            excludes=(
+                (7, 0),  # nSD        -\ upstream's own `.not(nsd_drw)`/
+                (7, 21),  # nSD_block -/ `.not(nsd_block)` (-> rhigh)
+                (1, 0),  # Activ       -\ `polyres_exclude`, see rsil above
+                (44, 0),  # ThickGateOx -/
+            ),
+            bulk_to_substrate=True,  # upstream connects `rppd_sub` to pwell
+            provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rppd"),
+        ),
     ),
 )
 

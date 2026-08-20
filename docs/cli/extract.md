@@ -21,9 +21,14 @@ two disagree, this document (and the code) win.
   auto-detects the stream format on read (same as `klt drc`); the extension
   is not authoritative.
 - `--deck` — required. The connectivity + device-extraction deck to run.
-  Currently: `sky130`, `gf180mcu`, `sg13g2`. `sg13g2`'s coverage is MOS-only
-  (no curated resistor/capacitor/bipolar/diode entries yet) — see
-  `src/klayout_tools/decks/sg13g2.py`'s own docstring.
+  Currently: `sky130`, `gf180mcu`, `sg13g2`. `sg13g2`'s device coverage is
+  MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the thick-oxide
+  `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0) and two drawn poly
+  resistors (`rsil`, `rppd`); it has **no** curated capacitor, bipolar (HBT)
+  or diode entries yet, and deliberately omits the third poly-resistor
+  flavour (`rhigh`, whose sheet resistance is ambiguous in the PDK's own
+  data) — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for each
+  gap and why.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
   "next to the input" convention `klt render`/`klt sim` already use). The
@@ -1340,13 +1345,15 @@ labels are unaffected either way (every MOS device, flavoured or not, still
 reports the deck's ordinary `"nfet"`/`"pfet"` class; only the *bound SPICE
 model name* differs).
 
-`sky130` and `sg13g2` declare no `mos_flavours` entry today (`sky130`'s
-curated deck has no high-voltage/thick-oxide marker layer at all; `sg13g2`'s
-`ThickGateOx` 44/0 marker is registered as a diagnostic-only gap, same as
-gf180mcu's `Dualgate` was before issue #1111 — a real per-flavour marker for
-it is a separate, not-yet-done follow-on), so a deck-registered voltage-
-domain marker with **no** matching `mos_flavours` entry still only produces
-the diagnostic below, never a corrected binding:
+`sg13g2` declares one such entry too (issue #1231), keyed on its
+`ThickGateOx` (44/0) marker: a transistor drawn inside it binds the real
+thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of
+the default `sg13_lv_nmos`/`sg13_lv_pmos` — the split the PDK's own
+`general_derivations.lvs` makes (`ngate_hv_base = ngate.and(thickgateox_drw)`
+vs. `ngate_lv_base = ngate.not(thickgateox_drw)`). `sky130` declares none
+(its curated deck has no high-voltage/thick-oxide marker layer at all). A
+deck-registered voltage-domain marker with **no** matching `mos_flavours`
+entry still only produces the diagnostic below, never a corrected binding:
 
 - A structured entry in the response's `voltage_domain_warnings[]` array
   (see "JSON schema" above): `{ "marker": "44/0", "description": str }` —
@@ -1363,12 +1370,15 @@ the diagnostic below, never a corrected binding:
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
 wrong — it does not correct the binding. For a marker `mos_flavours` *does*
-cover (gf180mcu's `Dualgate` as of issue #1111), the binding gap this field
-exists to flag is closed, so `voltage_domain_warnings` no longer fires for
-MOS device geometry inside it at all — the registry entry itself is
-unaffected (gf180mcu's `Dualgate` entry stays registered for the DRC-rule
-residue `klt drc`'s own coverage still tracks — `DF.6`, `PL.5a`/`PL.5b`, not
-transcribed by this curated deck yet).
+cover (gf180mcu's `Dualgate` as of issue #1111, sg13g2's `ThickGateOx` as of
+issue #1231), the binding gap this field exists to flag is closed, so
+`voltage_domain_warnings` no longer fires for MOS device geometry inside it
+at all — the registry entry itself is unaffected (gf180mcu's `Dualgate`
+entry stays registered for the DRC-rule residue `klt drc`'s own coverage
+still tracks — `DF.6`, `PL.5a`/`PL.5b`, not transcribed by that curated deck
+yet; sg13g2's `ThickGateOx` entry likewise stays registered for its own
+DRC-rule residue, e.g. the `Gat.a1`/`Gat.a2` channel-length-specific GatPoly
+widths).
 
 ### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462 and to junction diodes in #542)
 
@@ -1895,12 +1905,12 @@ primitive-card writer only for classes present in the resolved tables.
 **Coverage** (issue #339 extended #209's MOS-only binding to the other
 recognised analog device classes):
 
-| Device class | sky130 | gf180mcu | Geometry on the `X` card |
-|---|---|---|---|
-| MOS (`nfet`/`pfet`) | ✅ | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
-| Resistor | ✅ | ✅ (all flavours) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
-| Capacitor (MiM) | ✅ | ✅ | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
-| Bipolar | ✅ (`pnp`) | ❌ (carve-out) | none — a geometry-named variant selected by emitter area |
+| Device class | sky130 | gf180mcu | sg13g2 | Geometry on the `X` card |
+|---|---|---|---|---|
+| MOS (`nfet`/`pfet`) | ✅ | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
+| Resistor | ✅ | ✅ (all flavours) | ❌ (bare `R` card — no curated model table yet) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
+| Capacitor (MiM) | ✅ | ✅ | — (no capacitor recognition in that deck yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
+| Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
 
 MOS flavour note (issue #1111): gf180mcu's `nfet`/`pfet` binding is no
 longer a single fixed subcircuit name. A transistor drawn (fully or
@@ -1933,15 +1943,17 @@ the substrate internally, but no separate substrate pin is emitted on the
 resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
 future epic):
 
-- **One voltage/flavor per class, with one documented exception.** sky130's
+- **One voltage/flavor per class, with two documented exceptions.** sky130's
   `01v8` MOS core devices, sky130/gf180mcu's specific resistor/capacitor
   device names, and gf180mcu's *default* `03v3` MOS core devices (gf180mcu
   has no `gf180mcu_fd_pr__`-prefixed naming convention the way sky130 does)
-  are each still the one flavor those classes distinguish. gf180mcu's MOS
-  classes are the exception (issue #1111): a `Dualgate`-marked transistor
-  binds a second, real flavour (`nfet_06v0`/`pfet_06v0`) instead — see the
-  "MOS flavour note" above. `sky130`/`sg13g2` declare no such marker-scoped
-  flavour today.
+  are each still the one flavor those classes distinguish. gf180mcu's and
+  sg13g2's MOS classes are the exceptions (issues #1111/#1231): a
+  `Dualgate`-marked gf180mcu transistor binds `nfet_06v0`/`pfet_06v0`, and a
+  `ThickGateOx`-marked sg13g2 transistor binds
+  `sg13_hv_nmos`/`sg13_hv_pmos`, instead of their decks' defaults — see the
+  "MOS flavour note" above. `sky130` declares no such marker-scoped flavour
+  today.
 - **gf180mcu bipolar is deliberately left unbound** — its recognised `bjt`
   device stays a bare `Q` card under `--pdk`, **not** a subcircuit call. This
   is a *documented carve-out*, not an oversight: the gf180mcu deck itself has
@@ -1956,7 +1968,15 @@ future epic):
   bind; only the `bjt` stays a bare card). Any other recognised device class
   with no curated binding entry is likewise written as its bare primitive card
   rather than a guessed subcircuit call.
-- **Two curated decks only** (`sky130`, `gf180mcu`); a resolved PDK whose
+- **MOS-only binding for `sg13g2`** (issue #1231): its two drawn poly
+  resistors (`rsil`, `rppd`) have no curated resistor-model table entry yet,
+  so they stay bare `R` cards under `--pdk` — the same documented
+  bare-primitive carve-out gf180mcu's `bjt` gets above, not an error. Their
+  model token is already the PDK's own device-class name (`rsil`/`rppd`), so
+  a consumer can supply the matching `.subckt`/`.model` itself.
+- **Three curated decks** (`sky130`, `gf180mcu`, `sg13g2` — the last as of
+  issue #1231, resolved from the `ihp-sg13g2` variant name IHP-Open-PDK
+  installs use); a resolved PDK whose
   family has no curated MOS table entry for the requesting `--deck` (e.g. the
   `sky130` deck against a resolved `gf180mcuA` install, or a variant name
   matching no known PDK family at all) is an application error (exit 1)
