@@ -23,9 +23,11 @@ docs/
     cells.md
     components.md
     deck.md
+    design-centering.md
     draw.md
     drc.md
     economy.md
+    equiv.md
     erc.md
     eval.md
     extract.md
@@ -43,6 +45,7 @@ docs/
     pdk.md
     pex.md
     place-and-route.md
+    power.md
     precheck.md
     render.md
     report.md
@@ -54,19 +57,24 @@ docs/
     sta.md
     stats.md
     synthesize.md
+    techmap.md
     trajectory.md
     version.md
+    yield-sensitivity.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
+    analog-resource-survey.md
     co-simulation-approach-survey.md
     cocotb-verification-spike.md
     critical-net-mom-fidelity-phase2c.md
+    deck-compiler-proposal.md
     design-pipeline.md
     digital-flow-contracts-spike.md
     digital-fleet-unit-abstraction-decision.md
     em-field-sim-spike.md
     em-site-export-format.md
     extract-fidelity-roadmap.md
+    flute-congestion-precheck-results.md
     gen-bjt-array-spike.md
     gen-canary-bringup-phase3.md
     gen-composition-spike.md
@@ -74,14 +82,19 @@ docs/
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
+    matching-and-floorplanning.md
+    mom-cross-validation.md
     mom-iterative-solver.md
     mom-validation.md
+    native-routing-survey.md
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md
     pdk-device-corner-metadata-spike.md
     place-and-route-improvements-survey.md
+    post-route-sta-survey.md
     remote-job-description.md
     remote-sim-backend-spike.md
+    rsa-modexp-baseline.md
     sc-leflib-evaluation.md
     scgallery-zerosoc-survey.md
     sdf-annotate-feasibility-spike.md

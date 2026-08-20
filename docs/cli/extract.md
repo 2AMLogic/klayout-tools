@@ -2437,7 +2437,7 @@ ground plate, is placed directly beneath each such shape:
    (moving from 2× to 5× padding changed the answer by under 0.3% at a fixed
    panel size on a representative net).
 3. **Panel size.** `min(0.5, gap / 4)` micrometers, keeping the solve inside
-   [`docs/design/mom-validation.md`](mom-validation.md)'s ~1%-accuracy band
+   [`docs/design/mom-validation.md`](../design/mom-validation.md)'s ~1%-accuracy band
    for a `gap`-scale panel while staying well under the 8000-panel guard for
    a single standard-cell-scale net.
 4. **Solve.** `klt mom`'s native solver runs directly on this synthesized

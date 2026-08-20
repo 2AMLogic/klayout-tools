@@ -10,15 +10,22 @@ scripts/
   README.md                    # this file
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
+  fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
+  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
+  check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
   gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
   ingest-canary.py               # ingest a public canary block repo (issue #62) into blocks/<slug>/output/layout.json
+  _gallery_common.py             # render/label helpers shared by the two gallery content-pipeline scripts (#942)
+  generate_deck_history.py       # regenerate src/klayout_tools/decks/_history.json for `klt deck resolve` (#623)
+  mom_nec_reference.py           # standalone NEC2++ reference solve for `klt mom` S-parameter cross-validation (#895)
+  research/                      # measurement harnesses behind docs/design/ findings (FLUTE congestion #785, SDF annotate #962)
   aws/build-remote-sim-ami.sh    # build/publish the remote-sim AMI (see docs/cli/sim.md)
 ```
 
