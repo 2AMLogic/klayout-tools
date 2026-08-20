@@ -145,12 +145,16 @@ directly (SG13G2 ships `ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc`
 and a companion `.lvs` deck, neither in this repo's curated deck format).
 Issue #905 compiled the first curated `klayout_tools.decks.sg13g2` module
 from those sources — every rule carrying a `RuleProvenance` citation — so
-both commands now run against SG13G2. It remains a **starter subset**, not a
-full transcription:
+both commands now run against SG13G2. Issue #1243 then extended the deck's
+`metals`/`vias` connectivity stack (and the companion DRC rules) from its
+original Metal1/Via1/Metal2 ceiling up through Metal5/TopMetal1/TopMetal2,
+the prerequisite issue #1233 (MIM capacitors) and issue #1235 (metal
+resistors) both independently blocked on. It remains a **starter subset**,
+not a full transcription:
 
 | Surface | Covered today | Not covered |
 |---|---|---|
-| DRC geometric rules | one connected Activ→Metal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
+| DRC geometric rules | one connected Activ→TopMetal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2, Metal3, Via3, Metal4, Via4, Metal5, TopVia1, TopMetal1, TopVia2, TopMetal2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
 | LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1231) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`), the `sg13_hv_svaricap` varactor |
 | LVS other devices | drawn poly resistors `rsil` (7 Ω/sq) and `rppd` (260 Ω/sq), issue #1231 | `rhigh` (ambiguous sheet rho upstream — deliberately left as a short), metal resistors², MIM capacitors (`cap_cmim`/`rfcmim`)², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
 | Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
@@ -164,18 +168,23 @@ engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
 investigated, declined" docstring section for the full finding.
 
-² MIM capacitors and metal resistors are also a different kind of gap: both
-land entirely above this deck's curated Metal1/Via1/Metal2 stack (MIM caps
-on Metal5 with a TopMetal1 via; several metal-resistor flavours as high as
-TopMetal2), so declaring either today would recognise a device whose plates/
-body connect to nothing else in the extracted graph — issue #1233 (MIM caps)
-and issue #1235 (metal resistors) both investigated and deferred recognition
-until the deck's `metals`/`vias` stack is itself extended (issue #1243, the
-shared prerequisite), the same order sky130's own `met3`/`met4` MiM caps
-took (#619 extended the stack, #775 then wired the via) rather than
-gf180mcu's single pass (whose stack already reached `Metal4` when its MiM
-cap was curated). See `src/klayout_tools/decks/sg13g2.py`'s "MIM capacitors
-— investigated, deferred" docstring section for the full finding.
+² MIM capacitors and metal resistors are a different kind of gap: their own
+recognition (populating `EXTRACTION_DECK.capacitors`/`.resistors` for them)
+is **still not curated** — issue #1233 (MIM caps) and issue #1235 (metal
+resistors) both investigated and deferred it, since both land on levels
+(MIM caps on Metal5 with a TopMetal1 via; several metal-resistor flavours as
+high as TopMetal2) that were, at the time, above this deck's curated
+Metal1/Via1/Metal2 stack — recognising either without a connectivity stack
+reaching that far would produce a device whose plates/body connect to
+nothing else in the extracted graph. Issue #1243 has since extended
+`metals`/`vias` up through TopMetal2 (the shared prerequisite both issues
+named), the same order sky130's own `met3`/`met4` MiM caps took (#619
+extended the stack, #775 then wired the via) rather than gf180mcu's single
+pass (whose stack already reached `Metal4` when its MiM cap was curated) —
+so recognising `cap_cmim`/`rfcmim` and `res_metal1`..`res_topmetal2` is now
+each its own standalone follow-on against the already-extended stack, not a
+blocked one. See `src/klayout_tools/decks/sg13g2.py`'s "MIM capacitors —
+investigated, deferred" docstring section for the full finding.
 
 An unrecognised device class extracts as ordinary interconnect, so a design
 using one will see it as a short (LVS `device.unmatched`), never as a wrong

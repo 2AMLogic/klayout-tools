@@ -4754,26 +4754,31 @@ def test_run_drc_antenna_check_requires_other_layer(tmp_path, monkeypatch):
 # sg13g2 (Epic #711 Phase 3b, issue #905)
 # --------------------------------------------------------------------------- #
 #
-# `sg13g2.py`'s 14 width/space rules already have full golden violate/clean
-# coverage via `tests/golden_deck/sg13g2/manifest.json` (parametrized by
+# `sg13g2.py`'s 32 width/space rules (14 from issue #905's original
+# Activ-to-Metal2 stack, plus 18 added by issue #1243's Metal3-TopMetal2
+# extension) already have full golden violate/clean coverage via
+# `tests/golden_deck/sg13g2/manifest.json` (parametrized by
 # `tests/test_golden_deck.py`, which also asserts their `provenance` is
-# populated). The 5 rules below (`gatpoly.separation.activ.1`,
+# populated). The 11 rules below (`gatpoly.separation.activ.1`,
 # `activ.enclosing.cont.1`, `gatpoly.enclosing.cont.1`,
-# `metal1.enclosing.via1.1`, `metal2.enclosing.via2.1`) are `enclosing`/
-# `separation` checks, out of that manifest's width/space-only scope (see its
-# own README.md) -- mirroring how sky130/gf180mcu's own enclosing/separation
-# rules are hand-tested directly in this module (e.g.
+# `metal1.enclosing.via1.1`, `metal2.enclosing.via2.1`, plus issue #1243's
+# `metal3.enclosing.via3.1`, `metal4.enclosing.via4.1`,
+# `metal5.enclosing.topvia1.1`, `topmetal1.enclosing.topvia1.1`,
+# `topmetal1.enclosing.topvia2.1`, `topmetal2.enclosing.topvia2.1`) are
+# `enclosing`/`separation` checks, out of that manifest's width/space-only
+# scope (see its own README.md) -- mirroring how sky130/gf180mcu's own
+# enclosing/separation rules are hand-tested directly in this module (e.g.
 # `test_run_drc_sky130_met1_enclosing_via_violation` above).
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 19 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 43 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
-    compiled rule cites its SG13G2 PDK source line") -- not just the 14
-    width/space rules `tests/test_golden_deck.py`'s generic check already
-    covers."""
+    compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
+    Metal3-TopMetal2 stack) -- not just the 32 width/space rules
+    `tests/test_golden_deck.py`'s generic check already covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 19
+    assert len(deck) == 43
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -5030,6 +5035,135 @@ def test_run_drc_sg13g2_metal2_enclosing_via2_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- Metal3-TopMetal2 enclosure rules (issue #1243) -----------------------
+#
+# One parametrized violate/clean pair per new `"enclosing"` rule the Metal3-
+# TopMetal2 stack extension adds -- mirrors `_GF180MCU_CUT_ENCLOSURE_RULES`
+# above rather than one hand-written test per level, since all six share the
+# identical "cut shape hangs off its landing conductor's edge" failure mode
+# `metal1.enclosing.via1.1`/`metal2.enclosing.via2.1` above already exercise
+# individually. Entry shape: (rule id, conductor layer, conductor name, cut
+# layer, cut name, threshold_dbu).
+_SG13G2_METAL_STACK_ENCLOSURE_RULES = [
+    ("metal3.enclosing.via3.1", (30, 0), "Metal3.drawing", (49, 0), "Via3.drawing", 5),
+    ("metal4.enclosing.via4.1", (50, 0), "Metal4.drawing", (66, 0), "Via4.drawing", 5),
+    (
+        "metal5.enclosing.topvia1.1",
+        (67, 0),
+        "Metal5.drawing",
+        (125, 0),
+        "TopVia1.drawing",
+        100,
+    ),
+    (
+        "topmetal1.enclosing.topvia1.1",
+        (126, 0),
+        "TopMetal1.drawing",
+        (125, 0),
+        "TopVia1.drawing",
+        420,
+    ),
+    (
+        "topmetal1.enclosing.topvia2.1",
+        (126, 0),
+        "TopMetal1.drawing",
+        (133, 0),
+        "TopVia2.drawing",
+        500,
+    ),
+    (
+        "topmetal2.enclosing.topvia2.1",
+        (134, 0),
+        "TopMetal2.drawing",
+        (133, 0),
+        "TopVia2.drawing",
+        500,
+    ),
+]
+
+
+def _sg13g2_cut_stack(
+    tmp_path, name, conductor, conductor_name, cut, cut_name, conductor_box, cut_box
+):
+    """Write a two-layer conductor-over-cut layout and return its path --
+    mirrors `_gf180mcu_cut_stack` above."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    cond_layer = layout.layer(*conductor)
+    layout.set_info(
+        cond_layer, kdb.LayerInfo(conductor[0], conductor[1], conductor_name)
+    )
+    cut_layer = layout.layer(*cut)
+    layout.set_info(cut_layer, kdb.LayerInfo(cut[0], cut[1], cut_name))
+    top.shapes(cond_layer).insert(conductor_box)
+    top.shapes(cut_layer).insert(cut_box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return path
+
+
+@pytest.mark.parametrize(
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    _SG13G2_METAL_STACK_ENCLOSURE_RULES,
+    ids=[entry[0] for entry in _SG13G2_METAL_STACK_ENCLOSURE_RULES],
+)
+def test_run_drc_sg13g2_metal_stack_enclosure_violation(
+    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+):
+    """A via/cut shape hanging off the edge of its landing conductor by one
+    dbu less than the rule's own threshold trips exactly one violation --
+    the same failure mode `metal1.enclosing.via1.1`/`metal2.enclosing.via2.1`
+    above exercise individually, parametrized across the six new
+    Metal3-TopMetal2 enclosure rules issue #1243 adds."""
+    margin = threshold_dbu - 1
+    path = _sg13g2_cut_stack(
+        tmp_path,
+        f"{rule_id}_violation",
+        conductor,
+        conductor_name,
+        cut,
+        cut_name,
+        kdb.Box(0, 0, 4000 - margin, 2000),
+        kdb.Box(1000, 500, 4000, 1500),
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {rule_id: 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == rule_id
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == conductor_name
+
+
+@pytest.mark.parametrize(
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    _SG13G2_METAL_STACK_ENCLOSURE_RULES,
+    ids=[entry[0] for entry in _SG13G2_METAL_STACK_ENCLOSURE_RULES],
+)
+def test_run_drc_sg13g2_metal_stack_enclosure_clean(
+    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+):
+    """A cut shape enclosed by its landing conductor with a margin well above
+    every threshold in this family (max 500 dbu) reports clean."""
+    path = _sg13g2_cut_stack(
+        tmp_path,
+        f"{rule_id}_clean",
+        conductor,
+        conductor_name,
+        cut,
+        cut_name,
+        kdb.Box(0, 0, 6000, 3000),
+        kdb.Box(1000, 1000, 5000, 2000),
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
 def test_run_drc_sg13g2_coverage_deck_scope_matches_rule_scopes(tmp_path):
     """`coverage.deck_scope` (#566) is every distinct non-empty `DrcRule.scope`
     across the sg13g2 deck's rules, deduplicated and sorted -- mirrors
@@ -5057,17 +5191,26 @@ def test_run_drc_sg13g2_unmodeled_voltage_marker_registered():
 
 def test_sg13g2_extraction_deck_declares_mos_recognition():
     """sg13g2's `EXTRACTION_DECK` declares the curated `active`/`poly`/
-    `nwell`/`contact` MOS-recognition layers and a two-level Metal1/Metal2
-    connectivity stack joined by Via1 -- the same fields
-    `test_golden_pair_sg13g2_*` in `tests/test_sg13g2_deck.py` exercise
-    end-to-end."""
+    `nwell`/`contact` MOS-recognition layers and a seven-level Metal1-
+    TopMetal2 connectivity stack (issue #1243 extends the original
+    Metal1/Metal2/Via1 stack) joined by Via1-Via4/TopVia1/TopVia2 -- the same
+    fields `test_golden_pair_sg13g2_*` in `tests/test_sg13g2_deck.py`
+    exercise end-to-end."""
     deck = get_extraction_deck("sg13g2")
     assert deck.active == (1, 0)
     assert deck.poly == (5, 0)
     assert deck.nwell == (31, 0)
     assert deck.contact == (6, 0)
-    assert deck.metals == ((8, 0), (10, 0))
-    assert deck.vias == ((19, 0),)
+    assert deck.metals == (
+        (8, 0),
+        (10, 0),
+        (30, 0),
+        (50, 0),
+        (67, 0),
+        (126, 0),
+        (134, 0),
+    )
+    assert deck.vias == ((19, 0), (29, 0), (49, 0), (66, 0), (125, 0), (133, 0))
     assert deck.tap is None
     # `"resistor"` trails the MOS roles as of issue #1231's two curated poly
     # resistors; the thick-oxide MOS flavour added by the same issue

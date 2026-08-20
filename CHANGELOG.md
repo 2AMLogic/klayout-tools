@@ -969,6 +969,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-20 — The `sg13g2` curated deck's `metals`/`vias` connectivity
+  stack (and the companion DRC rule deck) now reaches **Metal5/TopMetal1/
+  TopMetal2**, extended from its original Metal1/Via1/Metal2 ceiling (issue
+  #1243, sg13g2's own equivalent of sky130's #619). Before this, a net
+  routed above Metal2 — or a device recognised on a level above it —
+  resolved to an isolated, unmerged node: `EXTRACTION_DECK.metals`/`.vias`
+  had no entries past Metal2, so a design routing through Metal3 or higher
+  silently split into disconnected nets on extraction. `DECK` gains 24 new
+  `DrcRule` entries (Metal3–Metal5/TopMetal1/TopMetal2 width/space, plus
+  each new via level's own enclosure rule(s) — TopVia1/TopVia2 each carry
+  *two*, since the upstream source defines both the below- and above-metal
+  enclosure), every one transcribed with a `RuleProvenance` citation against
+  the fetched IHP-Open-PDK v0.3.0 install, following the same
+  `beol/5_17_metaln.drc`/`5_19_via1.drc`/`5_20_vian.drc`/`5_21_topvia1.drc`/
+  `5_22_topmetal1.drc`/`5_24_topvia2.drc`/`5_25_topmetal2.drc` sources the
+  issue names. This is the prerequisite issue #1233 (MIM capacitors, whose
+  `cap_cmim`/`rfcmim` plates land on Metal5/TopMetal1) and issue #1235
+  (metal resistors, whose `res_metal1`..`res_topmetal2` flavours span up to
+  TopMetal2) both independently blocked on — neither device class is
+  recognised by this change itself; each remains its own standalone
+  follow-on now that the connectivity stack they would land on actually
+  reaches that far. See `src/klayout_tools/decks/sg13g2.py`'s "Scope guard"
+  and "MIM capacitors" docstring sections and
+  [`docs/cli/pdk.md`](docs/cli/pdk.md)'s SG13G2 coverage table.
 - 2026-08-20 — Investigated (and declined) recognising SG13G2's **SiGe HBTs**
   (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`) in the `sg13g2` extraction deck
   (issue #1232, a follow-on to #1231). Against a real fetched IHP-Open-PDK
