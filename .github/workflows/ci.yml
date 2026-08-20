@@ -340,7 +340,11 @@ jobs:
     # exercise of the compiled `klt-techmap` binary (issue #875's
     # `--verify-equivalence` gate) happens in the `test` job below, which
     # already provisions a real `yosys`/`iverilog` `klt equiv` needs.
-    runs-on: ubuntu-latest
+    # Heavy jobs run on the dedicated CI runner (2AMLogic/2am#29). The
+    # expression routes same-repo runs to it and sends fork PRs back to
+    # GitHub-hosted instead of skipping them, so required checks never go
+    # missing and no outside fork ever executes on our host.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     defaults:
       run:
