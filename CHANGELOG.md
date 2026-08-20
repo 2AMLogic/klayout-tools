@@ -969,6 +969,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-20 — Investigated (and declined) recognising SG13G2's **SiGe HBTs**
+  (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`) in the `sg13g2` extraction deck
+  (issue #1232, a follow-on to #1231). Against a real fetched IHP-Open-PDK
+  v0.3.0 install, SG13G2's own LVS deck extracts these through a custom Ruby
+  `CustomBJTExtractor` (`custom_bjt_extractor.lvs`) — not KLayout's stock
+  `DeviceExtractorBJT3Transistor` that `EXTRACTION_DECK.bipolars`
+  (`BipolarDevice`) wires up — with a device marker that is itself a 3-layer
+  compound boolean (and one of those layers is not even a literal drawn
+  layer in this PDK) and terminal pins distinguished by drawn
+  bounding-box/area filters this engine's device-recognition primitives have
+  no equivalent for. Forcing a same-shaped `BipolarDevice` approximation
+  would have produced a self-consistent golden pair that still does not
+  match the PDK's real connectivity, so `bipolars` stays empty — a drawn
+  SiGe HBT continues to extract as ordinary interconnect (a `klt lvs`
+  `device.unmatched`/short) rather than a wrong device. See
+  `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs — investigated, declined"
+  docstring section for the full finding, and
+  [`docs/cli/pdk.md`](docs/cli/pdk.md)'s SG13G2 coverage table.
 - 2026-08-20 — The `sg13g2` extraction deck now recognises SG13G2's
   **thick-oxide ("-HV") MOS** flavour and two of its **drawn poly resistors**
   (issue #1231). Before this, geometry drawn inside `ThickGateOx` (44/0)
