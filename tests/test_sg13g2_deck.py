@@ -98,15 +98,16 @@ def test_sg13g2_mos_provenance_cites_mos_extraction_lvs():
     )
 
 
-def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
+def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_entries():
     """Issue #1231 curates MOS (thin- *and* thick-oxide) plus the two
     unambiguous poly-resistor flavours; issue #1235 adds the third poly
     resistor (`rhigh`, its sheet-rho ambiguity resolved -- see `sg13g2.py`'s
     resistor note) and the two metal resistors that fit inside this deck's
-    curated Metal1/Metal2 stack (`res_metal1`/`res_metal2`). `diodes`
-    remains empty because no follow-on issue has curated it yet, exactly
-    like sky130/gf180mcu's own pre-#542 state (see `sg13g2.py`'s "Scope
-    guard" docstring section).
+    curated Metal1/Metal2 stack (`res_metal1`/`res_metal2`); issue #1234
+    additionally curates the two antenna diodes. `capacitors` remains empty
+    because no follow-on issue has curated it yet, exactly like
+    sky130/gf180mcu's own pre-#225 state (see `sg13g2.py`'s "Scope guard"
+    docstring section).
 
     `capacitors` staying empty is a deliberate deferral, not a plain gap:
     issue #1233 investigated populating it for `cap_cmim`/`rfcmim` and found
@@ -124,14 +125,18 @@ def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
     `CustomBJTExtractor`-based derivation (see `sg13g2.py`'s "SiGe HBTs --
     investigated, declined" docstring section for the full finding) -- see
     `test_sg13g2_bipolars_declined_after_investigation` below for a test
-    that documents *why*, not just *that*.
+    that documents *why*, not just *that*. Issue #1234's own investigation of
+    `schottky_nbl1` reached the same "declined" conclusion for a different
+    reason (a fixed-size, size-filtered emitter region and a dynamic
+    per-instance collector derivation, not a compound multi-layer marker) --
+    see `test_sg13g2_schottky_nbl1_declined_after_investigation` below.
 
     Named explicitly here so a future extension of this deck must update
     this assertion, rather than silently leaving the coverage-discipline
     test below out of sync."""
     assert EXTRACTION_DECK.capacitors == ()
     assert EXTRACTION_DECK.bipolars == ()
-    assert EXTRACTION_DECK.diodes == ()
+    assert {d.name for d in EXTRACTION_DECK.diodes} == {"dantenna", "dpantenna"}
     assert {r.name for r in EXTRACTION_DECK.resistors} == {
         "rsil",
         "rppd",
@@ -139,7 +144,13 @@ def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
         "res_metal1",
         "res_metal2",
     }
-    assert EXTRACTION_DECK.device_classes == ("nfet", "pfet", "resistor")
+    assert EXTRACTION_DECK.device_classes == (
+        "nfet",
+        "pfet",
+        "resistor",
+        "dantenna",
+        "dpantenna",
+    )
 
 
 def test_sg13g2_bipolars_declined_after_investigation():
@@ -776,6 +787,110 @@ def test_sg13g2_unmarked_metal1_bar_is_not_a_resistor(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# Antenna diodes (issue #1234)
+# --------------------------------------------------------------------------- #
+
+
+def test_sg13g2_diode_provenance_cites_diode_extraction_lvs():
+    """Both curated antenna-diode entries carry a `provenance` citing the
+    real `diode_extraction.lvs` `extract_devices(diode(...))` calls they were
+    transcribed from (issue #1234)."""
+    by_name = {d.name: d for d in EXTRACTION_DECK.diodes}
+    assert set(by_name) == {"dantenna", "dpantenna"}
+    for name in ("dantenna", "dpantenna"):
+        assert by_name[name].provenance == RuleProvenance(
+            source_repo="IHP-GmbH/IHP-Open-PDK",
+            source_path=(
+                "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/diode_extraction.lvs"
+            ),
+            rule_id=name,
+            commit=_IHP_OPEN_PDK_COMMIT,
+        )
+
+
+def _make_sg13g2_diode_layout() -> kdb.Layout:
+    """A minimal dual-diode layout on sg13g2's curated diode-recognition
+    layers -- one `dantenna` (n+ diffusion/p-substrate) and one `dpantenna`
+    (p+ diffusion/NWell) junction, each 1um x 1um (area 1.0um^2, perimeter
+    4.0um) -- mirrors `test_lvs_device_provenance.py`'s own
+    `_make_gf180mcu_diode_layout` topology."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    # dantenna: n+ diffusion in the p-substrate (no drawn PWell mask).
+    draw(99, 31, _box_um(-0.2, -0.2, 1.2, 1.2))  # Recog.diode marker
+    draw(1, 0, _box_um(0, 0, 1, 1))  # Activ (cathode)
+    draw(6, 0, _box_um(0.3, 0.3, 0.7, 0.7))  # Cont over the cathode
+    draw(8, 0, _box_um(0.2, 0.2, 0.8, 0.8))  # Metal1 over the cathode
+    label(8, 25, "CATH", 0.5, 0.5)
+
+    # dpantenna: p+ diffusion in NWell.
+    draw(31, 0, _box_um(4, 0, 7, 3))  # NWell (cathode)
+    draw(99, 31, _box_um(4.8, 0.8, 6.2, 2.2))  # Recog.diode marker
+    draw(1, 0, _box_um(5, 1, 6, 2))  # Activ (anode)
+    draw(14, 0, _box_um(5, 1, 6, 2))  # pSD (p+ doped)
+    draw(6, 0, _box_um(5.3, 1.3, 5.7, 1.7))  # Cont over the anode
+    draw(8, 0, _box_um(5.2, 1.2, 5.8, 1.8))  # Metal1 over the anode
+    label(8, 25, "ANOD", 5.5, 1.5)
+
+    return layout
+
+
+def test_golden_pair_sg13g2_diodes_extract_with_provenance_cited_devices(
+    tmp_path: Path,
+):
+    """The synthetic dual-diode layout extracts exactly the two `D` devices
+    its topology describes, each matching its own provenance-cited entry --
+    validating `EXTRACTION_DECK.diodes[].provenance`'s `dantenna`/
+    `dpantenna` citations end-to-end (issue #1234)."""
+    path = _write_gds(_make_sg13g2_diode_layout(), tmp_path / "diode.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "diode.spice"))
+
+    assert report["device_counts"] == {"dantenna": 1, "dpantenna": 1}
+    by_class = {device["class"]: device for device in report["devices"]}
+
+    dantenna = by_class["dantenna"]
+    assert dantenna["nets"] == {"a": EXTRACTION_DECK.substrate_net, "c": "CATH"}
+    assert dantenna["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+
+    dpantenna = by_class["dpantenna"]
+    assert dpantenna["nets"]["a"] == "ANOD"
+    assert dpantenna["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+
+
+def test_sg13g2_schottky_nbl1_declined_after_investigation():
+    """Issue #1234's own finding, pinned as a regression test: SG13G2's real
+    `schottky_nbl1` is extracted upstream via the *same* stock
+    `DeviceExtractorBJT3Transistor` extractor `BipolarDevice` wires up
+    (`bjt3('schottky_nbl1', Esd3Term)`, `Esd3Term < RBA::
+    DeviceClassBJT3Transistor`) -- but its emitter terminal is a fixed-size
+    box synthesized from a bounding-box-size-filtered region
+    (`with_bbox_min`/`with_bbox_max` then `middle(as_boxes).sized(...)`) and
+    its collector terminal a dynamic per-instance `.covering(...)`
+    derivation, neither expressible by `BipolarDevice`'s plain
+    layer-intersection `base`/`emitter`/`marker`/`collector` fields (see
+    `sg13g2.py`'s "Schottky diode (schottky_nbl1) -- investigated, declined"
+    docstring section for the full finding).
+
+    This test exists so that if a future change ever populates a
+    `schottky_nbl1` entry (in either `bipolars` or `diodes`) without
+    revisiting this finding, it fails loudly here rather than silently
+    landing a mapping nobody re-verified against the real PDK derivation."""
+    assert "schottky_nbl1" not in EXTRACTION_DECK.device_classes
+    assert {d.name for d in EXTRACTION_DECK.diodes} == {"dantenna", "dpantenna"}
+    assert EXTRACTION_DECK.bipolars == ()
+
+
+# --------------------------------------------------------------------------- #
 # Coverage discipline
 # --------------------------------------------------------------------------- #
 
@@ -783,10 +898,10 @@ def test_sg13g2_unmarked_metal1_bar_is_not_a_resistor(tmp_path: Path):
 def _provenanced_device_rule_ids() -> set[str]:
     """Mirrors `test_lvs_device_provenance.py`'s own
     `_provenanced_device_rule_ids`, scoped to sg13g2's `EXTRACTION_DECK`
-    (MOS -- thin- and thick-oxide -- plus the three curated poly resistors
-    and two curated metal resistors; see
-    `test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries`
-    above for what is still unrecognised)."""
+    (MOS -- thin- and thick-oxide -- plus the three curated poly resistors,
+    the two curated metal resistors and the two curated antenna diodes; see
+    `test_sg13g2_extraction_deck_has_no_capacitor_bipolar_entries` above for
+    what is still unrecognised)."""
     ids: set[str] = set()
     if EXTRACTION_DECK.nfet_provenance is not None:
         ids.add(EXTRACTION_DECK.nfet_provenance.rule_id)
@@ -822,6 +937,8 @@ _GOLDEN_PAIR_TESTED_RULE_IDS = frozenset(
         "rhigh",
         "res_metal1",
         "res_metal2",
+        "dantenna",
+        "dpantenna",
     }
 )
 

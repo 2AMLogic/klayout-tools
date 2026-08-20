@@ -3413,9 +3413,12 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
         # sg13g2 declares MOS (thin- and thick-oxide, the latter via
         # `mos_flavours`, which deliberately shares the `nfet`/`pfet` class
         # labels) plus its two unambiguous drawn poly-resistor flavours
-        # (issue #1231) -- no curated bipolar/capacitor/diode entries yet,
-        # so nothing trails the `"resistor"` role.
-        ("sg13g2", ("nfet", "pfet", "resistor")),
+        # (issue #1231) and its two curated antenna diodes (issue #1234) --
+        # no curated bipolar/capacitor entries yet.
+        (
+            "sg13g2",
+            ("nfet", "pfet", "resistor", "dantenna", "dpantenna"),
+        ),
     ],
 )
 def test_extraction_deck_device_classes_reports_every_curated_device_family(
