@@ -100,10 +100,13 @@ def test_sg13g2_mos_provenance_cites_mos_extraction_lvs():
 
 def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
     """Issue #1231 curates MOS (thin- *and* thick-oxide) plus the two
-    unambiguous poly-resistor flavours only -- `diodes` remains empty
-    because no follow-on issue has curated it yet, exactly like sky130/
-    gf180mcu's own pre-#542 state (see `sg13g2.py`'s "Scope guard" docstring
-    section).
+    unambiguous poly-resistor flavours; issue #1235 adds the third poly
+    resistor (`rhigh`, its sheet-rho ambiguity resolved -- see `sg13g2.py`'s
+    resistor note) and the two metal resistors that fit inside this deck's
+    curated Metal1/Metal2 stack (`res_metal1`/`res_metal2`). `diodes`
+    remains empty because no follow-on issue has curated it yet, exactly
+    like sky130/gf180mcu's own pre-#542 state (see `sg13g2.py`'s "Scope
+    guard" docstring section).
 
     `capacitors` staying empty is a deliberate deferral, not a plain gap:
     issue #1233 investigated populating it for `cap_cmim`/`rfcmim` and found
@@ -129,7 +132,13 @@ def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
     assert EXTRACTION_DECK.capacitors == ()
     assert EXTRACTION_DECK.bipolars == ()
     assert EXTRACTION_DECK.diodes == ()
-    assert {r.name for r in EXTRACTION_DECK.resistors} == {"rsil", "rppd"}
+    assert {r.name for r in EXTRACTION_DECK.resistors} == {
+        "rsil",
+        "rppd",
+        "rhigh",
+        "res_metal1",
+        "res_metal2",
+    }
     assert EXTRACTION_DECK.device_classes == ("nfet", "pfet", "resistor")
 
 
@@ -157,12 +166,12 @@ def test_sg13g2_bipolars_declined_after_investigation():
 
 
 def test_sg13g2_resistor_provenance_cites_res_extraction_lvs():
-    """Both curated poly-resistor entries cite the real `res_extraction.lvs`
-    `extract_devices(GeneralNTerminalExtractor.new(...))` call they were
-    transcribed from (issue #1231), with the sheet resistance taken from the
-    PDK's own `sg13g2_tech.json` `*_rspec` constant."""
+    """All five curated resistor entries cite the real `res_extraction.lvs`
+    `extract_devices(...)` call they were transcribed from (`rsil`/`rppd`:
+    issue #1231; `rhigh`/`res_metal1`/`res_metal2`: issue #1235), with the
+    sheet resistance taken from the PDK's own citable constants."""
     by_name = {r.name: r for r in EXTRACTION_DECK.resistors}
-    for name in ("rsil", "rppd"):
+    for name in ("rsil", "rppd", "rhigh", "res_metal1", "res_metal2"):
         assert by_name[name].provenance == RuleProvenance(
             source_repo="IHP-GmbH/IHP-Open-PDK",
             source_path=(
@@ -176,6 +185,35 @@ def test_sg13g2_resistor_provenance_cites_res_extraction_lvs():
     # (`techName == "SG13G2"` selects the `G2` suffix -- see `rppd_code.py`).
     assert by_name["rsil"].sheet_rho_ohm_sq == pytest.approx(7.0)
     assert by_name["rppd"].sheet_rho_ohm_sq == pytest.approx(260.0)
+    # `rhighG2_rspec` (1360.0), corroborated by `cornerRES.lib`'s `res_typ`
+    # corner `rsh_rhigh` -- see `sg13g2.py`'s resistor note for the full
+    # tie-break (issue #1235).
+    assert by_name["rhigh"].sheet_rho_ohm_sq == pytest.approx(1360.0)
+    # `RSH_RES_METAL1`/`RSH_RES_METAL2` (res_extraction.lvs's own inline
+    # constants, cited upstream to `libs.tech/parasitics/itf/
+    # sg13g2_typ.itf`).
+    assert by_name["res_metal1"].sheet_rho_ohm_sq == pytest.approx(0.110)
+    assert by_name["res_metal2"].sheet_rho_ohm_sq == pytest.approx(0.088)
+
+
+def test_sg13g2_rhigh_requires_both_implants_disambiguating_it_from_rppd():
+    """`rhigh`'s `requires` includes both `pSD`/`nSD` together (upstream:
+    `rhigh_res = polyres_mk.and(psd_drw).and(nsd_drw).and(salblock_drw)`),
+    which is what naturally keeps it distinct from `rppd` (whose own
+    `excludes` subtract `nSD`/`nSD_block`, `res_derivations.lvs`'s
+    `rppd_res = ... .not(nsd_block).not(nsd_drw)`) -- a segment carrying
+    nSD can only ever match `rhigh`, never be misclassified as `rppd`, and a
+    segment *without* nSD can only ever match `rppd`, never `rhigh` (issue
+    #1235's own edge-case test plan item)."""
+    by_name = {r.name: r for r in EXTRACTION_DECK.resistors}
+    rhigh = by_name["rhigh"]
+    rppd = by_name["rppd"]
+    assert (7, 0) in rhigh.requires  # nSD required
+    assert (7, 0) in rppd.excludes  # nSD excluded
+    assert (14, 0) in rhigh.requires  # pSD required
+    assert (14, 0) in rppd.requires  # pSD required
+    assert (28, 0) in rhigh.requires  # SalBlock required
+    assert (28, 0) in rppd.requires  # SalBlock required
 
 
 def test_sg13g2_thick_gate_ox_declares_a_mos_flavour():
@@ -602,6 +640,10 @@ def _make_poly_resistor_layout(
         # rppd: polyres & EXTBlock & pSD & SalBlock, nSD absent
         # (`rppd_res = polyres_mk.and(psd_drw).and(salblock_drw)...`).
         ("rppd", ((111, 0), (14, 0), (28, 0))),
+        # rhigh: polyres & EXTBlock & pSD & nSD & SalBlock -- both implants
+        # present together (`rhigh_res = polyres_mk.and(psd_drw)
+        # .and(nsd_drw).and(salblock_drw)`, issue #1235).
+        ("rhigh", ((111, 0), (14, 0), (7, 0), (28, 0))),
     ],
 )
 def test_golden_pair_sg13g2_poly_resistor_r_ohm_matches_provenance_coefficient(
@@ -643,6 +685,97 @@ def test_sg13g2_unmarked_poly_bar_is_not_a_resistor(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# Drawn metal resistors (issue #1235)
+# --------------------------------------------------------------------------- #
+
+_METAL_RES_SQUARES = 6.0  # 6um marked segment / 1um drawn width
+
+
+def _make_metal_resistor_layout(
+    metal_layer: int, marker_layer: int, label_layer: int
+) -> kdb.Layout:
+    """A 12x1um metal bar on `(metal_layer, 0)` with a 6um-long
+    `(marker_layer, 29)`-marked segment (`L=6um`/`W=1um`, 6.0 squares) and
+    two labelled heads on `(label_layer, 25)` -- the metal-resistor analogue
+    of `_make_poly_resistor_layout` above (`res_metal1`/`res_metal2`: issue
+    #1235)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(metal_layer, 0, _box_um(0, 0, 12, 1))  # metal bar, W=1um
+    draw(marker_layer, 29, _box_um(3, 0, 9, 1))  # res marker, 6um -> L=6um
+    label(label_layer, 25, "RA", 0.2, 0.5)
+    label(label_layer, 25, "RB", 11.8, 0.5)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("name", "metal_layer"),
+    [
+        ("res_metal1", 8),  # Metal1.drawing / Metal1.res (8/29)
+        ("res_metal2", 10),  # Metal2.drawing / Metal2.res (10/29)
+    ],
+)
+def test_golden_pair_sg13g2_metal_resistor_r_ohm_matches_provenance_coefficient(
+    tmp_path: Path, name: str, metal_layer: int
+):
+    """A drawn 6-square metal bar marked with its own metal-resistor layer
+    (`metal1_res`/`metal2_res`) extracts as that device class with `R =
+    squares * sheet_rho_ohm_sq`, computed from the deck's own
+    provenance-cited coefficient -- and its two heads resolve to the drawn,
+    labelled metal pads (the resistor is not left shorted through the metal
+    bar)."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
+
+    path = _write_gds(
+        _make_metal_resistor_layout(metal_layer, metal_layer, metal_layer),
+        tmp_path / f"{name}.gds",
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(
+        _METAL_RES_SQUARES * resistor.sheet_rho_ohm_sq
+    )
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+
+
+def test_sg13g2_unmarked_metal1_bar_is_not_a_resistor(tmp_path: Path):
+    """A Metal1 bar with no `metal1_res` marker stays ordinary interconnect
+    -- same "known-unmodelled beats silently wrong" discipline as the poly
+    resistors above."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(8, 0)).insert(_box_um(0, 0, 12, 1))
+    li = layout.layer(8, 25)
+    top.shapes(li).insert(
+        kdb.Text("RA", kdb.Trans(round(0.2 / _DBU_UM), round(0.5 / _DBU_UM)))
+    )
+    top.shapes(li).insert(
+        kdb.Text("RB", kdb.Trans(round(11.8 / _DBU_UM), round(0.5 / _DBU_UM)))
+    )
+
+    path = _write_gds(layout, tmp_path / "bare_metal1.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "bare_metal1.spice"))
+
+    assert report["device_counts"] == {}
+
+
+# --------------------------------------------------------------------------- #
 # Coverage discipline
 # --------------------------------------------------------------------------- #
 
@@ -650,7 +783,8 @@ def test_sg13g2_unmarked_poly_bar_is_not_a_resistor(tmp_path: Path):
 def _provenanced_device_rule_ids() -> set[str]:
     """Mirrors `test_lvs_device_provenance.py`'s own
     `_provenanced_device_rule_ids`, scoped to sg13g2's `EXTRACTION_DECK`
-    (MOS -- thin- and thick-oxide -- plus the two curated poly resistors; see
+    (MOS -- thin- and thick-oxide -- plus the three curated poly resistors
+    and two curated metal resistors; see
     `test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries`
     above for what is still unrecognised)."""
     ids: set[str] = set()
@@ -685,6 +819,9 @@ _GOLDEN_PAIR_TESTED_RULE_IDS = frozenset(
         "sg13_hv_pmos",
         "rsil",
         "rppd",
+        "rhigh",
+        "res_metal1",
+        "res_metal2",
     }
 )
 
