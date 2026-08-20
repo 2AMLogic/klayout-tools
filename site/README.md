@@ -348,6 +348,8 @@ site/
   README.md            # this file
   index.html            # Vite app-shell entry (dev CSR fallback + prerender template)
   package.json          # React/Vite/Tailwind/shadcn dependencies (isolated from repo root)
+  package-lock.json     # pinned install for `npm ci` (CI, deploy-site.sh)
+  .gitignore            # site-local ignores: dist/, node_modules/, staged public/blocks/ + public/em/
   vite.config.ts        # Vite config: React + Tailwind plugins, dev-time SSR middleware
   components.json       # shadcn/ui CLI configuration
   tsconfig.json / tsconfig.app.json / tsconfig.node.json
@@ -356,6 +358,8 @@ site/
     copy-renders.mjs    # prebuild: stages blocks/*/output/... into public/blocks/
     stage-models.mjs    # prebuild: stages checksummed sky130 SPICE model decks (issue #149)
     stage-models.test.mjs  # tests for the model-deck staging script
+    stage-em-data.mjs    # prebuild: stages geode-fem em-export JSON into public/em/ (Epic #840)
+    stage-em-data.test.mjs
     sky130-models.NOTICE.txt  # Apache-2.0 attribution staged alongside model decks
     playground-perf.mjs  # perf harness: reproduces the spike's engine timing (issue #150)
     prerender.mjs        # build: client + SSR Vite builds -> static dist/<route>/index.html
@@ -372,6 +376,18 @@ site/
       Footer.tsx           # site footer — build SHA, copyright, scope link
       LayoutCard.tsx        # one gallery card per block
       LayoutCard.test.tsx
+      em/                   # "Solver Validation" E&M results strip (Epic #840)
+        EmGallerySection.tsx  # section shell listing the per-fixture entries below
+        PatchAntennaGalleryEntry.tsx / PatchAntennaResult.tsx
+        SpiralInductorGalleryEntry.tsx / SpiralInductorResult.tsx
+        InterconnectCouplingGalleryEntry.tsx / InterconnectCouplingResult.tsx
+        ProvenancePanel.tsx   # solver/mesh provenance shown under each result
+        emMath.ts             # pure helpers (S-parameters, resonance) + tests
+        types.ts / index.ts
+      field/                # reusable 3D mesh + scalar/vector field viewer (#841)
+        FieldViewer.tsx
+        fieldMath.ts          # pure helpers (mesh bounds, field ranges) + tests
+        types.ts / index.ts
       playground/
         StimulusPlayground.tsx      # interactive SPICE playground UI (#151)
         StimulusPlayground.test.tsx
@@ -393,6 +409,8 @@ site/
       types.ts             # Layout type (schema v1, mirrors klt layout-metrics)
       loadLayouts.ts        # build-time layout data loader
       loadLayouts.test.ts
+      loadEmExport.ts       # build-time em-export (field data) loader for detail pages
+      loadEmExport.test.ts
       buildInfo.ts          # build-time git SHA lookup for the footer
       buildInfo.test.ts
     lib/
