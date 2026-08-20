@@ -100,16 +100,26 @@ def test_sg13g2_mos_provenance_cites_mos_extraction_lvs():
 
 def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
     """Issue #1231 curates MOS (thin- *and* thick-oxide) plus the two
-    unambiguous poly-resistor flavours only -- `capacitors`/`diodes` remain
-    empty because no follow-on issue has curated them yet, exactly like
-    sky130/gf180mcu's own pre-#225/#542 state (see `sg13g2.py`'s "Scope
-    guard" docstring section).
+    unambiguous poly-resistor flavours only -- `diodes` remains empty
+    because no follow-on issue has curated it yet, exactly like sky130/
+    gf180mcu's own pre-#542 state (see `sg13g2.py`'s "Scope guard" docstring
+    section).
 
-    `bipolars` staying empty is different: issue #1232 *investigated*
-    populating it and found the stock `BipolarDevice` model cannot
-    faithfully express SG13G2's own `CustomBJTExtractor`-based derivation
-    (see `sg13g2.py`'s "SiGe HBTs -- investigated, declined" docstring
-    section for the full finding) -- see
+    `capacitors` staying empty is a deliberate deferral, not a plain gap:
+    issue #1233 investigated populating it for `cap_cmim`/`rfcmim` and found
+    both plates land on Metal5/TopMetal1, above this deck's curated
+    Metal1/Via1/Metal2 stack -- declaring the entry today would recognise an
+    isolated-node capacitor (`CapacitorDevice`'s own documented "Known
+    limitation"), so recognition is deferred until the stack itself is
+    extended (issue #1243, shared with #1235's metal resistors). See
+    `sg13g2.py`'s "MIM capacitors -- investigated, deferred" docstring
+    section for the full finding.
+
+    `bipolars` staying empty is the same kind of deferral for a different
+    reason: issue #1232 *investigated* populating it and found the stock
+    `BipolarDevice` model cannot faithfully express SG13G2's own
+    `CustomBJTExtractor`-based derivation (see `sg13g2.py`'s "SiGe HBTs --
+    investigated, declined" docstring section for the full finding) -- see
     `test_sg13g2_bipolars_declined_after_investigation` below for a test
     that documents *why*, not just *that*.
 
