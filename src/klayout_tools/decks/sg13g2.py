@@ -118,17 +118,53 @@ device, never a wrong device with a plausible value):
   resistor note for why its sheet resistance is not confidently derivable
   from the PDK's own data -- and the metal resistors ``res_metal1``..
   ``res_topmetal2`` (their ``metals`` levels are above this deck's Metal2
-  stack). Both tracked by issue #1235.
-- MIM capacitors (``cap_cmim``/``rfcmim``) -- ``cap_derivations.lvs``; both
-  are drawn on ``MIM``-over-``Metal5`` with a ``TopMetal1`` via, i.e. wholly
-  above this deck's curated Metal1/Metal2 stack, so recognising them also
-  needs that stack extended (issue #1233).
+  stack). Both tracked by issue #1235, the latter blocked on the same
+  metal-stack extension (issue #1243) as MIM capacitors below.
 - Diodes -- ``diode_extraction.lvs``'s antenna diodes (``dantenna``/
   ``dpantenna``) and the three-terminal ``schottky_nbl1`` (extracted
   upstream as a ``bjt3``, not a ``diode``) -- issue #1234 -- plus the
   ``isolbox`` isolation device, the ``sg13_hv_svaricap`` varactor,
   inductors, ESD devices, and the RF MOS/RF MIM variants, none of which is
   tracked yet.
+
+### MIM capacitors -- investigated, deferred (issue #1233)
+
+Unlike the plain "not curated yet" gaps above, issue #1233 *investigated*
+populating ``EXTRACTION_DECK.capacitors`` for ``cap_cmim``/``rfcmim``
+(``cap_derivations.lvs``, verified against a real fetched IHP-Open-PDK
+v0.3.0 install: both flavours derive from ``mim_drw`` (36/0) over
+``metal5_con``, with a ``vmim_drw``/``topvia1_drw`` via up to
+``topmetal1_con``) and made a deliberate "defer" call rather than declaring
+the entry today:
+
+- :class:`~klayout_tools.decks.CapacitorDevice`'s own docstring permits a
+  ``bottom_plate`` that does not match one of the deck's tracked
+  ``metals[]`` -- it just stays its own self-connected node, isolated from
+  the rest of the extracted netlist ("Known limitation"). So populating
+  ``capacitors=`` today is *possible*, but both of ``cap_cmim``'s plates
+  (Metal5 bottom, TopMetal1-via top) sit entirely above this deck's
+  Metal1/Via1/Metal2 stack -- the recognised device would carry the right
+  capacitance value between two nets nothing else in the extracted graph
+  ever touches, never matchable against a real design's routing.
+- The two closest worked examples in this codebase answer the same
+  "recognise now vs. extend the stack first" question oppositely, and both
+  point the same way for sg13g2: gf180mcu's ``FuseTop``/``Metal4`` MiM cap
+  set ``top_plate_via``/``top_plate_via_metal`` from the start because that
+  deck's ``metals`` stack already reached ``Metal4`` when it was curated;
+  sky130's ``met3``/``met4`` MiM caps did **not** set them until issue #619
+  first extended sky130's own ``metals``/``vias`` stack far enough to reach
+  ``met3``/``met4`` (issue #775 then wired the via). sg13g2's Metal2-capped
+  stack is squarely in the sky130-pre-#619 situation, not the
+  gf180mcu-already-there one.
+
+**Decision:** defer ``cap_cmim``/``rfcmim`` recognition until the deck's
+``metals``/``vias`` stack itself is extended up through Metal5/TopMetal1 --
+filed as its own prerequisite, issue #1243, shared with #1235's metal
+resistors (``res_metal1``..``res_topmetal2``), which independently hits the
+identical Metal2 ceiling. Once #1243 lands, recognising ``cap_cmim``/
+``rfcmim`` becomes a standalone follow-on that can set
+``top_plate_via``/``top_plate_via_metal`` correctly on the first pass,
+mirroring #775 rather than repeating sky130's two-step history.
 
 ### SiGe HBTs -- investigated, declined (issue #1232)
 
