@@ -119,11 +119,6 @@ device, never a wrong device with a plausible value):
   from the PDK's own data -- and the metal resistors ``res_metal1``..
   ``res_topmetal2`` (their ``metals`` levels are above this deck's Metal2
   stack). Both tracked by issue #1235.
-- SiGe HBTs (``npn13G2``/``npn13G2l``/``npn13G2v``, the lateral ``pnpMPA``)
-  -- ``bjt_derivations.lvs``/``bjt_extraction.lvs``, each extracted upstream
-  by a *custom* Ruby ``CustomBJTExtractor`` rather than KLayout's stock
-  ``bjt3``, so transcribing them is more than populating ``bipolars``
-  (issue #1232).
 - MIM capacitors (``cap_cmim``/``rfcmim``) -- ``cap_derivations.lvs``; both
   are drawn on ``MIM``-over-``Metal5`` with a ``TopMetal1`` via, i.e. wholly
   above this deck's curated Metal1/Metal2 stack, so recognising them also
@@ -134,6 +129,73 @@ device, never a wrong device with a plausible value):
   ``isolbox`` isolation device, the ``sg13_hv_svaricap`` varactor,
   inductors, ESD devices, and the RF MOS/RF MIM variants, none of which is
   tracked yet.
+
+### SiGe HBTs -- investigated, declined (issue #1232)
+
+Unlike every other gap in this list, SiGe HBTs (``npn13G2``/``npn13G2l``/
+``npn13G2v``, the lateral ``pnpMPA``) are not simply "not curated yet": issue
+#1232 investigated populating ``EXTRACTION_DECK.bipolars`` (a tuple of
+:class:`~klayout_tools.decks.BipolarDevice`, the mechanism sky130's/
+gf180mcu's own curated ``pnp``/bipolar entries use) and concluded the model
+cannot faithfully express what SG13G2's own LVS deck does, against a real
+fetched IHP-Open-PDK v0.3.0 install (``bjt_derivations.lvs``/
+``bjt_extraction.lvs``/``bjt_connections.lvs``/``custom_bjt_extractor.lvs``):
+
+- **Different extractor class entirely.** SG13G2's deck calls
+  ``extract_devices(CustomBJTExtractor.new('npn13G2', false), {...})`` --
+  a hand-written Ruby ``RBA::GenericDeviceExtractor`` subclass
+  (``custom_bjt_extractor.lvs``), not KLayout's stock
+  ``DeviceExtractorBJT3Transistor`` that :class:`BipolarDevice` (and this
+  engine's own ``extract.py`` bipolar-recognition block) wires up. That
+  custom extractor iterates each device-marker instance individually and
+  computes device parameters (``we``/``le``/``Nx``/``m`` for NPN, ``A``/``P``/
+  ``m`` for PNP) from the *drawn bounding box* of the first recognised
+  emitter polygon -- there is no equivalent "per-instance geometric
+  measurement" step in this engine's ``BipolarDevice``/
+  ``DeviceExtractorBJT3Transistor`` wiring at all.
+- **The marker is itself a 3-layer compound derivation, not a single drawn
+  layer.** ``npn_mk = trans_drw.and(pwell).and(ptap_holes)`` --
+  :class:`BipolarDevice.marker` is a single ``(layer, datatype)`` pair, and
+  ``pwell`` is not even a literal drawn layer here (``pwell =
+  pwell_allowed.not(nwell_drw).not(digisub_gap)`` in
+  ``general_derivations.lvs`` -- the same "sg13g2 draws no separate
+  PWell layer" gap this module's MOS-recognition note above already
+  documents for the NMOS body/``substrate_net`` fallback).
+- **Collector/base/emitter pins are shape-filtered, not boolean-filtered.**
+  E.g. ``npn13G2_e_pin = npn13G2_e_.with_bbox_min(0.07.um)
+  .with_bbox_max(0.9.um).with_area(0.063.um)`` -- ``npn13G2``,
+  ``npn13G2l``, and ``npn13G2v`` are distinguished from each other almost
+  *entirely* by their emitter windows' drawn bounding-box/area filters
+  (``with_bbox_min``/``with_bbox_max``/``with_area``), not by a distinct
+  layer combination this engine could key a separate ``BipolarDevice``
+  entry off. ``extract.py``'s own bipolar wiring only ever intersects
+  layers (``base & marker``, ``emitter & base [& requires - excludes]``) --
+  it has no size-filtered-region primitive at all.
+- **npn13G2/npn13G2l/npn13G2v are 4-terminal devices with a genuinely
+  distinct substrate node** (``'S' => npn_sub`` alongside ``'C'``/``'B'``/
+  ``'E'`` in ``bjt_extraction.lvs``, ``npn_sub = npn_mk.not(npn_exclude)``,
+  connected to ``pwell`` in ``bjt_connections.lvs``) -- not the "collector
+  formed by substrate, ``collector=None`` folds it into the deck's
+  ``substrate_net`` global" 3-terminal case :class:`BipolarDevice`'s own
+  docstring describes (and sky130's/gf180mcu's populated entries use).
+  ``pnpMPA`` is 3-terminal, but its own terminals
+  (``pnp_mpa_b``/``pnp_mpa_c``) are each restricted to the subset
+  *dynamically* ``interacting`` with the *already-computed* emitter region's
+  extents (``pnp_b.interacting(pnp_b.extents.interacting(pnp_mpa_e))``) --
+  a per-instance geometric relationship, not a static per-terminal
+  ``requires``/``excludes`` layer set.
+
+Forcing a same-shaped approximation onto :class:`BipolarDevice` here (e.g.
+``base=(31, 0)`` NWell-alike, a single-layer ``marker``, no ``collector``)
+would produce a self-consistent golden pair that still does not match SG13G2's
+real connectivity or device count -- exactly the failure mode this issue's own
+acceptance criteria warned against, so this deck declines to populate
+``bipolars`` rather than ship a plausible-looking wrong mapping. A drawn
+SiGe HBT continues to extract as ordinary unconnected geometry (a
+``klt lvs`` ``device.unmatched``/short, never a wrong device) until either
+this engine grows a size-filtered/dynamic-relationship device-recognition
+primitive general enough for SG13G2's own custom extractor, or a future
+issue revisits this with a narrower, explicitly-approximate scope.
 
 ## No #524 cross-check
 

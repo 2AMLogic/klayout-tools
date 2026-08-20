@@ -152,8 +152,17 @@ full transcription:
 |---|---|---|
 | DRC geometric rules | one connected Activ→Metal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
 | LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1231) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`), the `sg13_hv_svaricap` varactor |
-| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq) and `rppd` (260 Ω/sq), issue #1231 | `rhigh` (ambiguous sheet rho upstream — deliberately left as a short), metal resistors, MIM capacitors (`cap_cmim`/`rfcmim`), SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`), diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
+| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq) and `rppd` (260 Ω/sq), issue #1231 | `rhigh` (ambiguous sheet rho upstream — deliberately left as a short), metal resistors, MIM capacitors (`cap_cmim`/`rfcmim`), SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
 | Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
+
+¹ SiGe HBTs are a different kind of gap from the rest of this row: issue
+#1232 *investigated* recognising them (not merely deferred it) and found
+SG13G2's own LVS deck extracts them through a custom Ruby
+`CustomBJTExtractor` — with a compound, non-single-layer device marker and
+terminal pins distinguished by drawn bounding-box/area filters — that this
+engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
+faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
+investigated, declined" docstring section for the full finding.
 
 An unrecognised device class extracts as ordinary interconnect, so a design
 using one will see it as a short (LVS `device.unmatched`), never as a wrong

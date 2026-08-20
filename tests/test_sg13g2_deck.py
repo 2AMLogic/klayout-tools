@@ -100,17 +100,50 @@ def test_sg13g2_mos_provenance_cites_mos_extraction_lvs():
 
 def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_diode_entries():
     """Issue #1231 curates MOS (thin- *and* thick-oxide) plus the two
-    unambiguous poly-resistor flavours only -- `capacitors`/`bipolars`/
-    `diodes` remain empty, exactly like sky130/gf180mcu's own
-    pre-#225/#223/#542 state (see `sg13g2.py`'s "Scope guard" docstring
-    section). Named explicitly here so a future extension of this deck must
-    update this assertion, rather than silently leaving the
-    coverage-discipline test below out of sync."""
+    unambiguous poly-resistor flavours only -- `capacitors`/`diodes` remain
+    empty because no follow-on issue has curated them yet, exactly like
+    sky130/gf180mcu's own pre-#225/#542 state (see `sg13g2.py`'s "Scope
+    guard" docstring section).
+
+    `bipolars` staying empty is different: issue #1232 *investigated*
+    populating it and found the stock `BipolarDevice` model cannot
+    faithfully express SG13G2's own `CustomBJTExtractor`-based derivation
+    (see `sg13g2.py`'s "SiGe HBTs -- investigated, declined" docstring
+    section for the full finding) -- see
+    `test_sg13g2_bipolars_declined_after_investigation` below for a test
+    that documents *why*, not just *that*.
+
+    Named explicitly here so a future extension of this deck must update
+    this assertion, rather than silently leaving the coverage-discipline
+    test below out of sync."""
     assert EXTRACTION_DECK.capacitors == ()
     assert EXTRACTION_DECK.bipolars == ()
     assert EXTRACTION_DECK.diodes == ()
     assert {r.name for r in EXTRACTION_DECK.resistors} == {"rsil", "rppd"}
     assert EXTRACTION_DECK.device_classes == ("nfet", "pfet", "resistor")
+
+
+def test_sg13g2_bipolars_declined_after_investigation():
+    """Issue #1232's own finding, pinned as a regression test: SG13G2's
+    real `bjt_extraction.lvs` recognises its SiGe HBTs
+    (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`) through a custom Ruby
+    `CustomBJTExtractor` (`custom_bjt_extractor.lvs`) -- not KLayout's stock
+    `DeviceExtractorBJT3Transistor` that `BipolarDevice`/`extract.py`'s
+    bipolar-recognition wiring assumes -- with a device marker that is
+    itself a 3-layer compound boolean (`trans_drw.and(pwell)
+    .and(ptap_holes)`, and `pwell` is not even a literal drawn layer in
+    this PDK) and terminal pins distinguished by drawn bounding-box/area
+    filters (`with_bbox_min`/`with_bbox_max`/`with_area`) this engine's
+    device-recognition primitives have no equivalent for.
+
+    This test exists so that if a future change ever populates
+    `EXTRACTION_DECK.bipolars` without revisiting this finding, it fails
+    loudly here rather than silently landing a mapping nobody re-verified
+    against the real PDK derivation -- the exact "self-consistent golden
+    pair that still does not match the PDK's real connectivity" failure
+    mode issue #1232's own acceptance criteria warned against."""
+    assert EXTRACTION_DECK.bipolars == ()
+    assert "bjt" not in EXTRACTION_DECK.device_classes
 
 
 def test_sg13g2_resistor_provenance_cites_res_extraction_lvs():
