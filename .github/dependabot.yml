@@ -1,0 +1,65 @@
+# Dependabot version updates — scaffolded by /repo:deps.
+#
+# Grouping policy: github-actions bumps are all grouped (individually
+# reviewing them is noise); package ecosystems group minor+patch and leave
+# majors ungrouped so a breaking change gets its own reviewable PR.
+# Risk-bearing deps are excluded from their group so every bump stands
+# alone: klayout (the core pya engine binding), eecircuit-engine (the
+# site's SPICE wasm engine), pyo3 (Python-interpreter-coupled).
+#
+# Deliberately not covered: the root package.json (dependency-free
+# placeholder), native/*/pyproject.toml (maturin build-system only, no
+# deps), and examples/em/*/geode_driver (path/workspace deps, no lockfile).
+#
+# Dependabot PRs carry no loom: label, so Loom automation ignores them —
+# a human or /repo:deps triages them.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["major", "minor", "patch"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      pip-minor-patch:
+        patterns: ["*"]
+        exclude-patterns: ["klayout"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        exclude-patterns: ["eecircuit-engine"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "cargo"
+    directories:
+      - "/native/congestion"
+      - "/native/legalize"
+      - "/native/mom"
+      - "/native/statime"
+      - "/native/techmap"
+      - "/native/yield"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        exclude-patterns: ["pyo3"]
+        update-types: ["minor", "patch"]
