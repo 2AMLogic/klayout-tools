@@ -276,6 +276,7 @@ import subprocess
 import tempfile
 from typing import Any
 
+from . import env_provenance
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
@@ -284,7 +285,15 @@ from .sim import SimError, _expand_corners, _resolve_models_lib
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #1274): `environment.models_lib` changed from the
+#: resolved *absolute* model-library path to the `{path, scope}` shape
+#: `env_provenance.repo_relative_path` defines, the same normalization
+#: `klt sim`/`klt pex` already apply to their own path fields (issue #1261).
+#: On a normal install the PDK lives under the user's home directory, so
+#: that field leaked a home path into every committed report. Nothing is
+#: lost: the library is still pinned by identity via `provenance.deck`.
+SCHEMA_VERSION = 2
 
 #: ``ngspice`` is the only implemented engine, mirroring ``sim.py``.
 SUPPORTED_ENGINES = ("ngspice",)
@@ -456,6 +465,20 @@ def load_request(request_path: str) -> dict[str, Any]:
             "mode) or 'topology' (coupled multi-device mode)"
         )
     return request
+
+
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise one resolved input path for this module's own JSON response
+    (issue #1274) -- a thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path`, matching
+    ``sim.py``'s helper of the same name so ``klt size``, ``klt sim``,
+    ``klt pex`` and ``klt env-provenance`` all agree on exactly one
+    ``{path, scope}`` shape. Pass an already-resolved absolute path (e.g.
+    ``_resolve_models_lib``'s answer); a bare relative string would be
+    resolved against the current process's cwd, which is not necessarily
+    what a caller meant.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
 
 
 def _require_positive_number(value: Any, field: str) -> float:
@@ -793,6 +816,11 @@ def run_size(
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #1274: `environment.models_lib` is normalised against this one
+    # repo root, resolved once from the request file's own location -- the
+    # same "walk up from the input" default `env_provenance.find_repo_root`
+    # uses for its own caller, and the same convention `sim.py` follows.
+    repo_root = env_provenance.find_repo_root(request_dir)
 
     engine = request.get("engine", "ngspice")
     if engine not in SUPPORTED_ENGINES:
@@ -804,6 +832,7 @@ def run_size(
         return _run_topology_size(
             request,
             request_dir,
+            repo_root=repo_root,
             artifacts_dir=artifacts_dir,
             timeout_s=timeout_s,
         )
@@ -879,6 +908,7 @@ def run_size(
             sizing_index=sizing_index,
             target=target,
             models_lib=models_lib,
+            repo_root=repo_root,
             gm_id_rel_tol=gm_id_rel_tol,
             w_grid=w_grid,
             work_dir=work_dir,
@@ -916,7 +946,11 @@ def run_size(
     environment = {
         "engine": "ngspice",
         "engine_version": engine_version,
-        "models_lib": models_lib,
+        # Issue #1274: `{path, scope}`, never the resolved absolute path --
+        # a PDK model library normally lives outside the repo (under the
+        # user's home directory) and would leak that layout into every
+        # committed report. `provenance.deck` still pins which library ran.
+        "models_lib": _report_path(models_lib, repo_root=repo_root),
     }
 
     if len(valid_points) < 2:
@@ -1329,6 +1363,7 @@ def _run_worst_case_margin(
     sizing_index: int,
     target: dict[str, Any],
     models_lib: str,
+    repo_root: str | None,
     gm_id_rel_tol: float,
     w_grid: list[float],
     work_dir: str,
@@ -1374,7 +1409,8 @@ def _run_worst_case_margin(
     environment = {
         "engine": "ngspice",
         "engine_version": engine_version,
-        "models_lib": models_lib,
+        # Issue #1274 -- see `run_size`'s own `environment` block.
+        "models_lib": _report_path(models_lib, repo_root=repo_root),
     }
 
     if not corner_curves:
@@ -2105,6 +2141,7 @@ def _run_topology_size(
     request: dict[str, Any],
     request_dir: str,
     *,
+    repo_root: str | None,
     artifacts_dir: str | None,
     timeout_s: float | None,
 ) -> dict[str, Any]:
@@ -2192,7 +2229,8 @@ def _run_topology_size(
     environment: dict[str, Any] = {
         "engine": "ngspice",
         "engine_version": None,
-        "models_lib": models_lib,
+        # Issue #1274 -- see `run_size`'s own `environment` block.
+        "models_lib": _report_path(models_lib, repo_root=repo_root),
     }
 
     def _finish(payload: dict[str, Any]) -> dict[str, Any]:

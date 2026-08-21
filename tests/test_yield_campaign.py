@@ -545,9 +545,9 @@ def test_run_campaign_hands_yield_a_netlist_that_unwraps_to_a_string(
 
     run_campaign(str(spec_path))
 
-    # Precondition: `run_sim` really did emit its schema-v2 object shape --
+    # Precondition: `run_sim` really did emit its schema-v3 object shape --
     # otherwise the assertion below would pass vacuously.
-    assert seen["sim_report"]["schema_version"] == 2
+    assert seen["sim_report"]["schema_version"] == 3
     assert seen["sim_report"]["netlist"] == {"path": "body.spice", "scope": "repo"}
 
     assert seen["source"]["kind"] == "sim-report"
@@ -561,7 +561,7 @@ def test_run_campaign_source_netlist_is_a_string_not_a_path_scope_object(
     """End-to-end over the real `run_sim` -> `run_yield` pipeline, inside a
     fake repo so the netlist resolves as `scope: "repo"` with a non-null
     path. The on-disk sim report carries the `{path, scope}` object (its own
-    schema v2), while the campaign's yield report exposes the unwrapped path
+    schema v3), while the campaign's yield report exposes the unwrapped path
     string that `docs/cli/yield.md` documents."""
     root = _make_fake_repo(tmp_path)
     _write_body(root)
@@ -578,9 +578,9 @@ def test_run_campaign_source_netlist_is_a_string_not_a_path_scope_object(
 
     with open(report["campaign"]["sim_report_path"], encoding="utf-8") as handle:
         sim_report = json.load(handle)
-    # Precondition: the campaign really did hand a schema-v2 report to
+    # Precondition: the campaign really did hand a schema-v3 report to
     # `run_yield` -- otherwise this test would pass vacuously.
-    assert sim_report["schema_version"] == 2
+    assert sim_report["schema_version"] == 3
     assert sim_report["netlist"] == {"path": "body.spice", "scope": "repo"}
 
     assert report["source"]["kind"] == "sim-report"

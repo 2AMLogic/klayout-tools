@@ -801,10 +801,24 @@ The spike's literal shape, for callers that already resolved `$PDK_ROOT`
 themselves (e.g. via `eval "$(klt pdk env)"`). Env vars and `~` are expanded;
 a relative path is joined against the request file's directory.
 
-Either way, the *resolved* absolute path is echoed in the response's
-`environment.models_lib`, and its SHA-256 in `environment.models_lib_sha256`
-— a stored result can be checked against the exact model file that produced
-it.
+Either way, the resolved library is reported in the response's
+`environment.models_lib` as the `{path, scope}` shape (`schema_version` `3`,
+issue [#1274](https://github.com/2AMLogic/klayout-tools/issues/1274)) — never
+the raw absolute path, which on a normal install sits under the user's home
+directory and would leak that layout into every committed report:
+
+```json
+{ "environment": { "models_lib": { "path": null, "scope": "external" } } }
+```
+
+A library that *does* live inside the invocation's repo reports
+`{"path": "<repo-relative>", "scope": "repo"}`; a run with no process axis
+(and therefore no resolved library at all) reports
+`{"path": null, "scope": "absent"}`. The library is still pinned **by
+identity** rather than by location: its SHA-256 is in
+`environment.models_lib_sha256` and its name/content hash in
+`provenance.deck`, so a stored result can be checked against the exact model
+file that produced it.
 
 ## Failure classification: from the log, never the exit code
 
@@ -971,18 +985,21 @@ below is the stable contract, subject to the same rules as every other `klt`
 verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 (`schema_version`, error shape, exit codes) shared across all commands.
 
-**The response's `netlist` and `environment.resume.checkpoint_path` report
-`{path, scope}`, never a raw path string (`schema_version` `2`, issue
-#1261).** Both are normalised via `env_provenance.repo_relative_path` — the
-same primitive and shape [`env-provenance.md`](env-provenance.md)
-documents: `scope: "repo"` with a repo-relative `path` when the input sits
-inside the invocation's repo, else `{"path": null, "scope": "external"}` —
-the absolute path is never echoed. A committed evidence record wraps a `klt
-sim` response unmodified (`docs/design/sim-evidence-discipline-spike.md`),
-so an absolute path in either field used to leak the run's own filesystem
-layout (author's home directory, a Loom worktree number) into every such
-record. The **request**'s own `netlist` field (below) is unaffected — this
-only changes what the *response* echoes back.
+**The response's `netlist`, `environment.resume.checkpoint_path`, and
+`environment.models_lib` report `{path, scope}`, never a raw path string**
+(`schema_version` `2` for the first two, issue #1261; `schema_version` `3`
+added `environment.models_lib`, issue #1274). All three are normalised via
+`env_provenance.repo_relative_path` — the same primitive and shape
+[`env-provenance.md`](env-provenance.md) documents: `scope: "repo"` with a
+repo-relative `path` when the input sits inside the invocation's repo, else
+`{"path": null, "scope": "external"}` (or `{"path": null, "scope":
+"absent"}` when nothing was resolved) — the absolute path is never echoed. A
+committed evidence record wraps a `klt sim` response unmodified
+(`docs/design/sim-evidence-discipline-spike.md`), so an absolute path in any
+of these fields used to leak the run's own filesystem layout (author's home
+directory, a Loom worktree number) into every such record. The **request**'s
+own `netlist`/`models` fields (below) are unaffected — this only changes what
+the *response* echoes back.
 
 ### Request
 
@@ -1042,7 +1059,7 @@ only changes what the *response* echoes back.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "netlist": { "path": "testbench.spice", "scope": "repo" },
   "status": "pass",
   "corner_count": 8,
@@ -1052,7 +1069,7 @@ only changes what the *response* echoes back.
   "environment": {
     "engine": "ngspice",
     "engine_version": "46",
-    "models_lib": "/abs/path/corner.lib",
+    "models_lib": { "path": null, "scope": "external" },
     "models_lib_sha256": "3ccce27a...",
     "netlist_sha256": "71d273ab...",
     "netlist_source": "extracted",
@@ -1128,12 +1145,12 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 
 | Field           | Type            | Description                                                                                                   |
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
-| `schema_version`| integer         | Version of this command's JSON shape (`2` as of issue #1261's `{path, scope}` path-normalization change; per-command, per `docs/json-contract.md`).                 |
+| `schema_version`| integer         | Version of this command's JSON shape (`3` as of issue #1274, which extended issue #1261's `{path, scope}` path-normalization to `environment.models_lib`; per-command, per `docs/json-contract.md`).                 |
 | `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. |
+| `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |

@@ -1231,7 +1231,7 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
 
     report = sim.run_sim(str(request))
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["status"] == "pass"
     assert report["passed"] == 1
     assert report["environment"]["engine_version"] == "99"
@@ -2875,6 +2875,84 @@ def test_run_sim_a_repo_relative_request_argument_is_not_doubly_nested(
         os.chdir(cwd)
 
     assert report["netlist"] == {"path": "body.spice", "scope": "repo"}
+
+
+# --------------------------------------------------------------------------- #
+# Path normalization, part 2 (issue #1274): `environment.models_lib` was
+# missed by #1261's field list, so it kept echoing the resolved *absolute*
+# PDK path -- on a normal install, the author's home directory.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_sim_models_lib_is_external_outside_any_repo(tmp_path, monkeypatch):
+    """The leak this issue reports: a model library outside the repo (the
+    normal case -- a PDK under `~/.volare`) must report
+    `{"path": None, "scope": "external"}`, never its absolute path."""
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {"process": ["tt"]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["environment"]["models_lib"] == {
+        "path": None,
+        "scope": "external",
+    }
+    # The identity pins that make the location redundant are still present.
+    assert report["environment"]["models_lib_sha256"] is not None
+    assert report["provenance"]["deck"]["name"] == "corner.lib"
+
+
+def test_run_sim_models_lib_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    """A model library *inside* the repo must still resolve to something
+    usable (a repo-relative string), not `null`/dropped -- the fix only
+    changes the outside-the-repo (leaking) case."""
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    _write_corner_lib(root)
+    request = _write_request(
+        root,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {"process": ["tt"]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["environment"]["models_lib"] == {
+        "path": "corner.lib",
+        "scope": "repo",
+    }
+
+
+def test_run_sim_models_lib_is_absent_when_no_process_axis(tmp_path, monkeypatch):
+    """No `corners.process` axis means no model library was resolved at all
+    -- reported as `scope: "absent"`, kept distinct from "outside the repo"
+    (`env_provenance.repo_relative_path`'s own tri-state)."""
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    request = _write_request(
+        root,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["environment"]["models_lib"] == {"path": None, "scope": "absent"}
 
 
 # --------------------------------------------------------------------------- #
@@ -4795,7 +4873,7 @@ def test_examples_sim_worked_example_passes():
 
     report = sim.run_sim(str(request_path))
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["status"] == "pass"
     assert report["corner_count"] == 8
     assert report["measurements"][0]["name"] == "vout"
@@ -4971,7 +5049,7 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
     remote = _load_sim_remote_json("matrix-remote.report.json")
 
     for report in (local, remote):
-        assert report["schema_version"] == 1
+        assert report["schema_version"] == 3
         assert report["status"] == "pass"
         assert report["corner_count"] == 5
         assert report["passed"] == 5

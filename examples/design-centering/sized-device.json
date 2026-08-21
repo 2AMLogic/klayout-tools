@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "pass",
   "topology": "diff_pair_mirror_tail",
   "corner": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
@@ -135,7 +135,10 @@
     "name": "coupled multi-device joint solve (diff-pair + mirror + tail)",
     "rationale": "Seeded from each role's own diode-connected gm/Id(W) curve, then corrected jointly against a single coupled ngspice operating-point measurement of the assembled circuit -- see docs/cli/size.md's 'Coupled multi-device topology sizing' section."
   },
-  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": "/abs/path/sky130.lib.spice" },
+  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": {
+    "path": null,
+    "scope": "external"
+  } },
   "provenance": {
     "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
