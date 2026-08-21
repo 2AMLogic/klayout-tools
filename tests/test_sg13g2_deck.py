@@ -330,6 +330,108 @@ def test_golden_pair_sg13g2_pfet_l_w_matches_drawn_geometry(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# Metal3-TopMetal2 connectivity stack extension (issue #1243)
+# --------------------------------------------------------------------------- #
+
+
+def _make_nmos_layout_routed_through_full_metal_stack() -> kdb.Layout:
+    """The same NMOS `_make_nmos_layout` draws, except the drain terminal is
+    routed straight up through *every* level of the extended
+    `EXTRACTION_DECK.metals`/`.vias` stack (Metal1 -> Via1 -> Metal2 -> Via2
+    -> Metal3 -> Via3 -> Metal4 -> Via4 -> Metal5 -> TopVia1 -> TopMetal1 ->
+    TopVia2 -> TopMetal2) instead of being labelled directly at Metal1 -- the
+    golden layout issue #1243's own acceptance criteria ask for ("routing a
+    device out through the new top of the stack"). The drain net's own `"D"`
+    label is drawn only at the very top (TopMetal2.text, 134/25); if any
+    level of the stack were disconnected, `run_extract` would instead report
+    an unlabelled/synthesized net for the drain terminal, not `"D"`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
+    draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um
+
+    draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
+    draw(8, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    label(8, 25, "S", 0.2, 0.5)
+
+    draw(6, 0, _box_um(0.9, 1.0, 1.1, 1.2))  # gate Cont
+    draw(8, 0, _box_um(0.85, 0.95, 1.15, 1.25))  # gate Metal1 pad
+    label(8, 25, "G", 1.0, 1.1)
+
+    # Drain: Cont lands on Metal1, then every metal/via level of the
+    # extended stack stacks straight up, each level's box wide/tall enough
+    # to satisfy that level's own DRC width floor and the via enclosure
+    # margin below/above it (see `sg13g2.py`'s `DECK`) -- not load-bearing
+    # for this connectivity-only test, but keeping the fixture DRC-clean
+    # too avoids a golden layout that would fail `klt drc` on the very
+    # stack it is meant to demonstrate.
+    draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
+    conductor_layers = [
+        (8, 0),  # Metal1.drawing
+        (10, 0),  # Metal2.drawing
+        (30, 0),  # Metal3.drawing
+        (50, 0),  # Metal4.drawing
+        (67, 0),  # Metal5.drawing
+        (126, 0),  # TopMetal1.drawing
+        (134, 0),  # TopMetal2.drawing
+    ]
+    via_layers = [
+        (19, 0),  # Via1.drawing
+        (29, 0),  # Via2.drawing
+        (49, 0),  # Via3.drawing
+        (66, 0),  # Via4.drawing
+        (125, 0),  # TopVia1.drawing
+        (133, 0),  # TopVia2.drawing
+    ]
+    for layer, datatype in conductor_layers:
+        draw(layer, datatype, _box_um(1.5, 0.0, 4.5, 3.0))
+    for layer, datatype in via_layers:
+        draw(layer, datatype, _box_um(2.0, 0.5, 3.0, 1.5))
+    label(134, 25, "D", 3.0, 1.5)  # TopMetal2.text -- the top of the stack
+
+    return layout
+
+
+def test_golden_pair_sg13g2_nfet_drain_routes_through_full_metal_stack(
+    tmp_path: Path,
+):
+    """The device-recognition geometry is unchanged from
+    `test_golden_pair_sg13g2_nfet_l_w_matches_drawn_geometry` above (same
+    `l_um`/`w_um`), but the drain terminal is only labelled at TopMetal2, the
+    top of the stack issue #1243 extends `EXTRACTION_DECK.metals`/`.vias` to
+    reach. Before #1243 (`metals`/`vias` capped at Metal1/Via1/Metal2), a
+    drain routed this far out would resolve to an *isolated*,
+    unlabelled/synthesized net -- `deck.metals`/`.vias` had no entries above
+    Metal2 to carry the connection, so the "D" label at TopMetal2 would never
+    reach the transistor's own drain terminal at all."""
+    path = _write_gds(
+        _make_nmos_layout_routed_through_full_metal_stack(),
+        tmp_path / "nmos_full_stack.gds",
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "nmos_full_stack.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["params"]["l_um"] == pytest.approx(0.4)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["nets"]["s"] == "S"
+    assert device["nets"]["d"] == "D"
+    assert device["nets"]["g"] == "G"
+    assert device["nets"]["b"] == "vsubs"
+
+
+# --------------------------------------------------------------------------- #
 # Thick-oxide ("-HV") MOS flavour (issue #1231)
 # --------------------------------------------------------------------------- #
 

@@ -529,6 +529,748 @@
       ]
     }
   },
+  "metal3.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      30,
+      0
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal3.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            265,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      30,
+      0
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            135,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal4.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            50,
+            0
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            50,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      50,
+      0
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            50,
+            0
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            50,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal4.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            265,
+            4000
+          ],
+          "layer": [
+            50,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      50,
+      0
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            135,
+            4000
+          ],
+          "layer": [
+            50,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal5.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            67,
+            0
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            67,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      67,
+      0
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            67,
+            0
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            67,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal5.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            265,
+            4000
+          ],
+          "layer": [
+            67,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      67,
+      0
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            135,
+            4000
+          ],
+          "layer": [
+            67,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topmetal1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            126,
+            0
+          ]
+        },
+        {
+          "box": [
+            3740,
+            0,
+            5740,
+            4000
+          ],
+          "layer": [
+            126,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      126,
+      0
+    ],
+    "threshold_dbu": 1640,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            126,
+            0
+          ]
+        },
+        {
+          "box": [
+            3540,
+            0,
+            5540,
+            4000
+          ],
+          "layer": [
+            126,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topmetal1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1740,
+            4000
+          ],
+          "layer": [
+            126,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      126,
+      0
+    ],
+    "threshold_dbu": 1640,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1540,
+            4000
+          ],
+          "layer": [
+            126,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topmetal2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            134,
+            0
+          ]
+        },
+        {
+          "box": [
+            4100,
+            0,
+            6100,
+            4000
+          ],
+          "layer": [
+            134,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      134,
+      0
+    ],
+    "threshold_dbu": 2000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            134,
+            0
+          ]
+        },
+        {
+          "box": [
+            3900,
+            0,
+            5900,
+            4000
+          ],
+          "layer": [
+            134,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topmetal2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2100,
+            4000
+          ],
+          "layer": [
+            134,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      134,
+      0
+    ],
+    "threshold_dbu": 2000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1900,
+            4000
+          ],
+          "layer": [
+            134,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topvia1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            125,
+            0
+          ]
+        },
+        {
+          "box": [
+            2520,
+            0,
+            4520,
+            4000
+          ],
+          "layer": [
+            125,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      125,
+      0
+    ],
+    "threshold_dbu": 420,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            125,
+            0
+          ]
+        },
+        {
+          "box": [
+            2320,
+            0,
+            4320,
+            4000
+          ],
+          "layer": [
+            125,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topvia1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            520,
+            4000
+          ],
+          "layer": [
+            125,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      125,
+      0
+    ],
+    "threshold_dbu": 420,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            320,
+            4000
+          ],
+          "layer": [
+            125,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topvia2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            133,
+            0
+          ]
+        },
+        {
+          "box": [
+            3160,
+            0,
+            5160,
+            4000
+          ],
+          "layer": [
+            133,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      133,
+      0
+    ],
+    "threshold_dbu": 1060,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            133,
+            0
+          ]
+        },
+        {
+          "box": [
+            2960,
+            0,
+            4960,
+            4000
+          ],
+          "layer": [
+            133,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "topvia2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            133,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      133,
+      0
+    ],
+    "threshold_dbu": 900,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            800,
+            4000
+          ],
+          "layer": [
+            133,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "via1.space.1": {
     "check": "space",
     "clean": {
@@ -735,6 +1477,218 @@
           ],
           "layer": [
             29,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via3.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            2290,
+            0,
+            4290,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      49,
+      0
+    ],
+    "threshold_dbu": 220,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            2150,
+            0,
+            4150,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via3.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            250,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      49,
+      0
+    ],
+    "threshold_dbu": 190,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            130,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via4.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            0
+          ]
+        },
+        {
+          "box": [
+            2290,
+            0,
+            4290,
+            4000
+          ],
+          "layer": [
+            66,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      66,
+      0
+    ],
+    "threshold_dbu": 220,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            0
+          ]
+        },
+        {
+          "box": [
+            2150,
+            0,
+            4150,
+            4000
+          ],
+          "layer": [
+            66,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via4.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            250,
+            4000
+          ],
+          "layer": [
+            66,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      66,
+      0
+    ],
+    "threshold_dbu": 190,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            130,
+            4000
+          ],
+          "layer": [
+            66,
             0
           ]
         }

@@ -62,16 +62,21 @@ Source (Apache-2.0, IHP-GmbH/IHP-Open-PDK, the same v0.3.0 release tag
 Mirrors sky130's own "Scope guard" (see ``sky130.py``'s module docstring):
 this is **not** a full transcription of sg13g2's official rule set (the real
 DRM spans dozens of ``.drc`` rule-deck files across FEOL/BEOL/forbidden/
-antenna/density categories, hundreds of individual rule ids). This first
-increment covers a single, connected FEOL-to-BEOL2 stack -- Activ, GatPoly,
-Cont, Metal1, Via1, Metal2, Via2 -- wide enough to draw a real two-terminal
-NMOS/PMOS device and route it out to a second metal level, proving the
-compiler generalizes to a PDK whose rule source is JSON-table-driven rather
-than inline-literal (sg13g2) as well as one whose thresholds are inline
-literals (sky130) or a published DRM CSV table (gf180mcu). Coverage is
-expected to grow incrementally in follow-on issues, exactly as sky130/
-gf180mcu's own coverage did (see e.g. ``sky130.py``'s met2/met3/met4/met5
-extension notes, each its own numbered issue).
+antenna/density categories, hundreds of individual rule ids). Issue #905's
+original increment covered a single, connected FEOL-to-BEOL2 stack -- Activ,
+GatPoly, Cont, Metal1, Via1, Metal2, Via2 -- wide enough to draw a real
+two-terminal NMOS/PMOS device and route it out to a second metal level,
+proving the compiler generalizes to a PDK whose rule source is
+JSON-table-driven rather than inline-literal (sg13g2) as well as one whose
+thresholds are inline literals (sky130) or a published DRM CSV table
+(gf180mcu). Issue #1243 (sg13g2's own equivalent of sky130's #619) then
+extended that stack up through Metal3, Metal4, Metal5, TopVia1, TopMetal1,
+TopVia2, and TopMetal2 -- the prerequisite issue #1233 (MIM capacitors) and
+issue #1235 (metal resistors) both independently blocked on (see
+"Device-class coverage" and "MIM capacitors" below). Coverage is expected to
+keep growing incrementally in follow-on issues, exactly as sky130/gf180mcu's
+own coverage did (see e.g. ``sky130.py``'s met2/met3/met4/met5 extension
+notes, each its own numbered issue).
 
 Not modelled in this increment, for the same "no compound/derived-layer
 evaluation" reason ``sky130.py``'s own docstring documents for its own
@@ -91,8 +96,10 @@ arbitrary boolean/derived expression):
   below transcribe the *general-case* Activ/GatPoly enclosure-of-Cont floor
   each of those refines.
 - ``M1.e``/``M1.f``/``M1.g``/``M1.i`` and their per-metal-level ``Mn.*``
-  analogues (wide-line/45-degree-bend spacing refinements) -- the same class
-  of refinement ``sky130.py`` already documents skipping for its own
+  analogues (wide-line/45-degree-bend spacing refinements, ``Metal2``
+  through ``Metal5``) and ``TopMetal2``'s own ``TM2.bR`` (a
+  ``RECOMMENDED``-gated wide-line refinement) -- the same class of
+  refinement ``sky130.py`` already documents skipping for its own
   ``m1.3ab``-style wide-metal exceptions.
 - No ``"area"``/``"density"``/``"antenna"`` rules (sg13g2's own
   ``density.drc``/``rule_decks/antenna.drc`` files) -- out of this
@@ -117,9 +124,12 @@ device, never a wrong device with a plausible value):
 - ``rhigh`` (the third poly-resistor flavour) -- see ``EXTRACTION_DECK``'s
   resistor note for why its sheet resistance is not confidently derivable
   from the PDK's own data -- and the metal resistors ``res_metal1``..
-  ``res_topmetal2`` (their ``metals`` levels are above this deck's Metal2
-  stack). Both tracked by issue #1235, the latter blocked on the same
-  metal-stack extension (issue #1243) as MIM capacitors below.
+  ``res_topmetal2``. Both tracked by issue #1235; the metal resistors were
+  independently blocked on the same ``metals``/``vias`` stack extension
+  (issue #1243) MIM capacitors below needed -- #1243 has since landed, so
+  #1235's metal-resistor flavours (up through ``res_topmetal2``, now that
+  the stack reaches ``TopMetal2``) are a standalone follow-on rather than a
+  blocked one.
 - Diodes -- ``diode_extraction.lvs``'s antenna diodes (``dantenna``/
   ``dpantenna``) and the three-terminal ``schottky_nbl1`` (extracted
   upstream as a ``bjt3``, not a ``diode``) -- issue #1234 -- plus the
@@ -127,7 +137,7 @@ device, never a wrong device with a plausible value):
   inductors, ESD devices, and the RF MOS/RF MIM variants, none of which is
   tracked yet.
 
-### MIM capacitors -- investigated, deferred (issue #1233)
+### MIM capacitors -- investigated/deferred (#1233), prerequisite landed (#1243)
 
 Unlike the plain "not curated yet" gaps above, issue #1233 *investigated*
 populating ``EXTRACTION_DECK.capacitors`` for ``cap_cmim``/``rfcmim``
@@ -135,17 +145,18 @@ populating ``EXTRACTION_DECK.capacitors`` for ``cap_cmim``/``rfcmim``
 v0.3.0 install: both flavours derive from ``mim_drw`` (36/0) over
 ``metal5_con``, with a ``vmim_drw``/``topvia1_drw`` via up to
 ``topmetal1_con``) and made a deliberate "defer" call rather than declaring
-the entry today:
+the entry at that time:
 
 - :class:`~klayout_tools.decks.CapacitorDevice`'s own docstring permits a
   ``bottom_plate`` that does not match one of the deck's tracked
   ``metals[]`` -- it just stays its own self-connected node, isolated from
   the rest of the extracted netlist ("Known limitation"). So populating
-  ``capacitors=`` today is *possible*, but both of ``cap_cmim``'s plates
-  (Metal5 bottom, TopMetal1-via top) sit entirely above this deck's
-  Metal1/Via1/Metal2 stack -- the recognised device would carry the right
-  capacitance value between two nets nothing else in the extracted graph
-  ever touches, never matchable against a real design's routing.
+  ``capacitors=`` was already *possible* at issue #1233's own time, but both
+  of ``cap_cmim``'s plates (Metal5 bottom, TopMetal1-via top) sat entirely
+  above this deck's then-current Metal1/Via1/Metal2 stack -- the recognised
+  device would have carried the right capacitance value between two nets
+  nothing else in the extracted graph touched, never matchable against a
+  real design's routing.
 - The two closest worked examples in this codebase answer the same
   "recognise now vs. extend the stack first" question oppositely, and both
   point the same way for sg13g2: gf180mcu's ``FuseTop``/``Metal4`` MiM cap
@@ -153,18 +164,25 @@ the entry today:
   deck's ``metals`` stack already reached ``Metal4`` when it was curated;
   sky130's ``met3``/``met4`` MiM caps did **not** set them until issue #619
   first extended sky130's own ``metals``/``vias`` stack far enough to reach
-  ``met3``/``met4`` (issue #775 then wired the via). sg13g2's Metal2-capped
-  stack is squarely in the sky130-pre-#619 situation, not the
+  ``met3``/``met4`` (issue #775 then wired the via). sg13g2's then-Metal2-
+  capped stack was squarely in the sky130-pre-#619 situation, not the
   gf180mcu-already-there one.
 
-**Decision:** defer ``cap_cmim``/``rfcmim`` recognition until the deck's
-``metals``/``vias`` stack itself is extended up through Metal5/TopMetal1 --
-filed as its own prerequisite, issue #1243, shared with #1235's metal
-resistors (``res_metal1``..``res_topmetal2``), which independently hits the
-identical Metal2 ceiling. Once #1243 lands, recognising ``cap_cmim``/
-``rfcmim`` becomes a standalone follow-on that can set
-``top_plate_via``/``top_plate_via_metal`` correctly on the first pass,
-mirroring #775 rather than repeating sky130's two-step history.
+**Decision (issue #1233):** defer ``cap_cmim``/``rfcmim`` recognition until
+the deck's ``metals``/``vias`` stack itself is extended up through
+Metal5/TopMetal1 -- filed as its own prerequisite, issue #1243, shared with
+#1235's metal resistors (``res_metal1``..``res_topmetal2``), which
+independently hit the identical Metal2 ceiling.
+
+**Prerequisite landed (issue #1243):** ``EXTRACTION_DECK.metals``/``.vias``
+now reach ``TopMetal2`` (see "Scope guard" above and ``EXTRACTION_DECK``'s
+own ``metals``/``vias`` comment below) -- ``cap_cmim``/``rfcmim`` recognition
+itself is **still not declared** here; #1243 only extends the connectivity
+stack those plates would land on. Recognising ``cap_cmim``/``rfcmim`` is now
+a standalone follow-on (issue #1233, reopened against the extended stack)
+that can set ``top_plate_via``/``top_plate_via_metal`` correctly on the
+first pass, mirroring #775 rather than repeating sky130's two-step
+history.
 
 ### SiGe HBTs -- investigated, declined (issue #1232)
 
@@ -598,6 +616,386 @@ DECK: list[DrcRule] = [
         scope="V2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.c"),
     ),
+    # --- 5.17 Metaln, Metal3 instance (beol/5_17_metaln.drc) -----------
+    # Issue #1243: extending the connectivity/DRC stack past Metal2, up
+    # through Metal5/TopMetal1/TopMetal2 -- the prerequisite #1233 (MIM
+    # capacitors) and #1235 (metal resistors) both block on (see the module
+    # docstring's own "MIM capacitors" section). `metaln.drc`'s templated
+    # "Mn.a"/"Mn.b" rule iterates `mets_lay = [metal2_drw, metal3_drw,
+    # metal4_drw, metal5_drw]` from `metal_start_index = 2` -- Metal2's own
+    # instance is transcribed above; Metal3/Metal4/Metal5 below share the
+    # identical `Mn_a`/`Mn_b` JSON-table values (0.20/0.21 um) that
+    # `metal2.width.1`/`metal2.space.1` already cite.
+    DrcRule(
+        id="metal3.width.1",
+        description="minimum Metal3 width",
+        layer=(30, 0),  # Metal3.drawing
+        check="width",
+        threshold_dbu=200,  # 0.20 um
+        # 5_17_metaln.drc rule "M3.a" (met_no=3 instance of "Mn.a"):
+        # metal3_drw.width(0.20um, euclidian)
+        # -> "5.17. M3.a: Min. Metal3 width: 0.20 um."
+        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2)
+        scope="M3",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M3.a"),
+    ),
+    DrcRule(
+        id="metal3.space.1",
+        description="minimum Metal3 space or notch",
+        layer=(30, 0),  # Metal3.drawing
+        check="space",
+        threshold_dbu=210,  # 0.21 um
+        # 5_17_metaln.drc rule "M3.b": metal3_drw.space(0.21um, euclidian)
+        # -> "5.17. M3.b: Min. Metal3 space or notch: 0.21 um."
+        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
+        scope="M3",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M3.b"),
+    ),
+    # --- 5.20 Vian, Via3 instance (beol/5_20_vian.drc) ------------------
+    # `vian.drc`'s templated table iterates `vias_lay = [via2_drw, via3_drw,
+    # via4_drw]` zipped with `metals_lay = [metal2_drw, metal3_drw,
+    # metal4_drw]` from `via_start_index = 2` -- so Via3's own "Vn.c"
+    # enclosure instance checks against **Metal3** (the metal *below* it,
+    # the same "enclosure checked against the lower metal only" convention
+    # `via1.width.1`'s docstring documents; Via3 physically also lands on
+    # Metal4 above, but the upstream rule only constrains the landing pad
+    # below it, exactly like Via1/Via2 above).
+    DrcRule(
+        id="via3.width.1",
+        description=(
+            "minimum (and, on the real rule, maximum) Via3 width -- "
+            "approximated as a minimum-width floor only, the same "
+            "min-size-only approximation via1.width.1/via2.width.1 above make"
+        ),
+        layer=(49, 0),  # Via3.drawing
+        check="width",
+        threshold_dbu=190,  # 0.19 um
+        # 5_20_vian.drc rule "V3.a" (via_no=3 instance of "Vn.a"):
+        # via3_nseal.without_bbox_min/max(0.19um)
+        # -> "5.20. V3.a : Min. and max. Via3 width: 0.19 um"
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19)
+        scope="V3",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.a"),
+    ),
+    DrcRule(
+        id="via3.space.1",
+        description="minimum Via3 spacing",
+        layer=(49, 0),  # Via3.drawing
+        check="space",
+        threshold_dbu=220,  # 0.22 um
+        # 5_20_vian.drc rule "V3.b": via3_nseal.space(0.22um, euclidian)
+        # -> "5.20. V3.b : Min. Via3 space: 0.22 um"
+        # (sg13g2_tech_default.json: drc_rules.Vn_b == 0.22)
+        scope="V3",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.b"),
+    ),
+    DrcRule(
+        id="metal3.enclosing.via3.1",
+        description="minimum Metal3 enclosure of Via3",
+        layer=(30, 0),  # Metal3.drawing
+        other_layer=(49, 0),  # Via3.drawing
+        check="enclosing",
+        threshold_dbu=5,  # 0.005 um
+        # 5_20_vian.drc rule "V3.c": via3_nseal.enclosed(metal3_drw, 0.005um,
+        # euclidian) -> "5.20. V3.c : Min. Metal3 enclosure of Via3 is 0.005 um"
+        # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
+        scope="V3",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.c"),
+    ),
+    # --- 5.17 Metaln, Metal4 instance (beol/5_17_metaln.drc) -----------
+    DrcRule(
+        id="metal4.width.1",
+        description="minimum Metal4 width",
+        layer=(50, 0),  # Metal4.drawing
+        check="width",
+        threshold_dbu=200,  # 0.20 um
+        # 5_17_metaln.drc rule "M4.a" (met_no=4 instance of "Mn.a"):
+        # metal4_drw.width(0.20um, euclidian)
+        # -> "5.17. M4.a: Min. Metal4 width: 0.20 um."
+        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2)
+        scope="M4",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M4.a"),
+    ),
+    DrcRule(
+        id="metal4.space.1",
+        description="minimum Metal4 space or notch",
+        layer=(50, 0),  # Metal4.drawing
+        check="space",
+        threshold_dbu=210,  # 0.21 um
+        # 5_17_metaln.drc rule "M4.b": metal4_drw.space(0.21um, euclidian)
+        # -> "5.17. M4.b: Min. Metal4 space or notch: 0.21 um."
+        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
+        scope="M4",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M4.b"),
+    ),
+    # --- 5.20 Vian, Via4 instance (beol/5_20_vian.drc) ------------------
+    DrcRule(
+        id="via4.width.1",
+        description=(
+            "minimum (and, on the real rule, maximum) Via4 width -- "
+            "approximated as a minimum-width floor only, the same "
+            "min-size-only approximation via1.width.1/via2.width.1/"
+            "via3.width.1 above make"
+        ),
+        layer=(66, 0),  # Via4.drawing
+        check="width",
+        threshold_dbu=190,  # 0.19 um
+        # 5_20_vian.drc rule "V4.a" (via_no=4 instance of "Vn.a"):
+        # via4_nseal.without_bbox_min/max(0.19um)
+        # -> "5.20. V4.a : Min. and max. Via4 width: 0.19 um"
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19)
+        scope="V4",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.a"),
+    ),
+    DrcRule(
+        id="via4.space.1",
+        description="minimum Via4 spacing",
+        layer=(66, 0),  # Via4.drawing
+        check="space",
+        threshold_dbu=220,  # 0.22 um
+        # 5_20_vian.drc rule "V4.b": via4_nseal.space(0.22um, euclidian)
+        # -> "5.20. V4.b : Min. Via4 space: 0.22 um"
+        # (sg13g2_tech_default.json: drc_rules.Vn_b == 0.22)
+        scope="V4",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.b"),
+    ),
+    DrcRule(
+        id="metal4.enclosing.via4.1",
+        description="minimum Metal4 enclosure of Via4",
+        layer=(50, 0),  # Metal4.drawing
+        other_layer=(66, 0),  # Via4.drawing
+        check="enclosing",
+        threshold_dbu=5,  # 0.005 um
+        # 5_20_vian.drc rule "V4.c": via4_nseal.enclosed(metal4_drw, 0.005um,
+        # euclidian) -> "5.20. V4.c : Min. Metal4 enclosure of Via4 is 0.005 um"
+        # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
+        scope="V4",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.c"),
+    ),
+    # --- 5.17 Metaln, Metal5 instance (beol/5_17_metaln.drc) -----------
+    # Metal5 is the top of `metaln.drc`'s own templated table
+    # (`mets_lay = [metal2_drw, metal3_drw, metal4_drw, metal5_drw]`) --
+    # everything above it (TopVia1/TopMetal1/TopVia2/TopMetal2) is its own,
+    # differently-thresholded "Top*" rule-deck file below.
+    DrcRule(
+        id="metal5.width.1",
+        description="minimum Metal5 width",
+        layer=(67, 0),  # Metal5.drawing
+        check="width",
+        threshold_dbu=200,  # 0.20 um
+        # 5_17_metaln.drc rule "M5.a" (met_no=5 instance of "Mn.a"):
+        # metal5_drw.width(0.20um, euclidian)
+        # -> "5.17. M5.a: Min. Metal5 width: 0.20 um."
+        # (sg13g2_tech_default.json: drc_rules.Mn_a == 0.2)
+        scope="M5",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M5.a"),
+    ),
+    DrcRule(
+        id="metal5.space.1",
+        description="minimum Metal5 space or notch",
+        layer=(67, 0),  # Metal5.drawing
+        check="space",
+        threshold_dbu=210,  # 0.21 um
+        # 5_17_metaln.drc rule "M5.b": metal5_drw.space(0.21um, euclidian)
+        # -> "5.17. M5.b: Min. Metal5 space or notch: 0.21 um."
+        # (sg13g2_tech_default.json: drc_rules.Mn_b == 0.21)
+        scope="M5",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_17_metaln.drc", "M5.b"),
+    ),
+    # --- 5.21 TopVia1 (beol/5_21_topvia1.drc) ---------------------------
+    # TopVia1 connects Metal5 to TopMetal1 -- the level issue #1233's
+    # `cap_cmim`/`rfcmim` MIM caps land their `vmim_drw`/`topvia1_drw` via
+    # on (see the module docstring's own "MIM capacitors" section). Unlike
+    # Via1-Via4's single below-only enclosure rule, TopVia1 carries *two*
+    # official enclosure rules -- "TV1.c" (Metal5, below) and "TV1.d"
+    # (TopMetal1, above) -- both transcribed here rather than only the
+    # lower one, since the upstream source genuinely defines both.
+    DrcRule(
+        id="topvia1.width.1",
+        description=(
+            "minimum (and, on the real rule, maximum) TopVia1 width -- "
+            "approximated as a minimum-width floor only, the same "
+            "min-size-only approximation via1.width.1 above makes"
+        ),
+        layer=(125, 0),  # TopVia1.drawing
+        check="width",
+        threshold_dbu=420,  # 0.42 um
+        # 5_21_topvia1.drc rule "TV1.a":
+        # topvia1_nseal.without_bbox_min/max(0.42um)
+        # -> "5.21. TV1.a : Min. and max. TopVia1 width: 0.42 um"
+        # (sg13g2_tech_default.json: drc_rules.TV1_a == 0.42)
+        scope="TV1",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_21_topvia1.drc", "TV1.a"),
+    ),
+    DrcRule(
+        id="topvia1.space.1",
+        description="minimum TopVia1 spacing",
+        layer=(125, 0),  # TopVia1.drawing
+        check="space",
+        threshold_dbu=420,  # 0.42 um
+        # 5_21_topvia1.drc rule "TV1.b": topvia1_nseal.space(0.42um, euclidian)
+        # -> "5.21. TV1.b : Min. TopVia1 space: 0.42 um"
+        # (sg13g2_tech_default.json: drc_rules.TV1_b == 0.42)
+        scope="TV1",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_21_topvia1.drc", "TV1.b"),
+    ),
+    DrcRule(
+        id="metal5.enclosing.topvia1.1",
+        description="minimum Metal5 enclosure of TopVia1",
+        layer=(67, 0),  # Metal5.drawing
+        other_layer=(125, 0),  # TopVia1.drawing
+        check="enclosing",
+        threshold_dbu=100,  # 0.10 um
+        # 5_21_topvia1.drc rule "TV1.c":
+        # topvia1_nseal.enclosed(metal5_drw, 0.10um, euclidian)
+        # -> "5.21. TV1.c : Min. Metal5 enclosure of TopVia1 is 0.10 um"
+        # (sg13g2_tech_default.json: drc_rules.TV1_c == 0.1)
+        scope="TV1",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_21_topvia1.drc", "TV1.c"),
+    ),
+    DrcRule(
+        id="topmetal1.enclosing.topvia1.1",
+        description="minimum TopMetal1 enclosure of TopVia1",
+        layer=(126, 0),  # TopMetal1.drawing
+        other_layer=(125, 0),  # TopVia1.drawing
+        check="enclosing",
+        threshold_dbu=420,  # 0.42 um
+        # 5_21_topvia1.drc rule "TV1.d":
+        # topvia1_nseal.enclosed(topmetal1_drw, 0.42um, euclidian)
+        # -> "5.21. TV1.d : Min. TopMetal1 enclosure of TopVia1 is 0.42 um"
+        # (sg13g2_tech_default.json: drc_rules.TV1_d == 0.42)
+        scope="TV1",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_21_topvia1.drc", "TV1.d"),
+    ),
+    # --- 5.22 TopMetal1 (beol/5_22_topmetal1.drc) -----------------------
+    # The level #1233's MIM caps' `topmetal1_con` top plate lands on. Note
+    # the much coarser threshold (1.64 um, vs. Metal2-Metal5's 0.20 um) --
+    # verified against both `5_22_topmetal1.drc`'s own inline prose comment
+    # and `sg13g2_tech_default.json`'s `TM1_a`/`TM1_b` entries, not a
+    # transcription error.
+    DrcRule(
+        id="topmetal1.width.1",
+        description="minimum TopMetal1 width",
+        layer=(126, 0),  # TopMetal1.drawing
+        check="width",
+        threshold_dbu=1640,  # 1.64 um
+        # 5_22_topmetal1.drc rule "TM1.a":
+        # topmetal1_drw.width(1.64um, euclidian)
+        # -> "5.22. TM1.a: Min. TopMetal1 width: 1.64 um."
+        # (sg13g2_tech_default.json: drc_rules.TM1_a == 1.64)
+        scope="TM1",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_22_topmetal1.drc", "TM1.a"),
+    ),
+    DrcRule(
+        id="topmetal1.space.1",
+        description="minimum TopMetal1 space or notch",
+        layer=(126, 0),  # TopMetal1.drawing
+        check="space",
+        threshold_dbu=1640,  # 1.64 um
+        # 5_22_topmetal1.drc rule "TM1.b":
+        # topmetal1_drw.space(1.64um, euclidian)
+        # -> "5.22. TM1.b: Min. TopMetal1 space or notch: 1.64 um."
+        # (sg13g2_tech_default.json: drc_rules.TM1_b == 1.64)
+        scope="TM1",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_22_topmetal1.drc", "TM1.b"),
+    ),
+    # --- 5.24 TopVia2 (beol/5_24_topvia2.drc) ---------------------------
+    # TopVia2 connects TopMetal1 to TopMetal2 -- the level issue #1235's
+    # `res_topmetal2` metal resistor flavour needs (see the module
+    # docstring's own resistor note). Like TopVia1 above, both of its
+    # official enclosure rules ("TV2.c" TopMetal1-below, "TV2.d"
+    # TopMetal2-above) are transcribed.
+    DrcRule(
+        id="topvia2.width.1",
+        description=(
+            "minimum (and, on the real rule, maximum) TopVia2 width -- "
+            "approximated as a minimum-width floor only, the same "
+            "min-size-only approximation via1.width.1/topvia1.width.1 above "
+            "make"
+        ),
+        layer=(133, 0),  # TopVia2.drawing
+        check="width",
+        threshold_dbu=900,  # 0.90 um
+        # 5_24_topvia2.drc rule "TV2.a":
+        # topvia2_nseal.without_bbox_min/max(0.90um)
+        # -> "5.24. TV2.a : Min. and max. TopVia2 width: 0.90 um"
+        # (sg13g2_tech_default.json: drc_rules.TV2_a == 0.9)
+        scope="TV2",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_24_topvia2.drc", "TV2.a"),
+    ),
+    DrcRule(
+        id="topvia2.space.1",
+        description="minimum TopVia2 spacing",
+        layer=(133, 0),  # TopVia2.drawing
+        check="space",
+        threshold_dbu=1060,  # 1.06 um
+        # 5_24_topvia2.drc rule "TV2.b": topvia2_nseal.space(1.06um, euclidian)
+        # -> "5.24. TV2.b : Min. TopVia2 space: 1.06 um"
+        # (sg13g2_tech_default.json: drc_rules.TV2_b == 1.06)
+        scope="TV2",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_24_topvia2.drc", "TV2.b"),
+    ),
+    DrcRule(
+        id="topmetal1.enclosing.topvia2.1",
+        description="minimum TopMetal1 enclosure of TopVia2",
+        layer=(126, 0),  # TopMetal1.drawing
+        other_layer=(133, 0),  # TopVia2.drawing
+        check="enclosing",
+        threshold_dbu=500,  # 0.50 um
+        # 5_24_topvia2.drc rule "TV2.c":
+        # topvia2_nseal.enclosed(topmetal1_drw, 0.50um, euclidian)
+        # -> "5.24. TV2.c : Min. TopMetal1 enclosure of TopVia2 is 0.50 um"
+        # (sg13g2_tech_default.json: drc_rules.TV2_c == 0.5)
+        scope="TV2",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_24_topvia2.drc", "TV2.c"),
+    ),
+    DrcRule(
+        id="topmetal2.enclosing.topvia2.1",
+        description="minimum TopMetal2 enclosure of TopVia2",
+        layer=(134, 0),  # TopMetal2.drawing
+        other_layer=(133, 0),  # TopVia2.drawing
+        check="enclosing",
+        threshold_dbu=500,  # 0.50 um
+        # 5_24_topvia2.drc rule "TV2.d":
+        # topvia2_nseal.enclosed(topmetal2_drw, 0.50um, euclidian)
+        # -> "5.24. TV2.d : Min. TopMetal2 enclosure of TopVia2 is 0.50 um"
+        # (sg13g2_tech_default.json: drc_rules.TV2_d == 0.5)
+        scope="TV2",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_24_topvia2.drc", "TV2.d"),
+    ),
+    # --- 5.25 TopMetal2 (beol/5_25_topmetal2.drc) -----------------------
+    # The top of the curated stack as of issue #1243 -- the level #1235's
+    # `res_topmetal2` metal resistor flavour needs. `TM2.bR` (the
+    # `RECOMMENDED`-gated wide-line spacing refinement) is not transcribed,
+    # the same "wide-line/45-degree-bend refinement" class of omission the
+    # module docstring's "Scope guard" section already documents for
+    # `M1.e`/`M1.f`/`M1.g`/`M1.i` and their `Mn.*` analogues.
+    DrcRule(
+        id="topmetal2.width.1",
+        description="minimum TopMetal2 width",
+        layer=(134, 0),  # TopMetal2.drawing
+        check="width",
+        threshold_dbu=2000,  # 2.00 um
+        # 5_25_topmetal2.drc rule "TM2.a":
+        # topmetal2_drw.width(2.00um, euclidian)
+        # -> "5.25. TM2.a: Min. TopMetal2 width: 2.00 um."
+        # (sg13g2_tech_default.json: drc_rules.TM2_a == 2.0)
+        scope="TM2",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_25_topmetal2.drc", "TM2.a"),
+    ),
+    DrcRule(
+        id="topmetal2.space.1",
+        description="minimum TopMetal2 space or notch",
+        layer=(134, 0),  # TopMetal2.drawing
+        check="space",
+        threshold_dbu=2000,  # 2.00 um
+        # 5_25_topmetal2.drc rule "TM2.b":
+        # topmetal2_drw.space(2.00um, euclidian)
+        # -> "5.25. TM2.b: Min. TopMetal2 space or notch: 2.00 um."
+        # (sg13g2_tech_default.json: drc_rules.TM2_b == 2.0)
+        scope="TM2",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_25_topmetal2.drc", "TM2.b"),
+    ),
 ]
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
@@ -610,6 +1008,24 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (29, 0): "Via2.drawing",
     (31, 0): "NWell.drawing",
     (44, 0): "ThickGateOx.drawing",
+    # Metal3-TopMetal2 (issue #1243, extending the stack past Metal2):
+    # layer numbers verified against `layers_def.drc`'s own
+    # `get_polygons(layer, datatype)`/`labels(layer, datatype)`
+    # declarations (`metal3_drw = get_polygons(30, 0)`, `via3_drw =
+    # get_polygons(49, 0)`, `metal4_drw = get_polygons(50, 0)`, `via4_drw =
+    # get_polygons(66, 0)`, `metal5_drw = get_polygons(67, 0)`,
+    # `topvia1_drw = get_polygons(125, 0)`, `topmetal1_drw =
+    # get_polygons(126, 0)`, `topvia2_drw = get_polygons(133, 0)`,
+    # `topmetal2_drw = get_polygons(134, 0)`).
+    (30, 0): "Metal3.drawing",
+    (49, 0): "Via3.drawing",
+    (50, 0): "Metal4.drawing",
+    (66, 0): "Via4.drawing",
+    (67, 0): "Metal5.drawing",
+    (125, 0): "TopVia1.drawing",
+    (126, 0): "TopMetal1.drawing",
+    (133, 0): "TopVia2.drawing",
+    (134, 0): "TopMetal2.drawing",
     # Poly-resistor recognition layers (issue #1231) -- names transcribed
     # from the PDK's own KLayout layer-properties file
     # (`libs.tech/klayout/tech/sg13g2.lyp`).
@@ -622,6 +1038,18 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (28, 0): "SalBlock.drawing",
     (8, 25): "Metal1.text",
     (10, 25): "Metal2.text",
+    # Metal3-TopMetal2 label/text layers (issue #1243), same
+    # `labels(layer, 25)` convention as Metal1.text/Metal2.text above --
+    # `layers_def.drc`'s `metal3_text = labels(30, 25)` / `metal4_text =
+    # labels(50, 25)` / `metal5_text = labels(67, 25)` / `topmetal1_text =
+    # labels(126, 25)` / `topmetal2_text = labels(134, 25)`. TopVia1/TopVia2
+    # (cut layers, not conductors) have no text layer of their own, the same
+    # "vias carry no label layer" convention Via1/Via2 above establish.
+    (30, 25): "Metal3.text",
+    (50, 25): "Metal4.text",
+    (67, 25): "Metal5.text",
+    (126, 25): "TopMetal1.text",
+    (134, 25): "TopMetal2.text",
 }
 
 # Voltage-domain marker layer this deck draws but does not *fully* model the
@@ -693,24 +1121,61 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # `nwell_drw = get_polygons(31, 0)`, `cont_drw = get_polygons(6, 0)`).
 #
 # `metals`/`vias`: Metal1 (8/0) is the level `contact` (Cont, 6/0) lands
-# devices on; Via1 (19/0) connects Metal1 to Metal2 (10/0) -- the same
-# stack this module's DECK above already carries DRC coverage for.
-# `metal_labels` (8/25, 10/25) are `labels(8, 25)`/`labels(10, 25)` in
-# `layers_def.drc` (`metal1_text`/`metal2_text`) -- genuine KLayout text
-# layers (unlike the `_pin` datatype-2 layers in that same file, which are
-# *polygon* pin-shape regions, not text -- so sg13g2 has no `well_label`/
-# `poly_label` analogue to sky130's datatype-5 `.pin` text-layer convention;
-# both stay `None`, the same "this curated deck declines to model a pin
-# text layer it has no clean single-layer candidate for" default
-# `ExtractionDeck`'s own docstring describes).
+# devices on. Issue #1243 extends the stack past its original Metal1/Via1/
+# Metal2 ceiling up through Metal5/TopMetal1/TopMetal2 -- the prerequisite
+# #1233's MIM caps (Metal5 bottom plate, TopVia1/TopMetal1 top plate) and
+# #1235's metal resistors (`res_metal1`..`res_topmetal2`) both block on (see
+# the module docstring's own "MIM capacitors" section, and mirroring
+# sky130's own #619 staged extension the module docstring's "Precedent"
+# section describes). Via1 (19/0) connects Metal1 to Metal2 (10/0); Via2
+# (29/0) connects Metal2 to Metal3 (30/0); Via3 (49/0) connects Metal3 to
+# Metal4 (50/0); Via4 (66/0) connects Metal4 to Metal5 (67/0); TopVia1
+# (125/0) connects Metal5 to TopMetal1 (126/0); TopVia2 (133/0) connects
+# TopMetal1 to TopMetal2 (134/0) -- the same stack this module's DECK above
+# now carries DRC coverage for (every level's width/space rules, plus each
+# via's own enclosure rule(s)).
+# `metal_labels` (8/25, 10/25, 30/25, 50/25, 67/25, 126/25, 134/25) are
+# `labels(<n>, 25)` in `layers_def.drc` (`metal1_text`/`metal2_text`/
+# `metal3_text`/`metal4_text`/`metal5_text`/`topmetal1_text`/
+# `topmetal2_text`) -- genuine KLayout text layers (unlike the `_pin`
+# datatype-2 layers in that same file, which are *polygon* pin-shape
+# regions, not text -- so sg13g2 has no `well_label`/`poly_label` analogue
+# to sky130's datatype-5 `.pin` text-layer convention; both stay `None`, the
+# same "this curated deck declines to model a pin text layer it has no
+# clean single-layer candidate for" default `ExtractionDeck`'s own
+# docstring describes). TopVia1/TopVia2 are cut layers, not conductors, so
+# -- like Via1-Via4 -- they carry no `metal_labels` entry of their own.
 EXTRACTION_DECK = ExtractionDeck(
     active=(1, 0),  # Activ.drawing
     poly=(5, 0),  # GatPoly.drawing
     nwell=(31, 0),  # NWell.drawing
     contact=(6, 0),  # Cont.drawing
-    metals=((8, 0), (10, 0)),  # Metal1.drawing, Metal2.drawing
-    vias=((19, 0),),  # Via1.drawing (Metal1 <-> Metal2)
-    metal_labels=((8, 25), (10, 25)),  # Metal1.text, Metal2.text
+    metals=(
+        (8, 0),  # Metal1.drawing
+        (10, 0),  # Metal2.drawing
+        (30, 0),  # Metal3.drawing
+        (50, 0),  # Metal4.drawing
+        (67, 0),  # Metal5.drawing
+        (126, 0),  # TopMetal1.drawing
+        (134, 0),  # TopMetal2.drawing
+    ),
+    vias=(
+        (19, 0),  # Via1.drawing (Metal1 <-> Metal2)
+        (29, 0),  # Via2.drawing (Metal2 <-> Metal3)
+        (49, 0),  # Via3.drawing (Metal3 <-> Metal4)
+        (66, 0),  # Via4.drawing (Metal4 <-> Metal5)
+        (125, 0),  # TopVia1.drawing (Metal5 <-> TopMetal1)
+        (133, 0),  # TopVia2.drawing (TopMetal1 <-> TopMetal2)
+    ),
+    metal_labels=(
+        (8, 25),  # Metal1.text
+        (10, 25),  # Metal2.text
+        (30, 25),  # Metal3.text
+        (50, 25),  # Metal4.text
+        (67, 25),  # Metal5.text
+        (126, 25),  # TopMetal1.text
+        (134, 25),  # TopMetal2.text
+    ),
     tap=None,
     well_label=None,
     poly_label=None,
