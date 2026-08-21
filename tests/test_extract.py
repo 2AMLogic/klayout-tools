@@ -1071,6 +1071,43 @@ def test_sg13g2_nmos_body_falls_back_to_substrate_global_without_tap(tmp_path):
     assert any("no DC bias path" in warning for warning in report["warnings"])
 
 
+def test_sg13g2_parasitics_metal1_metal2_report_nonzero_rc(tmp_path):
+    """Issue #1277: with `sg13g2.PARASITICS.metals`/`metal_overlaps` curated
+    for Metal1/Metal2, `--parasitics` on a layout that actually routes those
+    levels no longer reports `r_count: 0, c_count: 0` (this issue's own
+    repro) and no longer lists Metal1/Metal2 in
+    `metals_without_coefficient` -- Metal3-TopMetal2 remain a deliberate,
+    documented gap (out of scope for this issue), so those five levels are
+    still reported, which is correct/expected post-fix behaviour."""
+    layout = _make_sg13g2_inverter_layout()
+    top = layout.cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Extend the NMOS drain ("Y") net up onto Metal2 through a Via1 cut, so
+    # the net's parasitics span both curated metal levels.
+    draw(19, 0, kdb.Box(1650, 250, 1950, 550))  # Via1.drawing (Metal1<->Metal2)
+    draw(10, 0, kdb.Box(1600, 200, 2000, 1200))  # Metal2.drawing
+
+    path = _write_gds(layout, tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sg13g2", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+
+    para = report["parasitics"]
+    assert para["r_count"] > 0
+    assert para["c_count"] > 0
+    assert para["total_resistance_ohm"] > 0.0
+    assert para["total_capacitance_ff"] > 0.0
+
+    gap_indices = {gap["metal_index"] for gap in para["metals_without_coefficient"]}
+    assert 0 not in gap_indices  # Metal1 -- now curated
+    assert 1 not in gap_indices  # Metal2 -- now curated
+    # Metal3-TopMetal2 remain uncurated (out of scope, issue #1277).
+    assert gap_indices == {2, 3, 4, 5, 6}
+
+
 def test_sg13g2_tap_straddling_nwell_boundary_extracts_without_error(tmp_path):
     """A single drawn tie shape straddling the `NWell` boundary -- half
     covered by `nSD` *inside* the well (a well tie), half covered by `pSD`
@@ -7655,7 +7692,7 @@ def test_parasitics_coefficients_sourced_from_pdk_tech():
     each PDK's published magic tech file (issue #226) -- a guard against an
     accidental revert to the pre-#226 uncited starter numbers. One updated
     field per PDK, plus the dropped diffusion role."""
-    from klayout_tools.decks import gf180mcu, sky130
+    from klayout_tools.decks import gf180mcu, sg13g2, sky130
 
     # sky130: met1 (metals[1]) area cap from sky130.tech `defaultareacap`.
     assert sky130.PARASITICS.metals[1].cap_area_ff_um2 == pytest.approx(0.02578)
@@ -7700,6 +7737,38 @@ def test_parasitics_coefficients_sourced_from_pdk_tech():
     assert (
         len(gf180mcu.PARASITICS.metal_overlaps) == len(gf180mcu.PARASITICS.metals) - 1
     )
+
+    # sg13g2 (issue #1277): Metal1/Metal2 only, sourced from
+    # `libs.tech/magic/ihp-sg13g2-extract.tech`'s nominal (`variants ()`)
+    # corner -- see `klayout_tools.decks.sg13g2.PARASITICS`'s own module
+    # comment for why this file (not `sg13g2_typ.itf`, which carries no
+    # directly-transcribable area/perimeter-cap table) is the actual source.
+    assert len(sg13g2.PARASITICS.metals) == 2
+    # Metal1 (idx0): `sheet_res_ohm_sq` reuses `EXTRACTION_DECK.resistors`'
+    # already-curated `res_metal1` (0.110 ohm/sq); area/perim from
+    # `defaultareacap allm1 metal1 35.015` / `defaultperimeter allm1 metal1
+    # 39.585`.
+    assert sg13g2.PARASITICS.metals[0].sheet_res_ohm_sq == pytest.approx(0.110)
+    assert sg13g2.PARASITICS.metals[0].cap_area_ff_um2 == pytest.approx(0.035015)
+    assert sg13g2.PARASITICS.metals[0].cap_perim_ff_um == pytest.approx(0.039585)
+    # Metal2 (idx1): `sheet_res_ohm_sq` reuses the already-curated
+    # `res_metal2` (0.088 ohm/sq); area/perim from `defaultareacap allm2
+    # metal2 18.180` / `defaultperimeter allm2 metal2 34.798`.
+    assert sg13g2.PARASITICS.metals[1].sheet_res_ohm_sq == pytest.approx(0.088)
+    assert sg13g2.PARASITICS.metals[1].cap_area_ff_um2 == pytest.approx(0.018180)
+    assert sg13g2.PARASITICS.metals[1].cap_perim_ff_um == pytest.approx(0.034798)
+    # Metal1(idx0)<->Metal2(idx1) vertical-overlap coupling: `defaultoverlap
+    # allm2 metal2 allm1 metal1 67.225`.
+    assert sg13g2.PARASITICS.metal_overlaps == (pytest.approx(0.067225),)
+    # No diffusion/poly role curated (out of scope for issue #1277).
+    assert sg13g2.PARASITICS.diffusion is None
+    assert sg13g2.PARASITICS.poly is None
+    # Metal3-TopMetal2 (`EXTRACTION_DECK.metals[2:]`) remain a deliberate,
+    # documented gap -- `PARASITICS.metals` is intentionally shorter than
+    # `EXTRACTION_DECK.metals`, not silently zero-filled with guessed
+    # values.
+    assert len(sg13g2.EXTRACTION_DECK.metals) == 7
+    assert len(sg13g2.PARASITICS.metals) < len(sg13g2.EXTRACTION_DECK.metals)
 
 
 def test_gf180mcu_parasitics_metals_covers_full_stack():

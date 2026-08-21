@@ -52,6 +52,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/sim.md`](docs/cli/sim.md) and
   [`docs/cli/size.md`](docs/cli/size.md)'s "JSON schema (the contract)"
   sections.
+- 2026-08-21 — `klt extract --parasitics`: `sg13g2`'s `PARASITICS.metals`
+  table was an all-defaults-empty `ParasiticsDeck()` (issue #1277), so
+  `--parasitics` on this deck always reported `r_count: 0, c_count: 0` for
+  every net regardless of the input layout's real Metal1/Metal2 routing —
+  a caller who didn't specifically read `warnings[]` could easily miss that
+  every "parasitic" result for `sg13g2` was silently zero, the deck's own
+  analogue of #547's gf180mcu gap. `PARASITICS.metals[0]`/`[1]` (Metal1,
+  Metal2) and `metal_overlaps[0]` (the Metal1/Metal2 vertical-overlap
+  coefficient) are now curated, sourced from
+  `libs.tech/magic/ihp-sg13g2-extract.tech`'s public nominal (`variants
+  ()`) corner in a real IHP-Open-PDK v0.3.0 install (Apache-2.0) — *not*
+  `sg13g2_typ.itf` as originally suggested, since that file carries only a
+  raw process-stack description with no directly-transcribable area/
+  perimeter-capacitance table; see
+  `src/klayout_tools/decks/sg13g2.py`'s `PARASITICS` module comment for the
+  full rationale. `sheet_res_ohm_sq` reuses `EXTRACTION_DECK.resistors`'
+  already-curated `res_metal1`/`res_metal2` values (0.110/0.088 ohm/sq)
+  rather than re-deriving them; both independently cross-check against this
+  same `.tech` file's own `resist (allm1)/metal1 110` /
+  `resist (allm2)/metal2 88` nominal-corner entries. Metal3 through
+  TopMetal2 remain **deliberately uncurated** — out of scope for this issue
+  — and continue to report as gaps in `metals_without_coefficient`/
+  `overlap_pairs_without_coefficient`, which is correct, expected
+  post-fix behavior, not a regression. **Behavior change**: `klt extract
+  --deck sg13g2 --parasitics` on a layout routed on Metal1/Metal2 now
+  reports nonzero `r_count`/`c_count`/`total_resistance_ohm`/
+  `total_capacitance_ff` where it previously reported zero. See
+  [`docs/cli/extract.md`](docs/cli/extract.md) → "Parasitic (RC)
+  extraction".
 - 2026-08-21 — **Breaking (per-command `schema_version` bump 1 -> 2, both
   commands):** `klt pex` and `klt sim` JSON reports no longer embed absolute
   input paths (issue #1261, found while implementing #1254: `klt
