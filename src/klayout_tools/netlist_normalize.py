@@ -363,13 +363,13 @@ def _convert_mos_card(
     share the new multi-family dispatch in :func:`_convert_x_card`.
 
     ``from_device_map`` (issue #1163) marks a binding that came from a
-    caller-supplied ``device_map`` override rather than a curated ``deck``
-    table -- every ``device_map`` entry is currently resolved as a MOS
-    binding regardless of what the real device is (see
-    :func:`_build_subckt_map`'s docstring), so a terminal-count mismatch
-    here is not a malformed netlist, it is a non-MOS device the override
-    cannot express yet. That case gets a clear, actionable error instead of
-    the generic mismatch message.
+    caller-supplied ``device_map`` override that resolved to ``kind: "mos"``
+    -- either the original bare-string shape (still MOS-only, unchanged), or
+    an object-form entry that explicitly named ``"mos"`` (issue #1271). A
+    terminal-count mismatch on such a binding gets a clear, actionable error
+    naming the fix (an object-form ``device_map`` entry naming the real
+    ``kind``, or ``deck``) instead of the generic mismatch message, since a
+    bare-string entry cannot express a non-MOS device at all.
     """
     if len(nodes) != _MOS_TERMINALS:
         if from_device_map:
@@ -377,10 +377,12 @@ def _convert_mos_card(
                 f"device '{instance}' (subcircuit '{subckt_name}'): "
                 f"device_map only supports MOS-shaped {_MOS_TERMINALS}-terminal "
                 f"overrides today, but this subcircuit has {len(nodes)} "
-                f"terminal(s) ({' '.join(nodes) or '<none>'}) -- pass a "
-                'deck ("sky130"/"gf180mcu") instead if this device is '
-                "one of that deck's curated non-MOS (resistor/capacitor/"
-                "bipolar) classes, or flatten it out of the netlist"
+                f"terminal(s) ({' '.join(nodes) or '<none>'}) -- pass an "
+                'object-form device_map entry ({"kind": "resistor"|'
+                '"capacitor"|"bipolar", "class": ...}) naming the real '
+                'device kind, or a deck ("sky130"/"gf180mcu") instead if '
+                "this device is one of that deck's curated non-MOS classes, "
+                "or flatten it out of the netlist"
             )
         raise NormalizeError(
             f"device '{instance}' (subcircuit '{subckt_name}'): expected "
@@ -651,8 +653,79 @@ def _instance_name(name_token: str, kind: str = "mos") -> str:
     return f"{letter}{rest}"
 
 
+#: Every ``kind`` an object-valued ``device_map`` entry may name (issue
+#: #1271) -- the same four families :class:`DeviceLookup` already supports.
+_DEVICE_MAP_KINDS = ("mos", "resistor", "capacitor", "bipolar")
+
+
+def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
+    """Build one ``device_map`` entry's :class:`DeviceLookup` from its raw
+    JSON-decoded value (issue #1271).
+
+    Two shapes are accepted:
+
+    - A bare string (the original #280 shape, e.g. ``"nfet"``) always means a
+      4-terminal MOS ``l``/``w`` binding -- **unchanged** from before this
+      issue, for full backward compatibility with every existing caller's
+      ``device_map``.
+    - An object (``{"kind": ..., "class": ..., "length_param": ...,
+      "width_param": ...}``) opts into an explicit, non-MOS-only binding.
+      ``kind`` (one of :data:`_DEVICE_MAP_KINDS`) and ``class`` (the
+      plain-element device-class label, e.g. ``"res_generic_po"``) are
+      required. ``length_param``/``width_param`` (the real subcircuit's own
+      call-site geometry parameter spellings, e.g. gf180mcu's
+      ``"r_length"``/``"r_width"``) default to ``"l"``/``"w"`` and are
+      ignored for ``kind: "bipolar"`` (no geometry call-site parameter at
+      all -- see ``pdk_models.py``'s bipolar section); for ``kind: "mos"``
+      they are likewise ignored, since :func:`_convert_mos_card` always
+      reads the literal ``l``/``w`` parameter keys regardless of the
+      resolved binding's own ``length_param``/``width_param`` (matching
+      every curated MOS binding, which also always carries ``"l"``/``"w"``).
+
+    Raises :class:`NormalizeError` (never a bare ``KeyError``/``TypeError``)
+    for a malformed object entry -- this feeds a sign-off tool, so a
+    misspelled key must fail loudly rather than silently produce a wrong
+    binding.
+    """
+    if isinstance(value, str):
+        return DeviceLookup("mos", value, "l", "w")
+    if not isinstance(value, dict):
+        raise NormalizeError(
+            f"device_map entry '{name}': value must be a device-class string "
+            f"or an object with a 'kind', found {type(value).__name__}"
+        )
+    kind = value.get("kind")
+    if kind not in _DEVICE_MAP_KINDS:
+        raise NormalizeError(
+            f"device_map entry '{name}': 'kind' must be one of "
+            f"{', '.join(_DEVICE_MAP_KINDS)}, found {kind!r}"
+        )
+    device_class = value.get("class")
+    if not isinstance(device_class, str) or not device_class:
+        raise NormalizeError(
+            f"device_map entry '{name}': object form requires a non-empty "
+            "'class' (the plain-element device-class label)"
+        )
+    if kind in ("mos", "bipolar"):
+        # mos: `_convert_mos_card` always reads literal `l`/`w`, so a custom
+        # spelling here would be silently ignored -- not accepted, to avoid
+        # that trap. bipolar: no geometry call-site parameter exists at all.
+        return DeviceLookup(kind, device_class, "l", "w")
+    length_param = value.get("length_param", "l")
+    width_param = value.get("width_param", "w")
+    if not isinstance(length_param, str) or not length_param:
+        raise NormalizeError(
+            f"device_map entry '{name}': 'length_param' must be a non-empty string"
+        )
+    if not isinstance(width_param, str) or not width_param:
+        raise NormalizeError(
+            f"device_map entry '{name}': 'width_param' must be a non-empty string"
+        )
+    return DeviceLookup(kind, device_class, length_param, width_param)
+
+
 def _build_subckt_map(
-    deck: str | None, device_map: dict[str, str] | None
+    deck: str | None, device_map: dict[str, object] | None
 ) -> tuple[dict[str, DeviceLookup] | None, frozenset[str]]:
     """Resolve the ``<subckt-name> -> DeviceLookup`` map for a conversion
     request from an optional deck name and/or an optional explicit override
@@ -660,16 +733,17 @@ def _build_subckt_map(
     neither ``deck`` nor ``device_map`` is given (per-name auto-resolution
     against the whole curated table).
 
-    ``device_map`` (issue #280's caller-supplied override) is always treated
-    as a MOS ``l``/``w`` binding -- unchanged from before this issue's
-    device-family extension; a non-MOS override is not yet supported (a
-    caller needing one should use ``deck`` instead, whose curated table
-    already covers every family). ``device_map_names`` (issue #1163) is the
-    subset of the returned map's keys that came from ``device_map`` itself
-    (as opposed to ``deck``) -- used only so a non-MOS ``device_map`` entry
-    fails with a clear, named error (:func:`_convert_mos_card`) rather than
-    an opaque terminal-count mismatch indistinguishable from a genuinely
-    malformed netlist.
+    Each ``device_map`` (issue #280's caller-supplied override) entry is
+    resolved via :func:`_device_lookup_from_override` -- a bare string is
+    always a MOS ``l``/``w`` binding (unchanged); an object value opts into
+    an explicit non-MOS (or MOS) binding (issue #1271, closing the gap #1163
+    only worked around with a clearer error). ``device_map_names`` (issue
+    #1163) is the subset of the returned map's keys that came from
+    ``device_map`` itself (as opposed to ``deck``) -- used only so a
+    *bare-string* (still MOS-only) ``device_map`` entry naming a non-MOS
+    device fails with a clear, named error (:func:`_convert_mos_card`)
+    rather than an opaque terminal-count mismatch indistinguishable from a
+    genuinely malformed netlist.
     """
     resolved: dict[str, DeviceLookup] = {}
     if deck is not None:
@@ -683,8 +757,8 @@ def _build_subckt_map(
     if device_map:
         resolved.update(
             {
-                name: DeviceLookup("mos", device_class, "l", "w")
-                for name, device_class in device_map.items()
+                name: _device_lookup_from_override(name, value)
+                for name, value in device_map.items()
             }
         )
     return resolved or None, device_map_names
@@ -694,14 +768,19 @@ def normalize_reference_netlist(
     text: str,
     *,
     deck: str | None = None,
-    device_map: dict[str, str] | None = None,
+    device_map: dict[str, object] | None = None,
 ) -> str:
     """Convert subckt-call-form SPICE ``text`` to the plain-element form.
 
     ``deck`` selects the curated device map (``"sky130"``/``"gf180mcu"``);
-    ``device_map`` is an explicit ``<subckt-name> -> <device-class>`` override
-    (merged on top of the deck's map). With neither, each device subcircuit
-    name is auto-resolved against the whole curated table.
+    ``device_map`` is an explicit ``<subckt-name> -> <override>`` override
+    (merged on top of the deck's map), where ``<override>`` is either a bare
+    device-class string (always a MOS ``l``/``w`` binding, unchanged since
+    #280) or an object ``{"kind": ..., "class": ..., "length_param": ...,
+    "width_param": ...}`` naming an explicit non-MOS (or MOS) binding (issue
+    #1271 -- see :func:`_device_lookup_from_override`). With neither ``deck``
+    nor ``device_map``, each device subcircuit name is auto-resolved against
+    the whole curated table.
 
     Non-device lines (comments, ``.subckt``/``.ends``/``.model``, existing
     plain-element ``M`` cards, genuine hierarchical ``X`` instances) pass

@@ -648,6 +648,38 @@ XM1 Y A VGND VGND my_custom_nfet L=0.15u W=0.65u
     assert result["netlist"]["device_map"] == {"my_custom_nfet": "nfet"}
 
 
+def test_netlist_device_map_object_valued_non_mos_override_is_threaded_through(
+    tmp_path,
+):
+    # issue #1271: an object-valued device_map entry (a non-MOS override)
+    # must reach build_netlist_digest() the same way the original bare-
+    # string (MOS-only) shape already does.
+    text = """
+.subckt analog_block A B
+XR1 A B my_custom_res l=1u w=1u
+.ends
+"""
+    _write(tmp_path, "custom.spice", text)
+    plan = {
+        "schema": REQUEST_SCHEMA,
+        "netlist": {
+            "path": "custom.spice",
+            "top": "analog_block",
+            "form": "subckt-call",
+            "device_map": {
+                "my_custom_res": {"kind": "resistor", "class": "res_generic_po"}
+            },
+        },
+        "device_groups": [
+            {"id": "r1", "devices": ["1"], "generator": "res_array"},
+        ],
+    }
+
+    result = validate_layout_plan_document(plan, request_dir=str(tmp_path))
+    assert result["valid"] is True
+    assert result["netlist"]["device_count"] == 1
+
+
 # -- The published JSON Schema agrees with the reference validator --------
 
 

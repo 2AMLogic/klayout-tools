@@ -113,7 +113,7 @@ def build_netlist_digest(
     top: str | None = None,
     form: str = "plain-element",
     deck: str | None = None,
-    device_map: dict[str, str] | None = None,
+    device_map: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Parse the SPICE netlist at ``path`` and return a plain,
     JSON-serialisable digest of one circuit's devices and nets.

@@ -1070,6 +1070,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-21 — `reference.device_map` (`klt lvs`'s `form: "subckt-call"`
+  converter) and the identical `netlist.device_map` (`klt layout-plan`/`klt
+  digest`) now accept an explicit non-MOS override, not just MOS (issue
+  #1271). The original bare-string shape (`{ "<subckt-name>": "<nfet\|pfet>"
+  }`) is unchanged — every entry still means a 4-terminal MOS `l`/`w`
+  binding. A `device_map` entry may now also be an object, `{ "kind":
+  "mos"\|"resistor"\|"capacitor"\|"bipolar", "class": "<device-class>",
+  "length_param": "<param>", "width_param": "<param>" }`, letting a caller
+  name a custom (uncurated) resistor/capacitor/bipolar subcircuit and get a
+  correctly-terminal-counted `R`/`C`/`Q` conversion instead of the
+  `device_map only supports MOS-shaped ...` error issue #1163 added for
+  exactly this previously-unsupported case (that error still fires for a
+  *bare-string* entry naming a non-MOS device, since that shape cannot
+  express a non-MOS kind). See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `reference.device_map` field
+  description.
 - 2026-08-21 — New `klt env-provenance` verb (issue #1254) and the
   importable `klayout_tools.env_provenance` module behind it: the reference
   **environment-provenance emitter** for evidence-record harnesses.

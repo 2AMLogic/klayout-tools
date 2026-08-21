@@ -1580,7 +1580,7 @@ def _read_reference_netlist(
     *,
     form: str = "plain-element",
     deck: str | None = None,
-    device_map: dict[str, str] | None = None,
+    device_map: dict[str, object] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280).
