@@ -16,6 +16,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-21 — `klt pex`'s DUT `.include` swap no longer silently accepts a
+  non-DUT single-`.include` testbench, or a flat-schematic-DUT-vs-
+  `.SUBCKT`-wrapped-extraction mismatch (issue #1255, two gaps left by
+  #1030/#1039). **Gap 1**: a testbench whose sole `.include`/`.inc` target
+  is not plausibly the DUT (e.g. a shared corner/parameter file with no
+  `.SUBCKT` and no circuit element of its own — the testbench's own DUT
+  devices being inlined directly instead) used to be silently swapped in
+  as if it were the DUT, producing a vacuous `status: "pass"` with
+  `reference_netlist` naming the wrong file. This is now a hard, up-front
+  `PexError` (exit `1`), before either side ever simulates. **Gap 2**: a
+  schematic DUT netlisted flat (no `.SUBCKT`/`.ENDS` wrapper — the
+  testbench references its internal nodes directly as top-level nets)
+  against `klt extract`'s always-`.SUBCKT`-wrapped output used to make
+  `_pin_count_mismatch` silently return `None` (its comparison requires
+  both sides to declare a `.SUBCKT`), so the run either failed deep in a
+  per-corner `ngspice.log` or, worse, reported a spurious passing number
+  for a disconnected extracted-side fixture. This is now detected
+  proactively — before either side simulates, unlike the reactive
+  `pin_count_mismatch` check — and reported as a new, named
+  `flat_dut_mismatch` block (same shape as `pin_count_mismatch`:
+  `subcircuit`, `schematic`/`extracted` per-side detail, `ngspice_message`
+  — always `null` here — and `detail`), with per-corner `delta[]` rows
+  carrying `extracted_value: null`/`status: "error"` and exit code `4`
+  (mutually exclusive with `pin_count_mismatch`: the extracted side is
+  never even attempted). Purely additive — no `schema_version` bump (`klt
+  pex` stays at `1`); every existing `.include`-swap and
+  `pin_count_mismatch` behavior is unchanged. Documented in
+  [`docs/cli/pex.md`](docs/cli/pex.md) → "That one line must plausibly
+  name the DUT" and "Flat schematic DUT vs `.SUBCKT`-wrapped extraction".
 - 2026-08-19 — `klt lvs --check <report> --rerun` can now reconstruct the
   compare a committed report describes instead of guessing at it (issue
   #1205). The report echoed a single `top` and no `options`, so full mode
