@@ -129,6 +129,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from . import env_provenance
 from ._paths import _resolve_relative
 from .extract import ExtractError, run_extract
 from .sim import SimError, load_request, run_sim
@@ -137,7 +138,16 @@ __all__ = ["PexError", "run_pex"]
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #1261): `layout`/`netlist`/`reference_netlist` and
+#: each `testbenches[]` entry's `request`/`schematic_netlist` changed from a
+#: raw (often absolute) path string to the `{path, scope}` shape
+#: `env_provenance.repo_relative_path` already defines -- a committed
+#: evidence record wraps this response unmodified
+#: (`docs/design/sim-evidence-discipline-spike.md`), so an absolute path
+#: here used to leak the author's home directory/worktree layout into every
+#: such record. See `_report_path` below.
+SCHEMA_VERSION = 2
 
 #: A `.include`/`.inc` directive line, ngspice's two spellings, either
 #: quoted or bare -- matches `_find_dut_include`'s "thin testbench" swap
@@ -175,6 +185,21 @@ class PexError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback -- matching every other `klt` verb's error contract.
     """
+
+
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise one input-path field for this module's own JSON response
+    (issue #1261) -- a thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
+    second normalizer, so `klt pex`'s reports and `klt env-provenance`'s own
+    emitter agree on exactly one `{path, scope}` shape.
+
+    Deliberately **not** applied to the nested `pin_count_mismatch`/
+    `flat_dut_mismatch` diagnostic blocks' own `netlist` fields -- those are
+    out of this issue's confirmed scope (tracked separately if it turns out
+    to matter) and stay raw strings, unchanged.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
 
 
 def _strip_quotes(token: str) -> str:
@@ -941,6 +966,16 @@ def run_pex(
     if not testbench_paths:
         raise PexError("at least one testbench request is required")
 
+    # Issue #1261: every input-path field this run's own JSON response
+    # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
+    # entry's `request`/`schematic_netlist`) is normalised against this one
+    # repo root, resolved once from `layout_path`'s own location -- the same
+    # "walk up from the input" default `env_provenance.find_repo_root` uses
+    # for its own caller.
+    repo_root = env_provenance.find_repo_root(
+        os.path.dirname(os.path.abspath(layout_path))
+    )
+
     try:
         extract_report = run_extract(
             layout_path,
@@ -1121,8 +1156,8 @@ def run_pex(
             )
             testbenches_summary.append(
                 {
-                    "request": testbench_path,
-                    "schematic_netlist": dut_path,
+                    "request": _report_path(testbench_path, repo_root=repo_root),
+                    "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
                     "corner_count": schematic_report["corner_count"],
                     "measurement_names": [
                         m["name"] for m in schematic_report["measurements"]
@@ -1152,8 +1187,8 @@ def run_pex(
         delta.extend(rows)
         testbenches_summary.append(
             {
-                "request": testbench_path,
-                "schematic_netlist": dut_path,
+                "request": _report_path(testbench_path, repo_root=repo_root),
+                "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
                 "corner_count": extracted_report["corner_count"],
                 "measurement_names": [
                     m["name"] for m in extracted_report["measurements"]
@@ -1177,9 +1212,9 @@ def run_pex(
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
-        "layout": layout_path,
-        "netlist": extracted_netlist_path,
-        "reference_netlist": reference_netlist,
+        "layout": _report_path(layout_path, repo_root=repo_root),
+        "netlist": _report_path(extracted_netlist_path, repo_root=repo_root),
+        "reference_netlist": _report_path(reference_netlist, repo_root=repo_root),
         "extraction": {
             "deck": deck_name,
             "device_count": extract_report["device_count"],

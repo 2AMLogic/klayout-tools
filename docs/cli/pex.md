@@ -352,13 +352,28 @@ below is the stable contract, subject to the same rules as every other `klt`
 verb — see [`json-contract.md`](../json-contract.md) for the envelope
 (`schema_version`, error shape, exit codes) shared across all commands.
 
+**Input-path fields report `{path, scope}`, never a raw path string
+(`schema_version` `2`, issue #1261).** `layout`/`netlist`/`reference_netlist`
+and each `testbenches[]` entry's `request`/`schematic_netlist` are
+normalised via `env_provenance.repo_relative_path` — the same primitive and
+shape [`env-provenance.md`](env-provenance.md) documents. A committed
+evidence record wraps a `klt pex` response unmodified
+(`docs/design/sim-evidence-discipline-spike.md`), so an absolute path in one
+of these fields used to leak the run's own filesystem layout (author's home
+directory, a Loom worktree number) into every such record; this shape makes
+that structurally impossible instead of relying on every caller to remember
+to scrub it. `pin_count_mismatch`/`flat_dut_mismatch`'s own nested `netlist`
+fields are **not** normalised (out of this issue's scope) and stay raw
+strings — see `docs/cli/env-provenance.md`'s `{path, scope}` table for the
+full `repo`/`external`/`absent` scope meanings.
+
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "pass",
-  "layout": "top.gds",
-  "netlist": "top.spice",
-  "reference_netlist": "/abs/path/schematic_dut.spice",
+  "layout": { "path": "top.gds", "scope": "repo" },
+  "netlist": { "path": "top.spice", "scope": "repo" },
+  "reference_netlist": { "path": null, "scope": "external" },
   "extraction": {
     "deck": "sky130",
     "device_count": 1,
@@ -376,8 +391,8 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
   },
   "testbenches": [
     {
-      "request": "gain-tb.json",
-      "schematic_netlist": "/abs/path/schematic_dut.spice",
+      "request": { "path": "gain-tb.json", "scope": "repo" },
+      "schematic_netlist": { "path": null, "scope": "external" },
       "corner_count": 3,
       "measurement_names": ["gain_db"]
     }
@@ -412,13 +427,13 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 
 | Field               | Type              | Description                                                                          |
 | ------------------- | ----------------- | -------------------------------------------------------------------------------------- |
-| `schema_version`    | integer           | Version of this command's JSON shape (starts at `1`, per `docs/json-contract.md`).      |
+| `schema_version`    | integer           | Version of this command's JSON shape (`2` as of issue #1261's `{path, scope}` path-normalization change, per `docs/json-contract.md`).      |
 | `status`             | string            | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass` — mirrors `klt sim`. |
-| `layout`             | string            | Echo of `<layout>`, exactly as provided.                                                |
-| `netlist`            | string            | Path to the extracted (parasitic-annotated) netlist `klt extract` wrote.                |
-| `reference_netlist`  | string            | Absolute path of the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above). |
+| `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
+| `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
+| `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
 | `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), and `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
-| `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (the file path as given), `schematic_netlist` (the resolved DUT path it `.include`d), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
+| `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
 | `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |

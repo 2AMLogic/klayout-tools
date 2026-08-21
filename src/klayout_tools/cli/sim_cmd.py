@@ -19,6 +19,7 @@ section for the reasoning.
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..sim import SimError, run_sim
 from .output import emit_error, emit_success
 
@@ -51,7 +52,12 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _print_text(report: dict) -> None:
-    print(f"netlist: {report['netlist']}")
+    # Issue #1261: `netlist` is the `{path, scope}` shape
+    # `env_provenance.repo_relative_path` defines -- `render_path_field` is
+    # the same courtesy-rendering helper `klt env-provenance`'s own text
+    # output uses, so a path outside the repo never prints an absolute path
+    # here either.
+    print(f"netlist: {render_path_field(report['netlist'])}")
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "
@@ -77,7 +83,7 @@ def _print_text(report: dict) -> None:
         print(
             f"resume: reused {resume['resumed_corners']} checkpointed corner(s)  "
             f"checkpoint_retained={resume['checkpoint_retained']}  "
-            f"path={resume['checkpoint_path']}"
+            f"path={render_path_field(resume['checkpoint_path'])}"
         )
 
     measurements = report["measurements"]

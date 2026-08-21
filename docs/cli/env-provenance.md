@@ -176,8 +176,13 @@ path netlist: sim/bandgap/bandgap.spice
 ```
 
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
-`find_leaks()`, and `scan_files()` — a harness that formats its own records
-can use just the pieces it needs.
+`find_leaks()`, `scan_files()`, and `render_path_field()` (the same
+per-field `{path, scope}` -> text rendering `render_text_lines()` uses
+internally, exported so a `--format text` renderer for a *different* command
+— e.g. `klt pex`/`klt sim`'s own `layout`/`netlist`/`reference_netlist`/
+`request`/`schematic_netlist`/`checkpoint_path` fields, issue #1261 — can
+reuse it instead of re-deriving the same three-way rendering) — a harness
+that formats its own records can use just the pieces it needs.
 
 ## Non-goals
 
