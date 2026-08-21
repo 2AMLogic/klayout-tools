@@ -181,12 +181,13 @@ target-version = "py310"
 src = ["src", "tests"]
 
 [tool.ruff.format]
-# ruff formats fenced Python inside Markdown as well as .py files. `.loom/` and
-# `.claude/` are vendored agent-tooling trees (Loom + Claude skills) that this
-# repo does not own and re-syncs from upstream — formatting them would churn on
-# every upstream bump. Neither tree contains any first-party Python; scope the
-# formatter to code we own so `ruff format --check .` can gate CI.
-exclude = [".loom/**", ".claude/**"]
+# ruff formats fenced Python inside Markdown as well as .py files. `.loom/`,
+# `.claude/`, and `.agents/` are vendored agent-tooling trees (Loom + Claude
+# skills + repo-skills' agent-portable mirror, added by repo-skills 0.11.2)
+# that this repo does not own and re-syncs from upstream — formatting them
+# would churn on every upstream bump. No tree contains any first-party Python;
+# scope the formatter to code we own so `ruff format --check .` can gate CI.
+exclude = [".loom/**", ".claude/**", ".agents/**"]
 
 [tool.ruff.lint]
 select = [

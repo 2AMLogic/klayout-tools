@@ -126,6 +126,8 @@ klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone 
 klt deck resolve --content-hash sha256:... # pinned deck hash -> klayout-tools tag/version that shipped it
 klt deck hash --deck sky130              # the deck content hash this build will use, no layout needed
 klt deck info --deck gf180mcu            # this install's own deck hash, device coverage, release status -- no input layout needed
+klt env-provenance emit                  # committable environment provenance: repo-relative paths, pseudonymous host id, no login
+klt env-provenance scan records/*.md     # flag home-directory absolute paths leaked into committed evidence records
 klt version --format json                # which build is this: version, commit, release or not
 ```
 
