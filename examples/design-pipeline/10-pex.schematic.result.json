@@ -1,6 +1,9 @@
 {
-  "schema_version": 1,
-  "netlist": "10-pex.testbench.spice",
+  "schema_version": 2,
+  "netlist": {
+    "path": "examples/design-pipeline/10-pex.testbench.spice",
+    "scope": "repo"
+  },
   "status": "pass",
   "corner_count": 6,
   "passed": 6,
@@ -8,10 +11,10 @@
   "errored": 0,
   "environment": {
     "engine": "ngspice",
-    "engine_version": "47",
+    "engine_version": "46",
     "models_lib": null,
     "models_lib_sha256": null,
-    "netlist_sha256": "3bd486492f9251ff58f89f6a746ef0ab8f3cb4ec4b2c906e26dea81a4dc41716"
+    "netlist_sha256": "cab436680797f35321c80e6483ed15d32a70e6785b7d25db302a2f1baffa1510"
   },
   "provenance": {
     "klt_version": "0.2.0",
@@ -73,7 +76,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 0.09,
+      "runtime_s": 0.011,
       "measurements": [
         {
           "name": "n1_meas",
@@ -114,7 +117,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 0.084,
+      "runtime_s": 0.007,
       "measurements": [
         {
           "name": "n1_meas",
@@ -155,7 +158,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 0.087,
+      "runtime_s": 0.011,
       "measurements": [
         {
           "name": "n1_meas",
@@ -196,7 +199,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 0.063,
+      "runtime_s": 0.005,
       "measurements": [
         {
           "name": "n1_meas",
@@ -237,7 +240,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 0.089,
+      "runtime_s": 0.009,
       "measurements": [
         {
           "name": "n1_meas",
@@ -278,7 +281,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 0.158,
+      "runtime_s": 0.006,
       "measurements": [
         {
           "name": "n1_meas",

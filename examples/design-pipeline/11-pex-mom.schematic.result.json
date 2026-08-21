@@ -35,7 +35,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.084,
+      "runtime_s": 0.008,
       "status": "pass",
       "supply_v": {
         "vtail": -0.45
@@ -76,7 +76,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.093,
+      "runtime_s": 0.007,
       "status": "pass",
       "supply_v": {
         "vtail": -0.45
@@ -117,7 +117,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.125,
+      "runtime_s": 0.019,
       "status": "pass",
       "supply_v": {
         "vtail": -0.45
@@ -158,7 +158,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.104,
+      "runtime_s": 0.007,
       "status": "pass",
       "supply_v": {
         "vtail": -0.55
@@ -199,7 +199,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.119,
+      "runtime_s": 0.007,
       "status": "pass",
       "supply_v": {
         "vtail": -0.55
@@ -240,7 +240,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.116,
+      "runtime_s": 0.007,
       "status": "pass",
       "supply_v": {
         "vtail": -0.55
@@ -250,7 +250,7 @@
   ],
   "environment": {
     "engine": "ngspice",
-    "engine_version": "47",
+    "engine_version": "46",
     "models_lib": null,
     "models_lib_sha256": null,
     "netlist_sha256": "7f2c214ed063f30ccea2b7cf3f9a1e118359b3de8a25702a6120d4d293f19429"
@@ -301,7 +301,10 @@
       }
     }
   ],
-  "netlist": "11-pex-mom.testbench.spice",
+  "netlist": {
+    "path": "examples/design-pipeline/11-pex-mom.testbench.spice",
+    "scope": "repo"
+  },
   "passed": 6,
   "provenance": {
     "deck": null,
@@ -310,6 +313,6 @@
     "klt_version": "0.2.0",
     "pdk": null
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "pass"
 }
