@@ -2082,7 +2082,9 @@ to make the net double as a hub for.
   `(area_um2 − coupled_area_um2) * cap_area + perimeter_um * cap_perim`, the
   net's lumped ground capacitance — unchanged by the star split, still one
   capacitor per net. The reference node is the deck's `substrate_net`
-  (`vsubs`), which a `klt sim` testbench ties to the AC ground.
+  (`vsubs`), which `--parasitics` gives a DC reference of its own (see
+  "Substrate DC reference" below) and which a `klt sim` testbench ties to
+  the AC ground.
   `coupled_area_um2` is the part of that role's area that sits directly over
   or under *another* net's conductor on an adjacent metal level, which is
   charged between the two nets instead — see "Vertical-overlap coupling
@@ -3016,6 +3018,87 @@ sharper diagnostics (`unmodelled_poly`, `single_terminal_nets`,
 does not read at all is a different failure class again — see
 `ignored_layers` above.
 
+### Substrate DC reference (issue #1263)
+
+Every ground capacitor `--parasitics` injects hangs off the deck's
+`substrate_net` (`vsubs` for both sky130 and gf180mcu). That net is
+*synthesized* — KLayout's `connect_global` mints it, and any
+`<substrate_net>_iso<n>` per-isolated-region variant (see
+"Per-isolated-region NMOS substrate scoping"), out of nothing; no layout can
+draw a label for it. So
+nothing in the layout gives it a defined DC value, and a testbench that
+`.include`s the extracted file and `X`-instantiates its `.SUBCKT` (the
+convention documented under "Verified compatible with `klt sim`'s netlist
+convention" below) used to hand ngspice a node whose only connections were
+capacitors:
+
+```
+Warning: singular matrix:  check node xdut.vsubs
+Warning: Dynamic gmin stepping failed
+Warning: True gmin stepping failed
+Warning: source stepping failed
+```
+
+ngspice's gmin/source-stepping recovery sometimes still returns *a* number,
+but not a reproducible one — so the failure mode was a silently
+untrustworthy post-layout result rather than a hard error. Being a promoted
+pin did not help: `make_top_level_pins()` promotes the substrate net like
+any other named net, but a pin wired to an equally-undriven node in the
+caller's testbench floats just the same.
+
+**`--parasitics` now writes the tie itself.** For every synthesized
+substrate identity in the extraction — the deck's `substrate_net` *and*
+each `_iso<n>` variant — one large shunt resistor to SPICE's global ground
+node `0` is emitted **inside** the `.SUBCKT` body:
+
+```spice
+.SUBCKT sky130_fd_sc_hd__inv_1 A VGND VPB VPWR Y vsubs
+...
+CY Y vsubs 2.3966e-16
+Rvsubs_dctie vsubs 0 1e+12
+.ENDS sky130_fd_sc_hd__inv_1
+```
+
+Design notes, and what this does *not* change:
+
+- **Node `0`, not `.global`.** Node `0` is SPICE's global ground: it names
+  the same node inside a subcircuit body as at the top level, with no
+  `.global` card (conventionally a top-level card, which an extracted
+  circuit body must not emit) and no cooperation from the instantiating
+  testbench. The tie therefore travels with the extracted artifact and
+  behaves identically whether the file came from `klt extract --parasitics`
+  directly or from [`klt pex`](pex.md)'s own orchestration.
+- **The pin interface is untouched.** No pin is created, promoted, or
+  demoted; `pin_count`, the `.SUBCKT` header, `net_count`, `device_count`,
+  `devices[]` and `nets[]` are all byte-identical to what they were before.
+  In particular `klt pex`'s `pin_count_mismatch` / `flat_dut_mismatch`
+  diagnostics read exactly the same interface they always did.
+- **It is idempotent with a hand-authored tie.** A testbench that already
+  supplies `.global vsubs` + `Vsubs vsubs 0 DC 0` (or ngspice's blanket
+  `.options rshunt=1e12`) keeps working unchanged — 1 Tohm in parallel with
+  an ideal source draws ~1.8 pA at a 1.8 V rail, and the card lives in the
+  subcircuit's own namespace so there is no instance-name collision.
+  Existing testbenches do **not** need to remove their workaround.
+- **It is harmless where nothing floats.** On a node with a real DC path a
+  1 Tohm leak is below every simulator tolerance — the same property that
+  makes ngspice's own `.options rshunt` safe. Verified by
+  `tests/test_extract.py::test_parasitics_substrate_dc_tie_is_harmless_where_nothing_floats`,
+  which A/Bs the identical extraction with and without the card.
+- **It is a DC anchor, not an AC ground.** 1 Tohm against a fraction of a
+  femtofarad is an RC time constant of ~0.1 s, so within any realistic
+  transient the substrate node still *floats in AC*. A measurement that
+  needs `vsubs` held at a real 0 V reference (e.g. any coupling-capacitance
+  measurement, where a floating substrate node would create its own
+  aggressor→victim path through two series capacitors) must still tie it
+  explicitly in the testbench — `Vvsubs vsubs 0 DC 0` on the promoted pin,
+  as this page's own examples do.
+- **It is not a parasitic.** `parasitics.r_count` /
+  `parasitics.total_resistance_ohm` count *extracted* resistance only and do
+  not include these cards; they are reported separately in
+  `parasitics.substrate_dc_tie` (below). A consumer that cross-checks
+  "`R` cards written" against `r_count` must exclude the devices named
+  there.
+
 ### JSON `parasitics` block
 
 `--parasitics` adds a top-level `parasitics` field (an additive, independently
@@ -3097,6 +3180,15 @@ but strictly opt-in and net-scoped, recorded in `CHANGELOG.md` per the same
 pre-1.0-caveat precedent issue #798's own `--mom-net` swap already
 established.
 
+**Additive field, no `schema_version` bump (issue #1263):**
+`substrate_dc_tie` is new — no documented field is renamed or retyped, and
+every existing count/total keeps its exact meaning (the tie cards are *not*
+counted in `r_count`/`total_resistance_ohm`). The written SPICE gains one
+`R<net>_dctie <net> 0 1e+12` card per synthesized substrate net inside the
+`.SUBCKT` body — an additive behavior change recorded in `CHANGELOG.md`
+rather than versioned, per the same pre-1.0 caveat issue #547's R/C value
+change established. See "Substrate DC reference" above.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -3144,6 +3236,10 @@ established.
   "critical_nets": [],
   "distributed_rc": false,
   "mom_rlc_override": null,
+  "substrate_dc_tie": {
+    "resistance_ohm": 1000000000000.0,
+    "nets": [{ "net": "vsubs", "device": "Rvsubs_dctie" }]
+  },
   "model": {
     "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
     "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
@@ -3155,7 +3251,7 @@ established.
 
 | Field                  | Type            | Description                                                                                     |
 | ---------------------- | --------------- | ------------------------------------------------------------------------------------------------- |
-| `r_count`              | integer         | Total number of parasitic resistors emitted across every net — one per `terminals[]` entry (star topology, issue #592), or exactly one for a net with no device terminal (the pre-#592 Γ-shunt fallback). `>= c_count` whenever any net has more than one terminal. |
+| `r_count`              | integer         | Total number of parasitic resistors emitted across every net — one per `terminals[]` entry (star topology, issue #592), or exactly one for a net with no device terminal (the pre-#592 Γ-shunt fallback). `>= c_count` whenever any net has more than one terminal. Does **not** include the substrate DC-tie resistors (issue #1263) — those are counted in `substrate_dc_tie.nets[]` instead. |
 | `c_count`              | integer         | Number of **ground** capacitors emitted — always one per `nets[]` entry, unchanged since issue #216. Coupling capacitors are *not* counted here; see `cc_count`. |
 | `cc_count`             | integer         | Number of **coupling** capacitors emitted (issue #760) — one per distinct coupled net pair. `0` when the layout has no inter-net vertical overlap, or the deck curates no overlap coefficients. |
 | `l_count`              | integer         | Additive field (issue #988). Number of series inductors emitted — `0` unless `--mom-rlc-net`/`--mom-rlc-inductance-nh` was given, in which case `1` (this feature adds at most one net's worth). |
@@ -3171,6 +3267,14 @@ established.
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
 | `mom_rlc_override`     | object \| null  | Additive field (issue #988). `null` unless `--mom-rlc-net <net>` was given, in which case it is the substitution report for that one net — see "Substitute a caller-supplied `klt mom` R/L/C for a critical net" above and the field list below. |
+| `substrate_dc_tie`     | object          | Additive field (issue #1263). The DC reference written for every synthesized substrate net — see "Substrate DC reference" above and the field list below. Always present (never `null`); `nets` is `[]` when this extraction synthesized no substrate identity at all. |
+
+`substrate_dc_tie`:
+
+| Field | Type | Description |
+|---|---|---|
+| `resistance_ohm` | number | The shunt resistance used for every tie card (`1e12`). Fixed, not deck- or net-dependent. |
+| `nets` | array\<object\> | One entry per tied net, sorted by net name: `{"net", "device"}` — `net` is the substrate net's node name exactly as the written netlist spells it (the deck's `substrate_net`, or a `<substrate_net>_iso<n>` variant), and `device` is the emitted card's full instance name (e.g. `"Rvsubs_dctie"`), so a consumer cross-checking written `R` cards against `r_count` can exclude them by name. |
 
 `mom_crosscheck` (present only when `--mom-net` was given):
 
@@ -3415,6 +3519,25 @@ resistance plus the device-class name as a model token, so the testbench adds
 a matching `.model res_generic_po r`. (Unrelated to `--parasitics`, whose
 injected R/C elements are deliberately emitted as *bare* `R`/`C` cards with
 no model token.)
+
+**No substrate tie needs hand-authoring (issue #1263).** A `--parasitics`
+extraction carries its own DC reference for the deck's synthesized substrate
+net(s) — a `R<net>_dctie <net> 0 1e+12` card inside the `.SUBCKT` body — so a
+testbench written from scratch around the extracted file no longer has to add
+`.global vsubs` / `Vsubs vsubs 0 DC 0` / `.options rshunt=1e12` just to get a
+non-singular DC solve. A testbench that *already* has one keeps working
+unchanged (the tie is idempotent with it). Two things this does **not**
+cover, which are still the testbench's job:
+
+- an **AC** ground for the substrate net — 1 Tohm is a DC anchor, not a low
+  impedance, so a measurement whose result depends on the substrate node being
+  held at 0 V (any coupling measurement) must still drive it explicitly;
+- any *other* floating node — an unconnected gate, a `klt gen-compose`
+  generator port never wired through `connectivity[]` — for which ngspice's
+  blanket `.options rshunt=1e12` remains the right remedy (see
+  `examples/design-pipeline/09-sim.testbench.spice`).
+
+See "Substrate DC reference" under `--parasitics` above for the full rules.
 
 ## JSON schema (the contract)
 

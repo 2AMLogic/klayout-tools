@@ -1495,7 +1495,19 @@ def _write_lateral_coupling_testbench(path: Path, dut_path: Path) -> Path:
     finding. ``.options rshunt=1e12`` matches the same floating-node
     convergence workaround ``examples/design-pipeline/09-sim.testbench.
     spice`` already documents for this deck's own composed-layout canary
-    (issue #205)."""
+    (issue #205).
+
+    **Kept deliberately after issue #1263.** ``klt extract --parasitics``
+    now writes its own ``Rvsubs_dctie vsubs 0 1e12`` DC reference into the
+    extracted ``.SUBCKT`` body, so the *convergence* half of the cards below
+    (``.options rshunt``, and the DC-solve role of ``Vsubs``) is redundant
+    -- and harmlessly so, 1 Tohm in parallel with an ideal 0 V source draws
+    ~0 A. What is **not** redundant is ``Vsubs``'s role as an **AC** ground:
+    1 Tohm against this fixture's ~0.3 fF is an RC time constant nine orders
+    of magnitude longer than the 5 ns transient below, so without the hard
+    tie ``vsubs`` still floats *dynamically* and reinstates exactly the
+    accidental ``CAGR``/``CVIC`` series coupling path described above. The
+    cards stay."""
     path.write_text(
         f'.include "{dut_path}"\n'
         ".options rshunt=1e12\n"
@@ -1678,7 +1690,14 @@ def _write_distributed_rc_testbench(path: Path, dut_path: Path) -> Path:
     #205's floating-node workaround) -- without it every parasitic ground
     capacitor's `B` terminal floats, and `V(MID)` would track `V(SRC)`
     instantly regardless of any resistor in between (no real capacitive
-    loading without a fixed reference)."""
+    loading without a fixed reference).
+
+    **Kept deliberately after issue #1263**, for the same reason
+    `_write_lateral_coupling_testbench` above documents: the extraction's
+    own `Rvsubs_dctie vsubs 0 1e12` card makes the *DC-convergence* role of
+    these lines redundant (and idempotent -- nothing to remove), but this
+    measurement needs `vsubs` held at a real 0 V **AC** reference, which a
+    1 Tohm anchor does not provide on a 60 ps transient."""
     path.write_text(
         f'.include "{dut_path}"\n'
         ".model res_generic_po r\n"

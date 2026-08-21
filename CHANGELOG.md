@@ -51,6 +51,43 @@ not `klt --version`, if you need to detect this kind of drift. See
   the repo), keeping `source.netlist` the plain string
   [`docs/cli/yield.md`](docs/cli/yield.md) has always documented. Schema-v1
   sim reports (a raw string) still read through unchanged.
+- 2026-08-21 — `klt extract --parasitics` (and therefore `klt pex`, which
+  always extracts with `parasitics=True`) now writes a DC reference for the
+  deck's *synthesized* substrate net(s) instead of leaving them floating
+  (issue #1263). Every ground capacitor the parasitics pass injects hangs
+  off `substrate_net` (`vsubs`), a net `connect_global` mints out of nothing
+  — no layout can label it, and nothing in the written netlist gave it a
+  defined DC value. A testbench that `.include`d the extracted file and
+  `X`-instantiated its `.SUBCKT` (the convention
+  [`docs/cli/extract.md`](docs/cli/extract.md) documents) therefore hit
+  `Warning: singular matrix:  check node x<dut>.vsubs` on the `.op`/
+  transient solve, and ngspice's gmin/source-stepping recovery could return
+  a *non-reproducible* operating point rather than failing loudly — a
+  silently untrustworthy post-layout result. Pin exposure did not help: the
+  substrate net is normally promoted to a pin, but a pin wired to an
+  equally-undriven testbench node floats just the same. `--parasitics` now
+  emits one `R<net>_dctie <net> 0 1e+12` shunt per synthesized substrate
+  identity — the deck's `substrate_net` **and** every
+  `<substrate_net>_iso<n>` isolated-region variant (issue #1128) — **inside**
+  the extracted `.SUBCKT` body, against SPICE's global ground node `0` (which
+  needs no `.global` card and no cooperation from the including testbench),
+  so the tie travels with the artifact whether `klt extract` or `klt pex`
+  produced it. Additive behavior change, no `schema_version` bump: the
+  `.SUBCKT` header, pin list, `pin_count`, `net_count`, `device_count`,
+  `devices[]` and `nets[]` are all unchanged (so `klt pex`'s
+  `pin_count_mismatch`/`flat_dut_mismatch` diagnostics read the same
+  interfaces as before), `r_count`/`total_resistance_ohm` still count
+  *extracted* resistance only, and the new `parasitics.substrate_dc_tie`
+  block names the tied nets and their card names. Idempotent with a
+  hand-authored `.global vsubs`/`Vsubs`/`.options rshunt=1e12` (1 Tohm in
+  parallel with an ideal source draws ~1.8 pA at a 1.8 V rail — existing
+  testbenches need no edit), and measurably harmless on a leg that was
+  already DC-well-formed. It is a DC anchor, **not** an AC ground: a
+  measurement that needs the substrate held at a real 0 V reference (any
+  coupling-capacitance delta) must still tie it explicitly. Documented in
+  [`docs/cli/extract.md`](docs/cli/extract.md) → "Substrate DC reference" and
+  [`docs/cli/pex.md`](docs/cli/pex.md) → "The extracted side carries its own
+  substrate DC reference".
 - 2026-08-21 — `klt pex`'s DUT `.include` swap no longer silently accepts a
   non-DUT single-`.include` testbench, or a flat-schematic-DUT-vs-
   `.SUBCKT`-wrapped-extraction mismatch (issue #1255, two gaps left by
