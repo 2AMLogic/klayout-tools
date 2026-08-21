@@ -74,7 +74,9 @@ jobs:
     # No toolchain-install step: ubuntu-latest images ship a rustup-managed
     # stable Rust, so `cargo` is already on PATH (matching how this repo
     # avoids third-party actions elsewhere).
-    runs-on: ubuntu-latest
+    # Heavy jobs run on the dedicated CI runner (2AMLogic/2am#29); fork PRs
+    # route back to GitHub-hosted instead of being skipped.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       # fail-fast: false so e.g. a congestion regression doesn't cancel the
@@ -245,7 +247,9 @@ jobs:
     # crate still builds its standalone `klt-statime` CLI binary from the
     # same source -- `cargo test`/`clippy` below cover both targets
     # (`--all-targets`).
-    runs-on: ubuntu-latest
+    # Heavy jobs run on the dedicated CI runner (2AMLogic/2am#29); fork PRs
+    # route back to GitHub-hosted instead of being skipped.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 20
     defaults:
       run:
@@ -448,7 +452,9 @@ jobs:
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Heavy jobs run on the dedicated CI runner (2AMLogic/2am#29); fork PRs
+    # route back to GitHub-hosted instead of being skipped.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     # Explicit bound (issue #1009) so a stuck runner or hung step fails
     # outright instead of silently riding the platform default of 360
     # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
