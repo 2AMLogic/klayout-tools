@@ -17,6 +17,7 @@ from . import (
     draw_cmd,
     drc_cmd,
     economy_cmd,
+    env_provenance_cmd,
     equiv_cmd,
     erc_cmd,
     eval_cmd,
@@ -890,6 +891,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_pdk_parser(subparsers)
     _add_deck_parser(subparsers)
+    _add_env_provenance_parser(subparsers)
     _add_version_parser(subparsers)
 
     extract_parser = subparsers.add_parser(
@@ -3050,6 +3052,86 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text)",
     )
     info_parser.set_defaults(func=deck_cmd.run_info)
+
+
+def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``env-provenance`` verb with nested ``emit``/``scan``
+    subcommands (issue #1254), mirroring ``deck``/``pdk``'s grouped-verb
+    pattern -- the two are one subject (what an evidence record may say about
+    the machine that produced it) approached from opposite ends: write it
+    safely, or check that what was written is safe.
+    """
+    env_parser = subparsers.add_parser(
+        "env-provenance",
+        help="emit committable environment provenance for an evidence "
+        "record, or scan records for leaked home paths",
+        description=(
+            "Environment provenance an evidence record can carry in public "
+            "forever: repo-relative paths only, a stable pseudonymous "
+            "`host-<8hex>` id instead of the hostname, and no login/author "
+            "field beyond what git already records (see "
+            "docs/design-evidence-tiers.md, 'Provenance hygiene in evidence "
+            "records'). `emit` produces that block; `scan` reports "
+            "home-directory-shaped absolute paths in files that already "
+            "exist, so a regression is caught at PR time. A Python harness "
+            "can import klayout_tools.env_provenance directly for the same "
+            "payload with no subprocess."
+        ),
+    )
+    env_sub = env_parser.add_subparsers(
+        dest="env_provenance_command", metavar="<subcommand>"
+    )
+    env_parser.set_defaults(func=_no_subcommand_handler(env_parser))
+
+    emit_parser = env_sub.add_parser(
+        "emit",
+        help="emit the environment-provenance block for an evidence record",
+        description=(
+            "Emit the environment-provenance block: schema_version, host_id, "
+            "os (system/release/machine), python_version, klt_version, "
+            "klayout_version, and any --path entries normalised to "
+            "repo-relative form. A path outside the repo is reported as "
+            "{path: null, scope: 'external'} -- never as an absolute path; "
+            "pin such an input by identity (name/version/content hash) "
+            "instead. Refuses to emit (exit 1) if any collected value would "
+            "carry a local identifier."
+        ),
+    )
+    emit_parser.add_argument(
+        "--path",
+        dest="paths",
+        action="append",
+        metavar="LABEL=PATH",
+        default=None,
+        help=(
+            "a path to record under LABEL, normalised repo-relative (e.g. "
+            "--path netlist=sim/bandgap/bandgap.spice). Repeatable."
+        ),
+    )
+    _add_format_arg(emit_parser)
+    emit_parser.set_defaults(func=env_provenance_cmd.run_emit)
+
+    scan_parser = env_sub.add_parser(
+        "scan",
+        help="scan files for home-directory-shaped absolute paths",
+        description=(
+            "Scan files (e.g. the sim/**/records/*.md a PR adds) for "
+            "home-directory-shaped absolute paths -- /Users/<name>/..., "
+            "/home/<name>/..., C:\\Users\\<name>\\... A `~/`-rooted path is "
+            "not flagged: it names no user. Exits 3 when leaks are found (a "
+            "successful run with findings), 0 when clean, 1 if a file cannot "
+            "be read. Findings quote the leaking text, so scan output should "
+            "not itself be committed to the repo it scanned."
+        ),
+    )
+    scan_parser.add_argument(
+        "files",
+        nargs="+",
+        metavar="FILE",
+        help="files to scan",
+    )
+    _add_format_arg(scan_parser)
+    scan_parser.set_defaults(func=env_provenance_cmd.run_scan)
 
 
 def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:

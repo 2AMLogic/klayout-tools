@@ -351,6 +351,55 @@ spec-row convention and the CLI mechanism that checks it; the sizing-time
 question of *how much* area a specific matched structure legitimately
 needs stays owned by that document.
 
+## Provenance hygiene in evidence records
+
+Every item above rests on committed artifacts, and T1 item 9 ("pinned PDK
+revision") and the staleness rule below both push a harness to record *what
+environment produced this result*. That recording is permanent and public:
+evidence records are append-only by construction, and a record id embeds the
+commit SHA it was taken at — so a record cannot be rewritten later without
+destroying the verifiability that is the reason the evidence is published at
+all. Whatever a harness writes into a record, it writes forever.
+
+**The rule: an evidence record identifies the environment, never the
+author or the machine.** Concretely:
+
+- **Repo-relative paths only.** A path inside the block repo is recorded
+  relative to the repo root. A path *outside* it — a PDK install, a scratch
+  directory, a home directory — is recorded as being outside, and its
+  absolute location is not recorded at all. An external input is pinned by
+  **identity**, not location: the PDK name/version and the deck
+  `content_hash` the shared `provenance` block already carries
+  (`docs/json-contract.md`) reproduce a run; where the PDK happens to sit on
+  one machine reproduces nothing.
+- **A stable pseudonymous host id, not a hostname.** Correlating two records
+  to the same machine is legitimately useful ("both failures came from one
+  host"); naming that machine is not. Record `host-<8hex>` — a salted hash of
+  the hostname, the same opaque-id shape the fleet's own lease records use.
+- **No login/author field.** Git already records authorship, once, where a
+  reader expects to find it. A record that repeats it is adding a second,
+  unrevocable copy of an identifier to a public artifact for no evidentiary
+  gain.
+
+This is not hypothetical hygiene. A 2026-08 disclosure read-audit of the
+public canary repos found ~3,937 committed evidence records carrying all
+three — an absolute `/Users/<author>/…` PDK path, the dispatch host's name,
+and the author's login — written **by design** by each canary's own harness,
+so the count grew with every simulation run.
+
+**The reference implementation is `klt env-provenance`**
+([`docs/cli/env-provenance.md`](cli/env-provenance.md)): `emit` produces
+exactly this shape, and its Python module
+(`klayout_tools.env_provenance`) is importable, so a harness calls it instead
+of collecting host/path metadata itself. It **refuses to emit** a payload
+carrying a local identifier rather than minting a record that leaks one, and
+its `scan` subcommand reports home-directory-shaped absolute paths in files
+that already exist, so a regression is caught while it is still a diff.
+
+**Records that already leak are not rewritten.** Rewriting them would break
+every record id and every citation resting on it — a strictly worse outcome
+than the disclosure. The rule binds the writer, from now on.
+
 ## Verification rules
 
 - **Staleness is failure.** Every report is checked against current source
