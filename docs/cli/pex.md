@@ -329,6 +329,45 @@ DUT in a matching `.SUBCKT ... .ENDS` (with the same top-level pin list
 reused unmodified on both sides — the same convention `pin_count_mismatch`
 already requires.
 
+## The extracted side carries its own substrate DC reference (issue #1263)
+
+The extraction `klt pex` runs is `--parasitics`, so every net's ground
+capacitance hangs off the deck's *synthesized* substrate net (`vsubs`, plus
+any `<substrate_net>_iso<n>` isolated-region variant). Nothing in a layout
+can label that net, so nothing used to give it a defined DC value: an
+extracted-side leg whose testbench did not hand-author a tie hit ngspice's
+`Warning: singular matrix:  check node x<dut>.vsubs`, and the
+gmin/source-stepping recovery that followed could return a non-reproducible
+operating point rather than failing loudly.
+
+`klt extract --parasitics` now emits one `R<net>_dctie <net> 0 1e+12` shunt
+per synthesized substrate net **inside the extracted `.SUBCKT` body** — see
+[`extract.md`](extract.md#substrate-dc-reference-issue-1263). Because the
+tie lives in the extracted artifact rather than in `klt pex`'s
+testbench-assembly step, both legs behave predictably and nothing in this
+command's own contract changes:
+
+- **The `.include` swap is still the only edit `klt pex` makes.** Every
+  source, load, `.model` card, and measurement in the testbench remains
+  byte-identical between the two runs; `klt pex` adds no card of its own.
+- **Both `pin_count_mismatch` and `flat_dut_mismatch` are unaffected.** The
+  tie is a body card, not a pin: the extracted `.SUBCKT` header, its pin
+  list, and its pin count are exactly what they were before, so both
+  diagnostics compare the same interfaces they always did.
+- **The schematic side never sees it.** The tie exists only in the
+  extraction, so the schematic leg's `delta[].schematic_value` is unchanged
+  by definition — and on the extracted side a 1 Tohm leak to ground is below
+  every simulator tolerance for a node that already has a DC path, so an
+  extracted leg that converged before converges to the same numbers now.
+- **A testbench that already ties the substrate keeps working.** The default
+  is idempotent with a hand-authored `.global vsubs` / `Vsubs vsubs 0 DC 0`
+  / `.options rshunt=1e12`; there is nothing to remove. Keep an explicit
+  `Vvsubs vsubs 0 DC 0` where the *measurement* needs the substrate held at a
+  real 0 V **AC** reference (any coupling-capacitance delta does) — 1 Tohm
+  anchors the DC solve, it is not a low impedance. This repo's own
+  coupling-canary fixtures in `tests/test_pex.py` keep theirs for exactly
+  that reason.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught

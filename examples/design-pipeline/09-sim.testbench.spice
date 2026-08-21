@@ -15,6 +15,13 @@
 * terminals -- klt gen's own per-generator ports, never wired through
 * connectivity[] in 06-layout.request.json) a real DC path so ngspice's
 * solver converges cleanly with no `singular matrix` diagnostic.
+*
+* Still required after issue #1263: `klt extract --parasitics` now writes
+* its own `Rvsubs_dctie vsubs 0 1e12` DC reference into the extracted
+* .SUBCKT body, which covers the *substrate* net -- but not this
+* composition's floating gate/source terminals, which have no other DC path
+* at all. `.options rshunt` stays; it is idempotent with the extraction's
+* own tie (see docs/cli/extract.md, "Substrate DC reference").
 .model nfet nmos level=1
 .options rshunt=1e12
 .param vn1=1.0

@@ -270,6 +270,29 @@ _DEF_NET_NAME_PROPERTY_ID = 1
 #: one.
 _DEF_NET_NAME_PROBE_CANDIDATES = 4
 
+#: SPICE's own reserved *global* ground node. Node ``0`` is ground
+#: everywhere in a SPICE deck -- inside a ``.SUBCKT`` body just as much as at
+#: the top level, with no ``.global`` declaration and no cooperation from the
+#: instantiating testbench required. That property is what lets
+#: :func:`_tie_substrate_nets_to_ground` write the substrate DC-reference
+#: shunt *inside* the extracted ``.SUBCKT`` (issue #1263) without touching
+#: the subcircuit's declared pin interface.
+_SPICE_GLOBAL_GROUND_NODE = "0"
+
+#: Resistance (ohms) of the DC-reference shunt `--parasitics` writes from
+#: every synthesized substrate net to :data:`_SPICE_GLOBAL_GROUND_NODE`
+#: (issue #1263).
+#:
+#: 1 Tohm is the same order as ngspice's own ``.options rshunt`` remedy for a
+#: floating node (the workaround issue #1263 was reported with), chosen to be
+#: large enough that it is electrically invisible -- 1.8 pA at a 1.8 V rail,
+#: ~13 orders of magnitude below any current a real extracted device carries,
+#: and an RC time constant of ~0.3 s against the ~0.3 fF of substrate
+#: capacitance a small cell's extraction produces (i.e. eight-plus orders
+#: slower than any transient a post-layout testbench sweeps). It is a
+#: numerical anchor for the DC solve, not a circuit element.
+SUBSTRATE_DC_TIE_RESISTANCE_OHM = 1e12
+
 #: Machine-readable declaration of what `--parasitics` does and does not
 #: model (issue #728, updated by #760). Most `C` cards `_inject_parasitics`
 #: emits hang off the deck's ground/substrate net; since issue #760 a net
@@ -1896,6 +1919,14 @@ def run_extract(
                 "total_coupling_capacitance_ff": 0.0,
                 "total_inductance_nh": 0.0,
                 "nets": [],
+                # Additive field (issue #1263). This branch injected nothing
+                # into the circuit at all, so there is no substrate node for
+                # a DC tie to anchor either -- the block is still present
+                # (schema stability), just empty.
+                "substrate_dc_tie": {
+                    "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+                    "nets": [],
+                },
             }
         # `parasitics_deck` is only non-None when `--parasitics` was given
         # (see above), which is exactly when `parasitic_nets is not None`.
@@ -4702,7 +4733,23 @@ def _is_synthesized_substrate_net(name: str, deck: ExtractionDeck) -> bool:
     so a net carrying one of these names is one that earned no label of its
     own anywhere in the layout.
     """
-    return name == deck.substrate_net or name.startswith(f"{deck.substrate_net}_iso")
+    return _is_synthesized_substrate_net_name(name, deck.substrate_net)
+
+
+def _is_synthesized_substrate_net_name(name: str, substrate_net: str) -> bool:
+    """:func:`_is_synthesized_substrate_net`'s predicate, expressed against a
+    bare ``substrate_net`` string rather than a whole
+    :class:`ExtractionDeck`.
+
+    Split out for :func:`_tie_substrate_nets_to_ground` (issue #1263), which
+    runs inside :func:`_inject_parasitics` -- a function that is handed the
+    deck's ``substrate_net`` name (as ``ground_net_name``) but not the deck
+    object. Keeping the one-line rule in a single place stops the two call
+    sites drifting apart the next time the synthesized-identity naming
+    convention grows a variant (it already grew ``_iso<n>`` once, issue
+    #1128).
+    """
+    return name == substrate_net or name.startswith(f"{substrate_net}_iso")
 
 
 def _region_probe_points(region: kdb.Region) -> list[kdb.Point]:
@@ -7899,6 +7946,13 @@ def _inject_parasitics(
         total_cc_ff += pair["capacitance_ff"]
         cc_count += 1
 
+    # DC reference for the deck's synthesized substrate identities (issue
+    # #1263) -- last, so it sees every net this function created and cannot
+    # collide with one of them.
+    substrate_dc_tie = _tie_substrate_nets_to_ground(
+        circuit, res_class, ground_net_name
+    )
+
     return {
         "r_count": total_r_count,
         "c_count": total_c_count,
@@ -7912,6 +7966,112 @@ def _inject_parasitics(
         "total_coupling_capacitance_ff": round(total_cc_ff, 6),
         "total_inductance_nh": round(total_l_nh, 6),
         "nets": report_nets,
+        # Additive field (issue #1263): the substrate DC-reference shunt(s)
+        # written into the `.SUBCKT` body -- see
+        # `_tie_substrate_nets_to_ground`'s docstring.
+        "substrate_dc_tie": substrate_dc_tie,
+    }
+
+
+def _tie_substrate_nets_to_ground(
+    circuit: kdb.Circuit,
+    res_class: kdb.DeviceClass,
+    substrate_net: str,
+) -> dict[str, Any]:
+    """Give every *synthesized* substrate identity in ``circuit`` a DC path
+    to SPICE's global ground node ``0``, via one large shunt resistor per net
+    (``R<net>_dctie <net> 0 1e12``), and report what was written (issue
+    #1263).
+
+    **Why this is needed.** ``--parasitics`` hangs each net's lumped ground
+    capacitance off the deck's ``substrate_net`` (``vsubs`` for sky130 and
+    gf180mcu), and ``connect_global`` mints that net -- plus any
+    per-isolated-region ``f"{substrate_net}_iso{n}"`` variant (issue #1128)
+    -- out of nothing: no layout can draw a label for it. Nothing in the
+    written netlist then gives it a defined DC value. A caller who
+    ``.include``s the extracted file and ``X``-instantiates its ``.SUBCKT``
+    -- the exact convention ``docs/cli/extract.md`` documents -- therefore
+    hands ngspice a node whose only connections are capacitors, and the
+    ``.op``/transient solve hits ``Warning: singular matrix: check node
+    x<dut>.vsubs`` on it. The reported ngspice recovery (dynamic gmin
+    stepping, then true gmin stepping, then source stepping) can still
+    return *a* number, but not a reproducible one -- so the failure mode is
+    a silently untrustworthy post-layout result, not a hard error.
+
+    Being a *pin* does not save it: ``make_top_level_pins()`` promotes the
+    substrate net like any other named net, but a promoted pin wired to an
+    equally-undriven node in the caller's testbench is just as floating. The
+    missing DC tie, not the pin-exposure status, is the defect.
+
+    **Why a shunt resistor to node ``0``, inside the ``.SUBCKT``.** Node
+    ``0`` is SPICE's *global* ground: it means the same node inside a
+    subcircuit body as at the top level, needing neither a ``.global``
+    declaration (which is conventionally a top-level card, not a
+    ``.SUBCKT``-body one) nor any cooperation from the instantiating
+    testbench. So the tie travels with the extracted file itself and works
+    identically for a caller who runs ``klt extract --parasitics`` and
+    assembles their own testbench, for ``klt pex``'s orchestration, and for
+    anything downstream that re-includes the same artifact.
+
+    **Idempotent with a hand-authored tie.** A testbench that already
+    supplies its own ``.global vsubs`` + ``Vsubs vsubs 0 DC 0`` (or
+    ``.options rshunt=1e12``) keeps working unchanged: a 1 Tohm resistor in
+    parallel with an ideal 0 V source draws ~0 A and moves no node voltage
+    -- there is no duplicate instance name to clash, because this card lives
+    in the subcircuit's own namespace. Existing fixtures that hand-author
+    the workaround are left in place for exactly that reason.
+
+    **Harmless where nothing floats.** On a net that already has a real DC
+    path, adding a 1 Tohm leakage path to ground is below every simulator
+    tolerance -- the same property that makes ngspice's own blanket
+    ``.options rshunt`` safe (the reporter measured byte-identical results
+    with and without it on a non-extracted leg).
+
+    **Pin interface untouched.** No pin is created, promoted, or demoted
+    here: net ``0`` is minted after ``make_top_level_pins()``/``_reconcile_
+    top_pins`` have already run, so it stays internal and the written
+    ``.SUBCKT``'s declared pin count is unchanged -- which is what keeps
+    ``klt pex``'s ``pin_count_mismatch``/``flat_dut_mismatch`` diagnostics
+    (issue #1258) reading the same interface they did before.
+
+    Returns the additive ``parasitics.substrate_dc_tie`` report block:
+    ``{"resistance_ohm": float, "nets": [{"net": str, "device": str}, ...]}``
+    -- ``nets`` empty (and no card written) when this circuit carries no
+    synthesized substrate identity at all.
+    """
+    tied_nets = [
+        net
+        for net in circuit.each_net()
+        if _is_synthesized_substrate_net_name(_net_identity_name(net), substrate_net)
+    ]
+    entries: list[dict[str, str]] = []
+    if tied_nets:
+        reference = circuit.net_by_name(_SPICE_GLOBAL_GROUND_NODE)
+        if reference is None:
+            reference = circuit.create_net(_SPICE_GLOBAL_GROUND_NODE)
+        existing_devices = {device.expanded_name() for device in circuit.each_device()}
+        for net in sorted(tied_nets, key=_net_identity_name):
+            identity = _net_identity_name(net)
+            instance_name = _unique_net_name(
+                _sanitize_instance_name(identity), existing_devices, suffix="_dctie"
+            )
+            existing_devices.add(instance_name)
+            tie = circuit.create_device(res_class, instance_name)
+            tie.connect_terminal("A", net)
+            tie.connect_terminal("B", reference)
+            tie.set_parameter("R", SUBSTRATE_DC_TIE_RESISTANCE_OHM)
+            entries.append(
+                {
+                    # Report-boundary escape (issue #1162), so this JSON
+                    # value is byte-identical to the netlist's own node
+                    # spelling -- same convention as `nets[].net` above.
+                    "net": spice_safe_net_name(identity),
+                    "device": f"R{instance_name}",
+                }
+            )
+    return {
+        "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+        "nets": entries,
     }
 
 

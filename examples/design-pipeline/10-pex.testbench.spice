@@ -1,10 +1,11 @@
 * klt pex testbench for the sky130 5T OTA composed layout (06-layout.gds),
 * Epic #709 Phase 1c (#803) -- the same connectivity/bias network
 * 09-sim.testbench.spice already proved closes the extract -> sim loop
-* (see that file's own comments for why `.options rshunt=1e12` is needed
-* and why `nfet` is a generic device-class model, not a PDK-specific
-* flavor), reused here so `klt pex` can drive both legs of the
-* schematic-vs-extracted delta from one request.
+* (see that file's own comments for why `.options rshunt=1e12` is still
+* needed for this composition's floating gate/source terminals even after
+* issue #1263's own substrate DC tie, and why `nfet` is a generic
+* device-class model, not a PDK-specific flavor), reused here so `klt pex`
+* can drive both legs of the schematic-vs-extracted delta from one request.
 *
 * `.include`s the schematic-equivalent DUT: 07-reference.spice, the same
 * hand-written netlist 08-lvs.result.json already verified is

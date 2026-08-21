@@ -7128,6 +7128,14 @@ def test_parasitics_summary_block_shape(tmp_path):
         "model",
         "mom_crosscheck",
         "mom_rlc_override",
+        "substrate_dc_tie",
+    }
+    # `substrate_dc_tie` (issue #1263): every synthesized substrate identity
+    # this extraction produced, plus the shunt resistance used to give it a
+    # DC path to SPICE's global ground node `0`.
+    assert para["substrate_dc_tie"] == {
+        "resistance_ohm": 1e12,
+        "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
     }
     # `mom_crosscheck` (issue #798) is `None` unless `--mom-net` was given --
     # additive, present but empty here (this test does not pass `mom_net`).
@@ -7240,6 +7248,24 @@ def test_parasitics_netlist_header_declares_model_scope(tmp_path):
         assert line.startswith("*")
 
 
+def _parasitic_r_lines(netlist_text: str, parasitics: dict) -> list[str]:
+    """The written netlist's ``R`` cards that ``parasitics.r_count`` actually
+    counts -- i.e. every resistor card *except* the substrate DC-reference
+    shunts (issue #1263).
+
+    ``r_count`` is a count of *parasitic* resistance devices (star legs /
+    ladder segments); the DC tie is a numerical anchor for the solve, not an
+    extracted parasitic, and is reported separately under
+    ``parasitics.substrate_dc_tie``. Tests that cross-check "cards written"
+    against "devices reported" therefore have to exclude it explicitly."""
+    tie_devices = {entry["device"] for entry in parasitics["substrate_dc_tie"]["nets"]}
+    return [
+        line
+        for line in netlist_text.splitlines()
+        if line.startswith("R") and line.split()[0] not in tie_devices
+    ]
+
+
 def test_parasitics_writes_r_and_c_cards_preserving_subckt_interface(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     plain = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
@@ -7259,10 +7285,20 @@ def test_parasitics_writes_r_and_c_cards_preserving_subckt_interface(tmp_path):
     )
     assert plain_subckt == para_subckt
 
-    r_lines = [ln for ln in para_text.splitlines() if ln.startswith("R")]
+    # `r_count`/`c_count` are *parasitic* device counts. The substrate
+    # DC-reference shunt (issue #1263) is an R card too, but it is not a
+    # parasitic -- it is reported separately under `substrate_dc_tie`, so it
+    # is excluded here (and asserted for on its own below).
+    assert [
+        entry["device"] for entry in para["parasitics"]["substrate_dc_tie"]["nets"]
+    ] == ["Rvsubs_dctie"]
+    r_lines = _parasitic_r_lines(para_text, para["parasitics"])
     c_lines = [ln for ln in para_text.splitlines() if ln.startswith("C")]
     assert len(r_lines) == para["parasitics"]["r_count"]
     assert len(c_lines) == para["parasitics"]["c_count"]
+    # ... and the tie itself is present, in the `.SUBCKT` body, against
+    # SPICE's global ground node `0`.
+    assert "Rvsubs_dctie vsubs 0 1e+12" in para_text
     # Bare R/C cards: R<name> n1 n2 <value> -- no trailing model token.
     for ln in r_lines + c_lines:
         assert len(ln.split()) == 4
@@ -8939,7 +8975,7 @@ def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
     # The written SPICE netlist emits exactly two resistor cards for this
     # net's star (plus whatever other nets contribute) and one capacitor.
     netlist_text = Path(report["netlist_path"]).read_text()
-    r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
+    r_lines = _parasitic_r_lines(netlist_text, report["parasitics"])
     assert len(r_lines) == report["parasitics"]["r_count"]
 
 
@@ -9041,7 +9077,7 @@ def test_distributed_rc_replaces_star_with_two_segment_ladder(tmp_path):
     assert para["r_count"] == baseline["parasitics"]["r_count"] - 1
 
     netlist_text = Path(report["netlist_path"]).read_text()
-    r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
+    r_lines = _parasitic_r_lines(netlist_text, para)
     c_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("C")]
     assert len(r_lines) == para["r_count"]
     assert len(c_lines) == para["c_count"]
@@ -9542,6 +9578,263 @@ def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
 
     assert sim_report["status"] == "pass"
     assert sim_report["measurements"][0]["worst_case"]["value"] == pytest.approx(1.8)
+
+
+# --------------------------------------------------------------------------- #
+# Substrate DC reference for `--parasitics` output (issue #1263)
+# --------------------------------------------------------------------------- #
+
+
+def _make_floating_substrate_layout() -> kdb.Layout:
+    """Two met1 nets (``AGR``/``VIC``) 0.1 um apart and **nothing else** --
+    no diffusion, no well, no device of any kind.
+
+    The point is what the extraction's synthesized substrate net ends up
+    connected to: with no MOS body terminal anywhere in the layout, the only
+    thing hanging off ``vsubs`` in a ``--parasitics`` extraction is each
+    net's ground capacitor. There is no junction diode for ngspice's own
+    ``gmin`` to leak through, so ``vsubs`` is a genuinely floating node in
+    the DC solve -- the exact configuration issue #1263 reports (and, unlike
+    an inverter, one that reproduces it deterministically rather than being
+    rescued by an nfet's body diodes).
+
+    Geometry mirrors ``_make_lateral_coupling_layout``'s two-met1-net
+    arrangement; kept separate so tightening this fixture for the DC-tie
+    regression below cannot perturb the lateral-coupling tests."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(68, 20)
+    met1_label = layout.layer(68, 5)
+    top.shapes(met1).insert(kdb.Box(0, 0, 2000, 1000))
+    top.shapes(met1_label).insert(kdb.Text("AGR", kdb.Trans(1000, 500)))
+    top.shapes(met1).insert(kdb.Box(2100, 0, 4100, 1000))
+    top.shapes(met1_label).insert(kdb.Text("VIC", kdb.Trans(3100, 500)))
+    return layout
+
+
+def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
+    """The structural half of issue #1263: `--parasitics` writes one large
+    shunt resistor from the deck's synthesized substrate net to SPICE's
+    global ground node `0`, **inside** the `.SUBCKT` body -- so the tie
+    travels with the extracted artifact itself and needs no cooperation from
+    whatever testbench includes it -- while leaving the subcircuit's declared
+    pin interface byte-identical to a non-parasitic extraction."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+
+    plain_text = Path(plain["netlist_path"]).read_text()
+    para_text = Path(para["netlist_path"]).read_text()
+
+    # No `--parasitics`: nothing synthesized a substrate net, nothing to tie.
+    assert "_dctie" not in plain_text
+
+    # The tie sits between `.SUBCKT`/`.ENDS`, not at top level -- a
+    # `.global` card would have to be top-level, which an extracted
+    # subcircuit body is not allowed to emit (`klt sim` consumes it as an
+    # include, see "Verified compatible with klt sim's netlist convention").
+    body = para_text.split(".SUBCKT")[1].split(".ENDS")[0]
+    assert "Rvsubs_dctie vsubs 0 1e+12" in body
+
+    assert para["parasitics"]["substrate_dc_tie"] == {
+        "resistance_ohm": 1e12,
+        "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
+    }
+
+    # Purely additive: pin interface, pin count, and the schematic-equivalent
+    # view are all untouched -- which is what keeps `klt pex`'s
+    # `pin_count_mismatch`/`flat_dut_mismatch` diagnostics (issue #1258)
+    # reading the same interface they always did.
+    plain_subckt = next(
+        ln for ln in plain_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    para_subckt = next(
+        ln for ln in para_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    assert plain_subckt == para_subckt
+    assert para["pin_count"] == plain["pin_count"]
+    assert para["net_count"] == plain["net_count"]
+    assert para["device_count"] == plain["device_count"]
+
+
+def test_parasitics_substrate_dc_tie_covers_isolated_region_variants(tmp_path):
+    """Every *synthesized* substrate identity gets its own tie, not just the
+    deck-wide `substrate_net` name: a gf180mcu `DNWELL`-isolated NMOS with no
+    substrate tie drawn inside its island resolves its body to that island's
+    own `vsubs_iso0` net (issue #1128), which floats exactly the same way
+    `vsubs` does. Mirrors
+    `test_gf180mcu_nmos_body_isolated_region_without_tap_gets_own_synthesized_net`'s
+    fixture."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    def nmos_unit(x0, index):
+        draw(22, 0, kdb.Box(x0, 0, x0 + 2000, 1000))
+        draw(30, 0, kdb.Box(x0 + 800, -200, x0 + 1200, 1200))
+        draw(33, 0, kdb.Box(x0 + 100, 300, x0 + 300, 700))
+        draw(33, 0, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))
+        draw(34, 0, kdb.Box(x0, 200, x0 + 400, 800))
+        draw(34, 0, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))
+        label(34, 10, f"S{index}", x0 + 200, 500)
+        label(34, 10, f"D{index}", x0 + 1800, 500)
+        draw(12, 0, kdb.Box(x0 - 900, -900, x0 + 2900, 1900))  # DNWELL
+
+    nmos_unit(0, 0)
+    nmos_unit(20000, 1)
+
+    path = _write_gds(layout, tmp_path / "iso.gds")
+    report = run_extract(
+        path, "gf180mcu", output=str(tmp_path / "iso.spice"), parasitics=True
+    )
+
+    tie = report["parasitics"]["substrate_dc_tie"]
+    tied = {entry["net"] for entry in tie["nets"]}
+    # Two independently-isolated islands, neither with a drawn tie -> two
+    # synthesized `_iso<n>` identities, plus the deck-wide `vsubs` the
+    # parasitic ground capacitors themselves hang off.
+    assert {"vsubs_iso0", "vsubs_iso1"}.issubset(tied)
+    assert "vsubs" in tied
+
+    body = Path(report["netlist_path"]).read_text()
+    for entry in tie["nets"]:
+        assert f"{entry['device']} {entry['net']} 0 1e+12" in body
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitics_substrate_dc_tie_clears_singular_matrix(tmp_path):
+    """Issue #1263's own repro, end to end: `.include` a `--parasitics`
+    extraction, `X`-instantiate its `.SUBCKT` from a testbench that
+    hand-authors **no** substrate tie of any kind (no `.global vsubs`, no
+    `Vsubs`, no `.options rshunt=1e12`), and run ngspice.
+
+    Before the DC tie, this produced ngspice's
+    `Warning: singular matrix:  check node xdut.vsubs` (plus the failed
+    dynamic-gmin / true-gmin / source-stepping recovery cascade the issue
+    quotes) -- `sim.py`'s `singular_matrix` classifier, whose recovered
+    operating point the reporter measured as not reproducible run to run.
+    """
+    from klayout_tools import sim
+
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    netlist_path = tmp_path / "floating.spice"
+    run_extract(path, "sky130", output=str(netlist_path), parasitics=True)
+
+    testbench = tmp_path / "testbench.spice"
+    testbench.write_text(
+        f'.include "{netlist_path}"\n'
+        "Vagr AGR 0 PULSE(0 1 0 100p 100p 100n 200n)\n"
+        "Rvic_hiz VIC 0 1e9\n"
+        "Xdut AGR VIC TOP\n"
+    )
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": str(testbench),
+                "analysis": {"kind": "tran", "args": "1p 5n"},
+                "measurements": [
+                    {"name": "vic", "spice": ".meas tran vic FIND V(VIC) AT=2n"}
+                ],
+            }
+        )
+    )
+
+    sim_report = sim.run_sim(str(request))
+
+    codes = [
+        diagnostic["code"]
+        for corner in sim_report["corners"]
+        for diagnostic in corner["diagnostics"]
+    ]
+    assert "singular_matrix" not in codes, codes
+    assert "nonconvergence" not in codes, codes
+    assert sim_report["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitics_substrate_dc_tie_is_harmless_where_nothing_floats(tmp_path):
+    """The other half of issue #1263's acceptance bar: on a leg that was
+    already DC-well-formed -- here the inverter testbench that hand-authors
+    its own `Vvsubs vsubs 0 DC 0`, i.e. exactly the manual workaround
+    `tests/test_pex.py`'s fixtures and `examples/design-pipeline/*.spice`
+    carry -- the new default tie must not move a single simulated value.
+
+    A/B against the *same* extraction with the tie card stripped back out,
+    so the two decks differ in exactly one line. 1 Tohm in parallel with an
+    ideal 0 V source draws ~1.8 pA; the measured node voltages must come
+    back bit-for-bit identical, which is also what makes the default safely
+    idempotent for every testbench that already supplies its own tie
+    (nothing to remove, nothing to collide with)."""
+    from klayout_tools import sim
+
+    layout_path = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    with_tie = tmp_path / "with_tie.spice"
+    report = run_extract(
+        str(layout_path), "sky130", output=str(with_tie), parasitics=True
+    )
+    tie_devices = {
+        entry["device"] for entry in report["parasitics"]["substrate_dc_tie"]["nets"]
+    }
+    assert tie_devices
+
+    # The A/B deck: the identical extraction with the tie cards (and the
+    # `* device instance ...` comment KLayout writes immediately above each)
+    # stripped back out -- i.e. byte-for-byte the pre-#1263 output.
+    without_tie = tmp_path / "without_tie.spice"
+    kept: list[str] = []
+    for line in with_tie.read_text().splitlines():
+        if line.split()[:1] and line.split()[0] in tie_devices:
+            kept.pop()  # the preceding `* device instance` comment
+            continue
+        kept.append(line)
+    without_tie.write_text("\n".join(kept) + "\n")
+    assert "_dctie" not in without_tie.read_text()
+
+    def _measure(netlist_path):
+        testbench = tmp_path / f"tb_{netlist_path.stem}.spice"
+        testbench.write_text(
+            f'.include "{netlist_path}"\n'
+            ".model nfet nmos level=1\n"
+            ".model pfet pmos level=1\n"
+            ".param vdd=1.8\n"
+            "Vvpwr VPWR 0 DC {vdd}\n"
+            "Vvpb VPB 0 DC {vdd}\n"
+            "Vvgnd VGND 0 DC 0\n"
+            "Vvsubs vsubs 0 DC 0\n"
+            "Va A 0 PULSE(0 1.8 1n 100p 100p 5n 10n)\n"
+            "Xinv A VGND VPB VPWR Y vsubs sky130_fd_sc_hd__inv_1\n"
+        )
+        request = tmp_path / f"req_{netlist_path.stem}.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "netlist": str(testbench),
+                    "analysis": {"kind": "tran", "args": "10p 8n"},
+                    "measurements": [
+                        {"name": "vy", "spice": ".meas tran vy FIND V(Y) AT=4n"},
+                        {
+                            "name": "vsubs",
+                            "spice": ".meas tran vsubs FIND V(vsubs) AT=4n",
+                        },
+                    ],
+                }
+            )
+        )
+        result = sim.run_sim(str(request))
+        assert result["status"] == "pass"
+        return {m["name"]: m["worst_case"]["value"] for m in result["measurements"]}
+
+    assert _measure(with_tie) == _measure(without_tie)
 
 
 # --------------------------------------------------------------------------- #
