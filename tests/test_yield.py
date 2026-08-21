@@ -59,8 +59,21 @@ def _sample_set(tmp_path, samples, limits=None, name="m"):
     return str(path)
 
 
-def _sim_report(tmp_path, values, limits=None, corner="tt/1.800V/27C"):
-    """A minimal `klt sim` Monte Carlo report over one measurement."""
+def _sim_report(
+    tmp_path,
+    values,
+    limits=None,
+    corner="tt/1.800V/27C",
+    netlist="tb.spice",
+    schema_version=1,
+):
+    """A minimal `klt sim` Monte Carlo report over one measurement.
+
+    ``netlist``/``schema_version`` default to `klt sim`'s **schema-v1** shape
+    (a raw path string) so every pre-existing caller is unaffected; pass the
+    `{path, scope}` object plus ``schema_version=2`` to exercise the shape
+    `klt sim` emits from its version 2 onward (issue #1261).
+    """
     corners = [
         {
             "corner_id": f"{corner}/mc{i}",
@@ -71,8 +84,8 @@ def _sim_report(tmp_path, values, limits=None, corner="tt/1.800V/27C"):
         for i, v in enumerate(values)
     ]
     report = {
-        "schema_version": 1,
-        "netlist": "tb.spice",
+        "schema_version": schema_version,
+        "netlist": netlist,
         "status": "pass",
         "environment": {"monte_carlo": {"n": len(values), "seed": 1000}},
         "measurements": [{"name": "vref", "unit": "V", "limits": limits or {}}],
@@ -119,6 +132,56 @@ def test_sim_report_is_read_without_an_intermediate_format(tmp_path):
     assert measurements[0]["limits"] == {"min": 0.5, "max": 3.5}
     # The `/mc<i>` suffix is stripped, so the originating corner is named once.
     assert measurements[0]["source_corners"] == ["tt/1.800V/27C"]
+
+
+def test_sim_report_schema_v2_netlist_object_is_unwrapped_to_a_string(tmp_path):
+    """`klt sim` emits `netlist` as `{path, scope}` from its own
+    `schema_version` 2 onward (issue #1261, so an absolute path outside the
+    invocation's repo never leaks into a committed record). `klt yield`'s
+    `source.netlist` contract is a plain string (`docs/cli/yield.md`), and
+    `klt yield-campaign` feeds a live `run_sim` report straight into
+    `run_yield` -- so the object must be unwrapped here rather than echoed
+    through, which would silently break a second command's contract."""
+    path = _sim_report(
+        tmp_path,
+        [1.0, 2.0, 3.0],
+        limits={"min": 0.5, "max": 3.5},
+        netlist={"path": "tb.spice", "scope": "repo"},
+        schema_version=2,
+    )
+    _kind, _measurements, source = _read_samples(path)
+    assert source["netlist"] == "tb.spice"
+
+
+def test_sim_report_schema_v2_external_netlist_reads_as_null(tmp_path):
+    """A netlist outside the repo carries `{"path": null, "scope":
+    "external"}` -- `source.netlist` is `null`, the same "no netlist
+    recorded" value the sample-set branch already emits. Never the raw
+    absolute path, and never the object."""
+    path = _sim_report(
+        tmp_path,
+        [1.0, 2.0, 3.0],
+        limits={"min": 0.5, "max": 3.5},
+        netlist={"path": None, "scope": "external"},
+        schema_version=2,
+    )
+    _kind, _measurements, source = _read_samples(path)
+    assert source["netlist"] is None
+
+
+def test_sim_report_with_no_netlist_field_reads_as_null(tmp_path):
+    """A report carrying no `netlist` field at all still yields the key, set
+    to `null` -- `source.netlist` is never absent, in either schema."""
+    path = _sim_report(tmp_path, [1.0, 2.0, 3.0], limits={"min": 0.5, "max": 3.5})
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+    del report["netlist"]
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle)
+
+    _kind, _measurements, source = _read_samples(path)
+    assert "netlist" in source
+    assert source["netlist"] is None
 
 
 def test_sim_report_counts_null_measurements_as_errored(tmp_path):

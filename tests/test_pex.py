@@ -21,6 +21,7 @@ Two tiers, mirroring `tests/test_sim.py`/`tests/test_extract.py`:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -1035,10 +1036,13 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
 
     report = run_pex(resistor_layout, [str(request)], "sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "pass"
-    assert report["layout"] == resistor_layout
-    assert report["reference_netlist"] == str(dut)
+    # Issue #1261: `tmp_path` sits outside this repo, so every input-path
+    # field normalises to `{"path": None, "scope": "external"}` -- the
+    # absolute path is never echoed, even though it used to be.
+    assert report["layout"] == {"path": None, "scope": "external"}
+    assert report["reference_netlist"] == {"path": None, "scope": "external"}
     assert report["extraction"]["deck"] == "sky130"
     assert report["extraction"]["device_count"] == 1
     assert report["extraction"]["net_count"] == 2
@@ -1049,6 +1053,13 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
     assert report["errored"] == 0
     assert len(report["testbenches"]) == 1
     assert report["testbenches"][0]["measurement_names"] == ["vout"]
+    # Issue #1261: same normalization applies to each `testbenches[]`
+    # entry's own `request`/`schematic_netlist`.
+    assert report["testbenches"][0]["request"] == {"path": None, "scope": "external"}
+    assert report["testbenches"][0]["schematic_netlist"] == {
+        "path": None,
+        "scope": "external",
+    }
 
     (row,) = report["delta"]
     assert row["spec_row"] == "vout"
@@ -1103,7 +1114,90 @@ def test_integration_run_pex_pin_count_mismatch(
     assert mismatch["schematic"]["pins"] == ["RA", "RB"]
     assert mismatch["extracted"]["pin_count"] == 4
     assert sorted(mismatch["extracted"]["pins"]) == ["RA", "RB", "VNW", "VSUB"]
-    assert mismatch["extracted"]["netlist"] == report["netlist"]
+    # Issue #1261: `pin_count_mismatch`'s own nested `netlist` fields are out
+    # of this issue's confirmed scope and stay raw strings -- `report["netlist"]`
+    # (the top-level field) is now the normalised `{path, scope}` shape, so
+    # the two are no longer directly comparable; check against the raw
+    # extracted-netlist path (`klt extract`'s own default naming: `<layout>`
+    # with its extension replaced by `.spice`) instead.
+    expected_extracted_netlist = (
+        os.path.splitext(resistor_layout_promoted_taps)[0] + ".spice"
+    )
+    assert mismatch["extracted"]["netlist"] == expected_extracted_netlist
+    assert report["netlist"] == {"path": None, "scope": "external"}
+
+
+# --------------------------------------------------------------------------- #
+# Path normalization (issue #1261): input paths report `{path, scope}`, never
+# a raw absolute string -- a committed evidence record wraps this response
+# unmodified (docs/design/sim-evidence-discipline-spike.md), so a leaked
+# absolute path here used to land in every such record verbatim.
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises
+    as a repo root -- mirrors `tests/test_env_provenance.py`'s own
+    `_make_repo` helper (kept local here rather than imported across test
+    modules, matching this file's existing convention)."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_paths_are_repo_relative_inside_a_repo(tmp_path):
+    """The regression the issue's own Test Plan calls out: an input path
+    *inside* the repo must still resolve to something usable (a
+    repo-relative string, `scope: "repo"`) -- the fix only changes the
+    outside-the-repo (leaking) case, never the in-repo one."""
+    root = _make_fake_repo(tmp_path)
+    layout_path = _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    request = _write_request(root / "request.json", tb)
+
+    report = run_pex(layout_path, [str(request)], "sky130")
+
+    assert report["layout"] == {"path": "res.gds", "scope": "repo"}
+    assert report["netlist"] == {"path": "res.spice", "scope": "repo"}
+    assert report["reference_netlist"] == {
+        "path": "schematic_dut.spice",
+        "scope": "repo",
+    }
+    (tb_summary,) = report["testbenches"]
+    assert tb_summary["request"] == {"path": "request.json", "scope": "repo"}
+    assert tb_summary["schematic_netlist"] == {
+        "path": "schematic_dut.spice",
+        "scope": "repo",
+    }
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_a_repo_relative_request_argument_is_not_doubly_nested(tmp_path):
+    """Edge case from the issue's Test Plan: `<testbench>` is already given
+    as a *relative* CLI argument (relative to the current process's cwd, not
+    to the repo root) -- normalization must resolve it once, not treat the
+    already-relative string as if it needed a second round of relativizing
+    (which would nest it under itself or otherwise malform it)."""
+    root = _make_fake_repo(tmp_path)
+    layout_path = _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    request = _write_request(root / "request.json", tb)
+
+    cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        report = run_pex(
+            os.path.relpath(layout_path, root), [os.path.basename(request)], "sky130"
+        )
+    finally:
+        os.chdir(cwd)
+
+    assert report["layout"] == {"path": "res.gds", "scope": "repo"}
+    (tb_summary,) = report["testbenches"]
+    assert tb_summary["request"] == {"path": "request.json", "scope": "repo"}
 
 
 @_SKIP_NO_NGSPICE

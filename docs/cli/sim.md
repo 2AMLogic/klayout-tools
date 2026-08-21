@@ -418,12 +418,15 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
     "environment": {
       "resume": {
         "resumed_corners": 6,
-        "checkpoint_path": "/path/to/.klt/sim/checkpoint.json",
+        "checkpoint_path": { "path": ".klt/sim/checkpoint.json", "scope": "repo" },
         "checkpoint_retained": false
       }
     }
   }
   ```
+
+  `checkpoint_path` is the `{path, scope}` shape — see "JSON schema (the
+  contract)" below (issue #1261).
 
   Present only when `options.resume`/`--resume` was requested.
   `resumed_corners` counts corners reused from the checkpoint rather than
@@ -968,6 +971,19 @@ below is the stable contract, subject to the same rules as every other `klt`
 verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 (`schema_version`, error shape, exit codes) shared across all commands.
 
+**The response's `netlist` and `environment.resume.checkpoint_path` report
+`{path, scope}`, never a raw path string (`schema_version` `2`, issue
+#1261).** Both are normalised via `env_provenance.repo_relative_path` — the
+same primitive and shape [`env-provenance.md`](env-provenance.md)
+documents: `scope: "repo"` with a repo-relative `path` when the input sits
+inside the invocation's repo, else `{"path": null, "scope": "external"}` —
+the absolute path is never echoed. A committed evidence record wraps a `klt
+sim` response unmodified (`docs/design/sim-evidence-discipline-spike.md`),
+so an absolute path in either field used to leak the run's own filesystem
+layout (author's home directory, a Loom worktree number) into every such
+record. The **request**'s own `netlist` field (below) is unaffected — this
+only changes what the *response* echoes back.
+
 ### Request
 
 ```json
@@ -1026,8 +1042,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 
 ```json
 {
-  "schema_version": 1,
-  "netlist": "testbench.spice",
+  "schema_version": 2,
+  "netlist": { "path": "testbench.spice", "scope": "repo" },
   "status": "pass",
   "corner_count": 8,
   "passed": 8,
@@ -1112,12 +1128,12 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 
 | Field           | Type            | Description                                                                                                   |
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
-| `schema_version`| integer         | Version of this command's JSON shape (starts at `1`; per-command, per `docs/json-contract.md`).                 |
-| `netlist`       | string          | Echo of the request's `netlist`, exactly as provided.                                                            |
+| `schema_version`| integer         | Version of this command's JSON shape (`2` as of issue #1261's `{path, scope}` path-normalization change; per-command, per `docs/json-contract.md`).                 |
+| `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested) — see "Wall-clock budget, orphan safety, and resume" above. |
+| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |

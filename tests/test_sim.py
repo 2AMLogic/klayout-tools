@@ -1231,7 +1231,7 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
 
     report = sim.run_sim(str(request))
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "pass"
     assert report["passed"] == 1
     assert report["environment"]["engine_version"] == "99"
@@ -2780,6 +2780,101 @@ def test_run_sim_resume_flag_overrides_request_field(tmp_path, monkeypatch):
     report = sim.run_sim(str(request), resume=True)
 
     assert "resume" in report["environment"]
+
+
+# --------------------------------------------------------------------------- #
+# Path normalization (issue #1261): `netlist` and
+# `environment.resume.checkpoint_path` report `{path, scope}`, never a raw
+# absolute string -- a committed evidence record wraps this response
+# unmodified (docs/design/sim-evidence-discipline-spike.md), so a leaked
+# absolute path here used to land in every such record verbatim.
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises
+    as a repo root -- mirrors `tests/test_env_provenance.py`'s own
+    `_make_repo` helper (kept local here rather than imported across test
+    modules, matching this file's existing convention)."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+def test_run_sim_netlist_is_external_outside_any_repo(tmp_path, monkeypatch):
+    """`tmp_path` sits outside this repo -- `netlist` must report
+    `{"path": None, "scope": "external"}`, never the raw absolute path."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["netlist"] == {"path": None, "scope": "external"}
+
+
+def test_run_sim_netlist_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    """The regression the issue's own Test Plan calls out: an input path
+    *inside* a repo must still resolve to something usable (a repo-relative
+    string), not `null`/dropped -- the fix only changes the outside-the-repo
+    (leaking) case."""
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    request = _write_request(
+        root,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["netlist"] == {"path": "body.spice", "scope": "repo"}
+
+
+def test_run_sim_checkpoint_path_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    request = _write_request(
+        root,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), resume=True)
+
+    assert report["environment"]["resume"]["checkpoint_path"] == {
+        "path": ".klt/sim/checkpoint.json",
+        "scope": "repo",
+    }
+
+
+def test_run_sim_a_repo_relative_request_argument_is_not_doubly_nested(
+    tmp_path, monkeypatch
+):
+    """Edge case from the issue's Test Plan: `<request>` is given as a
+    relative CLI argument (relative to the current process's cwd) -- the
+    already-relative `netlist` value it references must resolve once, not
+    be treated as needing a second round of relativizing (which would nest
+    it under itself or otherwise malform it)."""
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    request = _write_request(
+        root,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        report = sim.run_sim(os.path.basename(request))
+    finally:
+        os.chdir(cwd)
+
+    assert report["netlist"] == {"path": "body.spice", "scope": "repo"}
 
 
 # --------------------------------------------------------------------------- #
@@ -4700,7 +4795,7 @@ def test_examples_sim_worked_example_passes():
 
     report = sim.run_sim(str(request_path))
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "pass"
     assert report["corner_count"] == 8
     assert report["measurements"][0]["name"] == "vout"

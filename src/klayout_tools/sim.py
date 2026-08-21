@@ -63,7 +63,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any
 
-from . import remote_fleet, remote_transport
+from . import env_provenance, remote_fleet, remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from ._text import line_containing as _line_containing
@@ -73,7 +73,16 @@ from .remote_launcher import RemoteLauncher, RemoteLaunchError
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #1261): the top-level `netlist` field and
+#: `environment.resume.checkpoint_path` changed from a raw (often absolute)
+#: path string to the `{path, scope}` shape
+#: `env_provenance.repo_relative_path` already defines -- a committed
+#: evidence record wraps this response unmodified
+#: (`docs/design/sim-evidence-discipline-spike.md`), so an absolute path
+#: here used to leak the author's home directory/worktree layout into every
+#: such record.
+SCHEMA_VERSION = 2
 
 #: Per-corner wall-clock budget applied when the request omits
 #: ``options.timeout_s``.
@@ -438,6 +447,20 @@ def load_request(request_path: str) -> dict[str, Any]:
     )
 
 
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise one input-path field for this module's own JSON response
+    (issue #1261) -- a thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
+    second normalizer, so `klt sim`'s reports and `klt env-provenance`'s own
+    emitter agree on exactly one `{path, scope}` shape. Always resolve
+    ``path`` first (e.g. against the request file's own directory, per the
+    "Netlist convention" -- see ``run_sim``'s docstring) before calling this;
+    a bare relative string is resolved against the current process's cwd,
+    which is not necessarily what a caller meant.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
 def _validate_meas_card(name: str, spice: str) -> None:
     """Reject a ``.meas`` card declaring an analysis type ngspice's own
     ``.MEASURE`` statement does not implement.
@@ -576,6 +599,12 @@ def run_sim(
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #1261: every input-path field this run's own JSON response
+    # echoes (`netlist`, `environment.resume.checkpoint_path`) is normalised
+    # against this one repo root, resolved once from the request file's own
+    # location -- the same "walk up from the input" default
+    # `env_provenance.find_repo_root` uses for its own caller.
+    repo_root = env_provenance.find_repo_root(request_dir)
 
     engine = request.get("engine", "ngspice")
     if engine not in SUPPORTED_ENGINES:
@@ -988,13 +1017,13 @@ def run_sim(
         # was requested -- see `run_sim`'s docstring.
         environment["resume"] = {
             "resumed_corners": len(pre_completed),
-            "checkpoint_path": checkpoint_path,
+            "checkpoint_path": _report_path(checkpoint_path, repo_root=repo_root),
             "checkpoint_retained": checkpoint_retained,
         }
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "netlist": netlist_ref,
+        "netlist": _report_path(netlist_path, repo_root=repo_root),
         "status": status,
         "corner_count": len(corners),
         "passed": passed,

@@ -73,6 +73,7 @@ __all__ = [
     "find_leaks",
     "find_repo_root",
     "opaque_host_id",
+    "render_path_field",
     "render_text_lines",
     "repo_relative_path",
     "scan_files",
@@ -456,6 +457,28 @@ def _assert_no_leaks(report: Mapping[str, Any]) -> None:
             )
 
 
+def render_path_field(entry: Mapping[str, Any] | None) -> str:
+    """Human-readable rendering of one :func:`repo_relative_path` entry.
+
+    Shared by :func:`render_text_lines` and any other ``--format text``
+    renderer that reports a normalised ``{path, scope}`` input field (e.g.
+    ``klt pex``/``klt sim``'s own ``layout``/``netlist``/``reference_netlist``/
+    ``request``/``schematic_netlist``/``checkpoint_path`` fields, issue
+    #1261) -- ``"repo"`` renders the repo-relative path itself, ``"external"``
+    renders ``<outside repo>`` (the absolute path is never rendered, even in
+    text mode), and anything else (``"absent"``, or a missing/malformed
+    entry) renders ``<unresolved>``.
+    """
+    if not entry:
+        return "<unresolved>"
+    scope = entry.get("scope")
+    if scope == "repo":
+        return str(entry.get("path"))
+    if scope == "external":
+        return "<outside repo>"
+    return "<unresolved>"
+
+
 def render_text_lines(report: Mapping[str, Any]) -> list[str]:
     """A human-readable rendering of :func:`environment_provenance`'s payload,
     one line per fact, for a harness that writes Markdown/plain-text records.
@@ -482,12 +505,5 @@ def render_text_lines(report: Mapping[str, Any]) -> list[str]:
         f"klt: {report.get('klt_version')} (klayout {report.get('klayout_version')})",
     ]
     for label, entry in (report.get("paths") or {}).items():
-        scope = entry.get("scope")
-        if scope == "repo":
-            rendered = entry.get("path")
-        elif scope == "external":
-            rendered = "<outside repo>"
-        else:
-            rendered = "<unresolved>"
-        lines.append(f"path {label}: {rendered}")
+        lines.append(f"path {label}: {render_path_field(entry)}")
     return lines

@@ -26,6 +26,7 @@ docs/cli/sim.md's "Exit codes" section.)
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..pex import PexError, run_pex
 from .output import emit_error, emit_success
 
@@ -103,9 +104,14 @@ def _print_mismatch(mismatch: dict | None, name: str) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"layout: {report['layout']}")
-    print(f"netlist: {report['netlist']}")
-    print(f"reference_netlist: {report['reference_netlist']}")
+    # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
+    # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
+    # `render_path_field` is the same courtesy-rendering helper `klt
+    # env-provenance`'s own text output uses, so a path outside the repo
+    # never prints an absolute path here either.
+    print(f"layout: {render_path_field(report['layout'])}")
+    print(f"netlist: {render_path_field(report['netlist'])}")
+    print(f"reference_netlist: {render_path_field(report['reference_netlist'])}")
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "
@@ -150,7 +156,7 @@ def _print_text(report: dict) -> None:
         print("testbenches:")
         for tb in testbenches:
             print(
-                f"  {tb['request']}  corners={tb['corner_count']}  "
+                f"  {render_path_field(tb['request'])}  corners={tb['corner_count']}  "
                 f"measurements={', '.join(tb['measurement_names'])}"
             )
 

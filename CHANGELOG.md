@@ -16,6 +16,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-21 — **Breaking (per-command `schema_version` bump 1 -> 2, both
+  commands):** `klt pex` and `klt sim` JSON reports no longer embed absolute
+  input paths (issue #1261, found while implementing #1254: `klt
+  env-provenance scan` flagged the author's home directory and a Loom
+  worktree number in this repo's own committed evidence records, since a
+  record wraps a `klt sim`/`klt pex` response unmodified —
+  `docs/design/sim-evidence-discipline-spike.md`). `klt pex`'s
+  `layout`/`netlist`/`reference_netlist` and each `testbenches[]` entry's
+  `request`/`schematic_netlist`, and `klt sim`'s `netlist` and
+  `environment.resume.checkpoint_path`, now report the `{path, scope}` shape
+  `env_provenance.repo_relative_path()` already defines (issue #1254/PR
+  #1260) rather than a raw path string: `scope: "repo"` with a
+  repo-relative `path` when the input sits inside the invocation's repo,
+  else `{"path": null, "scope": "external"}` — the absolute path is never
+  echoed, in either case. Chose this (repo-relative normalization at the
+  verb level) over the issue's other option (leaving the response
+  unmodified and pushing normalization onto the evidence-record wrapper)
+  because the wrapper convention's own "`result` is the untouched `klt
+  sim`/`klt pex` output" guarantee stays true either way: fixing the writer
+  means the wrapper needs no new step, while pushing the fix onto the
+  wrapper would have required revising that documented guarantee for no
+  added benefit. `pin_count_mismatch`/`flat_dut_mismatch`'s own nested
+  `netlist` fields are unaffected (out of scope) and stay raw strings.
+  Existing committed evidence records under `evidence/` are left
+  unmodified, as documented in #1254 — this only changes what a *future*
+  run emits. See [`docs/cli/pex.md`](docs/cli/pex.md) and
+  [`docs/cli/sim.md`](docs/cli/sim.md)'s "JSON schema (the contract)"
+  sections. **`klt yield`/`klt yield-campaign` are deliberately unaffected,
+  and do not bump**: `klt yield` echoes a sim report's `netlist` into its own
+  `source.netlist` — and `klt yield-campaign` feeds a live `klt sim` report
+  straight into it by default — so `yield_analysis._read_samples` now unwraps
+  the object to the resolved path string (`null` when the netlist is outside
+  the repo), keeping `source.netlist` the plain string
+  [`docs/cli/yield.md`](docs/cli/yield.md) has always documented. Schema-v1
+  sim reports (a raw string) still read through unchanged.
 - 2026-08-21 — `klt pex`'s DUT `.include` swap no longer silently accepts a
   non-DUT single-`.include` testbench, or a flat-schematic-DUT-vs-
   `.SUBCKT`-wrapped-extraction mismatch (issue #1255, two gaps left by
