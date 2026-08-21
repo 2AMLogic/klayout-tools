@@ -5496,6 +5496,134 @@ def test_normalize_deck_mos_terminal_count_keeps_generic_error():
     assert "device_map" not in str(excinfo.value)
 
 
+# --- issue #1271: object-valued device_map (non-MOS overrides) ------------- #
+
+
+def test_normalize_device_map_object_resistor_override():
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 my_custom_res l=48.2u w=1u\n",
+        device_map={"my_custom_res": {"kind": "resistor", "class": "res_generic_po"}},
+    )
+    assert out.strip() == "R1 r0 r1 0 res_generic_po L=48.2U W=1U"
+
+
+def test_normalize_device_map_object_capacitor_override_custom_params():
+    # A custom call-site length/width spelling (mirrors gf180mcu's
+    # c_length/c_width) is honored, not just the "l"/"w" default.
+    out = normalize_reference_netlist(
+        "XC1 c0 c1 my_custom_cap my_l=2u my_w=2u\n",
+        device_map={
+            "my_custom_cap": {
+                "kind": "capacitor",
+                "class": "cap_x",
+                "length_param": "my_l",
+                "width_param": "my_w",
+            }
+        },
+    )
+    assert out.strip() == "C1 c0 c1 0 cap_x A=4P P=8U"
+
+
+def test_normalize_device_map_object_bipolar_override():
+    # Bipolar carries no geometry call-site parameter at all.
+    out = normalize_reference_netlist(
+        "XQ1 c b e my_custom_pnp mult=4\n",
+        device_map={"my_custom_pnp": {"kind": "bipolar", "class": "pnp_custom"}},
+    )
+    assert out.strip() == "Q1 c b e pnp_custom NE=4"
+
+
+def test_normalize_device_map_bare_string_still_means_mos():
+    # Regression guard (issue #1271 acceptance criteria): the original
+    # bare-string shape must continue to mean a MOS l/w binding, unchanged.
+    out = normalize_reference_netlist(
+        "XM1 d g s b my_custom_nfet L=0.5u W=1u\n",
+        device_map={"my_custom_nfet": "nfet"},
+    )
+    assert out.strip() == "M1 d g s b nfet L=0.5U W=1U"
+
+
+def test_normalize_device_map_object_non_mos_malformed_terminal_count_still_errors():
+    # A correctly-kind-resolved but genuinely malformed non-MOS entry (wrong
+    # terminal count) must still fail with a clear, named error -- the
+    # #1163 clear-error path is for the previously-unsupported case (a
+    # bare-string entry naming a non-MOS device), not a blanket suppression
+    # of terminal-count checking once a kind is given.
+    with pytest.raises(NormalizeError, match="expected 2 terminals"):
+        normalize_reference_netlist(
+            "XC1 c0 c1 c2 my_custom_cap l=1u w=1u\n",
+            device_map={"my_custom_cap": {"kind": "capacitor", "class": "cap_x"}},
+        )
+
+
+@pytest.mark.parametrize(
+    "value,match",
+    [
+        (123, "value must be a device-class string or an object"),
+        ({"class": "res_generic_po"}, "'kind' must be one of"),
+        ({"kind": "diode", "class": "x"}, "'kind' must be one of"),
+        ({"kind": "resistor"}, "requires a non-empty 'class'"),
+        ({"kind": "resistor", "class": ""}, "requires a non-empty 'class'"),
+        (
+            {"kind": "resistor", "class": "res_x", "length_param": ""},
+            "'length_param' must be a non-empty string",
+        ),
+        (
+            {"kind": "resistor", "class": "res_x", "width_param": 5},
+            "'width_param' must be a non-empty string",
+        ),
+    ],
+)
+def test_normalize_device_map_object_malformed_entry_rejected(value, match):
+    with pytest.raises(NormalizeError, match=match):
+        normalize_reference_netlist(
+            "XR1 r0 r1 my_res l=1u w=1u\n", device_map={"my_res": value}
+        )
+
+
+def test_run_lvs_reference_device_map_object_entry_accepted(tmp_path):
+    # request.reference.device_map's top-level shape check (a JSON object)
+    # already accepts object-valued entries -- per-entry validation happens
+    # in netlist_normalize, surfaced as an LvsError.
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt res_block A B\nR1 A B 0 res_generic_po L=48.2U W=1U\n.ends\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt res_block A B\nXR1 A B my_custom_res l=48.2u w=1u\n.ends\n",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "res_block"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "res_block",
+            "form": "subckt-call",
+            "device_map": {
+                "my_custom_res": {"kind": "resistor", "class": "res_generic_po"}
+            },
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_reference_device_map_malformed_object_entry_is_lvs_error(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_SKY130)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "inv",
+            "form": "subckt-call",
+            "device_map": {"nfet": {"kind": "not-a-real-kind", "class": "x"}},
+        },
+    }
+    with pytest.raises(LvsError, match="'kind' must be one of"):
+        run_lvs(json.dumps(request))
+
+
 @pytest.mark.parametrize("param,value", [("nf", "2"), ("m", "4"), ("mult", "2")])
 def test_normalize_multiplicity_gt_one_rejected(param, value):
     with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
