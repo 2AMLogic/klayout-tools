@@ -1194,13 +1194,38 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # express (the same class of approximation sky130.py's own NMOS-body
 # handling documents: "sky130 draws no separate substrate/pwell layer" and
 # falls back to a synthesized `substrate_net` global). This curated deck
-# makes the identical choice: NMOS body falls back to `substrate_net`
-# (`"vsubs"`, the default) rather than the real drawn PWell region, and no
-# `tap` layer is declared -- sg13g2 derives well ties (`ntap`/`ptap` in
-# `general_derivations.lvs`) from the *same* Activ layer as transistor
-# source/drain (`nactiv`/`pactiv` split by NWell/PWell containment, minus the
-# gate), the same "no distinct tap layer, shared with transistor active"
-# case gf180mcu's own `tap=None` (`Comp`-only) already documents.
+# makes the identical choice absent a drawn tie: NMOS body falls back to
+# `substrate_net` (`"vsubs"`, the default) rather than the real drawn PWell
+# region, and no `tap` layer is declared -- sg13g2 derives well ties
+# (`ntap`/`ptap` in `general_derivations.lvs`) from the *same* Activ layer as
+# transistor source/drain (`nactiv`/`pactiv` split by NWell/PWell
+# containment, minus the gate), the same "no distinct tap layer, shared with
+# transistor active" case gf180mcu's own `tap=None` (`Comp`-only) already
+# documented pre-#1084.
+#
+# Issue #1273 (mirroring gf180mcu's own #1084 fix, same technique, different
+# implant layers): rather than leaving those well/substrate ties structurally
+# unrecognisable, this deck declares `tap_nplus`/`tap_pplus` -- the `nSD`
+# (7/0) / `pSD` (14/0) implant layers `mos_extraction.lvs` itself keys
+# NMOS/PMOS source-drain off of (`nsd_fet`/`psd_fet`, cited by this module's
+# `nfet_provenance`/`pfet_provenance` note below) -- so `extract.py` can
+# *derive* an equivalent tap region: an `nSD`-covered Activ shape *inside*
+# NWell is a well tie (ties the PMOS body to the well's real net -- opposite
+# doping from the PMOS's own S/D, which is `pSD`-covered Activ inside the
+# same NWell, so the two can never collide), and a `pSD`-covered Activ shape
+# *outside* every NWell is a substrate tie (ties the NMOS body to the
+# substrate's real net -- opposite doping from the NMOS's own S/D, which is
+# `nSD`-covered Activ outside NWell). This is exactly how the real IHP
+# SG13G2 PDK's own LVS deck derives `ntap`/`ptap` with no dedicated tap mask
+# (see `general_derivations.lvs`, cited above). `tap`/`well_label` stay
+# `None`: sg13g2 draws no distinct tap mask (the derivation above is the
+# whole point), and -- as this module's own `metal_labels` note below
+# explains -- sg13g2 has no datatype-5-style pin/label text layer distinct
+# from its per-metal `*_text` layers, so there is no `well_label` candidate
+# either. A layout drawing no tie extracts exactly as it always did (both
+# `tap_nplus`/`tap_pplus` are additive-only derivation inputs -- see
+# `ExtractionDeck.tap_nplus`/`.tap_pplus`'s own docstring for the exact
+# derivation `extract.py` performs).
 #
 # `active`/`poly`/`nwell`/`contact` layer numbers verified against
 # `layers_def.drc`'s own `get_polygons(layer, datatype)` declarations
@@ -1263,7 +1288,14 @@ EXTRACTION_DECK = ExtractionDeck(
         (126, 25),  # TopMetal1.text
         (134, 25),  # TopMetal2.text
     ),
+    # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
+    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
+    # region from these same implant layers (issue #1273, mirroring
+    # gf180mcu's #1084; see the module docstring note above this deck's
+    # definition for the full derivation).
     tap=None,
+    tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
+    tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
     well_label=None,
     poly_label=None,
     nfet_class="nfet",

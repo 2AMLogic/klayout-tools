@@ -244,6 +244,21 @@ def test_sg13g2_thick_gate_ox_declares_a_mos_flavour():
     assert flavour.pfet_provenance.commit == _IHP_OPEN_PDK_COMMIT
 
 
+def test_sg13g2_derives_well_substrate_taps_from_implant_layers():
+    """`EXTRACTION_DECK` declares no distinct drawn tap mask (`tap` stays
+    `None`), but -- issue #1273, mirroring gf180mcu's own `tap_nplus`/
+    `tap_pplus` fix (#1084) -- declares `tap_nplus`/`tap_pplus` so
+    `extract.py` can derive an equivalent well-/substrate-tie region from
+    the same `nSD`/`pSD` implant layers already used for MOS source/drain
+    recognition. `well_label` stays `None` too: sg13g2 has no datatype-5
+    -style pin/label text layer distinct from its per-metal `*_text` layers
+    (see the module's own `EXTRACTION_DECK` docstring note)."""
+    assert EXTRACTION_DECK.tap is None
+    assert EXTRACTION_DECK.tap_nplus == (7, 0)  # nSD.drawing
+    assert EXTRACTION_DECK.tap_pplus == (14, 0)  # pSD.drawing
+    assert EXTRACTION_DECK.well_label is None
+
+
 # --------------------------------------------------------------------------- #
 # Golden layout -> netlist pairs (issue #905 AC: "golden layout->netlist
 # pairs" for LVS device-extraction rules)
