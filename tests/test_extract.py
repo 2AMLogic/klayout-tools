@@ -1072,13 +1072,14 @@ def test_sg13g2_nmos_body_falls_back_to_substrate_global_without_tap(tmp_path):
 
 
 def test_sg13g2_parasitics_metal1_metal2_report_nonzero_rc(tmp_path):
-    """Issue #1277: with `sg13g2.PARASITICS.metals`/`metal_overlaps` curated
-    for Metal1/Metal2, `--parasitics` on a layout that actually routes those
-    levels no longer reports `r_count: 0, c_count: 0` (this issue's own
-    repro) and no longer lists Metal1/Metal2 in
-    `metals_without_coefficient` -- Metal3-TopMetal2 remain a deliberate,
-    documented gap (out of scope for this issue), so those five levels are
-    still reported, which is correct/expected post-fix behaviour."""
+    """Issue #1277 (extended to the full stack by #1281): with
+    `sg13g2.PARASITICS.metals`/`metal_overlaps` curated for every declared
+    metal level, `--parasitics` on a layout that actually routes Metal1/
+    Metal2 no longer reports `r_count: 0, c_count: 0` (issue #1277's own
+    repro) and no longer lists any metal level in
+    `metals_without_coefficient` -- Metal3-TopMetal2 are now curated too
+    (issue #1281), so the gap set is empty even though this fixture only
+    routes Metal1/Metal2."""
     layout = _make_sg13g2_inverter_layout()
     top = layout.cell("TOP")
 
@@ -1102,10 +1103,49 @@ def test_sg13g2_parasitics_metal1_metal2_report_nonzero_rc(tmp_path):
     assert para["total_capacitance_ff"] > 0.0
 
     gap_indices = {gap["metal_index"] for gap in para["metals_without_coefficient"]}
-    assert 0 not in gap_indices  # Metal1 -- now curated
-    assert 1 not in gap_indices  # Metal2 -- now curated
-    # Metal3-TopMetal2 remain uncurated (out of scope, issue #1277).
-    assert gap_indices == {2, 3, 4, 5, 6}
+    assert 0 not in gap_indices  # Metal1 -- curated (issue #1277)
+    assert 1 not in gap_indices  # Metal2 -- curated (issue #1277)
+    # Metal3-TopMetal2 are now curated too (issue #1281) -- no gaps remain.
+    assert gap_indices == set()
+
+
+def test_sg13g2_parasitics_topmetal2_routing_reports_no_gaps(tmp_path):
+    """Issue #1281: a layout routed all the way up through TopMetal2 (the
+    top of `EXTRACTION_DECK.metals`' seven-level stack) no longer lists any
+    metal level in `metals_without_coefficient` nor any adjacent pair in
+    `overlap_pairs_without_coefficient` -- the acceptance criteria's own
+    manual-verification scenario, extending `_make_sg13g2_inverter_layout()`
+    up through every via/metal level."""
+    layout = _make_sg13g2_inverter_layout()
+    top = layout.cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Stack the NMOS drain ("Y") net straight up from Metal1 through every
+    # via/metal level to TopMetal2, so its parasitics span the full stack.
+    stack = (
+        (19, 0, 10, 0),  # Via1 (M1<->M2), Metal2
+        (29, 0, 30, 0),  # Via2 (M2<->M3), Metal3
+        (49, 0, 50, 0),  # Via3 (M3<->M4), Metal4
+        (66, 0, 67, 0),  # Via4 (M4<->M5), Metal5
+        (125, 0, 126, 0),  # TopVia1 (M5<->TopMetal1), TopMetal1
+        (133, 0, 134, 0),  # TopVia2 (TopMetal1<->TopMetal2), TopMetal2
+    )
+    for via_layer, via_dt, metal_layer, metal_dt in stack:
+        draw(via_layer, via_dt, kdb.Box(1650, 250, 1950, 550))
+        draw(metal_layer, metal_dt, kdb.Box(1600, 200, 2000, 1200))
+
+    path = _write_gds(layout, tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sg13g2", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+
+    para = report["parasitics"]
+    assert para["r_count"] > 0
+    assert para["c_count"] > 0
+    assert para["metals_without_coefficient"] == []
+    assert para["overlap_pairs_without_coefficient"] == []
 
 
 def test_sg13g2_tap_straddling_nwell_boundary_extracts_without_error(tmp_path):
@@ -7738,12 +7778,13 @@ def test_parasitics_coefficients_sourced_from_pdk_tech():
         len(gf180mcu.PARASITICS.metal_overlaps) == len(gf180mcu.PARASITICS.metals) - 1
     )
 
-    # sg13g2 (issue #1277): Metal1/Metal2 only, sourced from
-    # `libs.tech/magic/ihp-sg13g2-extract.tech`'s nominal (`variants ()`)
-    # corner -- see `klayout_tools.decks.sg13g2.PARASITICS`'s own module
-    # comment for why this file (not `sg13g2_typ.itf`, which carries no
-    # directly-transcribable area/perimeter-cap table) is the actual source.
-    assert len(sg13g2.PARASITICS.metals) == 2
+    # sg13g2 (issue #1277, extended to the full stack by #1281): all seven
+    # metal levels, sourced from `libs.tech/magic/ihp-sg13g2-extract.tech`'s
+    # nominal (`variants ()`) corner -- see
+    # `klayout_tools.decks.sg13g2.PARASITICS`'s own module comment for why
+    # this file (not `sg13g2_typ.itf`, which carries no directly-
+    # transcribable area/perimeter-cap table) is the actual source.
+    assert len(sg13g2.PARASITICS.metals) == 7
     # Metal1 (idx0): `sheet_res_ohm_sq` reuses `EXTRACTION_DECK.resistors`'
     # already-curated `res_metal1` (0.110 ohm/sq); area/perim from
     # `defaultareacap allm1 metal1 35.015` / `defaultperimeter allm1 metal1
@@ -7759,16 +7800,76 @@ def test_parasitics_coefficients_sourced_from_pdk_tech():
     assert sg13g2.PARASITICS.metals[1].cap_perim_ff_um == pytest.approx(0.034798)
     # Metal1(idx0)<->Metal2(idx1) vertical-overlap coupling: `defaultoverlap
     # allm2 metal2 allm1 metal1 67.225`.
-    assert sg13g2.PARASITICS.metal_overlaps == (pytest.approx(0.067225),)
-    # No diffusion/poly role curated (out of scope for issue #1277).
+    assert sg13g2.PARASITICS.metal_overlaps[0] == pytest.approx(0.067225)
+    # No diffusion/poly role curated (out of scope for issue #1277/#1281).
     assert sg13g2.PARASITICS.diffusion is None
     assert sg13g2.PARASITICS.poly is None
-    # Metal3-TopMetal2 (`EXTRACTION_DECK.metals[2:]`) remain a deliberate,
-    # documented gap -- `PARASITICS.metals` is intentionally shorter than
-    # `EXTRACTION_DECK.metals`, not silently zero-filled with guessed
-    # values.
+    # Every declared metal level is index-aligned with EXTRACTION_DECK.metals
+    # -- no gap.
     assert len(sg13g2.EXTRACTION_DECK.metals) == 7
-    assert len(sg13g2.PARASITICS.metals) < len(sg13g2.EXTRACTION_DECK.metals)
+    assert len(sg13g2.PARASITICS.metals) == len(sg13g2.EXTRACTION_DECK.metals)
+
+
+def test_sg13g2_parasitics_metals_covers_full_stack():
+    """Regression guard for issue #1281: `sg13g2.PARASITICS.metals` used to
+    carry only two `LayerRC` entries (Metal1/Metal2, issue #1277) against a
+    7-level `EXTRACTION_DECK.metals` stack, so Metal3-TopMetal2 silently
+    contributed zero R/C. Now curated to 7 entries, index-aligned with
+    `EXTRACTION_DECK.metals`, sourced from `ihp-sg13g2-extract.tech`'s
+    nominal (`variants ()`) corner -- Metal3-Metal5's `sheet_res_ohm_sq`
+    (88, unlike Metal1/Metal2's 110/88) and TopMetal1/TopMetal2's markedly
+    smaller sheet resistance (18/11) are the values most likely to be
+    transcribed wrong, so this spot-checks them directly."""
+    from klayout_tools.decks import sg13g2
+
+    assert len(sg13g2.PARASITICS.metals) == len(sg13g2.EXTRACTION_DECK.metals) == 7
+    assert all(m is not None for m in sg13g2.PARASITICS.metals)
+
+    # Metal3 (index 2): sheet from `resist (allm3)/metal3 88`; area/perim
+    # from `defaultareacap`/`defaultperimeter allm3 metal3`.
+    m3 = sg13g2.PARASITICS.metals[2]
+    assert m3.sheet_res_ohm_sq == pytest.approx(0.088)
+    assert m3.cap_area_ff_um2 == pytest.approx(0.011994)
+    assert m3.cap_perim_ff_um == pytest.approx(0.031352)
+
+    # Metal4 (index 3): sheet from `resist (allm4)/metal4 88`.
+    m4 = sg13g2.PARASITICS.metals[3]
+    assert m4.sheet_res_ohm_sq == pytest.approx(0.088)
+    assert m4.cap_area_ff_um2 == pytest.approx(0.008948)
+    assert m4.cap_perim_ff_um == pytest.approx(0.029083)
+
+    # Metal5 (index 4): sheet from `resist (allm5)/metal5 88`.
+    m5 = sg13g2.PARASITICS.metals[4]
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.088)
+    assert m5.cap_area_ff_um2 == pytest.approx(0.007136)
+    assert m5.cap_perim_ff_um == pytest.approx(0.027527)
+
+    # TopMetal1 (index 5, `allm6`/`metal6`): sheet from
+    # `resist (allm6)/metal6 18` -- markedly lower than Metal1-5's 88/110.
+    tm1 = sg13g2.PARASITICS.metals[5]
+    assert tm1.sheet_res_ohm_sq == pytest.approx(0.018)
+    assert tm1.cap_area_ff_um2 == pytest.approx(0.005649)
+    assert tm1.cap_perim_ff_um == pytest.approx(0.037383)
+
+    # TopMetal2 (index 6, top metal of this 7-level stack, `allm7`/
+    # `metal7`): sheet from `resist (allm7)/metal7 11`.
+    tm2 = sg13g2.PARASITICS.metals[6]
+    assert tm2.sheet_res_ohm_sq == pytest.approx(0.011)
+    assert tm2.cap_area_ff_um2 == pytest.approx(0.003233)
+    assert tm2.cap_perim_ff_um == pytest.approx(0.031175)
+
+    # All 6 adjacent-pair vertical-overlap coefficients (issue #1281),
+    # transcribed from `defaultoverlap` entries under each `metalN->
+    # metal(N-1)` block in the same nominal-corner section.
+    assert len(sg13g2.PARASITICS.metal_overlaps) == len(sg13g2.PARASITICS.metals) - 1
+    assert sg13g2.PARASITICS.metal_overlaps == (
+        pytest.approx(0.067225),  # Metal1<->Metal2
+        pytest.approx(0.067225),  # Metal2<->Metal3
+        pytest.approx(0.067225),  # Metal3<->Metal4
+        pytest.approx(0.067225),  # Metal4<->Metal5
+        pytest.approx(0.042708),  # Metal5<->TopMetal1
+        pytest.approx(0.012965),  # TopMetal1<->TopMetal2
+    )
 
 
 def test_gf180mcu_parasitics_metals_covers_full_stack():

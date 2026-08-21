@@ -2136,12 +2136,11 @@ pattern as the DRC decks and the SPICE model-binding table (#214). Each changed
 coefficient carries an inline citation (source file + field name) in its deck
 comment.
 
-`sg13g2`'s `PARASITICS` table is **partial** (issue #1277): only Metal1/Metal2
-(`EXTRACTION_DECK.metals[0:2]`) and their one vertical-overlap coefficient are
-curated; Metal3-TopMetal2 remain deliberately uncurated (not zero-filled with
-guessed values) and continue to appear in `metals_without_coefficient` /
-`overlap_pairs_without_coefficient` for any layout routed on those levels —
-see `src/klayout_tools/decks/sg13g2.py`'s `PARASITICS` module comment for the
+`sg13g2`'s `PARASITICS` table covers its full seven-level metal stack
+(Metal1-TopMetal2, `EXTRACTION_DECK.metals[0:7]`) and all six adjacent-pair
+vertical-overlap coefficients (issue #1281, extending #1277's initial
+Metal1/Metal2 curation) — see
+`src/klayout_tools/decks/sg13g2.py`'s `PARASITICS` module comment for the
 full rationale, including why `ihp-sg13g2-extract.tech` (not
 `libs.tech/parasitics/itf/sg13g2_typ.itf`) is the source: the `.itf` file
 carries only a raw process-stack description with no directly-transcribable
