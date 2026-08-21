@@ -847,11 +847,18 @@ def _stub_hierarchical_yosys(
     *,
     modules: dict,
     version: str = "0.68+post",
+    design: dict | None = None,
 ) -> None:
     """Like `_stub_yosys_success`, but writes a full multi-module `modules`
     dict (already escaped/backslash-keyed) rather than a single top-level
     stats block -- the shape a real hierarchical design's
-    `stat -liberty ... -json -top <top>` output actually has."""
+    `stat -liberty ... -json -top <top>` output actually has.
+
+    `design`, when given, is written alongside `modules` as the report's own
+    `design` rollup key (Yosys survey section 2) -- needed to exercise the
+    `data["design"]["area"]` fallback (#1262) without requiring a `modules`
+    block whose top-level key is itself missing.
+    """
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-V"]:
@@ -863,8 +870,11 @@ def _stub_hierarchical_yosys(
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
         stats_path, netlist_path = _script_output_paths(script_path)
+        payload: dict = {"modules": modules}
+        if design is not None:
+            payload["design"] = design
         with open(stats_path, "w", encoding="utf-8") as handle:
-            json.dump({"modules": modules}, handle)
+            json.dump(payload, handle)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write("// fake mapped netlist\n")
         abc_log_path = _script_abc_log_path(script_path)
@@ -914,6 +924,53 @@ def test_run_synthesize_hierarchical_top_reports_recursive_instance_count(
         "sky130_fd_sc_hd__xor2_1": 32,
     }
     assert sum(by_type.values()) == 302
+
+
+#: `mac8`-shaped fixture with `area` dropped from the top module's own block
+#: entirely -- what distro-packaged Yosys (e.g. Ubuntu 24.04's 0.33) actually
+#: emits for a pure structural wrapper with zero directly-owned area: `stat
+#: -json` omits the `area` key rather than writing `"area": 0.0` (#1262).
+#: `design.area` (2364.768) is `adder16`'s 425.408 + `mult8`'s 1939.36, the
+#: same hierarchy-wide rollup `_MAC8_MODULES["\\mac8"]["area"]` carries when
+#: present -- verified live in #1262 to be exactly equal.
+_MAC8_MODULES_NO_TOP_AREA = {
+    "\\mac8": {
+        key: value for key, value in _MAC8_MODULES["\\mac8"].items() if key != "area"
+    },
+    "\\adder16": _ADDER16_MODULE_STATS,
+    "\\mult8": _MULT8_MODULE_STATS,
+}
+
+_MAC8_DESIGN_ROLLUP = {
+    "num_cells": 302,
+    "area": 2364.768,
+    "num_cells_by_type": {"adder16": 1, "mult8": 1},
+}
+
+
+def test_run_synthesize_hierarchical_top_missing_area_falls_back_to_design(
+    tmp_path, monkeypatch
+):
+    """Regression test for #1262: a hierarchical top module whose own `stat
+    -json` block omits `area` entirely (Ubuntu 24.04's Yosys 0.33, any pure
+    structural wrapper with zero cells of its own) must not raise a raw
+    `KeyError('area')` -- `run_synthesize` should report `area_um2` from the
+    report's own `design` rollup instead, identical to the value reported
+    when the top module's block does carry its own `area` key."""
+    assert "area" not in _MAC8_MODULES_NO_TOP_AREA["\\mac8"]
+    request_path = _setup_hierarchical_env(tmp_path, monkeypatch, "mac8")
+    _stub_hierarchical_yosys(
+        monkeypatch,
+        modules=_MAC8_MODULES_NO_TOP_AREA,
+        design=_MAC8_DESIGN_ROLLUP,
+        version="0.33",
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["engine_version"] == "0.33"
+    assert report["area_um2"] == 2364.768
+    assert report["instance_count"] == 302
 
 
 def test_read_stats_multiply_instantiated_submodule_scales_counts(tmp_path):
@@ -1141,6 +1198,40 @@ def test_read_stats_design_fallback_drops_submodule_pseudo_entries(tmp_path):
         "sky130_fd_sc_hd__xor2_1": 32,
         "sky130_fd_sc_hd__a211o_1": 22,
     }
+
+
+def test_read_stats_module_missing_area_falls_back_to_design_area(tmp_path):
+    """Regression test for #1262: when the resolved top module's own block
+    is present in `modules` (so the module-key-miss fallback above never
+    triggers) but is missing the `area` key specifically -- what
+    distro-packaged Yosys (e.g. Ubuntu 24.04's 0.33) emits for a pure
+    structural wrapper whose own directly-owned area is exactly zero --
+    `_read_stats` must fall back to `data["design"]["area"]` rather than
+    leaving `area` absent from its result (which would otherwise surface as
+    an unhandled `KeyError('area')` in `run_synthesize`)."""
+    modules = {
+        "\\mac8": {
+            "num_cells": 0,
+            "num_cells_by_type": {"adder16": 1, "mult8": 1},
+        },
+        "\\adder16": _ADDER16_MODULE_STATS,
+        "\\mult8": _MULT8_MODULE_STATS,
+    }
+    assert "area" not in modules["\\mac8"]
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "modules": modules,
+                "design": {"num_cells": 302, "area": 2364.768},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = synthesize._read_stats(str(stats_path), "mac8")
+
+    assert result["area"] == 2364.768
 
 
 def test_read_stats_cyclic_modules_graph_terminates(tmp_path):

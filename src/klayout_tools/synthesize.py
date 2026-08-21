@@ -1261,6 +1261,20 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
         )
 
     result = dict(module_stats)
+    if "area" not in result:
+        # Same class of gap as the module-key-miss fallback above, one
+        # condition earlier: distro-packaged Yosys (e.g. Ubuntu 24.04's
+        # 0.33) omits the `area` key entirely from a module's `stat -json`
+        # block when that module's own directly-owned area is exactly zero
+        # (a pure structural wrapper with no cells of its own -- the normal
+        # shape for an un-flattened hierarchical top). `data["design"]`'s
+        # own `area` is already the correct hierarchy-wide rollup in this
+        # case (verified live, #1262) -- the same equivalence this
+        # function's docstring already asserts for the module-key-miss
+        # path above, just reached from a narrower missing-field condition.
+        design_stats = data.get("design") if isinstance(data, dict) else None
+        if isinstance(design_stats, dict) and "area" in design_stats:
+            result["area"] = design_stats["area"]
     if used_module_lookup and isinstance(modules, dict):
         total_cells, cells_by_type = _aggregate_cell_counts(modules, module_key)
         result["num_cells"] = total_cells
