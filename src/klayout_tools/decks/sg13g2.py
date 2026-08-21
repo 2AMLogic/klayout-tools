@@ -109,27 +109,32 @@ arbitrary boolean/derived expression):
 
 The same incremental discipline applies to LVS device recognition. Issue
 #905 curated MOS only; issue #1231 added the thick-oxide MOS flavour and two
-poly resistors. Recognised today:
+poly resistors; issue #1235 resolved the third poly-resistor flavour
+(``rhigh``, previously left unrecognised pending an external sheet-rho
+source -- see below) and added the two metal resistors that fit inside this
+deck's already-curated Metal1/Metal2 stack. Recognised today:
 
 - **MOS** -- thin-oxide ``sg13_lv_nmos``/``sg13_lv_pmos`` (the default
   ``active``/``nwell`` split) and thick-oxide ``sg13_hv_nmos``/
   ``sg13_hv_pmos`` (``mos_flavours``, scoped to ``ThickGateOx`` 44/0).
-- **Drawn poly resistors** -- ``rsil`` and ``rppd``.
+- **Drawn poly resistors** -- ``rsil``, ``rppd``, and (issue #1235)
+  ``rhigh``.
+- **Drawn metal resistors** (issue #1235) -- ``res_metal1``/``res_metal2``,
+  the two flavours whose ``metals`` level (Metal1/Metal2) this deck's stack
+  already carries.
 
 Still unrecognised, each tracked as its own follow-on issue rather than left
 a silent gap (a device class this deck cannot recognise extracts as ordinary
 interconnect -- i.e. a *short* a ``klt lvs`` run reports as an unmatched
 device, never a wrong device with a plausible value):
 
-- ``rhigh`` (the third poly-resistor flavour) -- see ``EXTRACTION_DECK``'s
-  resistor note for why its sheet resistance is not confidently derivable
-  from the PDK's own data -- and the metal resistors ``res_metal1``..
-  ``res_topmetal2``. Both tracked by issue #1235; the metal resistors were
-  independently blocked on the same ``metals``/``vias`` stack extension
-  (issue #1243) MIM capacitors below needed -- #1243 has since landed, so
-  #1235's metal-resistor flavours (up through ``res_topmetal2``, now that
-  the stack reaches ``TopMetal2``) are a standalone follow-on rather than a
-  blocked one.
+- The remaining metal resistors ``res_metal3``..``res_topmetal2`` -- their
+  ``metals`` levels (Metal3-TopMetal2) sat above this deck's original
+  Metal1/Via1/Metal2 stack. Tracked by issue #1235 (carried forward, not
+  resolved by it -- ``rhigh`` and ``res_metal1``/``res_metal2`` were, see
+  above); #1243 has since landed the ``metals``/``vias`` stack extension
+  MIM capacitors below also needed, so ``res_metal3``..``res_topmetal2``
+  are now a standalone follow-on rather than a blocked one.
 - Diodes -- ``diode_extraction.lvs``'s antenna diodes (``dantenna``/
   ``dpantenna``) and the three-terminal ``schottky_nbl1`` (extracted
   upstream as a ``bjt3``, not a ``diode``) -- issue #1234 -- plus the
@@ -171,8 +176,11 @@ the entry at that time:
 **Decision (issue #1233):** defer ``cap_cmim``/``rfcmim`` recognition until
 the deck's ``metals``/``vias`` stack itself is extended up through
 Metal5/TopMetal1 -- filed as its own prerequisite, issue #1243, shared with
-#1235's metal resistors (``res_metal1``..``res_topmetal2``), which
-independently hit the identical Metal2 ceiling.
+#1235's metal resistors (``res_metal3``..``res_topmetal2`` -- issue #1235
+recognised ``res_metal1``/``res_metal2`` without needing the stack
+extension, since those two flavours sit on Metal1/Metal2, already inside
+this deck's curated stack; ``res_metal3`` and up independently hit the
+identical Metal2 ceiling).
 
 **Prerequisite landed (issue #1243):** ``EXTRACTION_DECK.metals``/``.vias``
 now reach ``TopMetal2`` (see "Scope guard" above and ``EXTRACTION_DECK``'s
@@ -1050,6 +1058,11 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (67, 25): "Metal5.text",
     (126, 25): "TopMetal1.text",
     (134, 25): "TopMetal2.text",
+    # Metal-resistor marker layers (issue #1235), transcribed from the same
+    # `sg13g2.lyp` layer-properties file: `metal1_res`/`metal2_res` in
+    # `layers_def.drc` (`get_polygons(8, 29)`/`get_polygons(10, 29)`).
+    (8, 29): "Metal1.res",
+    (10, 29): "Metal2.res",
 }
 
 # Voltage-domain marker layer this deck draws but does not *fully* model the
@@ -1275,15 +1288,27 @@ EXTRACTION_DECK = ExtractionDeck(
     #   which is *not* width-dependent), so `R = L/W * rspec` is a
     #   first-order transcription of the body term only -- stated here rather
     #   than silently implied.
-    # - `rhigh` (the third poly-resistor flavour) is deliberately **not**
-    #   declared: its sheet resistance is ambiguous in the PDK's own data --
-    #   `rhigh_code.py` reads `rhigh_rspec` (1300 ohm/sq, with its `G2`-suffix
-    #   branch commented out) while the shared `CbResCalc` helper that
-    #   computes the same PyCell's default resistance hardcodes the `G2`
-    #   suffix and so reads `rhighG2_rspec` (1360 ohm/sq). A segment this deck
-    #   cannot value confidently is left as ordinary connected poly (today's
-    #   short) rather than extracted with one of two contradictory
-    #   coefficients.
+    # - `rhigh` (the third poly-resistor flavour) -- issue #1235 resolved the
+    #   ambiguity #1231 originally left this device unrecognised for.
+    #   `sg13g2_tech.json` itself is genuinely self-contradictory: PyCell
+    #   `rhigh_code.py`'s `defineParamSpecs` reads `rhigh_rspec` (1300
+    #   ohm/sq) for the CDF `Rspec` field it displays, with the `if
+    #   'SG13G2' in SG13_TECHNOLOGY: suffix = 'G2'` branch its own
+    #   `rppd_code.py` sibling still runs commented out -- yet the shared
+    #   `utility_functions.py`'s `CbResCalc` helper, which computes the same
+    #   PyCell's *default resistance value*, hardcodes `suffix = 'G2'`
+    #   unconditionally and so reads `rhighG2_rspec` (1360 ohm/sq) instead. A
+    #   third, independent, citable source breaks the tie:
+    #   `libs.tech/ngspice/models/cornerRES.lib`'s typical-corner section
+    #   (`.LIB res_typ`) -- the coefficients ngspice itself simulates a
+    #   `.subckt rhigh`/`rmod_rhigh` instance with -- sets `rsh_rhigh =
+    #   1360`, matching the `G2`-suffixed value. The same `res_typ` section's
+    #   `rsh_rsil = 7.0`/`rsh_rppd = 260.0` independently reproduce this
+    #   deck's own already-curated `rsil`/`rppd` sheet rhos above exactly,
+    #   corroborating that `cornerRES.lib` -- not `rhigh_code.py`'s isolated,
+    #   evidently-stale non-G2 read -- is the value real SG13G2 designs
+    #   simulate against. `rhigh` is declared below with
+    #   `sheet_rho_ohm_sq=1360.0` on that basis.
     resistors=(
         ResistorDevice(
             name="rsil",  # upstream LVS device-class name
@@ -1329,6 +1354,67 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
             bulk_to_substrate=True,  # upstream connects `rppd_sub` to pwell
             provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rppd"),
+        ),
+        ResistorDevice(
+            name="rhigh",  # upstream LVS device-class name
+            body=(5, 0),  # GatPoly.drawing
+            marker=(128, 0),  # polyres.drawing
+            # See the "sheet-rho ambiguity" note above: `rhighG2_rspec` in
+            # sg13g2_tech.json, corroborated by `cornerRES.lib`'s
+            # `res_typ` corner (`rsh_rhigh = 1360`) over `rhigh_code.py`'s
+            # isolated `rhigh_rspec` (1300) read.
+            sheet_rho_ohm_sq=1360.0,
+            # `rhigh_res = polyres_mk.and(psd_drw).and(nsd_drw)
+            #   .and(salblock_drw)` (res_derivations.lvs) -- unlike
+            # rsil/rppd, this flavour *requires* nSD present alongside pSD
+            # (both implants over the same segment, the doping combination
+            # this flavour's higher sheet rho comes from), which is also
+            # what naturally disambiguates it from rppd: rppd's own
+            # `excludes` below subtract nSD/nSD_block, so a segment
+            # carrying nSD can only ever match this entry, never rppd's.
+            requires=(
+                (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
+                (14, 0),  # pSD      -\ both implants present together --
+                (7, 0),  # nSD       -/ what upstream's `.and(psd_drw)
+                #                        .and(nsd_drw)` requires
+                (28, 0),  # SalBlock -- unsalicided, same as rppd
+            ),
+            excludes=(
+                (1, 0),  # Activ       -\ `polyres_exclude`, see rsil/rppd
+                (44, 0),  # ThickGateOx -/ above
+            ),
+            bulk_to_substrate=True,  # upstream connects `rhigh_sub` to pwell
+            provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rhigh"),
+        ),
+        # Drawn metal resistors (issue #1235), transcribed from
+        # `res_derivations.lvs`/`res_extraction.lvs`: `res_metalN = metalN
+        # .and(metalN_res)`, extracted via KLayout's native 2-terminal
+        # `resistor(name, rsh, RES2)` builtin (`{ 'R' => res_metalN, 'C' =>
+        # metalN_con }`) -- unlike the poly resistors above, this upstream
+        # extractor call carries no third bulk/substrate terminal, so
+        # `bulk_to_substrate` stays the default `False` here. Sheet rhos are
+        # `res_extraction.lvs`'s own inline `RSH_RES_METAL1`/
+        # `RSH_RES_METAL2` constants, themselves cited upstream to
+        # `libs.tech/parasitics/itf/sg13g2_typ.itf`.
+        #
+        # Only `res_metal1`/`res_metal2` are declared: `res_metal3`..
+        # `res_topmetal2` need Metal3-TopMetal2, above this deck's curated
+        # Metal1/Via1/Metal2 stack (see the module docstring's "MIM
+        # capacitors" section for the shared issue #1243 stack-extension
+        # prerequisite those flavours share with `cap_cmim`/`rfcmim`).
+        ResistorDevice(
+            name="res_metal1",  # upstream LVS device-class name
+            body=(8, 0),  # Metal1.drawing
+            marker=(8, 29),  # Metal1.res (metal1_res)
+            sheet_rho_ohm_sq=0.110,  # RSH_RES_METAL1 (res_extraction.lvs)
+            provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "res_metal1"),
+        ),
+        ResistorDevice(
+            name="res_metal2",  # upstream LVS device-class name
+            body=(10, 0),  # Metal2.drawing
+            marker=(10, 29),  # Metal2.res (metal2_res)
+            sheet_rho_ohm_sq=0.088,  # RSH_RES_METAL2 (res_extraction.lvs)
+            provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "res_metal2"),
         ),
     ),
 )

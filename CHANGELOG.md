@@ -969,6 +969,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-20 — The `sg13g2` extraction deck now recognises SG13G2's third
+  **drawn poly resistor**, `rhigh`, and two **drawn metal resistors**,
+  `res_metal1`/`res_metal2` (issue #1235, a follow-on to #1231). `rhigh` was
+  left unrecognised by #1231 because `sg13g2_tech.json` itself disagrees with
+  itself on its sheet rho (`rhigh_rspec` 1300 Ω/sq vs `rhighG2_rspec` 1360
+  Ω/sq); a third, independent, citable source breaks the tie —
+  `libs.tech/ngspice/models/cornerRES.lib`'s typical-corner (`res_typ`)
+  section, the coefficients ngspice itself simulates a `rhigh` instance
+  with, sets `rsh_rhigh = 1360`, and that same section's `rsh_rsil`/
+  `rsh_rppd` independently reproduce this deck's own already-curated `rsil`/
+  `rppd` values exactly, corroborating it over `rhigh_code.py`'s isolated,
+  evidently-stale non-`G2` read. `rhigh` now extracts with
+  `sheet_rho_ohm_sq=1360.0`, distinguished from `rppd` by requiring both
+  `pSD`/`nSD` implants present together (upstream: `rhigh_res = polyres_mk
+  .and(psd_drw).and(nsd_drw).and(salblock_drw)`) rather than by an `excludes`
+  mirror of `rppd`'s own. `res_metal1` (0.110 Ω/sq)/`res_metal2` (0.088
+  Ω/sq) fit inside this deck's already-curated Metal1/Metal2 stack, so no
+  stack extension was needed for these two; `res_metal3`..`res_topmetal2`
+  remain unrecognised, blocked on the same Metal3+ stack extension (issue
+  #1243) MIM capacitors (#1233) are deferred behind. See
+  `src/klayout_tools/decks/sg13g2.py`'s resistor note and
+  [`docs/cli/pdk.md`](docs/cli/pdk.md)'s SG13G2 coverage table.
 - 2026-08-20 — The `sg13g2` curated deck's `metals`/`vias` connectivity
   stack (and the companion DRC rule deck) now reaches **Metal5/TopMetal1/
   TopMetal2**, extended from its original Metal1/Via1/Metal2 ceiling (issue

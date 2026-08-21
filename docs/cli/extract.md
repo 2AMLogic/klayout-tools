@@ -23,12 +23,15 @@ two disagree, this document (and the code) win.
 - `--deck` — required. The connectivity + device-extraction deck to run.
   Currently: `sky130`, `gf180mcu`, `sg13g2`. `sg13g2`'s device coverage is
   MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the thick-oxide
-  `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0) and two drawn poly
-  resistors (`rsil`, `rppd`); it has **no** curated capacitor, bipolar (HBT)
-  or diode entries yet, and deliberately omits the third poly-resistor
-  flavour (`rhigh`, whose sheet resistance is ambiguous in the PDK's own
-  data) — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for each
-  gap and why.
+  `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0), three drawn poly
+  resistors (`rsil`, `rppd`, and — as of issue #1235, its upstream
+  sheet-rho ambiguity resolved against a third citable source — `rhigh`),
+  and two drawn metal resistors (`res_metal1`, `res_metal2`, also issue
+  #1235); it has **no** curated capacitor, bipolar (HBT) or diode entries
+  yet, and deliberately omits the remaining metal resistors
+  (`res_metal3`..`res_topmetal2`, above this deck's curated Metal2 stack)
+  — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for each gap
+  and why.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
   "next to the input" convention `klt render`/`klt sim` already use). The
@@ -1968,12 +1971,14 @@ future epic):
   bind; only the `bjt` stays a bare card). Any other recognised device class
   with no curated binding entry is likewise written as its bare primitive card
   rather than a guessed subcircuit call.
-- **MOS-only binding for `sg13g2`** (issue #1231): its two drawn poly
-  resistors (`rsil`, `rppd`) have no curated resistor-model table entry yet,
-  so they stay bare `R` cards under `--pdk` — the same documented
-  bare-primitive carve-out gf180mcu's `bjt` gets above, not an error. Their
-  model token is already the PDK's own device-class name (`rsil`/`rppd`), so
-  a consumer can supply the matching `.subckt`/`.model` itself.
+- **MOS-only binding for `sg13g2`** (issue #1231): its drawn poly resistors
+  (`rsil`, `rppd`, and — issue #1235 — `rhigh`) and drawn metal resistors
+  (`res_metal1`, `res_metal2`, also issue #1235) have no curated
+  resistor-model table entry yet, so they stay bare `R` cards under `--pdk`
+  — the same documented bare-primitive carve-out gf180mcu's `bjt` gets
+  above, not an error. Their model token is already the PDK's own
+  device-class name (`rsil`/`rppd`/`rhigh`/`res_metal1`/`res_metal2`), so a
+  consumer can supply the matching `.subckt`/`.model` itself.
 - **Three curated decks** (`sky130`, `gf180mcu`, `sg13g2` — the last as of
   issue #1231, resolved from the `ihp-sg13g2` variant name IHP-Open-PDK
   installs use); a resolved PDK whose

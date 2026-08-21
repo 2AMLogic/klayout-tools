@@ -156,7 +156,7 @@ not a full transcription:
 |---|---|---|
 | DRC geometric rules | one connected Activ→TopMetal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2, Metal3, Via3, Metal4, Via4, Metal5, TopVia1, TopMetal1, TopVia2, TopMetal2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
 | LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1231) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`), the `sg13_hv_svaricap` varactor |
-| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq) and `rppd` (260 Ω/sq), issue #1231 | `rhigh` (ambiguous sheet rho upstream — deliberately left as a short), metal resistors², MIM capacitors (`cap_cmim`/`rfcmim`)², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
+| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq), `rppd` (260 Ω/sq, issue #1231) and `rhigh` (1360 Ω/sq, issue #1235 — its upstream sheet-rho ambiguity resolved against a third citable source, `cornerRES.lib`'s `res_typ` corner); drawn metal resistors `res_metal1` (0.110 Ω/sq) and `res_metal2` (0.088 Ω/sq), issue #1235 | metal resistors `res_metal3`..`res_topmetal2`², MIM capacitors (`cap_cmim`/`rfcmim`)², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
 | Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
 
 ¹ SiGe HBTs are a different kind of gap from the rest of this row: issue
@@ -168,12 +168,15 @@ engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
 investigated, declined" docstring section for the full finding.
 
-² MIM capacitors and metal resistors are a different kind of gap: their own
-recognition (populating `EXTRACTION_DECK.capacitors`/`.resistors` for them)
-is **still not curated** — issue #1233 (MIM caps) and issue #1235 (metal
+² MIM capacitors and the remaining metal resistors (`res_metal3` and up)
+are a different kind of gap from the rest of this row: their own recognition
+(populating `EXTRACTION_DECK.capacitors`/`.resistors` for them) is **still
+not curated** — issue #1233 (MIM caps) and issue #1235 (the remaining metal
 resistors) both investigated and deferred it, since both land on levels
-(MIM caps on Metal5 with a TopMetal1 via; several metal-resistor flavours as
-high as TopMetal2) that were, at the time, above this deck's curated
+(MIM caps on Metal5 with a TopMetal1 via; `res_metal3`..`res_topmetal2` as
+high as TopMetal2 — `res_metal1`/`res_metal2` sit on Metal1/Metal2, already
+inside the stack, which is why issue #1235 could recognise those two without
+waiting on the extension) that were, at the time, above this deck's curated
 Metal1/Via1/Metal2 stack — recognising either without a connectivity stack
 reaching that far would produce a device whose plates/body connect to
 nothing else in the extracted graph. Issue #1243 has since extended
@@ -181,7 +184,7 @@ nothing else in the extracted graph. Issue #1243 has since extended
 named), the same order sky130's own `met3`/`met4` MiM caps took (#619
 extended the stack, #775 then wired the via) rather than gf180mcu's single
 pass (whose stack already reached `Metal4` when its MiM cap was curated) —
-so recognising `cap_cmim`/`rfcmim` and `res_metal1`..`res_topmetal2` is now
+so recognising `cap_cmim`/`rfcmim` and `res_metal3`..`res_topmetal2` is now
 each its own standalone follow-on against the already-extended stack, not a
 blocked one. See `src/klayout_tools/decks/sg13g2.py`'s "MIM capacitors —
 investigated, deferred" docstring section for the full finding.
