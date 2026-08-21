@@ -7,14 +7,18 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 Exit codes (see ``docs/cli/pex.md`` for the full table):
     0 - every delta row passed
     1 - failed to run at all (bad layout/testbench, unresolvable deck/PDK,
-        a missing or ambiguous `.include` DUT reference, disagreeing
-        schematic references, an extraction or simulation failure) --
-        returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        a missing, ambiguous, or implausible `.include` DUT reference
+        (issue #1255, Gap 1), disagreeing schematic references, an
+        extraction or simulation failure) -- returned by ``emit_error`` as
+        ``output.ERROR_EXIT_CODE``
     3 - ran successfully, at least one delta row failed its measurement limit
     4 - at least one delta row errored (schematic or extracted side did not
         produce a trustworthy value) -- including a schematic/extracted
         pin-list mismatch, which reports a named ``pin_count_mismatch``
-        block here rather than aborting with exit 1 (issue #1030)
+        block here rather than aborting with exit 1 (issue #1030), and a
+        flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which
+        reports a named ``flat_dut_mismatch`` block the same way (issue
+        #1255, Gap 2)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. Exit codes 3/4 mirror `klt sim`'s own precedent -- see
 docs/cli/sim.md's "Exit codes" section.)
@@ -75,6 +79,29 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_PASS
 
 
+def _print_mismatch(mismatch: dict | None, name: str) -> None:
+    """Print ``mismatch`` (``pin_count_mismatch`` or ``flat_dut_mismatch`` --
+    both share the same structured shape: ``subcircuit``, a ``schematic``
+    and ``extracted`` per-side detail dict, ``ngspice_message``, and
+    ``detail``) under its own ``<name>:`` heading, or nothing at all when
+    ``mismatch`` is ``None``."""
+    if mismatch is None:
+        return
+    print()
+    print(f"{name}:")
+    for side in ("schematic", "extracted"):
+        entry = mismatch[side]
+        pins = entry["pins"]
+        print(
+            f"  {side}: {entry['netlist']}  "
+            f"subckt={entry['subcircuit']}  pins={entry['pin_count']}"
+            + (f"  ({', '.join(pins)})" if pins else "")
+        )
+    if mismatch["ngspice_message"]:
+        print(f"  ngspice: {mismatch['ngspice_message']}")
+    print(f"  {mismatch['detail']}")
+
+
 def _print_text(report: dict) -> None:
     print(f"layout: {report['layout']}")
     print(f"netlist: {report['netlist']}")
@@ -112,21 +139,10 @@ def _print_text(report: dict) -> None:
 
     # Additive (issue #1030): only printed when the extracted-side deck was
     # rejected for a schematic/extracted top-level pin-list mismatch.
-    mismatch = report.get("pin_count_mismatch")
-    if mismatch is not None:
-        print()
-        print("pin_count_mismatch:")
-        for side in ("schematic", "extracted"):
-            entry = mismatch[side]
-            pins = entry["pins"]
-            print(
-                f"  {side}: {entry['netlist']}  "
-                f"subckt={entry['subcircuit']}  pins={entry['pin_count']}"
-                + (f"  ({', '.join(pins)})" if pins else "")
-            )
-        if mismatch["ngspice_message"]:
-            print(f"  ngspice: {mismatch['ngspice_message']}")
-        print(f"  {mismatch['detail']}")
+    _print_mismatch(report.get("pin_count_mismatch"), "pin_count_mismatch")
+    # Additive (issue #1255, Gap 2): only printed when the schematic DUT is
+    # flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction.
+    _print_mismatch(report.get("flat_dut_mismatch"), "flat_dut_mismatch")
 
     testbenches = report["testbenches"]
     if testbenches:

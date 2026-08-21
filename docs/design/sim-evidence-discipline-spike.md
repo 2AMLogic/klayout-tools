@@ -25,6 +25,17 @@ The pex-specific parts are marked inline below; the survey and disposition
 sections above them are unchanged and remain `klt sim`-framed, since that is
 the decision they recorded.
 
+**Amendment ([#1254](https://github.com/2AMLogic/klayout-tools/issues/1254)):**
+records written under this convention must additionally satisfy the
+**provenance-hygiene rule** — repo-relative paths only, a pseudonymous host
+id, no login/author field. Nothing in the decision below changes; the rule
+constrains what a harness may put *in* a record's environment metadata, and
+`klt env-provenance` ([`../cli/env-provenance.md`](../cli/env-provenance.md))
+is the reference implementation a harness calls instead of collecting that
+metadata itself. See "Provenance hygiene" below, and
+[`../design-evidence-tiers.md`](../design-evidence-tiers.md) → "Provenance
+hygiene in evidence records" for the rule's own statement.
+
 ## Scope
 
 #347 originally listed four things both `gf180-bandgap`'s
@@ -433,6 +444,38 @@ silent-plausible-wrong-answer failure item 3's original framing named for
 PDK metadata. Like limits, an un-declared measurement in `min_spread` is
 never checked — reported, not failed, by omission, the same
 opt-in-per-measurement shape `klt sim`'s own `limits` field already uses.
+
+### Provenance hygiene (amendment, #1254)
+
+A–E above make a record *durable*: never edited, never deleted, always
+re-checkable. That durability is exactly why what a record says about the
+machine that produced it matters — the record id embeds a commit SHA, so a
+record carrying an identifier cannot be scrubbed later without breaking every
+citation resting on it. Append-only and "please redact that" are mutually
+exclusive by construction.
+
+A record's environment metadata therefore carries:
+
+- **repo-relative paths only** — a path outside the block repo is recorded as
+  being outside it, not by its absolute location. External inputs are pinned
+  by identity: `pdk_pin.expected_deck_content_hash` and the wrapper's
+  `result.provenance.pdk` already say *which* PDK reproduced this run; where
+  it sits on one machine says nothing.
+- **a stable pseudonymous host id** (`host-<8hex>`), never a hostname.
+- **no login/author field** — git already records authorship once.
+
+`klt env-provenance emit`
+([`../cli/env-provenance.md`](../cli/env-provenance.md)) produces exactly that
+shape and refuses to emit a payload carrying a local identifier;
+`klayout_tools.env_provenance.environment_provenance()` is the same payload
+for a Python harness with no subprocess. `klt env-provenance scan` is the
+CI-side counterpart: it reports home-directory-shaped absolute paths in files
+a change adds, which is the enforcement point, since the *only* moment a
+leaking record can be prevented is before it is committed.
+
+This is a constraint on the wrapper's own metadata, not on `result` — which
+stays the untouched `klt sim`/`klt pex` response, byte-for-byte, exactly as
+the sections above require.
 
 ## Worked example (Epic #709 Phase 1c, #803)
 

@@ -16,6 +16,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-21 — `klt pex`'s DUT `.include` swap no longer silently accepts a
+  non-DUT single-`.include` testbench, or a flat-schematic-DUT-vs-
+  `.SUBCKT`-wrapped-extraction mismatch (issue #1255, two gaps left by
+  #1030/#1039). **Gap 1**: a testbench whose sole `.include`/`.inc` target
+  is not plausibly the DUT (e.g. a shared corner/parameter file with no
+  `.SUBCKT` and no circuit element of its own — the testbench's own DUT
+  devices being inlined directly instead) used to be silently swapped in
+  as if it were the DUT, producing a vacuous `status: "pass"` with
+  `reference_netlist` naming the wrong file. This is now a hard, up-front
+  `PexError` (exit `1`), before either side ever simulates. **Gap 2**: a
+  schematic DUT netlisted flat (no `.SUBCKT`/`.ENDS` wrapper — the
+  testbench references its internal nodes directly as top-level nets)
+  against `klt extract`'s always-`.SUBCKT`-wrapped output used to make
+  `_pin_count_mismatch` silently return `None` (its comparison requires
+  both sides to declare a `.SUBCKT`), so the run either failed deep in a
+  per-corner `ngspice.log` or, worse, reported a spurious passing number
+  for a disconnected extracted-side fixture. This is now detected
+  proactively — before either side simulates, unlike the reactive
+  `pin_count_mismatch` check — and reported as a new, named
+  `flat_dut_mismatch` block (same shape as `pin_count_mismatch`:
+  `subcircuit`, `schematic`/`extracted` per-side detail, `ngspice_message`
+  — always `null` here — and `detail`), with per-corner `delta[]` rows
+  carrying `extracted_value: null`/`status: "error"` and exit code `4`
+  (mutually exclusive with `pin_count_mismatch`: the extracted side is
+  never even attempted). Purely additive — no `schema_version` bump (`klt
+  pex` stays at `1`); every existing `.include`-swap and
+  `pin_count_mismatch` behavior is unchanged. Documented in
+  [`docs/cli/pex.md`](docs/cli/pex.md) → "That one line must plausibly
+  name the DUT" and "Flat schematic DUT vs `.SUBCKT`-wrapped extraction".
 - 2026-08-19 — `klt lvs --check <report> --rerun` can now reconstruct the
   compare a committed report describes instead of guessing at it (issue
   #1205). The report echoed a single `top` and no `options`, so full mode
@@ -969,6 +998,33 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-21 — New `klt env-provenance` verb (issue #1254) and the
+  importable `klayout_tools.env_provenance` module behind it: the reference
+  **environment-provenance emitter** for evidence-record harnesses.
+  `emit` reports `{schema_version, host_id, os, python_version, klt_version,
+  klayout_version, paths}` where every path is repo-relative (a path outside
+  the repo is `{"path": null, "scope": "external"}` — the absolute location
+  is never emitted) and the host is a pseudonymous `host-<8hex>` salted hash
+  of the normalised hostname, never the hostname itself; there is no
+  login/author field. `scan` reports home-directory-shaped absolute paths
+  (`/Users/<name>/…`, `/home/<name>/…`, `C:\Users\<name>\…`; a `~/`-rooted
+  path is not flagged) in files a change adds, exiting `3` when it finds
+  them — a successful run with findings, mirroring `klt drc`'s exit `3`.
+  `emit` runs its own finished payload through that same scan and **refuses
+  to emit** (exit `1`) rather than mint a record carrying this machine's
+  hostname, login, or home directory, which is what makes the rule a
+  mechanism rather than a convention. Motivated by a 2026-08 disclosure
+  read-audit that found ~3,937 committed evidence records in the public
+  canary repos carrying all three identifier classes, written by design by
+  each canary's own harness. Existing records are **not** rewritten — a
+  record id embeds a commit SHA, so rewriting one breaks the verifiability
+  the evidence is published for; the rule binds the writer from now on. The
+  rule itself is stated in
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) →
+  "Provenance hygiene in evidence records" (a new section — the tier ladder
+  and T1 checklist `klt signoff` parses are unchanged) and in
+  [`docs/design/sim-evidence-discipline-spike.md`](docs/design/sim-evidence-discipline-spike.md)'s
+  amendment. See [`docs/cli/env-provenance.md`](docs/cli/env-provenance.md).
 - 2026-08-20 — The `sg13g2` extraction deck now recognises SG13G2's third
   **drawn poly resistor**, `rhigh`, and two **drawn metal resistors**,
   `res_metal1`/`res_metal2` (issue #1235, a follow-on to #1231). `rhigh` was

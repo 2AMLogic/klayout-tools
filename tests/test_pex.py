@@ -31,8 +31,11 @@ from klayout_tools.cli import main
 from klayout_tools.pex import (
     PexError,
     _build_delta_rows,
+    _check_dut_declares_a_circuit,
     _delta_pct,
+    _dut_declares_a_circuit,
     _find_dut_include,
+    _flat_dut_mismatch,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
     _rewrite_dut_include,
@@ -135,6 +138,74 @@ def test_rewrite_dut_include_preserves_no_trailing_newline():
     index, _path = _find_dut_include(body, "/work")
     rewritten = _rewrite_dut_include(body, index, "/extracted/top.spice")
     assert rewritten == '.model res_generic_po r\n.include "/extracted/top.spice"'
+
+
+# --------------------------------------------------------------------------- #
+# DUT-include plausibility check (Gap 1, issue #1255)
+# --------------------------------------------------------------------------- #
+
+
+def test_dut_declares_a_circuit_true_for_subckt_wrapped():
+    assert _dut_declares_a_circuit(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
+
+
+def test_dut_declares_a_circuit_true_for_empty_subckt():
+    """Just the header/wrapper is enough -- `_subckt_interfaces` only parses
+    headers, and a schematic DUT with a declared interface but (for
+    whatever reason) no devices inside it is still "the DUT", not a
+    parameter file."""
+    assert _dut_declares_a_circuit(".SUBCKT TOP A B\n.ENDS TOP\n")
+
+
+def test_dut_declares_a_circuit_true_for_flat_device_lines():
+    """No `.SUBCKT` wrapper at all, but a real device card -- the flat-DUT
+    shape (see `_flat_dut_mismatch`, Gap 2) is still plausibly a DUT."""
+    assert _dut_declares_a_circuit("R1 RA RB 289.2\n")
+
+
+def test_dut_declares_a_circuit_false_for_param_model_only():
+    """The Gap 1 failure shape: a shared corner/parameter file with no
+    circuit content of its own."""
+    text = (
+        "* corner selection\n"
+        ".param sw_stat_mismatch=0\n"
+        ".model res_generic_po r\n"
+        ".global vsubs\n"
+    )
+    assert not _dut_declares_a_circuit(text)
+
+
+def test_dut_declares_a_circuit_false_for_blank_and_comments_only():
+    assert not _dut_declares_a_circuit("\n* just a comment\n\n")
+
+
+def test_dut_declares_a_circuit_false_for_empty_text():
+    assert not _dut_declares_a_circuit("")
+
+
+def test_check_dut_declares_a_circuit_passes_for_real_dut(tmp_path):
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
+    # Does not raise.
+    _check_dut_declares_a_circuit("testbench.spice", str(dut))
+
+
+def test_check_dut_declares_a_circuit_raises_for_param_only_file(tmp_path):
+    corner = tmp_path / "design.ngspice"
+    corner.write_text(".param sw_stat_mismatch=0\n.model res_generic_po r\n")
+
+    with pytest.raises(PexError) as excinfo:
+        _check_dut_declares_a_circuit("testbench.spice", str(corner))
+
+    message = str(excinfo.value)
+    assert str(corner) in message
+    assert "declares no `.SUBCKT`" in message
+
+
+def test_check_dut_declares_a_circuit_raises_for_unreadable_file(tmp_path):
+    missing = tmp_path / "does-not-exist.spice"
+    with pytest.raises(PexError, match="could not be read"):
+        _check_dut_declares_a_circuit("testbench.spice", str(missing))
 
 
 # --------------------------------------------------------------------------- #
@@ -428,6 +499,73 @@ def test_pin_count_mismatch_from_report_none_when_any_value_came_back(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction diagnostic (Gap 2,
+# issue #1255)
+# --------------------------------------------------------------------------- #
+
+
+def _write_flat_dut(tmp_path) -> str:
+    """A schematic DUT with no `.SUBCKT`/`.ENDS` wrapper at all -- the
+    testbench references its `RA`/`RB` nodes directly as top-level nets."""
+    path = tmp_path / "flat_dut.spice"
+    path.write_text("R1 RA RB 289.2\n")
+    return str(path)
+
+
+def test_flat_dut_mismatch_reports_when_schematic_is_flat(tmp_path):
+    schematic = _write_flat_dut(tmp_path)
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB\nR1 RA RB 291.0\n.ENDS RES\n")
+
+    mismatch = _flat_dut_mismatch(
+        reference_netlist=schematic, extracted_netlist=str(extracted), top_cell="RES"
+    )
+
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["netlist"] == schematic
+    assert mismatch["schematic"]["subcircuit"] is None
+    assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["schematic"]["pins"] is None
+    assert mismatch["extracted"]["pin_count"] == 2
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
+    assert mismatch["ngspice_message"] is None
+    assert "declares no `.SUBCKT`" in mismatch["detail"]
+    assert "RES" in mismatch["detail"]
+
+
+def test_flat_dut_mismatch_none_when_schematic_is_subckt_wrapped(tmp_path):
+    """The normal case -- a `.SUBCKT`-wrapped schematic DUT -- is not flat,
+    so this diagnostic never fires (a real interface mismatch there, if
+    any, is `_pin_count_mismatch`'s job instead)."""
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["RA", "RB", "VSUBS"])
+    assert (
+        _flat_dut_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_flat_dut_mismatch_none_when_extracted_lacks_top_cell(tmp_path):
+    """Degrades safely (no diagnostic) rather than raising if the extracted
+    netlist -- which `klt extract` always wraps in `.SUBCKT <top>` -- ever
+    somehow doesn't declare `top_cell` at all."""
+    schematic = _write_flat_dut(tmp_path)
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT OTHER A B\n.ENDS OTHER\n")
+
+    assert (
+        _flat_dut_mismatch(
+            reference_netlist=schematic,
+            extracted_netlist=str(extracted),
+            top_cell="RES",
+        )
+        is None
+    )
+
+
+# --------------------------------------------------------------------------- #
 # `run_pex` error paths that are cheap (no `ngspice`, extraction only)
 # --------------------------------------------------------------------------- #
 
@@ -586,6 +724,43 @@ def test_run_pex_testbench_missing_include_raises(tmp_path, resistor_layout):
         run_pex(resistor_layout, [str(request)], "sky130")
 
 
+def test_run_pex_testbench_include_not_dut_raises(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Gap 1, issue #1255: a testbench whose *only* `.include` names a
+    shared corner/parameter file (not the DUT) used to be silently swapped
+    in -- now a hard error, raised before any `klt sim` call, confirmed
+    here by making `run_sim` unreachable (mirrors the sibling
+    two-`.include`s test above)."""
+    import klayout_tools.pex as pex_module
+
+    def _unreachable_run_sim(*_args, **_kwargs):
+        raise AssertionError(
+            "run_sim must not be called for a testbench whose sole "
+            "`.include` is not a plausible DUT"
+        )
+
+    monkeypatch.setattr(pex_module, "run_sim", _unreachable_run_sim)
+
+    corner = tmp_path / "design.ngspice"
+    corner.write_text(".param sw_stat_mismatch=0\n.model res_generic_po r\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{corner}"\n'
+        "R1 RA RB 289.2\n"  # the DUT's own devices, inlined directly
+        "Vdd RA 0 DC 1.8\n"
+        "Rload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError) as excinfo:
+        run_pex(resistor_layout, [str(request)], "sky130")
+
+    message = str(excinfo.value)
+    assert str(corner) in message
+    assert "declares no `.SUBCKT`" in message
+
+
 def test_run_pex_testbench_two_includes_raises_before_simulating(
     tmp_path, resistor_layout, monkeypatch
 ):
@@ -726,6 +901,67 @@ def test_run_pex_unrelated_sim_error_still_aborts(
 
     with pytest.raises(PexError, match="extracted-side simulation failed"):
         run_pex(resistor_layout, [str(request)], "sky130")
+
+
+def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Gap 2, issue #1255: a flat schematic DUT (no `.SUBCKT` wrapper)
+    against `klt extract`'s always-`.SUBCKT`-wrapped output is detected
+    proactively, before any extracted-side `run_sim` call is even
+    attempted -- confirmed here by making a second `run_sim` call
+    unreachable (only the schematic-side call is allowed through)."""
+    import klayout_tools.pex as pex_module
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "corners": [
+                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+                    {
+                        "corner_id": "ss/1.620V/-40C",
+                        "measurements": [_measurement(1.3)],
+                    },
+                ],
+                "corner_count": 2,
+                "measurements": [{"name": "vout"}],
+            }
+        raise AssertionError(
+            "the extracted-side run_sim call must not happen when "
+            "flat_dut_mismatch already explains why it would be meaningless"
+        )
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_flat_dut(tmp_path)
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(f'.include "{dut}"\nVdd RA 0 DC 1.8\nRload RB 0 1k\n')
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 1
+    assert report["status"] == "error"
+    assert report["errored"] == 2
+    assert [row["corner_id"] for row in report["delta"]] == [
+        "tt/1.800V/27C",
+        "ss/1.620V/-40C",
+    ]
+    assert all(row["extracted_value"] is None for row in report["delta"])
+    assert all(row["status"] == "error" for row in report["delta"])
+    # Mutually exclusive with `pin_count_mismatch` -- the extracted side was
+    # never even attempted, so there is no reactive diagnostic to report.
+    assert report["pin_count_mismatch"] is None
+
+    mismatch = report["flat_dut_mismatch"]
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["netlist"] == dut
+    assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
 
 
 def test_run_pex_testbench_netlist_not_found_raises(tmp_path, resistor_layout):
@@ -902,6 +1138,66 @@ def test_integration_run_pex_pin_count_mismatch_cli(
     assert "schematic:" in out
     assert "pins=2" in out
     assert "pins=4" in out
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_flat_dut_mismatch(tmp_path, resistor_layout):
+    """Gap 2, issue #1255, end to end against real `ngspice`: the schematic
+    DUT is netlisted flat (no `.SUBCKT` wrapper), with the testbench wiring
+    its source/load directly to the DUT's own `RA`/`RB` nodes -- exactly
+    the shape a real EDA tool's flat top-level netlist mode produces.
+    `klt extract` always wraps its output in `.SUBCKT RES ...`, so the
+    mismatch is detected proactively (before the extracted side is ever
+    attempted) rather than surfacing only once ngspice rejects (or,
+    depending on version/`.ic` usage, silently mis-simulates) the
+    disconnected extracted-side deck."""
+    dut = _write_flat_dut(tmp_path)
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(f'.include "{dut}"\nVdd RA 0 DC 1.8\nRload RB 0 1k\n')
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "error"
+    assert report["errored"] == 1
+    (row,) = report["delta"]
+    # The schematic side still measures fine (a real ngspice run of the
+    # flat DUT) -- only the extracted side has no trustworthy value,
+    # exactly as `pin_count_mismatch`'s own shape already establishes.
+    assert row["schematic_value"] == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-3)
+    assert row["extracted_value"] is None
+    assert row["status"] == "error"
+    assert report["pin_count_mismatch"] is None
+
+    mismatch = report["flat_dut_mismatch"]
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_flat_dut_mismatch_cli(tmp_path, resistor_layout, capsys):
+    """The same run through the CLI: exit code 4 and the named diagnostic
+    present in both output formats."""
+    dut = _write_flat_dut(tmp_path)
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(f'.include "{dut}"\nVdd RA 0 DC 1.8\nRload RB 0 1k\n')
+    request = _write_request(tmp_path / "request.json", tb)
+    argv = ["pex", str(resistor_layout), str(request), "--deck", "sky130"]
+
+    exit_code = main([*argv, "--format", "json"])
+    assert exit_code == 4
+    payload = json.loads(capsys.readouterr().out)
+    mismatch = payload["flat_dut_mismatch"]
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["extracted"]["pin_count"] == 2
+
+    exit_code = main(argv)
+    assert exit_code == 4
+    out = capsys.readouterr().out
+    assert "flat_dut_mismatch:" in out
+    assert "declares no `.SUBCKT`" in out
 
 
 @_SKIP_NO_NGSPICE
