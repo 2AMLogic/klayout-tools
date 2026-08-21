@@ -206,6 +206,12 @@ load on demand:
   #309) now run against shipped `klt` verbs; the skill still hand-assembles
   the parts `klt signoff` can't yet: the S3 spec diff and design-hygiene
   checklist items).
+- [economy-review](.claude/skills/economy-review/SKILL.md) — judge a
+  layout's silicon economy like a human reviewer: renders at multiple
+  zooms plus quantitative density numbers (utilization, whitespace grid,
+  bbox tightness), graded against a rubric that distinguishes
+  analog-legitimate spacing (guard rings, matching, isolation) from
+  genuine waste; pass / revise verdict with coordinate-level targets.
 
 ## Design notes
 
