@@ -28,6 +28,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim, yield_campaign
+from klayout_tools.yield_analysis import _read_samples
 from klayout_tools.yield_campaign import CampaignError, run_campaign
 
 requires_native = pytest.mark.skipif(
@@ -489,3 +490,98 @@ def test_run_campaign_end_to_end_same_spec_rerun_reproduces_sample_set(
     first_seeds = [(c["corner_id"], c["monte_carlo"]) for c in first_corners]
     second_seeds = [(c["corner_id"], c["monte_carlo"]) for c in second_corners]
     assert first_seeds == second_seeds
+
+
+# --------------------------------------------------------------------------- #
+# `klt sim`'s `{path, scope}` netlist field must not leak into `klt yield`'s
+# own contract (issue #1261). `run_campaign` is the path that makes this
+# reachable by default: it hands `run_sim`'s live report straight to
+# `run_yield`, so a shape change in the former silently becomes a shape
+# change in the latter unless `_read_samples` unwraps it.
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises
+    as a repo root -- mirrors `tests/test_sim.py`'s helper of the same name
+    (kept local here, matching this file's own fixture convention)."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+def test_run_campaign_hands_yield_a_netlist_that_unwraps_to_a_string(
+    tmp_path, monkeypatch
+):
+    """The regression, over the **real** `run_sim` -> `_read_samples` seam
+    rather than a hand-built fixture -- only the native statistics core is
+    stubbed, so this runs everywhere (`test_yield_campaign.py` is not in
+    CI's `klt_yield_native` matrix leg, which is why the `requires_native`
+    end-to-end below cannot be the only cover for this).
+
+    `run_campaign` dumps `run_sim`'s live report verbatim to
+    `sample-set.json` and hands the path straight to `run_yield`, so
+    whatever shape `run_sim` emits is exactly what `klt yield` reads."""
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    spec_path = _write_spec(root, _base_spec())
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  5.00000e-01\n"
+        ),
+    )
+
+    seen: dict = {}
+
+    def capturing_run_yield(sample_set_path, **_kwargs):
+        with open(sample_set_path, encoding="utf-8") as handle:
+            seen["sim_report"] = json.load(handle)
+        seen["source"] = _read_samples(sample_set_path)[2]
+        return _fake_yield_report()
+
+    monkeypatch.setattr(yield_campaign, "run_yield", capturing_run_yield)
+
+    run_campaign(str(spec_path))
+
+    # Precondition: `run_sim` really did emit its schema-v2 object shape --
+    # otherwise the assertion below would pass vacuously.
+    assert seen["sim_report"]["schema_version"] == 2
+    assert seen["sim_report"]["netlist"] == {"path": "body.spice", "scope": "repo"}
+
+    assert seen["source"]["kind"] == "sim-report"
+    assert seen["source"]["netlist"] == "body.spice"
+
+
+@requires_native
+def test_run_campaign_source_netlist_is_a_string_not_a_path_scope_object(
+    tmp_path, monkeypatch
+):
+    """End-to-end over the real `run_sim` -> `run_yield` pipeline, inside a
+    fake repo so the netlist resolves as `scope: "repo"` with a non-null
+    path. The on-disk sim report carries the `{path, scope}` object (its own
+    schema v2), while the campaign's yield report exposes the unwrapped path
+    string that `docs/cli/yield.md` documents."""
+    root = _make_fake_repo(tmp_path)
+    _write_body(root)
+    spec_path = _write_spec(root, _base_spec())
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  5.00000e-01\n"
+        ),
+    )
+
+    report = run_campaign(str(spec_path))
+
+    with open(report["campaign"]["sim_report_path"], encoding="utf-8") as handle:
+        sim_report = json.load(handle)
+    # Precondition: the campaign really did hand a schema-v2 report to
+    # `run_yield` -- otherwise this test would pass vacuously.
+    assert sim_report["schema_version"] == 2
+    assert sim_report["netlist"] == {"path": "body.spice", "scope": "repo"}
+
+    assert report["source"]["kind"] == "sim-report"
+    assert report["source"]["netlist"] == "body.spice"

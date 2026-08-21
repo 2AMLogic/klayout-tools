@@ -43,7 +43,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   unmodified, as documented in #1254 — this only changes what a *future*
   run emits. See [`docs/cli/pex.md`](docs/cli/pex.md) and
   [`docs/cli/sim.md`](docs/cli/sim.md)'s "JSON schema (the contract)"
-  sections.
+  sections. **`klt yield`/`klt yield-campaign` are deliberately unaffected,
+  and do not bump**: `klt yield` echoes a sim report's `netlist` into its own
+  `source.netlist` — and `klt yield-campaign` feeds a live `klt sim` report
+  straight into it by default — so `yield_analysis._read_samples` now unwraps
+  the object to the resolved path string (`null` when the netlist is outside
+  the repo), keeping `source.netlist` the plain string
+  [`docs/cli/yield.md`](docs/cli/yield.md) has always documented. Schema-v1
+  sim reports (a raw string) still read through unchanged.
 - 2026-08-21 — `klt pex`'s DUT `.include` swap no longer silently accepts a
   non-DUT single-`.include` testbench, or a flat-schematic-DUT-vs-
   `.SUBCKT`-wrapped-extraction mismatch (issue #1255, two gaps left by

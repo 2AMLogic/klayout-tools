@@ -784,7 +784,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `schema_version` | integer | Version of this command's JSON shape (starts at `1`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
 | `samples` | string | Echo of the `<samples>` argument. |
 | `limits` | string \| null | Echo of `--limits`, or `null`. |
-| `source` | object | `kind` (`"sim-report"` or `"sample-set"`), `netlist` and `monte_carlo` (echoed from a sim report, else `null`), and `sample_count` (usable samples analysed across every reported measurement). |
+| `source` | object | `kind` (`"sim-report"` or `"sample-set"`), `netlist` (string \| `null`) and `monte_carlo` (echoed from a sim report, else `null`), and `sample_count` (usable samples analysed across every reported measurement). |
 | `confidence` | number | Effective two-sided confidence level. |
 | `target_ci_halfwidth` | number | Effective sample-size target. |
 | `min_samples` | integer | Effective per-measurement minimum. |
@@ -792,6 +792,15 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `measurement_count` | integer | `== len(measurements)`. |
 | `measurements` | array\<object\> | One entry per analysed measurement, in input order. |
 | `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared, no measurement declared a `negative_control`, one that did not detect degradation, one that [excluded errored samples](#errored-samples-and-conditional-yield) from its denominator, or one that [counted `failed_unmeasurable` draws as failures](#errored-samples-and-conditional-yield)), followed by the core's own. |
+
+> **`source.netlist` is always a plain string (or `null`).** From `klt sim`'s
+> `schema_version` 2 onward, a sim report's own top-level `netlist` field is a
+> `{path, scope}` object rather than a raw path string (it stops absolute paths
+> outside the invocation's repo from leaking into committed evidence — see
+> [`sim.md`](sim.md)). `klt yield` unwraps it: `source.netlist` carries the
+> resolved repo-relative path string, or `null` when the netlist lives outside
+> the repo. Schema-v1 sim reports (a raw string) are echoed unchanged, so this
+> command's own contract is unchanged in either direction.
 
 ### `measurements[]` entries
 

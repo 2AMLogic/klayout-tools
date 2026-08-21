@@ -453,6 +453,31 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _source_netlist(raw: Any) -> str | None:
+    """Extract the plain netlist path a `klt sim` report names, as a string.
+
+    `klt sim`'s own ``netlist`` field changed shape in its ``schema_version``
+    2 (issue #1261): a raw path string became a ``{"path", "scope"}`` object
+    so an absolute path outside the invocation's repo is never echoed. `klt
+    yield` echoes that field into its own ``source.netlist``, whose
+    documented contract is a **string** (see ``docs/cli/yield.md``) -- so
+    unwrap the object here rather than letting the upstream shape change
+    ripple, unannounced, through a second command's contract:
+
+    - schema-v2 sim report -> the resolved repo-relative path string, or
+      ``None`` when the netlist lives outside the repo (``scope`` is
+      ``external``/``absent``, whose ``path`` is ``null`` by construction).
+    - schema-v1 sim report (or any hand-written sample document) -> the raw
+      string, unchanged.
+    - anything else (missing field, unexpected type) -> ``None``, matching
+      the "no netlist recorded" case the sample-set branch already emits.
+    """
+    if isinstance(raw, dict):
+        path = raw.get("path")
+        return path if isinstance(path, str) else None
+    return raw if isinstance(raw, str) else None
+
+
 def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Return ``(kind, measurements, source_info)`` for the input document."""
     doc = _load_json(path, "samples")
@@ -465,7 +490,7 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
         mc = environment.get("monte_carlo") if isinstance(environment, dict) else None
         source = {
             "kind": "sim-report",
-            "netlist": doc.get("netlist"),
+            "netlist": _source_netlist(doc.get("netlist")),
             "monte_carlo": mc,
         }
         return "sim-report", measurements, source
