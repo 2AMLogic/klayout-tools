@@ -112,7 +112,8 @@ The same incremental discipline applies to LVS device recognition. Issue
 poly resistors; issue #1235 resolved the third poly-resistor flavour
 (``rhigh``, previously left unrecognised pending an external sheet-rho
 source -- see below) and added the two metal resistors that fit inside this
-deck's already-curated Metal1/Metal2 stack. Recognised today:
+deck's already-curated Metal1/Metal2 stack; issue #1234 added the two
+antenna diodes. Recognised today:
 
 - **MOS** -- thin-oxide ``sg13_lv_nmos``/``sg13_lv_pmos`` (the default
   ``active``/``nwell`` split) and thick-oxide ``sg13_hv_nmos``/
@@ -122,6 +123,9 @@ deck's already-curated Metal1/Metal2 stack. Recognised today:
 - **Drawn metal resistors** (issue #1235) -- ``res_metal1``/``res_metal2``,
   the two flavours whose ``metals`` level (Metal1/Metal2) this deck's stack
   already carries.
+- **Junction diodes** (issue #1234) -- the two antenna diodes, ``dantenna``
+  (n+ diffusion/p-substrate) and ``dpantenna`` (p+ diffusion/NWell) -- see
+  ``EXTRACTION_DECK``'s own diode note below for the full derivation.
 
 Still unrecognised, each tracked as its own follow-on issue rather than left
 a silent gap (a device class this deck cannot recognise extracts as ordinary
@@ -135,12 +139,10 @@ device, never a wrong device with a plausible value):
   above); #1243 has since landed the ``metals``/``vias`` stack extension
   MIM capacitors below also needed, so ``res_metal3``..``res_topmetal2``
   are now a standalone follow-on rather than a blocked one.
-- Diodes -- ``diode_extraction.lvs``'s antenna diodes (``dantenna``/
-  ``dpantenna``) and the three-terminal ``schottky_nbl1`` (extracted
-  upstream as a ``bjt3``, not a ``diode``) -- issue #1234 -- plus the
-  ``isolbox`` isolation device, the ``sg13_hv_svaricap`` varactor,
-  inductors, ESD devices, and the RF MOS/RF MIM variants, none of which is
-  tracked yet.
+- ``schottky_nbl1`` -- see "Schottky diode (``schottky_nbl1``) --
+  investigated, declined" below -- plus the ``isolbox`` isolation device,
+  the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF
+  MOS/RF MIM variants, none of which is tracked yet.
 
 ### MIM capacitors -- investigated/deferred (#1233), prerequisite landed (#1243)
 
@@ -191,6 +193,72 @@ a standalone follow-on (issue #1233, reopened against the extended stack)
 that can set ``top_plate_via``/``top_plate_via_metal`` correctly on the
 first pass, mirroring #775 rather than repeating sky130's two-step
 history.
+
+### Schottky diode (``schottky_nbl1``) -- investigated, declined (issue #1234)
+
+Unlike ``dantenna``/``dpantenna`` (whose ``EnDiode``-typed
+``extract_devices(diode(...))`` calls are, modulo the LVS-comparison-only
+``EnDiode``/``DiodeDeviceCombiner`` customisation, a plain two-terminal
+overlap :class:`~klayout_tools.decks.DiodeDevice` already expresses),
+``schottky_nbl1`` is extracted upstream as
+``extract_devices(bjt3('schottky_nbl1', Esd3Term), {...})``
+(``diode_extraction.lvs``) -- structurally the *same* stock
+``DeviceExtractorBJT3Transistor`` extractor :class:`BipolarDevice` wires up
+(``Esd3Term < RBA::DeviceClassBJT3Transistor``, ``custom_devices.lvs`` --
+unlike SiGe HBTs' genuinely different ``CustomBJTExtractor``/
+``GenericDeviceExtractor`` class), which is why the Curator guidance on this
+issue reasonably expected a ``BipolarDevice`` mapping (collector tied to the
+substrate, the same pattern issue #1232's own bipolar investigation
+documents) to fit. Investigating the actual terminal derivations
+(``diode_derivations.lvs``) against a real fetched IHP-Open-PDK v0.3.0
+install finds it does not, for the same class of reason #1232 declined the
+SiGe HBTs -- the *extractor* matches, but the *terminal geometry* does not:
+
+- **The emitter (``E``) terminal is a fixed-size box synthesized from a
+  size-filtered region, not a plain layer intersection.**
+  ``schottcky_p = schottcky_p_.with_bbox_min(0.3um).with_bbox_max(1.0um)``
+  first *filters* the Cont-and-Activ-and-marker region down to only those
+  components whose bounding box falls in that 0.3um-1.0um range (rejecting
+  every other size), then ``schottcky_p_1x1 = schottcky_p.middle(as_boxes)
+  .sized(0.499um)`` collapses each surviving component to its own centroid
+  box, re-expanded to a fixed ~1um x 1um reference size the comment above it
+  spells out explicitly ("schottky_nbl1 is a fixed device (0.3um X 1.0 um)").
+  :class:`BipolarDevice`'s ``base``/``emitter``/``marker`` fields (and this
+  engine's device-recognition primitives generally) support only "intersect
+  this drawn layer with that one, then require/exclude other drawn layers" --
+  there is no bounding-box-size filter or per-instance
+  shrink-to-centroid-then-fixed-resize primitive to express either step,
+  the identical "no size-filtered-region primitive at all" gap issue #1232's
+  own SiGe HBT finding already documents (there, on the emitter *pin*
+  filters; here, on the emitter *region* itself).
+- **The collector (``C``) terminal is likewise a compound, per-instance
+  geometric derivation.** ``schottcky_sub = ptap.extents.covering(schottcky_p)
+  .covering(schottcky_n)`` -- the *extents* of whichever ``ptap`` polygon
+  geometrically covers *both* already-derived ``schottcky_p``/``schottcky_n``
+  regions, a dynamic per-instance relationship (mirroring #1232's own
+  ``pnpMPA`` finding on its ``interacting(... .extents.interacting(...))``
+  collector/base terminals), not a static per-terminal layer set.
+- **The base (``B``) terminal reuses the same size-filtered marker chain**
+  (``schottky_mk``, itself an 8-way compound boolean of ``recog_diode``,
+  ``thickgateox_drw``, ``diode_exclude``, ``pwell_block``, ``ptap_holes``,
+  ``nbulay_drw``, ``salblock_drw``, ``nsd_block``, ``nwell_holes`` and
+  ``pwell``/``psd_drw`` exclusions, several of them (``pwell``, ``ptap_holes``)
+  not literal drawn layers in this PDK at all -- the same "compound
+  multi-layer marker, not a single drawn layer" gap #1232 documents for
+  ``npn_mk``) before the ``with_bbox_min``/``with_bbox_max`` filter above even
+  applies.
+
+Forcing a same-shaped approximation onto ``BipolarDevice`` here (e.g. a
+plain ``base``/``emitter``/``marker`` layer triple with no size filter, no
+fixed-size re-normalisation, and a static collector layer standing in for
+``schottcky_sub``'s dynamic per-instance derivation) would produce a
+self-consistent golden pair that still does not match SG13G2's real
+`schottky_nbl1` device count or its fixed ~0.3um^2 area convention -- the
+same failure mode #1232's own investigation, and this deck's "SiGe HBTs"
+section below, already warn against. So ``schottky_nbl1`` stays unmodelled,
+tracked under this same issue rather than a silent gap, until this engine
+grows a bounding-box-size-filtered/dynamic-relationship device-recognition
+primitive general enough for its real derivation.
 
 ### SiGe HBTs -- investigated, declined (issue #1232)
 
@@ -288,6 +356,7 @@ diffed sky130's compiled deck against ``sky130.lvs``.
 from __future__ import annotations
 
 from . import (
+    DiodeDevice,
     DrcRule,
     ExtractionDeck,
     MOSFlavour,
@@ -1063,6 +1132,11 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     # `layers_def.drc` (`get_polygons(8, 29)`/`get_polygons(10, 29)`).
     (8, 29): "Metal1.res",
     (10, 29): "Metal2.res",
+    # Junction-diode recognition layers (issue #1234) -- names transcribed
+    # from the same `sg13g2.lyp` file, exactly as drawn there (neither
+    # carries a `.drawing` purpose suffix in the PDK's own naming).
+    (99, 31): "Recog.diode",
+    (46, 21): "PWell.block",
 }
 
 # Voltage-domain marker layer this deck draws but does not *fully* model the
@@ -1415,6 +1489,127 @@ EXTRACTION_DECK = ExtractionDeck(
             marker=(10, 29),  # Metal2.res (metal2_res)
             sheet_rho_ohm_sq=0.088,  # RSH_RES_METAL2 (res_extraction.lvs)
             provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "res_metal2"),
+        ),
+    ),
+    # Antenna diodes (issue #1234), transcribed from
+    # `diode_derivations.lvs`/`diode_extraction.lvs`:
+    #
+    #     diode_exclude = gatpoly.join(nsd_drw).join(trans_drw)
+    #                     .join(emwind_drw).join(emwihv_drw).join(polyres_drw)
+    #                     .join(extblock_drw).join(res_drw).join(activ_mask)
+    #                     .join(recog_esd).join(ind_drw).join(ind_pin)
+    #                     .join(substrate_drw)
+    #     antenna_d_exc = pwell_block.join(salblock_drw)
+    #                     .join(nsd_block).join(diode_exclude)
+    #     antenna_d_mk = recog_diode.not(antenna_d_exc)
+    #
+    #     dantenna_n = antenna_d_mk.and(activ).not(psd_drw).not(nwell_drw)
+    #     dantenna_p = antenna_d_mk.and(pwell).covering(dantenna_n)
+    #     extract_devices(diode('dantenna', EnDiode),
+    #                     { 'N' => dantenna_n, 'P' => dantenna_p })
+    #
+    #     dpantenna_p = antenna_d_mk.and(pactiv)
+    #     dpantenna_n = dpantenna_p.inside(nwell_drw)
+    #     extract_devices(diode('dpantenna', EnDiode),
+    #                     { 'N' => dpantenna_n, 'P' => dpantenna_p })
+    #
+    # (`pactiv = activ.and(psd_drw)`, `general_derivations.lvs`.) `EnDiode`
+    # is a thin `RBA::DeviceClassDiode` subclass (`custom_devices.lvs`) that
+    # only customises LVS-comparison tolerance/combining, not the extracted
+    # `A`/`P` parameters themselves -- functionally the same
+    # `kdb.DeviceExtractorDiode`/`DeviceClassDiode` pair this engine's own
+    # `DiodeDevice` wiring already drives, so both flavours map cleanly.
+    #
+    # Mapping onto `DiodeDevice` fields: `marker` is `recog_diode` (99/31,
+    # `Recog.diode` in the PDK's own `sg13g2.lyp`) rather than `antenna_d_mk`
+    # itself, since `antenna_d_mk`'s own `.not(antenna_d_exc)` narrowing is a
+    # boolean subtraction this engine expresses through `requires`/`excludes`
+    # instead -- applied to *both* terminals below (mirroring how the real
+    # derivation subtracts it before either `dantenna_n`/`dantenna_p` is
+    # computed). `pwell` (sg13g2 draws no separate PWell mask -- see the
+    # module docstring's MOS-recognition note above) is the same
+    # "no drawn substrate/well layer" case gf180mcu's own `diode_nd2ps_06v0`
+    # documents: `anode=None` for `dantenna` stands in with the device's own
+    # marker footprint, tied to `substrate_net` by `extract.py`.
+    #
+    # - `dantenna` (n+ diffusion/p-substrate): cathode = `Activ`, excluding
+    #   `pSD` (`.not(psd_drw)`) and `NWell` (`.not(nwell_drw)`); anode =
+    #   `None` (substrate stand-in), excluding `NWell` too (`pwell` itself
+    #   already excludes `nwell_drw` by definition).
+    # - `dpantenna` (p+ diffusion/NWell): anode = `Activ` requiring `pSD`
+    #   (`pactiv = activ.and(psd_drw)`); cathode = this deck's own `NWell`
+    #   layer, sharing that well's own net identity through `extract.py`'s
+    #   well wiring -- the same `diode_pd2nw_06v0`-style substitution
+    #   gf180mcu's own diode note documents for upstream's `...inside(...)`
+    #   well-selection idiom, and (mirroring that entry) deliberately *not*
+    #   narrowed by the `antenna_d_exc`/`diode_exclude` subset below: doing so
+    #   would punch holes in the well terminal for no disambiguation benefit,
+    #   since the marked diffusion side already decides whether the device
+    #   exists.
+    #
+    # Only the `antenna_d_exc`/`diode_exclude` members this deck already
+    # carries layer numbers for are transcribed as excludes (the same
+    # "modelled subset, explicit gap" discipline gf180mcu's own diode entries
+    # use for their `diode_exclude`): `PWell.block` (46/21) and `SalBlock`
+    # (28/0) (`antenna_d_exc`'s own head terms), `nSD.block` (7/21)
+    # (`antenna_d_exc`), and `GatPoly` (5/0), `nSD.drawing` (7/0), `PolyRes`
+    # (128/0), `EXTBlock` (111/0), `RES` (24/0) (the `diode_exclude` members
+    # this deck otherwise models as device-marker layers for the resistor
+    # entries above). The remaining `diode_exclude` members (`trans_drw`,
+    # `emwind_drw`, `emwihv_drw`, `activ_mask`, `recog_esd`, `ind_drw`,
+    # `ind_pin`, `substrate_drw`) are not modelled at all by this curated
+    # deck and are not transcribed -- an explicit, documented gap rather than
+    # a silent one.
+    diodes=(
+        DiodeDevice(
+            name="dantenna",  # upstream LVS device-class name
+            marker=(99, 31),  # Recog.diode
+            anode=None,  # p-substrate ("pwell") -- no drawn PWell mask
+            anode_excludes=(
+                (31, 0),  # NWell    -- `pwell` excludes `nwell_drw` itself
+                (46, 21),  # PWell.block -\
+                (28, 0),  # SalBlock     |
+                (7, 21),  # nSD.block    |- `antenna_d_exc`/`diode_exclude`
+                (5, 0),  # GatPoly       |  modelled subset (see note above)
+                (7, 0),  # nSD.drawing   |
+                (128, 0),  # PolyRes    |
+                (111, 0),  # EXTBlock  |
+                (24, 0),  # RES       -/
+            ),
+            cathode=(1, 0),  # Activ.drawing
+            cathode_excludes=(
+                (14, 0),  # pSD -- `dantenna_n` excludes `psd_drw`
+                (31, 0),  # NWell -- `dantenna_n` excludes `nwell_drw`
+                (46, 21),  # PWell.block -\
+                (28, 0),  # SalBlock     |
+                (7, 21),  # nSD.block    |- `antenna_d_exc`/`diode_exclude`
+                (5, 0),  # GatPoly       |  modelled subset (see note above)
+                (7, 0),  # nSD.drawing   |
+                (128, 0),  # PolyRes    |
+                (111, 0),  # EXTBlock  |
+                (24, 0),  # RES       -/
+            ),
+            provenance=_sg13g2_lvs_provenance("diode_extraction.lvs", "dantenna"),
+        ),
+        DiodeDevice(
+            name="dpantenna",  # upstream LVS device-class name
+            marker=(99, 31),  # Recog.diode
+            anode=(1, 0),  # Activ.drawing
+            anode_requires=(
+                (14, 0),  # pSD -- `pactiv = activ.and(psd_drw)`
+            ),
+            anode_excludes=(
+                (46, 21),  # PWell.block -\
+                (28, 0),  # SalBlock     |
+                (7, 21),  # nSD.block    |- `antenna_d_exc`/`diode_exclude`
+                (5, 0),  # GatPoly       |  modelled subset (see note above)
+                (7, 0),  # nSD.drawing   |
+                (128, 0),  # PolyRes    |
+                (111, 0),  # EXTBlock  |
+                (24, 0),  # RES       -/
+            ),
+            cathode=(31, 0),  # NWell.drawing -- shares this deck's well node
+            provenance=_sg13g2_lvs_provenance("diode_extraction.lvs", "dpantenna"),
         ),
     ),
 )

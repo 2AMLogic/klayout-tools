@@ -156,7 +156,7 @@ not a full transcription:
 |---|---|---|
 | DRC geometric rules | one connected Activ→TopMetal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2, Metal3, Via3, Metal4, Via4, Metal5, TopVia1, TopMetal1, TopVia2, TopMetal2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
 | LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1231) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`), the `sg13_hv_svaricap` varactor |
-| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq), `rppd` (260 Ω/sq, issue #1231) and `rhigh` (1360 Ω/sq, issue #1235 — its upstream sheet-rho ambiguity resolved against a third citable source, `cornerRES.lib`'s `res_typ` corner); drawn metal resistors `res_metal1` (0.110 Ω/sq) and `res_metal2` (0.088 Ω/sq), issue #1235 | metal resistors `res_metal3`..`res_topmetal2`², MIM capacitors (`cap_cmim`/`rfcmim`)², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, diodes (`dantenna`/`dpantenna`/`schottky_nbl1`), inductors, ESD devices |
+| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq), `rppd` (260 Ω/sq, issue #1231) and `rhigh` (1360 Ω/sq, issue #1235 — its upstream sheet-rho ambiguity resolved against a third citable source, `cornerRES.lib`'s `res_typ` corner); drawn metal resistors `res_metal1` (0.110 Ω/sq) and `res_metal2` (0.088 Ω/sq), issue #1235; antenna diodes `dantenna` (n+/p-substrate) and `dpantenna` (p+/NWell), issue #1234 | metal resistors `res_metal3`..`res_topmetal2`², MIM capacitors (`cap_cmim`/`rfcmim`)², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, `schottky_nbl1`³, inductors, ESD devices |
 | Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
 
 ¹ SiGe HBTs are a different kind of gap from the rest of this row: issue
@@ -188,6 +188,15 @@ so recognising `cap_cmim`/`rfcmim` and `res_metal3`..`res_topmetal2` is now
 each its own standalone follow-on against the already-extended stack, not a
 blocked one. See `src/klayout_tools/decks/sg13g2.py`'s "MIM capacitors —
 investigated, deferred" docstring section for the full finding.
+
+³ `schottky_nbl1` is likewise an *investigated, declined* gap (issue #1234):
+it extracts upstream through the same stock `DeviceExtractorBJT3Transistor`
+extractor `BipolarDevice` wires up, but its emitter terminal is a fixed-size
+box synthesized from a bounding-box-size-filtered region and its collector
+terminal a dynamic per-instance `.covering(...)` derivation — neither
+expressible by `BipolarDevice`'s plain layer-intersection fields. See
+`src/klayout_tools/decks/sg13g2.py`'s "Schottky diode (schottky_nbl1) —
+investigated, declined" docstring section for the full finding.
 
 An unrecognised device class extracts as ordinary interconnect, so a design
 using one will see it as a short (LVS `device.unmatched`), never as a wrong
