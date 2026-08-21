@@ -218,32 +218,64 @@ Device subcircuit names resolve through the same curated table `klt extract
 When a device name is not one of the curated devices, supply it explicitly:
 
 - `reference.deck` — `"sky130"` / `"gf180mcu"`, selects that deck's device
-  map (validates names against it).
-- `reference.device_map` — an explicit `{ "<subckt-name>": "<nfet|pfet>" }`
-  override, merged on top of the deck's map.
+  map (validates names against it, and already covers MOS, resistor,
+  capacitor, and bipolar for both registered decks — see below).
+- `reference.device_map` — an explicit, **MOS-only** `{ "<subckt-name>":
+  "<nfet|pfet>" }` override, merged on top of the deck's map. This field
+  cannot express a non-MOS device (resistor/capacitor/bipolar) — see the
+  `reference.device_map` field description below for the full limitation.
 
-The conversion is deliberately narrow and loud (a wrong parameter/unit mapping
-into a sign-off tool must never pass silently):
+The converter recognises four device families through that same curated
+table, never a second, independent device-name mapping — MOS, resistor,
+capacitor, and bipolar (issue #1130 extended the original, MOS-only #280
+converter). See `netlist_normalize.py`'s module docstring for the full
+per-family rationale. It is deliberately narrow and loud (a wrong
+parameter/unit mapping into a sign-off tool must never pass silently):
 
-- Only `X` cards that carry an `l`/`w` parameter are treated as MOS devices;
-  a genuine hierarchical subcircuit instance passes through untouched.
-- `L`/`W` are carried and converted to explicit micrometre-suffixed literals
-  (`0.5u` → `L=0.5U`; SI metres `1.5e-6` → `W=1.5U`). A `.option scale`
-  bare-micrometre convention is **not** inferred — emit explicit unit
-  suffixes (see "Unit suffixes matter" below).
-- Every other parameter is dropped: the parasitic-only
-  `ad`/`as`/`pd`/`ps`/`nrd`/`nrs`/`sa`/`sb`/`sd` (which `klt extract` does not
-  carry either) and any other model parameter.
-- `nf`/`m` > 1 (a multi-finger/multiplied device the curated plain-element
-  form cannot represent) is **rejected** with a specific error naming the
-  device — never silently dropped or misinterpreted. Flatten it (one device
-  per drawn gate) in the schematic netlist first.
-- A device-like `X` card whose subcircuit name is not in the resolved device
-  map is a hard error, never a silent pass-through.
+- **Detection.** An `X` card is a conversion candidate when its subcircuit
+  name resolves in the curated table (any family, including bipolar — see
+  below), *or*, for MOS/resistor/capacitor only, when it carries an
+  `l`/`w`/`r_length`/`r_width`/`c_length`/`c_width`-style geometry parameter
+  even though the name did not resolve (the original #280 MOS-only
+  heuristic, now shared across those three families). Bipolar carries no
+  distinguishing geometry parameter at all, so it is recognised **only** by
+  a positive subcircuit-name match against the curated table — never by the
+  geometry-parameter heuristic. Anything else (a genuine hierarchical
+  subcircuit instance) passes through untouched. A device-like `X` card
+  whose subcircuit name is not in the resolved device map is a hard error,
+  never a silent pass-through.
+- **MOS** converts to a plain `M` card. `L`/`W` are carried and converted to
+  explicit micrometre-suffixed literals (`0.5u` → `L=0.5U`; SI metres
+  `1.5e-6` → `W=1.5U`). A `.option scale` bare-micrometre convention is
+  **not** inferred — emit explicit unit suffixes (see "Unit suffixes
+  matter" below). Every other parameter is dropped: the parasitic-only
+  `ad`/`as`/`pd`/`ps`/`nrd`/`nrs`/`sa`/`sb`/`sd` (which `klt extract` does
+  not carry either) and any other model parameter.
+- **Resistor and capacitor** convert to plain `R`/`C` cards the same way —
+  their own length/width call-site parameters (`l`/`w` for sky130,
+  `r_length`/`r_width` or `c_length`/`c_width` for gf180mcu) are carried
+  onto explicit `L=`/`W=` (resistor) or a derived `A=`/`P=` plate
+  area/perimeter (capacitor: `area = L*W`, `perimeter = 2*(L+W)` —
+  elementary geometry, not a PDK-specific coefficient). Geometry is carried
+  only when the call actually supplies it; the subcircuit's own default
+  geometry applies otherwise.
+- **Bipolar** converts to a plain `Q` card. It carries no length/width-style
+  parameter at all (sky130's fixed-geometry `pnp_05v5` cells are selected
+  purely by subcircuit name); its only real call-site parameter is an
+  optional `mult`, carried onto the plain-element `Q` card's `NE`
+  (KLayout's `DeviceClassBJT3Transistor` natively represents multiple
+  parallel emitters via `NE`).
+- `nf`/`m`/`mult` > 1 on a MOS/resistor/capacitor call (a multi-finger/
+  multiplied device the curated plain-element form cannot represent) is
+  **rejected** with a specific error naming the device — never silently
+  dropped or misinterpreted. Flatten it (one device per drawn gate) in the
+  schematic netlist first. Bipolar's `mult` is the one exception: it is
+  carried onto `NE`, not rejected, since `DeviceClassBJT3Transistor` can
+  represent multiple parallel emitters that way.
 
-A reference netlist that *mixes* plain-element `M` cards and subckt-call `X`
-device cards converts correctly under `form: "subckt-call"` — the `M` cards
-pass through unchanged.
+A reference netlist that *mixes* plain-element (`M`/`R`/`C`/`Q`) cards and
+subckt-call `X` device cards converts correctly under `form:
+"subckt-call"` — the plain-element cards pass through unchanged.
 
 **gf180mcu MOS flavour subcircuits** (issue #1111): the curated table also
 recognises `nfet_06v0`/`pfet_06v0` (gf180mcu's `Dualgate`-scoped 5V/6V MOS
@@ -438,7 +470,7 @@ each resolves relative paths inside the document.
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
 | `reference.form` | string | `"plain-element"` (default) or `"subckt-call"`. `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. |
 | `reference.deck` | string | Only used with `form: "subckt-call"`. `"sky130"`/`"gf180mcu"` — selects that deck's curated device-name map for the conversion (and validates device names against it). Omit to auto-resolve each device subcircuit name against the whole curated table. |
-| `reference.device_map` | object\<string, string\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": "<nfet\|pfet>" }` overrides, merged on top of `reference.deck`'s map — for a device subcircuit name the curated table does not cover. |
+| `reference.device_map` | object\<string, string\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": "<nfet\|pfet>" }` overrides, merged on top of `reference.deck`'s map — for a MOS device subcircuit name the curated table does not cover. **MOS only, permanently**: every entry is resolved as a 4-terminal MOS (`d g s b`) binding regardless of the real device's shape, so a non-MOS device (resistor/capacitor/bipolar, or any other class a curated deck does not already recognise) cannot be overridden through this field today — pass `reference.deck` instead when the device is one of a registered deck's curated non-MOS classes, or hand-author the reference in plain-element form otherwise. |
 | `reference.device_bulk` | object\<string, string\> | Optional `{ "<device-class / model name>": "<reference net name>" }` — declares that the reference netlist's device class of that name carries an *implicit* bulk/well/collector terminal on the named net, which the layout side's same-named class declares explicitly (issue #506). `klt lvs` adds that one terminal to the reference class and ties it to the named net on every reference-side instance before `NetlistComparer.compare()` runs, so a deck's bulk-terminal device flavour can match a schematic reference that does not model the terminal at all — the reconciliation `device.class_arity` only diagnoses. The net is looked up on each circuit that instantiates the class (matched exactly, then case-insensitively) and **created** there when the reference does not model that node; to bind the added terminal to a layout-side net of a different name, compose with a `hints.same_nets` pair. Every reconciled class emits a `severity: "warning"`, `category: "device.bulk_reconciled"` disclosure entry — see "`device.bulk_reconciled`" below. Model names are matched exactly first and then case-insensitively (`NetlistSpiceReader` upper-cases `res_x` to `RES_X`). A name that resolves on neither side, a class the reference is *not* actually missing a terminal from, and a class two or more terminals apart (this hook reconciles exactly one extra terminal per class, since the entry names exactly one net) are each an application error (exit 1), not a silent no-op. `"engine": "klayout"` only. |
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. |
 | `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |
@@ -493,7 +525,7 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
     "devices": { "layout": 5, "reference": 5, "matched": 5 },
     "pins": { "layout": 4, "reference": 4, "matched": 4 }
   },
-  "device_classes": ["nfet", "pfet", "resistor"],
+  "device_classes": ["nfet", "pfet", "pnp", "sky130_fd_pr__model__cap_mim", "sky130_fd_pr__model__cap_mim_m4", "resistor"],
   "environment": {
     "engine": "klayout",
     "engine_version": "0.30.10",
@@ -576,7 +608,7 @@ section this engine buckets rather than fully structures:
 | `category_counts` | object\<string, int\> | Per-category mismatch counts (`error` and `warning` entries combined), keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
 | `category_error_counts` | object\<string, int\> | Issue #1132: `category_counts`, but counting only `severity: "error"` entries per category — lets a caller gate on "does category X have any real defect" without re-reading `mismatches[]` and re-filtering by `severity` itself. Same sorted-keys convention as `category_counts`; a category with zero `error` entries (all `warning`, e.g. an all-`warning` `topology.flattened` run) is simply absent from this object rather than reported as `0`, matching `category_counts`'s own "no entries of this category" convention. `sum(category_error_counts.values()) == error_count`. |
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. For `"engine": "netgen"`, `matched` is exact on a `"match"` verdict and `0` on a `"mismatch"` verdict (a known limitation — see "Engine" -> `"netgen"` above). |
-| `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Present (currently `["nfet", "pfet", "resistor"]` for both registered decks — MOS plus one drawn precision resistor, see `klt extract`'s "Drawn resistors") whenever a `layout.deck` is given — always for `layout.file` (inline extraction, where the deck is required), and also for the pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it (issue #585). `null` only when no `layout.deck` was given (the bare `{"netlist": ..., "top": ...}` shape). |
+| `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Deck-dependent, not MOS-only (issue #1130 added resistor/capacitor/bipolar/diode extraction to both registered decks) — as of 2026-08-21, sky130 reports `["nfet", "pfet", "pnp", "sky130_fd_pr__model__cap_mim", "sky130_fd_pr__model__cap_mim_m4", "resistor"]` and gf180mcu reports `["nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor", "diode_nd2ps_06v0", "diode_pd2nw_06v0"]` — re-check the installed deck's own `device_classes` rather than treating either list as a value this doc pins for future decks/versions. Present whenever a `layout.deck` is given — always for `layout.file` (inline extraction, where the deck is required), and also for the pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it (issue #585). `null` only when no `layout.deck` was given (the bare `{"netlist": ..., "top": ...}` shape). |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise — excluded from `klt lvs --check --rerun`'s drift diff, see "Full mode (`--rerun`)" below). |
 | `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (LVS is topological and resolves no PDK); `deck` pins the layout-side extraction deck by name and `sha256:` content hash whenever a `layout.deck` is given (both the `layout.file` and the pre-extracted `layout.netlist` shapes), and is `null` only when no `layout.deck` was given (matching `device_classes`). `deck.released` (issue #1193) is a non-fatal tri-state signal for whether that content hash ships in any released `klayout-tools` version — `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing). `deck.options` (issue #600) echoes the resolved `layout.deck_options` mapping — present only when non-empty, matching `klt extract`'s own `provenance.deck.options` shape exactly. `klayout_version` is populated the same way for both engines (it is this process's own `klayout` package build, used for netlist parsing/writing either way, not the comparator). |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
