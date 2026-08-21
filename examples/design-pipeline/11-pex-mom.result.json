@@ -160,16 +160,25 @@
     },
     "mom_rlc_override": null,
     "net_count": 12,
-    "netlist_sha256": "4cb8eefba323cc92f9147088476195d6a065ecea77a761a4ed0d5c64994d64c9"
+    "netlist_sha256": "b72d882a381b20646eef800fcfc2ced340c4ab8394ce38cfac88e76e278b8204"
   },
   "failed": 0,
-  "layout": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/06-layout.gds",
-  "netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/11-pex-mom-extracted.spice",
+  "flat_dut_mismatch": null,
+  "layout": {
+    "path": "examples/design-pipeline/06-layout.gds",
+    "scope": "repo"
+  },
+  "netlist": {
+    "path": "examples/design-pipeline/11-pex-mom-extracted.spice",
+    "scope": "repo"
+  },
   "passed": 18,
+  "pin_count_mismatch": null,
   "provenance": {
     "deck": {
       "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
-      "name": "sky130"
+      "name": "sky130",
+      "released": false
     },
     "input": {
       "content_hash": "sha256:c7e9145fb8def74b60c69d65a17f3a37c251ec4abbcadde7fc9ad3a31041ebf6"
@@ -178,8 +187,11 @@
     "klt_version": "0.2.0",
     "pdk": null
   },
-  "reference_netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/07-reference.spice",
-  "schema_version": 1,
+  "reference_netlist": {
+    "path": "examples/design-pipeline/07-reference.spice",
+    "scope": "repo"
+  },
+  "schema_version": 2,
   "status": "pass",
   "testbenches": [
     {
@@ -189,8 +201,14 @@
         "itail_meas",
         "ivout_meas"
       ],
-      "request": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/11-pex-mom.request.json",
-      "schematic_netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/07-reference.spice"
+      "request": {
+        "path": "examples/design-pipeline/11-pex-mom.request.json",
+        "scope": "repo"
+      },
+      "schematic_netlist": {
+        "path": "examples/design-pipeline/07-reference.spice",
+        "scope": "repo"
+      }
     }
   ]
 }

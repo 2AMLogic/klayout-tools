@@ -58,4 +58,6 @@ RVOUT_t0 VOUT__t0 VOUT 327.142
 RVOUT_t1 VOUT__t1 VOUT 327.142
 * device instance VOUT r0 *1 0,0 
 CVOUT VOUT vsubs 1.762458e-15
+* device instance vsubs_dctie r0 *1 0,0 
+Rvsubs_dctie vsubs 0 1e+12
 .ENDS ota_5t_layout_0
