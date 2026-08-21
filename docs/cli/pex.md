@@ -154,6 +154,38 @@ and reporting the wrong `reference_netlist` (issue #1030). Fold any other
 included file into the DUT netlist itself, or inline it into the testbench
 body, so exactly one `.include`/`.inc` line remains.
 
+### That one line must plausibly name the DUT
+
+Even with exactly one `.include`/`.inc` line, that file must itself
+plausibly *be* a DUT (issue #1255). A testbench whose sole `.include`
+happens to name a shared corner/parameter file — for example, because the
+testbench's own DUT is netlisted as discrete device-level primitives
+written directly in the testbench body (to break a feedback loop a
+black-box DUT doesn't expose a port for), leaving only an unrelated
+`.include` in the file — used to be silently swapped in as if it were the
+DUT: the run completed with `status: "pass"`, `reference_netlist` naming a
+file that was not the DUT at all, and an empty (or spurious) `delta[]` — a
+vacuous pass, not an error. This is now a hard, up-front error (exit `1`),
+before either side ever simulates:
+
+```
+testbench 'testbench.json': its single `.include`/`.inc` directive names
+'/abs/path/design.ngspice', but that file declares no `.SUBCKT` and no
+circuit element of its own -- it parses as parameter/model/corner-file
+content only, so it cannot be the DUT klt pex is meant to swap for the
+extracted netlist (issue #1255). ...
+```
+
+The check is deliberately permissive about *how* the DUT is written: both a
+`.SUBCKT`-wrapped file and a flat file (bare device cards, no wrapper — see
+"Flat schematic DUT vs `.SUBCKT`-wrapped extraction" below) pass it; only a
+file with no circuit content at all — pure `.param`/`.model`/`.lib`/comment
+lines — is rejected. If the DUT's own devices are written directly in the
+testbench body instead of `.include`d as a separate file, `klt pex` cannot
+re-point at the extracted netlist without also rewriting those device
+cards, which is out of scope: rewrite the testbench so its single
+`.include`/`.inc` line names the schematic DUT file itself.
+
 ### The pin lists must match: `pin_count_mismatch`
 
 Because the testbench's own `X...` instantiation line is reused
@@ -236,6 +268,67 @@ caller-supplied `--pin-map`, or an explicitly-named wrapper subcircuit —
 compare `klt lvs`'s [`hints.equivalent_pins`](lvs.md)) is deliberately out
 of scope here: this reports the mismatch, it does not paper over it.
 
+### Flat schematic DUT vs `.SUBCKT`-wrapped extraction: `flat_dut_mismatch`
+
+`pin_count_mismatch` above assumes the schematic DUT itself declares a
+`.SUBCKT` header — it compares two interfaces. A schematic DUT netlisted
+**flat** (no `.SUBCKT`/`.ENDS` wrapper at all — e.g. because an EDA tool
+netlisted it as a standalone top-level schematic, with the testbench
+relying on the DUT's own internal nodes being ordinary top-level nets) is a
+different, adjacent condition (issue #1255, Gap 2): `klt extract`'s output
+is **always** `.SUBCKT`-wrapped, so swapping a flat schematic `.include`
+for the wrapped extracted netlist silently disconnects every testbench
+source/probe from the DUT — `klt pex` only re-points the `.include`/`.inc`
+line, it never adds an `X...` instantiation of the newly-wrapped
+subcircuit.
+
+Unlike `pin_count_mismatch` (**reactive**: only ever consulted once an
+extracted-side simulation attempt has already come back with nothing
+measured), this check is **proactive**: it runs once, from the two
+netlists' own text, *before* either side ever simulates. That distinction
+matters because a flat-vs-wrapped mismatch does not reliably fail loudly —
+a testbench with no `.ic`/similar card referencing the now-disconnected
+nodes may simply simulate the disconnected fixture to completion and
+report a plausible-looking but physically meaningless number for a
+measurement that happens to be well-defined on the stimulus side alone,
+exactly the failure mode `pin_count_mismatch`'s "nothing measured came
+back" gate cannot catch.
+
+When it fires, the extracted side is never even attempted (so
+`pin_count_mismatch` stays `null` — the two diagnostics are mutually
+exclusive), and the report carries the same per-corner `delta[]` shape as a
+`pin_count_mismatch` run (`extracted_value: null`, `status: "error"`) plus
+a top-level `flat_dut_mismatch` block, in the same shape as
+`pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` per-side detail,
+`ngspice_message` — always `null` here, since no engine is ever invoked —
+and `detail`):
+
+```json
+"flat_dut_mismatch": {
+  "subcircuit": "RES",
+  "schematic": {
+    "netlist": "/abs/path/flat_dut.spice",
+    "subcircuit": null,
+    "pin_count": null,
+    "pins": null
+  },
+  "extracted": {
+    "netlist": "/abs/path/top.spice",
+    "subcircuit": "RES",
+    "pin_count": 2,
+    "pins": ["RA", "RB"]
+  },
+  "ngspice_message": null,
+  "detail": "the schematic DUT (...) declares no `.SUBCKT` at all -- ..."
+}
+```
+
+Exit code `4`, same as `pin_count_mismatch`. Fix by wrapping the schematic
+DUT in a matching `.SUBCKT ... .ENDS` (with the same top-level pin list
+`klt extract` produces), so the testbench's own instantiation line can be
+reused unmodified on both sides — the same convention `pin_count_mismatch`
+already requires.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -304,6 +397,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
   "failed": 0,
   "errored": 0,
   "pin_count_mismatch": null,
+  "flat_dut_mismatch": null,
   "provenance": {
     "klt_version": "0.4.2",
     "klayout_version": "0.30.10",
@@ -329,6 +423,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
 | `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
+| `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
 
 ### `delta[]` entries
@@ -347,9 +442,9 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | Exit code | Meaning                                                                                     |
 | --------- | -------------------------------------------------------------------------------------------- |
 | `0`       | Every `delta[]` row passed.                                                                   |
-| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one**, testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
+| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
-| `4`       | Ran successfully; at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`. |
+| `4`       | Ran successfully; at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
 
 (`2` is reserved for argparse usage errors, as with every other `klt`
 subcommand. Exit codes `3`/`4` mirror `klt sim`'s own precedent — see

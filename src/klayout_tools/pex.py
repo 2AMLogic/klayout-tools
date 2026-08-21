@@ -264,6 +264,53 @@ def _rewrite_dut_include(body_text: str, line_index: int, new_dut_path: str) -> 
     return "".join(lines)
 
 
+def _check_dut_declares_a_circuit(testbench_path: str, dut_path: str) -> None:
+    """Raise :class:`PexError` if ``dut_path`` -- the sole `.include`/`.inc`
+    target :func:`_find_dut_include` resolved for ``testbench_path`` -- does
+    not plausibly *be* a DUT at all (Gap 1, issue #1255).
+
+    A testbench whose only `.include` happens to name a shared parameter/
+    model/corner file (declaring no `.SUBCKT` and no circuit element of its
+    own -- e.g. a PDK's global switch-parameter file, or a corner-selection
+    `.param` file, `.include`d because the testbench structurally can't
+    `.include` the real DUT at all, e.g. its own devices are decomposed and
+    written directly in the testbench body instead) used to be silently
+    swapped in as if it were the DUT: the run would complete with
+    `status: "pass"`, `reference_netlist` naming a file that is not the DUT
+    at all, and an empty (or spurious) `delta[]` -- a vacuous pass, not an
+    error. This is a hard, up-front error instead (before either side ever
+    simulates), matching :func:`_find_dut_include`'s own two sibling error
+    cases (no `.include` at all, or more than one).
+
+    Deliberately permissive about *how* the DUT is written -- see
+    :func:`_dut_declares_a_circuit`'s own docstring for what does and does
+    not count as "a circuit".
+    """
+    text = _read_text(dut_path)
+    if text is None:
+        raise PexError(
+            f"testbench '{testbench_path}': `.include`/`.inc` target "
+            f"could not be read: {dut_path}"
+        )
+    if _dut_declares_a_circuit(text):
+        return
+    raise PexError(
+        f"testbench '{testbench_path}': its single `.include`/`.inc` "
+        f"directive names {dut_path!r}, but that file declares no "
+        "`.SUBCKT` and no circuit element of its own -- it parses as "
+        "parameter/model/corner-file content only, so it cannot be the "
+        "DUT klt pex is meant to swap for the extracted netlist (issue "
+        "#1255). If the DUT's own devices are written directly in the "
+        "testbench body instead of `.include`d as a separate file (e.g. "
+        "to decompose it into discrete primitives, to break a feedback "
+        "loop a black-box DUT doesn't expose a port for), klt pex cannot "
+        "re-point at the extracted netlist without also rewriting those "
+        "device cards, which is out of scope -- rewrite the testbench so "
+        "its single `.include`/`.inc` line names the schematic DUT file "
+        "itself"
+    )
+
+
 def _read_text(path: str) -> str | None:
     """``path``'s text, or ``None`` if it cannot be read -- every caller here
     is building a *diagnostic*, so an unreadable file degrades the diagnostic
@@ -315,6 +362,40 @@ def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
             pins.append(token)
         interfaces.setdefault(name.lower(), (name, pins))
     return interfaces
+
+
+def _dut_declares_a_circuit(text: str) -> bool:
+    """``True`` if ``text`` -- a ``.include``/``.inc`` target's own file
+    contents -- declares at least one ``.subckt`` header or circuit element
+    card of its own, i.e. plausibly *is* a DUT netlist rather than
+    parameter/model/corner-file content with no circuit of its own (Gap 1,
+    issue #1255: a testbench whose only `.include` happens to name a shared
+    corner/parameter file used to be silently swapped in as if it were the
+    DUT).
+
+    Deliberately permissive about *how* the DUT is written: both a
+    ``.SUBCKT``-wrapped file (any header at all, even an empty body --
+    ``_subckt_interfaces`` only parses headers) and a flat file (bare device
+    cards, no wrapper) pass this check; only a file with *no* circuit
+    content at all -- pure ``.param``/``.model``/``.lib``/comment/`.` control
+    cards -- fails it. A flat schematic DUT against a `.SUBCKT`-wrapped
+    extraction is a *different*, separately-diagnosed condition -- see
+    :func:`_flat_dut_mismatch`.
+
+    Every non-blank line that survives comment-stripping and is not itself
+    a `.`-prefixed control card is treated as a circuit element -- SPICE's
+    own convention is that such a line names a device/subcircuit instance
+    (``R``/``C``/``L``/``M``/``Q``/``D``/``X``/``V``/``I``/...), so no fixed
+    prefix list is needed.
+    """
+    if _subckt_interfaces(text):
+        return True
+    for line in _logical_lines(text):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("*", ".")):
+            continue
+        return True
+    return False
 
 
 def _mismatch_side(
@@ -406,6 +487,81 @@ def _pin_count_mismatch(
             "netlist's `.SUBCKT` pin list -- klt pex re-runs that line "
             "unmodified against both the schematic DUT and the extracted "
             "netlist, so the two must declare the same number of pins"
+        ),
+    }
+
+
+def _flat_dut_mismatch(
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+    top_cell: str,
+) -> dict[str, Any] | None:
+    """The structured ``flat_dut_mismatch`` diagnostic (Gap 2, issue #1255):
+    the schematic DUT (``reference_netlist``) declares **no** `.SUBCKT`
+    header at all -- i.e. it is netlisted flat, with the testbench relying
+    on the DUT's own internal nodes being ordinary top-level nets -- while
+    the extraction (``extracted_netlist``) always writes a
+    `.SUBCKT <top_cell>` wrapper (`klt extract`'s own convention, `top_cell`
+    being its own top-cell name -- ``run_extract``'s ``"top"`` report
+    field). Swapping the flat schematic `.include` for the `.SUBCKT`-wrapped
+    extracted one silently disconnects every testbench source/probe from
+    the DUT: `klt pex` only re-points the `.include`/`.inc` line, it never
+    adds an `X...` instantiation of the newly-wrapped subcircuit.
+
+    Unlike :func:`_pin_count_mismatch` -- which is *reactive*, only ever
+    consulted once an extracted-side simulation attempt has already come
+    back with nothing measured -- this check is *proactive*: it runs once,
+    up front, from the two netlists' text alone, before either side
+    simulates. That matters because a flat-vs-wrapped mismatch does not
+    reliably fail loudly: a testbench with no `.ic`/similar card referencing
+    the now-disconnected nodes may simply simulate the disconnected fixture
+    to completion and report a plausible-looking but physically meaningless
+    number for a measurement that happens to be well-defined on the
+    stimulus side alone -- exactly the failure mode
+    :func:`_pin_count_mismatch`'s "nothing measured came back" gate cannot
+    catch.
+
+    Returns ``None`` when the schematic DUT declares *any* `.SUBCKT` at all
+    (not flat -- a real interface mismatch there, if any, is
+    :func:`_pin_count_mismatch`'s job) or the extracted netlist does not
+    itself declare ``top_cell`` as a `.SUBCKT` (should not happen -- `klt
+    extract` always wraps its own output -- but degrades safely to "no
+    diagnostic" rather than raising if it ever does).
+    """
+    schematic_text = _read_text(reference_netlist)
+    if _subckt_interfaces(schematic_text or ""):
+        return None  # not flat -- `_pin_count_mismatch`'s job, if any
+
+    extracted_text = _read_text(extracted_netlist)
+    extracted_interfaces = _subckt_interfaces(extracted_text or "")
+    extracted_interface = extracted_interfaces.get(top_cell.lower())
+    if extracted_interface is None:
+        return None
+
+    return {
+        "subcircuit": extracted_interface[0],
+        "schematic": _mismatch_side(reference_netlist, None),
+        "extracted": _mismatch_side(extracted_netlist, extracted_interface),
+        "ngspice_message": None,
+        "detail": (
+            f"the schematic DUT ({reference_netlist}) declares no `.SUBCKT` "
+            "at all -- it is netlisted flat, with the testbench referencing "
+            "its internal nodes directly as top-level nets -- but the "
+            f"extracted netlist always wraps its output in `.SUBCKT "
+            f"{extracted_interface[0]}` ({len(extracted_interface[1])} pins: "
+            f"{', '.join(extracted_interface[1])}). klt pex only re-points "
+            "the testbench's `.include`/`.inc` line at the extracted "
+            "netlist -- it does not add an `X...` instantiation -- so every "
+            "source/probe the testbench wires to the flat DUT's own nodes "
+            "is left disconnected from the extracted netlist's `.SUBCKT` "
+            "body on the extracted-side run, which may simulate to "
+            "completion and report a spurious value rather than error. Wrap "
+            "the schematic DUT in a matching `.SUBCKT ... .ENDS` (with the "
+            "same top-level pin list `klt extract` produces) so the "
+            "testbench's own instantiation line can be reused unmodified "
+            "on both sides, the same convention `pin_count_mismatch` "
+            "already requires"
         ),
     }
 
@@ -747,7 +903,12 @@ def run_pex(
     directive -- none (nothing to swap) and more than one (no way to tell
     which one is the DUT) are both refused up front with a
     :class:`PexError`, before any simulation runs (issue #1030; see
-    :func:`_find_dut_include`).
+    :func:`_find_dut_include`). That single `.include`/`.inc` target must
+    also itself plausibly *be* a DUT -- a shared corner/parameter file with
+    no `.SUBCKT` and no circuit element of its own is likewise refused up
+    front with a :class:`PexError`, rather than silently swapped in for a
+    vacuous `status: "pass"` (issue #1255, Gap 1; see
+    :func:`_check_dut_declares_a_circuit`).
 
     A schematic/extracted top-level *pin-list* mismatch -- the extracted
     netlist declaring a different number of `.SUBCKT` pins than the
@@ -757,6 +918,16 @@ def run_pex(
     still emitted, with per-corner `delta[]` rows carrying a `null`
     `extracted_value` and the named `pin_count_mismatch` block naming both
     sides' pin lists (issue #1030; see :func:`_pin_count_mismatch`).
+
+    A schematic DUT netlisted **flat** (no `.SUBCKT`/`.ENDS` wrapper at
+    all) against `klt extract`'s always-`.SUBCKT`-wrapped output is also
+    not an abort, and is detected proactively -- before either side
+    simulates, rather than reactively from a failed/empty simulation
+    attempt -- since a flat-vs-wrapped mismatch does not reliably fail
+    loudly. The report still emits, with per-corner `delta[]` rows carrying
+    a `null` `extracted_value` (the extracted side is never even attempted)
+    and the named `flat_dut_mismatch` block (issue #1255, Gap 2; see
+    :func:`_flat_dut_mismatch`).
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pex.md``) -- notably a `delta[]` array plus a
@@ -837,6 +1008,11 @@ def run_pex(
         _include_line, dut_path = _find_dut_include(
             body_text, os.path.dirname(schematic_body_path)
         )
+        # Gap 1 (issue #1255): the single `.include`/`.inc` target must
+        # itself plausibly be a DUT -- a shared corner/parameter file with
+        # no circuit content of its own used to be silently swapped in as
+        # if it were the DUT.
+        _check_dut_declares_a_circuit(testbench_path, dut_path)
         dut_paths.append(dut_path)
 
     if len(set(dut_paths)) > 1:
@@ -847,6 +1023,21 @@ def run_pex(
             "netlist, so a single reference_netlist can be reported"
         )
     reference_netlist = dut_paths[0]
+
+    # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
+    # wrapper at all) against `klt extract`'s always-`.SUBCKT`-wrapped
+    # output is diagnosed once, up front, for the whole run -- unlike
+    # `_pin_count_mismatch` below (reactive: only ever consulted once a
+    # simulation attempt has already come back with nothing measured), this
+    # must run *before* either side simulates, since a testbench with no
+    # `.ic` card might otherwise just simulate a disconnected fixture and
+    # report a spurious passing number rather than an error at all (see
+    # `_flat_dut_mismatch`'s own docstring).
+    flat_dut_mismatch = _flat_dut_mismatch(
+        reference_netlist=reference_netlist,
+        extracted_netlist=extracted_netlist_path,
+        top_cell=extract_report["top"],
+    )
 
     testbenches_summary: list[dict[str, Any]] = []
     delta: list[dict[str, Any]] = []
@@ -874,36 +1065,47 @@ def run_pex(
             ) from exc
 
         extracted_report: dict[str, Any] | None = None
-        try:
-            extracted_request_path = _prepare_extracted_request(
-                testbench_path=testbench_path,
-                extracted_netlist_path=extracted_netlist_path,
-                work_dir=work_dir,
-                label=label,
-            )
-            extracted_report = run_sim(
-                extracted_request_path,
-                artifacts_dir=os.path.join(work_dir, label, "extracted"),
-                backend=backend,
-            )
-        except SimError as exc:
-            # Issue #1030: a pin-count mismatch reported through the engine's
-            # own text (a backend that raises rather than classifying, e.g.
-            # `remote`) is a *diagnosable* failure, not an unexplained one --
-            # report it as a named field plus per-corner error rows and keep
-            # going, instead of aborting the whole run with only a stderr
-            # message. Any other SimError still aborts, unchanged.
-            mismatch = _pin_count_mismatch_from_message(
-                str(exc),
-                reference_netlist=reference_netlist,
-                extracted_netlist=extracted_netlist_path,
-            )
-            if mismatch is None:
-                raise PexError(
-                    f"testbench '{testbench_path}': extracted-side simulation "
-                    f"failed: {exc}"
-                ) from exc
-            pin_count_mismatch = pin_count_mismatch or mismatch
+        # Gap 2 (issue #1255): already know (statically, from both
+        # netlists' own `.SUBCKT` headers, via `flat_dut_mismatch` above)
+        # that the extracted-side deck would be meaningless to run -- every
+        # testbench source/probe wired to the flat DUT's own nodes is
+        # disconnected from the extracted netlist's `.SUBCKT` body, so
+        # there is nothing trustworthy an actual simulation attempt could
+        # add. Skip it entirely and fall through to the
+        # `extracted_report is None` branch below, exactly as an unrunnable
+        # extracted side already does.
+        if flat_dut_mismatch is None:
+            try:
+                extracted_request_path = _prepare_extracted_request(
+                    testbench_path=testbench_path,
+                    extracted_netlist_path=extracted_netlist_path,
+                    work_dir=work_dir,
+                    label=label,
+                )
+                extracted_report = run_sim(
+                    extracted_request_path,
+                    artifacts_dir=os.path.join(work_dir, label, "extracted"),
+                    backend=backend,
+                )
+            except SimError as exc:
+                # Issue #1030: a pin-count mismatch reported through the
+                # engine's own text (a backend that raises rather than
+                # classifying, e.g. `remote`) is a *diagnosable* failure,
+                # not an unexplained one -- report it as a named field plus
+                # per-corner error rows and keep going, instead of aborting
+                # the whole run with only a stderr message. Any other
+                # SimError still aborts, unchanged.
+                mismatch = _pin_count_mismatch_from_message(
+                    str(exc),
+                    reference_netlist=reference_netlist,
+                    extracted_netlist=extracted_netlist_path,
+                )
+                if mismatch is None:
+                    raise PexError(
+                        f"testbench '{testbench_path}': extracted-side simulation "
+                        f"failed: {exc}"
+                    ) from exc
+                pin_count_mismatch = pin_count_mismatch or mismatch
 
         spec_row_prefix = (
             None
@@ -1011,6 +1213,15 @@ def run_pex(
         # mismatch that made the extracted-side deck unrunnable, with both
         # sides' pin lists (see `_pin_count_mismatch`).
         "pin_count_mismatch": pin_count_mismatch,
+        # Additive field (issue #1255, Gap 2): `None` on every run whose
+        # schematic DUT is `.SUBCKT`-wrapped (the normal case) --
+        # byte-identical to before this feature existed. Non-`None` names
+        # the flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch
+        # that made the extracted-side deck unrunnable (see
+        # `_flat_dut_mismatch`); when this fires, no extracted-side
+        # simulation is even attempted, so `pin_count_mismatch` above stays
+        # `None`.
+        "flat_dut_mismatch": flat_dut_mismatch,
         "provenance": extract_report["provenance"],
     }
     return result
