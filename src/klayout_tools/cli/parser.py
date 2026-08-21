@@ -1828,7 +1828,11 @@ def create_parser() -> argparse.ArgumentParser:
             "report -- see docs/design/layout-generator-spike.md section 2 "
             "for the request/response contract. Runs fully headless via "
             "KLayout's native pya.PCellDeclarationHelper -- no GUI, no Qt. "
-            "PDK resolution reuses `klt pdk find`'s resolver."
+            "PDK resolution reuses `klt pdk find`'s resolver. Note: every "
+            "generator except resistor_strip only supports the sky130/"
+            "gf180mcu PDK families today (any other resolved family is an "
+            "application error) -- see docs/cli/gen.md's 'PDK-family "
+            "support' section."
         ),
     )
     gen_parser.add_argument(

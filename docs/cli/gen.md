@@ -73,16 +73,68 @@ successor.
 
 ### PDK-family support (phase 2 generators)
 
-`mos_array`, `res_array`, `guard_ring`, and `diff_pair` draw on their
-resolved PDK's own curated-DRC-deck layers (the same layer/datatype pairs
-`klt drc --deck sky130`/`--deck gf180mcu` check — see
+`mos_array`, `res_array`, `cap_array`, `guard_ring`, `diff_pair`,
+`esd_device`, `bond_pad`, and `bjt_array` (every generator except
+`resistor_strip`, the deliberately PDK-agnostic phase-1 reference generator)
+draw on their resolved PDK's own curated-DRC-deck layers (the same
+layer/datatype pairs `klt drc --deck sky130`/`--deck gf180mcu` check — see
 [`klt drc`](drc.md)), so they only support the `sky130`/`gf180mcu` PDK
 families (matched by the resolved `pdk.variant`'s prefix, e.g. `sky130A` or
 `gf180mcuC`). Any other resolved PDK family is an application error (exit
-code `1`). Every generator's **documented default `params`** are chosen to
-pass `klt drc --deck sky130` and `klt drc --deck gf180mcu` clean; a
-non-default `params` set is not guaranteed to (see each generator's
+code `1`) — including a family `klt pdk find`/`list`/`env` themselves
+resolve successfully, since PDK *resolution* and generator layer-role
+*support* are independent: the resolver is generic across families, but each
+generator's layer lookup is a hardcoded per-family table (see "Adding a
+third PDK family" below). Every generator's **documented default `params`**
+are chosen to pass `klt drc --deck sky130` and `klt drc --deck gf180mcu`
+clean; a non-default `params` set is not guaranteed to (see each generator's
 "advisory, not authoritative" `drc_hints.notes` behaviour below).
+
+#### Adding a third PDK family
+
+There is no generator flag, config, or fallback to a PDK's own native PCell
+library today — supporting a new family means contributing that family's
+entry to `src/klayout_tools/gen.py`'s `_PDK_ROLE_LAYERS` table (and, for
+`res_array`'s poly-resistor flavours and `mos_array`'s/`diff_pair`'s
+higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
+`_PDK_VOLTAGE_FLAVOR_LAYERS` tables). Concretely:
+
+- **Family key and resolution**: `_pdk_family()` maps a resolved
+  `pdk.variant` string (e.g. `"sky130A"`) to a family key by prefix match
+  against `_PDK_ROLE_LAYERS`'s top-level keys — so the new key must be a
+  literal prefix of every variant string the target PDK's resolver produces
+  (mirroring `"sky130"`/`"gf180mcu"`).
+- **Mandatory roles**: `active`, `poly`, `contact`, and `metal` are drawn by
+  essentially every generator (the base MOS/resistor unit-device geometry)
+  and must resolve to a real `(layer, datatype)` pair — a generator cannot
+  produce a device at all without them.
+- **Conditionally-required roles**: `well` (needed only when a generator
+  draws a well-tap device, e.g. `guard_ring` or a `pfet`-flavoured
+  `mos_array`/`diff_pair`), `tap` (substrate/well tap rings), `res_mark`/
+  `bjt_mark` (device-class markers `klt extract`'s curated deck keys off of
+  — omitting them means the drawn device extracts as a generic short/wire
+  rather than its intended class), and the routing-plane roles (`metal2`/
+  `via1`, `metal3`/`via2`) `gen_compose`'s router resolves. Each role's
+  purpose and the exact curated-deck citation it must match is documented
+  inline as a comment on that role's entry in the existing `sky130`/
+  `gf180mcu` blocks of `_PDK_ROLE_LAYERS` — follow those comments' citation
+  style (point at the specific `klayout_tools.decks.<family>` rule or
+  `EXTRACTION_DECK` entry the number comes from, never an unverified guess).
+- **Optional roles**: any role a family's curated deck has no equivalent
+  layer for (e.g. sky130's `_PDK_ROLE_LAYERS` entry has no `esd_mark`/
+  `salicide_block`) may simply be omitted — `_role_layer_info()` already
+  returns `None` for a missing key, and generators report the resulting
+  "role not drawn on this family" state through `drc_hints.notes` rather
+  than failing.
+- **The bar for landing it**: a contributed family's entry must be backed by
+  a **curated DRC/extraction deck** for that family (see [`klt drc`](drc.md)
+  / [`klt extract`](extract.md)) so `klt drc --deck <family>` can actually
+  check the drawn layers, and every affected generator's documented default
+  `params` must pass `klt drc --deck <family>` clean on it — the same bar
+  the existing `sky130`/`gf180mcu` support meets, stated above.
+
+This is a scope statement for what a contribution needs to satisfy, not a
+commitment that a third family is currently planned or in progress.
 
 ### `mos_array` (family 1: matched transistor array)
 
