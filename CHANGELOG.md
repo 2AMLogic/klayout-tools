@@ -81,6 +81,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   `total_capacitance_ff` where it previously reported zero. See
   [`docs/cli/extract.md`](docs/cli/extract.md) → "Parasitic (RC)
   extraction".
+- 2026-08-21 — `klt extract --parasitics`: `sg13g2`'s `PARASITICS.metals`/
+  `metal_overlaps` tables now cover the deck's full seven-level metal stack
+  (Metal1-TopMetal2), extending #1277's initial Metal1/Metal2-only slice
+  (issue #1281). `metals[2:7]` (Metal3, Metal4, Metal5, TopMetal1,
+  TopMetal2) and `metal_overlaps[1:6]` (the five remaining adjacent-pair
+  vertical-overlap coefficients) are now curated, sourced from the same
+  `libs.tech/magic/ihp-sg13g2-extract.tech` public nominal (`variants ()`)
+  corner #1277 used, in the same real IHP-Open-PDK v0.3.0 install
+  (Apache-2.0). Unlike Metal1/Metal2, `sheet_res_ohm_sq` for Metal3-
+  TopMetal2 is transcribed **directly** from this file's nominal
+  `resist (),(lvs)` block — `EXTRACTION_DECK.resistors` does not (yet)
+  declare `res_metal3`..`res_topmetal2` sheet rhos to reuse — and
+  independently cross-checked against
+  `libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs`'s
+  `RSH_RES_METAL3`..`RSH_RES_TOPMETAL2`, which agree exactly. See
+  `src/klayout_tools/decks/sg13g2.py`'s `PARASITICS` module comment for the
+  full per-value citations. **Behavior change**: `klt extract --deck sg13g2
+  --parasitics` on a layout routed through Metal3-TopMetal2 now reports
+  those levels' contribution to `r_count`/`c_count`/`total_resistance_ohm`/
+  `total_capacitance_ff` instead of silently omitting it, and no longer
+  lists any metal level in `metals_without_coefficient` /
+  `overlap_pairs_without_coefficient` regardless of routing. See
+  [`docs/cli/extract.md`](docs/cli/extract.md) → "Parasitic (RC)
+  extraction".
 - 2026-08-21 — **Breaking (per-command `schema_version` bump 1 -> 2, both
   commands):** `klt pex` and `klt sim` JSON reports no longer embed absolute
   input paths (issue #1261, found while implementing #1254: `klt
