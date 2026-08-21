@@ -27,8 +27,17 @@
 #   .claude/skills/repo/SKILL.md                        <- skills/repo/SKILL.md
 #   .claude/skills/repo/hooks/*.sh                      <- hooks/repo/*.sh
 #   .claude/skills/repo/scripts/repo-remote.sh          <- scripts/repo/repo-remote.sh
+#   .claude/skills/repo/scripts/repo-scrub-forks.sh     <- scripts/repo/repo-scrub-forks.sh
 #   .claude/skills/repo/scripts/resync-installed.sh     <- scripts/repo/resync-installed.sh
 #   .claude/commands/repo/<cmd>.md                      <- commands/repo/<cmd>.md
+#   .agents/skills/repo/SKILL.md                        <- skills/repo/SKILL.md (Codex form)
+#   .agents/skills/repo/references/<cmd>.md             <- commands/repo/<cmd>.md
+#
+# The Codex half is refreshed ONLY when it is already installed and carries this
+# package's ownership marker. A repo installed before Codex packaging existed, or
+# one whose operator declined it with `install.sh --no-codex`, is left without
+# it: a refresh must not quietly add a surface nobody asked for. Re-run install.sh
+# to adopt it (that is what the layout_version warning below is telling you).
 #
 # EXPLICITLY OUT OF SCOPE (owned by install.sh / uninstall.sh, not by resync):
 #   .claude/settings.json  - hook wiring is a JSON merge into a file the consumer
@@ -219,6 +228,28 @@ else
        Pull that clone and retry, or re-run its install.sh."
 fi
 
+# The Codex surface emitter. Soft-sourced, unlike the two above: an older source
+# clone that predates Codex packaging can still refresh every Claude-side file it
+# does know about, which is strictly better than refusing the whole run.
+CODEX_EMITTER=false
+if [[ -f "$SOURCE_ROOT/lib/codex-skill.sh" ]]; then
+  # shellcheck source=../../lib/codex-skill.sh
+  source "$SOURCE_ROOT/lib/codex-skill.sh"
+  CODEX_EMITTER=true
+fi
+
+# The post-refresh gitignore sweep — requirement C9 of INSTALLER-CONTRACT.md,
+# which C7 (this script) SHOULD also run since a consumer editing .gitignore
+# after install can introduce the condition without a fresh install.sh run.
+# Soft-sourced like the Codex emitter above: an older source clone that
+# predates C9 can still resync everything it knows how to.
+GITIGNORE_CHECK_AVAILABLE=false
+if [[ -f "$SOURCE_ROOT/lib/gitignore-check.sh" ]]; then
+  # shellcheck source=../../lib/gitignore-check.sh
+  source "$SOURCE_ROOT/lib/gitignore-check.sh"
+  GITIGNORE_CHECK_AVAILABLE=true
+fi
+
 VERSION="$(cat "$SOURCE_ROOT/VERSION" 2>/dev/null || echo unknown)"
 COMMIT="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 # The install-date token is stamped once, at install time. Re-deriving it as
@@ -252,16 +283,17 @@ fi
 # Build the plan. Parallel arrays (not associative) so this runs on bash 3.2,
 # which is still what macOS ships.
 # ---------------------------------------------------------------------------
-PLAN_SRC=(); PLAN_DST=(); PLAN_EXEC=()
+PLAN_SRC=(); PLAN_DST=(); PLAN_EXEC=(); PLAN_XFORM=()
 
-plan() {  # <source-rel> <dest-rel> <exec:0|1>
-  PLAN_SRC+=("$1"); PLAN_DST+=("$2"); PLAN_EXEC+=("$3")
+plan() {  # <source-rel> <dest-rel> <exec:0|1> [transform: render|codex-skill]
+  PLAN_SRC+=("$1"); PLAN_DST+=("$2"); PLAN_EXEC+=("$3"); PLAN_XFORM+=("${4:-render}")
 }
 
 plan "skills/repo/SKILL.md"                 ".claude/skills/repo/SKILL.md"                    0
 plan "hooks/repo/guard-destructive.sh"      ".claude/skills/repo/hooks/guard-destructive.sh"  1
 plan "hooks/repo/session-start-handoff.sh"  ".claude/skills/repo/hooks/session-start-handoff.sh" 1
 plan "scripts/repo/repo-remote.sh"          ".claude/skills/repo/scripts/repo-remote.sh"      1
+plan "scripts/repo/repo-scrub-forks.sh"     ".claude/skills/repo/scripts/repo-scrub-forks.sh" 1
 
 # Which commands belong to this install. A `--skills=` install is a deliberate
 # subset, so widening it here would install commands the operator declined; an
@@ -287,6 +319,20 @@ while IFS= read -r cmd; do
   plan "commands/repo/$cmd.md" ".claude/commands/repo/$cmd.md" 0
 done <<<"$COMMANDS"
 
+# The Codex surface, when this install actually has one (see the header). The
+# SKILL.md is emitted by the same lib/codex-skill.sh function install.sh used, so
+# an untouched install reports "unchanged" rather than phantom drift; the
+# references/ files are ordinary rendered copies of the command procedures.
+CODEX_ROOT=""
+if [[ "$CODEX_EMITTER" == true ]] && codex_skill_is_managed "$TARGET/$CODEX_SKILL_REL/SKILL.md"; then
+  CODEX_ROOT="$TARGET/$CODEX_SKILL_REL"
+  plan "skills/repo/SKILL.md" "$CODEX_SKILL_REL/SKILL.md" 0 codex-skill
+  while IFS= read -r cmd; do
+    [[ -n "$cmd" ]] || continue
+    plan "commands/repo/$cmd.md" "$CODEX_REFERENCES_REL/$cmd.md" 0
+  done <<<"$COMMANDS"
+fi
+
 # Deferred self-update: this script is one of the files it refreshes, so it goes
 # last (see the header). rename(2) already makes the swap safe; ordering makes it
 # obviously safe.
@@ -305,8 +351,18 @@ report() {  # <verb> <colour> <dest-rel> [detail]
   say "  $(printf '%b%-9s%b %s%s' "$2" "$1" "$NC" "$3" "${4:+  ($4)}")"
 }
 
-sync_one() {  # <source-rel> <dest-rel> <exec:0|1>
-  local src="$SOURCE_ROOT/$1" dst="$TARGET/$2" is_exec="$3" tmp dstdir
+# emit <source-abs> <transform> — write the candidate file to stdout. The only
+# place a destination's rendering differs, so the two call sites below (dry-run
+# candidate, real write) can never disagree about how a file is produced.
+emit() {
+  case "$2" in
+    codex-skill) codex_skill_render "$1" "$COMMANDS" ;;
+    *)           render <"$1" ;;
+  esac
+}
+
+sync_one() {  # <source-rel> <dest-rel> <exec:0|1> <transform>
+  local src="$SOURCE_ROOT/$1" dst="$TARGET/$2" is_exec="$3" xform="$4" tmp dstdir
 
   if [[ ! -f "$src" ]]; then
     N_SKIPPED=$((N_SKIPPED + 1)); report "skipped" "$YELLOW" "$2" "no counterpart in source"; return
@@ -321,7 +377,7 @@ sync_one() {  # <source-rel> <dest-rel> <exec:0|1>
   if [[ "$DRY_RUN" == true ]]; then
     [[ -n "$SCRATCH" ]] || SCRATCH="$(mktemp -d)"
     tmp="$SCRATCH/candidate"
-    if ! render <"$src" >"$tmp" 2>/dev/null; then
+    if ! emit "$src" "$xform" >"$tmp" 2>/dev/null; then
       N_FAILED=$((N_FAILED + 1)); FAILED_PATHS+=("$2 (render failed)"); report "FAILED" "$RED" "$2" "render failed"; return
     fi
     if ! render_assert_no_placeholders "$tmp"; then
@@ -347,7 +403,7 @@ sync_one() {  # <source-rel> <dest-rel> <exec:0|1>
   if ! tmp="$(mktemp "$dstdir/.resync-installed.XXXXXX" 2>/dev/null)"; then
     N_FAILED=$((N_FAILED + 1)); FAILED_PATHS+=("$2 (staging failed)"); report "FAILED" "$RED" "$2" "cannot stage in $dstdir"; return
   fi
-  if ! render <"$src" >"$tmp" 2>/dev/null; then
+  if ! emit "$src" "$xform" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"
     N_FAILED=$((N_FAILED + 1)); FAILED_PATHS+=("$2 (render failed)"); report "FAILED" "$RED" "$2" "render failed"; return
   fi
@@ -387,7 +443,7 @@ say ""
 
 i=0
 while [[ $i -lt ${#PLAN_SRC[@]} ]]; do
-  sync_one "${PLAN_SRC[$i]}" "${PLAN_DST[$i]}" "${PLAN_EXEC[$i]}"
+  sync_one "${PLAN_SRC[$i]}" "${PLAN_DST[$i]}" "${PLAN_EXEC[$i]}" "${PLAN_XFORM[$i]}"
   i=$((i + 1))
 done
 
@@ -396,13 +452,16 @@ done
 # an installed file with no source counterpart is named, not removed.
 # ---------------------------------------------------------------------------
 ORPHANS=()
-for d in "$TARGET/.claude/commands/repo" "$SKILL_ROOT" "$SKILL_ROOT/hooks" "$SKILL_ROOT/scripts"; do
+ORPHAN_DIRS=("$TARGET/.claude/commands/repo" "$SKILL_ROOT" "$SKILL_ROOT/hooks" "$SKILL_ROOT/scripts")
+[[ -n "$CODEX_ROOT" ]] && ORPHAN_DIRS+=("$CODEX_ROOT" "$CODEX_ROOT/references")
+for d in "${ORPHAN_DIRS[@]}"; do
   [[ -d "$d" ]] || continue
   for f in "$d"/*; do
     [[ -f "$f" ]] || continue
     rel="${f#"$TARGET"/}"
     case "$rel" in
       .claude/skills/repo/install-metadata.json|.claude/skills/repo/.install-local.json|.claude/skills/repo/config.json) continue ;;
+      .agents/skills/repo/install-metadata.json) continue ;;
     esac
     known=false
     j=0
@@ -420,6 +479,19 @@ if [[ ${#ORPHANS[@]} -gt 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# C9 sweep: warn (never fail) about any installed file now hidden by the
+# consumer's .gitignore. Runs regardless of --dry-run — the files it checks
+# already exist on disk from a prior install, so this also catches drift (a
+# .gitignore edited after install) that --dry-run's "nothing written" framing
+# would otherwise mask.
+# ---------------------------------------------------------------------------
+if [[ "$GITIGNORE_CHECK_AVAILABLE" == true ]]; then
+  GITIGNORE_SWEEP_DIRS=("$SKILL_ROOT" "$TARGET/.claude/commands/repo")
+  [[ -n "$CODEX_ROOT" ]] && GITIGNORE_SWEEP_DIRS+=("$CODEX_ROOT")
+  warn_gitignored_payload "$TARGET" "${GITIGNORE_SWEEP_DIRS[@]}"
+fi
+
+# ---------------------------------------------------------------------------
 # Re-stamp metadata. Only on a clean, applied run: a partial run must not claim
 # the install is at the source's version.
 #
@@ -434,6 +506,15 @@ stamp_metadata() {
   tmp="$(mktemp "$SKILL_ROOT/.install-metadata.XXXXXX")" || { warn "Could not stage install-metadata.json — version stamp skipped"; return; }
   metadata_tracked_json "$VERSION" "$COMMIT" "${DEV_INSTALL:-false}" "${FILTERED:-false}" "$COMMANDS" >"$tmp"
   mv -f "$tmp" "$METADATA" 2>/dev/null || { rm -f "$tmp"; warn "Could not update install-metadata.json — version stamp skipped"; }
+
+  # The Codex surface carries its own copy of the same tracked metadata (same
+  # emitter, same C5 guarantees), so it must be re-stamped alongside or it would
+  # keep claiming the version it was installed at.
+  [[ -n "$CODEX_ROOT" && -f "$CODEX_ROOT/install-metadata.json" ]] || return 0
+  tmp="$(mktemp "$CODEX_ROOT/.install-metadata.XXXXXX")" || { warn "Could not stage $CODEX_SKILL_REL/install-metadata.json — version stamp skipped"; return; }
+  metadata_tracked_json "$VERSION" "$COMMIT" "${DEV_INSTALL:-false}" "${FILTERED:-false}" "$COMMANDS" >"$tmp"
+  mv -f "$tmp" "$CODEX_ROOT/install-metadata.json" 2>/dev/null \
+    || { rm -f "$tmp"; warn "Could not update $CODEX_SKILL_REL/install-metadata.json — version stamp skipped"; }
 }
 
 stamp_sidecar() {

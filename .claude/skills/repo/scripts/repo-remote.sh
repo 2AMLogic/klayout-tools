@@ -102,7 +102,6 @@
 set -uo pipefail
 
 # ── output helpers ──────────────────────────────────────────────────────────
-_is_tty() { [[ -t 2 ]]; }
 log()  { printf '%s\n' "repo-remote: $*" >&2; }
 die()  { local code="$1"; shift; printf '%s\n' "repo-remote: ERROR: $*" >&2; exit "$code"; }
 
