@@ -23,6 +23,7 @@ this command shares.
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..size import SizeError, run_size
 from .output import emit_error, emit_success
 
@@ -111,7 +112,12 @@ def _print_text(report: dict) -> None:
     env = report["environment"]
     print()
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
-    print(f"models_lib: {env['models_lib']}")
+    # Issue #1274: `models_lib` is the `{path, scope}` shape
+    # `env_provenance.repo_relative_path` defines -- rendered through the
+    # same shared helper `klt sim`/`klt env-provenance` use, so a PDK
+    # outside the repo prints `<outside repo>`, never an absolute home path
+    # (and never a raw dict repr).
+    print(f"models_lib: {render_path_field(env['models_lib'])}")
 
 
 def _print_topology_text(report: dict) -> None:
@@ -193,4 +199,9 @@ def _print_topology_text(report: dict) -> None:
     env = report["environment"]
     print()
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
-    print(f"models_lib: {env['models_lib']}")
+    # Issue #1274: `models_lib` is the `{path, scope}` shape
+    # `env_provenance.repo_relative_path` defines -- rendered through the
+    # same shared helper `klt sim`/`klt env-provenance` use, so a PDK
+    # outside the repo prints `<outside repo>`, never an absolute home path
+    # (and never a raw dict repr).
+    print(f"models_lib: {render_path_field(env['models_lib'])}")

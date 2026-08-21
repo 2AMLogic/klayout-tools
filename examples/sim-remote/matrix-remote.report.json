@@ -1,6 +1,9 @@
 {
-  "schema_version": 1,
-  "netlist": "ring_tb.spice",
+  "schema_version": 3,
+  "netlist": {
+    "path": "examples/sim-remote/ring_tb.spice",
+    "scope": "repo"
+  },
   "status": "pass",
   "corner_count": 5,
   "passed": 5,
@@ -9,7 +12,10 @@
   "environment": {
     "engine": "ngspice",
     "engine_version": "46",
-    "models_lib": "/Users/rwalters/.volare/sky130A/libs.tech/ngspice/sky130.lib.spice",
+    "models_lib": {
+      "path": null,
+      "scope": "external"
+    },
     "models_lib_sha256": "17c208a699228f5acb87bf59c09c22a4c4d3937b6766b4957737d34e8e075f64",
     "netlist_sha256": "cec1a27667cb34bd96c0eec739fa8ac1264ada72eb0f3fd43eaf9767d1ec6a6c",
     "remote": {

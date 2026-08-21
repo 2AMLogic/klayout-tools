@@ -82,7 +82,14 @@ from .remote_launcher import RemoteLauncher, RemoteLaunchError
 #: (`docs/design/sim-evidence-discipline-spike.md`), so an absolute path
 #: here used to leak the author's home directory/worktree layout into every
 #: such record.
-SCHEMA_VERSION = 2
+#:
+#: Bumped 2 -> 3 (issue #1274): `environment.models_lib` -- missed by
+#: #1261's field list -- changed from the resolved *absolute* model-library
+#: path to the same `{path, scope}` shape. On a normal install the PDK lives
+#: under the user's home directory, so that field leaked a home path into
+#: every committed report. Nothing is lost: the library is still pinned by
+#: identity via `environment.models_lib_sha256` and `provenance.deck`.
+SCHEMA_VERSION = 3
 
 #: Per-corner wall-clock budget applied when the request omits
 #: ``options.timeout_s``.
@@ -599,10 +606,11 @@ def run_sim(
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
-    # Issue #1261: every input-path field this run's own JSON response
-    # echoes (`netlist`, `environment.resume.checkpoint_path`) is normalised
-    # against this one repo root, resolved once from the request file's own
-    # location -- the same "walk up from the input" default
+    # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
+    # field this run's own JSON response echoes (`netlist`,
+    # `environment.resume.checkpoint_path`, `environment.models_lib`) is
+    # normalised against this one repo root, resolved once from the request
+    # file's own location -- the same "walk up from the input" default
     # `env_provenance.find_repo_root` uses for its own caller.
     repo_root = env_provenance.find_repo_root(request_dir)
 
@@ -973,7 +981,13 @@ def run_sim(
     environment: dict[str, Any] = {
         "engine": engine,
         "engine_version": engine_version,
-        "models_lib": models_lib,
+        # Issue #1274: normalised like every other path field this response
+        # echoes -- the resolved library usually lives outside the repo (a
+        # PDK under the user's home directory), which reports
+        # `{"path": null, "scope": "external"}` rather than the absolute
+        # path. `models_lib_sha256` right below (plus `provenance.deck`)
+        # still pins exactly which library ran.
+        "models_lib": _report_path(models_lib, repo_root=repo_root),
         "models_lib_sha256": sha256_file(models_lib),
         "netlist_sha256": sha256_file(netlist_path),
     }

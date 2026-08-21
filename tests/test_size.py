@@ -1106,6 +1106,102 @@ def test_corner_label_formats_process_and_temperature():
 
 
 # --------------------------------------------------------------------------- #
+# Path normalization (issue #1274): `environment.models_lib` reports
+# `{path, scope}`, never a raw absolute string -- on a normal install the
+# resolved PDK model library lives under the user's home directory, so the
+# old raw-string field leaked that layout into every committed report.
+# Mirrors `tests/test_sim.py`'s equivalent coverage for `klt sim`.
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises
+    as a repo root -- mirrors `tests/test_sim.py`'s own local helper (kept
+    per-module, matching this file's existing convention)."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+def test_run_size_models_lib_is_external_outside_any_repo(tmp_path, monkeypatch):
+    """The leak this issue reports: a model library outside the repo (the
+    normal case -- a PDK under `~/.volare`) must report
+    `{"path": None, "scope": "external"}`, never its absolute path."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_request())
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["environment"]["models_lib"] == {
+        "path": None,
+        "scope": "external",
+    }
+    # The identity pin that makes the location redundant survives.
+    assert report["provenance"]["deck"]["name"] == "models.lib"
+    assert report["provenance"]["deck"]["content_hash"] is not None
+
+
+def test_run_size_models_lib_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    """A model library *inside* the repo must still resolve to something
+    usable (a repo-relative string), not `null`/dropped -- the fix only
+    changes the outside-the-repo (leaking) case."""
+    root = _make_fake_repo(tmp_path)
+    _write_models_lib(root)
+    request = _write_request(root, _base_request())
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["environment"]["models_lib"] == {
+        "path": "models.lib",
+        "scope": "repo",
+    }
+
+
+def test_run_size_worst_case_margin_models_lib_is_normalised(tmp_path, monkeypatch):
+    """The `worst_case_margin` objective builds its own `environment` block
+    (a second writer site in `size.py`) -- it must normalise the same way."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [-40, 27],
+                "vdd_v": 1.8,
+                "objective": "worst_case_margin",
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["environment"]["models_lib"] == {
+        "path": None,
+        "scope": "external",
+    }
+
+
+def test_run_size_topology_models_lib_is_normalised(tmp_path, monkeypatch):
+    """Topology mode builds a third `environment` block in `size.py` -- the
+    evaluator-error path reaches it without needing a real ngspice."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+    _stub_subprocess_run(monkeypatch, side_effect=FileNotFoundError("no ngspice"))
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    assert report["environment"]["models_lib"] == {
+        "path": None,
+        "scope": "external",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Corner-set verification pipeline (issue #729): full run_size, stubbed
 # ngspice (synthetic square-law model -- see `_install_synthetic_ngspice_stub`)
 # --------------------------------------------------------------------------- #

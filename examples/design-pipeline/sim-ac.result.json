@@ -1,6 +1,9 @@
 {
-  "schema_version": 1,
-  "netlist": "ota_5t.spice",
+  "schema_version": 3,
+  "netlist": {
+    "path": "examples/design-pipeline/ota_5t.spice",
+    "scope": "repo"
+  },
   "status": "pass",
   "corner_count": 20,
   "passed": 20,
@@ -9,9 +12,27 @@
   "environment": {
     "engine": "ngspice",
     "engine_version": "46",
-    "models_lib": "/Users/rwalters/.volare/sky130A/libs.tech/ngspice/sky130.lib.spice",
-    "models_lib_sha256": "5efa041a988893c1a3580d0ecd57870ea3146b27741c7d42b56baaa336b9549e",
+    "models_lib": {
+      "path": null,
+      "scope": "external"
+    },
+    "models_lib_sha256": "17c208a699228f5acb87bf59c09c22a4c4d3937b6766b4957737d34e8e075f64",
     "netlist_sha256": "b3dda1de18154f351f6f0d9aabd404eae468d070ff6a155242d925315da5c96a"
+  },
+  "provenance": {
+    "klt_version": "0.2.0",
+    "klayout_version": "0.30.10",
+    "pdk": {
+      "name": "sky130A",
+      "source": "search root: ~/.volare",
+      "version": "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+    },
+    "deck": {
+      "name": "sky130.lib.spice",
+      "content_hash": "sha256:17c208a699228f5acb87bf59c09c22a4c4d3937b6766b4957737d34e8e075f64",
+      "released": false
+    },
+    "input": null
   },
   "measurements": [
     {
@@ -74,7 +95,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.435,
+      "runtime_s": 43.415,
       "measurements": [
         {
           "name": "gain_db",
@@ -109,8 +130,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "tt/1.620V/125C",
@@ -120,7 +143,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.025,
+      "runtime_s": 42.865,
       "measurements": [
         {
           "name": "gain_db",
@@ -155,8 +178,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "tt/1.980V/-40C",
@@ -166,7 +191,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.432,
+      "runtime_s": 43.565,
       "measurements": [
         {
           "name": "gain_db",
@@ -201,8 +226,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "tt/1.980V/125C",
@@ -212,7 +239,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.627,
+      "runtime_s": 43.463,
       "measurements": [
         {
           "name": "gain_db",
@@ -247,8 +274,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ss/1.620V/-40C",
@@ -258,7 +287,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.327,
+      "runtime_s": 42.863,
       "measurements": [
         {
           "name": "gain_db",
@@ -293,8 +322,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ss/1.620V/125C",
@@ -304,7 +335,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.36,
+      "runtime_s": 43.317,
       "measurements": [
         {
           "name": "gain_db",
@@ -339,8 +370,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ss/1.980V/-40C",
@@ -350,7 +383,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.15,
+      "runtime_s": 43.517,
       "measurements": [
         {
           "name": "gain_db",
@@ -385,8 +418,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ss/1.980V/125C",
@@ -396,7 +431,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 19.64,
+      "runtime_s": 43.215,
       "measurements": [
         {
           "name": "gain_db",
@@ -431,8 +466,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ff/1.620V/-40C",
@@ -442,7 +479,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 17.218,
+      "runtime_s": 43.219,
       "measurements": [
         {
           "name": "gain_db",
@@ -477,8 +514,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ff/1.620V/125C",
@@ -488,7 +527,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.876,
+      "runtime_s": 43.516,
       "measurements": [
         {
           "name": "gain_db",
@@ -523,8 +562,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ff/1.980V/-40C",
@@ -534,7 +575,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.422,
+      "runtime_s": 43.316,
       "measurements": [
         {
           "name": "gain_db",
@@ -569,8 +610,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "ff/1.980V/125C",
@@ -580,7 +623,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.13,
+      "runtime_s": 43.412,
       "measurements": [
         {
           "name": "gain_db",
@@ -615,8 +658,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "sf/1.620V/-40C",
@@ -626,7 +671,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 17.963,
+      "runtime_s": 43.415,
       "measurements": [
         {
           "name": "gain_db",
@@ -661,8 +706,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "sf/1.620V/125C",
@@ -672,7 +719,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.676,
+      "runtime_s": 43.165,
       "measurements": [
         {
           "name": "gain_db",
@@ -707,8 +754,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "sf/1.980V/-40C",
@@ -718,7 +767,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.535,
+      "runtime_s": 43.318,
       "measurements": [
         {
           "name": "gain_db",
@@ -753,8 +802,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "sf/1.980V/125C",
@@ -764,7 +815,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 17.842,
+      "runtime_s": 43.413,
       "measurements": [
         {
           "name": "gain_db",
@@ -799,8 +850,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "fs/1.620V/-40C",
@@ -810,7 +863,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 17.412,
+      "runtime_s": 44.561,
       "measurements": [
         {
           "name": "gain_db",
@@ -845,8 +898,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "fs/1.620V/125C",
@@ -856,7 +911,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 18.438,
+      "runtime_s": 43.916,
       "measurements": [
         {
           "name": "gain_db",
@@ -891,8 +946,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "fs/1.980V/-40C",
@@ -902,7 +959,7 @@
       },
       "temperature_c": -40,
       "status": "pass",
-      "runtime_s": 18.378,
+      "runtime_s": 43.357,
       "measurements": [
         {
           "name": "gain_db",
@@ -937,8 +994,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     },
     {
       "corner_id": "fs/1.980V/125C",
@@ -948,7 +1007,7 @@
       },
       "temperature_c": 125,
       "status": "pass",
-      "runtime_s": 16.411,
+      "runtime_s": 43.118,
       "measurements": [
         {
           "name": "gain_db",
@@ -983,8 +1042,10 @@
       "artifacts": {
         "log": null,
         "raw": null,
-        "waveform": null
-      }
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
     }
   ]
 }

@@ -16,6 +16,42 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-21 — **Breaking (`klt sim` `schema_version` 2 -> 3, `klt size`
+  `schema_version` 1 -> 2):** `environment.models_lib` no longer echoes the
+  resolved **absolute** model-library path (issue #1274, found while
+  implementing #1264). This is the same leak class the entry below fixed for
+  the other `klt sim`/`klt pex` path fields — `environment.models_lib` was
+  simply missing from that PR's field list, and `klt size` had the identical
+  defect in all three of its `environment` writers (default `sizing_corner`
+  objective, `worst_case_margin` objective, and coupled-topology mode). On a
+  normal install the PDK lives under the user's home directory, so every
+  committed report carried something like
+  `/home/<user>/.volare/sky130A/libs.tech/ngspice/sky130.lib.spice` and
+  `klt env-provenance scan` flagged it — and unlike the other fields, this
+  one could not be cleaned by regenerating the report, since a fresh run
+  just substitutes the regenerating machine's home path. Both commands now
+  report the `{path, scope}` shape `env_provenance.repo_relative_path()`
+  defines: `{"path": "<repo-relative>", "scope": "repo"}` for a library
+  inside the invocation's repo, `{"path": null, "scope": "external"}` for
+  one outside it (the absolute path is never echoed), and — for `klt sim`
+  only, which resolves a library only when the request declares a
+  `corners.process` axis — `{"path": null, "scope": "absent"}` when none was
+  resolved at all. Chose `{path, scope}` over keeping a `string | null`
+  because it matches the shape every other normalized path field in these
+  reports already uses, and keeps "outside the repo" distinguishable from
+  "not resolved". Nothing is lost: the library stays pinned **by identity**
+  via `environment.models_lib_sha256` (`klt sim`) and
+  `provenance.deck.name`/`content_hash`/`provenance.pdk` (both), which is
+  `env_provenance.py`'s own documented rule ("pin such an input by identity
+  … not by location"). `--format text` renders the field through
+  `env_provenance.render_path_field()`, printing `<outside repo>` rather
+  than a raw dict or an absolute path. The four committed example reports
+  that carried the leak (`examples/design-pipeline/sim-ac.result.json`,
+  `sim-op.result.json`, `examples/sim-remote/matrix-local.report.json`,
+  `matrix-remote.report.json`) are regenerated in the same change. See
+  [`docs/cli/sim.md`](docs/cli/sim.md) and
+  [`docs/cli/size.md`](docs/cli/size.md)'s "JSON schema (the contract)"
+  sections.
 - 2026-08-21 — **Breaking (per-command `schema_version` bump 1 -> 2, both
   commands):** `klt pex` and `klt sim` JSON reports no longer embed absolute
   input paths (issue #1261, found while implementing #1254: `klt

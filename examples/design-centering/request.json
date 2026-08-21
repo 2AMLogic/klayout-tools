@@ -60,7 +60,7 @@
     "warnings": []
   },
   "sized_device": {
-    "schema_version": 1,
+    "schema_version": 2,
     "status": "pass",
     "topology": "diff_pair_mirror_tail",
     "corner": {
@@ -393,7 +393,10 @@
     "environment": {
       "engine": "ngspice",
       "engine_version": "46",
-      "models_lib": "/abs/path/sky130.lib.spice"
+      "models_lib": {
+        "path": null,
+        "scope": "external"
+      }
     },
     "provenance": {
       "klt_version": "0.2.0",

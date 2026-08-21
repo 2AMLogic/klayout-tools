@@ -161,6 +161,10 @@ below is the stable contract, subject to the same rules as every other `klt`
 verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
 (`schema_version`, error shape, exit codes) shared across all commands.
 
+**The response's `environment.models_lib` reports `{path, scope}`, never a
+raw path string** (`schema_version` `2`, issue #1274) -- see the
+`environment`/`provenance` bullet under "Response" below.
+
 ### Request
 
 ```json
@@ -373,7 +377,7 @@ choice of width holds it constant across a PVT matrix. So the top-level
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "pass",
   "device": {
     "kind": "nmos", "model": "sky130_fd_pr__nfet_01v8", "l_um": 0.5,
@@ -399,7 +403,7 @@ choice of width holds it constant across a PVT matrix. So the top-level
     "bracket_w_um": [3.077, 3.755], "interpolated_w_um": 3.5719,
     "feasible": true
   },
-  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": "/abs/path/sky130.lib.spice" },
+  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": { "path": null, "scope": "external" } },
   "provenance": { "klt_version": "0.2.0", "klayout_version": "0.30.10", "pdk": { "...": "..." }, "deck": { "...": "..." }, "input": null }
 }
 ```
@@ -443,7 +447,15 @@ choice of width holds it constant across a PVT matrix. So the top-level
   when `target.vds_v` is set.
 - `environment`/`provenance` -- the same shape `klt sim` emits (see
   [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance`
-  block"). `environment.artifacts_dir` is present only when
+  block"). `environment.models_lib` is the `{path, scope}` shape
+  `env_provenance.repo_relative_path` defines (`schema_version` `2`, issue
+  [#1274](https://github.com/2AMLogic/klayout-tools/issues/1274)), never the
+  resolved absolute path: `{"path": null, "scope": "external"}` for the
+  usual PDK outside the invocation's repo, `{"path": "<repo-relative>",
+  "scope": "repo"}` for a library inside it. The library stays pinned by
+  *identity* via `provenance.deck` (`name`/`content_hash`), not by location
+  -- see [`env-provenance.md`](env-provenance.md).
+  `environment.artifacts_dir` is present only when
   `options.keep_artifacts` is true.
 - `corners` -- always populated (present on every response, including
   `status: "error"`), reporting the full declared corner set, the sizing
@@ -619,7 +631,7 @@ differ in the real circuit (different drain nodes, hence different `Vds`).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "pass",
   "topology": "diff_pair_mirror_tail",
   "corner": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
@@ -670,7 +682,7 @@ differ in the real circuit (different drain nodes, hence different `Vds`).
     ]
   },
   "method": { "name": "coupled multi-device joint solve (diff-pair + mirror + tail)", "...": "..." },
-  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": "/abs/path/sky130.lib.spice" },
+  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": { "path": null, "scope": "external" } },
   "provenance": { "...": "..." }
 }
 ```

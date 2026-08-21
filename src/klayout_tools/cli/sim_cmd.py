@@ -68,7 +68,10 @@ def _print_text(report: dict) -> None:
 
     env = report["environment"]
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
-    print(f"models_lib: {env['models_lib']}")
+    # Issue #1274: `models_lib` is the same `{path, scope}` shape as
+    # `netlist` above -- rendered through the shared helper so a PDK outside
+    # the repo prints `<outside repo>`, never an absolute home path.
+    print(f"models_lib: {render_path_field(env['models_lib'])}")
 
     budget = env.get("budget")
     if budget is not None:
