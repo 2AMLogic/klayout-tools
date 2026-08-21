@@ -2124,15 +2124,28 @@ counting them here would double-count it (#226):
   comment their active-layer parasitic caps out for the same reason.
 
 The coefficients are curated per-PDK-family in each deck module's `PARASITICS`
-table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py`), **transcribed with
-citations from each PDK's public magic technology file** (`sky130.tech` /
-`gf180mcu.tech` in fossi-foundation/open-pdks, GPLv3) — sheet resistances from
-its `resist` entries, area/fringe capacitances from its `defaultareacap` /
+table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py`),
+**transcribed with citations from each PDK's public magic-format technology
+file** — `sky130.tech` / `gf180mcu.tech` in fossi-foundation/open-pdks
+(GPLv3), and `libs.tech/magic/ihp-sg13g2-extract.tech` in
+IHP-GmbH/IHP-Open-PDK (Apache-2.0) — sheet resistances from its `resist`
+entries, area/fringe capacitances from its `defaultareacap` /
 `defaultperimeter` entries, vertical-overlap coupling from its
 `defaultoverlap` entries — never NDA'd, the same public-source curation
 pattern as the DRC decks and the SPICE model-binding table (#214). Each changed
 coefficient carries an inline citation (source file + field name) in its deck
 comment.
+
+`sg13g2`'s `PARASITICS` table is **partial** (issue #1277): only Metal1/Metal2
+(`EXTRACTION_DECK.metals[0:2]`) and their one vertical-overlap coefficient are
+curated; Metal3-TopMetal2 remain deliberately uncurated (not zero-filled with
+guessed values) and continue to appear in `metals_without_coefficient` /
+`overlap_pairs_without_coefficient` for any layout routed on those levels —
+see `src/klayout_tools/decks/sg13g2.py`'s `PARASITICS` module comment for the
+full rationale, including why `ihp-sg13g2-extract.tech` (not
+`libs.tech/parasitics/itf/sg13g2_typ.itf`) is the source: the `.itf` file
+carries only a raw process-stack description with no directly-transcribable
+area/perimeter-capacitance table.
 
 Even so, the R/C values remain **order-of-magnitude and uncalibrated to
 silicon**: while now sourced and re-verifiable against the published process
