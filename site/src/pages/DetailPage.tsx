@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { Layout } from "@/data/types";
 import type { EmSiteExport } from "@/components/em/types";
@@ -8,6 +8,10 @@ import { StimulusPlayground, isPlaygroundEligible } from "@/components/playgroun
 import { FieldViewer } from "@/components/field";
 import { ProvenancePanel } from "@/components/em";
 import { GdsViewer } from "@/components/layout";
+// Imported from `@/lib/gds/layerNames` rather than the `@/lib/gds` barrel on
+// purpose: the barrel also reaches the generated PDK color tables, which must
+// stay inside the viewer's lazily-loaded chunk (see `GdsViewer.tsx`).
+import { layerNamesFromRenders, type PdkFamily } from "@/lib/gds/layerNames";
 import { blockAssetUrl } from "@/lib/blockAssets";
 
 /**
@@ -41,18 +45,17 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * behind `layout.downloadable`, and a back-link to the gallery index.
  *
  * Render thumbnails and the downloads section's viewer entry both open
- * `@/components/layout`'s `GdsViewer` -- an in-page overlay embedding Tiny
- * Tapeout's hosted GDS/OAS viewer (issue #943, superseding #249's Option 1
- * link-out-to-a-new-tab with a same-page, clickable-thumbnail affordance;
- * see `GdsViewer.tsx`'s module doc for why the hosted viewer is still the
- * rendering engine underneath) so a reviewer can zoom/pan/toggle layers
- * without a local KLayout install or leaving klayout-tools.org.
+ * `@/components/layout`'s `GdsViewer` -- an in-page overlay that renders the
+ * block's staged GDS client-side, same-origin (issue #943, superseding
+ * #249's Option 1 link-out-to-a-new-tab and #1284's hosted-viewer iframe) --
+ * so a reviewer can zoom/pan/toggle layers without a local KLayout install
+ * and without leaving klayout-tools.org.
  * The gallery now spans multiple PDK families (sky130, gf180mcu, and
- * eventually ihp sg13g2 — issue #1060), so the viewer's `pdk` query param is
+ * eventually ihp sg13g2 — issue #1060), so the viewer's layer styling is
  * derived per block from its slug prefix (`inferPdkFamily()` below) rather
  * than hardcoded — `layout.json` carries no explicit PDK family field yet
  * (see `types.ts`'s `drc.deck`, the closest existing analog), so this is a
- * slug-prefix heuristic; a follow-up could add an explicit field to the
+ * slug-prefix heuristic; issue #1285 tracks adding an explicit field to the
  * `klt layout-metrics` schema so the site never has to guess.
  *
  * Matches the original Astro page's chrome exactly: no shared Header/Footer
@@ -77,36 +80,11 @@ const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
 };
 
 /**
- * Deployed origin for the static site (see `CLAUDE.md`: klayout-tools.org).
- * Hardcoded rather than derived from `window.location` because this page is
- * also rendered server-side at build time (`entry-server.tsx` via
- * `scripts/prerender.mjs`), where no `window` exists — and the viewer link
- * needs an absolute, publicly fetchable URL regardless of render context
- * (Tiny Tapeout's hosted viewer fetches the file cross-origin).
- */
-const SITE_ORIGIN = "https://klayout-tools.org";
-
-/**
- * One block's inferred PDK family, used only to pick the viewer's `pdk=`
- * identifier below -- not a general-purpose PDK enum.
- */
-type PdkFamily = "sky130" | "gf180mcu" | "ihp-sg13g2";
-
-/**
- * Tiny Tapeout's own PDK identifiers, as accepted by its hosted viewer's
- * `?pdk=` query param (github.com/TinyTapeout/tt-gds-action).
- */
-const VIEWER_PDK_BY_FAMILY: Record<PdkFamily, string> = {
-  sky130: "sky130A",
-  gf180mcu: "gf180mcuD",
-  "ihp-sg13g2": "ihp-sg13g2",
-};
-
-/**
  * Infers a block's PDK family from its slug prefix (issue #1060). This is a
  * fallback heuristic -- `layout.json` has no explicit PDK family field yet
- * (see module doc comment above) -- so it is deliberately conservative: an
- * unrecognized prefix returns `undefined` rather than guessing wrong.
+ * (see module doc comment above; issue #1285) -- so it is deliberately
+ * conservative: an unrecognized prefix returns `undefined` rather than
+ * guessing wrong.
  */
 function inferPdkFamily(slug: string): PdkFamily | undefined {
   if (slug.startsWith("gf180mcu_") || slug.startsWith("gf180-")) return "gf180mcu";
@@ -116,23 +94,21 @@ function inferPdkFamily(slug: string): PdkFamily | undefined {
 }
 
 /**
- * Resolves a block's `GdsViewer` `pdk` prop from its slug (issue #1060,
- * carried forward by #943). `pdk` is derived from `slug` via
- * `inferPdkFamily()` rather than hardcoded, since the gallery now spans
- * multiple PDK families. When the family can't be inferred, `undefined` is
- * returned (the viewer falls back to its own default) rather than lying
- * with a wrong PDK identifier -- and a build-time warning is logged so an
- * unrecognized slug prefix doesn't go unnoticed.
+ * Resolves a block's `GdsViewer` `pdkFamily` prop from its slug (issue
+ * #1060, carried forward by #943). When the family can't be inferred,
+ * `undefined` is returned -- the renderer then colors layers by a
+ * deterministic per-layer hue instead of styling them with a wrong PDK's
+ * palette -- and a warning is logged so an unrecognized slug prefix doesn't
+ * go unnoticed.
  */
-function resolveViewerPdk(slug: string): string | undefined {
+function resolveViewerPdkFamily(slug: string): PdkFamily | undefined {
   const family = inferPdkFamily(slug);
-  const pdk = family ? VIEWER_PDK_BY_FAMILY[family] : undefined;
-  if (!pdk) {
+  if (!family) {
     console.warn(
-      `resolveViewerPdk: could not infer a PDK family for slug "${slug}" -- omitting the viewer's pdk param (it will use its own default) instead of guessing wrong.`,
+      `resolveViewerPdkFamily: could not infer a PDK family for slug "${slug}" -- the viewer will color layers by a generated fallback palette instead of guessing wrong.`,
     );
   }
-  return pdk;
+  return family;
 }
 
 /**
@@ -193,14 +169,26 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
   }
 
   const canDownload = layout.downloadable === true && layout.layout_file !== undefined;
+  // Same-origin, root-relative URL: the viewer now parses and draws the file
+  // in the browser itself (issue #1284), so it must resolve against whatever
+  // origin is actually serving the page -- the deployed site, a local `npm
+  // run dev` preview, or a `vite preview` -- rather than a hardcoded
+  // production origin, which would make every non-production preview fetch
+  // cross-origin.
   const layoutFileUrl = canDownload
-    ? `${SITE_ORIGIN}${blockAssetUrl(layout.slug, layout.layout_file as string)}`
+    ? blockAssetUrl(layout.slug, layout.layout_file as string)
     : undefined;
   // Whether the GdsViewer overlay has a file to show -- gates the render
   // thumbnails' click affordance and the Downloads section's viewer entry
   // on the exact same condition as the raw-file download link.
   const canView = canDownload && layoutFileUrl !== undefined;
-  const viewerPdk = canView ? resolveViewerPdk(layout.slug) : undefined;
+  const viewerPdkFamily = canView ? resolveViewerPdkFamily(layout.slug) : undefined;
+  // Memoized so the overlay's style table isn't rebuilt (and the canvas
+  // redrawn) on every re-render of this page.
+  const viewerLayerNames = useMemo(
+    () => (canView ? layerNamesFromRenders(layout.renders) : undefined),
+    [canView, layout.renders],
+  );
   const openViewer = () => setIsViewerOpen(true);
   const handleViewerKeyDown = (event: KeyboardEvent) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -456,7 +444,8 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
           isOpen={isViewerOpen}
           onClose={() => setIsViewerOpen(false)}
           fileUrl={layoutFileUrl}
-          pdk={viewerPdk}
+          pdkFamily={viewerPdkFamily}
+          layerNames={viewerLayerNames}
           displayName={displayName}
         />
       )}
