@@ -19,6 +19,8 @@ scripts/
   _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
+  install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
+  place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
   gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
   ingest-canary.py               # ingest a public canary block repo (issue #62) into blocks/<slug>/output/layout.json
@@ -168,6 +170,33 @@ See the script's header comment for the full knob list and the incident log
 evidence; [`tests/test_ci_apt_install.py`](../tests/test_ci_apt_install.py)
 exercises every retry/timeout/fatal path against a fake `apt-get` and pins
 the workflow wiring.
+
+## `install-openroad-docker.sh` / `place-and-route-smoke.sh`
+
+CI provisioning + pipeline for
+[`.github/workflows/place-and-route-smoke.yml`](../.github/workflows/place-and-route-smoke.yml)
+(issue #1328, Epic #700 Phase 4) — the end-to-end
+synth→place-and-route→GDS→`klt lvs`→`klt drc` smoke job
+[`docs/cli/place-and-route.md`'s "CI" section](../docs/cli/place-and-route.md#ci)
+documents.
+
+`install-openroad-docker.sh` writes an `openroad` wrapper script onto
+`$PATH` that shells out to the `openroad/orfs` Docker image per invocation
+(there is no apt/brew/pip package for `openroad` — see
+`docs/cli/place-and-route.md`'s "Installing OpenROAD" section), additionally
+mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
+the container too — see the script's own header comment for why that matters.
+
+`place-and-route-smoke.sh` runs the pipeline for `gcd`/`mult8` (the only
+two designs with a committed `regenerate.sh` recipe — no `modexp` fixture
+exists) and asserts `klt lvs`'s/`klt drc`'s own JSON `status`/
+`error_count`/`violation_count` fields, not just each process's exit code.
+
+```
+scripts/install-openroad-docker.sh "$HOME/.cache/openroad-docker/bin"
+PATH="$HOME/.cache/openroad-docker/bin:$PATH" PDK=sky130A PDK_ROOT=~/.volare \
+  scripts/place-and-route-smoke.sh gcd mult8
+```
 
 ## `gallery_signals.py` / `bootstrap-gallery-blocks.py`
 

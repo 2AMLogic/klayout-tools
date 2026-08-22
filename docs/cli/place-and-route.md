@@ -126,14 +126,40 @@ pinned and verified for this repo, so there is no equivalent
 
 ### CI
 
-No CI job in this repo provisions `openroad` today — `.github/workflows/ci.yml`
-installs `ngspice`, a pinned Yosys, and pinned Icarus Verilog/Verilator by
-name, but has no step that installs OpenROAD, so `klt place-and-route` is
-not yet exercised end-to-end in CI (unlike `klt synthesize`, `klt equiv`,
-and `klt functional-verification`). The Docker recipe above is the
-straightforward way to close that gap — a `docker run` step per invocation,
-or the wrapper script above committed to the repo and put on `$PATH` before
-any `klt place-and-route` call — it just is not wired up yet.
+[`.github/workflows/place-and-route-smoke.yml`](../../.github/workflows/place-and-route-smoke.yml)
+(issue #1328, Epic #700 Phase 4) provisions `openroad` and runs the full
+synth→place-and-route→GDS→`klt lvs`→`klt drc` pipeline on the `gcd`/`mult8`
+corpus designs. It installs `openroad` via
+[`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)
+— the Docker recipe above, scripted: pulls `openroad/orfs:latest` and writes
+a wrapper onto `$PATH` that shells out to it per invocation, additionally
+mounting `$PDK_ROOT` (read-only, at the identical host path) alongside
+`$PWD` — see that script's own header comment for why the bare `-v
+"$PWD":"$PWD"`-only recipe above is not sufficient once a real PDK is
+involved. It fetches a full open_pdks-layout sky130A PDK via the pinned
+`volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b`
+(matching `scripts/aws/build-remote-sim-ami.sh`'s own pin) — the full
+LEF/tech-LEF/liberty tree this command's PDK resolution needs, not the
+liberty-only subset `.github/workflows/ci.yml`'s `test` job already caches
+for `klt synthesize`'s worked example. The pipeline itself runs through
+[`scripts/place-and-route-smoke.sh`](../../scripts/place-and-route-smoke.sh),
+which parses `klt lvs`'s `status`/`error_count` and `klt drc`'s
+`status`/`violation_count` JSON fields directly (not merely each process's
+exit code) — see that script's header comment for the LVS self-compare
+methodology it uses and why it does not (yet) compare against this
+command's own `verilog_path` as-built netlist (see "As-built netlist" above
+for that gap).
+
+This is a `workflow_dispatch`-only job, not part of `ci.yml`'s PR-gating
+`test` job: the Docker pull plus full PDK fetch are multiple GB of one-time
+cost on a cache miss, judged too heavy to run on every PR. Trigger it
+manually (Actions tab, or `gh workflow run place-and-route-smoke.yml`)
+whenever `klt place-and-route`/`klt lvs`/`klt drc`/`klt extract`/`klt
+synthesize` change, or before a release. Scoped to `gcd`/`mult8` only — the
+only two designs with a committed, reviewed fixture-regeneration recipe
+(`tests/corpus/place_and_route/regenerate.sh`); there is no committed
+`modexp` fixture, and real `modexp`/fleet-canary validation is tracked
+separately (issue #1329).
 
 ## Stage granularity and invocation shape
 
