@@ -502,6 +502,25 @@ def create_parser() -> argparse.ArgumentParser:
             "(--engine klayout only)"
         ),
     )
+    drc_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' script global to pass to the klayout "
+            "subprocess, beyond the always-set 'input'/'report' (--engine "
+            "klayout only; ignored for --engine curated). Repeatable -- "
+            "pass once per variable. Some PDK-native decks gate every rule "
+            "behind additional globals (FEOL/BEOL enable flags, a "
+            "metal-stack selector, etc.) their PDK's own run wrapper would "
+            "normally set; without this, such a deck silently checks "
+            "nothing and still reports a clean, empty report. Not needed "
+            "for a self-contained deck (e.g. sky130A's sky130A.lydrc). "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
     drc_input_group.add_argument(
         "--check",
         default=None,

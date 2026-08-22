@@ -102,12 +102,42 @@ def _run(args: argparse.Namespace) -> dict:
                 "docs/cli/drc.md, 'Engine' -> 'klayout')"
             )
         return run_drc_klayout_engine(
-            args.file, deck_file, top=args.top, timeout_s=args.timeout_s
+            args.file,
+            deck_file,
+            top=args.top,
+            timeout_s=args.timeout_s,
+            deck_vars=_parse_deck_vars(args.deck_var),
         )
 
     if not args.deck:
         raise DrcError("argument --deck is required for --engine curated")
     return run_drc(args.file, args.deck, top=args.top)
+
+
+def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--deck-var name=value`` values (issue #1302) into
+    the ``deck_vars`` mapping :func:`run_drc_klayout_engine` threads through
+    as extra ``-rd`` script globals. Silently ignored (returns ``{}``) when
+    ``--engine curated`` is selected -- ``--deck-var`` is a klayout-engine-
+    only flag, the same "ignored, not rejected" treatment ``--deck-file``
+    and ``--timeout-s`` already get under the curated engine.
+
+    Raises :class:`DrcError` for a malformed value missing the required
+    ``=`` separator -- a clean error (exit 1) rather than a confusing
+    ``KeyError``/silent no-op.
+    """
+    if not raw:
+        return {}
+    deck_vars: dict[str, str] = {}
+    for item in raw:
+        name, sep, value = item.partition("=")
+        if not sep:
+            raise DrcError(
+                f"invalid --deck-var {item!r}: expected 'name=value' "
+                "(e.g. --deck-var feol=true)"
+            )
+        deck_vars[name] = value
+    return deck_vars
 
 
 def _print_text(report: dict) -> None:
