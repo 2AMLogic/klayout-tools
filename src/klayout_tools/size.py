@@ -785,6 +785,18 @@ def _bias_label(target: dict[str, Any]) -> str:
     return "diode-connected (gate tied to drain, Vds=Vgs)"
 
 
+#: Every device-shaped entry in a ``klt size`` response (single-device
+#: mode's top-level payload, or one instance in topology mode's
+#: ``devices.<instance>`` map) must carry these three keys -- issue #770's
+#: extension of the epic's "a result with no stated method is not accepted"
+#: bar (issue #721) to gm/Id itself: a device result is not just method-
+#: documented, its achieved gm/Id and inversion level must be present too,
+#: never silently omitted. Values may be ``None`` (e.g. ``status: "error"``,
+#: where no operating point was ever confirmed) -- what is refused is the
+#: *key* being absent, not the value being unknown.
+_DEVICE_RATIONALE_FIELDS = ("gm_id_target", "gm_id_achieved", "inversion_level")
+
+
 def run_size(
     request_path: str,
     *,
@@ -812,8 +824,65 @@ def run_size(
     model library, unsupported engine/device kind) -- once the sweep starts,
     the response always carries a ``status`` and a populated ``method``
     (see this module's docstring and the "no stated method is rejected"
-    acceptance criterion, issue #721).
+    acceptance criterion, issue #721). Before returning, every device-shaped
+    entry in the response is checked for the gm/Id rationale fields issue
+    #770 requires -- see :func:`_validate_device_rationale`.
     """
+    payload = _run_size_impl(
+        request_path, artifacts_dir=artifacts_dir, timeout_s=timeout_s
+    )
+    _validate_device_rationale(payload)
+    return payload
+
+
+def _validate_device_rationale(payload: dict[str, Any]) -> None:
+    """Refuse to emit a response where a sized device's gm/Id rationale is
+    missing (issue #770): every device-shaped entry must carry
+    ``gm_id_target``/``gm_id_achieved``/``inversion_level`` -- the
+    hoisted-to-top-level counterparts of ``target.gm_id``/
+    ``operating_point.gm_id``/``operating_point.inversion_level`` that a
+    caller would otherwise have to reconstruct by hand. This mirrors
+    ``method``'s own "always populated, even on `status: 'error'`"
+    precedent (this module's docstring): the *keys* are always present
+    (values may be ``None`` when nothing was ever confirmed), so "missing"
+    can only mean a response-building code path forgot to set them --
+    a structural bug in this module, not a condition a caller's request can
+    trigger, hence :class:`SizeError` rather than a silent gap.
+
+    Topology mode's ``status: "error"`` is the one documented exception:
+    ``devices`` itself is ``None`` there (the evaluator never produced any
+    per-instance result to attach rationale to -- see
+    :func:`_topology_error_payload`), so there is nothing to check.
+    """
+    if "devices" in payload:
+        devices = payload["devices"]
+        if devices is None:
+            return
+        for key, entry in devices.items():
+            _require_device_rationale_fields(entry, f"devices.{key!r}")
+        return
+    _require_device_rationale_fields(payload, "response")
+
+
+def _require_device_rationale_fields(entry: dict[str, Any], where: str) -> None:
+    missing = [field for field in _DEVICE_RATIONALE_FIELDS if field not in entry]
+    if missing:
+        raise SizeError(
+            f"internal error: {where} is missing required gm/Id rationale "
+            f"field(s) {missing} -- refusing to emit an unexplained number "
+            "(issue #770)"
+        )
+
+
+def _run_size_impl(
+    request_path: str,
+    *,
+    artifacts_dir: str | None = None,
+    timeout_s: float | None = None,
+) -> dict[str, Any]:
+    """The former body of :func:`run_size` -- split out so
+    :func:`_validate_device_rationale` has exactly one call site to guard,
+    regardless of which of this function's several return points fired."""
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1274: `environment.models_lib` is normalised against this one
@@ -1159,6 +1228,12 @@ def run_size(
         "corner": _corner_public(sizing_corner),
         "corners": corners_echo,
         "target": target,
+        # Issue #770: hoisted rationale fields, so a caller can read a
+        # device's gm/Id target/achieved/inversion-level without
+        # reconstructing them from `target`/`operating_point` by hand.
+        "gm_id_target": target["gm_id"],
+        "gm_id_achieved": confirmed_gm_id,
+        "inversion_level": inversion_level,
         "tolerance": {"gm_id_rel": gm_id_rel_tol},
         "operating_point": operating_point,
         "margins": {
@@ -1567,6 +1642,11 @@ def _run_worst_case_margin(
         "corner": _corner_public(corner_points[worst_index]),
         "corners": corners_echo,
         "target": target,
+        # Issue #770: hoisted from the worst corner's own confirmed
+        # operating point -- see the default-objective payload above.
+        "gm_id_target": target["gm_id"],
+        "gm_id_achieved": worst["operating_point"]["gm_id"],
+        "inversion_level": worst["operating_point"]["inversion_level"],
         "tolerance": {"gm_id_rel": gm_id_rel_tol},
         "operating_point": worst["operating_point"],
         "margins": worst["margins"],
@@ -1592,7 +1672,10 @@ def _error_payload(
     ``method`` is still populated (per this module's docstring, "no stated
     method is rejected" applies to every status, not just a successful
     one); ``corners.declared``/``corners.sizing`` are still echoed,
-    ``corners.results`` stays ``None`` (never evaluated).
+    ``corners.results`` stays ``None`` (never evaluated). ``gm_id_target``
+    (issue #770) is still echoed from the request's own declared target --
+    ``gm_id_achieved``/``inversion_level`` are ``None`` since no operating
+    point was ever confirmed.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1601,6 +1684,9 @@ def _error_payload(
         "corner": _corner_public(corner),
         "corners": corners,
         "target": target,
+        "gm_id_target": target["gm_id"],
+        "gm_id_achieved": None,
+        "inversion_level": None,
         "tolerance": None,
         "operating_point": None,
         "margins": None,
@@ -2673,6 +2759,11 @@ def _build_topology_device_results(
             "device": device,
             "status": status,
             "target": {"gm_id": target_gm_id, "id_a": nominal_id},
+            # Issue #770: hoisted rationale fields -- see the single-device
+            # payload's own copy of this comment.
+            "gm_id_target": target_gm_id,
+            "gm_id_achieved": gm_id,
+            "inversion_level": operating_point["inversion_level"],
             "operating_point": operating_point,
             "margins": {
                 "gm_id_rel_error": gm_id_rel_error,

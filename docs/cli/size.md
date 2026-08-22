@@ -387,6 +387,7 @@ choice of width holds it constant across a PVT matrix. So the top-level
   "corner": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
   "corners": { "declared": [{ "...": "..." }], "sizing": { "...": "..." }, "hold_across_corners": false, "results": [{ "...": "..." }] },
   "target": { "id_a": 2e-05, "gm_id": 12.0 },
+  "gm_id_target": 12.0, "gm_id_achieved": 12.00158, "inversion_level": "strong",
   "tolerance": { "gm_id_rel": 0.03 },
   "operating_point": {
     "w_um": 3.571887060106671, "l_um": 0.5, "nf": 1, "mult": 1,
@@ -416,6 +417,19 @@ choice of width holds it constant across a PVT matrix. So the top-level
   fatal ngspice error). `operating_point`/`margins`/`tolerance` are `null`
   only for `status: "error"`; `"fail"` still reports the closest achievable
   operating point (never silently extrapolated) and its margins.
+- `gm_id_target`/`gm_id_achieved`/`inversion_level` (issue #770) -- the
+  sized device's gm/Id rationale hoisted to top-level fields, so a caller
+  can audit *why* this device was sized this way without reconstructing it
+  from `target`/`operating_point` by hand: `gm_id_target` mirrors
+  `target.gm_id`, `gm_id_achieved` mirrors `operating_point.gm_id` (the
+  confirmed, in-circuit value), and `inversion_level` mirrors
+  `operating_point.inversion_level`. **Always present as keys** on every
+  response, including `status: "error"` -- `gm_id_achieved`/
+  `inversion_level` are `null` there (no operating point was ever
+  confirmed), but `gm_id_target` still echoes the request's own declared
+  target. A response missing any of these three keys is a bug in this
+  command, not a state a caller can trigger -- `klt size` refuses to build
+  one (see `_validate_device_rationale` in `size.py`).
 - `operating_point` -- the confirmed sizing (see "Method" above):
   `inversion_level` is `"weak"`/`"moderate"`/`"strong"`/`"unknown"`, derived
   from `Vov = Vgs - Vth` against a documented rule-of-thumb threshold
@@ -658,6 +672,7 @@ differ in the real circuit (different drain nodes, hence different `Vds`).
       "placement": "diode-connected tail-bias replica ...",
       "device": { "...": "..." }, "status": "pass",
       "target": { "gm_id": 14.23, "id_a": 2e-05 },
+      "gm_id_target": 14.23, "gm_id_achieved": 14.15, "inversion_level": "strong",
       "operating_point": { "...": "same shape as single-device mode's operating_point" },
       "margins": { "gm_id_rel_error": 0.0, "id_rel_error": 0.0 },
       "rationale": "[tail_ref] tail role, ... Measured in-circuit gm/Id=14.23 S/A ... Inversion level 'strong' from Vov=Vgs-Vth=0.1141V ..."
@@ -706,8 +721,14 @@ differ in the real circuit (different drain nodes, hence different `Vds`).
   control device and whether its target was reachable in bounds.
 - `devices.<instance key>` -- one entry per *instance* (six), each with its
   own in-circuit `operating_point` (same shape as single-device mode's),
-  `margins`, `status`, and a `rationale` string stating that device's gm/Id
-  against its target and the numeric basis for its `inversion_level`.
+  `margins`, `status`, a `rationale` string stating that device's gm/Id
+  against its target and the numeric basis for its `inversion_level`, and
+  (issue #770) the same hoisted `gm_id_target`/`gm_id_achieved`/
+  `inversion_level` fields single-device mode's top-level response carries
+  -- see that mode's "Response" section above. `devices` itself is `null`
+  on `status: "error"` (see above); every present instance always carries
+  all three fields (`_validate_device_rationale` in `size.py` refuses a
+  response that does not).
 - `joint_solve.iterations` -- the coupled search trajectory: one entry per
   ngspice evaluation of the assembled circuit, with that candidate's widths,
   the measured per-role in-circuit gm/Id, and the resulting relative errors.

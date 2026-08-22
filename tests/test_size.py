@@ -381,6 +381,25 @@ def test_run_size_stubbed_empty_log_is_evaluator_error(tmp_path, monkeypatch):
     assert report["status"] == "error"
 
 
+def test_run_size_stubbed_error_still_echoes_gm_id_target_but_nulls_achieved(
+    tmp_path, monkeypatch
+):
+    """Issue #770: on `status: "error"` no operating point was ever
+    confirmed, so `gm_id_achieved`/`inversion_level` are `None` -- but the
+    *keys* are still present (never silently dropped), and `gm_id_target`
+    still echoes the request's own declared target."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_request())
+    _stub_subprocess_run(monkeypatch, side_effect=FileNotFoundError("no ngspice"))
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    assert report["gm_id_target"] == report["target"]["gm_id"]
+    assert report["gm_id_achieved"] is None
+    assert report["inversion_level"] is None
+
+
 def test_cli_exit_code_evaluator_errored(tmp_path, monkeypatch):
     _write_models_lib(tmp_path)
     request = _write_request(tmp_path, _base_request())
@@ -404,6 +423,74 @@ def test_cli_unresolvable_request_error_envelope(tmp_path, capsys):
 # --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #
+
+
+def test_validate_device_rationale_passes_when_all_fields_present():
+    # Single-device shape.
+    size._validate_device_rationale(
+        {
+            "gm_id_target": 8.0,
+            "gm_id_achieved": 8.1,
+            "inversion_level": "strong",
+        }
+    )
+    # Topology shape.
+    size._validate_device_rationale(
+        {
+            "devices": {
+                "tail": {
+                    "gm_id_target": 14.2,
+                    "gm_id_achieved": 14.15,
+                    "inversion_level": "moderate",
+                }
+            }
+        }
+    )
+    # Topology `status: "error"` -- `devices` is `None`, nothing to check.
+    size._validate_device_rationale({"devices": None})
+
+
+@pytest.mark.parametrize(
+    "missing_field", ["gm_id_target", "gm_id_achieved", "inversion_level"]
+)
+def test_validate_device_rationale_raises_when_single_device_field_missing(
+    missing_field,
+):
+    """Issue #770's second acceptance criterion: a result missing the gm/Id
+    rationale for a device fails validation -- exercised here directly
+    against the internal check, since every real response-building branch
+    in this module always sets these fields (see `run_size`'s own docstring:
+    the check is a structural guard, not a caller-triggerable condition)."""
+    payload = {
+        "gm_id_target": 8.0,
+        "gm_id_achieved": 8.1,
+        "inversion_level": "strong",
+    }
+    del payload[missing_field]
+
+    with pytest.raises(size.SizeError, match=missing_field):
+        size._validate_device_rationale(payload)
+
+
+@pytest.mark.parametrize(
+    "missing_field", ["gm_id_target", "gm_id_achieved", "inversion_level"]
+)
+def test_validate_device_rationale_raises_when_topology_instance_field_missing(
+    missing_field,
+):
+    payload = {
+        "devices": {
+            "tail": {
+                "gm_id_target": 14.2,
+                "gm_id_achieved": 14.15,
+                "inversion_level": "moderate",
+            }
+        }
+    }
+    del payload["devices"]["tail"][missing_field]
+
+    with pytest.raises(size.SizeError, match=missing_field):
+        size._validate_device_rationale(payload)
 
 
 def test_log_space_endpoints_and_count():
@@ -535,6 +622,23 @@ def test_run_size_nmos_pass(tmp_path):
     assert report["method"]["feasible"] is True
     assert report["environment"]["engine"] == "ngspice"
     assert report["environment"]["engine_version"] is not None
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_pass_includes_hoisted_gm_id_rationale_fields(tmp_path):
+    """Issue #770: every sized device's gm/Id target, achieved gm/Id, and
+    inversion level are hoisted to top-level response fields -- not just
+    nested inside `target`/`operating_point` -- so a caller can read the
+    sizing rationale without reconstructing it by hand."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_request())
+
+    report = size.run_size(str(request))
+
+    assert report["gm_id_target"] == report["target"]["gm_id"]
+    assert report["gm_id_achieved"] == report["operating_point"]["gm_id"]
+    assert report["inversion_level"] == report["operating_point"]["inversion_level"]
+    assert report["inversion_level"] in {"weak", "moderate", "strong", "unknown"}
 
 
 @_SKIP_NO_NGSPICE
@@ -1480,6 +1584,14 @@ def test_run_size_worst_case_margin_reports_corners_block(tmp_path, monkeypatch)
     assert report["method"]["bracket_w_um"] is None
     assert report["method"]["interpolated_w_um"] is not None
 
+    # Issue #770: hoisted fields mirror the worst-margin corner's own
+    # confirmed result, same as `operating_point`/`margins` above.
+    assert report["gm_id_target"] == report["target"]["gm_id"]
+    assert report["gm_id_achieved"] == worst_result["operating_point"]["gm_id"]
+    assert (
+        report["inversion_level"] == worst_result["operating_point"]["inversion_level"]
+    )
+
 
 def test_run_size_worst_case_margin_reduces_worst_case_error_vs_sizing_corner(
     tmp_path, monkeypatch
@@ -2156,6 +2268,25 @@ def test_run_size_topology_every_device_states_gm_id_and_inversion(tmp_path):
         # the polarity normalization is what keeps them off "weak".
         if entry["device"]["kind"] == "pmos":
             assert op["vov_v"] > 0
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_devices_include_hoisted_gm_id_rationale_fields(tmp_path):
+    """Issue #770: every instance in `devices.<instance>` carries the same
+    hoisted `gm_id_target`/`gm_id_achieved`/`inversion_level` fields
+    single-device mode's top-level response does (see
+    `test_run_size_pass_includes_hoisted_gm_id_rationale_fields`)."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+
+    report = size.run_size(str(request))
+
+    for key, entry in report["devices"].items():
+        assert entry["gm_id_target"] == entry["target"]["gm_id"], key
+        assert entry["gm_id_achieved"] == entry["operating_point"]["gm_id"], key
+        assert (
+            entry["inversion_level"] == entry["operating_point"]["inversion_level"]
+        ), key
 
 
 @_SKIP_NO_NGSPICE
