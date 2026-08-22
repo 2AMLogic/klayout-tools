@@ -7152,6 +7152,110 @@ def test_abstract_cells_in_cell_label_resolves_disjoint_fragment_to_routed_net(
     assert tokens[1] == "ROUTED", x_line
 
 
+def test_abstract_cells_local_candidate_does_not_bind_to_unrelated_instance(
+    tmp_path,
+):
+    """Issue #1296: a merged, non-rectangular local candidate island's
+    *bounding-box centre* must not be used as its representative probe
+    point -- that point can land in a concave notch the island's actual
+    drawn geometry never covers, and probing it globally against the
+    whole-design connectivity graph can then resolve to a completely
+    unrelated net an entirely different abstracted-cell instance happens to
+    have drawn at that coordinate.
+
+    ``LSHAPE_PIN``'s pin ``I`` sits on an isolated, never-externally-routed
+    li1 pad (``F1``). Locally (within ``LSHAPE_PIN``'s own definition, tied
+    only through its own poly -- exactly the connectivity abstraction
+    erasure severs), that pad is also connected to two more li1 rectangles
+    (``F2``/``F3``) that together draw an "L" shape. The "L"'s bounding-box
+    centre falls squarely in its own empty notch -- confirmed directly
+    against ``klayout.db``: for this exact two-rectangle union,
+    ``polygon.bbox()``'s centre is *not* ``polygon.inside(...)``.
+
+    A second, unrelated abstracted cell type (``NEIGHBOR_PIN``) is placed so
+    that its own real, externally-routed, named pin (``J`` -> ``NET_B``)
+    sits exactly at that notch coordinate -- reproducing "adjacent
+    instances' local routing fragments colliding as pin candidates" (the
+    shape PR #1184's own candidate-expansion fix is suspected of, per this
+    issue). Before this issue's fix, ``LSHAPE_PIN``'s pin ``I`` resolved to
+    ``NET_B`` -- another instance's own net -- instead of its own isolated
+    net; confirmed via direct reproduction (see this issue's PR) that the
+    unfixed code emits ``XLSHAPE_PIN_0 NET_B LSHAPE_PIN``, merging ``I``'s
+    net with ``NET_B`` even though nothing in the design actually
+    electrically connects them once ``LSHAPE_PIN`` is abstracted. This is
+    the same category shift (``net.merged``/``net.split`` dominating) this
+    issue's real ``gf180-trng`` repro reports (``mismatch_count`` 8 ->
+    1503).
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LSHAPE_PIN")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # F2 (foot) + F3 (leg) form an "L" whose union bbox is (0,0)-(4000,4000)
+    # -- centre (2000,2000) -- but neither rectangle covers that point (F2's
+    # y-range tops out at 1000; F3's x-range starts at 3000).
+    draw(leaf, 67, 20, kdb.Box(0, 0, 4000, 1000))  # F2 (li1)
+    draw(leaf, 67, 20, kdb.Box(3000, 0, 4000, 4000))  # F3 (li1)
+
+    # F1: pin I's own label pad -- geometrically disjoint from F2/F3 on li1,
+    # never externally routed.
+    draw(leaf, 67, 20, kdb.Box(100, 6000, 500, 6400))  # F1 (li1)
+    leaf.shapes(layout.layer(67, 5)).insert(kdb.Text("I", kdb.Trans(300, 6200)))
+
+    # Local-only poly jumper tying F1 to F2 -- exactly the mechanism
+    # `_local_pin_candidate_points` exists to discover (issue #1183), erased
+    # by `--abstract-cells` for real black-box abstraction.
+    draw(leaf, 66, 20, kdb.Box(200, 900, 400, 6100))  # poly.drawing
+    draw(leaf, 66, 44, kdb.Box(200, 6000, 400, 6100))  # licon1 near F1
+    draw(leaf, 66, 44, kdb.Box(200, 900, 400, 1000))  # licon1 near F2
+
+    # A second, distinct abstracted cell type with its own normally-routed
+    # pin -- placed so its own li1 pad sits exactly at LSHAPE_PIN's "L"
+    # bounding-box-centre notch, global (2000, 2000).
+    neighbor = layout.create_cell("NEIGHBOR_PIN")
+    draw(neighbor, 67, 20, kdb.Box(0, 0, 400, 400))
+    neighbor.shapes(layout.layer(67, 5)).insert(kdb.Text("J", kdb.Trans(200, 200)))
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(neighbor.cell_index(), kdb.Trans(1900, 1900)))
+
+    # Route NEIGHBOR_PIN's J normally: mcon + met1 + a net-name label,
+    # landing directly over its own li1 pad (global (1900,1900)-(2300,2300)
+    # -- covers LSHAPE_PIN's notch point (2000,2000), never touches any of
+    # LSHAPE_PIN's own drawn geometry).
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(1900, 1900, 2300, 2300))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(1900, 1900, 2300, 2300))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("NET_B", kdb.Trans(2100, 2100)))
+
+    path = _write_gds(layout, tmp_path / "lshape_pin.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lshape_pin.spice"),
+        abstract_cell_patterns=("LSHAPE_PIN", "NEIGHBOR_PIN"),
+    )
+
+    cells_by_name = {entry["cell"]: entry for entry in report["abstracted_cells"]}
+    assert cells_by_name["LSHAPE_PIN"]["resolution_source"] == "in_cell_labels"
+    assert cells_by_name["NEIGHBOR_PIN"]["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    x_lines = {
+        line.split()[2]: line.split()
+        for line in spice.splitlines()
+        if line.startswith("X")
+    }
+    # Sanity: the neighbour's own pin still resolves to its own routed net.
+    assert x_lines["NEIGHBOR_PIN"][1] == "NET_B"
+    # The actual regression guard: LSHAPE_PIN's isolated pin I must never be
+    # bound to NEIGHBOR_PIN's unrelated net, no matter what it resolves to
+    # instead (its own isolated/unnamed net, or nothing at all).
+    assert x_lines["LSHAPE_PIN"][1] != "NET_B", x_lines["LSHAPE_PIN"]
+
+
 def test_abstract_cells_present_in_cli_json(tmp_path, capsys):
     """`abstracted_cells` is part of the JSON contract and is emitted by the
     CLI, via the repeatable `--abstract-cells` flag."""

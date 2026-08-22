@@ -468,13 +468,74 @@ def _local_pin_candidate_points(
             l2n.shapes_of_net(net, target_region, True, shapes)
             points = extra_points.setdefault(text.string, [])
             for polygon in kdb.Region(shapes).merged().each():
-                box = polygon.bbox()
-                candidate = kdb.Point(
-                    (box.left + box.right) // 2, (box.bottom + box.top) // 2
-                )
+                candidate = _polygon_interior_point(polygon)
                 if candidate not in points:
                     points.append(candidate)
     return extra_points
+
+
+def _polygon_interior_point(polygon: kdb.Polygon) -> kdb.Point:
+    """A point *guaranteed* to lie inside ``polygon`` -- never merely inside
+    its bounding box (issue #1296).
+
+    ``polygon.bbox()``'s centre only lies on the polygon itself when the
+    polygon *is* its own bounding box (a plain rectangle). For anything else
+    -- an "L"/"T"/"+"-shaped island formed when
+    :func:`_local_pin_candidate_points` merges several disjoint same-layer
+    fragments of one locally-connected net, exactly the common case this
+    function serves -- the bounding-box centre can land in a concave notch
+    the polygon never draws at all. Probing that point later does not fail
+    safely: it runs against the *global*, whole-design connectivity graph
+    (not this function's cell-local one), so ``LayoutToNetlist.probe_net``
+    answers with whatever real geometry another, unrelated instance happens
+    to have drawn at that exact coordinate -- e.g. an abutting neighbour's
+    own local routing, since routing layers are deliberately left un-erased
+    for abstracted cells (see :func:`_abstract_cell_mask_layers`).
+    :func:`_probe_abstract_pin_net`'s scoring then prefers that unrelated,
+    already-named net over the pin's own correct (often still-unnamed)
+    resolution, merging two electrically separate nets into one and
+    splitting the net that should have kept both -- confirmed as this
+    issue's root cause both by direct reproduction (``bbox().center()``
+    computed for a two-rectangle "L" island landed outside the drawn
+    geometry, and probing it globally resolved to an unrelated, already-named
+    net drawn by a different abstracted-cell instance placed at that
+    coordinate) and against the real ``gf180-trng`` digital-section LVS run
+    this issue reports (``mismatch_count`` 8 -> 1503).
+
+    Decomposes ``polygon`` into trapezoid pieces
+    (``Polygon.decompose_trapezoids``, ``TD_htrapezoids`` -- for the
+    Manhattan geometry every conductor layer in this codebase's decks draws,
+    each piece is a plain rectangle) and returns the arithmetic mean of the
+    *largest* piece's own vertices. A trapezoid piece is convex by
+    construction, and the mean of a convex polygon's vertices is a convex
+    combination of them -- always inside the polygon, by definition of
+    convexity. The *largest* piece is used only so a single, deterministic,
+    reasonably-central candidate is chosen from a shape that decomposes into
+    several pieces.
+
+    Falls back to the exact bounding-box-centre behaviour when ``polygon``
+    ``is_box()`` (the overwhelmingly common case: a single-rectangle
+    fragment, or several fragments that happen to merge back into one) --
+    for a box, the bounding-box centre already *is* an interior point, so no
+    decomposition is needed and every existing single-rectangle-pin design
+    resolves exactly as it did before this issue's fix.
+    """
+    import klayout.db as kdb
+
+    box = polygon.bbox()
+    if polygon.is_box():
+        return kdb.Point((box.left + box.right) // 2, (box.bottom + box.top) // 2)
+    pieces = polygon.decompose_trapezoids(kdb.Polygon.TD_htrapezoids)
+    if not pieces:
+        # Degenerate/empty polygon -- no worse than this function's
+        # pre-#1296 bounding-box-centre behaviour for whatever edge case
+        # produced this.
+        return kdb.Point((box.left + box.right) // 2, (box.bottom + box.top) // 2)
+    largest = max(pieces, key=lambda piece: piece.area())
+    piece_points = list(largest.each_point())
+    x = sum(vertex.x for vertex in piece_points) // len(piece_points)
+    y = sum(vertex.y for vertex in piece_points) // len(piece_points)
+    return kdb.Point(x, y)
 
 
 def _resolve_abstract_cell_pins(
