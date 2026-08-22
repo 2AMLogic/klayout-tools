@@ -32,6 +32,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   embedded GDS viewer's `pdk=` identifier, keeping the heuristic as the
   fallback for blocks that predate the field. See
   `docs/cli/layout-metrics.md`.
+
+- `klt pex`'s `pin_count_mismatch` diagnostic (issue #1030, PR #1039) is now
+  detected **pre-flight and engine-independent** instead of only reactively
+  from ngspice's own refusal to elaborate the extracted-side deck (issue
+  #1041). Immediately after extraction, `run_pex` statically compares the
+  schematic DUT's and the extracted netlist's `.SUBCKT` headers for the
+  specific subcircuit `klt extract` wrapped its output in — scoped to that
+  one instantiated subcircuit, so an unrelated helper `.SUBCKT` of a
+  different pin count elsewhere in either netlist cannot false-positive it —
+  before the extracted-side `run_sim` call for any testbench. A mismatch
+  found this way skips the extracted-side simulation entirely for every
+  testbench (it cannot produce a trustworthy value either way) and reports
+  the same `pin_count_mismatch` shape as before, with `ngspice_message:
+  null`. This matters because ngspice 42 — what `apt`/this repo's CI
+  installs — is measurably laxer than ngspice 46 and silently accepts many
+  pin-count mismatches (an extra pin, or fewer pins than declared) instead
+  of rejecting them, so the previous purely-reactive detection could report
+  a plausible-looking `status: "pass"` with `pin_count_mismatch: null` and
+  silently wrong extracted values on exactly the ngspice version most users
+  and CI actually run. The original reactive paths
+  (`_pin_count_mismatch_from_report` / `_pin_count_mismatch_from_message`)
+  remain as a fallback for mismatches the static header comparison cannot
+  see — e.g. a subcircuit name only one side declares, or an unreadable
+  header — so `ngspice_message` is still populated (non-`null`) when the
+  fallback is what actually caught it. See `docs/cli/pex.md`'s "The pin
+  lists must match" section (the "Detection depends on your ngspice
+  version" caveat it previously documented no longer applies). No
+  response-shape break — `pin_count_mismatch`'s own shape and
+  `schema_version` are both unaffected, only *when* the block is populated
+  changed.
+
 - `klt power` gains the **per-net EM (electromigration) current-density
   verdict** — issue #846, Phase 1c of the power/IR-drop + EM signoff epic
   #712. Each `stackup`/`vias` role gains two new optional inputs,
@@ -717,15 +748,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   extracted side simulated, and the detection only runs when the extracted
   side produced no measured value at all, so a passing run cannot pick up a
   false positive. Bridging a genuine interface mismatch (a caller-supplied
-  pin map, a wrapper subcircuit) remains deliberately out of scope. Note that
-  detection is only as good as the engine's own refusal to elaborate the
-  deck: ngspice 46 rejects any pin-count difference, but ngspice 42 (what
-  `apt` ships, and what CI installs) silently accepts every "too many
-  parameters" case *and* a one-pin "too few" shortfall, simulating on with
-  dangling terminals — so on ngspice < 46 such a run still reports `status:
-  "pass"` with `pin_count_mismatch: null`. See `docs/cli/pex.md`, "Detection
-  depends on your ngspice version". No response-shape break;
-  `schema_version` unaffected.
+  pin map, a wrapper subcircuit) remains deliberately out of scope. At the
+  time this landed, detection was only as good as the engine's own refusal
+  to elaborate the deck: ngspice 46 rejects any pin-count difference, but
+  ngspice 42 (what `apt` ships, and what CI installs) silently accepts every
+  "too many parameters" case *and* a one-pin "too few" shortfall, simulating
+  on with dangling terminals — so on ngspice < 46 such a run still reported
+  `status: "pass"` with `pin_count_mismatch: null`. **Superseded by issue
+  #1041 (below):** detection is now a static, engine-independent pre-flight
+  check that no longer depends on which ngspice version is installed; the
+  version-dependent reactive detection this entry originally described
+  remains only as a fallback for what the pre-flight check cannot see. No
+  response-shape break; `schema_version` unaffected.
 
 - 2026-08-14 — `klt drc` no longer reports false-positive `"enclosing"` /
   `"enclosed"` violations when a checked layer is drawn as several abutting

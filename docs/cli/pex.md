@@ -193,25 +193,35 @@ byte-identically on both sides, the schematic DUT's `.SUBCKT <top>
 <pins...>` header and the extracted netlist's must declare the **same number
 of pins**. When they do not — the common case being a deck whose extraction
 promotes a device-body/substrate-tap net (or any other physical net a
-hand-written schematic subcircuit never models) to a top-level pin — ngspice
-refuses the extracted-side deck outright:
+hand-written schematic subcircuit never models) to a top-level pin — a
+strict-enough ngspice would refuse the extracted-side deck outright:
 
 ```
 Too few parameters for subcircuit type "res" (instance: xxres)
     Simulation interrupted due to error!
 ```
 
-`klt pex` detects that specific failure mode and reports it **by name**
-rather than leaving it buried in a per-corner `ngspice.log` artifact (issue
-#1030). The run is not aborted: the JSON report is still emitted, with
+`klt pex` never actually needs ngspice to say so, though: it detects the
+mismatch **statically and pre-flight**, comparing the schematic DUT's and
+the extracted netlist's `.SUBCKT` headers for the specific subcircuit `klt
+extract` wrapped its output in, *before* either side ever simulates (issue
+#1041) — the same comparison ngspice's own elaboration would otherwise make,
+done in Python instead of relying on the engine to make and report it. This
+is **engine-independent**: it fires identically whatever ngspice version is
+installed, rather than depending on the engine actually rejecting the
+mismatched deck (see "Detection is engine-independent" below for why that
+distinction matters). It reports the mismatch **by name** rather than
+leaving it buried in a per-corner `ngspice.log` artifact (issue #1030). The
+run is not aborted: the JSON report is still emitted, with
 
 - one `delta[]` row per schematic-side `(corner, measurement)` carrying
   `extracted_value: null`, `delta_pct: null`, `status: "error"` — so a
   caller still gets a per-corner report of exactly which rows have no
-  trustworthy extracted value, and
+  trustworthy extracted value, and the extracted-side simulation is skipped
+  entirely for every testbench (it cannot produce a trustworthy value
+  either way), and
 - a top-level `pin_count_mismatch` block naming both sides' netlists, their
-  `.SUBCKT` pin lists and counts, ngspice's own line (when the corner kept
-  its log artifact via `options.keep_artifacts`), and a `detail` sentence:
+  `.SUBCKT` pin lists and counts, and a `detail` sentence:
 
 ```json
 "pin_count_mismatch": {
@@ -228,7 +238,7 @@ rather than leaving it buried in a per-corner `ngspice.log` artifact (issue
     "pin_count": 3,
     "pins": ["RA", "RB", "VSUBS"]
   },
-  "ngspice_message": "Too few parameters for subcircuit type \"res\" (instance: xxres)",
+  "ngspice_message": null,
   "detail": "the extracted netlist declares `.SUBCKT RES` with 3 pins (RA, RB, VSUBS) but the schematic DUT declares 2 (RA, RB) -- ..."
 }
 ```
@@ -236,30 +246,39 @@ rather than leaving it buried in a per-corner `ngspice.log` artifact (issue
 The exit code is `4` (a `delta[]` row errored), not `1` — the command ran,
 it just has no trustworthy extracted-side value to report. `--format text`
 prints the same block. On every run whose extracted side actually
-simulated, `pin_count_mismatch` is `null`; the detection only ever runs when
-the extracted side produced no measured value at all, so a passing (or
-merely limit-failing) run can never pick up a false-positive diagnostic.
+simulated, `pin_count_mismatch` is `null`.
 
-**Detection depends on your ngspice version.** Because the diagnostic is
-raised from ngspice's own refusal to elaborate the deck, `klt pex` can only
-name a mismatch that ngspice actually rejects — and older ngspice does not
-reject all of them. Measured directly on both versions:
+**A reactive fallback remains for what the static check cannot see.** The
+pre-flight comparison above is scoped to the *instantiated* subcircuit
+(`klt extract`'s own top-cell name) specifically, so it never false-positives
+on an unrelated helper `.SUBCKT` of a different pin count elsewhere in
+either netlist — but it also cannot catch a mismatch it has no name to
+compare, e.g. the schematic DUT declaring its subcircuit under a name the
+extracted netlist does not share, or an unreadable header. For those cases,
+`klt pex` still falls back to inferring the mismatch reactively, from
+ngspice's own refusal once an extracted-side run has already come back with
+no measured value at all (issue #1030's original detection) — carrying
+ngspice's own line (`ngspice_message`, non-`null` in that case) when the
+corner kept its log artifact via `options.keep_artifacts`. Either path
+populates the same `pin_count_mismatch` shape, so a caller does not need to
+know which one fired; only `ngspice_message` tells you (`null` when the
+pre-flight check caught it, ngspice's own text when the reactive fallback
+did). The reactive fallback is gated on "nothing at all came back", so a
+passing (or merely limit-failing) run can never pick up a false-positive
+diagnostic from it.
 
-| Mismatch (relative to the testbench's `X...` node count) | ngspice 46 | ngspice 42 |
-| --- | --- | --- |
-| Extracted `.SUBCKT` declares **≥2 more** pins ("too few parameters") | rejected | rejected |
-| Extracted `.SUBCKT` declares **exactly 1 more** pin | rejected | **accepted silently** |
-| Extracted `.SUBCKT` declares **fewer** pins ("too many parameters") | rejected | **accepted silently** |
-
-Where ngspice 42 accepts the deck, it simulates to completion and the
-extra/missing terminals are simply left dangling — so the run reports
-`status: "pass"` with `pin_count_mismatch: null` and **silently wrong**
-extracted values, rather than an error. ngspice 42 is what Debian/Ubuntu
-`apt` currently ships (`42+ds-3build1`), including in this repo's CI. If you
-are on ngspice < 46 and an extracted-vs-schematic delta looks implausible,
-compare the two `.SUBCKT` headers by hand before trusting it. Tightening
-this into an unconditional, engine-independent pre-flight header check is
-tracked in issue #1041.
+**Detection is engine-independent.** Because the pre-flight check compares
+the two `.SUBCKT` headers directly rather than waiting for ngspice to reject
+the deck, behaviour is identical on every ngspice version — including
+ngspice 42 (what Debian/Ubuntu `apt` currently ships, `42+ds-3build1`,
+including in this repo's CI), which is measurably laxer than ngspice 46 and
+silently accepts many pin-count mismatches instead of rejecting them (an
+extra pin, or fewer pins than declared), simulating to completion with the
+extra/missing terminals left dangling. Before this pre-flight check existed,
+that meant a `status: "pass"` with `pin_count_mismatch: null` and **silently
+wrong** extracted values on exactly the ngspice version most users and CI
+actually run — the pre-flight check closes that gap by never depending on
+ngspice's own strictness in the first place.
 
 **Fixing a real mismatch is the caller's job, for now.** Give the schematic
 subcircuit the same pin list as the extracted one, or extract with a
@@ -282,17 +301,20 @@ source/probe from the DUT — `klt pex` only re-points the `.include`/`.inc`
 line, it never adds an `X...` instantiation of the newly-wrapped
 subcircuit.
 
-Unlike `pin_count_mismatch` (**reactive**: only ever consulted once an
+Like `pin_count_mismatch`'s own pre-flight check, this runs once, from the
+two netlists' own text, *before* either side ever simulates — unlike
+`pin_count_mismatch`'s *reactive fallback* (only ever consulted once an
 extracted-side simulation attempt has already come back with nothing
-measured), this check is **proactive**: it runs once, from the two
-netlists' own text, *before* either side ever simulates. That distinction
-matters because a flat-vs-wrapped mismatch does not reliably fail loudly —
-a testbench with no `.ic`/similar card referencing the now-disconnected
-nodes may simply simulate the disconnected fixture to completion and
-report a plausible-looking but physically meaningless number for a
-measurement that happens to be well-defined on the stimulus side alone,
-exactly the failure mode `pin_count_mismatch`'s "nothing measured came
-back" gate cannot catch.
+measured), which cannot apply here at all: the flat schematic DUT declares
+no `.SUBCKT` interface for the pre-flight check (or the fallback) to compare
+in the first place, so a flat-vs-wrapped mismatch needs its own proactive
+check. That matters because a flat-vs-wrapped mismatch does not reliably
+fail loudly — a testbench with no `.ic`/similar card referencing the
+now-disconnected nodes may simply simulate the disconnected fixture to
+completion and report a plausible-looking but physically meaningless number
+for a measurement that happens to be well-defined on the stimulus side
+alone, exactly the failure mode `pin_count_mismatch`'s reactive fallback's
+"nothing measured came back" gate cannot catch.
 
 When it fires, the extracted side is never even attempted (so
 `pin_count_mismatch` stays `null` — the two diagnostics are mutually
