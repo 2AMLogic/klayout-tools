@@ -429,6 +429,7 @@ def test_no_false_warning_when_a_prior_call_already_rewrote_the_file(
 _APT_STEP_NAMES = (
     "Install ngspice",
     "Install Yosys build dependencies",
+    "Install SymbiYosys (sby) + Bitwuzla runtime dependencies",
     "Install Icarus Verilog + Verilator build dependencies",
 )
 
@@ -498,11 +499,12 @@ def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
     # outer bound would turn the fail-fast guard back into a long hang.
     assert deadline < 300
 
-    # The other two steps are not observed stalling in the same way (their
+    # The other steps are not observed stalling in the same way (their
     # payloads are an order of magnitude smaller) and keep the script's own
     # defaults -- no override needed/expected.
     for name in (
         "Install ngspice",
+        "Install SymbiYosys (sby) + Bitwuzla runtime dependencies",
         "Install Icarus Verilog + Verilator build dependencies",
     ):
         step = _step_text(text, name)

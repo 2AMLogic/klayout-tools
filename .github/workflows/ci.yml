@@ -580,6 +580,54 @@ jobs:
       - name: Verify Yosys runs headlessly
         run: yosys -V
 
+      - name: Install SymbiYosys (sby) + Bitwuzla runtime dependencies
+        # scripts/install-symbiyosys.sh (issue #1312, Phase 2 of Epic #707)
+        # installs sby -- the orchestration tool docs/design/
+        # sequential-equivalence-survey.md section 4.1 identifies as the
+        # prerequisite for every later Phase 2 sequential-equivalence item
+        # -- plus a pinned Bitwuzla SAT/SMT backend. sby itself needs no
+        # compiler (upstream's own `make install` just copies Python
+        # files), so this only needs Bitwuzla's runtime shared-library
+        # dependencies, not a full build toolchain like the Yosys step
+        # above. libgmp10/libmpfr6 back Bitwuzla's own dynamic linkage
+        # (see the script's header comment); libstdc++6/libgcc-s1 ship by
+        # default on ubuntu-latest and need no explicit install.
+        #
+        # Per-step timeout + noninteractive apt (issue #1204) and the
+        # mirror-resilient wrapper (issue #1219): same apt-mirror-stall
+        # exposure as the ngspice/Yosys steps above -- see the ngspice
+        # step's comment for the incident evidence and rationale.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh libgmp10 libmpfr6
+
+      - name: Cache pinned SymbiYosys + Bitwuzla install
+        id: symbiyosys-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/symbiyosys-0.67
+          key: symbiyosys-0.67-bitwuzla-0.9.1-${{ runner.os }}-${{ hashFiles('scripts/install-symbiyosys.sh', 'scripts/_install_common.sh') }}
+
+      - name: Install pinned SymbiYosys + Bitwuzla (cache miss only)
+        if: steps.symbiyosys-cache.outputs.cache-hit != 'true'
+        run: scripts/install-symbiyosys.sh
+
+      - name: Add pinned SymbiYosys + Bitwuzla to PATH
+        # sby's own launcher (share/yosys/python3/sby.py) locates its
+        # Python modules relative to this bin/ directory, and at runtime
+        # shells out to `yosys`/`yosys-smtbmc` (already on PATH from the
+        # pinned Yosys step above) and `bitwuzla` (installed into this same
+        # prefix by scripts/install-symbiyosys.sh) -- see the script's
+        # header comment for why this must run after, not before/instead
+        # of, the pinned Yosys install.
+        run: echo "$HOME/.cache/symbiyosys-0.67/bin" >>"$GITHUB_PATH"
+
+      - name: Verify SymbiYosys + Bitwuzla run headlessly
+        run: |
+          sby --version
+          bitwuzla --version
+
       - name: Cache pinned sky130_fd_sc_hd liberty
         id: sky130-liberty-cache
         uses: actions/cache@v6
