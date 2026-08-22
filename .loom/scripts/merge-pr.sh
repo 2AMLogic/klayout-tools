@@ -1512,20 +1512,6 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
         # Native attempted and failed (not a Gitea decline) — keep the gh error
         # in AUTO_MERGE_OUTPUT and fall through to the recheck/retry logic.
         _AM_DECLINED=false
-        # #1293: an App-installation-token permission-scope 403
-        # ("Resource not accessible by integration") on this native path
-        # cannot self-heal by simply retrying the same native binary call —
-        # loom-daemon's Rust `forge auto-merge` has no fresh-token
-        # escalation of its own (that lives in the separate Loom tool repo,
-        # out of scope here). Route this one failure signature to the
-        # shell-based forge_auto_merge below instead: it now retries through
-        # forge_gh_perm_safe, which force-mints a fresh installation token
-        # before giving up — the same recovery a manual `GH_TOKEN`-scoped
-        # re-run of this script already demonstrated works.
-        if is_app_permission_error "$AUTO_MERGE_OUTPUT"; then
-          info "Native loom-daemon auto-merge hit an App-permission 403 (#1293) — falling back to the forge_gh_perm_safe-backed shell path for a fresh-token retry"
-          _AM_DECLINED=true
-        fi
       fi
     fi
     if [[ "$_AM_DECLINED" == true ]]; then

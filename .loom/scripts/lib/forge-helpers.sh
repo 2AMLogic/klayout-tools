@@ -347,24 +347,15 @@ forge_merge_pr() {
         -d '{"Do":"squash","delete_branch_after_merge":false}'
     fi
   else
-    # Routed through forge_gh_perm_safe (#1293): a cached App-installation
-    # token whose write-scope grant hasn't propagated yet 403s with
-    # "Resource not accessible by integration" on this exact call — the
-    # terminal, most consequential write in the sweep lifecycle. Rather than
-    # surface that as a permanent failure, force-mint a fresh installation
-    # token and retry once before giving up (same ladder create-pr.sh and the
-    # comment/label helpers already use). No `2>&1` here: forge_gh_perm_safe
-    # manages its own stdout/stderr split, and every caller of forge_merge_pr
-    # already redirects `2>&1` at its own call site.
     if [[ -n "$expected_head_sha" ]]; then
-      forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number/merge" \
+      gh api "repos/$nwo/pulls/$pr_number/merge" \
         -X PUT \
         -f merge_method=squash \
-        -f sha="$expected_head_sha"
+        -f sha="$expected_head_sha" 2>&1
     else
-      forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number/merge" \
+      gh api "repos/$nwo/pulls/$pr_number/merge" \
         -X PUT \
-        -f merge_method=squash
+        -f merge_method=squash 2>&1
     fi
   fi
 }
@@ -570,32 +561,26 @@ forge_auto_merge() {
         -d '{"Do":"squash","merge_when_checks_succeed":true,"delete_branch_after_merge":true}'
     fi
   else
-    # Resolve PR node_id (required by GraphQL mutation). Routed through
-    # forge_gh_perm_safe (#1293) for the same App-permission-window 403
-    # retry forge_merge_pr now gets — a scope gap here would otherwise abort
-    # the whole auto-merge attempt before the mutation is even tried. No
-    # `2>/dev/null`: forge_gh_perm_safe needs the error text to detect
-    # is_app_permission_error, and every caller of forge_auto_merge already
-    # redirects `2>&1` at its own call site to capture it.
+    # Resolve PR node_id (required by GraphQL mutation).
     local node_id
-    node_id=$(forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number" --jq '.node_id') || return 1
+    node_id=$(gh api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
     [[ -z "$node_id" ]] && return 1
 
     if [[ -n "$expected_head_sha" ]]; then
       local mutation_with_oid='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod, expectedHeadOid: $expectedHeadOid}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
 
-      forge_gh_perm_safe api graphql \
+      gh api graphql \
         -f "query=$mutation_with_oid" \
         -F "pullRequestId=$node_id" \
         -F "mergeMethod=SQUASH" \
-        -F "expectedHeadOid=$expected_head_sha"
+        -F "expectedHeadOid=$expected_head_sha" 2>/dev/null
     else
       local mutation='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
 
-      forge_gh_perm_safe api graphql \
+      gh api graphql \
         -f "query=$mutation" \
         -F "pullRequestId=$node_id" \
-        -F "mergeMethod=SQUASH"
+        -F "mergeMethod=SQUASH" 2>/dev/null
     fi
   fi
 }
