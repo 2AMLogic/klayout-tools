@@ -1512,6 +1512,14 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
         # Native attempted and failed (not a Gitea decline) — keep the gh error
         # in AUTO_MERGE_OUTPUT and fall through to the recheck/retry logic.
         _AM_DECLINED=false
+        # #1293/#1316: an App-installation permission-scope 403 here is a
+        # token-propagation-window artifact, not a real scope gap — the
+        # native binary has no retry-with-fresh-token ladder of its own, so
+        # fall through to the shell forge_auto_merge path below instead
+        # (which routes through forge_gh_perm_safe and recovers).
+        if is_app_permission_error "$AUTO_MERGE_OUTPUT"; then
+          _AM_DECLINED=true
+        fi
       fi
     fi
     if [[ "$_AM_DECLINED" == true ]]; then
