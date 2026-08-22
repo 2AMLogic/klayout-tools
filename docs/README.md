@@ -98,6 +98,7 @@ docs/
     sc-leflib-evaluation.md
     scgallery-zerosoc-survey.md
     sdf-annotate-feasibility-spike.md
+    sequential-equivalence-survey.md
     siliconcompiler-core-survey.md
     sim-evidence-discipline-spike.md
     spice-corner-runner-spike.md
