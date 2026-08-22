@@ -1,6 +1,7 @@
-"""Extract a routed layout's power grid as a resistive network and solve it
-for its static (DC) IR drop (``klt power``, issues #844/#845, Phases 1a/1b of
-the power/IR-drop + EM signoff epic #712).
+"""Extract a routed layout's power grid as a resistive network, solve it for
+its static (DC) IR drop, and emit a per-net EM (electromigration)
+current-density verdict (``klt power``, issues #844/#845/#846, Phases
+1a/1b/1c of the power/IR-drop + EM signoff epic #712).
 
 Pure library: :func:`run_power` returns plain Python data (a JSON-
 serialisable ``dict``) and never prints -- serialisation and human-readable
@@ -10,7 +11,8 @@ formatting live in ``cli/power_cmd.py``, matching every other ``klt`` verb
 Scope of this module (see ``docs/cli/power.md`` for the full picture):
 ``klt power`` is defined end to end as JSON in (a routed layout + a
 power-net definition + a per-instance current model) / JSON out (an IR-drop
-map + worst-case droop + a per-net EM verdict). Two phases have landed:
+map + worst-case droop + a per-net EM verdict). All three phases have
+landed:
 
 - **#844, Phase 1a** -- the interface and the resistive-network extraction:
   turning a routed layout's named power/ground nets into a graph of nodes +
@@ -22,10 +24,15 @@ map + worst-case droop + a per-net EM verdict). Two phases have landed:
   algebra lives in :mod:`klayout_tools.ir_solver`, deliberately geometry-free
   so it can be validated against closed-form resistive networks with no
   layout involved; this module is the geometry-to-network binding.
-
-The per-net EM verdict (#846, Phase 1c) consumes this module's output
-additively -- in particular ``ir_drop_map``'s per-edge branch currents -- and
-is not implemented here.
+- **#846, Phase 1c** -- the per-net EM (electromigration) current-density
+  verdict: each ``stackup``/``vias`` role may additionally declare its own
+  EM current-density limit (``current_limit_a_per_um``/``current_limit_a``,
+  expressed the same way a real PDK's own tech LEF already expresses it --
+  see :func:`_compute_em_verdict`'s docstring) plus a free-text
+  ``current_limit_source`` citation. ``em_verdict`` compares every solved
+  edge's branch current (1b's ``ir_drop_map``) against its own cited limit
+  and rolls the result up per net -- ``None`` when there was no IR-drop
+  solve at all (nothing to compare).
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
 purely for wire/via connectivity (no device recognition registered) --
@@ -82,11 +89,11 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
 #: `1` -- the resistive-network extraction (issue #844, Phase 1a of epic
-#: #712) plus the static IR-drop solve (#845, Phase 1b). 1b added
-#: `ir_drop_map`/`worst_case_droop_mv` **additively** -- every field 1a
-#: documented is unchanged -- so no bump was needed (see docs/cli/power.md
-#: and docs/json-contract.md's additive-envelope design). A future phase adds
-#: `em_verdict` the same way.
+#: #712), the static IR-drop solve (#845, Phase 1b), and the per-net EM
+#: verdict (#846, Phase 1c). Each phase added its fields **additively** --
+#: every field an earlier phase documented is unchanged -- so no bump was
+#: needed for any of them (see docs/cli/power.md and
+#: docs/json-contract.md's additive-envelope design).
 SCHEMA_VERSION = 1
 
 
@@ -159,12 +166,48 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
                 f"must be >= 0 (got {sheet_r!r})"
             )
 
+        # `current_limit_a_per_um` (issue #846, Phase 1c): this role's own
+        # EM (electromigration) current-density limit, expressed the same
+        # way the PDK's own tech LEF expresses it -- a per-width-micron
+        # current, not a per-area one (see `docs/cli/power.md`'s "EM
+        # current-density verdict" section for why: a `DCCURRENTDENSITY`
+        # entry in a real sky130 `.tlef` is already `mA/um` at that layer's
+        # fixed drawn thickness, so no separate thickness term is needed).
+        # Optional -- a stackup entry that omits it simply reports no EM
+        # verdict for its edges (`current_limit_a: null`), matching how an
+        # omitted `label_layer` simply cannot name a net.
+        current_limit_a_per_um = entry.get("current_limit_a_per_um")
+        if current_limit_a_per_um is not None:
+            try:
+                current_limit_a_per_um = float(current_limit_a_per_um)
+            except (TypeError, ValueError) as exc:
+                raise PowerError(
+                    f"spec '{spec_path}': stackup[{i}].current_limit_a_per_um "
+                    f"must be a number (got {current_limit_a_per_um!r})"
+                ) from exc
+            if current_limit_a_per_um < 0:
+                raise PowerError(
+                    f"spec '{spec_path}': stackup[{i}].current_limit_a_per_um "
+                    f"must be >= 0 (got {current_limit_a_per_um!r})"
+                )
+
+        # `current_limit_source` (optional): a free-text citation of exactly
+        # where `current_limit_a_per_um` came from (e.g. the PDK doc/rule
+        # name), echoed back in `em_verdict` -- see `docs/cli/power.md`'s
+        # worked example, which cites a real sky130 `.tlef`
+        # `DCCURRENTDENSITY` line this way.
+        current_limit_source = entry.get("current_limit_source")
+        if current_limit_source is not None:
+            current_limit_source = str(current_limit_source)
+
         entries.append(
             {
                 "name": name,
                 "layer": layer,
                 "label_layer": label_layer,
                 "sheet_resistance_ohm_per_sq": sheet_r,
+                "current_limit_a_per_um": current_limit_a_per_um,
+                "current_limit_source": current_limit_source,
             }
         )
 
@@ -229,12 +272,40 @@ def _validate_vias(
             raise PowerError(f"spec '{spec_path}': duplicate via/stackup name {name!r}")
         names.append(name)
 
+        # `current_limit_a` (issue #846, Phase 1c): this via role's own EM
+        # limit -- unlike a metal role's `current_limit_a_per_um`, a real
+        # PDK's `DCCURRENTDENSITY` for a via/cut layer is already a flat
+        # per-shape amperage (e.g. sky130's `.tlef` "mA per via"), matching
+        # this spec's existing "one merged via polygon = one resistor"
+        # model (`resistance_ohm` above): the limit applies verbatim to
+        # every merged via edge this role contributes, with no width term.
+        current_limit_a = entry.get("current_limit_a")
+        if current_limit_a is not None:
+            try:
+                current_limit_a = float(current_limit_a)
+            except (TypeError, ValueError) as exc:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}].current_limit_a must be a "
+                    f"number (got {current_limit_a!r})"
+                ) from exc
+            if current_limit_a < 0:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}].current_limit_a must be "
+                    f">= 0 (got {current_limit_a!r})"
+                )
+
+        current_limit_source = entry.get("current_limit_source")
+        if current_limit_source is not None:
+            current_limit_source = str(current_limit_source)
+
         entries.append(
             {
                 "name": name,
                 "layer": layer,
                 "between": (str(between[0]), str(between[1])),
                 "resistance_ohm": resistance_ohm,
+                "current_limit_a": current_limit_a,
+                "current_limit_source": current_limit_source,
             }
         )
     return entries
@@ -443,7 +514,13 @@ def _build_island_network(
         return node_id
 
     def add_edge(
-        kind: str, layer_name: str, frm: str, to: str, resistance_ohm: float
+        kind: str,
+        layer_name: str,
+        frm: str,
+        to: str,
+        resistance_ohm: float,
+        current_limit_a: float | None = None,
+        current_limit_source: str | None = None,
     ) -> None:
         edge_id = f"e{counters['edge']}"
         counters["edge"] += 1
@@ -455,6 +532,14 @@ def _build_island_network(
                 "from": frm,
                 "to": to,
                 "resistance_ohm": round(resistance_ohm, 9),
+                # Issue #846, Phase 1c: this edge's own EM current-density
+                # limit, `null` when its `stackup`/`vias` role declared none
+                # -- see `_validate_stackup`/`_validate_vias` above and
+                # `docs/cli/power.md`'s "EM current-density verdict" section.
+                "current_limit_a": (
+                    round(current_limit_a, 12) if current_limit_a is not None else None
+                ),
+                "current_limit_source": current_limit_source,
             }
         )
 
@@ -485,7 +570,24 @@ def _build_island_network(
             n_a = add_node(entry["name"], a_x, a_y)
             n_b = add_node(entry["name"], b_x, b_y)
             resistance_ohm = entry["sheet_resistance_ohm_per_sq"] * length_um / cross_um
-            add_edge("metal", entry["name"], n_a, n_b, resistance_ohm)
+            # A metal role's EM limit is per-width (like a real PDK's own
+            # `DCCURRENTDENSITY`, mA/um at that layer's fixed thickness), so
+            # it scales by this specific merged rail's own cross-width --
+            # a narrow rail has a lower absolute current limit than a wide
+            # one on the same layer, exactly as electromigration physics
+            # says it should.
+            current_limit_a = entry["current_limit_a_per_um"]
+            if current_limit_a is not None:
+                current_limit_a = current_limit_a * cross_um
+            add_edge(
+                "metal",
+                entry["name"],
+                n_a,
+                n_b,
+                resistance_ohm,
+                current_limit_a,
+                entry["current_limit_source"],
+            )
             rails_by_layer[entry["name"]].append(
                 {"endpoints": [(n_a, a_x, a_y), (n_b, b_x, b_y)]}
             )
@@ -514,7 +616,15 @@ def _build_island_network(
                     f"matching {missing!r} rail on this net -- skipped"
                 )
                 continue
-            add_edge("via", via["name"], node_a, node_b, via["resistance_ohm"])
+            add_edge(
+                "via",
+                via["name"],
+                node_a,
+                node_b,
+                via["resistance_ohm"],
+                via["current_limit_a"],
+                via["current_limit_source"],
+            )
 
     return nodes, edges
 
@@ -830,6 +940,152 @@ def _round_or_none(
     return None if value is None else round(value * scale, digits)
 
 
+def _compute_em_verdict(
+    networks: list[dict[str, Any]], ir_drop_map: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """The per-net EM (electromigration) current-density verdict (issue
+    #846, Phase 1c): compare every solved edge's branch current
+    (``ir_drop_map``'s per-segment currents, Phase 1b) against that edge's
+    own ``current_limit_a`` (this module's Phase 1a extraction, scaled from
+    the spec's per-layer ``current_limit_a_per_um``/``current_limit_a`` --
+    see ``_build_island_network`` above), citing the exact limit and its
+    ``current_limit_source`` for every edge it checks.
+
+    ``None`` when there is nothing to check: either no IR-drop solve ran at
+    all (no ``pads``/``current_model`` in the spec -- there are no branch
+    currents to compare), matching how ``ir_drop_map`` itself is ``None``
+    in that case. An edge with no declared ``current_limit_a`` (the spec's
+    stackup/vias role set none) or no solved ``current_a`` (an unsolved
+    island, or a zero-resistance short whose own current is not
+    recoverable -- see ``ir_solver.py``) is counted in
+    ``unchecked_edge_count``, never guessed at, the same "report, never
+    guess" discipline ``_solve_ir_drop`` above already applies to droop.
+
+    A net's own ``status`` is ``"fail"`` if any of its checked edges
+    exceeds its limit, ``"pass"`` if at least one edge was checked and none
+    failed, or ``"not_checked"`` if the net had no edge with both a
+    declared limit and a solved current (e.g. every edge on that net's
+    stackup/via roles declared no ``current_limit_a_per_um``/
+    ``current_limit_a`` at all).
+    """
+    if ir_drop_map is None:
+        return None
+
+    # (net, island_id, edge_id) -> the base extraction edge, which carries
+    # `kind`/`layer`/`current_limit_a`/`current_limit_source` -- everything
+    # `ir_drop_map`'s own (deliberately slimmer) per-edge `current_a` does
+    # not repeat.
+    base_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for net_entry in networks:
+        for island in net_entry["islands"]:
+            for edge in island["edges"]:
+                base_edges[(net_entry["net"], island["island_id"], edge["id"])] = edge
+
+    def _edge_verdict(
+        net_name: str, island_id: str, edge: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """A single edge's checked verdict, or ``None`` when it cannot be
+        checked (no declared limit, or no solved current)."""
+        base = base_edges.get((net_name, island_id, edge["id"]))
+        if base is None:
+            return None
+        limit = base["current_limit_a"]
+        current = edge["current_a"]
+        if limit is None or current is None:
+            return None
+        current_abs = abs(current)
+        margin_a = limit - current_abs
+        return {
+            "net": net_name,
+            "island_id": island_id,
+            "edge_id": edge["id"],
+            "kind": base["kind"],
+            "layer": base["layer"],
+            "current_a": round(current_abs, 12),
+            "current_limit_a": round(limit, 12),
+            "current_limit_source": base["current_limit_source"],
+            "margin_a": round(margin_a, 12),
+            "status": "fail" if current_abs > limit else "pass",
+        }
+
+    net_reports: list[dict[str, Any]] = []
+    overall_worst: dict[str, Any] | None = None
+    overall_checked = 0
+    overall_unchecked = 0
+    overall_fail = 0
+
+    for net_entry in ir_drop_map["nets"]:
+        net_name = net_entry["net"]
+        checked = 0
+        unchecked = 0
+        fail_count = 0
+        failing_edges: list[dict[str, Any]] = []
+        net_worst: dict[str, Any] | None = None
+
+        for island in net_entry["islands"]:
+            for edge in island["edges"]:
+                verdict = _edge_verdict(net_name, island["island_id"], edge)
+                if verdict is None:
+                    unchecked += 1
+                    continue
+                checked += 1
+                if verdict["status"] == "fail":
+                    fail_count += 1
+                    failing_edges.append(verdict)
+                # The "worst case" is whichever checked edge sits closest
+                # to (or furthest past) its own limit -- the smallest
+                # margin, which is negative for a failing edge -- the same
+                # "largest deviation wins" idea `_solve_ir_drop` already
+                # uses for `worst_case_droop_mv`, just signed the other way
+                # (margin shrinking is worse, not growing).
+                if net_worst is None or verdict["margin_a"] < net_worst["margin_a"]:
+                    net_worst = verdict
+
+        overall_checked += checked
+        overall_unchecked += unchecked
+        overall_fail += fail_count
+
+        if checked == 0:
+            status = "not_checked"
+        elif fail_count:
+            status = "fail"
+        else:
+            status = "pass"
+
+        net_reports.append(
+            {
+                "net": net_name,
+                "status": status,
+                "checked_edge_count": checked,
+                "unchecked_edge_count": unchecked,
+                "fail_count": fail_count,
+                "worst_case": net_worst,
+                "failing_edges": failing_edges,
+            }
+        )
+
+        if net_worst is not None and (
+            overall_worst is None or net_worst["margin_a"] < overall_worst["margin_a"]
+        ):
+            overall_worst = net_worst
+
+    if overall_checked == 0:
+        status = "not_checked"
+    elif overall_fail:
+        status = "fail"
+    else:
+        status = "pass"
+
+    return {
+        "status": status,
+        "checked_edge_count": overall_checked,
+        "unchecked_edge_count": overall_unchecked,
+        "fail_count": overall_fail,
+        "worst_case": overall_worst,
+        "nets": net_reports,
+    }
+
+
 def run_power(
     file: str,
     spec_path: str,
@@ -1022,6 +1278,17 @@ def run_power(
         worst_case = ir_drop_map["worst_case"]
         worst_case_droop_mv = worst_case["droop_mv"] if worst_case else None
 
+    # Issue #846, Phase 1c: the per-net EM current-density verdict, built
+    # from this same `ir_drop_map`'s per-segment currents (`None` when there
+    # was no solve at all -- see `_compute_em_verdict`'s own docstring).
+    em_verdict = _compute_em_verdict(networks, ir_drop_map)
+    if em_verdict and em_verdict["fail_count"]:
+        warnings.append(
+            f"{em_verdict['fail_count']} of {em_verdict['checked_edge_count']} "
+            "EM-checked edge(s) exceed their declared current-density limit "
+            "-- see em_verdict for the cited limit each failed against"
+        )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -1033,5 +1300,6 @@ def run_power(
         "island_count": total_islands,
         "ir_drop_map": ir_drop_map,
         "worst_case_droop_mv": worst_case_droop_mv,
+        "em_verdict": em_verdict,
         "warnings": warnings,
     }

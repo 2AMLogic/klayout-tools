@@ -2425,18 +2425,20 @@ def create_parser() -> argparse.ArgumentParser:
     power_parser = subparsers.add_parser(
         "power",
         help=(
-            "extract a routed layout's power grid as a resistive network and "
-            "solve it for static IR drop"
+            "extract a routed layout's power grid as a resistive network, "
+            "solve it for static IR drop, and emit a per-net EM "
+            "current-density verdict"
         ),
         description=(
             "Extract a routed layout's named power/ground nets into a graph "
             "of nodes + segment resistances and -- when the spec declares "
             "'pads' and/or a 'current_model' -- solve that network for its "
-            "DC operating point, reporting an IR-drop map and the worst-case "
-            "droop (issues #844/#845, Phases 1a/1b of the power/IR-drop + EM "
-            "signoff epic #712). The per-net EM current-density verdict is a "
-            "later phase. See docs/cli/power.md for the spec-file schema and "
-            "the JSON contract."
+            "DC operating point, reporting an IR-drop map, the worst-case "
+            "droop, and a per-net EM (electromigration) current-density "
+            "verdict citing each 'stackup'/'vias' role's own declared limit "
+            "(issues #844/#845/#846, Phases 1a/1b/1c of the power/IR-drop + "
+            "EM signoff epic #712). See docs/cli/power.md for the spec-file "
+            "schema and the JSON contract."
         ),
     )
     power_parser.add_argument(
@@ -2447,11 +2449,12 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "path to a JSON spec file: a non-empty 'power_nets' array, a "
             "non-empty 'stackup' array mapping GDS layer/datatype pairs to "
-            "metal roles + sheet resistance (at least one with a "
-            "'label_layer'), an optional 'vias' array, and -- to ask for an "
-            "IR-drop solve -- an optional 'pads' array (where each net's "
-            "supply is delivered) and 'current_model' object (what each "
-            "instance draws) -- see docs/cli/power.md's 'Spec file' section"
+            "metal roles + sheet resistance + an optional EM current-density "
+            "limit (at least one entry with a 'label_layer'), an optional "
+            "'vias' array, and -- to ask for an IR-drop solve -- an optional "
+            "'pads' array (where each net's supply is delivered) and "
+            "'current_model' object (what each instance draws) -- see "
+            "docs/cli/power.md's 'Spec file' section"
         ),
     )
     power_parser.add_argument(

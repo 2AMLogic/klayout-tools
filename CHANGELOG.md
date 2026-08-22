@@ -14,7 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-_Nothing yet._
+- `klt power` gains the **per-net EM (electromigration) current-density
+  verdict** — issue #846, Phase 1c of the power/IR-drop + EM signoff epic
+  #712. Each `stackup`/`vias` role gains two new optional inputs,
+  `current_limit_a_per_um` (a metal role's own EM limit, per-width, the same
+  way a real PDK's tech LEF already expresses `DCCURRENTDENSITY`) and
+  `current_limit_a` (a via role's flat per-shape limit), plus a free-text
+  `current_limit_source` citing where each came from; the response gains a
+  new `em_verdict` field comparing every solved edge's branch current
+  (Phase 1b's `ir_drop_map`) against its own cited limit and rolling the
+  result up per net (`"pass"`/`"fail"`/`"not_checked"`), plus
+  `current_limit_a`/`current_limit_source` on every base extraction edge.
+  All additive — every field an earlier phase promised is unchanged, so
+  `schema_version` stays `1`. An edge with no declared limit or no solved
+  current is `unchecked`, never guessed at. Validated with golden pass/fail
+  segments (a rail engineered just under, and just over, a declared limit,
+  on both a metal edge and a via edge) plus an end-to-end pass on the real
+  OpenROAD-produced `gcd` corpus fixture against sky130's own real
+  `DCCURRENTDENSITY AVERAGE 2.8` met1/met2 limit (verified against a real
+  sky130A install). See `docs/cli/power.md`.
 
 ## 0.3.0 (2026-08-21)
 

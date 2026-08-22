@@ -534,15 +534,18 @@ def test_cli_json_contract(tmp_path, capsys):
         "node_count",
         "edge_count",
         "island_count",
-        # Added additively by #845 (Phase 1b); both are null for a spec that
-        # declares neither `pads` nor a `current_model`, so every field Phase
-        # 1a documented is unchanged -- hence no `schema_version` bump.
+        # Added additively by #845 (Phase 1b) and #846 (Phase 1c); all three
+        # are null for a spec that declares neither `pads` nor a
+        # `current_model`, so every field Phase 1a documented is unchanged --
+        # hence no `schema_version` bump.
         "ir_drop_map",
         "worst_case_droop_mv",
+        "em_verdict",
         "warnings",
     }
     assert data["ir_drop_map"] is None
     assert data["worst_case_droop_mv"] is None
+    assert data["em_verdict"] is None
     assert data["schema_version"] == 1
 
 
@@ -746,6 +749,7 @@ def test_no_pads_and_no_current_model_means_no_solve(tmp_path):
     report = run_power(str(gds), str(spec))
     assert report["ir_drop_map"] is None
     assert report["worst_case_droop_mv"] is None
+    assert report["em_verdict"] is None
 
 
 def test_point_load_droop_is_ohms_law_end_to_end(tmp_path):
@@ -1216,3 +1220,442 @@ def test_gcd_fixture_solves_for_a_real_ir_drop_map(tmp_path):
         for net_entry in ir_drop["nets"]
         for island in net_entry["islands"]
     )
+
+
+# --- EM current-density verdict (issue #846, Phase 1c) ---------------------
+#
+# `current_limit_a_per_um`/`current_limit_a` are declared the same way
+# `sheet_resistance_ohm_per_sq`/`resistance_ohm` already are -- per
+# `stackup`/`vias` role, in the spec, citable via `current_limit_source`.
+# The values below (`2.8`/`0.29` mA per um/via) are real sky130
+# `DCCURRENTDENSITY` numbers, verified against a real sky130A install
+# (volare) -- see `sky130_fd_sc_hd__nom.tlef`'s `met1`/`via` `LAYER` blocks
+# (Apache-2.0, no NDA'd data) -- but the module itself hardcodes nothing
+# PDK-specific: any of these tests would work with any numbers.
+
+
+def _em_spec(
+    path,
+    *,
+    pads,
+    current_model=None,
+    power_nets=("VPWR", "VGND"),
+    met1_current_limit_a_per_um=None,
+    met2_current_limit_a_per_um=None,
+    current_limit_source=None,
+    via_current_limit_a=None,
+) -> None:
+    met1 = {
+        "name": "met1",
+        "layer": "1/0",
+        "label_layer": "1/5",
+        "sheet_resistance_ohm_per_sq": 0.1,
+    }
+    if met1_current_limit_a_per_um is not None:
+        met1["current_limit_a_per_um"] = met1_current_limit_a_per_um
+    if current_limit_source is not None:
+        met1["current_limit_source"] = current_limit_source
+
+    met2 = {"name": "met2", "layer": "2/0", "sheet_resistance_ohm_per_sq": 0.05}
+    if met2_current_limit_a_per_um is not None:
+        met2["current_limit_a_per_um"] = met2_current_limit_a_per_um
+
+    via1 = {
+        "name": "via1",
+        "layer": "3/0",
+        "between": ["met1", "met2"],
+        "resistance_ohm": 5.0,
+    }
+    if via_current_limit_a is not None:
+        via1["current_limit_a"] = via_current_limit_a
+
+    spec = {
+        "power_nets": list(power_nets),
+        "stackup": [met1, met2],
+        "vias": [via1],
+        "pads": pads,
+    }
+    if current_model is not None:
+        spec["current_model"] = current_model
+    path.write_text(json.dumps(spec))
+
+
+def test_stackup_current_limit_is_scaled_by_rail_width_at_extraction(tmp_path):
+    """Even with no `pads`/`current_model` (extraction only, no solve), the
+    base network's own edges already carry their scaled `current_limit_a` --
+    Phase 1a extraction, not Phase 1c's verdict, does the width scaling."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "em.extract.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        spec,
+        pads=[],
+        power_nets=("VPWR",),
+        met1_current_limit_a_per_um=0.01,
+        current_limit_source="unit-test synthetic limit",
+    )
+
+    report = run_power(str(gds), str(spec))
+    assert report["em_verdict"] is None  # no solve requested at all
+
+    vpwr = next(entry for entry in report["networks"] if entry["net"] == "VPWR")
+    island_a = next(i for i in vpwr["islands"] if i["node_count"] == 2)
+    edge = island_a["edges"][0]
+    # met1's rail is 1 um wide (x: [0, 10], y: [0, 1]): 0.01 A/um * 1 um.
+    assert edge["current_limit_a"] == pytest.approx(0.01)
+    assert edge["current_limit_source"] == "unit-test synthetic limit"
+
+    # met2 declared no limit at all -- null, not a default/inherited value.
+    island_b = next(i for i in vpwr["islands"] if i["node_count"] == 4)
+    met2_edge = next(
+        e for e in island_b["edges"] if e["kind"] == "metal" and e["layer"] == "met2"
+    )
+    assert met2_edge["current_limit_a"] is None
+    assert met2_edge["current_limit_source"] is None
+    # The via role declared no `current_limit_a` either.
+    via_edge = next(e for e in island_b["edges"] if e["kind"] == "via")
+    assert via_edge["current_limit_a"] is None
+
+
+def test_em_verdict_golden_pass_under_the_limit(tmp_path):
+    """1 mA through a 1-um-wide met1 rail against a 10 mA limit: comfortably
+    under -- the golden *pass* segment."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "em.pass.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3}],
+        },
+        met1_current_limit_a_per_um=0.01,  # 0.01 A/um * 1 um = 10 mA limit
+        current_limit_source="unit-test synthetic limit",
+    )
+
+    report = run_power(str(gds), str(spec))
+    em = report["em_verdict"]
+    assert em is not None
+    assert em["status"] == "pass"
+    assert em["fail_count"] == 0
+    # Island A's one edge (the only solved one) is checked; island B's three
+    # edges (unsolved -- no pad) and island C's one edge (VGND, unsolved) are
+    # not, regardless of any declared limit.
+    assert em["checked_edge_count"] == 1
+    assert em["unchecked_edge_count"] == 4
+
+    worst = em["worst_case"]
+    assert worst["net"] == "VPWR"
+    assert worst["kind"] == "metal"
+    assert worst["layer"] == "met1"
+    assert worst["current_a"] == pytest.approx(1e-3)
+    assert worst["current_limit_a"] == pytest.approx(0.01)
+    assert worst["current_limit_source"] == "unit-test synthetic limit"
+    assert worst["margin_a"] == pytest.approx(0.009)
+    assert worst["status"] == "pass"
+
+    vpwr = next(n for n in em["nets"] if n["net"] == "VPWR")
+    assert vpwr["status"] == "pass"
+    assert vpwr["checked_edge_count"] == 1
+    assert vpwr["fail_count"] == 0
+    assert vpwr["failing_edges"] == []
+
+    vgnd = next(n for n in em["nets"] if n["net"] == "VGND")
+    assert vgnd["status"] == "not_checked"
+    assert vgnd["checked_edge_count"] == 0
+    assert vgnd["worst_case"] is None
+
+    # No failure means no extra warning.
+    assert not any("current-density limit" in w for w in report["warnings"])
+
+
+def test_em_verdict_golden_fail_over_the_limit(tmp_path):
+    """The same 1 mA through the same rail against a 0.5 mA limit: clearly
+    over -- the golden *fail* segment."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "em.fail.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3}],
+        },
+        met1_current_limit_a_per_um=5e-4,  # 5e-4 A/um * 1 um = 0.5 mA limit
+        current_limit_source="unit-test synthetic limit",
+    )
+
+    report = run_power(str(gds), str(spec))
+    em = report["em_verdict"]
+    assert em["status"] == "fail"
+    assert em["fail_count"] == 1
+    assert em["checked_edge_count"] == 1
+
+    worst = em["worst_case"]
+    assert worst["current_a"] == pytest.approx(1e-3)
+    assert worst["current_limit_a"] == pytest.approx(5e-4)
+    assert worst["margin_a"] == pytest.approx(-5e-4)
+    assert worst["status"] == "fail"
+
+    vpwr = next(n for n in em["nets"] if n["net"] == "VPWR")
+    assert vpwr["status"] == "fail"
+    assert vpwr["fail_count"] == 1
+    assert len(vpwr["failing_edges"]) == 1
+    failing = vpwr["failing_edges"][0]
+    assert failing["kind"] == "metal"
+    assert failing["layer"] == "met1"
+    assert failing["current_limit_source"] == "unit-test synthetic limit"
+    assert failing["status"] == "fail"
+
+    assert any(
+        "1 of 1" in w and "current-density limit" in w for w in report["warnings"]
+    )
+
+
+def test_em_verdict_via_edge_over_limit_fails(tmp_path):
+    """A via's EM limit is a flat per-shape amperage (no width term) --
+    exercised on island B's met1 -> via -> met2 path."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "em.via.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 5.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 5.0, "y_um": 10.0, "current_a": 1e-3}],
+        },
+        power_nets=("VPWR",),
+        via_current_limit_a=5e-4,  # 0.5 mA limit; 1 mA actual -> fail
+    )
+
+    report = run_power(str(gds), str(spec))
+    em = report["em_verdict"]
+    assert em["status"] == "fail"
+    assert em["fail_count"] == 1
+
+    vpwr = next(n for n in em["nets"] if n["net"] == "VPWR")
+    via_fail = next(e for e in vpwr["failing_edges"] if e["kind"] == "via")
+    assert via_fail["layer"] == "via1"
+    assert via_fail["current_a"] == pytest.approx(1e-3)
+    assert via_fail["current_limit_a"] == pytest.approx(5e-4)
+
+
+def test_em_verdict_not_checked_without_any_declared_limit(tmp_path):
+    """A spec that declares no `current_limit_a_per_um`/`current_limit_a` at
+    all still gets an `em_verdict` (there was a solve), but nothing can be
+    checked -- `"not_checked"`, never guessed at."""
+    report = _pad_and_load_report(tmp_path)
+
+    em = report["em_verdict"]
+    assert em is not None
+    assert em["status"] == "not_checked"
+    assert em["checked_edge_count"] == 0
+    assert em["fail_count"] == 0
+    assert em["worst_case"] is None
+    for net_entry in em["nets"]:
+        assert net_entry["status"] == "not_checked"
+
+
+# --- EM current-density verdict: CLI ----------------------------------------
+
+
+def test_cli_text_output_renders_the_em_verdict_summary(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "em.fail.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3}],
+        },
+        met1_current_limit_a_per_um=5e-4,
+        current_limit_source="unit-test synthetic limit",
+    )
+
+    assert main(["power", str(gds), str(spec)]) == 0
+    out = capsys.readouterr().out
+    assert "em verdict: FAIL" in out
+    assert "net VPWR: fail" in out
+    assert "unit-test synthetic limit" in out
+
+
+def test_cli_text_output_has_no_em_section_without_a_solve(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["power", str(gds), str(spec)]) == 0
+    assert "em verdict:" not in capsys.readouterr().out
+
+
+def test_cli_json_em_verdict_shape(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "em.pass.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3}],
+        },
+        met1_current_limit_a_per_um=0.01,
+    )
+
+    assert main(["power", str(gds), str(spec), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+
+    em = data["em_verdict"]
+    assert set(em.keys()) == {
+        "status",
+        "checked_edge_count",
+        "unchecked_edge_count",
+        "fail_count",
+        "worst_case",
+        "nets",
+    }
+    assert set(em["nets"][0].keys()) == {
+        "net",
+        "status",
+        "checked_edge_count",
+        "unchecked_edge_count",
+        "fail_count",
+        "worst_case",
+        "failing_edges",
+    }
+    worst = em["worst_case"]
+    assert set(worst.keys()) == {
+        "net",
+        "island_id",
+        "edge_id",
+        "kind",
+        "layer",
+        "current_a",
+        "current_limit_a",
+        "current_limit_source",
+        "margin_a",
+        "status",
+    }
+
+    # The base extraction edges also carry the new additive fields.
+    edge = data["networks"][0]["islands"][0]["edges"][0]
+    assert "current_limit_a" in edge
+    assert "current_limit_source" in edge
+
+
+# --- Acceptance: EM verdict on real klt par output --------------------------
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+def test_gcd_fixture_em_verdict_passes_on_real_rails(tmp_path):
+    """The real, OpenROAD-produced GCD macro's own rail currents (0.2/0.4 mA
+    per the IR-drop worked example) are nowhere near sky130's real
+    `DCCURRENTDENSITY AVERAGE 2.8` met1/met2 limit (2.8 mA/um, verified
+    against a real sky130A install -- `sky130_fd_sc_hd__nom.tlef`'s `met1`
+    `LAYER` block) at this macro's modest load and sky130's own minimum
+    routing width (0.14 um met1/met2) -- every checked edge passes."""
+    base = {
+        "power_nets": ["VPWR", "VGND"],
+        "stackup": [
+            {
+                "name": "met1",
+                "layer": "68/20",
+                "label_layer": "68/5",
+                "sheet_resistance_ohm_per_sq": 0.125,
+                "current_limit_a_per_um": 0.0028,
+                "current_limit_source": (
+                    "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+                ),
+            },
+            {
+                "name": "met2",
+                "layer": "69/20",
+                "label_layer": "69/5",
+                "sheet_resistance_ohm_per_sq": 0.125,
+                "current_limit_a_per_um": 0.0028,
+                "current_limit_source": (
+                    "sky130_fd_sc_hd__nom.tlef met2 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+                ),
+            },
+        ],
+        "vias": [
+            {
+                "name": "via1",
+                "layer": "68/44",
+                "between": ["met1", "met2"],
+                "resistance_ohm": 4.5,
+            }
+        ],
+    }
+    probe = tmp_path / "gcd.em.probe.json"
+    probe.write_text(json.dumps(base))
+    extracted = run_power(str(PLACE_AND_ROUTE_GDS), str(probe))
+
+    pads = []
+    instances = []
+    for net_entry in extracted["networks"]:
+        for island in net_entry["islands"]:
+            first, last = island["nodes"][0], island["nodes"][-1]
+            pads.append(
+                {
+                    "name": f"pad_{island['island_id']}",
+                    "net": net_entry["net"],
+                    "x_um": first["x_um"],
+                    "y_um": first["y_um"],
+                    "voltage_v": 1.8 if net_entry["net"] == "VPWR" else 0.0,
+                }
+            )
+            if net_entry["net"] == "VPWR":
+                instances.append(
+                    {
+                        "name": f"load_{island['island_id']}",
+                        "x_um": last["x_um"],
+                        "y_um": last["y_um"],
+                        "current_a": 2e-4,
+                    }
+                )
+
+    spec = tmp_path / "gcd.em.power.json"
+    spec.write_text(
+        json.dumps(
+            {
+                **base,
+                "pads": pads,
+                "current_model": {
+                    "supply_net": "VPWR",
+                    "ground_net": "VGND",
+                    "instances": instances,
+                },
+            }
+        )
+    )
+    report = run_power(str(PLACE_AND_ROUTE_GDS), str(spec))
+    em = report["em_verdict"]
+
+    assert em is not None
+    assert em["status"] == "pass"
+    assert em["fail_count"] == 0
+    # Every edge in the design is on a met1/met2 role with a declared limit,
+    # and (per the IR-drop acceptance test above) every node solves -- so
+    # every edge is checked, none unchecked.
+    assert em["checked_edge_count"] == report["edge_count"]
+    assert em["unchecked_edge_count"] == 0
