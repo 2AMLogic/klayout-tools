@@ -50,12 +50,25 @@ requires_native = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 
 
-def _sample_set(tmp_path, samples, limits=None, name="m"):
+def _sample_set(
+    tmp_path, samples, limits=None, name="m", analytic=None, filename="samples.json"
+):
     entry = {"name": name, "unit": "V", "samples": samples}
     if limits is not None:
         entry["limits"] = limits
-    path = tmp_path / "samples.json"
+    if analytic is not None:
+        entry["analytic"] = analytic
+    path = tmp_path / filename
     path.write_text(json.dumps({"measurements": [entry]}))
+    return str(path)
+
+
+def _multi_sample_set(tmp_path, measurements, filename="samples.json"):
+    """A sample-set document over several measurements at once --
+    ``measurements`` is a list of already-built entry dicts (``{"name",
+    "samples", ...}``)."""
+    path = tmp_path / filename
+    path.write_text(json.dumps({"measurements": measurements}))
     return str(path)
 
 
@@ -499,3 +512,318 @@ def test_worked_example_matches_the_documented_numbers():
     assert iq["capability"]["cp"] is None
     assert iq["capability"]["limiting_side"] == "upper"
     assert iq["sample_size"]["required_n_for_target"] == 874
+
+
+# --------------------------------------------------------------------------- #
+# Negative control (issue #817, Phase 1b of the yield epic #710)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_negative_control_not_provided_is_flagged_with_a_warning(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    report = run_yield(path)
+    assert report["negative_control"] == {
+        "provided": False,
+        "samples": None,
+        "status": "not_provided",
+    }
+    assert report["measurements"][0]["negative_control"] == {"status": "not_provided"}
+    assert any("no negative control was supplied" in w for w in report["warnings"])
+
+
+@requires_native
+def test_negative_control_detects_a_known_bad_variant(tmp_path):
+    """A seeded variant with its mean shifted well outside the spec window
+    must show up as a clearly worse, non-overlapping yield interval."""
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    nc_path = _sample_set(
+        tmp_path, _normal_grid(50, 10.0, 1.0), name="a", filename="nc.json"
+    )
+    report = run_yield(path, negative_control_path=nc_path)
+    assert report["negative_control"]["provided"] is True
+    assert report["negative_control"]["samples"] == nc_path
+    assert report["negative_control"]["status"] == "detected"
+    m_nc = report["measurements"][0]["negative_control"]
+    assert m_nc["status"] == "detected"
+    assert m_nc["n"] == 50
+    assert m_nc["yield"]["empirical"]["estimate"] == 0.0
+    assert not any(
+        "did not show the expected degradation" in w for w in report["warnings"]
+    )
+
+
+@requires_native
+def test_negative_control_flags_a_variant_that_does_not_show_degradation(tmp_path):
+    """A "negative control" drawn from the *same* distribution as the
+    primary campaign has no power to demonstrate anything -- it must be
+    flagged `not_detected`, not silently accepted as a passing check."""
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    nc_path = _sample_set(
+        tmp_path, _normal_grid(50, 0.0, 1.0), name="a", filename="nc.json"
+    )
+    report = run_yield(path, negative_control_path=nc_path)
+    assert report["negative_control"]["status"] == "not_detected"
+    assert report["measurements"][0]["negative_control"]["status"] == "not_detected"
+    assert any("did not show the expected degradation" in w for w in report["warnings"])
+
+
+@requires_native
+def test_negative_control_missing_measurement_is_flagged(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    nc_path = _sample_set(
+        tmp_path, _normal_grid(50, 10.0, 1.0), name="not-a", filename="nc.json"
+    )
+    report = run_yield(path, negative_control_path=nc_path)
+    assert report["negative_control"]["status"] == "missing"
+    assert report["measurements"][0]["negative_control"] == {"status": "missing"}
+    assert any(
+        "no matching entry in the negative control samples" in w
+        for w in report["warnings"]
+    )
+
+
+@requires_native
+def test_negative_control_partial_when_only_some_measurements_are_covered(tmp_path):
+    path = _multi_sample_set(
+        tmp_path,
+        [
+            {
+                "name": "a",
+                "samples": _normal_grid(300, 0.0, 1.0),
+                "limits": {"min": -3.0, "max": 3.0},
+            },
+            {
+                "name": "b",
+                "samples": _normal_grid(300, 0.0, 1.0),
+                "limits": {"min": -3.0, "max": 3.0},
+            },
+        ],
+    )
+    nc_path = _sample_set(
+        tmp_path, _normal_grid(50, 10.0, 1.0), name="a", filename="nc.json"
+    )
+    report = run_yield(path, negative_control_path=nc_path)
+    assert report["negative_control"]["status"] == "partial"
+    by_name = {
+        m["name"]: m["negative_control"]["status"] for m in report["measurements"]
+    }
+    assert by_name == {"a": "detected", "b": "missing"}
+
+
+@requires_native
+def test_negative_control_too_few_samples_is_flagged_as_an_error(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    nc_path = _sample_set(tmp_path, [10.0], name="a", filename="nc.json")
+    report = run_yield(path, negative_control_path=nc_path)
+    assert report["negative_control"]["status"] == "not_detected"
+    m_nc = report["measurements"][0]["negative_control"]
+    assert m_nc["status"] == "error"
+    assert "detail" in m_nc
+    assert any("could not be analyzed" in w for w in report["warnings"])
+
+
+@requires_native
+def test_negative_control_input_errors_propagate(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    with pytest.raises(YieldError, match="samples file not found"):
+        run_yield(path, negative_control_path=str(tmp_path / "nope.json"))
+
+
+@requires_native
+def test_cli_negative_control_flag_is_wired(tmp_path, capsys):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    nc_path = _sample_set(
+        tmp_path, _normal_grid(50, 10.0, 1.0), name="a", filename="nc.json"
+    )
+    assert (
+        main(
+            [
+                "yield",
+                path,
+                "--negative-control",
+                nc_path,
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["negative_control"]["status"] == "detected"
+
+
+# --------------------------------------------------------------------------- #
+# Analytic cross-check (issue #817, Phase 1b of the yield epic #710)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_analytic_cross_check_not_provided_by_default(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    report = run_yield(path)
+    assert report["analytic_cross_check"] == {
+        "tolerance_sigma": 0.2,
+        "status": "not_provided",
+    }
+    assert report["measurements"][0]["analytic_cross_check"] == {
+        "status": "not_provided"
+    }
+
+
+@requires_native
+def test_analytic_cross_check_consistent_within_tolerance(tmp_path):
+    """A grid drawn exactly from `N(0, 1)` must cross-check consistent
+    against the same closed-form model."""
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+        analytic={"mean": 0.0, "stddev": 1.0, "model": "N(0, 1)"},
+    )
+    report = run_yield(path)
+    assert report["analytic_cross_check"]["status"] == "consistent"
+    m_ac = report["measurements"][0]["analytic_cross_check"]
+    assert m_ac["status"] == "consistent"
+    assert m_ac["analytic"] == {"mean": 0.0, "stddev": 1.0}
+    assert m_ac["delta_mean"] == pytest.approx(0.0, abs=1e-9)
+    assert m_ac["delta_mean_sigma"] == pytest.approx(0.0, abs=1e-9)
+
+
+@requires_native
+def test_analytic_cross_check_discrepant_beyond_tolerance(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -5.0, "max": 5.0},
+        name="a",
+        analytic={"mean": 2.0, "stddev": 1.0, "model": "deliberately wrong"},
+    )
+    report = run_yield(path)
+    assert report["analytic_cross_check"]["status"] == "discrepant"
+    m_ac = report["measurements"][0]["analytic_cross_check"]
+    assert m_ac["status"] == "discrepant"
+    assert m_ac["delta_mean_sigma"] == pytest.approx(-2.0, abs=0.05)
+    assert any("diverges from its deliberately wrong" in w for w in report["warnings"])
+
+
+@requires_native
+def test_analytic_cross_check_spec_file_wins_over_sample_document(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        name="a",
+        analytic={
+            "mean": 99.0,
+            "stddev": 1.0,
+            "model": "sample-document (should lose)",
+        },
+    )
+    limits_path = tmp_path / "limits.json"
+    limits_path.write_text(
+        json.dumps(
+            {
+                "measurements": {
+                    "a": {
+                        "min": -3.0,
+                        "max": 3.0,
+                        "analytic": {"mean": 0.0, "stddev": 1.0, "model": "spec file"},
+                    }
+                }
+            }
+        )
+    )
+    report = run_yield(path, limits_path=str(limits_path))
+    m_ac = report["measurements"][0]["analytic_cross_check"]
+    assert m_ac["model"] == "spec file"
+    assert m_ac["status"] == "consistent"
+
+
+@requires_native
+def test_analytic_tolerance_sigma_must_be_positive(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+    )
+    with pytest.raises(YieldError, match="analytic_tolerance_sigma must be > 0"):
+        run_yield(path, analytic_tolerance_sigma=0.0)
+
+
+@requires_native
+def test_cli_analytic_tolerance_flag_is_wired(tmp_path, capsys):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -5.0, "max": 5.0},
+        name="a",
+        analytic={"mean": 0.5, "stddev": 1.0, "model": "N(0.5, 1)"},
+    )
+    # 0.5 sigma of drift is outside a tight 0.1-sigma tolerance...
+    assert main(["yield", path, "--analytic-tolerance", "0.1", "--format", "json"]) == 0
+    tight = json.loads(capsys.readouterr().out)
+    assert tight["analytic_cross_check"]["status"] == "discrepant"
+    # ...but within a loose 1.0-sigma tolerance.
+    assert main(["yield", path, "--analytic-tolerance", "1.0", "--format", "json"]) == 0
+    loose = json.loads(capsys.readouterr().out)
+    assert loose["analytic_cross_check"]["status"] == "consistent"
+
+
+@requires_native
+def test_analytic_and_negative_control_coexist(tmp_path):
+    """Both checks report independently on the same run."""
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(300, 0.0, 1.0),
+        limits={"min": -3.0, "max": 3.0},
+        name="a",
+        analytic={"mean": 0.0, "stddev": 1.0, "model": "N(0, 1)"},
+    )
+    nc_path = _sample_set(
+        tmp_path, _normal_grid(50, 10.0, 1.0), name="a", filename="nc.json"
+    )
+    report = run_yield(path, negative_control_path=nc_path)
+    assert report["negative_control"]["status"] == "detected"
+    assert report["analytic_cross_check"]["status"] == "consistent"

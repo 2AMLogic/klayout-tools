@@ -2,14 +2,19 @@
 
 Turn a Monte Carlo **sample set** plus its **spec limits** into a yield
 estimate — with a confidence interval, a distribution fit, Cpk/sigma-to-spec,
-and a sample-size verdict. Phase 1a of the statistical/yield epic
-([#710](https://github.com/2AMLogic/klayout-tools/issues/710)), delivered by
-[#816](https://github.com/2AMLogic/klayout-tools/issues/816).
+and a sample-size verdict — and two reality-grounding checks: a **negative
+control** and an **analytic cross-check**. Statistical/yield epic
+([#710](https://github.com/2AMLogic/klayout-tools/issues/710)) Phase 1a
+([#816](https://github.com/2AMLogic/klayout-tools/issues/816)) delivered the
+core estimator; Phase 1b
+([#817](https://github.com/2AMLogic/klayout-tools/issues/817)) added the two
+checks below.
 
 ```
 klt yield <samples> [--limits <file>] [--confidence <c>]
                     [--target-ci-halfwidth <h>] [--min-samples <n>]
-                    [--measurement <name>]... [--format text|json]
+                    [--measurement <name>]... [--negative-control <path>]
+                    [--analytic-tolerance <sigma>] [--format text|json]
 ```
 
 - `<samples>` — a `klt sim --format json` **Monte Carlo report**, or a plain
@@ -26,6 +31,10 @@ klt yield <samples> [--limits <file>] [--confidence <c>]
   floor `2`).
 - `--measurement` — restrict the analysis to this measurement. Repeatable,
   and comma-separated names are accepted.
+- `--negative-control` — path to a seeded, known-bad variant's samples (same
+  shapes as `<samples>`). See "Negative control" below.
+- `--analytic-tolerance` — tolerance, in analytic-model sigmas, for the
+  analytic cross-check (default `0.2`). See "Analytic cross-check" below.
 - `--format` — `text` (default) or `json`.
 
 The command is headless and safe in CI, **except** that it requires the
@@ -59,6 +68,86 @@ that a rule, and this command **enforces it rather than advising it**:
   yield"*.
 
 There is deliberately no flag to turn any of this off.
+
+## Negative control
+
+A yield claim from a statistical test with no demonstrated ability to fail is
+not evidence — it might pass every campaign regardless of the design's actual
+quality. Epic #710's Phase 1b makes that discipline explicit: `klt yield`
+checks every campaign against a seeded, **known-bad** variant that should
+demonstrably show the degradation the statistics claim to detect.
+
+```bash
+klt yield mc.json --limits spec-limits.json --negative-control mc-bad.json
+```
+
+`--negative-control` accepts the same two input shapes as `<samples>` — a
+`klt sim` Monte Carlo report or a sample-set document — over the same
+measurement names. For every measurement `klt yield` analyses:
+
+1. The negative control's own samples are analysed under the **same** spec
+   limits.
+2. Its empirical yield confidence interval is compared **directly against
+   the primary campaign's**: detection requires the negative control's
+   interval to sit strictly below the primary's, with no overlap.
+
+Comparing against the primary campaign — not against the negative control's
+own `target_yield` — is deliberate: a negative-control campaign is typically
+much smaller than the primary one, so a small-N campaign can miss a
+`target_yield` claim purely on sample-size grounds, with no real degradation
+at all. Judging it that way would flag a perfectly healthy negative control
+as "detected" for the wrong reason, which defeats the check's purpose.
+
+| `negative_control.status` | Meaning |
+| --- | --- |
+| `not_provided` | `--negative-control` was not given. Flagged with a run-level warning. |
+| `detected` | The negative control's yield interval sits strictly below the primary campaign's — the statistics have demonstrated power to catch a real regression. |
+| `not_detected` | A negative control was analysed but its interval overlaps the primary campaign's — it does not demonstrably show the expected degradation. Flagged with a warning. |
+| `missing` | `--negative-control` was given, but none of the analysed measurements' names appear in it. |
+| `partial` | Some analysed measurements have a negative-control entry, others don't. |
+| `error` (per measurement only) | The negative control's samples for this measurement could not be analysed (e.g. too few usable samples). |
+
+A campaign that lacks a negative control, or whose negative control doesn't
+show the expected degradation, is **flagged rather than silently accepted**:
+the run-level and per-measurement `negative_control.status` fields, plus a
+warning for anything short of full `detected` coverage. This does not change
+the run's exit code — `klt yield`'s exit `3` still means specifically "a
+`target_yield` claim was not supported"; a missing or non-detecting negative
+control is a separate, additive signal a caller (or `klt signoff`) can check.
+
+## Analytic cross-check
+
+Where a measurement has a **closed-form distribution** — a kT/C noise term, a
+mismatch-dominated offset with a known sigma from a device model — the
+empirical Monte Carlo fit can be checked against it directly, rather than
+trusted on its own. Declare an `analytic` block on the measurement, in either
+the sample document or the `--limits` spec file (the spec file wins, same
+precedence as `limits`):
+
+```json
+{
+  "vnoise": {
+    "max": 5.0e-3,
+    "analytic": { "mean": 0.0, "stddev": 1.23e-3, "model": "kT/C" }
+  }
+}
+```
+
+`klt yield` compares the empirical normal fit's `mean`/`stddev`
+(`distribution.mean`/`distribution.stddev`, already computed for the
+distribution-fit report) against the declared `analytic.mean`/`analytic.stddev`
+and reports the discrepancy in units of the analytic model's own `stddev`
+(one unit, so `--analytic-tolerance` has one number to reason about):
+
+| Field | Meaning |
+| --- | --- |
+| `delta_mean` / `delta_stddev` | Empirical minus analytic, in the measurement's own unit. |
+| `delta_mean_sigma` | `delta_mean / analytic.stddev`. `null` when `analytic.stddev` is `0`. |
+| `delta_stddev_pct` | `delta_stddev / analytic.stddev`. `null` when `analytic.stddev` is `0`. |
+| `status` | `consistent` when both `|delta_mean_sigma|` and `|delta_stddev_pct|` are within `--analytic-tolerance` (default `0.2`); `discrepant` otherwise, with a warning. `not_provided` when the measurement declares no `analytic` block — most don't, and that's not an error. |
+
+A measurement's `analytic.stddev` of exactly `0` (a degenerate model) admits
+no tolerance band: only an exact match is `consistent`.
 
 ## Input
 
@@ -125,21 +214,30 @@ limits the sample document carried — it is the caller's explicit spec.
   "target_ci_halfwidth": 0.01,
   "min_samples": 2,
   "target_yield": 0.99,
+  "analytic_tolerance_sigma": 0.2,
   "measurements": {
     "vref":  { "min": 1.15, "max": 1.25, "target_yield": 0.99 },
-    "iq_ua": { "max": 10.0 }
+    "iq_ua": { "max": 10.0 },
+    "vnoise": {
+      "max": 5.0e-3,
+      "analytic": { "mean": 0.0, "stddev": 1.23e-3, "model": "kT/C" }
+    }
   }
 }
 ```
 
 - `measurements` (object, required) — keyed by measurement name.
-- The four run-level keys are defaults; a CLI flag beats the file, which
+- The five run-level keys are defaults; a CLI flag beats the file, which
   beats the documented default. A run-level `target_yield` applies to every
-  measurement that does not state its own.
+  measurement that does not state its own; `analytic_tolerance_sigma`
+  mirrors `--analytic-tolerance` (see "Analytic cross-check" above).
 - A measurement present in the sample document but **not** in this file keeps
   whatever limits it already had. A measurement that ends up with neither
   `min` nor `max` is skipped with a warning — unless it was named explicitly
   via `--measurement`, in which case it is an error.
+- A measurement's `analytic` block (see "Analytic cross-check" above) works
+  the same way: the spec file's `analytic` wins over the sample document's
+  own, when both are present.
 
 ## What is computed
 
@@ -288,6 +386,15 @@ directly.
   "min_samples": 2,
   "status": "fail",
   "measurement_count": 2,
+  "negative_control": {
+    "provided": false,
+    "samples": null,
+    "status": "not_provided"
+  },
+  "analytic_cross_check": {
+    "tolerance_sigma": 0.2,
+    "status": "not_provided"
+  },
   "measurements": [
     {
       "name": "vref",
@@ -296,6 +403,8 @@ directly.
       "errored": 0,
       "limits": { "min": 1.15, "max": 1.25, "target_yield": 0.99 },
       "source_corners": [],
+      "negative_control": { "status": "not_provided" },
+      "analytic_cross_check": { "status": "not_provided" },
       "distribution": {
         "model": "normal",
         "mean": 1.201501763333333,
@@ -367,8 +476,10 @@ directly.
 | `min_samples` | integer | Effective per-measurement minimum. |
 | `status` | string | `"pass"`, `"fail"`, or `"reported"` (no measurement declared a `target_yield`). `fail` wins over `pass`. |
 | `measurement_count` | integer | `== len(measurements)`. |
+| `negative_control` | object | `provided` (bool), `samples` (echo of `--negative-control`, or `null`), `status` — see "Negative control" above. |
+| `analytic_cross_check` | object | `tolerance_sigma` (effective `--analytic-tolerance`), `status` — see "Analytic cross-check" above. |
 | `measurements` | array\<object\> | One entry per analysed measurement, in input order. |
-| `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared), followed by the core's own. |
+| `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared, negative-control/analytic-cross-check flags), followed by the core's own. |
 
 ### `measurements[]` entries
 
@@ -379,6 +490,8 @@ directly.
 | `errored` | integer | Samples excluded because they had no usable value. `n + errored` is the total draw. |
 | `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
+| `negative_control` | object | `status` (`not_provided`/`missing`/`error`/`not_detected`/`detected`), plus `n`, `errored`, `distribution`, `yield`, `measurement_status` when the negative control was analysed — see "Negative control" above. |
+| `analytic_cross_check` | object | `status` (`not_provided`/`consistent`/`discrepant`), plus `model`, `analytic`, `empirical`, `delta_mean`, `delta_mean_sigma`, `delta_stddev`, `delta_stddev_pct`, `tolerance_sigma` when the measurement declares an `analytic` block — see "Analytic cross-check" above. |
 | `distribution` | object | See "Distribution fit" above. |
 | `yield` | object | `empirical` (always present) and `normal` (`null` when the fit is degenerate) — see "Two yield estimates". |
 | `capability` | object | See "Capability" above. |
@@ -466,13 +579,21 @@ whole epic:
 - **No campaign orchestration.** `klt yield` consumes a campaign; it does not
   drive one. Seed management, adaptive sampling, and importance/Latin-hypercube
   sampling for rare-event tails are epic #710 Phase 2.
-- **No negative control, no analytic cross-check — yet.** Enforcing a seeded
-  known-bad variant per campaign and checking the empirical result against a
-  closed-form distribution where one exists is Phase 1b
-  ([#817](https://github.com/2AMLogic/klayout-tools/issues/817)). This
-  command's *own* numerics are checked against closed forms in
-  `native/yield/`'s unit tests and `tests/test_yield.py`, but nothing here
-  yet enforces that discipline on a caller's campaign.
+- **Negative control and analytic cross-check are flags, not gates.**
+  Phase 1b ([#817](https://github.com/2AMLogic/klayout-tools/issues/817))
+  reports both alongside the yield estimate (`negative_control.status`,
+  `analytic_cross_check.status`, both run-level and per measurement) and
+  raises a warning for anything short of a fully-detecting negative control
+  or a fully-consistent analytic cross-check — but neither changes `klt
+  yield`'s own exit code, which stays specifically "was the `target_yield`
+  claim supported". A caller that wants to gate on these (e.g. `klt
+  signoff`) reads the field directly.
+- **The analytic cross-check compares a caller-supplied closed form, not a
+  built-in physics model.** `klt yield` does not compute kT/C noise or a
+  mismatch-dominated sigma itself — the caller supplies `analytic.mean`/
+  `analytic.stddev` (from their own device-model math), and this command
+  only compares the empirical fit against it. See "Analytic cross-check"
+  above.
 - **No sensitivity ranking.** Which device mismatches drive the spread is
   Phase 3.
 
@@ -493,9 +614,8 @@ was missed" precedent rather than inventing a new number.
 - [`docs/cli/sim.md`](sim.md#monte-carlo-sampling) — the Monte Carlo request
   and the report shape this command consumes directly.
 - [#710](https://github.com/2AMLogic/klayout-tools/issues/710) — the parent
-  statistical/yield epic (later phases: negative controls and analytic
-  cross-checks, campaign orchestration + variance reduction, sensitivity and
-  design centering).
+  statistical/yield epic (later phases: campaign orchestration + variance
+  reduction, sensitivity and design centering).
 - [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) — the T1
   statistical-row bar this command produces evidence for.
 - [`docs/json-contract.md`](../json-contract.md) — the shared envelope,

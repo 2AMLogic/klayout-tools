@@ -48,6 +48,15 @@ DEFAULT_CONFIDENCE = 0.95
 DEFAULT_TARGET_CI_HALFWIDTH = 0.01
 ABSOLUTE_MIN_SAMPLES = 2
 
+#: Default tolerance for the analytic cross-check (issue #817, Phase 1b of
+#: the yield epic #710), expressed in units of the analytic model's own
+#: ``stddev``: the empirical mean must land within this many analytic
+#: sigmas of the analytic mean, and the empirical stddev must be within
+#: this same fraction of the analytic stddev. One knob, one unit, so a
+#: caller tightening or loosening the check only has one number to reason
+#: about.
+DEFAULT_ANALYTIC_TOLERANCE_SIGMA = 0.2
+
 
 class YieldError(Exception):
     """Raised when ``klt yield`` cannot run: a bad/missing input document, a
@@ -106,6 +115,44 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
             )
         limits[key] = float(value)
     return limits
+
+
+def _analytic_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
+    """Normalise one measurement's optional analytic cross-check model
+    (issue #817): a closed-form ``mean``/``stddev`` -- e.g. a kT/C noise
+    term or a mismatch-dominated offset with a known sigma -- to compare
+    the empirical Monte Carlo fit against.
+
+    ``None`` when the measurement declares no analytic model; that is the
+    common case and is not an error -- not every measurement has a
+    closed form to check against.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise YieldError(f"{where}: measurement '{name}' has non-object analytic")
+    mean = raw.get("mean")
+    stddev = raw.get("stddev")
+    if mean is None or stddev is None:
+        raise YieldError(
+            f"{where}: measurement '{name}' analytic block needs both 'mean' and "
+            "'stddev' -- there is no closed-form distribution to cross-check "
+            "against without both"
+        )
+    for key, value in (("mean", mean), ("stddev", stddev)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise YieldError(
+                f"{where}: measurement '{name}' analytic.{key} must be a number"
+            )
+    stddev = float(stddev)
+    if stddev < 0:
+        raise YieldError(f"{where}: measurement '{name}' analytic.stddev must be >= 0")
+    model = raw.get("model")
+    if model is not None and not isinstance(model, str):
+        raise YieldError(
+            f"{where}: measurement '{name}' analytic.model must be a string"
+        )
+    return {"mean": float(mean), "stddev": stddev, "model": model}
 
 
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -173,6 +220,7 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 "errored": errored,
                 "limits": _limits_from(entry.get("limits"), name, "sim report"),
                 "source_corners": source_corners,
+                "analytic": _analytic_from(entry.get("analytic"), name, "sim report"),
             }
         )
     return out
@@ -218,6 +266,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "errored": errored,
                 "limits": _limits_from(entry.get("limits"), name, "sample set"),
                 "source_corners": [str(c) for c in source_corners],
+                "analytic": _analytic_from(entry.get("analytic"), name, "sample set"),
             }
         )
     return out
@@ -254,14 +303,29 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
     )
 
 
-def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Read a spec-limits file into ``(per_measurement_limits, run_defaults)``."""
+def _read_spec(
+    path: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, dict[str, Any]]]:
+    """Read a spec-limits file into ``(per_measurement_limits, run_defaults,
+    per_measurement_analytic)``.
+
+    ``per_measurement_analytic`` (issue #817) is keyed the same way as
+    ``per_measurement_limits`` but only carries an entry for a measurement
+    that declares an ``analytic`` block -- most measurements have no closed
+    form to check against, so absence is the common case, not an error.
+    """
     doc = _load_json(path, "limits")
     if not isinstance(doc, dict):
         raise YieldError(f"limits '{path}' must be a JSON object")
 
     defaults: dict[str, Any] = {}
-    for key in ("confidence", "target_ci_halfwidth", "min_samples", "target_yield"):
+    for key in (
+        "confidence",
+        "target_ci_halfwidth",
+        "min_samples",
+        "target_yield",
+        "analytic_tolerance_sigma",
+    ):
         if doc.get(key) is not None:
             defaults[key] = doc[key]
 
@@ -280,7 +344,14 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         name: _limits_from(value, name, f"limits '{path}'")
         for name, value in raw.items()
     }
-    return limits, defaults
+    analytics: dict[str, dict[str, Any]] = {}
+    for name, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        model = _analytic_from(value.get("analytic"), name, f"limits '{path}'")
+        if model is not None:
+            analytics[name] = model
+    return limits, defaults, analytics
 
 
 # --------------------------------------------------------------------------- #
@@ -296,6 +367,8 @@ def run_yield(
     target_ci_halfwidth: float | None = None,
     min_samples: int | None = None,
     measurements: list[str] | None = None,
+    negative_control_path: str | None = None,
+    analytic_tolerance_sigma: float | None = None,
 ) -> dict[str, Any]:
     """Estimate yield for every measurement in ``samples_path``.
 
@@ -305,6 +378,22 @@ def run_yield(
     restricts the analysis to the named measurements -- an explicitly named
     measurement with no limits is an error rather than a silent skip.
 
+    Issue #817 (Phase 1b of the yield epic #710) adds two reality-grounding
+    checks, both reported alongside the yield estimate rather than gating it
+    on their own exit code:
+
+    - ``negative_control_path`` -- a seeded, known-bad variant (same input
+      shape as ``samples_path``) that should demonstrably show the
+      degradation the statistics claim to detect. Omitting it, or supplying
+      one that doesn't show the expected degradation, is *flagged* (a
+      run-level and per-measurement ``negative_control`` status, plus a
+      warning) rather than silently accepted.
+    - ``analytic_tolerance_sigma`` -- the tolerance (in analytic-model
+      sigmas) an ``analytic`` block declared on a measurement (in the
+      sample document or the spec-limits file) is checked against. Only
+      measurements that declare one are cross-checked; most don't, and
+      that's not an error.
+
     Returns this command's JSON payload (see ``docs/cli/yield.md``); raises
     :class:`YieldError` for anything that makes the analysis unrunnable.
     """
@@ -312,8 +401,9 @@ def run_yield(
 
     spec_limits: dict[str, dict[str, Any]] = {}
     spec_defaults: dict[str, Any] = {}
+    spec_analytics: dict[str, dict[str, Any]] = {}
     if limits_path is not None:
-        spec_limits, spec_defaults = _read_spec(limits_path)
+        spec_limits, spec_defaults, spec_analytics = _read_spec(limits_path)
 
     by_name = {e["name"]: e for e in entries}
     if measurements is not None:
@@ -330,6 +420,10 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    # A spec-limits file's analytic model wins over the sample document's own
+    # (same precedence as limits), keyed by measurement name; only
+    # measurements that end up in `request_measurements` matter here.
+    name_to_analytic: dict[str, dict[str, Any]] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -351,6 +445,9 @@ def run_yield(
             )
             continue
         request_measurements.append({**entry, "limits": limits})
+        analytic = spec_analytics.get(name, entry.get("analytic"))
+        if analytic is not None:
+            name_to_analytic[name] = analytic
 
     if not request_measurements:
         raise YieldError(
@@ -358,20 +455,34 @@ def run_yield(
             "them via --limits (see docs/cli/yield.md)"
         )
 
-    request: dict[str, Any] = {
-        "confidence": _resolve(
-            confidence, spec_defaults.get("confidence"), DEFAULT_CONFIDENCE
-        ),
-        "target_ci_halfwidth": _resolve(
-            target_ci_halfwidth,
-            spec_defaults.get("target_ci_halfwidth"),
-            DEFAULT_TARGET_CI_HALFWIDTH,
-        ),
-        "measurements": request_measurements,
-    }
+    resolved_confidence = _resolve(
+        confidence, spec_defaults.get("confidence"), DEFAULT_CONFIDENCE
+    )
+    resolved_ci_halfwidth = _resolve(
+        target_ci_halfwidth,
+        spec_defaults.get("target_ci_halfwidth"),
+        DEFAULT_TARGET_CI_HALFWIDTH,
+    )
     resolved_min = _resolve(
         min_samples, spec_defaults.get("min_samples"), ABSOLUTE_MIN_SAMPLES
     )
+    resolved_analytic_tolerance = _resolve(
+        analytic_tolerance_sigma,
+        spec_defaults.get("analytic_tolerance_sigma"),
+        DEFAULT_ANALYTIC_TOLERANCE_SIGMA,
+    )
+    if not (float(resolved_analytic_tolerance) > 0):
+        raise YieldError(
+            "analytic_tolerance_sigma must be > 0 (got "
+            f"{resolved_analytic_tolerance}); a non-positive tolerance can "
+            "never be satisfied"
+        )
+
+    request: dict[str, Any] = {
+        "confidence": resolved_confidence,
+        "target_ci_halfwidth": resolved_ci_halfwidth,
+        "measurements": request_measurements,
+    }
     request["min_samples"] = int(resolved_min)
 
     native = _load_native()
@@ -401,8 +512,254 @@ def run_yield(
             f"{SCHEMA_VERSION} -- rebuild the extension (`uv sync --group yield`)"
         )
     payload["schema_version"] = SCHEMA_VERSION
+
+    primary_by_name = {m["name"]: m for m in payload["measurements"]}
+
+    # Issue #817: negative control -- a seeded known-bad variant that must
+    # demonstrably show the degradation the statistics claim to detect.
+    nc_overall, nc_by_name = _negative_control_report(
+        negative_control_path,
+        request_measurements,
+        primary_by_name,
+        confidence=resolved_confidence,
+        target_ci_halfwidth=resolved_ci_halfwidth,
+        min_samples=int(resolved_min),
+        native=native,
+        warnings=warnings,
+    )
+    payload["negative_control"] = nc_overall
+
+    # Issue #817: analytic cross-check -- compare the empirical fit against
+    # a closed-form distribution where the measurement declares one.
+    ac_overall, ac_by_name = _analytic_cross_check(
+        request_measurements,
+        name_to_analytic,
+        primary_by_name,
+        tolerance_sigma=float(resolved_analytic_tolerance),
+        warnings=warnings,
+    )
+    payload["analytic_cross_check"] = ac_overall
+
+    for m in payload["measurements"]:
+        name = m["name"]
+        m["negative_control"] = nc_by_name.get(name, {"status": "not_provided"})
+        m["analytic_cross_check"] = ac_by_name.get(name, {"status": "not_provided"})
+
     payload["warnings"] = warnings + list(response.get("warnings") or [])
     return payload
+
+
+def _negative_control_report(
+    negative_control_path: str | None,
+    request_measurements: list[dict[str, Any]],
+    primary_by_name: dict[str, dict[str, Any]],
+    *,
+    confidence: float,
+    target_ci_halfwidth: float,
+    min_samples: int,
+    native: Any,
+    warnings: list[str],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Check every analysed measurement against a seeded known-bad variant.
+
+    Returns ``(run_level_summary, per_measurement)``. Appends a warning to
+    ``warnings`` (in place) for anything short of every measurement showing
+    the expected degradation -- issue #817's "flagged rather than silently
+    accepted" requirement.
+    """
+    if negative_control_path is None:
+        warnings.append(
+            "no negative control was supplied for this campaign -- there is "
+            "no seeded known-bad variant demonstrating that this statistical "
+            "test can actually detect a real regression; supply one via "
+            "--negative-control"
+        )
+        return {"provided": False, "samples": None, "status": "not_provided"}, {}
+
+    _nc_kind, nc_entries, _nc_source = _read_samples(negative_control_path)
+    nc_by_input_name = {e["name"]: e for e in nc_entries}
+
+    per_measurement: dict[str, dict[str, Any]] = {}
+    for entry in request_measurements:
+        name = entry["name"]
+        nc_entry = nc_by_input_name.get(name)
+        if nc_entry is None:
+            per_measurement[name] = {"status": "missing"}
+            warnings.append(
+                f"measurement '{name}': no matching entry in the negative "
+                f"control samples ({negative_control_path}) -- its "
+                "statistical power to detect a real regression is unverified"
+            )
+            continue
+
+        nc_request = {
+            "confidence": confidence,
+            "target_ci_halfwidth": target_ci_halfwidth,
+            "min_samples": min_samples,
+            "measurements": [
+                {
+                    "name": name,
+                    "unit": nc_entry.get("unit"),
+                    "samples": nc_entry["samples"],
+                    "errored": nc_entry.get("errored", 0),
+                    "limits": entry["limits"],
+                    "source_corners": nc_entry.get("source_corners", []),
+                }
+            ],
+        }
+        try:
+            nc_response_json = native.analyze_yield_json(json.dumps(nc_request))
+        except ValueError as exc:
+            per_measurement[name] = {"status": "error", "detail": str(exc)}
+            warnings.append(
+                f"measurement '{name}': the negative control could not be "
+                f"analyzed ({exc})"
+            )
+            continue
+
+        nc_measurement = json.loads(nc_response_json)["measurements"][0]
+        status = _negative_control_status(nc_measurement, primary_by_name[name])
+        per_measurement[name] = {
+            "status": status,
+            "n": nc_measurement["n"],
+            "errored": nc_measurement["errored"],
+            "distribution": {
+                "mean": nc_measurement["distribution"]["mean"],
+                "stddev": nc_measurement["distribution"]["stddev"],
+            },
+            "yield": nc_measurement["yield"],
+            "measurement_status": nc_measurement["status"],
+        }
+        if status == "not_detected":
+            warnings.append(
+                f"measurement '{name}': the negative control did not show "
+                "the expected degradation -- its yield was not measurably "
+                "worse than the primary campaign's at the stated "
+                "confidence, so this campaign's power to detect a real "
+                "regression is unverified"
+            )
+
+    statuses = [m["status"] for m in per_measurement.values()]
+    if not statuses:
+        overall_status = "not_provided"
+    elif any(s in ("not_detected", "error") for s in statuses):
+        overall_status = "not_detected"
+    elif all(s == "missing" for s in statuses):
+        overall_status = "missing"
+    elif any(s == "missing" for s in statuses):
+        overall_status = "partial"
+    else:
+        overall_status = "detected"
+
+    overall = {
+        "provided": True,
+        "samples": negative_control_path,
+        "status": overall_status,
+    }
+    return overall, per_measurement
+
+
+def _negative_control_status(
+    nc_measurement: dict[str, Any],
+    primary_measurement: dict[str, Any],
+) -> str:
+    """``"detected"`` when the negative control demonstrably shows the
+    expected degradation relative to the primary campaign, ``"not_detected"``
+    otherwise.
+
+    Deliberately **not** "did the negative control fail its own
+    ``target_yield``": a negative control campaign is often much smaller
+    than the primary one, so a small-N campaign can miss a `target_yield`
+    claim on sample-size grounds alone, with no real degradation at all --
+    that would flag a perfectly healthy negative control as "detected" for
+    the wrong reason (a false positive that defeats the check's purpose).
+    Instead, this compares the negative control's empirical yield directly
+    against the *primary* campaign's: detection requires the negative
+    control's confidence interval to sit strictly below the primary's, with
+    no overlap -- a non-parametric, assumption-free demonstration of a real,
+    resolved difference between "known good" and "known bad".
+    """
+    nc_ci = nc_measurement["yield"]["empirical"]["confidence_interval"]
+    primary_ci = primary_measurement["yield"]["empirical"]["confidence_interval"]
+    return "detected" if nc_ci["high"] < primary_ci["low"] else "not_detected"
+
+
+def _analytic_cross_check(
+    request_measurements: list[dict[str, Any]],
+    name_to_analytic: dict[str, dict[str, Any]],
+    primary_by_name: dict[str, dict[str, Any]],
+    *,
+    tolerance_sigma: float,
+    warnings: list[str],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Compare the empirical distribution fit against a declared closed-form
+    model (issue #817), for every measurement that declares one.
+
+    Returns ``(run_level_summary, per_measurement)``. Appends a warning to
+    ``warnings`` (in place) for a measurement whose empirical fit diverges
+    from its analytic model by more than ``tolerance_sigma``.
+    """
+    per_measurement: dict[str, dict[str, Any]] = {}
+    for entry in request_measurements:
+        name = entry["name"]
+        analytic = name_to_analytic.get(name)
+        if analytic is None:
+            per_measurement[name] = {"status": "not_provided"}
+            continue
+
+        dist = primary_by_name[name]["distribution"]
+        empirical_mean = dist["mean"]
+        empirical_stddev = dist["stddev"]
+        analytic_mean = analytic["mean"]
+        analytic_stddev = analytic["stddev"]
+        delta_mean = empirical_mean - analytic_mean
+        delta_stddev = empirical_stddev - analytic_stddev
+        if analytic_stddev > 0:
+            delta_mean_sigma = delta_mean / analytic_stddev
+            delta_stddev_pct = delta_stddev / analytic_stddev
+            mean_ok = abs(delta_mean_sigma) <= tolerance_sigma
+            stddev_ok = abs(delta_stddev_pct) <= tolerance_sigma
+        else:
+            # A degenerate (zero-spread) analytic model admits no tolerance
+            # band -- only an exact match is "consistent".
+            delta_mean_sigma = None
+            delta_stddev_pct = None
+            mean_ok = delta_mean == 0.0
+            stddev_ok = delta_stddev == 0.0
+        status = "consistent" if (mean_ok and stddev_ok) else "discrepant"
+        per_measurement[name] = {
+            "status": status,
+            "model": analytic.get("model"),
+            "analytic": {"mean": analytic_mean, "stddev": analytic_stddev},
+            "empirical": {"mean": empirical_mean, "stddev": empirical_stddev},
+            "delta_mean": delta_mean,
+            "delta_mean_sigma": delta_mean_sigma,
+            "delta_stddev": delta_stddev,
+            "delta_stddev_pct": delta_stddev_pct,
+            "tolerance_sigma": tolerance_sigma,
+        }
+        if status == "discrepant":
+            label = analytic.get("model") or "analytic model"
+            warnings.append(
+                f"measurement '{name}': empirical distribution diverges from "
+                f"its {label} by more than {tolerance_sigma} sigma (mean "
+                f"delta {delta_mean_sigma!r} sigma, stddev delta "
+                f"{delta_stddev_pct!r} relative)"
+            )
+
+    statuses = [m["status"] for m in per_measurement.values()]
+    checked = [s for s in statuses if s != "not_provided"]
+    if not checked:
+        overall_status = "not_provided"
+    elif any(s == "discrepant" for s in checked):
+        overall_status = "discrepant"
+    else:
+        overall_status = "consistent"
+
+    return {
+        "tolerance_sigma": tolerance_sigma,
+        "status": overall_status,
+    }, per_measurement
 
 
 def _resolve(explicit: Any, from_spec: Any, fallback: Any) -> Any:

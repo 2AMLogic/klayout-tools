@@ -44,6 +44,8 @@ def run(args: argparse.Namespace) -> int:
             target_ci_halfwidth=args.target_ci_halfwidth,
             min_samples=args.min_samples,
             measurements=measurements,
+            negative_control_path=args.negative_control,
+            analytic_tolerance_sigma=args.analytic_tolerance_sigma,
         )
     except YieldError as exc:
         return emit_error("yield", str(exc), args.format)
@@ -70,6 +72,14 @@ def _print_text(report: dict) -> None:
         f"target_ci_halfwidth: {report['target_ci_halfwidth']}"
     )
     print(f"status: {report['status']}  measurements: {report['measurement_count']}")
+    nc = report["negative_control"]
+    nc_source = f"  ({nc['samples']})" if nc.get("samples") else ""
+    print(f"negative control: {nc['status']}{nc_source}")
+    ac = report["analytic_cross_check"]
+    print(
+        f"analytic cross-check: {ac['status']}  "
+        f"tolerance: {ac['tolerance_sigma']} sigma"
+    )
 
     for m in report["measurements"]:
         unit = f" [{m['unit']}]" if m.get("unit") else ""
@@ -131,6 +141,17 @@ def _print_text(report: dict) -> None:
                     if needed is not None
                     else "unreachable at the observed pass rate"
                 )
+            )
+        m_nc = m["negative_control"]
+        print(f"  negative control: {m_nc['status']}")
+        m_ac = m["analytic_cross_check"]
+        if m_ac["status"] == "not_provided":
+            print("  analytic cross-check: not_provided")
+        else:
+            print(
+                f"  analytic cross-check: {m_ac['status']} "
+                f"(delta_mean={_fmt(m_ac['delta_mean_sigma'])} sigma, "
+                f"delta_stddev={_fmt(m_ac['delta_stddev_pct'])} relative)"
             )
         for warning in m["warnings"]:
             print(f"  warning: {warning}")

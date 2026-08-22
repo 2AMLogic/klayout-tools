@@ -440,6 +440,39 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt yield` now enforces two reality-grounding checks on top
+  of its yield estimate (issue #817, Phase 1b of the statistical/yield epic
+  #710, building on #816's Phase 1a core): a **negative control** and an
+  **analytic cross-check**. Both are additive — reported alongside the
+  existing payload, no `schema_version` bump.
+
+  **Negative control** (`--negative-control <path>`, same input shapes as
+  `<samples>`): a seeded, known-bad variant that should demonstrably show
+  the degradation the statistics claim to detect. Per measurement, detection
+  compares the negative control's empirical yield confidence interval
+  directly against the primary campaign's — not whether the negative
+  control fails its own `target_yield`, since a small negative-control
+  campaign can miss that claim on sample-size grounds alone with no real
+  degradation, which would flag a healthy negative control as "detected"
+  for the wrong reason. A campaign that omits a negative control, or
+  supplies one that doesn't show the expected degradation, is **flagged**
+  (`negative_control.status`: `not_provided` / `missing` / `not_detected`
+  / `partial` / `detected`, both run-level and per measurement) with a
+  run-level warning — not silently accepted.
+
+  **Analytic cross-check** (an optional `analytic: {mean, stddev, model}`
+  block on a measurement, in the sample document or the `--limits` spec
+  file): for a measurement with a closed-form distribution — a kT/C noise
+  term, a mismatch-dominated offset with a known sigma — the empirical
+  normal fit's `mean`/`stddev` is compared against the declared analytic
+  values and the discrepancy reported (`delta_mean`, `delta_mean_sigma`,
+  `delta_stddev`, `delta_stddev_pct`), with a `--analytic-tolerance`
+  sigma-relative tolerance (default `0.2`) determining `consistent` vs.
+  `discrepant`. A measurement that declares no analytic model is
+  `not_provided`, not an error — most measurements have no closed form to
+  check against. See `docs/cli/yield.md`'s "Negative control" and
+  "Analytic cross-check" sections.
+
 - 2026-08-12 — Every sky130 LVS device-extraction rule that carries a
   `RuleProvenance` citation (issue #868, Phase 2a) now also ships a golden
   layout→netlist pair validating it end-to-end — issue #867, Phase 2b of

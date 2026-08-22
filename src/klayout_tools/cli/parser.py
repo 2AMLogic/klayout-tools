@@ -1728,6 +1728,32 @@ def create_parser() -> argparse.ArgumentParser:
             "no spec limits is an error rather than a silent skip"
         ),
     )
+    yield_parser.add_argument(
+        "--negative-control",
+        dest="negative_control",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to a seeded, known-bad variant's samples (same shapes as "
+            "<samples>: a `klt sim --format json` report or a sample-set "
+            "document) that the statistics claim to detect -- issue #817, "
+            "Phase 1b of the yield epic #710. Omitting it, or supplying one "
+            "that doesn't demonstrably show the expected degradation, is "
+            "flagged in the report rather than silently accepted"
+        ),
+    )
+    yield_parser.add_argument(
+        "--analytic-tolerance",
+        dest="analytic_tolerance_sigma",
+        type=float,
+        default=None,
+        help=(
+            "tolerance, in analytic-model sigmas, for the analytic "
+            "cross-check of any measurement declaring an 'analytic' "
+            "{mean, stddev} block (default: 0.2). Only measurements that "
+            "declare one are checked; most don't"
+        ),
+    )
     _add_format_arg(yield_parser)
     yield_parser.set_defaults(func=yield_cmd.run)
 
