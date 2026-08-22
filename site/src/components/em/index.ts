@@ -9,6 +9,7 @@ export type { InterconnectCouplingResultProps } from "./InterconnectCouplingResu
 export { InterconnectCouplingGalleryEntry } from "./InterconnectCouplingGalleryEntry";
 export { ProvenancePanel } from "./ProvenancePanel";
 export type { ProvenancePanelProps } from "./ProvenancePanel";
+export { LiveSolveAvailabilityNotice } from "./LiveSolveAvailabilityNotice";
 export { EmGallerySection } from "./EmGallerySection";
 export type {
   EmCapacitance,

@@ -46,6 +46,21 @@ import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
  * Adding a benchmark here is additive: give it its own `<Benchmark>Result` +
  * `<Benchmark>GalleryEntry` pair (see `PatchAntennaGalleryEntry`'s /
  * `SpiralInductorGalleryEntry`'s doc comments) and list it below.
+ *
+ * **Live-solve capability check (Epic #840 Phase 2c, issue #891) — built,
+ * deliberately not mounted here yet:** every entry below always renders
+ * Phase 1's pre-computed geode-fem export, and there is no live-solve UI
+ * anywhere in this repo (Phase 2a/2b/2d are unbuilt; see
+ * `docs/design/geode-fem-wasm-webgpu-spike.md`'s DEFER verdict). The
+ * capability probe (`lib/liveSolveCapability.ts`) and its fallback notice
+ * (`LiveSolveAvailabilityNotice`) ship exported and tested, but this section
+ * does **not** render the notice: a "not available on this device" message
+ * only makes sense once live solving is available on *some* device, and
+ * `navigator.deviceMemory < 4` is a routinely-hit condition on real mobile
+ * traffic, so mounting it today would tell real visitors a feature is
+ * device-gated when it does not exist at all. Wire it in from whichever
+ * component owns the live-solve entry point when #890/#892 land —
+ * `EmGallerySection.test.tsx` asserts the notice stays unmounted until then.
  */
 export function EmGallerySection() {
   return (
