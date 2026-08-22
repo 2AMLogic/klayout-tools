@@ -1,5 +1,5 @@
-"""``klt equiv`` command: serialise the combinational-equivalence report as
-text or JSON.
+"""``klt equiv`` command: serialise the combinational or sequential
+equivalence report as text or JSON.
 
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
@@ -64,7 +64,29 @@ def _print_text(report: dict) -> None:
         print(f"  diagnostic: {diag['code']} - {diag['message']}")
 
     counterexample = report["counterexample"]
-    if counterexample is not None:
+    if counterexample is not None and "cycles" in counterexample:
+        # "yosys-sequential" engine's own multi-cycle shape (issue #1313) --
+        # see docs/cli/equiv.md's "Sequential equivalence" section.
+        print()
+        first_diverging = counterexample["first_diverging_cycle"]
+        print(f"counterexample (first diverging cycle: {first_diverging}):")
+        for cycle in counterexample["cycles"]:
+            for name, entry in cycle["inputs"].items():
+                print(
+                    f"  t={cycle['time']} in  {name} = {entry['bin']}b "
+                    f"({entry['value']})"
+                )
+            for name in cycle["diverging_outputs"]:
+                gold_entry = cycle["gold_outputs"][name]
+                gate_entry = cycle["gate_outputs"][name]
+                print(
+                    f"  t={cycle['time']} out {name}: gold={gold_entry['bin']}b "
+                    f"({gold_entry['value']})  gate={gate_entry['bin']}b "
+                    f"({gate_entry['value']})"
+                )
+        confirmed = counterexample["confirmed_by_simulation"]
+        print(f"  confirmed_by_simulation: {confirmed}")
+    elif counterexample is not None:
         print()
         print("counterexample:")
         for name, entry in counterexample["inputs"].items():
@@ -87,3 +109,7 @@ def _print_text(report: dict) -> None:
         print(f"netlist: {artifacts['netlist_path']}")
     if artifacts["log_path"]:
         print(f"log: {artifacts['log_path']}")
+    if artifacts.get("stage2_script_path"):
+        print(f"stage2 script: {artifacts['stage2_script_path']}")
+    if artifacts.get("stage2_log_path"):
+        print(f"stage2 log: {artifacts['stage2_log_path']}")
