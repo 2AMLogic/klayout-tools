@@ -428,6 +428,44 @@ def test_pin_count_mismatch_case_insensitive_subckt_names(tmp_path):
     assert mismatch["extracted"]["pin_count"] == 3
 
 
+def test_pin_count_mismatch_subcircuit_scoping_ignores_unrelated_helper(tmp_path):
+    """Issue #1041 (Champion-flagged false-positive guard): a `subcircuit`
+    argument naming the one actually instantiated must restrict the
+    comparison to it -- an unrelated helper `.SUBCKT` with a differing pin
+    count elsewhere in either netlist must not trip the check."""
+    schematic = tmp_path / "schematic_dut.spice"
+    schematic.write_text(
+        ".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n"
+        ".SUBCKT HELPER A B C\nR2 A B 10\n.ENDS HELPER\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT RES RA RB\nR1 RA RB 291.0\n.ENDS RES\n"
+        ".SUBCKT HELPER A B\nR2 A B 10\n.ENDS HELPER\n"
+    )
+
+    # Unscoped (`subcircuit=None`, the reactive fallback's own default)
+    # scans every `.SUBCKT` the extracted netlist declares and would find
+    # `HELPER`'s mismatch -- confirming the guard below actually matters.
+    assert (
+        _pin_count_mismatch(
+            reference_netlist=str(schematic), extracted_netlist=str(extracted)
+        )
+        is not None
+    )
+
+    # Scoped to the actually-instantiated subcircuit (`RES`, whose pin
+    # counts agree), the unrelated `HELPER` mismatch must not surface.
+    assert (
+        _pin_count_mismatch(
+            reference_netlist=str(schematic),
+            extracted_netlist=str(extracted),
+            subcircuit="RES",
+        )
+        is None
+    )
+
+
 def _errored_sim_report(log_path=None):
     return {
         "corners": [
@@ -798,18 +836,102 @@ def test_run_pex_testbench_two_includes_raises_before_simulating(
     assert str(dut) in message
 
 
-def test_run_pex_pin_count_mismatch_reports_instead_of_aborting(
+def test_run_pex_pin_count_mismatch_preflight_skips_extracted_side_entirely(
     tmp_path, resistor_layout, monkeypatch
 ):
-    """Issue #1030: an extracted-side failure whose engine output carries
-    ngspice's own pin-count-mismatch text is reported as a named,
-    structured `pin_count_mismatch` block plus per-corner error rows -- not
-    a bare `PexError` wrapping the raw engine string.
+    """Issue #1041: the schematic/extracted top-level pin-list mismatch is
+    now detected *proactively*, from the two netlists' own `.SUBCKT`
+    headers alone, before the extracted-side `run_sim` call is even
+    attempted -- confirmed here by making a second `run_sim` call
+    unreachable (only the schematic-side call is allowed through), mirroring
+    `test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely` above.
+    This is what makes detection identical on every ngspice version: no
+    engine is ever invoked on the extracted side, so there is nothing for a
+    lax ngspice (e.g. 42) to silently accept.
+    """
+    import klayout_tools.pex as pex_module
+
+    schematic_report = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+            {"corner_id": "ss/1.620V/-40C", "measurements": [_measurement(1.3)]},
+        ],
+        "corner_count": 2,
+        "measurements": [{"name": "vout"}],
+    }
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return schematic_report
+        raise AssertionError(
+            "the extracted-side run_sim call must not happen when the "
+            "pre-flight pin_count_mismatch check already explains why it "
+            "would be meaningless"
+        )
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    # Same subcircuit name ("RES") as `resistor_layout`'s extraction top
+    # cell -- an extra `VSUB` pin the schematic DUT does not declare, the
+    # exact issue #1030 shape -- so the pre-flight check (scoped to
+    # `extract_report["top"]`, i.e. "RES") can see and compare it.
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n'
+        ".model res_generic_po r\n"
+        "Vdd RA 0 DC 1.8\n"
+        "Xres RA RB 0 RES\n"
+        "Rload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 1
+    # The whole run still produces a JSON report, per corner.
+    assert report["status"] == "error"
+    assert [row["corner_id"] for row in report["delta"]] == [
+        "tt/1.800V/27C",
+        "ss/1.620V/-40C",
+    ]
+    assert all(row["extracted_value"] is None for row in report["delta"])
+    assert all(row["status"] == "error" for row in report["delta"])
+    assert report["errored"] == 2
+
+    mismatch = report["pin_count_mismatch"]
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pins"] == ["RA", "RB", "VSUB"]
+    assert mismatch["schematic"]["pin_count"] == 3
+    assert mismatch["extracted"]["pin_count"] == 2
+    # No engine was ever invoked on the extracted side -- there is no
+    # ngspice line to carry through.
+    assert mismatch["ngspice_message"] is None
+
+
+def test_run_pex_pin_count_mismatch_reactive_fallback_when_preflight_cannot_see_it(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #1030 / #1041: the reactive fallback (`_pin_count_mismatch_
+    from_message`, driven by ngspice's own engine text) still fires for a
+    mismatch the static pre-flight header comparison cannot see -- here, the
+    schematic DUT declares its subcircuit under a *different* name (`RESX`)
+    than the extracted netlist's top-level `.SUBCKT RES`. The pre-flight
+    check is scoped to `extract_report["top"]` ("RES"), so it finds no
+    same-named schematic interface to compare and returns `None`, exactly
+    like a genuinely unrelated schematic file would -- the mismatch is only
+    surfaced once ngspice's own refusal names the extracted-side subcircuit
+    it tried (and failed) to elaborate.
 
     `run_sim` is monkeypatched here (schematic side succeeds, extracted side
     raises) so the diagnostic path is covered everywhere, including machines
     without `ngspice`; `test_integration_run_pex_pin_count_mismatch` below
-    proves the same report against a real ngspice run.
+    proves the equivalent pre-flight-visible report against a real ngspice
+    run.
     """
     import klayout_tools.pex as pex_module
     from klayout_tools.sim import SimError
@@ -837,19 +959,20 @@ def test_run_pex_pin_count_mismatch_reports_instead_of_aborting(
     monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
 
     dut = tmp_path / "schematic_dut.spice"
-    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    dut.write_text(".SUBCKT RESX RA RB VSUB\nR1 RA RB 289.2\n.ENDS RESX\n")
     tb = tmp_path / "testbench.spice"
     tb.write_text(
         f'.include "{dut}"\n'
         ".model res_generic_po r\n"
         "Vdd RA 0 DC 1.8\n"
-        "Xres RA RB 0 RES\n"
+        "Xres RA RB 0 RESX\n"
         "Rload RB 0 1k\n"
     )
     request = _write_request(tmp_path / "request.json", tb)
 
     report = run_pex(resistor_layout, [str(request)], "sky130")
 
+    assert calls["n"] == 2
     # The whole run still produces a JSON report, per corner.
     assert report["status"] == "error"
     assert [row["corner_id"] for row in report["delta"]] == [
@@ -862,9 +985,11 @@ def test_run_pex_pin_count_mismatch_reports_instead_of_aborting(
 
     mismatch = report["pin_count_mismatch"]
     assert mismatch is not None
-    assert mismatch["subcircuit"] == "RES"
-    assert mismatch["schematic"]["pins"] == ["RA", "RB", "VSUB"]
-    assert mismatch["schematic"]["pin_count"] == 3
+    # Named from ngspice's own message (lower-case, as ngspice printed it) --
+    # the schematic side has no same-named interface at all.
+    assert mismatch["subcircuit"] == "res"
+    assert mismatch["schematic"]["pins"] is None
+    assert mismatch["schematic"]["pin_count"] is None
     assert mismatch["extracted"]["pin_count"] == 2
     assert mismatch["ngspice_message"] == (
         'Too few parameters for subcircuit type "res" (instance: xxres)'
