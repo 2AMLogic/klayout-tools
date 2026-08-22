@@ -421,6 +421,21 @@ class CommandRouter:
     # This class has no self.x = assignments but DOES use self.method()
     # for internal dispatch. Converting to module functions would lose
     # the dispatch-table organization. Do NOT flag this.
+
+# NOT a stateless ceremony: Custom exception class
+class ExtractError(RuntimeError):
+    """Raised when extraction fails."""
+    # No self.x = assignment because Exception.__init__ stores the args.
+    # The class exists to be caught by type, not to hold state. Do NOT flag this.
+
+# NOT a stateless ceremony: Declarative data container
+@dataclass
+class DeviceBinding:
+    name: str
+    layer: int
+    # Fields are class-level AnnAssign nodes, not self.x = assignments, but
+    # they ARE the instance state. Same for NamedTuple/attrs/pydantic models.
+    # Do NOT flag this.
 ```
 
 ```typescript
@@ -453,7 +468,8 @@ function normalizeData(data: RawData): NormalizedData {
 **Detection scripts:**
 
 ```bash
-# Python: Find classes with no instance state (AST-based, excludes dispatch-table classes)
+# Python: Find classes with no instance state (AST-based; excludes dispatch-table
+# classes, custom exception classes, and declarative data containers)
 python3 -c "
 import ast, sys, os
 for root, dirs, files in os.walk('.'):
@@ -507,6 +523,36 @@ for root, dirs, files in os.walk('.'):
                     break
             if has_dispatch_table:
                 continue  # Builds dispatch table from self.method references
+            # Exclusion 4: Custom exception class (base name ends in Error or
+            # Exception, and no methods beyond the exception dunders). These
+            # never assign self.x -- Exception.__init__ stores the args -- so
+            # every custom error class matches the no-instance-state shape.
+            base_names = [
+                b.id if isinstance(b, ast.Name) else b.attr
+                for b in node.bases
+                if isinstance(b, (ast.Name, ast.Attribute))
+            ]
+            is_exception_subclass = any(
+                b.endswith('Error') or b.endswith('Exception')
+                for b in base_names
+            )
+            own_methods = [
+                n.name for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            if is_exception_subclass and all(
+                m in ('__init__', '__str__', '__repr__') for m in own_methods
+            ):
+                continue  # Trivial exception subclass -- not a class costume
+            # Exclusion 5: Declarative data container (class-level annotated
+            # fields: @dataclass, NamedTuple, attrs, pydantic). Fields are
+            # AnnAssign nodes at class scope, never self.x = assignments, so
+            # the has_self_assign check above cannot see their real state.
+            has_annotated_fields = any(
+                isinstance(n, ast.AnnAssign) for n in node.body
+            )
+            if has_annotated_fields:
+                continue  # Fields declared at class scope ARE the instance state
             print(f'{path}:{node.lineno}: {node.name} (no instance state)')
 "
 
