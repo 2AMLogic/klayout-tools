@@ -41,6 +41,19 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
   (never a false `"equivalent"`) and that the solver's counterexample
   vector is independently confirmed by re-running it through both
   netlists via iverilog/vvp.
+- **Sequential seeded-broken negative controls** (issue #1314, Phase 2 of
+  Epic #707): two more deliberately-broken pairs for the `"yosys-sequential"`
+  engine, per `docs/design/sequential-equivalence-survey.md` SS4.3, again each
+  derived from an existing known-good fixture in this module -- a
+  "buffer-insertion + duplicated register" mutant (derived from
+  `_SEQ_GOLD_DFF_RTL`/`_SEQ_GATE_DFF_RTL_BUFFERED`, the already-proven
+  register-*preserving* buffer-insertion pair, with an extra pipeline
+  register stage added -- a state-element-set change register
+  correspondence must catch) and a "reset-style mismatch" mutant (derived
+  from `_SEQ_GOLD_SIMPLE_DFF_RTL`, async reset on `gold` vs. synchronous
+  reset on `gate`). Both assert `status == "counterexample"` and an
+  iverilog/vvp-confirmed multi-cycle counterexample, mirroring #832's own
+  two-sided acceptance bar extended to the sequential engine.
 - **Corpus integration test** (skipif when `yosys`/`iverilog` are missing,
   or no real PDK standard-cell library resolves) runs `klt synthesize`
   (this repo's own Yosys-backed synthesis flow) on a small, real
@@ -1003,6 +1016,57 @@ module top(input clk, input rst, input d, output reg q);
 endmodule
 """
 
+# Issue #1314 (Phase 2 of Epic #707): two more seeded-broken sequential
+# negative controls, following #832's own precedent (deliberately-broken
+# pairs derived from an existing known-good fixture already in this module)
+# extended to the sequential engine per
+# `docs/design/sequential-equivalence-survey.md` SS4.3.
+#
+# (a) A **buffer-insertion mutant that also duplicates a register** --
+# derived from `_SEQ_GOLD_DFF_RTL`/`_SEQ_GATE_DFF_RTL_BUFFERED` above (the
+# already-proven register-*preserving* buffer-insertion pair): the same
+# double-inverter buffer insertion, but an extra pipeline register stage is
+# also (incorrectly) inserted between the combinational cone and the
+# original register -- a hypothetical P&R bug that *did* change the
+# state-element set (register count 1 -> 2), the exact negative control
+# SS4.3 names as the case register correspondence must catch, unlike the
+# register-*preserving* buffer insertion already proven equivalent above.
+_SEQ_GOLD_DUP_RTL = _SEQ_GOLD_DFF_RTL
+
+_SEQ_GATE_DUP_REGISTER_RTL = """\
+module top(input clk, input rst, input [3:0] a, input [3:0] b, output reg [3:0] q);
+  wire [3:0] sum_raw = a + b;
+  wire [3:0] sum = ~(~sum_raw);
+  reg [3:0] q_pipe;
+  always @(posedge clk or posedge rst)
+    if (rst) q_pipe <= 4'b0;
+    else q_pipe <= sum;
+  always @(posedge clk or posedge rst)
+    if (rst) q <= 4'b0;
+    else q <= q_pipe;
+endmodule
+"""
+
+# (b) A **reset-polarity/style mismatch mutant** -- derived from
+# `_SEQ_GOLD_SIMPLE_DFF_RTL` above, SS3.5's own flagged risk class: `gold`
+# resets `q` *asynchronously* (`posedge clk or posedge rst` -- reset takes
+# effect immediately, independent of `clk`); `gate` resets `q`
+# *synchronously* (`posedge clk` only -- reset is only sampled on a clock
+# edge), a real "async vs. sync reset style" bug class SS4.3 names
+# explicitly, not a synthetic/arbitrary corruption. Same register set/names
+# as `_SEQ_GOLD_SIMPLE_DFF_RTL`, so this exercises the same
+# register-correspondence machinery the register-count mutant above does
+# not.
+_SEQ_GOLD_RESET_RTL = _SEQ_GOLD_SIMPLE_DFF_RTL
+
+_SEQ_GATE_SYNC_RESET_RTL = """\
+module top(input clk, input rst, input d, output reg q);
+  always @(posedge clk)
+    if (rst) q <= 1'b0;
+    else q <= d;
+endmodule
+"""
+
 # Note: `equiv_make`/`equiv_induct`/`clk2fflogic` are plain built-in Yosys
 # passes (verified live against this repo's own pinned Yosys v0.67 while
 # developing this engine) -- no separate `sby`/`eqy` install is needed to
@@ -1128,6 +1192,80 @@ def test_sequential_engine_counterexample_confirmed_by_multicycle_simulation(
     assert "q" in simulation["diverging_outputs"]
     # The simulation independently reproduces the *same* diverging output
     # the solver reported -- not merely "some" divergence, somewhere.
+    assert set(simulation["diverging_outputs"]) & set(
+        counterexample["diverging_outputs"]
+    )
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+def test_sequential_engine_buffer_insertion_with_duplicated_register_is_counterexample(
+    tmp_path,
+):
+    """Issue #1314 seeded-broken negative control (a): a buffer-insertion
+    mutant that also duplicates a register (state-element-set change, not
+    the register-*preserving* transformation
+    `test_sequential_engine_proves_register_preserving_buffer_insertion`
+    above proves equivalent) must be reported `"counterexample"`, never a
+    false `"equivalent"`, with an executable, iverilog/vvp-confirmed
+    counterexample."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_DUP_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_DUP_REGISTER_RTL)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert "q" in counterexample["diverging_outputs"]
+    assert counterexample["first_diverging_cycle"] is not None
+    assert counterexample["confirmed_by_simulation"] is True
+    simulation = counterexample["simulation"]
+    assert simulation["engine"] == "icarus"
+    assert set(simulation["diverging_outputs"]) & set(
+        counterexample["diverging_outputs"]
+    )
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+def test_sequential_engine_reset_style_mismatch_is_counterexample(tmp_path):
+    """Issue #1314 seeded-broken negative control (b): an async-vs-sync
+    reset-style mismatch (SS3.5's own flagged risk class) must be reported
+    `"counterexample"`, never a false `"equivalent"` or a spurious
+    `"inconclusive"`-forever hang, with an executable,
+    iverilog/vvp-confirmed counterexample."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_RESET_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SYNC_RESET_RTL)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert "q" in counterexample["diverging_outputs"]
+    assert counterexample["first_diverging_cycle"] is not None
+    assert counterexample["confirmed_by_simulation"] is True
+    simulation = counterexample["simulation"]
+    assert simulation["engine"] == "icarus"
     assert set(simulation["diverging_outputs"]) & set(
         counterexample["diverging_outputs"]
     )
