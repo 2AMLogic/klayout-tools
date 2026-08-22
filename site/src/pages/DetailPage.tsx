@@ -1,3 +1,5 @@
+import { useState } from "react";
+import type { KeyboardEvent } from "react";
 import type { Layout } from "@/data/types";
 import type { EmSiteExport } from "@/components/em/types";
 import { Table, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
@@ -5,6 +7,7 @@ import { WaveformViewer } from "@/components/waveform";
 import { StimulusPlayground, isPlaygroundEligible } from "@/components/playground";
 import { FieldViewer } from "@/components/field";
 import { ProvenancePanel } from "@/components/em";
+import { GdsViewer } from "@/components/layout";
 import { blockAssetUrl } from "@/lib/blockAssets";
 
 /**
@@ -37,11 +40,13 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * `@/components/em`'s `ProvenancePanel` — a downloads section gated
  * behind `layout.downloadable`, and a back-link to the gallery index.
  *
- * The downloads section also links out to Tiny Tapeout's hosted GDS/OAS
- * viewer (issue #249, Option 1 of that issue: link-out to a hosted viewer
- * rather than embedding one in this site — cheapest way to prove the
- * pattern, revisit only if the operator wants a same-origin viewer later)
- * so a reviewer can zoom/pan/toggle layers without a local KLayout install.
+ * Render thumbnails and the downloads section's viewer entry both open
+ * `@/components/layout`'s `GdsViewer` -- an in-page overlay embedding Tiny
+ * Tapeout's hosted GDS/OAS viewer (issue #943, superseding #249's Option 1
+ * link-out-to-a-new-tab with a same-page, clickable-thumbnail affordance;
+ * see `GdsViewer.tsx`'s module doc for why the hosted viewer is still the
+ * rendering engine underneath) so a reviewer can zoom/pan/toggle layers
+ * without a local KLayout install or leaving klayout-tools.org.
  * The gallery now spans multiple PDK families (sky130, gf180mcu, and
  * eventually ihp sg13g2 — issue #1060), so the viewer's `pdk` query param is
  * derived per block from its slug prefix (`inferPdkFamily()` below) rather
@@ -111,31 +116,23 @@ function inferPdkFamily(slug: string): PdkFamily | undefined {
 }
 
 /**
- * Builds a Tiny Tapeout hosted-viewer link for a block's layout file (issue
- * #249). Mirrors Tiny Tapeout's own `?model=<url>&pdk=<pdk>` convention
- * (github.com/TinyTapeout/tt-gds-action) so the file can be inspected
- * (zoom/pan/layer toggle) from a browser with no local KLayout install.
- *
- * `pdk` is derived from `slug` via `inferPdkFamily()` (issue #1060) rather
- * than hardcoded, since the gallery now spans multiple PDK families. When
- * the family can't be inferred, the `pdk` param is omitted entirely (the
- * viewer falls back to its own default) rather than lying with a wrong PDK
- * identifier -- and a build-time warning is logged so an unrecognized slug
- * prefix doesn't go unnoticed.
+ * Resolves a block's `GdsViewer` `pdk` prop from its slug (issue #1060,
+ * carried forward by #943). `pdk` is derived from `slug` via
+ * `inferPdkFamily()` rather than hardcoded, since the gallery now spans
+ * multiple PDK families. When the family can't be inferred, `undefined` is
+ * returned (the viewer falls back to its own default) rather than lying
+ * with a wrong PDK identifier -- and a build-time warning is logged so an
+ * unrecognized slug prefix doesn't go unnoticed.
  */
-function gdsViewerUrl(fileUrl: string, slug: string): string {
+function resolveViewerPdk(slug: string): string | undefined {
   const family = inferPdkFamily(slug);
   const pdk = family ? VIEWER_PDK_BY_FAMILY[family] : undefined;
   if (!pdk) {
     console.warn(
-      `gdsViewerUrl: could not infer a PDK family for slug "${slug}" -- omitting the viewer's pdk param (it will use its own default) instead of guessing wrong.`,
+      `resolveViewerPdk: could not infer a PDK family for slug "${slug}" -- omitting the viewer's pdk param (it will use its own default) instead of guessing wrong.`,
     );
   }
-  const params = new URLSearchParams({ model: fileUrl });
-  if (pdk) {
-    params.set("pdk", pdk);
-  }
-  return `https://gds-viewer.tinytapeout.com/?${params.toString()}`;
+  return pdk;
 }
 
 /**
@@ -161,6 +158,12 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
   const displayName = layout.name;
   const isPreLayout = layout.status === "in design — simulation evidence";
   const isBuilt = layout.status !== "no_artifacts" && !isPreLayout;
+
+  // GdsViewer overlay state (issue #943). `useState` is safe in a
+  // server-rendered component -- `renderToString` only reads the initial
+  // value, and this can only ever flip to `true` from a client-side click,
+  // never during SSR (see `GdsViewer.tsx`'s module doc).
+  const [isViewerOpen, setIsViewerOpen] = useState(false);
 
   const allRenderEntries = Object.entries(layout.renders ?? {});
   const overviewRender = allRenderEntries.find(([id]) => id === "overview");
@@ -193,6 +196,18 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
   const layoutFileUrl = canDownload
     ? `${SITE_ORIGIN}${blockAssetUrl(layout.slug, layout.layout_file as string)}`
     : undefined;
+  // Whether the GdsViewer overlay has a file to show -- gates the render
+  // thumbnails' click affordance and the Downloads section's viewer entry
+  // on the exact same condition as the raw-file download link.
+  const canView = canDownload && layoutFileUrl !== undefined;
+  const viewerPdk = canView ? resolveViewerPdk(layout.slug) : undefined;
+  const openViewer = () => setIsViewerOpen(true);
+  const handleViewerKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openViewer();
+    }
+  };
 
   return (
     <main className="mx-auto max-w-[44rem] px-6 pt-12 pb-16">
@@ -282,10 +297,26 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
 
       <section aria-label="Renders" className="mt-9">
         <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Renders</h2>
+        {canView && (
+          <p className="mb-3 text-[0.8rem] text-fog-dim">
+            Click a render to open an interactive, pan/zoom viewer of the actual GDS.
+          </p>
+        )}
         {overviewRender || otherRenderEntries.length > 0 ? (
           <>
             {overviewRender && (
-              <figure className="overflow-hidden rounded-lg border border-border bg-panel">
+              <figure
+                className={`group relative overflow-hidden rounded-lg border border-border bg-panel ${canView ? "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan" : ""}`}
+                {...(canView
+                  ? {
+                      role: "button",
+                      tabIndex: 0,
+                      "aria-label": `Open interactive viewer for the overview render of ${displayName}`,
+                      onClick: openViewer,
+                      onKeyDown: handleViewerKeyDown,
+                    }
+                  : {})}
+              >
                 <img
                   src={blockAssetUrl(layout.slug, overviewRender[1])}
                   alt={`Overview render of ${displayName}`}
@@ -293,6 +324,11 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
                   decoding="async"
                   className="block aspect-4/3 w-full bg-night object-contain"
                 />
+                {canView && (
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-night/60 font-mono text-[0.85rem] text-fog opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                    Click to explore &rarr;
+                  </span>
+                )}
                 <figcaption className="border-t border-border px-2.5 py-1.5 text-center font-mono text-[0.75rem] text-fog-dim">
                   {formatRenderLabel(overviewRender[0])}
                 </figcaption>
@@ -303,7 +339,16 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
                 {otherRenderEntries.map(([id, relPath]) => (
                   <figure
                     key={id}
-                    className="overflow-hidden rounded-lg border border-border bg-panel"
+                    className={`group relative overflow-hidden rounded-lg border border-border bg-panel ${canView ? "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan" : ""}`}
+                    {...(canView
+                      ? {
+                          role: "button",
+                          tabIndex: 0,
+                          "aria-label": `Open interactive viewer for the ${formatRenderLabel(id)} render of ${displayName}`,
+                          onClick: openViewer,
+                          onKeyDown: handleViewerKeyDown,
+                        }
+                      : {})}
                   >
                     <img
                       src={blockAssetUrl(layout.slug, relPath)}
@@ -312,6 +357,11 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
                       decoding="async"
                       className="block aspect-4/3 w-full bg-night object-contain"
                     />
+                    {canView && (
+                      <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-night/60 font-mono text-[0.75rem] text-fog opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                        Click to explore &rarr;
+                      </span>
+                    )}
                     <figcaption className="border-t border-border px-2.5 py-1.5 text-center font-mono text-[0.75rem] text-fog-dim">
                       {formatRenderLabel(id)}
                     </figcaption>
@@ -383,14 +433,13 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
               </a>
             </li>
             <li>
-              <a
-                href={gdsViewerUrl(layoutFileUrl, layout.slug)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-block rounded-lg border border-border bg-panel px-[0.9rem] py-[0.55rem] text-[0.9rem] text-fog no-underline hover:border-cyan focus-visible:border-cyan focus-visible:outline-none"
+              <button
+                type="button"
+                onClick={openViewer}
+                className="inline-block rounded-lg border border-border bg-panel px-[0.9rem] py-[0.55rem] text-[0.9rem] text-fog hover:border-cyan focus-visible:border-cyan focus-visible:outline-none"
               >
                 View in browser
-              </a>
+              </button>
             </li>
           </ul>
         ) : (
@@ -401,6 +450,16 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
       <footer className="mt-12 border-t border-border pt-6 text-[0.9rem]">
         <a href="/">&larr; Back to gallery</a>
       </footer>
+
+      {canView && layoutFileUrl && (
+        <GdsViewer
+          isOpen={isViewerOpen}
+          onClose={() => setIsViewerOpen(false)}
+          fileUrl={layoutFileUrl}
+          pdk={viewerPdk}
+          displayName={displayName}
+        />
+      )}
     </main>
   );
 }
