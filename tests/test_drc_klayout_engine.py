@@ -350,6 +350,43 @@ def test_klayout_engine_no_deck_vars_unaffected(tmp_path, monkeypatch):
     assert any(a.startswith("report=") for a in rd_values)
 
 
+def test_klayout_engine_deck_vars_recorded_in_provenance_deck_options(
+    tmp_path, monkeypatch
+):
+    """issue #1306: `deck_vars` must reach `provenance.deck.options` so a
+    committed report records *which* `--deck-var` configuration produced
+    it -- reusing the same `build_provenance(deck_options=...)` mechanism
+    already wired for `klt extract --deck-option`/`klt lvs` (issue #595)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(
+        gds, deck_file, deck_vars={"feol": "true", "metal_top": "6LM"}
+    )
+
+    assert report["provenance"]["deck"]["options"] == {
+        "feol": "true",
+        "metal_top": "6LM",
+    }
+
+
+def test_klayout_engine_no_deck_vars_provenance_omits_options_key(
+    tmp_path, monkeypatch
+):
+    """Regression: the zero-config path (no deck_vars) must leave
+    `provenance.deck` byte-identical to today's -- no `options` key at
+    all, matching `build_provenance`'s existing omit-when-empty
+    convention."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert "options" not in report["provenance"]["deck"]
+
+
 def test_klayout_engine_missing_binary_raises_actionable_error(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(
         monkeypatch, side_effect=FileNotFoundError("no such file: klayout")
