@@ -1446,6 +1446,7 @@ def run_drc_klayout_engine(
     deck_file: str,
     top: str | None = None,
     timeout_s: float = KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S,
+    deck_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1466,6 +1467,19 @@ def run_drc_klayout_engine(
     itself would otherwise default to, so the result is always the
     structured format :func:`_parse_klayout_rdb_report` reads -- never
     KLayout's plain-text list alternative.
+
+    ``deck_vars`` (issue #1302, CLI: repeatable ``--deck-var name=value``)
+    appends additional ``-rd name=value`` pairs to the invocation, after the
+    ``input``/``report`` pair, in insertion order. Some PDK-native decks are
+    assembled from feature-toggle globals a PDK's own run wrapper would
+    normally set (FEOL/BEOL enable flags, a metal-stack selector, etc.) and
+    gate every rule behind them -- without a way to set those extra globals,
+    every rule's enable condition evaluates false and the deck silently
+    checks nothing while still producing a well-formed, empty report (a
+    false "clean" verdict indistinguishable from a real one). ``deck_vars``
+    is empty/``None`` by default, so the existing zero-config contract for a
+    self-contained deck (e.g. sky130A's ``sky130A.lydrc``, which needs only
+    ``input``/``report``) is unchanged.
 
     Mirrors ``lvs.py``'s ``_run_netgen_lvs`` in every structural way that
     module's docstring calls out:
@@ -1545,6 +1559,8 @@ def run_drc_klayout_engine(
             "-rd",
             f"report={report_path}",
         ]
+        for name, value in (deck_vars or {}).items():
+            cmd.extend(["-rd", f"{name}={value}"])
         try:
             completed = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout_s

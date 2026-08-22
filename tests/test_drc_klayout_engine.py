@@ -307,6 +307,49 @@ def test_klayout_engine_invokes_expected_command_shape(tmp_path, monkeypatch):
     assert any(a.startswith("report=") for a in cmd)
 
 
+def test_klayout_engine_deck_vars_appended_as_extra_rd_pairs(tmp_path, monkeypatch):
+    """issue #1302: extra `-rd NAME=VALUE` script globals, beyond the
+    always-set `input`/`report` pair, must be threaded through to the
+    subprocess so a PDK-native deck gated behind FEOL/BEOL/metal-stack
+    toggles can actually run its rules instead of silently checking
+    nothing."""
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(
+        gds, deck_file, deck_vars={"feol": "true", "metal_top": "6LM"}
+    )
+
+    (cmd,) = captured
+    assert f"input={gds}" in cmd
+    assert any(a.startswith("report=") for a in cmd)
+    assert "feol=true" in cmd
+    assert "metal_top=6LM" in cmd
+    # Extra vars are appended *after* input/report, as additional `-rd`
+    # pairs -- same mechanical pattern as the existing pairs.
+    feol_idx = cmd.index("feol=true")
+    assert cmd[feol_idx - 1] == "-rd"
+
+
+def test_klayout_engine_no_deck_vars_unaffected(tmp_path, monkeypatch):
+    """Regression: the zero-config path (no deck_vars) is unaffected --
+    only `input`/`report` are ever passed as `-rd` pairs."""
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(gds, deck_file)
+
+    (cmd,) = captured
+    rd_values = [a for a in cmd if "=" in a]
+    assert len(rd_values) == 2
+    assert f"input={gds}" in rd_values
+    assert any(a.startswith("report=") for a in rd_values)
+
+
 def test_klayout_engine_missing_binary_raises_actionable_error(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(
         monkeypatch, side_effect=FileNotFoundError("no such file: klayout")
@@ -562,6 +605,82 @@ def test_cli_drc_klayout_engine_clean_exits_zero(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "engine: klayout" in out
     assert "status: clean" in out
+
+
+def test_cli_drc_klayout_engine_deck_var_reaches_subprocess(tmp_path, monkeypatch):
+    """issue #1302: `--deck-var NAME=VALUE` (repeatable) reaches the
+    subprocess as extra `-rd` pairs."""
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--deck-var",
+            "feol=true",
+            "--deck-var",
+            "beol=true",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    (cmd,) = captured
+    assert "feol=true" in cmd
+    assert "beol=true" in cmd
+
+
+def test_cli_drc_klayout_engine_malformed_deck_var_raises(
+    tmp_path, monkeypatch, capsys
+):
+    """A `--deck-var` value missing the `=` separator is a clean error
+    (exit 1), not a `KeyError`/traceback."""
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--deck-var",
+            "feol_no_equals",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = capsys.readouterr().err
+    assert "invalid --deck-var" in payload
+
+
+def test_cli_drc_deck_var_ignored_for_curated_engine(tmp_path, capsys):
+    """`--deck-var` combined with `--engine curated` (the default) is a
+    clean no-op -- ignored, not rejected, the same treatment
+    `--deck-file`/`--timeout-s` already get for that engine mismatch. The
+    existing `--deck is required` error still fires normally, proving
+    `--deck-var` was never consulted on this path."""
+    gds = _write_gds(tmp_path / "test.gds")
+
+    exit_code = main(["drc", gds, "--deck-var", "feol_no_equals", "--format", "json"])
+
+    assert exit_code == 1
+    payload = capsys.readouterr().err
+    assert "--deck is required" in payload
+    assert "invalid --deck-var" not in payload
 
 
 # --------------------------------------------------------------------------- #

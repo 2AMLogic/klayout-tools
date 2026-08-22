@@ -83,6 +83,25 @@ completion signal (mirroring `_run_netgen_lvs`'s "no log file at all" check
 in `lvs.py`). A timeout (`--timeout-s`, default `300`) or a malformed/
 unparseable report both raise a clean error rather than guessing.
 
+**`--deck-var NAME=VALUE` (issue #1302, repeatable).** Passes an additional
+`-rd NAME=VALUE` script global to the `klayout` subprocess, beyond the
+always-set `input`/`report` pair — e.g. `--deck-var feol=true --deck-var
+metal_top=6LM`. Some PDK-native decks are assembled (by the PDK's own
+tooling) from feature-toggle globals a PDK's own run wrapper would normally
+set — FEOL/BEOL enable flags, a metal-stack/option-variant selector, etc. —
+and gate every rule behind one or more of them. Without a way to set those
+extra globals, every rule's enable condition evaluates to Ruby's falsy
+default and the deck silently checks nothing while `klayout -b -r` still
+exits `0` and writes a well-formed, *empty* `.lyrdb` report — a false
+`"status": "clean"` verdict indistinguishable from a genuinely clean layout.
+`--deck-var` is opt-in and additive: omitting it leaves the zero-config
+`input`/`report`-only invocation unchanged, so a self-contained deck (e.g.
+sky130A's `sky130A.lydrc`) needs no new flag. A value missing the `=`
+separator is a clean error (exit 1). `--deck-var` is a klayout-engine-only
+flag — passing it alongside `--engine curated` (the default) is silently
+ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
+already get for that engine mismatch.
+
 **Deck resolution.** `<deck_file>` is resolved, in order: `--deck-file` (an
 explicit path) if given; otherwise `klayout_tools.pdk.drc_deck_file(variant=
 --pdk, root=--pdk-root)` (issue #565), which resolves a PDK-native,
@@ -110,6 +129,12 @@ already produced a merged deck (e.g. by running the PDK's own `run_drc.py
   engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
   whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
   clean error rather than a silently-ignored request.
+- **A deck that gates rules behind globals beyond `input`/`report` silently
+  checks nothing unless you pass them via `--deck-var`.** See `--deck-var
+  NAME=VALUE` above — without it, a deck assembled around FEOL/BEOL enable
+  flags or a metal-stack selector this invocation never sets can produce a
+  well-formed, empty `.lyrdb` report and a false `"status": "clean"`
+  verdict, indistinguishable from a genuinely clean layout (issue #1302).
 - **No `coverage` population.** Unlike the curated engine's declarative
   `DrcRule` table, an external deck's rule set is opaque to `klt drc` — every
   `coverage` sub-field (`deck_layers`, `layers_checked`,
