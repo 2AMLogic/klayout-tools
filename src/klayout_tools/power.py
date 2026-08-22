@@ -33,6 +33,12 @@ landed:
   edge's branch current (1b's ``ir_drop_map``) against its own cited limit
   and rolls the result up per net -- ``None`` when there was no IR-drop
   solve at all (nothing to compare).
+- **#1320, epic #712's Phase 2** -- the activity-weighted current mode: a
+  ``current_model.instances[]`` entry may set an ``activity`` object
+  (``toggle_rate_hz`` * ``capacitance_f`` * ``vdd_v``, a synthesis/P&R
+  switching-activity estimate) instead of a static ``current_a`` -- see
+  :func:`_validate_activity`. Additive to Phase 1b's static-only model: a
+  spec that only ever set ``current_a`` behaves exactly as before.
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
 purely for wire/via connectivity (no device recognition registered) --
@@ -367,13 +373,85 @@ def _validate_pads(
     return pads
 
 
+def _validate_activity(
+    entry: dict[str, Any],
+    spec_path: str,
+    field: str,
+    default_vdd_v: float | None,
+) -> float:
+    """Compute one instance's ``activity``-mode current: a synthesis/P&R
+    switching-activity estimate -- toggle rate * capacitance * Vdd -- rather
+    than a caller-supplied static ``current_a`` (issue #1320, Phase 2 of epic
+    #712's power/IR-drop + EM signoff, additive to Phase 1b's static-only
+    model; see ``docs/cli/power.md``'s "Activity-weighted current mode").
+
+    This is the standard average-current estimate a synthesis/P&R tool's own
+    switching-activity report already implies: a node that transitions at
+    ``toggle_rate_hz`` moves ``capacitance_f`` of charge to/from ``vdd_v``
+    that many times a second, so its average current is
+    ``toggle_rate_hz * capacitance_f * vdd_v`` (equivalently, dynamic power
+    ``C * V^2 * f`` divided by ``V``). Every quantity is a magnitude (`>= 0`),
+    matching the existing static ``current_a``'s own sign convention -- the
+    instance's ``supply_net``/``ground_net`` decide which way the current
+    actually flows, not this computation.
+    """
+    activity = entry["activity"]
+    if not isinstance(activity, dict):
+        raise PowerError(f"spec '{spec_path}': {field}.activity must be a JSON object")
+    activity_field = f"{field}.activity"
+
+    toggle_rate_hz = _require_number(
+        activity, "toggle_rate_hz", spec_path, activity_field
+    )
+    if toggle_rate_hz < 0:
+        raise PowerError(
+            f"spec '{spec_path}': {activity_field}.toggle_rate_hz must be >= 0 "
+            f"(got {toggle_rate_hz!r})"
+        )
+
+    capacitance_f = _require_number(
+        activity, "capacitance_f", spec_path, activity_field
+    )
+    if capacitance_f < 0:
+        raise PowerError(
+            f"spec '{spec_path}': {activity_field}.capacitance_f must be >= 0 "
+            f"(got {capacitance_f!r})"
+        )
+
+    if "vdd_v" in activity:
+        vdd_v = _require_number(activity, "vdd_v", spec_path, activity_field)
+    elif default_vdd_v is not None:
+        vdd_v = default_vdd_v
+    else:
+        raise PowerError(
+            f"spec '{spec_path}': {activity_field} has no 'vdd_v' and "
+            "'current_model.vdd_v' sets no default"
+        )
+    if vdd_v < 0:
+        raise PowerError(
+            f"spec '{spec_path}': {activity_field}.vdd_v must be >= 0 (got {vdd_v!r})"
+        )
+
+    return toggle_rate_hz * capacitance_f * vdd_v
+
+
 def _validate_current_model(
     spec: dict[str, Any], spec_path: str, power_nets: list[str]
 ) -> list[dict[str, Any]] | None:
     """Validate the (optional) ``current_model``: what each instance draws,
     and from/to which nets. Returns ``None`` when the spec declares no
     current model at all (extraction-only, the Phase 1a behaviour), or a list
-    of normalised instance records."""
+    of normalised instance records.
+
+    Each instance sets exactly one of two additive current sources (issue
+    #1320, Phase 2 of epic #712 -- see ``docs/cli/power.md``): a static
+    ``current_a`` magnitude (Phase 1b, unchanged), or an ``activity`` object
+    -- a switching-activity estimate (toggle rate * capacitance * Vdd, see
+    ``_validate_activity``) an agent can derive straight from a synthesis/P&R
+    tool's own activity report instead of hand-picking a static number. Both
+    resolve to the same normalised ``current_a`` field every downstream solve
+    step already consumes, so the static mode's own behaviour is unchanged.
+    """
     raw = spec.get("current_model")
     if raw is None:
         return None
@@ -394,6 +472,25 @@ def _validate_current_model(
 
     default_supply = _default_net("supply_net")
     default_ground = _default_net("ground_net")
+
+    # `vdd_v` (issue #1320): a model-level default supply voltage for every
+    # instance's ``activity`` block that omits its own -- the same
+    # per-model-default-with-per-instance-override convention
+    # `supply_net`/`ground_net` already use above.
+    default_vdd_v = raw.get("vdd_v")
+    if default_vdd_v is not None:
+        try:
+            default_vdd_v = float(default_vdd_v)
+        except (TypeError, ValueError) as exc:
+            raise PowerError(
+                f"spec '{spec_path}': current_model.vdd_v must be a number "
+                f"(got {default_vdd_v!r})"
+            ) from exc
+        if default_vdd_v < 0:
+            raise PowerError(
+                f"spec '{spec_path}': current_model.vdd_v must be >= 0 "
+                f"(got {default_vdd_v!r})"
+            )
 
     instances_raw = raw.get("instances")
     if not isinstance(instances_raw, list) or not instances_raw:
@@ -437,7 +534,26 @@ def _validate_current_model(
                 f"same net {supply_net!r}"
             )
 
-        current_a = _require_number(entry, "current_a", spec_path, field)
+        has_current_a = "current_a" in entry
+        has_activity = "activity" in entry
+        if has_current_a and has_activity:
+            raise PowerError(
+                f"spec '{spec_path}': {field} sets both 'current_a' and "
+                "'activity' -- an instance's current comes from exactly one "
+                "current source, not both"
+            )
+        if has_activity:
+            current_a = _validate_activity(entry, spec_path, field, default_vdd_v)
+            current_source = "activity"
+        elif has_current_a:
+            current_a = _require_number(entry, "current_a", spec_path, field)
+            current_source = "static"
+        else:
+            raise PowerError(
+                f"spec '{spec_path}': {field} missing 'current_a' (a static "
+                "instance current) or 'activity' (an activity-weighted "
+                "current model -- see docs/cli/power.md)"
+            )
         if current_a < 0:
             raise PowerError(
                 f"spec '{spec_path}': {field}.current_a must be >= 0 (got "
@@ -454,6 +570,7 @@ def _validate_current_model(
                 "x_um": _require_number(entry, "x_um", spec_path, field),
                 "y_um": _require_number(entry, "y_um", spec_path, field),
                 "current_a": current_a,
+                "current_source": current_source,
             }
         )
     return instances
@@ -1114,8 +1231,13 @@ def run_power(
       delivered -- ``{"name" (optional), "net", "x_um", "y_um",
       "voltage_v"}``.
     - ``current_model`` (optional object): what each instance draws --
-      ``{"supply_net"/"ground_net" (optional per-model defaults),
-      "instances": [{"name" (optional), "x_um", "y_um", "current_a",
+      ``{"supply_net"/"ground_net" (optional per-model defaults), "vdd_v"
+      (optional per-model default supply voltage for ``activity`` below),
+      "instances": [{"name" (optional), "x_um", "y_um", "current_a" *or*
+      "activity": {"toggle_rate_hz", "capacitance_f", "vdd_v" (optional,
+      falls back to the model-level default)} -- exactly one of
+      "current_a"/"activity" per instance (issue #1320's activity-weighted
+      current mode, additive to the static "current_a"),
       "supply_net"/"ground_net" (optional per-instance overrides)}]}``.
 
     ``top`` selects the top cell to analyse when the stream has more than

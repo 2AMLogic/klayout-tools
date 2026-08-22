@@ -4,9 +4,10 @@ Extract a routed layout's power grid as a resistive network (nodes +
 segment resistances), solve it for static (DC) IR drop, and emit a per-net
 EM (electromigration) current-density verdict — issues
 [#844](https://github.com/2AMLogic/klayout-tools/issues/844) (Phase 1a),
-[#845](https://github.com/2AMLogic/klayout-tools/issues/845) (Phase 1b), and
-[#846](https://github.com/2AMLogic/klayout-tools/issues/846) (Phase 1c) of
-the power/IR-drop + EM signoff epic
+[#845](https://github.com/2AMLogic/klayout-tools/issues/845) (Phase 1b),
+[#846](https://github.com/2AMLogic/klayout-tools/issues/846) (Phase 1c), and
+[#1320](https://github.com/2AMLogic/klayout-tools/issues/1320) (Phase 2, the
+activity-weighted current mode) of the power/IR-drop + EM signoff epic
 [#712](https://github.com/2AMLogic/klayout-tools/issues/712).
 
 ```
@@ -38,7 +39,7 @@ not need the `klt_mom_native` Rust extension).
 - **JSON out**: an IR-drop map, the worst-case droop, and a per-net EM
   (electromigration) verdict citing the PDK's current-density limit.
 
-Two phases have landed:
+Four phases have landed:
 
 - **#844, Phase 1a — the interface and the resistive-network extraction.**
   The spec file's `power_nets`/`stackup`/`vias` *are* the power-net
@@ -61,9 +62,17 @@ Two phases have landed:
   (`ir_drop_map.nets[].islands[].edges[].current_a`) against its own cited
   limit and rolls the result up per net.
 
+- **#1320, Phase 2 — the activity-weighted current mode.** A
+  `current_model.instances[]` entry may set an `activity` object
+  (`toggle_rate_hz` × `capacitance_f` × `vdd_v`, a synthesis/P&R
+  switching-activity estimate) instead of a static `current_a` — see
+  "Activity-weighted current mode" below. This is additive to Phase 1b's
+  static-only model: a spec that only ever sets `current_a` behaves exactly
+  as before.
+
 Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-design, 1b's and 1c's new fields needed **no `schema_version` bump** —
-every field an earlier phase promised is unchanged.
+design, 1b's, 1c's, and Phase 2's new fields needed **no `schema_version`
+bump** — every field an earlier phase promised is unchanged.
 
 ## Why a named net is (usually) several disconnected islands, not one mesh
 
@@ -193,16 +202,34 @@ The spec file is a JSON object:
 - `current_model` (optional object) — what each instance draws:
   - `supply_net` / `ground_net` (strings, optional) — per-model defaults for
     the instances below; each must be one of `power_nets`.
+  - `vdd_v` (number, optional, `>= 0`) — a per-model default supply voltage
+    for any instance's `activity.vdd_v` (below) that omits its own; the same
+    default-with-per-instance-override convention `supply_net`/`ground_net`
+    already use.
   - `instances` (non-empty array, required when `current_model` is present):
     - `name` (string, optional, defaults to `"inst<index>"`, must be
       unique).
     - `x_um` / `y_um` (numbers, required) — the instance's position, snapped
       to the nearest extracted node *on each of its nets independently*.
-    - `current_a` (number, required, `>= 0`) — a **magnitude**, not a signed
-      injection: the instance draws it off `supply_net` and returns the same
-      current to `ground_net`. The sign convention is set by which net is
-      which, so a negative `current_a` is rejected rather than silently
-      reinterpreted.
+    - **Exactly one** of `current_a` or `activity` (issue #1320, Phase 2 —
+      see "Activity-weighted current mode" below), giving the same
+      normalised, non-negative amperage magnitude either way:
+      - `current_a` (number, `>= 0`) — a **magnitude**, not a signed
+        injection: the instance draws it off `supply_net` and returns the
+        same current to `ground_net`. The sign convention is set by which
+        net is which, so a negative `current_a` is rejected rather than
+        silently reinterpreted.
+      - `activity` (object) — a switching-activity estimate instead of a
+        static number:
+        - `toggle_rate_hz` (number, required, `>= 0`) — how many times a
+          second this instance's output(s) switch.
+        - `capacitance_f` (number, required, `>= 0`) — the capacitance
+          switched each transition (the driven net's own load capacitance —
+          typically read straight off a synthesis/P&R tool's own parasitic
+          or activity report).
+        - `vdd_v` (number, optional, `>= 0`) — the supply voltage; falls
+          back to `current_model.vdd_v` when omitted, and is an error if
+          neither is set.
     - `supply_net` / `ground_net` (strings, optional) — per-instance
       overrides of the model defaults. An instance needs a `supply_net` from
       one place or the other; `ground_net` may legitimately be absent (the
@@ -313,6 +340,61 @@ point (its own sparse LU, its own netlist parser, the same engine `klt sim`
 already uses) — node for node and branch for branch, on a synthetic 2-D mesh
 and end to end on the real routed `gcd` corpus fixture, agreeing to `1e-9` V
 and `1e-12` A.
+
+## Activity-weighted current mode (Phase 2)
+
+Phase 1b's `current_model.instances[].current_a` is a static magnitude the
+caller must already know — average or peak, picked by hand. Issue #1320
+(Phase 2 of epic #712) adds an **additive** alternative: an `activity`
+object per instance, letting an agent derive that same current straight from
+a synthesis/P&R tool's own switching-activity estimate instead of hand-
+picking a number. A spec may mix both freely (some instances static, some
+activity-weighted) — each instance still resolves to exactly one
+non-negative `current_a` before the rest of the solve runs, so nothing
+downstream (the IR-drop solve, the EM verdict) can tell which mode produced
+it.
+
+- **The model: average current from switching activity.** A node that
+  transitions at `toggle_rate_hz`, moving `capacitance_f` of charge to/from
+  `vdd_v` each time, draws an average current of
+  `current_a = toggle_rate_hz * capacitance_f * vdd_v` — equivalently,
+  dynamic power `C * V^2 * f` divided by `V`. This is the standard estimate
+  a synthesis/P&R tool's own activity report (a per-net toggle rate) plus its
+  extracted/estimated load capacitance already imply; `klt power` does not
+  compute toggle rates or capacitances itself (no VCD/SAIF parsing, no
+  parasitic extraction) — it only turns caller-supplied estimates of both
+  into the same amperage `current_a` already consumes.
+- **`vdd_v` has a per-model default.** `current_model.vdd_v` sets a default
+  every instance's `activity.vdd_v` may omit and inherit — useful when every
+  instance in a spec shares one supply rail's nominal voltage. A per-instance
+  `activity.vdd_v` overrides it, the same override precedence
+  `supply_net`/`ground_net` already use.
+- **Exactly one current source per instance.** An instance sets `current_a`
+  *or* `activity`, never both (rejected as ambiguous) and never neither
+  (rejected — an instance with no current source is a spec error, not a
+  silent zero-draw).
+- **All three quantities are magnitudes, `>= 0`.** `toggle_rate_hz`,
+  `capacitance_f`, and `vdd_v` are each rejected if negative, the same
+  discipline `current_a` itself already applies — this mode does not change
+  which net a current is drawn from/returned to; that is still entirely
+  `supply_net`/`ground_net`'s job.
+
+**Worked example.** `500e6` Hz (a 500 MHz toggle rate) × `1e-12` F (1 pF) ×
+`2.0` V = `1e-3` A — exactly the static `current_a: 1e-3` Phase 1b's own
+worked example above already uses, so the two modes agree bit for bit on the
+resulting droop when fed the same numbers. See
+`tests/test_power.py`'s `test_activity_weighted_current_matches_hand_computed_value`
+(this exact example) and `test_activity_weighted_current_with_fractional_inputs`
+(a second hand-computed check with non-round inputs, `250e6 * 0.4e-12 * 0.9 =
+9e-5` A) for the validated, closed-form arithmetic end to end through a real
+IR-drop solve.
+
+**How it is validated.** `tests/test_power.py` checks the activity-weighted
+current computation against hand-computed examples end to end (the worked
+example above, plus fractional inputs, a model-level `vdd_v` default, and a
+per-instance `vdd_v` override), and validates every rejected-input error
+message (both `current_a`/`activity` set, neither set, a negative
+`toggle_rate_hz`, a missing `vdd_v` with no default).
 
 ## EM current-density verdict (Phase 1c)
 
@@ -669,13 +751,23 @@ real-fixture scale check.
   instance is wired to the nearest *extracted* node on its net, not spliced
   into a rail at its exact position — same trade, and same "immaterial for
   a short rail, less so for a long strap" caveat, as via taps above.
-- **Static (DC) only.** This is an operating-point solve on resistors:
-  no decoupling capacitance, no package/board parasitics, no switching
-  activity, no `di/dt`. `current_model` currents are the caller's own
-  average/peak numbers, taken verbatim — `klt power` does not derive them
-  from a netlist, a VCD, or a liberty file. Dynamic (transient) IR drop is
-  explicitly a later phase of epic #712, not a limitation to be worked
-  around here.
+- **The IR-drop solve itself is still a single DC operating point.** This is
+  a resistor-network solve at one instant, not a transient (`di/dt`)
+  simulation: no decoupling capacitance, no package/board parasitics, and no
+  time axis — every instance's current (however it is derived) is treated as
+  a constant injection for the one operating point that gets solved. Full
+  transient/dynamic IR drop (a droop waveform over time, not one worst-case
+  number) remains a later phase of epic #712.
+- **Where that per-instance current comes from is no longer static-only,**
+  though (issue #1320, Phase 2 — see "Activity-weighted current mode"
+  above). `current_model.instances[]` may set a static `current_a` magnitude
+  (the caller's own average/peak number, taken verbatim — Phase 1b's
+  original behaviour, unchanged) *or* an `activity` object
+  (`toggle_rate_hz` × `capacitance_f` × `vdd_v`, a synthesis/P&R
+  switching-activity estimate `klt power` computes for the caller). Either
+  way, `klt power` never derives toggle rates or capacitances itself from a
+  netlist, a VCD/SAIF file, or a liberty file — those remain caller-supplied
+  inputs, same as `current_a` always was.
 - **EM limits are opt-in per role, not a built-in PDK table.** `klt power`
   never bundles PDK electrical rules itself (see CLAUDE.md's "open PDKs
   only" discipline) — a caller supplies `current_limit_a_per_um`/
@@ -696,8 +788,8 @@ real-fixture scale check.
 ## See also
 
 - [#712](https://github.com/2AMLogic/klayout-tools/issues/712) — the parent
-  power/IR-drop + EM signoff epic (remaining phase: dynamic/activity-weighted
-  currents).
+  power/IR-drop + EM signoff epic (remaining phases: signoff integration and
+  canary validation).
 - [#845](https://github.com/2AMLogic/klayout-tools/issues/845) — Phase 1b,
   the static IR-drop solve this command's resistive network feeds
   (`klayout_tools/ir_solver.py`, validated in `tests/test_ir_solver.py` and
@@ -705,6 +797,9 @@ real-fixture scale check.
 - [#846](https://github.com/2AMLogic/klayout-tools/issues/846) — Phase 1c,
   the per-net EM current-density verdict (`em_verdict`, this document's "EM
   current-density verdict" section above).
+- [#1320](https://github.com/2AMLogic/klayout-tools/issues/1320) — Phase 2,
+  the activity-weighted current mode (`current_model.instances[].activity`,
+  this document's "Activity-weighted current mode" section above).
 - [`docs/cli/place-and-route.md`](place-and-route.md) — `klt place-and-route`,
   the source of the routed layouts this command analyses (and of the "no
   PDN generation in this v1" fact "Why a named net is usually several
