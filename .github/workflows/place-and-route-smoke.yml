@@ -1,0 +1,136 @@
+name: Place-and-route smoke (LVS/DRC)
+
+# Epic #700 Phase 4 (issue #1328): a manually-triggered, CI-runnable
+# synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke job for the
+# `gcd`/`mult8` place-and-route corpus designs. Before this workflow existed,
+# `klt place-and-route` had no CI job at all -- exercising the pipeline end
+# to end required a manual Docker/volare setup (see
+# docs/cli/place-and-route.md's "Installing OpenROAD" section). This job
+# provisions `openroad` (via the documented Docker-wrapper recipe) and a
+# full open_pdks-layout sky130A PDK, then runs the pipeline through
+# scripts/place-and-route-smoke.sh -- which asserts `klt lvs`'s and `klt
+# drc`'s own JSON `status`/`violation_count`/`error_count` fields, not just
+# that the processes exited 0. See that script's own header comment for the
+# LVS self-compare methodology and why it does not (yet) compare against
+# `klt place-and-route`'s `verilog_path`.
+#
+# Scoped to `gcd`/`mult8` only -- the only two designs with a committed,
+# reviewed fixture-regeneration recipe
+# (tests/corpus/place_and_route/regenerate.sh). There is no committed
+# `modexp` fixture; real `modexp`/fleet-canary validation is tracked
+# separately by issue #1329.
+#
+# `workflow_dispatch` only, deliberately NOT `pull_request`/`push` like
+# .github/workflows/ci.yml's `test` job: this job pulls a large
+# `openroad/orfs:latest` Docker image and fetches a full open_pdks-layout
+# sky130A PDK (LEF + tech-LEF + liberty -- heavier than the liberty-only
+# subset `test` already caches under `pdks/sky130-liberty/`), multi-GB of
+# one-time cost on a cache miss -- judged too heavy to gate every PR.
+# Trigger manually from the Actions tab, or `gh workflow run
+# place-and-route-smoke.yml`, whenever `klt place-and-route`/`klt lvs`/`klt
+# drc`/`klt extract`/`klt synthesize` change, or before a release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: place-and-route-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  place-and-route-smoke:
+    name: synth -> place-and-route -> LVS -> DRC (gcd, mult8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Verify KLayout imports headlessly
+        run: |
+          uv run --frozen --extra dev python -c "
+          import klayout.db as kdb
+          print('klayout', kdb.Layout().dbu)
+          "
+
+      - name: Install Yosys build dependencies
+        # Mirrors .github/workflows/ci.yml's `test` job step of the same
+        # name -- see that step's own comment for the per-package rationale
+        # and the apt-mirror-stall history behind the timeout/retry wrapper.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          CI_APT_DEADLINE: "270"
+          CI_APT_PER_CMD_TIMEOUT: "150"
+        run: |
+          scripts/ci-apt-install.sh \
+            cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
+            libffi-dev pkg-config zlib1g-dev
+
+      - name: Cache pinned Yosys build
+        id: yosys-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yosys-0.67
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
+
+      - name: Build + install pinned Yosys (cache miss only)
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        run: scripts/install-yosys.sh
+
+      - name: Add pinned Yosys to PATH
+        run: echo "$HOME/.cache/yosys-0.67/bin" >>"$GITHUB_PATH"
+
+      - name: Verify Yosys runs headlessly
+        run: yosys -V
+
+      - name: Install volare
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: Cache full sky130A PDK (volare, pinned)
+        id: pdk-cache
+        uses: actions/cache@v6
+        with:
+          path: .pdk-cache
+          # Pinned open_pdks build -- the same commit
+          # scripts/aws/build-remote-sim-ami.sh and docs/cli/drc.md's
+          # gf180mcu recipe pin, reused here for reproducibility rather than
+          # "whatever volare's latest is at run time".
+          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Fetch full sky130A PDK (volare, cache miss only)
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          PDK_ROOT="${{ github.workspace }}/.pdk-cache" \
+            volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Install the openroad Docker wrapper
+        # scripts/install-openroad-docker.sh (issue #1328) -- pulls
+        # `openroad/orfs:latest` and writes a wrapper script that shells out
+        # to it per invocation, mirroring docs/cli/place-and-route.md's
+        # documented recipe. GitHub-hosted `ubuntu-latest` runners ship
+        # Docker preinstalled, so no separate Docker setup step is needed.
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$HOME/.cache/openroad-docker/bin"
+          scripts/install-openroad-docker.sh "$HOME/.cache/openroad-docker/bin"
+          echo "$HOME/.cache/openroad-docker/bin" >>"$GITHUB_PATH"
+
+      - name: Run the synth -> place-and-route -> LVS -> DRC smoke pipeline (gcd, mult8)
+        env:
+          PDK: sky130A
+          PDK_ROOT: ${{ github.workspace }}/.pdk-cache
+        run: scripts/place-and-route-smoke.sh gcd mult8
