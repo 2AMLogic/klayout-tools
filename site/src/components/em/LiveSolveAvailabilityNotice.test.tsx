@@ -8,6 +8,10 @@
  *      announce yet),
  *   3. the check never spins up a `Worker` — capability-check failure (or
  *      success) must not consume solve resources.
+ *
+ * The component is deliberately not mounted on the public site yet (see its
+ * doc comment, and the complementary guard in `EmGallerySection.test.tsx`);
+ * these tests are what keep it correct until #890/#892 wire it in.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";

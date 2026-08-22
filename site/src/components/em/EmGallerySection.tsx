@@ -1,5 +1,4 @@
 import { InterconnectCouplingGalleryEntry } from "./InterconnectCouplingGalleryEntry";
-import { LiveSolveAvailabilityNotice } from "./LiveSolveAvailabilityNotice";
 import { PatchAntennaGalleryEntry } from "./PatchAntennaGalleryEntry";
 import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
 
@@ -48,14 +47,20 @@ import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
  * `<Benchmark>GalleryEntry` pair (see `PatchAntennaGalleryEntry`'s /
  * `SpiralInductorGalleryEntry`'s doc comments) and list it below.
  *
- * **Live-solve capability check (Epic #840 Phase 2c, issue #891):** every
- * entry below always renders Phase 1's pre-computed geode-fem export — there
- * is no live-solve UI in this repo yet (Phase 2a/2b/2d are unbuilt; see
- * `docs/design/geode-fem-wasm-webgpu-spike.md`'s DEFER verdict). This section
- * still runs the capability check via `LiveSolveAvailabilityNotice` so the
- * signal (and a clear, non-alarming note when unsupported) is in place for a
- * future live-solve interaction to gate on — see that component's doc
- * comment and `lib/liveSolveCapability.ts`.
+ * **Live-solve capability check (Epic #840 Phase 2c, issue #891) — built,
+ * deliberately not mounted here yet:** every entry below always renders
+ * Phase 1's pre-computed geode-fem export, and there is no live-solve UI
+ * anywhere in this repo (Phase 2a/2b/2d are unbuilt; see
+ * `docs/design/geode-fem-wasm-webgpu-spike.md`'s DEFER verdict). The
+ * capability probe (`lib/liveSolveCapability.ts`) and its fallback notice
+ * (`LiveSolveAvailabilityNotice`) ship exported and tested, but this section
+ * does **not** render the notice: a "not available on this device" message
+ * only makes sense once live solving is available on *some* device, and
+ * `navigator.deviceMemory < 4` is a routinely-hit condition on real mobile
+ * traffic, so mounting it today would tell real visitors a feature is
+ * device-gated when it does not exist at all. Wire it in from whichever
+ * component owns the live-solve entry point when #890/#892 land —
+ * `EmGallerySection.test.tsx` asserts the notice stays unmounted until then.
  */
 export function EmGallerySection() {
   return (
@@ -76,8 +81,6 @@ export function EmGallerySection() {
         committed solver run — see each entry&rsquo;s provenance panel for the exact
         solver version, geometry, and solve parameters behind it.
       </p>
-
-      <LiveSolveAvailabilityNotice />
 
       <div className="flex flex-col gap-4">
         <PatchAntennaGalleryEntry />

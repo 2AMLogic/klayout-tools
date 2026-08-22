@@ -2,27 +2,32 @@ import { useEffect, useState } from "react";
 import { checkLiveSolveCapability, type LiveSolveCapabilityResult } from "@/lib/liveSolveCapability";
 
 /**
- * Graceful-fallback wiring for the Electromagnetics gallery (Epic #840
+ * Graceful-fallback notice for a future in-browser live solve (Epic #840
  * Phase 2c, issue #891): runs {@link checkLiveSolveCapability} once on
  * mount and, only when the browser can't support an in-browser solve,
- * renders a small, non-alarming inline note above the gallery entries.
+ * renders a small, non-alarming inline note pointing at the pre-computed
+ * results instead.
  *
- * **There is no live-solve UI in this repo yet** (Phase 2a/2b/2d — issues
+ * **NOT MOUNTED ANYWHERE YET — this is deliberate, not an oversight.**
+ * There is no live-solve UI in this repo (Phase 2a/2b/2d — issues
  * #889/#890/#892 — are unbuilt; see
- * `docs/design/geode-fem-wasm-webgpu-spike.md`'s DEFER verdict). So today
+ * `docs/design/geode-fem-wasm-webgpu-spike.md`'s DEFER verdict), so
  * `EmGallerySection`'s benchmark entries (`PatchAntennaGalleryEntry` etc.)
  * always render Phase 1's pre-computed results regardless of what this
- * component finds — the "fallback" the acceptance criteria asks for is
- * already the section's only rendering path, and stays that way whether
- * this component's check passes or fails. This component's job is narrower
- * and forward-looking: surface the capability signal now, and give a
- * future live-solve interaction (whenever #890/#892 land) a component to
- * wrap around instead of duplicating the check-and-notice logic.
+ * component would find — the "fallback" the acceptance criteria asks for is
+ * already that section's only rendering path. Rendering this notice on the
+ * public site today would therefore tell a real visitor that live solving
+ * is unavailable *on their device* when it is unavailable on every device,
+ * and `navigator.deviceMemory < 4` is a routinely-hit condition on real
+ * mobile traffic — not a hypothetical. So the probe and this notice ship
+ * built, exported, and tested, and the component gets mounted by whichever
+ * component owns the live-solve entry point once #890/#892 land, at which
+ * point the copy below is accurate. `EmGallerySection.test.tsx` asserts it
+ * stays unmounted until then.
  *
- * When the check finds the browser capable, this renders nothing — there
- * is no live-solve feature yet to announce as "available", and a
- * self-congratulatory "you *could* run this" note with nothing behind it
- * would be misleading.
+ * When the check finds the browser capable, this renders nothing — a
+ * "you *could* run this" note is noise next to a working live-solve
+ * control, which is the only context this component is mounted in.
  *
  * The capability check itself never touches worker/solve resources (see
  * `liveSolveCapability.ts`'s doc comment); this component adds nothing
