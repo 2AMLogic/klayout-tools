@@ -14,6 +14,10 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.3.0 (2026-08-21)
+
 ### Fixed since release
 
 - 2026-08-21 — **Breaking (`klt sim` `schema_version` 2 -> 3, `klt size`
