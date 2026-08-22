@@ -3227,6 +3227,7 @@ def _resolve_black_box_regions(
 # module still calls directly are re-imported below.
 # --------------------------------------------------------------------------- #
 
+
 def _resolve_resistors(
     layout: kdb.Layout,
     top_cell: kdb.Cell,

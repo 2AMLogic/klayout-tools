@@ -994,4 +994,3 @@ def _wire_abstract_cells(
 
     report.sort(key=lambda entry: entry["cell"])
     return report, warnings
-
