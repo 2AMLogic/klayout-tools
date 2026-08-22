@@ -236,9 +236,12 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
 
     # Field shape mirrors `klt layout-metrics` (issue #61) exactly — see
     # src/klayout_tools/layout_metrics.py and docs/cli/layout-metrics.md. In
-    # particular: no `$schema` (the envelope key is `schema_version`), no
-    # `pdk` field, and `name` is always present. `drc` is omitted here
-    # because this bootstrap doesn't run a DRC deck against the corpus GDS.
+    # particular: no `$schema` (the envelope key is `schema_version`) and
+    # `name` is always present. `drc` is omitted here because this bootstrap
+    # doesn't run a DRC deck against the corpus GDS. `pdk` (issue #1285) is
+    # the `tests/corpus/<pdk>/` directory this run is walking -- known
+    # exactly here, so the site never has to guess it from the slug (see
+    # `DetailPage.tsx`'s `resolveViewerPdk`).
     layout = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -246,6 +249,7 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
         "name": slug,
         "status": "ok",
         "description": f"{pdk} standard-cell layout `{slug}` from the #4 test corpus.",
+        "pdk": pdk,
         "layer_count": layers["layer_count"],
         "cell_count": cells["cell_count"],
         "instance_count": instance_count,

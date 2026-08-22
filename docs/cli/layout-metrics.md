@@ -7,15 +7,24 @@ metrics ad hoc: it calls the exact same library functions that back `klt
 layers`, `klt cells`, and `klt drc`.
 
 ```
-klt layout-metrics <block> [--deck sky130|gf180mcu] [--output PATH]
+klt layout-metrics <block> [--deck sky130|gf180mcu|sg13g2]
+                    [--pdk sky130|gf180mcu|sg13g2] [--output PATH]
                     [--dry-run] [--format text|json]
 ```
 
 - `<block>` — path to a block directory (e.g. `blocks/example-block`). See
   "Block directory layout" below.
 - `--deck` — optional DRC deck to run for the `drc.violation_count` field
-  (currently: `sky130`, `gf180mcu`). Omitted by default — DRC is opt-in per
-  invocation since the deck cannot be inferred from the block directory.
+  (currently: `sky130`, `gf180mcu`, `sg13g2`). Omitted by default — DRC is
+  opt-in per invocation since the deck cannot be inferred from the block
+  directory.
+- `--pdk` — optional PDK family this block targets, recorded verbatim as the
+  `pdk` field (same vocabulary as `--deck`). Omitted by default — like the
+  deck, a block directory carries nothing that identifies its PDK, and this
+  command never guesses one. **Unlike `--deck`** (best-effort: an unknown
+  name just omits `drc`), an unknown `--pdk` exits `1`: an explicit,
+  caller-supplied identifier that is wrong would be written straight into
+  the contract.
 - `--output` / `-o` — override the output path. Defaults to
   `<block>/output/layout.json`.
 - `--dry-run` — print the computed `layout.json` without writing any file.
@@ -65,6 +74,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "slug": "example-block",
   "name": "Example Block",
   "description": "A short description of the block.",
+  "pdk": "sky130",
   "layout_file": "layout.gds",
   "layer_count": 12,
   "cell_count": 34,
@@ -110,6 +120,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `slug`             | string          | The block directory's basename.                                                                     |
 | `name`             | string          | Display name — from `meta.json`, else a title-cased fallback of `slug`.                             |
 | `description`      | string          | **Optional.** From `meta.json`; omitted if not set.                                                 |
+| `pdk`              | string          | **Optional.** The PDK family this block targets, from `--pdk`. See below.                            |
 | `layout_file`      | string          | **Optional.** The layout file used, relative to `<block>`. Omitted when `status` is `no_artifacts`. |
 | `layer_count`      | integer         | **Optional.** From `klt layers`. Omitted when the layout could not be parsed.                       |
 | `cell_count`       | integer         | **Optional.** From `klt cells`. Omitted when the layout could not be parsed.                        |
@@ -118,6 +129,31 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `renders`          | object          | **Optional.** Present only when at least one PNG exists under `output/renders/`. Filename stem -> path relative to `output/`. |
 | `signals`          | object          | **Optional.** Present only when `output/sim/signals.json` exists. See below.                        |
 | `status`           | string          | One of `"ok"`, `"partial"`, `"no_artifacts"` — see below.                                           |
+
+### `pdk` field
+
+Introduced by issue #1285. One of `klt`'s own PDK-family names — currently
+`"sky130"`, `"gf180mcu"`, `"sg13g2"` — the same vocabulary `drc.deck` uses.
+Adding it required no `schema_version` bump: same additive, omit-absent
+convention as `drc`/`renders`/`signals`, so a `layout.json` written before
+this field existed stays valid.
+
+**It is never inferred.** Nothing in a block directory says which PDK its
+layout targets, so the field appears only when a caller passed `--pdk`. The
+content pipelines behind the klayout-tools.org gallery supply it where they
+genuinely know it:
+
+- `scripts/bootstrap-gallery-blocks.py` knows the PDK exactly — it walks
+  `tests/corpus/<pdk>/` — and attaches it to every corpus block it writes.
+- `scripts/ingest-canary.py` takes an explicit `--pdk` (authoritative) and
+  otherwise falls back to the conservative `<pdk>-<name>` slug guess that
+  already labels canary renders (`scripts/_gallery_common.py`'s
+  `infer_pdk`), omitting the field entirely when that guess fails — no
+  field rather than a wrong one.
+
+The gallery site (`site/src/pages/DetailPage.tsx`) prefers this field when
+picking the embedded GDS viewer's `pdk=` identifier, and falls back to its
+own slug-prefix heuristic (issue #1060) for blocks that carry no `pdk`.
 
 ### `drc` object
 
@@ -185,10 +221,11 @@ for that pipeline's full field-level documentation.
 ## Text format
 
 ```
-$ klt layout-metrics blocks/example-block --deck sky130
+$ klt layout-metrics blocks/example-block --deck sky130 --pdk sky130
 slug: example-block
 name: Example Block
 status: ok
+pdk: sky130
 layer_count: 12
 cell_count: 34
 instance_count: 120
@@ -204,7 +241,7 @@ Its exact layout is **not** part of the contract — parse the JSON instead.
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | Success — `layout.json` written (or printed, under `--dry-run`).         |
-| `1`       | `<block>` does not exist or is not a directory.                          |
+| `1`       | `<block>` does not exist or is not a directory, or `--pdk` names an unknown PDK family. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse.    |
 
 A block that exists but lacks a layout file, DRC deck, or renders is **not**

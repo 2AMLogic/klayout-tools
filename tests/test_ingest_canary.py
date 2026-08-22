@@ -435,6 +435,72 @@ def test_render_failure_is_best_effort(tmp_path, monkeypatch):
     assert "renders" not in layout
 
 
+def test_explicit_pdk_is_recorded_verbatim(tmp_path):
+    """Issue #1285: `--pdk` is the authoritative source when the operator
+    supplies it -- it must win over the slug guess, which would say
+    `sky130` for this slug."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    layout = ic.build_layout_json(
+        repo_dir,
+        repo="2AMLogic/sky130-bandgap",
+        ref="deadbeef",
+        slug="sky130-bandgap",
+        block_dir=tmp_path / "blocks" / "sky130-bandgap",
+        pdk="gf180mcu",
+    )
+    assert layout["pdk"] == "gf180mcu"
+
+
+def test_pdk_falls_back_to_the_slug_guess(tmp_path):
+    """Without `--pdk`, the same conservative `<pdk>-<name>` slug guess
+    that already labels canary renders supplies the field."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    layout = ic.build_layout_json(
+        repo_dir,
+        repo="2AMLogic/gf180-bandgap",
+        ref="deadbeef",
+        slug="gf180-bandgap",
+        block_dir=tmp_path / "blocks" / "gf180-bandgap",
+    )
+    assert layout["pdk"] == "gf180mcu"
+
+
+def test_pdk_omitted_when_unguessable(tmp_path):
+    """No field rather than a wrong one: an unrecognised slug prefix and
+    no `--pdk` leaves `pdk` out entirely, so the site keeps its own
+    fallback behaviour instead of being handed a guess."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    layout = ic.build_layout_json(
+        repo_dir,
+        repo="2AMLogic/some-block",
+        ref="deadbeef",
+        slug="some-block",
+        block_dir=tmp_path / "blocks" / "some-block",
+    )
+    assert "pdk" not in layout
+
+
+def test_unknown_explicit_pdk_is_rejected(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    with pytest.raises(ic.IngestError, match="unknown pdk"):
+        ic.build_layout_json(
+            repo_dir,
+            repo="2AMLogic/some-block",
+            ref="deadbeef",
+            slug="some-block",
+            block_dir=tmp_path / "blocks" / "some-block",
+            pdk="not-a-real-pdk",
+        )
+
+
 def test_no_gds_yields_in_design_status(tmp_path):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()

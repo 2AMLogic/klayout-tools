@@ -266,6 +266,18 @@ export interface Layout {
   name: string;
   status: LayoutStatus;
   description?: string;
+  /**
+   * The PDK family this block targets (issue #1285) -- one of `klt`'s own
+   * deck names (`"sky130"`, `"gf180mcu"`, `"sg13g2"`), the same vocabulary
+   * `drc.deck` uses. Optional and omit-absent: it is written only by a
+   * pipeline that actually knows the PDK (the corpus bootstrap, which walks
+   * `tests/corpus/<pdk>/`; a canary ingest with `--pdk` or a recognised
+   * `<pdk>-<name>` slug), never guessed into place. `DetailPage.tsx` prefers
+   * it over its own slug heuristic when picking the GDS viewer's `pdk=`
+   * identifier, and falls back to that heuristic for blocks that predate
+   * this field.
+   */
+  pdk?: string;
   /** The layout file used, relative to the block dir. Omitted when `no_artifacts`. */
   layout_file?: string;
   /** From `klt layers` — number of distinct (layer, datatype) pairs. */

@@ -111,9 +111,14 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from _gallery_common import attach_overview_render, infer_layer_names  # noqa: E402
+from _gallery_common import (  # noqa: E402
+    attach_overview_render,
+    infer_layer_names,
+    infer_pdk,
+)
 
 from klayout_tools.cells import CellsError, cells_report  # noqa: E402
+from klayout_tools.decks import deck_names  # noqa: E402
 from klayout_tools.layers import LayersError, layers_report  # noqa: E402
 
 # RenderError is not used directly in this module anymore (the shared
@@ -863,12 +868,25 @@ def build_layout_json(
     slug: str,
     block_dir: Path,
     dry_run: bool = False,
+    pdk: str | None = None,
 ) -> dict[str, Any]:
     """Assemble a `layout.json`-shaped dict for a cloned canary repo.
 
     Field order mirrors `docs/cli/layout-metrics.md`'s example (`status`
     last) for readability; JSON key order carries no semantic meaning.
+
+    `pdk` (issue #1285) is the block's PDK family, written as the optional
+    `pdk` field. A canary repo carries no explicit PDK of its own, so it
+    comes from `--pdk` when the operator supplies one (authoritative), and
+    otherwise from the same conservative `<pdk>-<name>` slug guess that
+    already labels this pipeline's renders (`_gallery_common.infer_pdk`).
+    When neither yields a PDK the field is omitted entirely -- no field
+    rather than a wrong one; the site keeps its own slug heuristic for
+    those blocks.
     """
+    if pdk is not None and pdk not in deck_names():
+        raise IngestError(f"unknown pdk: {pdk} (known: {', '.join(deck_names())})")
+
     layout: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -879,6 +897,10 @@ def build_layout_json(
     description = repo_description(repo)
     if description:
         layout["description"] = description
+
+    resolved_pdk = pdk or infer_pdk(slug)
+    if resolved_pdk is not None:
+        layout["pdk"] = resolved_pdk
 
     gds_path = find_layout_gds(repo_dir)
     source_path = "."
@@ -934,9 +956,11 @@ def ingest(
     blocks_dir: Path = DEFAULT_BLOCKS_DIR,
     cache_dir: Path = DEFAULT_CACHE_DIR,
     dry_run: bool = False,
+    pdk: str | None = None,
 ) -> dict[str, Any]:
     """Gate, clone, and ingest `repo`, returning the emitted `layout.json`
-    dict. Raises `IngestError` (writing nothing) if the gate refuses."""
+    dict. Raises `IngestError` (writing nothing) if the gate refuses or
+    `pdk` names a PDK family this build does not ship."""
     assert_public_repo(repo)
 
     resolved_slug = slug or repo.split("/")[-1]
@@ -950,6 +974,7 @@ def ingest(
         slug=resolved_slug,
         block_dir=block_dir,
         dry_run=dry_run,
+        pdk=pdk,
     )
 
     if not dry_run:
@@ -974,6 +999,16 @@ def main(argv: list[str] | None = None) -> int:
         "--slug", default=None, help="Block slug override (default: repo name)"
     )
     parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK family this block targets, written as layout.json's `pdk` "
+            "field (currently: sky130, gf180mcu, sg13g2). Default: guessed "
+            "from the slug's <pdk>-<name> prefix, and omitted entirely when "
+            "that guess fails. An unknown name exits 1."
+        ),
+    )
+    parser.add_argument(
         "--blocks-dir",
         type=Path,
         default=DEFAULT_BLOCKS_DIR,
@@ -996,6 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
             blocks_dir=args.blocks_dir,
             cache_dir=args.cache_dir,
             dry_run=args.dry_run,
+            pdk=args.pdk,
         )
     except IngestError as exc:
         print(f"ingest-canary: {exc}", file=sys.stderr)

@@ -281,6 +281,72 @@ describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forwa
     expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "ihp-sg13g2");
   });
 
+  it("prefers layout.pdk over the slug heuristic (issue #1285)", async () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          // Slug says sky130; the explicit field says otherwise and wins.
+          slug: "sky130_fd_sc_hd__buf_4",
+          pdk: "gf180mcu",
+          downloadable: true,
+          layout_file: "buf_4.gds",
+        })}
+      />,
+    );
+
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "gf180mcu");
+  });
+
+  it("maps layout.pdk=sg13g2 onto the viewer's ihp-sg13g2 family (issue #1285)", async () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "some-future-pdk-block",
+          pdk: "sg13g2",
+          downloadable: true,
+          layout_file: "layout.gds",
+        })}
+      />,
+    );
+
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "ihp-sg13g2");
+  });
+
+  it("falls back to the slug heuristic when layout.pdk is absent (issue #1285)", async () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "gf180mcu_fd_sc_mcu9t5v0__and2_1",
+          pdk: undefined,
+          downloadable: true,
+          layout_file: "and2_1.gds",
+        })}
+      />,
+    );
+
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "gf180mcu");
+  });
+
+  it("falls back to the slug heuristic (and warns) for an unrecognized layout.pdk value (issue #1285)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "sky130_fd_sc_hd__buf_4",
+          pdk: "not-a-real-pdk",
+          downloadable: true,
+          layout_file: "buf_4.gds",
+        })}
+      />,
+    );
+
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "sky130");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("not-a-real-pdk"));
+
+    warnSpy.mockRestore();
+  });
+
   it("passes no PDK family (rather than defaulting to sky130) and logs a warning for an unrecognized slug prefix", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 

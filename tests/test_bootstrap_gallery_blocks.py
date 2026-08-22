@@ -11,6 +11,7 @@ canary-ingest side.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -97,6 +98,35 @@ def test_attach_overview_render_is_best_effort_on_failure(
 
     assert "renders" not in layout
     assert "skipping render" in capsys.readouterr().out
+
+
+def test_bootstrap_block_records_the_corpus_pdk(tmp_path, monkeypatch):
+    """Issue #1285: the corpus pipeline knows its PDK exactly (from the
+    `tests/corpus/<pdk>/` directory it walks), so it writes an explicit
+    `pdk` field instead of leaving the site to guess from the slug."""
+    corpus_dir = tmp_path / "corpus" / "gf180mcu"
+    corpus_dir.mkdir(parents=True)
+    gds_path = corpus_dir / "gf180mcu_fd_sc_mcu9t5v0__and2_1.gds"
+    _make_gds(gds_path)
+
+    monkeypatch.setattr(bg, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(bg, "BLOCKS_ROOT", tmp_path / "blocks")
+    monkeypatch.setattr(
+        bg,
+        "run_klt",
+        lambda *args: {"layer_count": 1, "cell_count": 1, "cells": [{"instances": 0}]},
+    )
+
+    bg.bootstrap_block(gds_path, "gf180mcu", skip_signals=True)
+
+    written = (
+        tmp_path
+        / "blocks"
+        / "gf180mcu_fd_sc_mcu9t5v0__and2_1"
+        / "output"
+        / "layout.json"
+    )
+    assert json.loads(written.read_text())["pdk"] == "gf180mcu"
 
 
 @pytest.mark.parametrize("slug", sorted(bg.NO_ARTIFACTS_SLUGS))

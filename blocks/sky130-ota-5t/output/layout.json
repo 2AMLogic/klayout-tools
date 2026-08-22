@@ -4,6 +4,7 @@
   "slug": "sky130-ota-5t",
   "name": "Sky130 Ota 5t",
   "description": "5T OTA reference buffer — klayout-tools design-pipeline worked example (Epic #105 Phase 3)",
+  "pdk": "sky130",
   "schematic": {
     "path": "schematic.svg",
     "provenance": "Drawn from examples/design-pipeline/ota_5t.spice @ 7c8f43a."

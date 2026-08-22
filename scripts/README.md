@@ -203,4 +203,10 @@ for the full field-level documentation.
 ```
 python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap
 python scripts/ingest-canary.py --repo 2AMLogic/sky130-bandgap
+python scripts/ingest-canary.py --repo 2AMLogic/some-block --pdk sg13g2
 ```
+
+`--pdk` sets `layout.json`'s optional `pdk` field (issue #1285) when the
+slug doesn't follow the `<pdk>-<name>` convention the script otherwise
+guesses from; an unknown name exits `1`, and an unguessable slug with no
+`--pdk` simply omits the field.

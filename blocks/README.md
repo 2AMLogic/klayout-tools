@@ -185,8 +185,19 @@ the pre-layout status below, and `renders` (overview + per-layer + a zoomed
 `center_crop`, issue #942) is attached the same way the #4 corpus blocks
 get theirs, plus the crop (see "Renders" above). Layer labels come from
 `infer_layer_names()`'s slug-prefix PDK guess (`gf180-bandgap` ->
-gf180mcu, `sky130-bandgap` -> sky130), since a canary repo carries no
-explicit `pdk` field. Both blocks are `downloadable: true`.
+gf180mcu, `sky130-bandgap` -> sky130), since a canary *repo* carries no
+PDK declaration of its own. Both blocks are `downloadable: true`.
+
+**`layout.json`'s `pdk` field** (issue #1285) records that PDK family
+explicitly, so the gallery site never has to re-derive it from the slug.
+`ingest-canary.py --pdk <name>` is authoritative when supplied; otherwise
+the same `infer_pdk()` slug guess above fills it in, and the field is
+omitted entirely when that guess fails — no field rather than a wrong one,
+which leaves the site's own fallback heuristic in charge for that block.
+The #4 corpus blocks always carry it: `bootstrap-gallery-blocks.py` knows
+each block's PDK exactly from the `tests/corpus/<pdk>/` directory it walks.
+See [`../docs/cli/layout-metrics.md`](../docs/cli/layout-metrics.md)'s
+`pdk` field section for the full contract.
 
 **GDS detection.** Canary repos don't share one fixed layout-output
 convention, so `find_layout_gds()` tries, under each of `layout/`, `gds/`,

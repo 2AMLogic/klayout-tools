@@ -52,11 +52,10 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * and without leaving klayout-tools.org.
  * The gallery now spans multiple PDK families (sky130, gf180mcu, and
  * eventually ihp sg13g2 — issue #1060), so the viewer's layer styling is
- * derived per block from its slug prefix (`inferPdkFamily()` below) rather
- * than hardcoded — `layout.json` carries no explicit PDK family field yet
- * (see `types.ts`'s `drc.deck`, the closest existing analog), so this is a
- * slug-prefix heuristic; issue #1285 tracks adding an explicit field to the
- * `klt layout-metrics` schema so the site never has to guess.
+ * derived per block from `layout.json`'s optional `pdk` field (issue #1285)
+ * when the content pipeline knew the block's PDK, falling back to the
+ * `inferPdkFamily()` slug-prefix heuristic below for blocks that carry no
+ * such field. See `resolveViewerPdkFamily()` below.
  *
  * Matches the original Astro page's chrome exactly: no shared Header/Footer
  * — this page has always been a standalone document (see `[slug].astro`,
@@ -80,11 +79,23 @@ const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
 };
 
 /**
- * Infers a block's PDK family from its slug prefix (issue #1060). This is a
- * fallback heuristic -- `layout.json` has no explicit PDK family field yet
- * (see module doc comment above; issue #1285) -- so it is deliberately
- * conservative: an unrecognized prefix returns `undefined` rather than
- * guessing wrong.
+ * `layout.json`'s own `pdk` values (issue #1285) -- `klt`'s deck-name
+ * vocabulary, see `docs/cli/layout-metrics.md` -- mapped onto this page's
+ * PDK families. Only `sg13g2` differs from its family name: `klt` names the
+ * deck after the process, the viewer after the foundry+process.
+ */
+const PDK_FAMILY_BY_LAYOUT_PDK: Record<string, PdkFamily> = {
+  sky130: "sky130",
+  gf180mcu: "gf180mcu",
+  sg13g2: "ihp-sg13g2",
+};
+
+/**
+ * Infers a block's PDK family from its slug prefix (issue #1060). This is
+ * the fallback for blocks whose `layout.json` carries no explicit `pdk`
+ * field (issue #1285 added it, but it is optional and omit-absent), so it
+ * is deliberately conservative: an unrecognized prefix returns `undefined`
+ * rather than guessing wrong.
  */
 function inferPdkFamily(slug: string): PdkFamily | undefined {
   if (slug.startsWith("gf180mcu_") || slug.startsWith("gf180-")) return "gf180mcu";
@@ -94,15 +105,33 @@ function inferPdkFamily(slug: string): PdkFamily | undefined {
 }
 
 /**
- * Resolves a block's `GdsViewer` `pdkFamily` prop from its slug (issue
- * #1060, carried forward by #943). When the family can't be inferred,
- * `undefined` is returned -- the renderer then colors layers by a
- * deterministic per-layer hue instead of styling them with a wrong PDK's
- * palette -- and a warning is logged so an unrecognized slug prefix doesn't
- * go unnoticed.
+ * Resolves a block's `GdsViewer` `pdkFamily` prop (issue #1060, carried
+ * forward by #943, made explicit-first by #1285).
+ *
+ * `layout.pdk` wins whenever it is present and recognized -- the content
+ * pipeline knows the PDK exactly for every block it can (`tests/corpus/
+ * <pdk>/` for corpus blocks, `--pdk` for a canary ingest) and writes it
+ * into the contract, so the site does not have to guess. `layoutPdk` is
+ * absent for blocks that predate the field, and can be an unrecognized
+ * string (the field is a plain `string` in the contract, not an enum);
+ * both cases fall back to the `inferPdkFamily()` slug heuristic, which is
+ * exactly the pre-#1285 behavior.
+ *
+ * When neither source yields a family, `undefined` is returned -- the
+ * renderer then colors layers by a deterministic per-layer hue instead of
+ * styling them with a wrong PDK's palette -- and a warning is logged so an
+ * unrecognized slug prefix (or `pdk` value) doesn't go unnoticed.
  */
-function resolveViewerPdkFamily(slug: string): PdkFamily | undefined {
-  const family = inferPdkFamily(slug);
+function resolveViewerPdkFamily(slug: string, layoutPdk?: string): PdkFamily | undefined {
+  const explicitFamily =
+    layoutPdk !== undefined ? PDK_FAMILY_BY_LAYOUT_PDK[layoutPdk] : undefined;
+  if (layoutPdk !== undefined && !explicitFamily) {
+    console.warn(
+      `resolveViewerPdkFamily: unrecognized layout.json pdk "${layoutPdk}" for slug "${slug}" -- falling back to the slug heuristic.`,
+    );
+  }
+
+  const family = explicitFamily ?? inferPdkFamily(slug);
   if (!family) {
     console.warn(
       `resolveViewerPdkFamily: could not infer a PDK family for slug "${slug}" -- the viewer will color layers by a generated fallback palette instead of guessing wrong.`,
@@ -182,7 +211,9 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
   // thumbnails' click affordance and the Downloads section's viewer entry
   // on the exact same condition as the raw-file download link.
   const canView = canDownload && layoutFileUrl !== undefined;
-  const viewerPdkFamily = canView ? resolveViewerPdkFamily(layout.slug) : undefined;
+  const viewerPdkFamily = canView
+    ? resolveViewerPdkFamily(layout.slug, layout.pdk)
+    : undefined;
   // Memoized so the overlay's style table isn't rebuilt (and the canvas
   // redrawn) on every re-render of this page.
   const viewerLayerNames = useMemo(
