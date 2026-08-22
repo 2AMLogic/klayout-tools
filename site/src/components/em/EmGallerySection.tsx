@@ -1,4 +1,5 @@
 import { InterconnectCouplingGalleryEntry } from "./InterconnectCouplingGalleryEntry";
+import { LiveSolveAvailabilityNotice } from "./LiveSolveAvailabilityNotice";
 import { PatchAntennaGalleryEntry } from "./PatchAntennaGalleryEntry";
 import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
 
@@ -46,6 +47,15 @@ import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
  * Adding a benchmark here is additive: give it its own `<Benchmark>Result` +
  * `<Benchmark>GalleryEntry` pair (see `PatchAntennaGalleryEntry`'s /
  * `SpiralInductorGalleryEntry`'s doc comments) and list it below.
+ *
+ * **Live-solve capability check (Epic #840 Phase 2c, issue #891):** every
+ * entry below always renders Phase 1's pre-computed geode-fem export — there
+ * is no live-solve UI in this repo yet (Phase 2a/2b/2d are unbuilt; see
+ * `docs/design/geode-fem-wasm-webgpu-spike.md`'s DEFER verdict). This section
+ * still runs the capability check via `LiveSolveAvailabilityNotice` so the
+ * signal (and a clear, non-alarming note when unsupported) is in place for a
+ * future live-solve interaction to gate on — see that component's doc
+ * comment and `lib/liveSolveCapability.ts`.
  */
 export function EmGallerySection() {
   return (
@@ -66,6 +76,8 @@ export function EmGallerySection() {
         committed solver run — see each entry&rsquo;s provenance panel for the exact
         solver version, geometry, and solve parameters behind it.
       </p>
+
+      <LiveSolveAvailabilityNotice />
 
       <div className="flex flex-col gap-4">
         <PatchAntennaGalleryEntry />
