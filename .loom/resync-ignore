@@ -48,3 +48,20 @@ commands/loom/champion.md
 commands/loom/curator.md
 commands/loom/judge.md
 commands/loom/doctor.md
+
+# #1292: hermit-patterns.md's `stateless_ceremony` AST detector carries two
+# local-only exclusions added by #1288 (closing #920) — exclusion 4 skips
+# custom exception subclasses (base name ending in Error/Exception/Warning,
+# which must be classes to be raised/caught) and exclusion 5 skips declarative
+# data containers (classes whose body is only class-level `AnnAssign`
+# annotations, e.g. dataclasses). Without them the detector was a 100%
+# false-positive generator on this tree (107 hits, all false; 8 after the
+# fix), which is the recurring-waste failure #920 was filed to end. These
+# exclusions were never upstreamed into rjwalters/loom's own
+# hermit-patterns.md template (which still has only exclusions 1-3), so an
+# unpinned resync would silently revert them and restore the false-positive
+# rate with no signal — the same reversion that already happened to #606
+# (commit 71d46d0) and #662 (commit 1ae78c6). If the upstream Loom project
+# ever adopts an equivalent exclusion, this pin can be dropped and the file
+# resynced normally.
+commands/loom/hermit-patterns.md
