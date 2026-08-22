@@ -1627,5 +1627,6 @@ def run_drc_klayout_engine(
             deck_name=os.path.basename(deck_file),
             deck_path=deck_file,
             input_path=path,
+            deck_options=deck_vars,
         ),
     }

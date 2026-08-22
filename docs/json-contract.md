@@ -115,7 +115,12 @@ above): adopting it required no `schema_version` bump on any verb.
   selected a non-default flavour of a shared-geometry device family (e.g.
   gf180mcu's `{"poly_res": "2k"}`) — omitted entirely when no such option was
   given, so the block is otherwise unchanged. See `docs/cli/extract.md`'s
-  "Selecting a shared-geometry resistor flavour".
+  "Selecting a shared-geometry resistor flavour". `klt drc --engine klayout`
+  carries the same `options` key (issue #1306) when one or more `--deck-var
+  NAME=VALUE` flags were passed, recording the extra `-rd` script globals
+  that were threaded into the deck for that run (e.g. `{"feol": "true"}`) —
+  likewise omitted entirely when no `--deck-var` was given. See
+  `docs/cli/drc.md`.
   A pinned `content_hash` can be turned back into the klayout-tools git
   tag/PyPI version that shipped it with `klt deck resolve --content-hash
   <hash>` (issue #623) — a resolve-only lookup against a generated
