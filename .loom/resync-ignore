@@ -65,3 +65,21 @@ commands/loom/doctor.md
 # ever adopts an equivalent exclusion, this pin can be dropped and the file
 # resynced normally.
 commands/loom/hermit-patterns.md
+
+# #1316: scripts/lib/forge-helpers.sh's forge_merge_pr()/forge_auto_merge()
+# and scripts/merge-pr.sh's native `loom-daemon forge auto-merge` fallback
+# carry a local-only App-installation permission-scope 403 retry (originally
+# #1308, closing #1293): forge_merge_pr()/forge_auto_merge() route their `gh
+# api` calls through forge_gh_perm_safe (fresh installation-token retry on a
+# 403 "not accessible by integration"), and merge-pr.sh's native path detects
+# that same 403 via is_app_permission_error() and falls through to the
+# (fixed) shell forge_auto_merge path instead of just retrying the native
+# binary call again. This fix was never upstreamed into rjwalters/loom's own
+# templates, so an unpinned resync silently reverted it once already (commit
+# 1edbd2b, "chore: resync installed Loom surfaces") even though #1308 had
+# already merged to main — the same reversion pattern as #606/#662/#1292.
+# These pins are what prevent a recurrence. If the upstream Loom project ever
+# adopts an equivalent retry, these pins can be dropped and the files
+# resynced normally.
+scripts/lib/forge-helpers.sh
+scripts/merge-pr.sh

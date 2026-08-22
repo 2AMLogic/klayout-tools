@@ -347,13 +347,17 @@ forge_merge_pr() {
         -d '{"Do":"squash","delete_branch_after_merge":false}'
     fi
   else
+    # #1293/#1316: route through forge_gh_perm_safe so an App-installation
+    # permission-scope 403 (a token-propagation-window artifact, not a real
+    # scope gap) retries with a freshly minted installation token instead of
+    # failing the merge outright.
     if [[ -n "$expected_head_sha" ]]; then
-      gh api "repos/$nwo/pulls/$pr_number/merge" \
+      forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number/merge" \
         -X PUT \
         -f merge_method=squash \
         -f sha="$expected_head_sha" 2>&1
     else
-      gh api "repos/$nwo/pulls/$pr_number/merge" \
+      forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number/merge" \
         -X PUT \
         -f merge_method=squash 2>&1
     fi
@@ -562,14 +566,18 @@ forge_auto_merge() {
     fi
   else
     # Resolve PR node_id (required by GraphQL mutation).
+    # #1293/#1316: both the node_id lookup and the mutation route through
+    # forge_gh_perm_safe so an App-installation permission-scope 403 (a
+    # token-propagation-window artifact, not a real scope gap) retries with a
+    # freshly minted installation token instead of failing outright.
     local node_id
-    node_id=$(gh api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
+    node_id=$(forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
     [[ -z "$node_id" ]] && return 1
 
     if [[ -n "$expected_head_sha" ]]; then
       local mutation_with_oid='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod, expectedHeadOid: $expectedHeadOid}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
 
-      gh api graphql \
+      forge_gh_perm_safe api graphql \
         -f "query=$mutation_with_oid" \
         -F "pullRequestId=$node_id" \
         -F "mergeMethod=SQUASH" \
@@ -577,7 +585,7 @@ forge_auto_merge() {
     else
       local mutation='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
 
-      gh api graphql \
+      forge_gh_perm_safe api graphql \
         -f "query=$mutation" \
         -F "pullRequestId=$node_id" \
         -F "mergeMethod=SQUASH" 2>/dev/null
