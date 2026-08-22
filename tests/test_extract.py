@@ -7087,16 +7087,17 @@ def test_abstract_cells_in_cell_label_resolves_disjoint_fragment_to_routed_net(
     ``clkload13``/``I`` pin this issue reports: the two li1 fragments are
     tied together only through the cell's own poly (self-connected, then
     ``contact``-linked to each fragment) -- exactly the internal
-    connectivity :func:`~klayout_tools.extract._erase_abstracted_cell_geometry`
+    connectivity
+    :func:`~klayout_tools.extract_abstract._erase_abstracted_cell_geometry`
     deliberately erases for black-box abstraction. Before this issue's fix,
-    :func:`~klayout_tools.extract._resolve_abstract_cell_pins` only ever
-    captured the ``"I"`` label's own point as pin ``I``'s sole candidate,
+    :func:`~klayout_tools.extract_abstract._resolve_abstract_cell_pins` only
+    ever captured the ``"I"`` label's own point as pin ``I``'s sole candidate,
     so it probed straight onto the label's own now-isolated ~2-shape
     fragment (li1 + its own contact) instead of the externally-routed one --
-    #1181/#1182's multi-candidate probing (:func:`~klayout_tools.extract.
-    _probe_abstract_pin_net`) never helped here, since it only had the one
-    candidate to probe. The fix
-    (:func:`~klayout_tools.extract._local_pin_candidate_points`) discovers
+    #1181/#1182's multi-candidate probing (:func:`~klayout_tools.
+    extract_abstract._probe_abstract_pin_net`) never helped here, since it
+    only had the one candidate to probe. The fix
+    (:func:`~klayout_tools.extract_abstract._local_pin_candidate_points`) discovers
     the routed fragment as an *additional* candidate by computing this
     connectivity once, before erasure.
     """
