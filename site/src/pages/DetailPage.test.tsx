@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 /**
- * Behavior tests for `DetailPage`'s Downloads section, covering the
- * browser GDS/OAS viewer link added in issue #249: a "View in browser" link
- * to Tiny Tapeout's hosted viewer (Option 1 of that issue — link-out rather
- * than an embedded viewer), gated on the exact same condition as the
+ * Behavior tests for `DetailPage`'s Downloads section and embedded GDS
+ * viewer overlay (issue #943), which supersedes the "View in browser" link
+ * added in issue #249: a link to Tiny Tapeout's hosted viewer that
+ * navigated away to a new tab is now a same-page overlay (`GdsViewer`)
+ * opened by clicking either a render thumbnail or the Downloads section's
+ * "View in browser" button -- both gated on the exact same condition as the
  * existing raw-file download link (`layout.downloadable === true &&
  * layout.layout_file !== undefined`).
  *
- * Also covers per-PDK-family `pdk=` derivation on that link (issue #1060):
- * the viewer link used to hardcode `pdk=sky130A` for every block, which
- * broke the viewer for gf180mcu blocks (wrong layer table, empty render).
+ * Also covers per-PDK-family `pdk=` derivation feeding the overlay's
+ * `<iframe src>` (issue #1060): the viewer used to hardcode `pdk=sky130A`
+ * for every block, which broke the viewer for gf180mcu blocks (wrong layer
+ * table, empty render).
  *
  * Also covers the Signals section's canary-block degradation (issue #653):
  * when `layout.signals` carries corners with no `waveform` artifact (e.g.
@@ -18,7 +21,7 @@
  * corner-toggle fieldset wired to a plot that can never draw.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { DetailPage } from "./DetailPage";
 import type { Layout, LayoutSignals } from "@/data/types";
 import type { EmSiteExport } from "@/components/em/types";
@@ -37,8 +40,8 @@ function makeLayout(overrides: Partial<Layout> = {}): Layout {
   };
 }
 
-describe("DetailPage viewer link", () => {
-  it("renders both the download link and the viewer link when downloadable with a layout_file", () => {
+describe("DetailPage GdsViewer overlay (issue #943)", () => {
+  it("renders the download link and a 'View in browser' button that opens the embedded viewer when downloadable with a layout_file", () => {
     render(
       <DetailPage
         layout={makeLayout({ downloadable: true, layout_file: "buf_4.gds" })}
@@ -51,46 +54,127 @@ describe("DetailPage viewer link", () => {
       "/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds",
     );
 
-    const viewerLink = screen.getByRole("link", { name: "View in browser" });
-    const href = viewerLink.getAttribute("href") ?? "";
-    expect(href).toMatch(/^https:\/\/gds-viewer\.tinytapeout\.com\/\?/);
+    // No overlay until the entry point is clicked -- never rendered eagerly.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    const params = new URLSearchParams(href.split("?")[1]);
+    const viewerButton = screen.getByRole("button", { name: "View in browser" });
+    fireEvent.click(viewerButton);
+
+    const dialog = screen.getByRole("dialog", { name: /Interactive GDS viewer for/ });
+    const iframe = within(dialog).getByTitle(/Interactive GDS viewer for/);
+    const src = iframe.getAttribute("src") ?? "";
+    expect(src).toMatch(/^https:\/\/gds-viewer\.tinytapeout\.com\/\?/);
+
+    const params = new URLSearchParams(src.split("?")[1]);
     expect(params.get("model")).toBe(
       "https://klayout-tools.org/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds",
     );
     expect(params.get("pdk")).toBe("sky130A");
-    expect(viewerLink).toHaveAttribute("target", "_blank");
-    expect(viewerLink).toHaveAttribute("rel", "noopener noreferrer");
   });
 
-  it("omits the viewer link when downloadable is true but layout_file is absent", () => {
+  it("closes the overlay via the Close button", () => {
+    render(
+      <DetailPage layout={makeLayout({ downloadable: true, layout_file: "buf_4.gds" })} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "View in browser" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("closes the overlay on Escape", () => {
+    render(
+      <DetailPage layout={makeLayout({ downloadable: true, layout_file: "buf_4.gds" })} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "View in browser" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens the same overlay by clicking a render thumbnail", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          downloadable: true,
+          layout_file: "buf_4.gds",
+          renders: { overview: "renders/overview.png" },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByText("Click a render to open an interactive, pan/zoom viewer of the actual GDS."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open interactive viewer for the overview render of buf_4" }),
+    );
+
+    const dialog = screen.getByRole("dialog");
+    const iframe = within(dialog).getByTitle(/Interactive GDS viewer for/);
+    const params = new URLSearchParams((iframe.getAttribute("src") ?? "").split("?")[1]);
+    expect(params.get("model")).toBe(
+      "https://klayout-tools.org/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds",
+    );
+  });
+
+  it("render thumbnails are not clickable (no button role, no hint text) when the block has no downloadable layout file", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          renders: { overview: "renders/overview.png" },
+        })}
+      />,
+    );
+
+    expect(
+      screen.queryByText(/Click a render to open an interactive/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Open interactive viewer/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("omits the 'View in browser' button when downloadable is true but layout_file is absent", () => {
     render(<DetailPage layout={makeLayout({ downloadable: true, layout_file: undefined })} />);
 
-    expect(screen.queryByRole("link", { name: "View in browser" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "View in browser" })).not.toBeInTheDocument();
     expect(screen.getByText("No download available.")).toBeInTheDocument();
   });
 
-  it("omits the viewer link when downloadable is false", () => {
+  it("omits the 'View in browser' button when downloadable is false", () => {
     render(
       <DetailPage
         layout={makeLayout({ downloadable: false, layout_file: "buf_4.gds" })}
       />,
     );
 
-    expect(screen.queryByRole("link", { name: "View in browser" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "View in browser" })).not.toBeInTheDocument();
     expect(screen.getByText("No download available.")).toBeInTheDocument();
   });
 
-  it("omits the viewer link when downloadable/layout_file are both absent (no_artifacts)", () => {
+  it("omits the 'View in browser' button when downloadable/layout_file are both absent (no_artifacts)", () => {
     render(<DetailPage layout={makeLayout({ status: "no_artifacts" })} />);
 
-    expect(screen.queryByRole("link", { name: "View in browser" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "View in browser" })).not.toBeInTheDocument();
     expect(screen.getByText("No download available.")).toBeInTheDocument();
   });
 });
 
-describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
+describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forward by #943)", () => {
+  function openViewerAndGetSrcParams(): URLSearchParams {
+    fireEvent.click(screen.getByRole("button", { name: "View in browser" }));
+    const dialog = screen.getByRole("dialog");
+    const iframe = within(dialog).getByTitle(/Interactive GDS viewer for/);
+    const src = iframe.getAttribute("src") ?? "";
+    return new URLSearchParams(src.split("?")[1]);
+  }
+
   it("emits pdk=gf180mcuD for a gf180mcu std-cell slug", () => {
     render(
       <DetailPage
@@ -103,9 +187,7 @@ describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
       />,
     );
 
-    const viewerLink = screen.getByRole("link", { name: "View in browser" });
-    const href = viewerLink.getAttribute("href") ?? "";
-    const params = new URLSearchParams(href.split("?")[1]);
+    const params = openViewerAndGetSrcParams();
     expect(params.get("model")).toBe(
       "https://klayout-tools.org/blocks/gf180mcu_fd_sc_mcu9t5v0__and2_1/and2_1.gds",
     );
@@ -127,10 +209,7 @@ describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
       />,
     );
 
-    const viewerLink = screen.getByRole("link", { name: "View in browser" });
-    const href = viewerLink.getAttribute("href") ?? "";
-    const params = new URLSearchParams(href.split("?")[1]);
-    expect(params.get("pdk")).toBe("gf180mcuD");
+    expect(openViewerAndGetSrcParams().get("pdk")).toBe("gf180mcuD");
   });
 
   it("emits pdk=sky130A for a sky130 slug", () => {
@@ -144,10 +223,7 @@ describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
       />,
     );
 
-    const viewerLink = screen.getByRole("link", { name: "View in browser" });
-    const href = viewerLink.getAttribute("href") ?? "";
-    const params = new URLSearchParams(href.split("?")[1]);
-    expect(params.get("pdk")).toBe("sky130A");
+    expect(openViewerAndGetSrcParams().get("pdk")).toBe("sky130A");
   });
 
   it("emits pdk=ihp-sg13g2 for an sg13g2 slug", () => {
@@ -161,10 +237,7 @@ describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
       />,
     );
 
-    const viewerLink = screen.getByRole("link", { name: "View in browser" });
-    const href = viewerLink.getAttribute("href") ?? "";
-    const params = new URLSearchParams(href.split("?")[1]);
-    expect(params.get("pdk")).toBe("ihp-sg13g2");
+    expect(openViewerAndGetSrcParams().get("pdk")).toBe("ihp-sg13g2");
   });
 
   it("omits the pdk param (rather than defaulting to sky130A) and logs a warning for an unrecognized slug prefix", () => {
@@ -180,9 +253,7 @@ describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
       />,
     );
 
-    const viewerLink = screen.getByRole("link", { name: "View in browser" });
-    const href = viewerLink.getAttribute("href") ?? "";
-    const params = new URLSearchParams(href.split("?")[1]);
+    const params = openViewerAndGetSrcParams();
     expect(params.has("pdk")).toBe(false);
     expect(params.get("model")).toBe(
       "https://klayout-tools.org/blocks/some-future-pdk-block/layout.gds",
