@@ -20,11 +20,11 @@ from .output import emit_error, emit_success
 def run(args: argparse.Namespace) -> int:
     try:
         if args.dry_run:
-            report = layout_metrics_report(args.block, deck=args.deck)
+            report = layout_metrics_report(args.block, deck=args.deck, pdk=args.pdk)
             written = None
         else:
             written = emit_layout_json(
-                args.block, deck=args.deck, output_path=args.output
+                args.block, deck=args.deck, output_path=args.output, pdk=args.pdk
             )
             report = json.loads(written.read_text())
     except LayoutMetricsError as exc:
@@ -38,6 +38,8 @@ def _print_text(report: dict, written) -> None:
     print(f"slug: {report['slug']}")
     print(f"name: {report['name']}")
     print(f"status: {report['status']}")
+    if "pdk" in report:
+        print(f"pdk: {report['pdk']}")
     if "layer_count" in report:
         print(f"layer_count: {report['layer_count']}")
     if "cell_count" in report:

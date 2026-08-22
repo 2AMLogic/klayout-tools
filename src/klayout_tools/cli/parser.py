@@ -804,6 +804,17 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     layout_metrics_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK family this block targets, recorded verbatim as the pdk "
+            "field (currently: sky130, gf180mcu, sg13g2). Omit to leave the "
+            "field out -- nothing in a block directory identifies its PDK, "
+            "so it is never inferred. Unlike --deck, an unknown name exits 1 "
+            "rather than being silently dropped."
+        ),
+    )
+    layout_metrics_parser.add_argument(
         "--output",
         "-o",
         default=None,

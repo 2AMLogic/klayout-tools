@@ -246,6 +246,68 @@ def test_report_omits_drc_on_unsupported_deck_without_affecting_status(tmp_path)
     assert report["status"] == "ok"
 
 
+# --- pdk field (issue #1285) --------------------------------------------
+
+
+def test_report_includes_pdk_when_given(tmp_path):
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    report = layout_metrics_report(str(block_dir), pdk="sky130")
+    assert report["pdk"] == "sky130"
+
+
+def test_report_omits_pdk_by_default(tmp_path):
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    report = layout_metrics_report(str(block_dir))
+    assert "pdk" not in report
+
+
+def test_report_pdk_present_even_when_no_artifacts(tmp_path):
+    """`pdk` is caller-supplied, not layout-derived, so it survives the
+    early `no_artifacts` return -- same as `renders`."""
+    block_dir = tmp_path / "empty-block"
+    block_dir.mkdir()
+
+    report = layout_metrics_report(str(block_dir), pdk="gf180mcu")
+    assert report["status"] == "no_artifacts"
+    assert report["pdk"] == "gf180mcu"
+
+
+def test_report_raises_on_unknown_pdk(tmp_path):
+    """Unlike `--deck` (best-effort, omits `drc` on an unknown name), an
+    explicit `--pdk` the caller got wrong is a usage error: writing a
+    wrong PDK identifier into the contract is worse than failing."""
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    with pytest.raises(LayoutMetricsError, match="unknown pdk"):
+        layout_metrics_report(str(block_dir), pdk="not-a-real-pdk")
+
+
+def test_emit_layout_json_writes_pdk(tmp_path):
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    written = emit_layout_json(str(block_dir), pdk="sg13g2")
+    assert json.loads(written.read_text())["pdk"] == "sg13g2"
+
+
+def test_cli_pdk_flag_writes_field(tmp_path):
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    assert main(["layout-metrics", str(block_dir), "--pdk", "sky130"]) == 0
+    data = json.loads((block_dir / "output" / "layout.json").read_text())
+    assert data["pdk"] == "sky130"
+
+
+def test_cli_unknown_pdk_exits_1(tmp_path, capsys):
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    assert main(["layout-metrics", str(block_dir), "--pdk", "nope"]) == 1
+    captured = capsys.readouterr()
+    assert "unknown pdk" in captured.err
+    assert not (block_dir / "output" / "layout.json").exists()
+
+
 # --- error path: bad block_dir -----------------------------------------
 
 

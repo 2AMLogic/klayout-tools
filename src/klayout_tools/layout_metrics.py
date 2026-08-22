@@ -41,6 +41,7 @@ source data is absent or unavailable.
       "slug": "example-block",
       "name": "Example Block",
       "description": "A short description of the block.",
+      "pdk": "sky130",
       "layout_file": "layout.gds",
       "layer_count": 12,
       "cell_count": 34,
@@ -69,6 +70,17 @@ source data is absent or unavailable.
                         parsed (unreadable/corrupt stream).
 * ``"no_artifacts"`` — no layout file was found under the block directory.
 
+``pdk`` (issue #1285) is the PDK family this block targets — one of the
+names :func:`klayout_tools.decks.deck_names` reports (currently ``sky130``,
+``gf180mcu``, ``sg13g2``), the same vocabulary ``drc.deck`` uses. It is
+populated only when a ``--pdk`` is supplied: nothing in a block directory
+identifies its PDK, so this module never infers one. Unlike ``--deck``
+(best-effort — an unknown name simply omits ``drc``), an unknown ``--pdk``
+raises :class:`LayoutMetricsError`: an explicit, caller-supplied identifier
+that is wrong would be written straight into the contract, and the site's
+GDS-viewer layer table keys off it. Additive, like ``renders``/``drc``:
+introducing it required no ``schema_version`` bump.
+
 ``drc`` is populated only when a ``--deck`` is supplied *and* the DRC run
 succeeds; it never affects ``status`` (DRC is opt-in per invocation, not a
 required artifact). ``renders`` is populated only when at least one PNG is
@@ -93,6 +105,7 @@ from pathlib import Path
 from typing import Any
 
 from .cells import CellsError, cells_report
+from .decks import deck_names
 from .drc import DrcError, run_drc
 from .layers import LayersError, layers_report
 
@@ -219,18 +232,25 @@ def _attach_signals(metrics: dict[str, Any], output_dir: Path) -> None:
         metrics["signals"] = data
 
 
-def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, Any]:
+def layout_metrics_report(
+    block_dir: str, deck: str | None = None, pdk: str | None = None
+) -> dict[str, Any]:
     """Read existing block artifacts and return a ``layout.json`` dict.
 
     Never raises on missing/partial per-block artifacts (layout file, DRC
     deck, renders) — those are reflected in the ``status`` field and by
-    omitting the corresponding keys. Only raises :class:`LayoutMetricsError`
-    when ``block_dir`` itself is not a usable directory.
+    omitting the corresponding keys. Raises :class:`LayoutMetricsError` only
+    for usage-level errors: ``block_dir`` not being a usable directory, or
+    ``pdk`` naming a PDK family this build does not ship.
 
     Args:
         block_dir: Path to a block directory (e.g. ``blocks/example-block``).
         deck: Optional DRC deck name (e.g. ``"sky130"``) to run via ``klt
             drc``. When omitted, the ``drc`` field is not included.
+        pdk: Optional PDK family this block targets (issue #1285) — one of
+            :func:`klayout_tools.decks.deck_names`. Recorded verbatim as the
+            ``pdk`` field; nothing in a block directory identifies its PDK,
+            so it is never inferred. When omitted, ``pdk`` is not included.
 
     Returns:
         A schema-conforming ``layout.json`` dict (see module docstring).
@@ -240,6 +260,10 @@ def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, 
         raise LayoutMetricsError(f"directory not found: {block_dir}")
     if not path.is_dir():
         raise LayoutMetricsError(f"not a directory: {block_dir}")
+    if pdk is not None and pdk not in deck_names():
+        raise LayoutMetricsError(
+            f"unknown pdk: {pdk} (known: {', '.join(deck_names())})"
+        )
 
     slug = path.name
     meta = _load_meta(path)
@@ -252,6 +276,8 @@ def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, 
     }
     if "description" in meta:
         metrics["description"] = meta["description"]
+    if pdk is not None:
+        metrics["pdk"] = pdk
 
     output_dir = path / "output"
     layout_file = _find_layout_file(path)
@@ -299,7 +325,10 @@ def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, 
 
 
 def emit_layout_json(
-    block_dir: str, deck: str | None = None, output_path: str | None = None
+    block_dir: str,
+    deck: str | None = None,
+    output_path: str | None = None,
+    pdk: str | None = None,
 ) -> Path:
     """Extract metrics and write ``layout.json``; return the written path.
 
@@ -308,11 +337,13 @@ def emit_layout_json(
         deck: Optional DRC deck name, forwarded to :func:`layout_metrics_report`.
         output_path: Override output path. Defaults to
             ``<block_dir>/output/layout.json``.
+        pdk: Optional PDK family name, forwarded to
+            :func:`layout_metrics_report`.
 
     Returns:
         The path the ``layout.json`` was written to.
     """
-    metrics = layout_metrics_report(block_dir, deck=deck)
+    metrics = layout_metrics_report(block_dir, deck=deck, pdk=pdk)
 
     resolved_output = (
         Path(output_path)

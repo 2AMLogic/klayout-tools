@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt layout-metrics` gains an optional **`--pdk`** flag and a matching
+  optional **`pdk`** field in `layout.json` — issue #1285, the deferred
+  follow-up from #943/#1060. The value is one of `klt`'s own PDK-family
+  names (`sky130`, `gf180mcu`, `sg13g2`, the same vocabulary as
+  `drc.deck`), recorded verbatim and **never inferred**: a block directory
+  carries nothing that identifies its PDK. Additive, so `schema_version`
+  stays `1` and a `layout.json` written before this field remains valid.
+  Unlike `--deck` (best-effort — an unknown name just omits `drc`), an
+  unknown `--pdk` exits `1` rather than writing a wrong identifier into the
+  contract. The gallery content pipelines populate it where they know it:
+  `scripts/bootstrap-gallery-blocks.py` from the `tests/corpus/<pdk>/`
+  directory it walks, `scripts/ingest-canary.py` from a new `--pdk` flag or
+  the conservative `<pdk>-<name>` slug guess it already uses for render
+  labels (omitted when neither yields a PDK). The site's block detail page
+  now prefers this field over its slug-prefix heuristic when picking the
+  embedded GDS viewer's `pdk=` identifier, keeping the heuristic as the
+  fallback for blocks that predate the field. See
+  `docs/cli/layout-metrics.md`.
 - `klt power` gains the **per-net EM (electromigration) current-density
   verdict** — issue #846, Phase 1c of the power/IR-drop + EM signoff epic
   #712. Each `stackup`/`vias` role gains two new optional inputs,

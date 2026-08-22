@@ -147,28 +147,45 @@ def attach_overview_render(
     return None
 
 
-def infer_layer_names(slug: str) -> dict[tuple[int, int], str]:
-    """Best-effort PDK guess from a block's `slug`, resolved to that PDK's
-    curated `(layer, datatype) -> name` table (`klayout_tools.decks
-    .get_layer_names`) -- used only to label canary blocks' `renders` keys,
-    since canary repos carry no explicit `pdk` field (unlike the #4 corpus
-    pipeline, which already knows its PDK from the `tests/corpus/<pdk>/`
-    directory it is walking).
+def infer_pdk(slug: str) -> str | None:
+    """Best-effort PDK-family guess from a block's `slug`, or `None`.
 
-    Every current and documented-candidate canary slug is `<pdk>-<name>`
-    (e.g. `gf180-bandgap`, `sky130-bandgap`, `gf180-trng`) -- see
-    `blocks/README.md`'s "still-private canaries" list -- so a simple
-    prefix match is enough; returns `{}` (no labels -- callers fall back to
-    the `layer_<n>_<n>` label) for any slug that doesn't start with a
-    recognised PDK prefix, rather than guessing wrong.
+    Returns one of `klayout_tools.decks.deck_names()` (`sky130`,
+    `gf180mcu`, `sg13g2`) -- the same vocabulary `layout.json`'s `pdk`
+    field (issue #1285) and `drc.deck` use.
+
+    Only the canary pipeline (`scripts/ingest-canary.py`) needs this:
+    canary repos carry no explicit PDK, unlike the #4 corpus pipeline,
+    which already knows its PDK from the `tests/corpus/<pdk>/` directory it
+    is walking. Every current and documented-candidate canary slug is
+    `<pdk>-<name>` (e.g. `gf180-bandgap`, `sky130-bandgap`, `gf180-trng`)
+    -- see `blocks/README.md`'s "still-private canaries" list -- so a simple
+    prefix match is enough; an unrecognised prefix returns `None` rather
+    than guessing wrong ("no field rather than a wrong one"), leaving the
+    site's own slug heuristic in charge for that block.
+    """
+    if slug.startswith("gf180"):
+        return "gf180mcu"
+    if slug.startswith("sky130"):
+        return "sky130"
+    if slug.startswith("sg13g2"):
+        return "sg13g2"
+    return None
+
+
+def infer_layer_names(slug: str) -> dict[tuple[int, int], str]:
+    """`infer_pdk(slug)`'s curated `(layer, datatype) -> name` table
+    (`klayout_tools.decks.get_layer_names`) -- used only to label canary
+    blocks' `renders` keys.
+
+    Returns `{}` (no labels -- callers fall back to the `layer_<n>_<n>`
+    label) for any slug whose PDK can't be guessed, rather than guessing
+    wrong.
     """
     from klayout_tools.decks import get_layer_names
 
-    if slug.startswith("gf180"):
-        return get_layer_names("gf180mcu")
-    if slug.startswith("sky130"):
-        return get_layer_names("sky130")
-    return {}
+    pdk = infer_pdk(slug)
+    return get_layer_names(pdk) if pdk is not None else {}
 
 
 # Re-exported so callers that only need the type hint don't need to reach
@@ -177,4 +194,5 @@ __all__ = [
     "CENTER_CROP_FRACTION",
     "attach_overview_render",
     "infer_layer_names",
+    "infer_pdk",
 ]

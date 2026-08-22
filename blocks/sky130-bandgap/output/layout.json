@@ -4,6 +4,7 @@
   "slug": "sky130-bandgap",
   "name": "Sky130 Bandgap",
   "description": "Bandgap voltage reference on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
   "layer_count": 16,
   "cell_count": 27,
   "instance_count": 26,
