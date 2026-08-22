@@ -101,6 +101,7 @@ docs/
     sequential-equivalence-survey.md
     siliconcompiler-core-survey.md
     sim-evidence-discipline-spike.md
+    sky130-modexp-canary-signoff-status.md
     spice-corner-runner-spike.md
     synth-techmap-stage-contract.md
     synthesize-qor-improvements-survey.md
