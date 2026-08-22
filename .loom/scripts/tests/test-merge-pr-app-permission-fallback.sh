@@ -382,7 +382,7 @@ echo "Testing merge-pr.sh native loom-daemon path wiring (#1293)..."
 # The native path's failure branch must check is_app_permission_error and, on
 # a match, set _AM_DECLINED=true so the (fixed) shell forge_auto_merge runs
 # instead of just retrying the native binary call again.
-_native_block="$(awk '/AUTO_MERGE_OUTPUT=\$\(loom-daemon forge auto-merge/{f=1} f; /^\s*if \[\[ "\$_AM_DECLINED" == true \]\]; then$/{if(f){exit}}' "$MERGE_PR_SRC")"
+_native_block="$(awk '/AUTO_MERGE_OUTPUT=\$\(loom-daemon forge auto-merge/{f=1} f; /^[[:space:]]*if \[\[ "\$_AM_DECLINED" == true \]\]; then$/{if(f){exit}}' "$MERGE_PR_SRC")"
 
 if echo "$_native_block" | grep -q 'is_app_permission_error "\$AUTO_MERGE_OUTPUT"'; then
     pass "merge-pr.sh's native-path failure branch checks is_app_permission_error on AUTO_MERGE_OUTPUT"
