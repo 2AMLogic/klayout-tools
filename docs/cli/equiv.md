@@ -1,17 +1,20 @@
 # `klt equiv`
 
-Prove or refute **combinational** equivalence between two RTL/gate-level
-netlists (`gold` and `gate`) via Yosys's built-in miter/SAT flow — Phase 0
-of the formal-equivalence epic
+Prove or refute **combinational** (`"yosys"` engine, Phase 0/1) or
+**register-correspondence sequential** (`"yosys-sequential"` engine, Phase
+2, #1313) equivalence between two RTL/gate-level netlists (`gold` and
+`gate`) via Yosys's own built-in equivalence-checking primitives — part of
+the formal-equivalence epic
 [#707](https://github.com/2AMLogic/klayout-tools/issues/707), the
 correctness loop-closer
 [#704](https://github.com/2AMLogic/klayout-tools/issues/704) (RTL
 synthesis) and [#700](https://github.com/2AMLogic/klayout-tools/issues/700)
 (place-and-route) both name as their own verification step.
 [`klt synthesize --verify-equivalence`](synthesize.md#equivalence-gate)
-wires this command in directly as `klt synthesize`'s own acceptance gate
-(#704 Phase 1) — see that flag's docs for the wired, one-command version of
-the "synthesize, then check" flow this document describes standalone.
+wires this command's combinational engine in directly as `klt synthesize`'s
+own acceptance gate (#704 Phase 1) — see that flag's docs for the wired,
+one-command version of the "synthesize, then check" flow this document
+describes standalone.
 
 ```
 klt equiv <request> [--timeout-s <seconds>] [--format text|json]
@@ -40,24 +43,34 @@ cleanly.
   `"equivalent"`. See "Timeout and the inconclusive verdict" below.
 - `--format` — `text` (default) or `json`.
 
-## Scope: combinational only (Phase 0)
+## Scope
 
-This is deliberately narrow. A design containing flip-flops, latches, or
-memories on either side is rejected up front with a clear scope error
-(exit `1`) — not silently checked per-cycle and reported with a
-misleadingly confident verdict. Sequential equivalence (temporal
-induction / bounded model checking, orchestrated via SymbiYosys) is a
-later phase of #707, once it can be exercised end to end in this repo's
-own CI (see "Engine" below).
+Two engines, both proving/refuting **functional** (Boolean) equivalence —
+timing is out of scope for both, see "Out of scope" below.
+
+- **`"yosys"`** (default, Phase 0/1): **combinational only**. A design
+  containing flip-flops, latches, or memories on either side is rejected
+  up front with a clear scope error (exit `1`) — not silently checked
+  per-cycle and reported with a misleadingly confident verdict.
+- **`"yosys-sequential"`** (Phase 2, #1313): **register-correspondence
+  sequential equivalence** — `gold`/`gate` may contain flip-flops, as long
+  as both sides share an identical, 1:1-by-name set of state elements
+  (registers). This is the case this repo's own `klt place-and-route`
+  pipeline actually, measurably produces (buffer insertion and
+  drive-strength resizing only — zero register-count change; see
+  `docs/design/sequential-equivalence-survey.md` §2.2). General sequential
+  equivalence (retiming, register cloning, FSM re-encoding, where no 1:1
+  register correspondence exists) is out of scope for this engine — see
+  that survey's §4.4 for the explicitly staged, evidence-gated follow-on.
 
 ## Engine
 
 `request.engine` is a data field, not a code path (matching every other
 digital-flow verb's own precedent — `synthesize.py`,
-`functional_verification.py`) — only `"yosys"` is implemented today. An
-unsupported value is an application error (exit `1`).
+`functional_verification.py`) — `"yosys"` and `"yosys-sequential"` are
+both implemented. An unsupported value is an application error (exit `1`).
 
-### `"yosys"` (default, only value implemented)
+### `"yosys"` (default) — combinational
 
 Orchestrates Yosys's own built-in equivalence-checking primitives directly
 — the same `miter -equiv` / `sat -prove-asserts` recipe the Yosys manual's
@@ -81,15 +94,62 @@ run:
    right tool for a gate-level RTL vector — `iverilog`/`vvp` is the
    digital equivalent, reused here.
 
-**Why plain Yosys, not SymbiYosys.** This repo's CI
-(`.github/workflows/ci.yml`) installs a real `yosys` binary but no
-`sby`/SymbiYosys — and SymbiYosys's main value (orchestrating multi-step
-*sequential* proofs) is exactly what this MVP's combinational-only scope
-does not need. Rather than stub an orchestration interface no build of
-this repo can exercise, this engine runs the same recipe SymbiYosys's own
-`mode equiv` expands to for a single-cycle proof. A `sby`-backed
-`"engine": "symbiyosys"` for sequential designs is left for a later phase
-of #707.
+**Why plain Yosys, not SymbiYosys.** SymbiYosys's main value (orchestrating
+multi-step *sequential* proofs) is exactly what this MVP's
+combinational-only scope does not need — this engine runs the same recipe
+SymbiYosys's own `mode bmc`/`mode prove` internally expand to for a
+single-cycle proof, orchestrated directly rather than through `sby`.
+
+### `"yosys-sequential"` — register-correspondence sequential
+
+Orchestrates Yosys's own `equiv_make`/`equiv_simple`/`equiv_induct`/
+`equiv_status` command family — **not** SymbiYosys (`sby`): as of the
+pinned `v0.67` this repo's CI installs (`scripts/install-symbiyosys.sh`,
+#1312), `sby` implements only `bmc`/`prove`/`cover`/`live`/`prep` modes —
+there is no `sby mode equiv`. The `equiv_make`/`equiv_induct` family are
+plain built-in Yosys passes, invoked directly via `yosys -s <script>`, the
+same "orchestrate Yosys's own primitives directly" choice the `"yosys"`
+engine already made for `miter`/`sat`. Two stages:
+
+1. **Stage 1 (always runs).** `equiv_make` pairs corresponding gold/gate
+   wires by name; `clk2fflogic` lowers every clocked flip-flop to Yosys's
+   formal-verification `$ff` model (uniform single-/multi-clock,
+   sync-/async-reset handling); `equiv_simple` resolves what it can with
+   plain per-cell SAT; `equiv_induct` resolves the rest by temporal
+   induction over the design's own state elements
+   (`request.induction_depth` cycles, default `4`); `equiv_status` reports
+   the tally. All cells proven → `status: "equivalent"`.
+2. **Stage 2 (only when stage 1 leaves cells unproven).** Register
+   correspondence via induction is a *proof* technique, not a
+   counterexample-*finding* one — an "unproven" cell honestly means "could
+   not decide," not "these differ." Stage 2 rebuilds the same pairing with
+   `equiv_make -make_assert` and runs a genuinely bounded (not inductive)
+   `sat -seq <induction_depth> -set-init-zero -prove-asserts` search for an
+   actual violating trace. `-set-init-zero` anchors both sides to an
+   identical, defined starting register state — without it, an
+   *unconstrained* free initial state diverges trivially regardless of
+   whether the designs actually differ once reachable from reset (a known
+   formal-verification pitfall, `docs/design/sequential-equivalence-survey.md`
+   §3.5). A violation found within the bound is a **real, demonstrated**
+   counterexample; finding none is `status: "inconclusive"` (a bounded,
+   all-zero-start search finding nothing does not establish the general,
+   unbounded claim induction itself could not prove) — **never** silently
+   upgraded to `"equivalent"`.
+
+A genuine stage-2 counterexample is independently confirmed by simulation
+exactly as the combinational engine's own counterexample is (see above),
+generalised to multi-cycle: the confirmation testbench replays the *entire*
+captured cycle-by-cycle input sequence (not a single vector) through the
+same flattened gold/gate netlist via `iverilog`/`vvp`, and checks the
+solver-reported divergence reproduces *somewhere* in the replayed trace —
+not necessarily at the identical cycle index, since a real Verilog
+simulation's registers start at `x` (undefined), unlike `-set-init-zero`'s
+SAT-side assumption, so the first cycle or two can legitimately disagree on
+settling details even for a fully accurate replay.
+
+**`request.induction_depth`** (integer, default `4`, must be positive) —
+overrides both stage 1's `equiv_induct -seq` depth and stage 2's `sat -seq`
+bound. `4` matches `equiv_induct`'s own Yosys-internal default.
 
 ## Request
 
@@ -117,14 +177,19 @@ of #707.
 | `gold.top` / `gate.top` | string | That side's top module name. The two sides may legally use the *same* top module name (e.g. both `"top"`) — each is elaborated in its own namespace before comparison. Required. |
 | `gold.liberty` / `gate.liberty` | string \| omitted | A standard-cell liberty file, read via `read_liberty -ignore_miss_func` (no `-lib`, so each cell's liberty `function` string becomes real logic, not a blackbox) before that side's `sources`. **Required for a post-synthesis gate-level netlist** (e.g. `klt synthesize`'s own `netlist_path` output) — without it, the netlist's standard-cell instances have no logic definition and elaboration fails outright. Omit for self-contained RTL. |
 | `port_map` | object\<string,string\> \| null | The **I/O mapping** between the two sides, `{"<gate_port_name>": "<gold_port_name>"}` — only needed when a port was renamed between the two representations (e.g. by a synthesis or netlist-rewriting step that does not preserve top-level port names). Ports not listed are assumed identically named on both sides. Omit (or `null`) when both sides already share the same port names — the common case. |
-| `engine` | string | `"yosys"` (default; only value implemented). |
-| `timeout_s` | number | Overall wall-clock timeout in seconds (default `60`). Overridden by `--timeout-s` when given. Must be positive. |
+| `engine` | string | `"yosys"` (default, combinational) or `"yosys-sequential"` (register-correspondence sequential, #1313). |
+| `timeout_s` | number | Overall wall-clock timeout in seconds (default `60`). Overridden by `--timeout-s` when given. Must be positive. Applied independently to *each* stage of the `"yosys-sequential"` engine's two-stage run — a worst-case run may take up to 2x this budget. |
+| `induction_depth` | integer | **`"yosys-sequential"` only.** `equiv_induct -seq`/stage-2 `sat -seq` depth (default `4`, matching `equiv_induct`'s own Yosys-internal default). Must be a positive integer. Ignored (no effect) for the `"yosys"` engine. |
 
-**State mapping is out of scope for this (combinational) MVP.** A future
-sequential phase of #707 will extend this request shape with a register/
-state correspondence (analogous to `port_map`, but for `$dff` state
-elements) — not needed here since either side containing a register is
-already a scope error (see "Scope" above).
+**State/register mapping.** The `"yosys"` engine's `port_map` only ever
+covers I/O renaming (state mapping is out of scope — either side containing
+a register is a scope error). The `"yosys-sequential"` engine needs no
+separate register-mapping field: `equiv_make` matches state elements the
+same way it matches everything else, by **identical name** — the same
+property this repo's own real P&R output preserves (unchanged instance
+names across P&R, `docs/design/sequential-equivalence-survey.md` §2.2).
+`port_map` still covers top-level I/O renaming for this engine too, applied
+before `equiv_make` runs.
 
 ## Response
 
@@ -193,6 +258,60 @@ already a scope error (see "Scope" above).
 | `confirmed_by_simulation` | boolean \| null | `true` when `iverilog`/`vvp` independently reproduced the divergence; `false` when the re-simulation ran but did **not** reproduce it (treat the counterexample with suspicion — see `diagnostics`); `null` when confirmation could not be attempted at all (e.g. `iverilog` not installed — see `diagnostics`). |
 | `simulation` | object \| null | `{engine, engine_version, gold_outputs, gate_outputs, diverging_outputs}` from the independent `iverilog`/`vvp` run — `gold_outputs`/`gate_outputs` here are raw `{name: bin_string}`, not the richer `{bin, width, value}` shape above. `null` when confirmation could not be attempted. |
 
+### Response additions for `"yosys-sequential"`
+
+Additive only — every field above is unchanged for this engine (`gold`/
+`gate`/`port_map`/`timeout_s`/`elapsed_s`/`diagnostics`/`provenance`, and
+`artifacts.script_path`/`netlist_path`/`log_path` continue to refer to
+stage 1, always run):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `induction_depth` | integer | Echo of the effective `induction_depth` used (request field, or the `4` default). |
+| `artifacts.stage2_script_path` / `artifacts.stage2_log_path` | string \| null | The stage-2 (bounded counterexample search) `.ys` script and raw Yosys log, when stage 2 ran (i.e. stage 1 alone did not reach `"equivalent"`) — `null` when stage 2 never ran. |
+
+### Sequential counterexample shape (`"yosys-sequential"` only)
+
+Present only when `status == "counterexample"` — replaces the single-vector
+shape above with a **multi-cycle** one, generalising it for a genuinely
+sequential trace:
+
+```json
+{
+  "cycles": [
+    { "time": 1, "inputs": { "clk": {"bin":"0","width":1,"value":0}, "d": {"bin":"1","width":1,"value":1} },
+      "gold_outputs": { "q": {"bin":"0","width":1,"value":0} },
+      "gate_outputs": { "q": {"bin":"0","width":1,"value":0} },
+      "diverging_outputs": [] },
+    { "time": 2, "inputs": { "clk": {"bin":"1","width":1,"value":1}, "d": {"bin":"1","width":1,"value":1} },
+      "gold_outputs": { "q": {"bin":"1","width":1,"value":1} },
+      "gate_outputs": { "q": {"bin":"0","width":1,"value":0} },
+      "diverging_outputs": ["q"] }
+  ],
+  "diverging_outputs": ["q"],
+  "first_diverging_cycle": 2,
+  "confirmed_by_simulation": true,
+  "simulation": {
+    "engine": "icarus",
+    "engine_version": "12.0",
+    "cycles": [
+      { "time": 1, "gold_outputs": {"q": "x"}, "gate_outputs": {"q": "x"}, "diverging_outputs": [] },
+      { "time": 2, "gold_outputs": {"q": "1"}, "gate_outputs": {"q": "0"}, "diverging_outputs": ["q"] }
+    ],
+    "diverging_outputs": ["q"]
+  }
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `cycles` | array\<object\> | One entry per captured cycle (`induction_depth` entries), each the same `{time, inputs, gold_outputs, gate_outputs, diverging_outputs}` shape a single combinational vector has (see "Counterexample shape" above), plus `time` (the 1-indexed cycle number). |
+| `diverging_outputs` | array\<string\> | The union of every cycle's own `diverging_outputs` — every output that diverged on *any* captured cycle. |
+| `first_diverging_cycle` | integer \| null | The `time` of the earliest cycle with a nonempty `diverging_outputs`. |
+| `confirmed_by_simulation` | boolean \| null | Same meaning as the combinational shape, but "confirmed" means the reported divergence reproduces on *some* replayed cycle, not necessarily the identical cycle index — see the `"yosys-sequential"` engine's own "Engine" section above for why (a real Verilog simulation's registers start at `x`, unlike the solver's own `-set-init-zero` assumption). |
+| `simulation.cycles` | array\<object\> | The independent `iverilog`/`vvp` run's own per-cycle `{time, gold_outputs, gate_outputs, diverging_outputs}` (raw `{name: bin_string}` values, not the richer `{bin, width, value}` shape). |
+| `simulation.diverging_outputs` | array\<string\> | The union of every simulated cycle's own divergence. |
+
 ## Timeout and the inconclusive verdict
 
 `--timeout-s` (or the request's own `timeout_s`) bounds the whole
@@ -213,7 +332,7 @@ caller should rely on.
 | Code | Meaning |
 | ---- | ------- |
 | `0` | Proven equivalent (`status: "equivalent"`). |
-| `1` | Failed to run at all — bad request, unresolvable/unreadable RTL or liberty source, unsupported engine, a sequential design (out of this MVP's scope), a Yosys elaboration/miter-construction error, or a missing `yosys` binary. |
+| `1` | Failed to run at all — bad request, unresolvable/unreadable RTL or liberty source, unsupported engine, a sequential design given to the `"yosys"` engine (out of its combinational-only scope), a Yosys elaboration/miter-construction error, or a missing `yosys` binary. |
 | `2` | Usage error (missing argument, bad `--format`/`--timeout-s` value) — from argparse. |
 | `3` | Ran successfully, proven non-equivalent (`status: "counterexample"`). |
 | `4` | Ran, but the proof is inconclusive — solver or process timeout (`status: "inconclusive"`). Never `0`. |
@@ -254,14 +373,41 @@ RTL, produces a proven, independently-confirmed counterexample instead
 (`status: "counterexample"`, `counterexample.confirmed_by_simulation:
 true`) — see `tests/test_equiv.py` for the full request/response pair.
 
+A register-preserving pipeline stage (`gold`) compared against a
+buffer-inserted mutation of the same design (`gate`, a real P&R-shaped
+transformation — see "Scope" above) with `"engine": "yosys-sequential"`:
+
+```console
+$ klt equiv seq_request.json --format json
+{
+  "schema_version": 1,
+  "engine": "yosys-sequential",
+  "engine_version": "0.67",
+  "status": "equivalent",
+  "induction_depth": 4,
+  ...
+}
+```
+
+A deliberately seeded-broken mutant (a D-input polarity inversion feeding
+the same register) instead produces a proven, independently-confirmed
+multi-cycle counterexample (`status: "counterexample"`,
+`counterexample.confirmed_by_simulation: true`) — see
+`tests/test_equiv.py`'s `yosys-sequential` engine tests for the full
+request/response pair.
+
 ## Out of scope
 
-- **Sequential equivalence.** See "Scope" above — a later phase of #707.
-- **State mapping.** Only `port_map` (I/O renaming) is supported; a
-  register/state correspondence has no meaning yet since sequential
-  designs are rejected outright.
-- **SymbiYosys / `sby` orchestration.** See "Engine" above — left for a
-  later phase, once sequential scope makes it worth the added dependency.
+- **General sequential equivalence.** The `"yosys-sequential"` engine
+  proves *register-correspondence* equivalence only (§"Scope" above) —
+  retiming, register cloning, and FSM re-encoding (cases with no 1:1
+  register correspondence) are explicitly out of scope for it; a later,
+  evidence-gated phase of #707 covers bounded/k-induction model checking
+  for those cases (`docs/design/sequential-equivalence-survey.md` §4.4).
+- **State mapping beyond identical naming.** `equiv_make` matches state
+  elements the same way it matches everything else: by identical name.
+  There is no separate register-remapping field analogous to `port_map`
+  for a design whose register *names* differ between `gold`/`gate`.
 - **Timing-aware equivalence.** This is a purely functional (Boolean)
   proof; timing is entirely out of scope, matching `klt synthesize`'s own
   `timing: null` posture.

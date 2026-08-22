@@ -1,5 +1,5 @@
-"""Prove or refute combinational equivalence between two RTL/gate-level
-netlists via Yosys, headless.
+"""Prove or refute combinational or sequential equivalence between two
+RTL/gate-level netlists via Yosys, headless.
 
 Pure library: :func:`run_equiv` returns plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never prints, mirroring ``lvs.py``/
@@ -68,6 +68,85 @@ Two subprocesses are actually run:
    vector; ``iverilog``/``vvp`` is the digital equivalent already wired up
    as a first-class dependency by ``klt functional-verification``
    (``functional_verification.py``) -- reused here, not SPICE.
+
+## Engine: ``"yosys-sequential"`` -- register-correspondence sequential
+equivalence (Phase 2, #1313)
+
+A second engine, additive to ``"yosys"`` above (the combinational-only
+engine keeps rejecting sequential designs outright, unchanged): proves
+**register-correspondence** sequential equivalence -- the case where
+``gold``/``gate`` share an identical set of state elements (flip-flops),
+matched 1:1 by name, and only the *combinational* logic between them
+differs. This is deliberately narrower than general sequential equivalence
+(retiming, register cloning, FSM re-encoding): it is the evidence-matched
+shape ``docs/design/sequential-equivalence-survey.md`` (SS2) found this
+repo's own place-and-route pipeline actually produces (buffer insertion and
+drive-strength resizing only -- zero register-count change, measured on a
+real corpus run), and mirrors Yosys's own manual, which recommends exactly
+this ``equiv_make``/``equiv_simple``/``equiv_induct``/``equiv_status``
+family for this case.
+
+**Not SymbiYosys (``sby``).** The survey's own §4.2 proposed driving this
+via "``sby``'s ``mode equiv``" -- that mode does not exist. `sby` (as of
+the pinned `v0.67`, verified live in this task) only implements
+``bmc``/``prove``/``cover``/``live``/``prep`` modes (see
+``sby_core.py``'s own ``self.opt_mode not in [...]`` check); the
+``equiv_make``/``equiv_induct`` command family lives in Yosys itself and is
+normally orchestrated by a *separate* YosysHQ project, ``eqy``, which is not
+installed in this repo (a heavier dependency: a from-source C++ plugin
+build, not just a pinned Python launcher) and was not needed -- these are
+plain built-in Yosys passes, invocable directly via ``yosys -s <script>``,
+the same "orchestrate Yosys's own primitives directly, no extra dependency
+this repo can't exercise" choice ``equiv.py``'s combinational engine already
+made for ``miter``/``sat``.
+
+**Two stages, because ``equiv_status`` cannot itself report a
+counterexample.** Read literally, Yosys's ``equiv_status`` pass has exactly
+two states per ``$equiv`` cell -- "proven" (collapsed to a tautology) or
+"unproven" (verified against Yosys's own ``passes/equiv/equiv_status.cc``
+source, live in this task) -- never a definite "refuted". Register
+correspondence via temporal induction (``equiv_induct``) is a *proof*
+technique, not a counterexample-*finding* one: "unproven" honestly means
+"this technique could not decide", not "these designs differ".
+
+1. **Stage 1 (the named technique):** ``equiv_make`` pairs corresponding
+   gold/gate wires by name; ``clk2fflogic`` lowers every clocked flip-flop
+   to Yosys's formal-verification-friendly ``$ff`` model (handles both
+   single- and multi-clock, sync- and async-reset designs uniformly, unlike
+   hand-rolling one specific reset style); ``equiv_simple`` resolves what it
+   can with plain per-cell SAT; ``equiv_induct`` resolves the rest by
+   temporal induction over the design's own state elements; ``equiv_status``
+   reports the final tally. All ``$equiv`` cells proven -> ``"equivalent"``.
+2. **Stage 2 (only runs when stage 1 leaves cells unproven):** rebuilds the
+   same gold/gate pairing with ``equiv_make -make_assert`` (turning each
+   matched pair into an ``$assert`` instead of an ``$equiv`` cell), then
+   runs a genuinely bounded (not inductive) ``sat -seq <N> -set-init-zero
+   -prove-asserts`` search for an actual violating trace, up to the same
+   depth ``equiv_induct`` used. ``-set-init-zero`` anchors both sides to an
+   identical, defined starting register state -- without it, this task's
+   own live experiments reproduced a well-known false-positive class
+   (SS3.5 of the survey): an *unconstrained* free initial register state on
+   each side diverges trivially, with no bearing on whether the two designs
+   actually behave differently once reachable from reset. A genuine
+   violation found within the bound is a **real, demonstrated**
+   counterexample (this bounded search is a complete decision procedure
+   *within its own depth*, unlike induction); finding none is reported
+   ``"inconclusive"`` (a bounded, all-zero-start search finding nothing
+   does not establish the general, unbounded claim register-correspondence
+   induction itself could not prove) -- **never** silently upgraded to
+   ``"equivalent"``, this module's own scope requirement restated for the
+   sequential engine.
+
+A genuine stage-2 counterexample is independently confirmed by simulation
+exactly as the combinational engine's own counterexample is (see above),
+generalised to multi-cycle: the confirmation testbench replays the entire
+captured cycle-by-cycle input sequence (not a single vector) through the
+same flattened gold/gate netlist via ``iverilog``/``vvp`` and checks the
+solver-reported divergence reproduces somewhere in the trace -- see
+:func:`_confirm_sequential_counterexample`'s own docstring for why "somewhere
+in the trace" rather than "at the identical cycle index" (the same
+X-vs-zero-init mismatch between a real Verilog simulation's own default
+register reset value and ``-set-init-zero``'s SAT-side assumption).
 """
 
 from __future__ import annotations
@@ -86,15 +165,24 @@ from ._provenance import _combined_content_hash, _yosys_version, build_provenanc
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: ``"yosys"`` is the only engine implemented today -- see this module's
-#: docstring, "Engine" section.
-SUPPORTED_ENGINES = ("yosys",)
+#: ``"yosys"`` (combinational, Phase 0/1) and ``"yosys-sequential"``
+#: (register-correspondence sequential, Phase 2) -- see this module's
+#: docstring, "Engine" sections.
+SUPPORTED_ENGINES = ("yosys", "yosys-sequential")
 
 #: Default per-run wall-clock timeout, overridable via ``request.timeout_s``
 #: or the CLI's ``--timeout-s``. Generous enough for a real corpus design's
 #: proof, tight enough that an accidentally-hard SAT instance doesn't hang
-#: a CI job indefinitely.
+#: a CI job indefinitely. Applied independently to *each* stage of the
+#: ``"yosys-sequential"`` engine's two-stage run (see that engine's own
+#: docstring) -- a worst-case run may take up to 2x this budget.
 DEFAULT_TIMEOUT_S = 60.0
+
+#: Default ``equiv_induct -seq``/stage-2 ``sat -seq`` depth for the
+#: ``"yosys-sequential"`` engine, overridable via ``request.induction_depth``
+#: -- matches ``equiv_induct``'s own Yosys-internal default, so omitting the
+#: field behaves identically to not passing ``-seq`` at all.
+DEFAULT_INDUCTION_DEPTH = 4
 
 #: RTLIL cell-type prefixes that mean "this module has state" -- flip-flops
 #: (``$dff``/``$adff``/``$sdff`` and their enable/async-reset/set-reset
@@ -123,6 +211,36 @@ _SIGNAL_TABLE_HEADER_RE = re.compile(r"Signal Name.*Bin\s*$")
 _SIM_DISPLAY_RE = re.compile(r"^EQUIV_SIM (gold|gate) (\S+) ([01xz]+)$")
 
 _REQUIRED_REQUEST_FIELDS = ("gold", "gate")
+
+# --------------------------------------------------------------------------- #
+# "yosys-sequential" engine (Phase 2, #1313) -- additional regexes/constants.
+# --------------------------------------------------------------------------- #
+
+#: ``equiv_status``'s own exact success line (verified live against the
+#: pinned Yosys v0.67 this repo's own CI installs, `equiv_status.cc`'s
+#: `unproven_equiv_cells.empty()` branch) -- every `$equiv` cell was proven.
+_EQUIV_ALL_PROVEN_RE = re.compile(r"Equivalence successfully proven!")
+
+#: `equiv_make`'s own degenerate-case line: zero `$equiv` cells were even
+#: created (no matching gold/gate wire names found at all) -- a request-
+#: shape problem (missing/wrong `port_map`, or gold/gate share no register
+#: names), not a real proof outcome. Reported as an `EquivError`, not a
+#: (misleading) `"inconclusive"` verdict.
+_EQUIV_NONE_FOUND_RE = re.compile(r"No \$equiv cells found in")
+
+#: Multi-cycle counterpart of `_SIGNAL_TABLE_HEADER_RE`/`_parse_signal_table`
+#: -- `sat -seq N`'s own dump prepends a leading "Time" column and repeats
+#: the "Signal Name / Dec / Hex / Bin" table once per timestep (see
+#: `_parse_multicycle_signal_table`).
+_SEQ_TIME_HEADER_RE = re.compile(r"Time Signal Name.*Bin\s*$")
+
+_SEQ_SIM_DISPLAY_RE = re.compile(r"^EQUIV_SIM_CYCLE (\d+) (gold|gate) (\S+) ([01xz]+)$")
+
+#: Parses one `write_verilog -noattr`-emitted port declaration line, e.g.
+#: `  input clk;` or `  output [3:0] sum;` -- see `_parse_module_ports`.
+_PORT_DECL_RE = re.compile(r"^\s*(input|output|inout)\s+(?:\[[^\]]+\]\s+)?(\S+?);\s*$")
+_MODULE_START_RE = re.compile(r"^\s*module\s+(\S+)\s*\(")
+_MODULE_END_RE = re.compile(r"^\s*endmodule\s*$")
 
 
 class EquivError(Exception):
@@ -177,9 +295,11 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
 
 
 def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]:
-    """Run the ``klt equiv`` combinational-equivalence check declared by
-    ``request`` (a path, ``-`` for stdin, or an inline JSON object string --
-    see :func:`load_request_arg`).
+    """Run the ``klt equiv`` equivalence check declared by ``request`` (a
+    path, ``-`` for stdin, or an inline JSON object string -- see
+    :func:`load_request_arg`), via ``request.engine`` (``"yosys"``,
+    combinational, or ``"yosys-sequential"``, register-correspondence
+    sequential -- see this module's own docstring "Engine" sections).
 
     ``timeout_s`` (the CLI's ``--timeout-s``) overrides the request's own
     ``timeout_s`` field when given; the request field is used when
@@ -242,6 +362,25 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
             f"could not create output directory '{output_dir}': {exc}"
         ) from exc
 
+    if engine == "yosys-sequential":
+        induction_depth = request_doc.get("induction_depth", DEFAULT_INDUCTION_DEPTH)
+        if (
+            not isinstance(induction_depth, int)
+            or isinstance(induction_depth, bool)
+            or induction_depth < 1
+        ):
+            raise EquivError("request.induction_depth must be a positive integer")
+        return _run_sequential(
+            gold=gold,
+            gate=gate,
+            port_map=port_map or {},
+            output_dir=output_dir,
+            effective_timeout_s=effective_timeout_s,
+            induction_depth=induction_depth,
+            engine=engine,
+        )
+
+    # engine == "yosys" (combinational, Phase 0/1) continues below, unchanged.
     script_path = os.path.join(output_dir, "equiv.ys")
     netlist_path = os.path.join(output_dir, "equiv_netlist.v")
     log_path = os.path.join(output_dir, "equiv.log")
@@ -421,6 +560,45 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
     return {"top": top, "sources": resolved, "liberty": resolved_liberty}
 
 
+def _side_prep_lines(
+    label: str, side: dict[str, Any], port_map: dict[str, str]
+) -> list[str]:
+    """Build the ``.ys`` script lines that read, elaborate, flatten, and
+    stash one side (``"gold"``/``"gate"``) of an equivalence request --
+    shared between the combinational engine's own miter/sat script
+    (:func:`_write_script`) and the ``"yosys-sequential"`` engine's
+    ``equiv_make``-based scripts (:func:`_write_sequential_stage1_script`/
+    :func:`_write_sequential_stage2_script`).
+    """
+    lines: list[str] = []
+    if side.get("liberty"):
+        # No `-lib`: turns each cell's liberty `function` string into
+        # real logic (a plain module `flatten` can inline), not an
+        # opaque blackbox -- see `_resolve_side`'s `liberty` docs.
+        # `-ignore_miss_func` skips any cell lacking a `function` spec
+        # (e.g. a pure sequential cell) rather than erroring the whole
+        # liberty read; such a cell surfaces instead as a missing-
+        # submodule `hierarchy` error if the netlist actually instantiates
+        # it.
+        lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
+    for path in side["sources"]:
+        lines.append(f"read_verilog {path}")
+    lines += [
+        "proc",
+        "opt_clean",
+        f"hierarchy -check -top {side['top']}",
+        "flatten",
+        "opt_clean",
+    ]
+    if label == "gate" and port_map:
+        lines.append(f"select -module {side['top']}")
+        for gate_port, gold_port in port_map.items():
+            lines.append(f"rename {gate_port} {gold_port}")
+        lines.append("select -clear")
+    lines.append(f"design -stash {label}_design")
+    return lines
+
+
 def _write_script(
     *,
     script_path: str,
@@ -450,31 +628,7 @@ def _write_script(
     lines: list[str] = []
 
     for label, side in (("gold", gold), ("gate", gate)):
-        if side.get("liberty"):
-            # No `-lib`: turns each cell's liberty `function` string into
-            # real logic (a plain module `flatten` can inline), not an
-            # opaque blackbox -- see this function's docstring and
-            # `_resolve_side`'s `liberty` docs. `-ignore_miss_func` skips
-            # any cell lacking a `function` spec (e.g. a pure sequential
-            # cell) rather than erroring the whole liberty read; such a
-            # cell surfaces instead as a missing-submodule `hierarchy`
-            # error if the netlist actually instantiates it.
-            lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
-        for path in side["sources"]:
-            lines.append(f"read_verilog {path}")
-        lines += [
-            "proc",
-            "opt_clean",
-            f"hierarchy -check -top {side['top']}",
-            "flatten",
-            "opt_clean",
-        ]
-        if label == "gate" and port_map:
-            lines.append(f"select -module {side['top']}")
-            for gate_port, gold_port in port_map.items():
-                lines.append(f"rename {gate_port} {gold_port}")
-            lines.append("select -clear")
-        lines.append(f"design -stash {label}_design")
+        lines += _side_prep_lines(label, side, port_map)
 
     lines.append(f"design -copy-from gold_design -as gold {gold['top']}")
     lines.append(f"design -copy-from gate_design -as gate {gate['top']}")
@@ -880,3 +1034,878 @@ def _build_report(
         },
         "provenance": provenance,
     }
+
+
+# --------------------------------------------------------------------------- #
+# "yosys-sequential" engine (Phase 2, #1313): register-correspondence
+# sequential equivalence via equiv_make/equiv_simple/equiv_induct/
+# equiv_status, with a bounded-SAT fallback (stage 2) to extract a genuine,
+# confirmable counterexample when stage 1 leaves cells unproven -- see this
+# module's own docstring, "Engine: yosys-sequential" section, for the full
+# rationale.
+# --------------------------------------------------------------------------- #
+
+
+class _YosysRunResult:
+    """Small return-value bundle for :func:`_run_yosys_subprocess` -- mirrors
+    the local variables ``run_equiv``'s own combinational path already
+    tracks inline (``timed_out``/``returncode``/``stdout``/``stderr``), just
+    packaged so the sequential engine's two near-identical stages can share
+    one subprocess-running helper instead of duplicating it."""
+
+    def __init__(
+        self,
+        *,
+        timed_out: bool,
+        returncode: int | None,
+        stdout: str,
+        stderr: str,
+        elapsed_s: float,
+    ) -> None:
+        self.timed_out = timed_out
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.elapsed_s = elapsed_s
+
+
+def _run_yosys_subprocess(script_path: str, timeout_s: float) -> _YosysRunResult:
+    """Run ``yosys -s <script_path>``, bounded by ``timeout_s`` -- the same
+    subprocess-invocation shape ``run_equiv``'s own combinational path uses
+    inline, factored out so the sequential engine's two stages
+    (:func:`_run_sequential`) can share it."""
+    started = time.monotonic()
+    timed_out = False
+    stdout = ""
+    stderr = ""
+    returncode: int | None = None
+    try:
+        completed = subprocess.run(
+            ["yosys", "-s", script_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    except OSError as exc:
+        raise EquivError(f"could not launch yosys: {exc}") from exc
+    elapsed_s = round(time.monotonic() - started, 3)
+    return _YosysRunResult(
+        timed_out=timed_out,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        elapsed_s=elapsed_s,
+    )
+
+
+def _write_sequential_stage1_script(
+    *,
+    script_path: str,
+    gold: dict[str, Any],
+    gate: dict[str, Any],
+    port_map: dict[str, str],
+    netlist_path: str,
+    induction_depth: int,
+) -> None:
+    """Generate stage 1's ``.ys`` script: the named register-correspondence
+    technique (``equiv_make``/``equiv_simple``/``equiv_induct``/
+    ``equiv_status``) -- see this module's docstring "Engine:
+    yosys-sequential" section for the full recipe rationale.
+
+    Also writes ``netlist_path`` (the plain, flattened, still-really-clocked
+    gold/gate netlist, *before* ``equiv_make``/``clk2fflogic`` run) --
+    reused both by :func:`_parse_module_ports` (to discover the shared
+    gold/gate port list) and by the stage-2 counterexample-confirmation
+    testbench (:func:`_confirm_sequential_counterexample`), the same
+    "write the netlist once, reuse it for confirmation" convention
+    :func:`_write_script` already uses for the combinational engine.
+    """
+    lines: list[str] = []
+    for label, side in (("gold", gold), ("gate", gate)):
+        lines += _side_prep_lines(label, side, port_map)
+
+    lines.append(f"design -copy-from gold_design -as gold {gold['top']}")
+    lines.append(f"design -copy-from gate_design -as gate {gate['top']}")
+    lines.append(f"write_verilog -noattr {netlist_path}")
+    lines.append("equiv_make gold gate equiv")
+    lines.append("hierarchy -top equiv")
+    # `clk2fflogic` (not `async2sync`): handles single- and multi-clock,
+    # sync- and async-reset designs uniformly via Yosys's own formal-
+    # verification `$ff` model -- see module docstring.
+    lines.append("clk2fflogic")
+    lines.append("equiv_simple")
+    lines.append(f"equiv_induct -seq {induction_depth}")
+    lines.append("equiv_status")
+
+    try:
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        raise EquivError(
+            f"could not write equiv script '{script_path}': {exc}"
+        ) from exc
+
+
+def _write_sequential_stage2_script(
+    *,
+    script_path: str,
+    gold: dict[str, Any],
+    gate: dict[str, Any],
+    port_map: dict[str, str],
+    ports: dict[str, str],
+    bmc_depth: int,
+    sat_timeout_s: int,
+) -> None:
+    """Generate stage 2's ``.ys`` script: a genuinely bounded (not
+    inductive) ``sat -seq <bmc_depth> -set-init-zero -prove-asserts`` search
+    for an actual violating trace, over the same gold/gate pairing rebuilt
+    with ``equiv_make -make_assert`` -- see this module's docstring "Engine:
+    yosys-sequential" section for why this stage exists and why
+    ``-set-init-zero`` is required.
+
+    ``-show <name>_gold -show <name>_gate`` is passed explicitly for every
+    port in ``ports`` (rather than the broader ``-show-public``) so a
+    genuine counterexample's dump is limited to the design's own actual
+    interface -- :func:`_parse_module_ports` discovers ``ports`` from the
+    plain netlist stage 1 already wrote.
+    """
+    lines: list[str] = []
+    for label, side in (("gold", gold), ("gate", gate)):
+        lines += _side_prep_lines(label, side, port_map)
+
+    lines.append(f"design -copy-from gold_design -as gold {gold['top']}")
+    lines.append(f"design -copy-from gate_design -as gate {gate['top']}")
+    lines.append("equiv_make -make_assert gold gate equiv2")
+    lines.append("hierarchy -top equiv2")
+    lines.append("clk2fflogic")
+    show_args = " ".join(
+        f"-show {name}_gold -show {name}_gate" for name in sorted(ports)
+    )
+    lines.append(
+        f"sat -seq {bmc_depth} -set-init-zero -prove-asserts -show-ports "
+        f"{show_args} -timeout {sat_timeout_s} equiv2"
+    )
+
+    try:
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        raise EquivError(
+            f"could not write equiv script '{script_path}': {exc}"
+        ) from exc
+
+
+def _parse_module_ports(netlist_path: str, module_name: str) -> dict[str, str]:
+    """Parse ``module_name``'s ``input``/``output``/``inout`` port
+    declarations out of the flattened Verilog ``write_verilog -noattr``
+    already wrote to ``netlist_path`` (see
+    :func:`_write_sequential_stage1_script`) -- ``{port_name: direction}``.
+
+    Gold and gate share identical port names by construction (``equiv_make``
+    can only match wires with identical names -- a request whose gold/gate
+    ports differ needs ``port_map``, exactly as the combinational engine
+    already requires), so parsing the ``gold`` module block alone gives the
+    complete, correct port list for both sides. ``inout`` ports are recorded
+    but treated the same as ``output`` everywhere else in this module (rare
+    at the gate-level netlists this engine targets; not specially modelled).
+    """
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise EquivError(
+            f"could not read generated netlist '{netlist_path}': {exc}"
+        ) from exc
+
+    ports: dict[str, str] = {}
+    in_module = False
+    for line in text.splitlines():
+        if not in_module:
+            match = _MODULE_START_RE.match(line)
+            if match and match.group(1) == module_name:
+                in_module = True
+            continue
+        if _MODULE_END_RE.match(line):
+            break
+        match = _PORT_DECL_RE.match(line)
+        if match:
+            direction, name = match.groups()
+            ports.setdefault(name, direction)
+    return ports
+
+
+def _parse_multicycle_signal_table(stdout: str) -> dict[str, dict[str, str]]:
+    """Parse ``sat -seq N -show-...``'s multi-cycle ``Time Signal Name ...
+    Bin`` table into ``{time_label: {signal_name: bin_string}}``.
+
+    ``time_label`` is ``"init"`` for the pre-first-cycle sample-tracking
+    block ``clk2fflogic``'s own internal helper signals populate (discarded
+    by :func:`_build_sequential_counterexample`, which only wants the
+    numbered cycles) or a stringified cycle number (``"1"``, ``"2"``, ...)
+    for every other block. Mirrors :func:`_parse_signal_table`'s own
+    whitespace-split parsing, generalised for the extra leading "Time"
+    column and the repeated per-timestep table blocks."""
+    lines = stdout.splitlines()
+    cycles: dict[str, dict[str, str]] = {}
+    seen_header = False
+    in_table = False
+    for line in lines:
+        if not seen_header:
+            if _SEQ_TIME_HEADER_RE.search(line):
+                seen_header = True
+            continue
+        stripped = line.strip()
+        if stripped.startswith("----"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not stripped:
+            break
+        parts = stripped.split()
+        if len(parts) < 4:
+            break
+        time_label = parts[0]
+        name = parts[1].lstrip("\\")
+        bin_str = parts[-1]
+        cycles.setdefault(time_label, {})[name] = bin_str
+    return cycles
+
+
+def _build_sequential_counterexample(
+    cycles: dict[str, dict[str, str]], ports: dict[str, str]
+) -> dict[str, Any]:
+    """Turn :func:`_parse_multicycle_signal_table`'s parsed per-cycle signal
+    dump into the documented multi-cycle ``counterexample`` shape: a
+    ``cycles`` list (each entry the same ``inputs``/``gold_outputs``/
+    ``gate_outputs``/``diverging_outputs`` shape the combinational engine's
+    own :func:`_build_counterexample` produces, plus ``time``), a top-level
+    ``diverging_outputs`` (the union across every cycle), and
+    ``first_diverging_cycle`` (the earliest cycle with a nonempty
+    ``diverging_outputs``, or ``None``).
+
+    Every port's gold/gate values are read from the ``<name>_gold``/
+    ``<name>_gate`` signal pair ``-show`` dumped (see
+    :func:`_write_sequential_stage2_script`) -- for an ``input`` port, both
+    sides are ``equiv_make``-matched and asserted equal by construction, so
+    only the gold-side value is recorded once (matching the combinational
+    engine's own single-vector ``inputs`` shape); for an ``output``/
+    ``inout`` port, both sides are recorded separately so a genuine
+    divergence is visible.
+    """
+    time_labels = sorted((label for label in cycles if label != "init"), key=int)
+    cycle_entries: list[dict[str, Any]] = []
+    diverging_union: set[str] = set()
+
+    for label in time_labels:
+        signals = cycles[label]
+        inputs: dict[str, Any] = {}
+        gold_outputs: dict[str, Any] = {}
+        gate_outputs: dict[str, Any] = {}
+
+        for name, direction in ports.items():
+            gold_bin = signals.get(f"{name}_gold")
+            gate_bin = signals.get(f"{name}_gate")
+            if direction == "input":
+                bin_str = gold_bin if gold_bin is not None else gate_bin
+                if bin_str is not None:
+                    inputs[name] = {
+                        "bin": bin_str,
+                        "width": len(bin_str),
+                        "value": _decode_bin(bin_str),
+                    }
+            else:
+                if gold_bin is not None:
+                    gold_outputs[name] = {
+                        "bin": gold_bin,
+                        "width": len(gold_bin),
+                        "value": _decode_bin(gold_bin),
+                    }
+                if gate_bin is not None:
+                    gate_outputs[name] = {
+                        "bin": gate_bin,
+                        "width": len(gate_bin),
+                        "value": _decode_bin(gate_bin),
+                    }
+
+        diverging = sorted(
+            name
+            for name in gold_outputs
+            if name in gate_outputs
+            and gold_outputs[name]["bin"] != gate_outputs[name]["bin"]
+        )
+        diverging_union.update(diverging)
+        cycle_entries.append(
+            {
+                "time": int(label),
+                "inputs": inputs,
+                "gold_outputs": gold_outputs,
+                "gate_outputs": gate_outputs,
+                "diverging_outputs": diverging,
+            }
+        )
+
+    first_diverging_cycle = next(
+        (entry["time"] for entry in cycle_entries if entry["diverging_outputs"]),
+        None,
+    )
+
+    return {
+        "cycles": cycle_entries,
+        "diverging_outputs": sorted(diverging_union),
+        "first_diverging_cycle": first_diverging_cycle,
+        "confirmed_by_simulation": None,
+        "simulation": None,
+    }
+
+
+def _build_sequential_testbench(
+    counterexample: dict[str, Any], ports: dict[str, str]
+) -> str:
+    """Generate a multi-cycle Verilog testbench that replays
+    ``counterexample``'s entire captured cycle-by-cycle input sequence (not
+    a single vector) through ``gold``/``gate`` (as written by
+    ``write_verilog`` to the stage-1 ``netlist_path``) and ``$display``s
+    both modules' output values after each cycle -- the sequential
+    generalisation of :func:`_build_testbench`.
+
+    Every recorded input value is driven directly, cycle by cycle
+    (including any clock signal -- the real, still-``posedge``-clocked
+    gold/gate modules fire on the replayed transitions exactly as a real
+    testbench's clock generator would, since the solver's own ``-seq``
+    trace already encodes a self-consistent clock waveform); real Verilog
+    simulation semantics (undriven registers start at ``x``, not sat's own
+    ``-set-init-zero`` assumption) are why
+    :func:`_confirm_sequential_counterexample` checks for the reported
+    divergence reproducing *somewhere* in the trace rather than at the
+    identical cycle index -- see that function's own docstring.
+    """
+    input_names = sorted(
+        name for name, direction in ports.items() if direction == "input"
+    )
+    output_names = sorted(
+        name for name, direction in ports.items() if direction != "input"
+    )
+
+    lines = ["module equiv_tb;"]
+    for name in input_names:
+        lines.append(f"  reg {name};")
+    for name in output_names:
+        lines.append(f"  wire gold_{name}, gate_{name};")
+
+    def _conns(prefix: str) -> str:
+        conns = [f".{name}({name})" for name in input_names]
+        conns += [f".{name}({prefix}_{name})" for name in output_names]
+        return ", ".join(conns)
+
+    lines.append(f"  gold u_gold ({_conns('gold')});")
+    lines.append(f"  gate u_gate ({_conns('gate')});")
+    lines.append("  initial begin")
+    for cycle in counterexample["cycles"]:
+        for name in input_names:
+            entry = cycle["inputs"].get(name)
+            if entry is None:
+                continue
+            width = entry["width"]
+            if width == 1:
+                lines.append(f"    {name} = 1'b{entry['bin']};")
+            else:
+                lines.append(f"    {name} = {width}'b{entry['bin']};")
+        lines.append("    #1;")
+        time_value = cycle["time"]
+        for name in output_names:
+            lines.append(
+                f'    $display("EQUIV_SIM_CYCLE {time_value} gold {name} %b", '
+                f"gold_{name});"
+            )
+            lines.append(
+                f'    $display("EQUIV_SIM_CYCLE {time_value} gate {name} %b", '
+                f"gate_{name});"
+            )
+    lines.append("    $finish;")
+    lines.append("  end")
+    lines.append("endmodule")
+    return "\n".join(lines) + "\n"
+
+
+def _confirm_sequential_counterexample(
+    *,
+    counterexample: dict[str, Any],
+    ports: dict[str, str],
+    netlist_path: str,
+    output_dir: str,
+    diagnostics: list[dict[str, str]],
+) -> None:
+    """Multi-cycle counterpart of :func:`_confirm_counterexample`:
+    independently re-runs ``counterexample``'s entire captured trace through
+    the flattened ``gold``/``gate`` netlists via ``iverilog``/``vvp``.
+
+    Mutates ``counterexample`` in place (``confirmed_by_simulation``,
+    ``simulation``); appends to ``diagnostics`` on any degradation, exactly
+    as :func:`_confirm_counterexample` does.
+
+    **Confirmed if the reported divergence reproduces anywhere in the
+    trace, not necessarily at the identical cycle index.** A real Verilog
+    simulation's registers start at ``x`` (undefined) per standard Verilog
+    semantics, while the solver's own ``-set-init-zero`` search assumed an
+    all-zero start -- so the first one or two cycles can legitimately
+    disagree on timing/settling details even for a fully accurate replay.
+    Requiring only that the *same output signal* diverges *at some* replayed
+    cycle -- not literally the solver's own cycle index -- is the same
+    "confirm the reported divergence is real, not the solver's exact
+    bookkeeping" bar :func:`_confirm_counterexample` already applies to the
+    combinational engine's single-vector case, generalised for the
+    additional timing degree of freedom a multi-cycle trace introduces.
+    """
+    if not ports:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": "could not determine gold/gate module port list "
+                "for the confirmation testbench",
+            }
+        )
+        return
+
+    tb_path = os.path.join(output_dir, "equiv_seq_tb.v")
+    vvp_path = os.path.join(output_dir, "equiv_seq_tb.vvp")
+
+    tb_source = _build_sequential_testbench(counterexample, ports)
+    try:
+        with open(tb_path, "w", encoding="utf-8") as handle:
+            handle.write(tb_source)
+    except OSError as exc:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": f"could not write confirmation testbench: {exc}",
+            }
+        )
+        return
+
+    try:
+        compiled = subprocess.run(
+            ["iverilog", "-g2012", "-o", vvp_path, netlist_path, tb_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": "iverilog not found on $PATH -- counterexample "
+                "reported by the solver only, not independently confirmed "
+                "by simulation",
+            }
+        )
+        return
+    except subprocess.TimeoutExpired:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": "iverilog did not complete within 30s while "
+                "compiling the counterexample-confirmation testbench",
+            }
+        )
+        return
+
+    if compiled.returncode != 0:
+        tail = (compiled.stderr or compiled.stdout).strip()[-500:]
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": "iverilog failed to compile the counterexample-"
+                f"confirmation testbench: {tail}",
+            }
+        )
+        return
+
+    try:
+        ran = subprocess.run(
+            ["vvp", vvp_path], capture_output=True, text=True, timeout=30
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": f"could not run confirmation testbench with vvp: {exc}",
+            }
+        )
+        return
+
+    sim_cycles: dict[int, dict[str, dict[str, str]]] = {}
+    for line in (ran.stdout or "").splitlines():
+        match = _SEQ_SIM_DISPLAY_RE.match(line.strip())
+        if not match:
+            continue
+        time_str, side, name, bits = match.groups()
+        entry = sim_cycles.setdefault(int(time_str), {"gold": {}, "gate": {}})
+        entry[side][name] = bits
+
+    sim_cycle_entries: list[dict[str, Any]] = []
+    sim_diverging_union: set[str] = set()
+    for time_value in sorted(sim_cycles):
+        gold_outputs = sim_cycles[time_value]["gold"]
+        gate_outputs = sim_cycles[time_value]["gate"]
+        diverging = sorted(
+            name
+            for name in gold_outputs
+            if name in gate_outputs and gold_outputs[name] != gate_outputs[name]
+        )
+        sim_diverging_union.update(diverging)
+        sim_cycle_entries.append(
+            {
+                "time": time_value,
+                "gold_outputs": gold_outputs,
+                "gate_outputs": gate_outputs,
+                "diverging_outputs": diverging,
+            }
+        )
+
+    counterexample["simulation"] = {
+        "engine": "icarus",
+        "engine_version": _icarus_version(),
+        "cycles": sim_cycle_entries,
+        "diverging_outputs": sorted(sim_diverging_union),
+    }
+
+    confirmed = bool(sim_diverging_union & set(counterexample["diverging_outputs"]))
+    counterexample["confirmed_by_simulation"] = confirmed
+    if not confirmed:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "counterexample_not_reproduced",
+                "message": "re-running the solver's counterexample trace "
+                "through the flattened netlists via iverilog/vvp did not "
+                "reproduce a diverging output on any replayed cycle -- "
+                "treat this counterexample with suspicion",
+            }
+        )
+
+
+def _build_sequential_report(
+    *,
+    engine: str,
+    engine_version: str | None,
+    status: str,
+    gold: dict[str, Any],
+    gate: dict[str, Any],
+    port_map: dict[str, str] | None,
+    timeout_s: float,
+    elapsed_s: float,
+    induction_depth: int,
+    counterexample: dict[str, Any] | None,
+    diagnostics: list[dict[str, str]],
+    stage1_script_path: str,
+    stage1_log_path: str,
+    stage2_script_path: str | None,
+    stage2_log_path: str | None,
+    netlist_path: str,
+) -> dict[str, Any]:
+    """The ``"yosys-sequential"`` engine's own report builder -- mirrors
+    :func:`_build_report`'s shape (``schema_version``/``engine``/``status``/
+    ``gold``/``gate``/``port_map``/``timeout_s``/``elapsed_s``/
+    ``counterexample``/``diagnostics``/``artifacts``/``provenance``) plus
+    two additive fields this engine alone needs: ``induction_depth`` (the
+    effective ``equiv_induct -seq``/stage-2 ``sat -seq`` depth actually
+    used) and ``artifacts.stage2_script_path``/``artifacts.stage2_log_path``
+    (``None`` when stage 2 never ran, i.e. stage 1 alone reached
+    ``"equivalent"``) -- ``artifacts.script_path``/``artifacts.log_path``
+    keep referring to stage 1 (always run), matching the combinational
+    engine's own singular ``script_path``/``log_path`` field names so a
+    caller that only reads those two fields still gets a meaningful path.
+    """
+    all_sources = gold["sources"] + gate["sources"]
+    if len(all_sources) == 1:
+        provenance = build_provenance(input_path=all_sources[0])
+    else:
+        provenance = build_provenance()
+        provenance["input"] = {"content_hash": _combined_content_hash(all_sources)}
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "engine": engine,
+        "engine_version": engine_version,
+        "status": status,
+        "gold": gold,
+        "gate": gate,
+        "port_map": port_map,
+        "timeout_s": timeout_s,
+        "elapsed_s": elapsed_s,
+        "induction_depth": induction_depth,
+        "counterexample": counterexample,
+        "diagnostics": diagnostics,
+        "artifacts": {
+            "script_path": stage1_script_path,
+            "netlist_path": netlist_path if os.path.isfile(netlist_path) else None,
+            "log_path": stage1_log_path if os.path.isfile(stage1_log_path) else None,
+            "stage2_script_path": stage2_script_path,
+            "stage2_log_path": (
+                stage2_log_path
+                if stage2_log_path is not None and os.path.isfile(stage2_log_path)
+                else None
+            ),
+        },
+        "provenance": provenance,
+    }
+
+
+def _run_sequential(
+    *,
+    gold: dict[str, Any],
+    gate: dict[str, Any],
+    port_map: dict[str, str],
+    output_dir: str,
+    effective_timeout_s: float,
+    induction_depth: int,
+    engine: str,
+) -> dict[str, Any]:
+    """The ``"yosys-sequential"`` engine's own top-level driver, called from
+    ``run_equiv`` once ``gold``/``gate``/``port_map``/``output_dir`` are
+    already resolved -- see this module's docstring, "Engine:
+    yosys-sequential" section, for the two-stage rationale."""
+    script1_path = os.path.join(output_dir, "equiv_seq_stage1.ys")
+    netlist_path = os.path.join(output_dir, "equiv_seq_netlist.v")
+    log1_path = os.path.join(output_dir, "equiv_seq_stage1.log")
+
+    int_timeout = max(1, round(effective_timeout_s))
+
+    _write_sequential_stage1_script(
+        script_path=script1_path,
+        gold=gold,
+        gate=gate,
+        port_map=port_map,
+        netlist_path=netlist_path,
+        induction_depth=induction_depth,
+    )
+
+    stage1 = _run_yosys_subprocess(script1_path, effective_timeout_s)
+    try:
+        with open(log1_path, "w", encoding="utf-8") as handle:
+            handle.write(stage1.stdout)
+            if stage1.stderr:
+                handle.write("\n--- stderr ---\n")
+                handle.write(stage1.stderr)
+    except OSError:
+        pass
+
+    engine_version = _yosys_version()
+    total_elapsed_s = stage1.elapsed_s
+
+    if stage1.timed_out:
+        return _build_sequential_report(
+            engine=engine,
+            engine_version=engine_version,
+            status="inconclusive",
+            gold=gold,
+            gate=gate,
+            port_map=port_map or None,
+            timeout_s=effective_timeout_s,
+            elapsed_s=total_elapsed_s,
+            induction_depth=induction_depth,
+            counterexample=None,
+            diagnostics=[
+                {
+                    "severity": "error",
+                    "code": "process_timeout",
+                    "message": (
+                        f"yosys (stage 1: equiv_make/equiv_induct) did not "
+                        f"complete within {effective_timeout_s}s (process "
+                        "killed) -- proof is inconclusive, not 'equivalent'"
+                    ),
+                }
+            ],
+            stage1_script_path=script1_path,
+            stage1_log_path=log1_path,
+            stage2_script_path=None,
+            stage2_log_path=None,
+            netlist_path=netlist_path,
+        )
+
+    if stage1.returncode != 0:
+        # No `select -assert-none` sequential-cell guard exists in this
+        # engine's own script (unlike the combinational engine's -- this
+        # engine exists specifically *for* sequential designs), so a
+        # nonzero return here is always a genuine elaboration/build error,
+        # never the combinational engine's own scope-rejection shape.
+        message = _yosys_error_message(stage1.stdout, stage1.stderr, stage1.returncode)
+        raise EquivError(message)
+
+    if _EQUIV_NONE_FOUND_RE.search(stage1.stdout):
+        raise EquivError(
+            "yosys-sequential engine found no matching gold/gate signals to "
+            "compare (equiv_make only matches identically-named wires) -- "
+            "check that gold/gate share port and register names, or supply "
+            "request.port_map"
+        )
+
+    if _EQUIV_ALL_PROVEN_RE.search(stage1.stdout):
+        return _build_sequential_report(
+            engine=engine,
+            engine_version=engine_version,
+            status="equivalent",
+            gold=gold,
+            gate=gate,
+            port_map=port_map or None,
+            timeout_s=effective_timeout_s,
+            elapsed_s=total_elapsed_s,
+            induction_depth=induction_depth,
+            counterexample=None,
+            diagnostics=[],
+            stage1_script_path=script1_path,
+            stage1_log_path=log1_path,
+            stage2_script_path=None,
+            stage2_log_path=None,
+            netlist_path=netlist_path,
+        )
+
+    # Stage 1 left one or more $equiv cells unproven -- register-
+    # correspondence induction alone could not decide. Stage 2 attempts a
+    # genuinely bounded (complete-within-its-own-depth) SAT search for an
+    # actual demonstrated counterexample; see module docstring.
+    ports = _parse_module_ports(netlist_path, "gold")
+
+    script2_path = os.path.join(output_dir, "equiv_seq_stage2.ys")
+    log2_path = os.path.join(output_dir, "equiv_seq_stage2.log")
+
+    _write_sequential_stage2_script(
+        script_path=script2_path,
+        gold=gold,
+        gate=gate,
+        port_map=port_map,
+        ports=ports,
+        bmc_depth=induction_depth,
+        sat_timeout_s=int_timeout,
+    )
+
+    stage2 = _run_yosys_subprocess(script2_path, effective_timeout_s)
+    try:
+        with open(log2_path, "w", encoding="utf-8") as handle:
+            handle.write(stage2.stdout)
+            if stage2.stderr:
+                handle.write("\n--- stderr ---\n")
+                handle.write(stage2.stderr)
+    except OSError:
+        pass
+
+    total_elapsed_s = round(total_elapsed_s + stage2.elapsed_s, 3)
+
+    if stage2.timed_out:
+        return _build_sequential_report(
+            engine=engine,
+            engine_version=engine_version,
+            status="inconclusive",
+            gold=gold,
+            gate=gate,
+            port_map=port_map or None,
+            timeout_s=effective_timeout_s,
+            elapsed_s=total_elapsed_s,
+            induction_depth=induction_depth,
+            counterexample=None,
+            diagnostics=[
+                {
+                    "severity": "error",
+                    "code": "process_timeout",
+                    "message": (
+                        "yosys (stage 2: bounded counterexample search) did "
+                        f"not complete within {effective_timeout_s}s "
+                        "(process killed) -- proof is inconclusive, not "
+                        "'equivalent'"
+                    ),
+                }
+            ],
+            stage1_script_path=script1_path,
+            stage1_log_path=log1_path,
+            stage2_script_path=script2_path,
+            stage2_log_path=log2_path,
+            netlist_path=netlist_path,
+        )
+
+    if stage2.returncode != 0:
+        message = _yosys_error_message(stage2.stdout, stage2.stderr, stage2.returncode)
+        raise EquivError(message)
+
+    status2, diagnostics2 = _classify_sat_result(stage2.stdout)
+
+    if status2 != "counterexample":
+        if status2 == "equivalent":
+            # A bounded, all-zero-start search found no violation within
+            # `induction_depth` cycles -- weaker than the general,
+            # unbounded claim register-correspondence induction itself
+            # could not prove (see module docstring). Never silently
+            # upgraded to "equivalent".
+            diagnostics2 = diagnostics2 + [
+                {
+                    "severity": "warning",
+                    "code": "unproven_by_induction",
+                    "message": (
+                        "register-correspondence induction (equiv_induct) "
+                        f"could not prove full equivalence within "
+                        f"{induction_depth} induction cycles, and a bounded "
+                        "confirmation search (from an all-registers-zero "
+                        "start state) found no counterexample either -- "
+                        "treating as inconclusive rather than silently "
+                        "upgrading to 'equivalent'"
+                    ),
+                }
+            ]
+        return _build_sequential_report(
+            engine=engine,
+            engine_version=engine_version,
+            status="inconclusive",
+            gold=gold,
+            gate=gate,
+            port_map=port_map or None,
+            timeout_s=effective_timeout_s,
+            elapsed_s=total_elapsed_s,
+            induction_depth=induction_depth,
+            counterexample=None,
+            diagnostics=diagnostics2,
+            stage1_script_path=script1_path,
+            stage1_log_path=log1_path,
+            stage2_script_path=script2_path,
+            stage2_log_path=log2_path,
+            netlist_path=netlist_path,
+        )
+
+    cycles = _parse_multicycle_signal_table(stage2.stdout)
+    counterexample = _build_sequential_counterexample(cycles, ports)
+    _confirm_sequential_counterexample(
+        counterexample=counterexample,
+        ports=ports,
+        netlist_path=netlist_path,
+        output_dir=output_dir,
+        diagnostics=diagnostics2,
+    )
+
+    return _build_sequential_report(
+        engine=engine,
+        engine_version=engine_version,
+        status="counterexample",
+        gold=gold,
+        gate=gate,
+        port_map=port_map or None,
+        timeout_s=effective_timeout_s,
+        elapsed_s=total_elapsed_s,
+        induction_depth=induction_depth,
+        counterexample=counterexample,
+        diagnostics=diagnostics2,
+        stage1_script_path=script1_path,
+        stage1_log_path=log1_path,
+        stage2_script_path=script2_path,
+        stage2_log_path=log2_path,
+        netlist_path=netlist_path,
+    )

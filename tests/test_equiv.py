@@ -927,6 +927,479 @@ def test_sequential_design_is_rejected(tmp_path):
         run_equiv(request_path)
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1313 (Phase 2 of Epic #707): "yosys-sequential" engine --
+# register-correspondence sequential equivalence via equiv_make/
+# equiv_simple/equiv_induct/equiv_status, with a bounded-SAT stage-2
+# fallback to extract a genuine, confirmable counterexample when stage 1
+# leaves cells unproven. See `equiv.py`'s own module docstring ("Engine:
+# yosys-sequential" section) for the full two-stage rationale, and
+# `docs/design/sequential-equivalence-survey.md` SS4.2 for why this is the
+# evidence-matched first sequential-equivalence technique to ship.
+#
+# `_SEQ_GOLD_DFF_RTL`/`_SEQ_GATE_DFF_RTL_BUFFERED` model the shape this
+# repo's own P&R pipeline actually, measurably produces (buffer insertion
+# on the combinational logic feeding a register -- same register set, same
+# names, zero register-count change; see `docs/cli/place-and-route.md`'s
+# "As-built netlist" section, quoted by the survey's own SS2.2): a
+# double-inverter pair inserted between the adder and the register it
+# feeds is functionally a no-op, structurally a real insertion, exactly
+# the "40 of ~720 changed instances... unchanged instance names" shape
+# the survey's own real, measured corpus run found.
+# --------------------------------------------------------------------------- #
+
+_SEQ_GOLD_DFF_RTL = """\
+module top(input clk, input rst, input [3:0] a, input [3:0] b, output reg [3:0] q);
+  wire [3:0] sum = a + b;
+  always @(posedge clk or posedge rst)
+    if (rst) q <= 4'b0;
+    else q <= sum;
+endmodule
+"""
+
+# Register-preserving transformation: a buffer-insertion-shaped mutation
+# (double-invert on the combinational cone feeding the register) -- same
+# register set/names, only the combinational logic changed. Functionally
+# identical to `_SEQ_GOLD_DFF_RTL`.
+_SEQ_GATE_DFF_RTL_BUFFERED = """\
+module top(input clk, input rst, input [3:0] a, input [3:0] b, output reg [3:0] q);
+  wire [3:0] sum_raw = a + b;
+  wire [3:0] sum = ~(~sum_raw);
+  always @(posedge clk or posedge rst)
+    if (rst) q <= 4'b0;
+    else q <= sum;
+endmodule
+"""
+
+_SEQ_GOLD_SIMPLE_DFF_RTL = """\
+module top(input clk, input rst, input d, output reg q);
+  always @(posedge clk or posedge rst)
+    if (rst) q <= 1'b0;
+    else q <= d;
+endmodule
+"""
+
+# Structurally different (extra double-inverter buffer pair on the D
+# input) but functionally identical to `_SEQ_GOLD_SIMPLE_DFF_RTL`.
+_SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED = """\
+module top(input clk, input rst, input d, output reg q);
+  wire d_buf = ~(~d);
+  always @(posedge clk or posedge rst)
+    if (rst) q <= 1'b0;
+    else q <= d_buf;
+endmodule
+"""
+
+# Seeded-broken: `d` is inverted before the register -- a real "polarity
+# flip" bug class, not a synthetic/arbitrary corruption. Same register set
+# as `_SEQ_GOLD_SIMPLE_DFF_RTL`, so this is exactly the shape register
+# correspondence must catch (a genuinely different combinational cone
+# feeding an otherwise-corresponding register).
+_SEQ_GATE_SIMPLE_DFF_RTL_INVERTED = """\
+module top(input clk, input rst, input d, output reg q);
+  always @(posedge clk or posedge rst)
+    if (rst) q <= 1'b0;
+    else q <= ~d;
+endmodule
+"""
+
+# Note: `equiv_make`/`equiv_induct`/`clk2fflogic` are plain built-in Yosys
+# passes (verified live against this repo's own pinned Yosys v0.67 while
+# developing this engine) -- no separate `sby`/`eqy` install is needed to
+# run the "yosys-sequential" engine itself, only `yosys` (already gated by
+# `HAVE_YOSYS` below, the same guard the combinational engine's own tests
+# use).
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_proves_register_preserving_buffer_insertion(tmp_path):
+    """Acceptance criterion: the engine drives equiv_make/equiv_simple/
+    equiv_induct/equiv_status end-to-end and reports `"equivalent"` on a
+    register-preserving transformation shaped like this repo's own real,
+    measured P&R output (SS2.2 of the survey)."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["schema_version"] == 1
+    assert report["engine"] == "yosys-sequential"
+    assert report["status"] == "equivalent"
+    assert report["counterexample"] is None
+    assert report["diagnostics"] == []
+    assert report["induction_depth"] == equiv.DEFAULT_INDUCTION_DEPTH
+    assert os.path.isfile(report["artifacts"]["script_path"])
+    assert os.path.isfile(report["artifacts"]["netlist_path"])
+    # Stage 2 (the bounded counterexample search) never runs when stage 1
+    # alone already proves equivalence.
+    assert report["artifacts"]["stage2_script_path"] is None
+    assert report["artifacts"]["stage2_log_path"] is None
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_proves_buffer_pair_on_single_bit_register(tmp_path):
+    """A second, minimal register-preserving pair (single-bit register,
+    double-inverter buffer on D) -- the simplest possible instance of the
+    same transformation shape."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent"
+    assert report["counterexample"] is None
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_seeded_broken_pair_produces_counterexample(tmp_path):
+    """Acceptance criterion: a seeded-broken (deliberate D-input polarity
+    inversion) register-preserving pair must produce a `"counterexample"`,
+    never `"equivalent"` -- the negative control this engine's whole
+    purpose is to catch."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_INVERTED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert "q" in counterexample["diverging_outputs"]
+    assert counterexample["first_diverging_cycle"] is not None
+    assert len(counterexample["cycles"]) == equiv.DEFAULT_INDUCTION_DEPTH
+    # Stage 2 (the bounded counterexample search) always runs when stage 1
+    # cannot prove equivalence.
+    assert report["artifacts"]["stage2_script_path"] is not None
+    assert os.path.isfile(report["artifacts"]["stage2_script_path"])
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+def test_sequential_engine_counterexample_confirmed_by_multicycle_simulation(
+    tmp_path,
+):
+    """The epic's own "a counterexample is executable" discipline,
+    extended for multi-cycle testbenches (this issue's own acceptance
+    criterion): the concrete cycle-by-cycle trace is independently re-run
+    through both netlists via iverilog/vvp, not just trusted from the
+    solver."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_INVERTED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    simulation = counterexample["simulation"]
+    assert simulation["engine"] == "icarus"
+    assert "q" in simulation["diverging_outputs"]
+    # The simulation independently reproduces the *same* diverging output
+    # the solver reported -- not merely "some" divergence, somewhere.
+    assert set(simulation["diverging_outputs"]) & set(
+        counterexample["diverging_outputs"]
+    )
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_timeout_is_inconclusive_never_equivalent(tmp_path):
+    """This module's own scope requirement, restated for the sequential
+    engine: a process-level timeout is always `"inconclusive"`, never
+    `"equivalent"`."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path, timeout_s=1e-6)
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "equivalent"
+    assert report["counterexample"] is None
+    assert report["diagnostics"][0]["code"] == "process_timeout"
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_accepts_combinational_design_too(tmp_path):
+    """The sequential engine is a superset, not a narrower scope: a purely
+    combinational pair (zero registers) degrades gracefully to a
+    combinational proof via `equiv_simple` alone."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GATE_AND_EQUIVALENT)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent"
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_custom_induction_depth(tmp_path):
+    """`request.induction_depth` overrides `DEFAULT_INDUCTION_DEPTH` and is
+    echoed back in the report."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+            "induction_depth": 2,
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent"
+    assert report["induction_depth"] == 2
+
+
+@pytest.mark.parametrize("bad_depth", [0, -1, "4", 1.5, True])
+def test_sequential_engine_bad_induction_depth_is_error(tmp_path, bad_depth):
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+            "induction_depth": bad_depth,
+        },
+    )
+
+    with pytest.raises(EquivError, match="induction_depth must be a positive integer"):
+        run_equiv(request_path)
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_cli_exit_codes(tmp_path, capsys):
+    """CLI-level counterpart, mirroring the combinational engine's own
+    `test_cli_equivalent_exits_zero`/`test_cli_counterexample_exits_three`:
+    the sequential engine's `status` maps through the same shared 0/3/4
+    exit-code table."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    equivalent_request = _write_request(
+        tmp_path / "equivalent.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+    exit_code = main(["equiv", equivalent_request, "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "equivalent"
+
+    _write(tmp_path / "gate_broken.v", _SEQ_GATE_SIMPLE_DFF_RTL_INVERTED)
+    broken_request = _write_request(
+        tmp_path / "broken.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate_broken.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+    exit_code = main(["equiv", broken_request, "--format", "json"])
+    assert exit_code == 3
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "counterexample"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #1313 acceptance criterion: "Validated on at least one real
+# register-preserving P&R transformation from this repo's own pipeline."
+#
+# Requires a real `openroad` binary and a real, host-resolved sky130 PDK
+# install -- this repo's own CI does not install `openroad` (grep-confirmed
+# against `.github/workflows/ci.yml`, mirroring `test_place_and_route.py`'s
+# own `HAVE_OPENROAD`-gated integration tests, which are skipped in CI for
+# the identical reason), so this test never runs there. It is a real, not
+# fake, live-verification path for a machine that does have `openroad`
+# installed -- the same posture `test_place_and_route.py`'s
+# `test_integration_real_openroad_gcd_worked_example` already established.
+# --------------------------------------------------------------------------- #
+
+
+def _find_real_sky130_pnr_variant() -> tuple[str, str] | None:
+    """Search every install/variant `list_pdks()` discovers for one shipping
+    a real `sky130_fd_sc_hd` liberty + tech/cell LEF + GDS view -- the four
+    assets a real P&R run actually needs. Returns `(root, variant)` or
+    `None`. Mirrors `test_place_and_route.py`'s own
+    `_find_real_pnr_variant()` (duplicated rather than imported cross-module
+    -- see this file's own note on why, above); this repo's own liberty-only
+    `_find_any_cell_library()` in *this* file is not sufficient here since
+    it never checks for LEF/GDS at all."""
+    try:
+        result = pdk_module.list_pdks()
+    except Exception:
+        return None
+    cell_library = "sky130_fd_sc_hd"
+    for install in result["installs"]:
+        for variant in install["variants"]:
+            lib_dir = os.path.join(
+                install["root"], variant["name"], "libs.ref", cell_library
+            )
+            if all(
+                os.path.exists(os.path.join(lib_dir, sub))
+                for sub in (
+                    "lib",
+                    os.path.join("techlef", f"{cell_library}__nom.tlef"),
+                    os.path.join("lef", f"{cell_library}.lef"),
+                    os.path.join("gds", f"{cell_library}.gds"),
+                )
+            ):
+                return install["root"], variant["name"]
+    return None
+
+
+_REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    shutil.which("openroad") is None, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_sequential_engine_real_pnr_register_preserving_transformation(
+    tmp_path, monkeypatch
+):
+    """`klt synthesize`'s pre-P&R netlist vs. `klt place-and-route`'s real,
+    post-route `verilog_path` (issue #996) on the GCD worked example --
+    proven `"equivalent"` by the sequential engine, the direct real-P&R
+    validation this issue's own acceptance criteria requires."""
+    root, variant = _REAL_SKY130_PNR_VARIANT
+    cell_library, corner = "sky130_fd_sc_hd", "tt_025C_1v80"
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.place_and_route import run_place_and_route
+
+    gcd_rtl_path = (
+        Path(__file__).parent / "corpus" / "place_and_route" / "gcd" / "gcd.v"
+    )
+    if not gcd_rtl_path.is_file():
+        pytest.skip("tests/corpus/place_and_route/gcd/gcd.v fixture not present")
+
+    synth_dir = tmp_path / "synth"
+    synth_dir.mkdir()
+    _write(synth_dir / "gcd.v", gcd_rtl_path.read_text(encoding="utf-8"))
+    synth_request = _write_request(
+        synth_dir / "synth.json",
+        {
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": cell_library, "corner": corner},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+    assert synth_report["status"] == "ok"
+
+    pnr_dir = tmp_path / "pnr"
+    pnr_dir.mkdir()
+    # Request shape mirrors `test_place_and_route.py`'s own
+    # `_base_request()`/`test_integration_real_openroad_gcd_worked_example`
+    # -- duplicated here (rather than imported cross-module) since
+    # `tests/` has no `__init__.py` package structure to import through.
+    pnr_request = _write_request(
+        pnr_dir / "pnr.json",
+        {
+            "engine": "openroad",
+            "netlist": synth_report["netlist_path"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": cell_library, "corner": corner},
+            "floorplan": {
+                "method": "utilization",
+                "utilization_pct": 38,
+                "aspect_ratio": 1.0,
+                "core_margin_um": 2.0,
+                "site": "unithd",
+            },
+            "io": {"layer_h": "met3", "layer_v": "met2"},
+            "constraints": {"clock_port": "clk", "clock_period_ns": 1.1},
+            "seed": 1,
+            "target_stage": "route",
+        },
+    )
+    pnr_report = run_place_and_route(pnr_request)
+    assert pnr_report["status"] == "ok"
+    assert pnr_report["verilog_path"] is not None
+
+    liberty_path, _corner, _pdk_info = synthesize_module._resolve_liberty(
+        cell_library, corner
+    )
+
+    equiv_dir = tmp_path / "equiv"
+    equiv_dir.mkdir()
+    equiv_request = _write_request(
+        equiv_dir / "equiv.json",
+        {
+            "gold": _side(
+                [synth_report["netlist_path"]], top="gcd", liberty=liberty_path
+            ),
+            "gate": _side(
+                [pnr_report["verilog_path"]], top="gcd", liberty=liberty_path
+            ),
+            "engine": "yosys-sequential",
+            "timeout_s": 300,
+        },
+    )
+    equiv_report = run_equiv(equiv_request)
+
+    assert equiv_report["status"] == "equivalent", equiv_report["diagnostics"]
+
+
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
 def test_port_map_remapping(tmp_path):
     _write(tmp_path / "gold.v", _GOLD_AND)
