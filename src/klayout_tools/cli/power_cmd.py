@@ -1,5 +1,5 @@
-"""``klt power`` command: serialise the resistive-network extraction + static
-IR-drop report as text or JSON.
+"""``klt power`` command: serialise the resistive-network extraction, static
+IR-drop report, and per-net EM current-density verdict as text or JSON.
 
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
@@ -50,6 +50,7 @@ def _print_text(report: dict) -> None:
             )
 
     _print_ir_drop(report)
+    _print_em_verdict(report)
 
     warnings = report["warnings"]
     if warnings:
@@ -97,4 +98,44 @@ def _print_ir_drop(report: dict) -> None:
             f"{net_entry['solved_island_count'] + net_entry['unsolved_island_count']}"
             " island(s) solved, worst droop "
             + ("n/a" if droop is None else f"{droop:.6g} mV")
+        )
+
+
+def _print_em_verdict(report: dict) -> None:
+    """The per-net EM current-density verdict (issue #846). Silent when
+    there was no IR-drop solve at all (`em_verdict` is `None`, same
+    condition as `_print_ir_drop`'s early return) -- there are no branch
+    currents to check."""
+    em_verdict = report.get("em_verdict")
+    if em_verdict is None:
+        return
+
+    print()
+    print(
+        f"em verdict: {em_verdict['status'].upper()} -- "
+        f"{em_verdict['checked_edge_count']} edge(s) checked, "
+        f"{em_verdict['fail_count']} over limit, "
+        f"{em_verdict['unchecked_edge_count']} unchecked (no declared limit "
+        "or unsolved)"
+    )
+    worst = em_verdict["worst_case"]
+    if worst is not None:
+        print(
+            f"  worst case: {worst['net']} {worst['island_id']}/"
+            f"{worst['edge_id']} ({worst['layer']}) "
+            f"{worst['current_a'] * 1e3:.6g} mA vs "
+            f"{worst['current_limit_a'] * 1e3:.6g} mA limit "
+            f"[{worst['status']}]"
+            + (
+                f" -- {worst['current_limit_source']}"
+                if worst["current_limit_source"]
+                else ""
+            )
+        )
+
+    for net_entry in em_verdict["nets"]:
+        print(
+            f"  net {net_entry['net']}: {net_entry['status']} "
+            f"({net_entry['fail_count']}/{net_entry['checked_edge_count']} "
+            "checked edge(s) over limit)"
         )

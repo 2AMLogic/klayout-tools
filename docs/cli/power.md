@@ -1,9 +1,11 @@
 # `klt power`
 
 Extract a routed layout's power grid as a resistive network (nodes +
-segment resistances) and solve it for static (DC) IR drop — issues
-[#844](https://github.com/2AMLogic/klayout-tools/issues/844) (Phase 1a) and
-[#845](https://github.com/2AMLogic/klayout-tools/issues/845) (Phase 1b) of
+segment resistances), solve it for static (DC) IR drop, and emit a per-net
+EM (electromigration) current-density verdict — issues
+[#844](https://github.com/2AMLogic/klayout-tools/issues/844) (Phase 1a),
+[#845](https://github.com/2AMLogic/klayout-tools/issues/845) (Phase 1b), and
+[#846](https://github.com/2AMLogic/klayout-tools/issues/846) (Phase 1c) of
 the power/IR-drop + EM signoff epic
 [#712](https://github.com/2AMLogic/klayout-tools/issues/712).
 
@@ -50,16 +52,18 @@ Two phases have landed:
   extraction-only, and both response fields are `null` — there is nothing
   to solve.
 
-One field from the full interface above is **not part of these phases**:
-
-- `em_verdict` (response,
-  [#846](https://github.com/2AMLogic/klayout-tools/issues/846), Phase 1c) —
-  the per-net EM current-density verdict, which consumes this phase's
-  per-branch currents (`ir_drop_map.nets[].islands[].edges[].current_a`).
+- **#846, Phase 1c — the per-net EM current-density verdict.** Each
+  `stackup`/`vias` entry may additionally declare its own EM
+  (electromigration) current-density limit
+  (`current_limit_a_per_um`/`current_limit_a`) plus a free-text
+  `current_limit_source` citation; the response's `em_verdict` compares
+  every solved edge's branch current
+  (`ir_drop_map.nets[].islands[].edges[].current_a`) against its own cited
+  limit and rolls the result up per net.
 
 Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-design, 1b's new fields needed **no `schema_version` bump** — every field
-1a promised is unchanged — and 1c's will not either.
+design, 1b's and 1c's new fields needed **no `schema_version` bump** —
+every field an earlier phase promised is unchanged.
 
 ## Why a named net is (usually) several disconnected islands, not one mesh
 
@@ -143,6 +147,18 @@ The spec file is a JSON object:
     sheet resistance, ohms per square, used to turn a merged rail
     polygon's length/width into a resistance (see "Resistor-network model"
     below).
+  - `current_limit_a_per_um` (number, optional, `>= 0`) — this role's own
+    EM (electromigration) current-density limit, expressed the same way a
+    real PDK's own tech LEF already expresses it: amps per micron of the
+    merged rail's own cross-width, **not** per unit area (see "EM
+    current-density verdict" below). Omitted by default — a role with no
+    limit declared simply contributes edges with `current_limit_a: null`,
+    which `em_verdict` counts as unchecked, never guessed at.
+  - `current_limit_source` (string, optional) — a free-text citation of
+    exactly where `current_limit_a_per_um` came from (e.g. a PDK doc/rule
+    name), echoed back on every edge's `em_verdict` entry. See "Worked
+    example" below, which cites a real sky130 `.tlef` `DCCURRENTDENSITY`
+    line this way.
 - `vias` (optional array, default `[]`) — each entry bridges two `stackup`
   roles:
   - `name` (string, optional, defaults to `"via<index>"`) — echoed in every
@@ -154,6 +170,15 @@ The spec file is a JSON object:
   - `resistance_ohm` (number, required, `>= 0`) — this via's resistance,
     used verbatim for every via shape matched (see "Scope and limitations"
     — a via array drawn as one merged shape is not split per cut).
+  - `current_limit_a` (number, optional, `>= 0`) — this via role's own EM
+    limit. Unlike a metal role's `current_limit_a_per_um`, a real PDK's
+    `DCCURRENTDENSITY` for a via/cut layer is already a flat per-shape
+    amperage (e.g. sky130's `.tlef` "mA per via"), so this value applies
+    verbatim to every merged via edge this role contributes — no width
+    term, matching the existing `resistance_ohm` "one merged via polygon =
+    one resistor" model.
+  - `current_limit_source` (string, optional) — same citation convention as
+    a `stackup` entry's, above.
 - `pads` (optional array, default `[]`) — where each power net's supply is
   actually delivered. Each pad is held at a fixed voltage (an ideal source)
   and is the boundary condition the solve is relative to:
@@ -289,6 +314,50 @@ already uses) — node for node and branch for branch, on a synthetic 2-D mesh
 and end to end on the real routed `gcd` corpus fixture, agreeing to `1e-9` V
 and `1e-12` A.
 
+## EM current-density verdict (Phase 1c)
+
+Once a spec's `stackup`/`vias` entries declare `current_limit_a_per_um`/
+`current_limit_a` (see "Spec file" above), the same solved edges the
+IR-drop solve already produced are checked against those limits, per net.
+
+- **A metal edge's limit scales by its own drawn width.** A real PDK's tech
+  LEF already expresses a routing layer's EM limit as a per-width current
+  (e.g. sky130's `DCCURRENTDENSITY AVERAGE 2.8` for `met1`, in mA per
+  micron — see "Worked example" below), because the layer's thickness is
+  fixed. So a merged rail's own `current_limit_a` is
+  `current_limit_a_per_um * cross_um`, using the exact same `cross_um`
+  (the merged polygon's shorter bounding-box dimension) the resistance
+  calculation above already computed — a wide rail tolerates more absolute
+  current than a narrow one on the same layer, which is exactly the
+  physical intent of a per-width limit.
+- **A via edge's limit is flat, not scaled.** A real PDK's `DCCURRENTDENSITY`
+  for a via/cut layer is already a flat per-shape current (sky130's is "mA
+  per via"), matching this spec's existing "one merged via polygon = one
+  resistor" model: `current_limit_a` applies verbatim, with no width term.
+- **Checked against the magnitude of the solved branch current.** Each
+  checked edge compares `abs(ir_drop_map...edges[].current_a)` against its
+  own `current_limit_a`; `margin_a = current_limit_a - abs(current_a)` is
+  reported signed so a caller can see *how much* headroom (positive) or
+  overage (negative) an edge has, not just pass/fail.
+- **An edge with no declared limit, or no solved current, is `unchecked`,
+  never guessed at.** The same discipline `_solve_ir_drop` already applies
+  to droop: a `stackup`/`vias` role that declared no
+  `current_limit_a_per_um`/`current_limit_a` contributes edges nobody can
+  check, and an edge on an unsolved island (or a `resistance_ohm: 0`
+  short, whose own current is not recoverable — see "Static IR-drop
+  solve" above) has no current to compare. Both land in
+  `unchecked_edge_count`, not `fail_count`.
+- **A net's `status` is `"fail"` if any checked edge is over its limit,
+  `"pass"` if at least one edge was checked and none failed, or
+  `"not_checked"` if the net had no edge with both a declared limit and a
+  solved current** — e.g. a net whose whole stackup declared no EM limits
+  at all. The overall `em_verdict.status` rolls the same three values up
+  across every net.
+- **`em_verdict` is `null` when there was no IR-drop solve at all** (the
+  spec declared neither `pads` nor `current_model`) — there are no branch
+  currents to compare, the same condition under which `ir_drop_map` itself
+  is `null`.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
@@ -322,7 +391,9 @@ the shared envelope (`schema_version`, error shape, exit codes).
               "layer": "met1",
               "from": "n0",
               "to": "n1",
-              "resistance_ohm": 1.0
+              "resistance_ohm": 1.0,
+              "current_limit_a": 0.0028,
+              "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
             }
           ]
         }
@@ -397,6 +468,36 @@ the shared envelope (`schema_version`, error shape, exit codes).
     ]
   },
   "worst_case_droop_mv": 1.0,
+  "em_verdict": {
+    "status": "pass",
+    "checked_edge_count": 1,
+    "unchecked_edge_count": 0,
+    "fail_count": 0,
+    "worst_case": {
+      "net": "VPWR",
+      "island_id": "VPWR#0",
+      "edge_id": "e0",
+      "kind": "metal",
+      "layer": "met1",
+      "current_a": 0.001,
+      "current_limit_a": 0.0028,
+      "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um",
+      "margin_a": 0.0018,
+      "status": "pass"
+    },
+    "nets": [
+      {
+        "net": "VPWR",
+        "status": "pass",
+        "checked_edge_count": 1,
+        "unchecked_edge_count": 0,
+        "fail_count": 0,
+        "worst_case": {"net": "VPWR", "island_id": "VPWR#0", "edge_id": "e0", "kind": "metal", "layer": "met1", "current_a": 0.001, "current_limit_a": 0.0028, "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um", "margin_a": 0.0018, "status": "pass"},
+        "failing_edges": []
+      },
+      {"net": "VGND", "status": "not_checked", "checked_edge_count": 0, "unchecked_edge_count": 0, "fail_count": 0, "worst_case": null, "failing_edges": []}
+    ]
+  },
   "warnings": [
     "power net 'VGND' matches no labelled net in this layout -- check 'power_nets' against the layout's own pin/label text, and that at least one 'stackup' entry's 'label_layer' actually carries it"
   ]
@@ -405,7 +506,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field                | Type               | Description                                                                                       |
 | -------------------- | ------------------ | --------------------------------------------------------------------------------------------------|
-| `schema_version`     | integer            | `1` (unchanged by Phase 1b, which only added fields; see "Phase scope" above for the one additive field still to come). |
+| `schema_version`     | integer            | `1` (unchanged by Phase 1b/1c, which only added fields; see "Phase scope" above). |
 | `file`               | string             | The input layout path exactly as provided.                                                        |
 | `spec`               | string              | The spec file path exactly as provided.                                                           |
 | `power_nets`         | array\<string\>    | Deduplicated net names, in first-seen order (same order as `networks`).                           |
@@ -417,11 +518,12 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].island_id` | string            | `"<net>#<index>"`, stable within one run, in ascending internal net-id order (not guaranteed stable across `klt` versions/KLayout builds). |
 | `islands[].node_count`/`edge_count` | integer | This island's own totals.                                                                         |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "layer", "x_um", "y_um"}` — `id` is scoped to this island (see "Resistor-network model" above). |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "current_limit_a", "current_limit_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. |
 | `node_count`/`edge_count`/`island_count` | integer | Totals across every requested net.                                                    |
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
-| `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry, a non-rectangular segment approximated by its bounding box, a via with no matching rail on one side, a pad/instance on a net with no geometry, current stranded on a padless island, or an aggregate count of quiet unloaded padless islands. Empty on a clean run.            |
+| `em_verdict`         | object \| null     | The per-net EM current-density verdict, or `null` when the spec declared neither `pads` nor `current_model` (the same condition under which `ir_drop_map` is `null`) — see below. |
+| `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry, a non-rectangular segment approximated by its bounding box, a via with no matching rail on one side, a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
 
 ### `ir_drop_map` (Phase 1b)
 
@@ -450,6 +552,20 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].iterations`/`residual` | integer / number | Conjugate-gradient iterations and the achieved relative residual (worst over the island's components). |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "voltage_v", "droop_mv", "injected_current_a", "pad_voltage_v"}` — `id` matches the sibling `networks[]` node; `voltage_v`/`droop_mv` are `null` on an unsolved island; `injected_current_a` is signed (negative = drawn off this net) and `pad_voltage_v` is `null` unless a pad landed here. |
 | `islands[].edges[]`  | array\<object\>    | `{"id", "current_a"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. |
+
+### `em_verdict` (Phase 1c)
+
+| Field                | Type               | Description                                                                                       |
+| -------------------- | ------------------ | --------------------------------------------------------------------------------------------------|
+| `status`             | string             | `"pass"`, `"fail"`, or `"not_checked"` — the roll-up across every net (see "EM current-density verdict" above). |
+| `checked_edge_count`/`unchecked_edge_count` | integer | Edges with both a declared limit and a solved current, vs. edges missing either.               |
+| `fail_count`         | integer            | Checked edges whose \|current\| exceeded their own `current_limit_a`. `0` on a clean run.         |
+| `worst_case`         | object \| null     | The checked edge with the smallest `margin_a` anywhere (most over its limit, or closest to it) — same shape as a `nets[].failing_edges[]` entry below, `null` if nothing was checked. |
+| `nets[]`             | array\<object\>    | One entry per requested net, same order as `ir_drop_map.nets[]`.                                  |
+| `nets[].status`      | string             | This net's own `"pass"`/`"fail"`/`"not_checked"`.                                                  |
+| `nets[].checked_edge_count`/`unchecked_edge_count`/`fail_count` | integer | This net's own totals.                                                        |
+| `nets[].worst_case`  | object \| null     | This net's own worst-margin checked edge (same shape as below), `null` if none was checked.        |
+| `nets[].failing_edges[]` | array\<object\> | Every edge on this net that failed: `{"net", "island_id", "edge_id", "kind", "layer", "current_a", "current_limit_a", "current_limit_source", "margin_a", "status"}` — `current_a`/`current_limit_a` are magnitudes; `margin_a = current_limit_a - current_a` (negative for a failing edge); `current_limit_source` is the spec's citation, `null` if none was given; `status` is always `"fail"` in this array (present for symmetry with `worst_case`, which can be `"pass"`). |
 
 ## Worked example: real `klt place-and-route` output (the `gcd` corpus fixture)
 
@@ -505,6 +621,21 @@ every branch current to `1e-12` A (`tests/test_power.py`'s
 `tests/test_power_ir_cross_check.py`'s
 `test_gcd_routed_design_matches_ngspice`).
 
+Adding `current_limit_a_per_um: 0.0028` (sky130's own `met1`/`met2` EM
+limit — `DCCURRENTDENSITY AVERAGE 2.8` in a real
+`sky130_fd_sc_hd__nom.tlef`, meaning 2.8 mA/um) to both metal roles turns
+the same run into a full EM check. Every one of the 193 solved edges
+carries a well under 1 mA branch current on rails at least `0.14` um wide
+(sky130's own `met1`/`met2` minimum routing width), so every checked edge
+passes comfortably (`em_verdict.status: "pass"`, `fail_count: 0`) —
+`tests/test_power.py`'s `test_gcd_fixture_em_verdict_passes_on_real_rails`
+pins this as a regression: a real routed design's rail currents are, by
+construction, nowhere near a real PDK's EM limit at this macro's modest
+load. The golden pass/fail *classification* itself (an edge engineered to
+be just over vs. just under a declared limit) is validated on the smaller
+synthetic fixtures in "EM current-density verdict" above, not on this
+real-fixture scale check.
+
 ## Scope and limitations
 
 - **No device recognition, wire/via connectivity only (by design).** Unlike
@@ -545,29 +676,35 @@ every branch current to `1e-12` A (`tests/test_power.py`'s
   from a netlist, a VCD, or a liberty file. Dynamic (transient) IR drop is
   explicitly a later phase of epic #712, not a limitation to be worked
   around here.
-- **No EM verdict yet.** See "Phase scope" above — `em_verdict` does not
-  exist yet; the per-branch currents it needs are already reported
-  (`ir_drop_map.nets[].islands[].edges[].current_a`).
+- **EM limits are opt-in per role, not a built-in PDK table.** `klt power`
+  never bundles PDK electrical rules itself (see CLAUDE.md's "open PDKs
+  only" discipline) — a caller supplies `current_limit_a_per_um`/
+  `current_limit_a` per `stackup`/`vias` role exactly as `sheet_resistance_
+  ohm_per_sq`/`resistance_ohm` already work, citing wherever that number
+  came from in `current_limit_source`. A role that declares no limit
+  contributes edges `em_verdict` cannot check (`unchecked_edge_count`, not
+  a failure) — see "EM current-density verdict" above.
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
-| `0`       | Success — every requested power net was reported (with `island_count: 0` and a `warnings` entry for any net that matched no labelled geometry). |
+| `0`       | Success — every requested power net was reported (with `island_count: 0` and a `warnings` entry for any net that matched no labelled geometry). **A `"fail"` `em_verdict.status` does not change the exit code** — like `worst_case_droop_mv`, the EM verdict is a reported result of a successful run, not a run failure; a caller gating CI on it should check `em_verdict.status`/`fail_count` in the JSON output, the same way a caller gates on `klt drc`'s violation count today. |
 | `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `power_nets`/`stackup`/`vias`/`pads`/`current_model` declaration, an ambiguous top cell (pass `--top`), or **every** requested power net matched no geometry at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
 
 ## See also
 
 - [#712](https://github.com/2AMLogic/klayout-tools/issues/712) — the parent
-  power/IR-drop + EM signoff epic (remaining phases: the per-net EM verdict,
-  then dynamic currents).
+  power/IR-drop + EM signoff epic (remaining phase: dynamic/activity-weighted
+  currents).
 - [#845](https://github.com/2AMLogic/klayout-tools/issues/845) — Phase 1b,
   the static IR-drop solve this command's resistive network feeds
   (`klayout_tools/ir_solver.py`, validated in `tests/test_ir_solver.py` and
   cross-checked against ngspice in `tests/test_power_ir_cross_check.py`).
 - [#846](https://github.com/2AMLogic/klayout-tools/issues/846) — Phase 1c,
-  the per-net EM current-density verdict.
+  the per-net EM current-density verdict (`em_verdict`, this document's "EM
+  current-density verdict" section above).
 - [`docs/cli/place-and-route.md`](place-and-route.md) — `klt place-and-route`,
   the source of the routed layouts this command analyses (and of the "no
   PDN generation in this v1" fact "Why a named net is usually several
