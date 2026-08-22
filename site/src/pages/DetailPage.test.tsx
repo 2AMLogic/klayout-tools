@@ -2,17 +2,22 @@
 /**
  * Behavior tests for `DetailPage`'s Downloads section and embedded GDS
  * viewer overlay (issue #943), which supersedes the "View in browser" link
- * added in issue #249: a link to Tiny Tapeout's hosted viewer that
- * navigated away to a new tab is now a same-page overlay (`GdsViewer`)
- * opened by clicking either a render thumbnail or the Downloads section's
- * "View in browser" button -- both gated on the exact same condition as the
- * existing raw-file download link (`layout.downloadable === true &&
+ * added in issue #249: a link that navigated away to a third-party hosted
+ * viewer in a new tab is now a same-page overlay (`GdsViewer`) opened by
+ * clicking either a render thumbnail or the Downloads section's "View in
+ * browser" button -- both gated on the exact same condition as the existing
+ * raw-file download link (`layout.downloadable === true &&
  * layout.layout_file !== undefined`).
  *
- * Also covers per-PDK-family `pdk=` derivation feeding the overlay's
- * `<iframe src>` (issue #1060): the viewer used to hardcode `pdk=sky130A`
- * for every block, which broke the viewer for gf180mcu blocks (wrong layer
- * table, empty render).
+ * The overlay's renderer (`GdsCanvas`, issue #1284) is stubbed here so these
+ * page-level tests assert what the page hands it -- the same-origin file
+ * URL, the derived PDK family, and the block's own layer names -- rather
+ * than re-testing rendering; `GdsCanvas.test.tsx` covers the real renderer
+ * against real GDS bytes.
+ *
+ * Also covers per-PDK-family derivation (issue #1060): the viewer used to
+ * hardcode `sky130A` for every block, which gave gf180mcu blocks the wrong
+ * layer colors entirely.
  *
  * Also covers the Signals section's canary-block degradation (issue #653):
  * when `layout.signals` carries corners with no `waveform` artifact (e.g.
@@ -25,6 +30,28 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { DetailPage } from "./DetailPage";
 import type { Layout, LayoutSignals } from "@/data/types";
 import type { EmSiteExport } from "@/components/em/types";
+
+vi.mock("@/components/layout/GdsCanvas", () => ({
+  default: ({
+    fileUrl,
+    displayName,
+    pdkFamily,
+    layerNames,
+  }: {
+    fileUrl: string;
+    displayName: string;
+    pdkFamily?: string;
+    layerNames?: Record<string, string>;
+  }) => (
+    <div
+      data-testid="gds-canvas-stub"
+      data-file-url={fileUrl}
+      data-display-name={displayName}
+      data-pdk-family={pdkFamily ?? ""}
+      data-layer-names={JSON.stringify(layerNames ?? {})}
+    />
+  ),
+}));
 
 afterEach(cleanup);
 
@@ -40,8 +67,15 @@ function makeLayout(overrides: Partial<Layout> = {}): Layout {
   };
 }
 
+/** Opens the overlay from the Downloads section and returns the renderer stub. */
+async function openViewerFromDownloads(): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "View in browser" }));
+  const dialog = screen.getByRole("dialog");
+  return within(dialog).findByTestId("gds-canvas-stub");
+}
+
 describe("DetailPage GdsViewer overlay (issue #943)", () => {
-  it("renders the download link and a 'View in browser' button that opens the embedded viewer when downloadable with a layout_file", () => {
+  it("renders the download link and a 'View in browser' button that opens the embedded viewer when downloadable with a layout_file", async () => {
     render(
       <DetailPage
         layout={makeLayout({ downloadable: true, layout_file: "buf_4.gds" })}
@@ -57,19 +91,15 @@ describe("DetailPage GdsViewer overlay (issue #943)", () => {
     // No overlay until the entry point is clicked -- never rendered eagerly.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    const viewerButton = screen.getByRole("button", { name: "View in browser" });
-    fireEvent.click(viewerButton);
-
-    const dialog = screen.getByRole("dialog", { name: /Interactive GDS viewer for/ });
-    const iframe = within(dialog).getByTitle(/Interactive GDS viewer for/);
-    const src = iframe.getAttribute("src") ?? "";
-    expect(src).toMatch(/^https:\/\/gds-viewer\.tinytapeout\.com\/\?/);
-
-    const params = new URLSearchParams(src.split("?")[1]);
-    expect(params.get("model")).toBe(
-      "https://klayout-tools.org/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds",
-    );
-    expect(params.get("pdk")).toBe("sky130A");
+    const canvas = await openViewerFromDownloads();
+    expect(
+      screen.getByRole("dialog", { name: /Interactive GDS viewer for/ }),
+    ).toBeInTheDocument();
+    // Same-origin, root-relative: the renderer fetches and draws the file
+    // itself, so it must resolve against whatever origin serves the page
+    // (issue #1284) rather than a hardcoded production origin.
+    expect(canvas).toHaveAttribute("data-file-url", "/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds");
+    expect(canvas).toHaveAttribute("data-pdk-family", "sky130");
   });
 
   it("closes the overlay via the Close button", () => {
@@ -96,7 +126,7 @@ describe("DetailPage GdsViewer overlay (issue #943)", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("opens the same overlay by clicking a render thumbnail", () => {
+  it("opens the same overlay by clicking a render thumbnail", async () => {
     render(
       <DetailPage
         layout={makeLayout({
@@ -115,12 +145,33 @@ describe("DetailPage GdsViewer overlay (issue #943)", () => {
       screen.getByRole("button", { name: "Open interactive viewer for the overview render of buf_4" }),
     );
 
-    const dialog = screen.getByRole("dialog");
-    const iframe = within(dialog).getByTitle(/Interactive GDS viewer for/);
-    const params = new URLSearchParams((iframe.getAttribute("src") ?? "").split("?")[1]);
-    expect(params.get("model")).toBe(
-      "https://klayout-tools.org/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds",
+    const canvas = await within(screen.getByRole("dialog")).findByTestId("gds-canvas-stub");
+    expect(canvas).toHaveAttribute("data-file-url", "/blocks/sky130_fd_sc_hd__buf_4/buf_4.gds");
+  });
+
+  it("passes the block's own per-layer render names through to the viewer", async () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "gf180-bandgap",
+          name: "gf180 Bandgap",
+          downloadable: true,
+          layout_file: "bandgap_top.gds",
+          renders: {
+            overview: "renders/overview.png",
+            Nwell: "renders/21_0.png",
+            Metal1: "renders/34_0.png",
+            layer_49_0: "renders/49_0.png",
+          },
+        })}
+      />,
     );
+
+    const canvas = await openViewerFromDownloads();
+    expect(JSON.parse(canvas.getAttribute("data-layer-names") ?? "{}")).toEqual({
+      "21/0": "Nwell",
+      "34/0": "Metal1",
+    });
   });
 
   it("render thumbnails are not clickable (no button role, no hint text) when the block has no downloadable layout file", () => {
@@ -167,15 +218,7 @@ describe("DetailPage GdsViewer overlay (issue #943)", () => {
 });
 
 describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forward by #943)", () => {
-  function openViewerAndGetSrcParams(): URLSearchParams {
-    fireEvent.click(screen.getByRole("button", { name: "View in browser" }));
-    const dialog = screen.getByRole("dialog");
-    const iframe = within(dialog).getByTitle(/Interactive GDS viewer for/);
-    const src = iframe.getAttribute("src") ?? "";
-    return new URLSearchParams(src.split("?")[1]);
-  }
-
-  it("emits pdk=gf180mcuD for a gf180mcu std-cell slug", () => {
+  it("styles a gf180mcu std-cell slug with the gf180mcu palette", async () => {
     render(
       <DetailPage
         layout={makeLayout({
@@ -187,17 +230,15 @@ describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forwa
       />,
     );
 
-    const params = openViewerAndGetSrcParams();
-    expect(params.get("model")).toBe(
-      "https://klayout-tools.org/blocks/gf180mcu_fd_sc_mcu9t5v0__and2_1/and2_1.gds",
+    const canvas = await openViewerFromDownloads();
+    expect(canvas).toHaveAttribute(
+      "data-file-url",
+      "/blocks/gf180mcu_fd_sc_mcu9t5v0__and2_1/and2_1.gds",
     );
-    // Well-formed viewer URL for a real gf180 block slug (acceptance
-    // criterion #2 -- full visual verification in the actual viewer was
-    // not possible in this headless environment, see PR description).
-    expect(params.get("pdk")).toBe("gf180mcuD");
+    expect(canvas).toHaveAttribute("data-pdk-family", "gf180mcu");
   });
 
-  it("emits pdk=gf180mcuD for the gf180-bandgap slug", () => {
+  it("styles the gf180-bandgap slug with the gf180mcu palette", async () => {
     render(
       <DetailPage
         layout={makeLayout({
@@ -209,10 +250,10 @@ describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forwa
       />,
     );
 
-    expect(openViewerAndGetSrcParams().get("pdk")).toBe("gf180mcuD");
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "gf180mcu");
   });
 
-  it("emits pdk=sky130A for a sky130 slug", () => {
+  it("styles a sky130 slug with the sky130 palette", async () => {
     render(
       <DetailPage
         layout={makeLayout({
@@ -223,10 +264,10 @@ describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forwa
       />,
     );
 
-    expect(openViewerAndGetSrcParams().get("pdk")).toBe("sky130A");
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "sky130");
   });
 
-  it("emits pdk=ihp-sg13g2 for an sg13g2 slug", () => {
+  it("styles an sg13g2 slug with the ihp-sg13g2 palette", async () => {
     render(
       <DetailPage
         layout={makeLayout({
@@ -237,10 +278,10 @@ describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forwa
       />,
     );
 
-    expect(openViewerAndGetSrcParams().get("pdk")).toBe("ihp-sg13g2");
+    expect(await openViewerFromDownloads()).toHaveAttribute("data-pdk-family", "ihp-sg13g2");
   });
 
-  it("omits the pdk param (rather than defaulting to sky130A) and logs a warning for an unrecognized slug prefix", () => {
+  it("passes no PDK family (rather than defaulting to sky130) and logs a warning for an unrecognized slug prefix", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     render(
@@ -253,11 +294,9 @@ describe("DetailPage GdsViewer PDK family derivation (issue #1060, carried forwa
       />,
     );
 
-    const params = openViewerAndGetSrcParams();
-    expect(params.has("pdk")).toBe(false);
-    expect(params.get("model")).toBe(
-      "https://klayout-tools.org/blocks/some-future-pdk-block/layout.gds",
-    );
+    const canvas = await openViewerFromDownloads();
+    expect(canvas).toHaveAttribute("data-pdk-family", "");
+    expect(canvas).toHaveAttribute("data-file-url", "/blocks/some-future-pdk-block/layout.gds");
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("some-future-pdk-block"));
 
     warnSpy.mockRestore();

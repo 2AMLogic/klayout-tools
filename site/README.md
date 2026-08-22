@@ -172,6 +172,44 @@ files outside its project root, so the `predev`/`prebuild` npm hooks run
 `site/public/blocks/<slug>/...` (git-ignored, regenerated every run) so they
 are served from `/blocks/<slug>/...`.
 
+### Embedded GDS viewer (Renders section + Downloads)
+
+Clicking any render thumbnail — or the Downloads section's "View in browser"
+button — opens `src/components/layout/GdsViewer.tsx`, a full-screen overlay
+that renders that block's **actual GDS**, in the browser, from
+klayout-tools.org itself (issues #943/#1284). The entry points are gated on
+the same condition as the raw download link (`downloadable === true &&
+layout_file`), so a block with no staged layout file has no click affordance
+at all.
+
+Nothing external is involved: no hosted viewer service, no WASM blob, no
+precomputed glTF/mesh artifact per block. The overlay lazily imports
+`GdsCanvas.tsx`, which `fetch`es the file `copy-renders.mjs` already stages
+at `/blocks/<slug>/<layout_file>` and draws it with `src/lib/gds/`:
+
+- `parseGds.ts` — dependency-free GDSII stream reader (BOUNDARY, PATH, BOX,
+  SREF, AREF, TEXT).
+- `flattenGds.ts` — resolves the SREF/AREF hierarchy into flat per-layer
+  shapes, bounded by explicit shape/depth caps.
+- `viewTransform.ts` — fit / zoom-about-cursor / drag-pan math.
+- `layerStyle.ts` + `layerStyles.generated.ts` — per-PDK layer colors and
+  names, extracted from each open PDK's **own** KLayout `.lyp` file by
+  `scripts/gen-gds-layer-styles.mjs`, so the in-browser view is styled the
+  way KLayout styles the same block when the Python pipeline renders its
+  per-layer PNGs. Regenerate after a PDK bump with
+  `node scripts/gen-gds-layer-styles.mjs` (needs a local PDK install; the
+  generated table is committed so site builds never depend on one).
+
+The PDK family is inferred from the block's slug prefix (`inferPdkFamily()`
+in `DetailPage.tsx`); an unrecognised prefix styles layers with a
+deterministic fallback hue rather than another PDK's palette. Issue #1285
+tracks carrying an explicit `pdk` field in `layout.json` instead of guessing.
+
+`GdsCanvas` is loaded through `React.lazy()`, so it (parser, flattener, and
+the ~27 KB of generated PDK tables) ships as its own chunk that a detail page
+only downloads when a visitor actually opens the viewer — verified by
+`dist/assets/GdsCanvas-*.js` being a separate chunk from the entry bundle.
+
 ### Waveform viewer (Signals section)
 
 When a block's `layout.json` has a `signals` field (see `LayoutSignals` in
@@ -362,6 +400,7 @@ site/
     stage-em-data.test.mjs
     sky130-models.NOTICE.txt  # Apache-2.0 attribution staged alongside model decks
     playground-perf.mjs  # perf harness: reproduces the spike's engine timing (issue #150)
+    gen-gds-layer-styles.mjs  # dev: regenerates src/lib/gds/layerStyles.generated.ts from PDK .lyp files
     prerender.mjs        # build: client + SSR Vite builds -> static dist/<route>/index.html
     html-template.mjs    # shared HTML injection helper (prerender.mjs + vite.config.ts's dev SSR)
   public/
@@ -384,6 +423,12 @@ site/
         ProvenancePanel.tsx   # solver/mesh provenance shown under each result
         emMath.ts             # pure helpers (S-parameters, resonance) + tests
         types.ts / index.ts
+      layout/               # embedded GDS viewer overlay (#943/#1284)
+        GdsViewer.tsx         # full-screen overlay chrome; lazily loads the renderer
+        GdsViewer.test.tsx
+        GdsCanvas.tsx         # fetch + parse + canvas render, pan/zoom/layer toggles
+        GdsCanvas.test.tsx
+        index.ts               # public re-exports
       field/                # reusable 3D mesh + scalar/vector field viewer (#841)
         FieldViewer.tsx
         fieldMath.ts          # pure helpers (mesh bounds, field ranges) + tests
@@ -416,6 +461,15 @@ site/
     lib/
       utils.ts             # shadcn's `cn` class-merging helper
       blockAssets.ts        # block-relative asset URL helper (renders/signals)
+      gds/                  # client-side GDSII reading + styling (#943/#1284)
+        parseGds.ts           # GDSII stream -> structures/elements
+        flattenGds.ts         # SREF/AREF hierarchy -> flat per-layer shapes
+        viewTransform.ts      # fit / zoom-about-cursor / pan math
+        layerStyle.ts         # (layer, datatype) -> PDK color + name, with fallback
+        layerStyles.generated.ts  # GENERATED from PDK .lyp files (see scripts/)
+        layerNames.ts         # PdkFamily + renders-map -> layer-name derivation
+        gdsFixture.ts         # test-only GDSII writer used by the suites below
+        *.test.ts              # incl. realBlocks.test.ts (KLayout-derived expectations)
       playground/           # client-side SPICE playground engine wrapper (#150)
         netlist.ts          # pure stimulus-params -> netlist assembly
         netlist.test.ts
