@@ -37,10 +37,17 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
   via this module's own `_merge_def_to_gds` producing a valid GDS) -- see
   the PR description for the full transcript; that manual run is not
   automated as a test here since it depends on Docker, which is not a
-  project dependency. The gf180mcu sibling (issue #637) has **not** had an
-  equivalent manual run: no `openroad`/Docker/volare and no gf180mcu
-  install were available in the environment that added it, so its live
-  proof is the gated test above, wherever that toolchain exists.
+  project dependency. **The gf180mcu sibling (issue #637) has now had its
+  own equivalent live run too** (issue #1331, 2026-08-22): `openroad
+  26Q3-1080-gab6fd26351` from the `openroad/orfs:latest` Docker image
+  against a real volare `gf180mcuC` install (`open_pdks
+  c6d73a35f524070e85faff4a6a9eef49553ebc2b`), floorplan through a full
+  detailed route with `route__drc_errors: 0` and 0 antenna-violating
+  nets/pins, followed by a real DEF->GDS merge producing a valid GDS. See
+  `docs/cli/place-and-route.md`'s "Live verification" section for the full
+  result, including the two findings that run surfaced (the 5LM variant
+  requirement encoded in `_find_real_pnr_variant` below, and the
+  `request.power`-dependent DRC outcome of the merged GDS).
 """
 
 from __future__ import annotations
@@ -5277,7 +5284,29 @@ def test_merge_def_to_gds_caps_measured_overhang_at_site_height(tmp_path):
 HAVE_OPENROAD = shutil.which("openroad") is not None
 
 
-def _find_real_pnr_variant(cell_library: str) -> tuple[str, str] | None:
+def _techlef_declares_layers(tlef_path: str, layers: tuple[str, ...]) -> bool:
+    """True when ``tlef_path`` declares a ``LAYER <name>`` for every entry in
+    ``layers`` (issue #1331).
+
+    A cheap textual scan rather than a LEF parse: the gate only needs to know
+    whether a metal name the request will reference exists in this variant's
+    stack at all, and every open_pdks tech LEF writes those declarations one
+    per line as ``LAYER <name>``."""
+    try:
+        with open(tlef_path, encoding="utf-8", errors="replace") as handle:
+            declared = {
+                line.split()[1]
+                for line in handle
+                if line.startswith("LAYER ") and len(line.split()) >= 2
+            }
+    except OSError:
+        return False
+    return all(layer in declared for layer in layers)
+
+
+def _find_real_pnr_variant(
+    cell_library: str, required_layers: tuple[str, ...] = ()
+) -> tuple[str, str] | None:
     """Search every install/variant `list_pdks()` discovers for one shipping
     a real ``cell_library`` liberty + tech/cell LEF + GDS view. Returns
     ``(root, variant)`` or ``None``.
@@ -5285,7 +5314,24 @@ def _find_real_pnr_variant(cell_library: str) -> tuple[str, str] | None:
     Parameterized by cell library (issue #637) so the same gate serves both
     the sky130hd and gf180mcu live worked examples -- the four asset paths
     it probes are exactly what `lef_files()`/`_resolve_liberty`/
-    `_resolve_gds_view` resolve, and none of them is PDK-family-specific."""
+    `_resolve_gds_view` resolve, and none of them is PDK-family-specific.
+
+    ``required_layers`` additionally requires the variant's ``__nom.tlef`` to
+    declare each named routing layer (issue #1331). Asset *presence* is not
+    sufficient for gf180mcu: a stock volare/open_pdks gf180mcu install ships
+    four sibling variants that differ **only** in metal-stack depth --
+    ``gf180mcuA`` is 3LM (``Metal1``..``Metal3``), ``gf180mcuB`` 4LM,
+    ``gf180mcuC``/``gf180mcuD`` 5LM -- and all four ship a complete
+    ``gf180mcu_fd_sc_mcu9t5v0`` liberty/LEF/GDS set. Without this check the
+    first variant sorted alphabetically (``gf180mcuA``) wins the gate, and
+    the run dies mid-flow in the ``place`` stage with
+    ``[ERROR PPL-0051] Layer Metal4 not found`` -- observed live against
+    ``openroad 26Q3-1080-gab6fd26351`` + volare
+    ``open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b``. The layers this
+    module's gf180mcu request actually references are the ORFS-sourced
+    ``Metal2``..``Metal5`` signal-routing range in
+    ``place_and_route._ROUTING_LAYER_RANGE`` plus the ``Metal3``/``Metal4``
+    IO layers below, i.e. a 5LM variant."""
     try:
         result = pdk_module.list_pdks()
     except Exception:
@@ -5295,21 +5341,31 @@ def _find_real_pnr_variant(cell_library: str) -> tuple[str, str] | None:
             lib_dir = os.path.join(
                 install["root"], variant["name"], "libs.ref", cell_library
             )
-            if all(
+            tlef = os.path.join("techlef", f"{cell_library}__nom.tlef")
+            if not all(
                 os.path.exists(os.path.join(lib_dir, sub))
                 for sub in (
                     "lib",
-                    os.path.join("techlef", f"{cell_library}__nom.tlef"),
+                    tlef,
                     os.path.join("lef", f"{cell_library}.lef"),
                     os.path.join("gds", f"{cell_library}.gds"),
                 )
             ):
-                return install["root"], variant["name"]
+                continue
+            if required_layers and not _techlef_declares_layers(
+                os.path.join(lib_dir, tlef), required_layers
+            ):
+                continue
+            return install["root"], variant["name"]
     return None
 
 
 _REAL_SKY130_PNR_VARIANT = _find_real_pnr_variant("sky130_fd_sc_hd")
-_REAL_GF180MCU_PNR_VARIANT = _find_real_pnr_variant(_GF180MCU_CELL_LIBRARY)
+#: gf180mcu needs a 5LM variant -- see `_find_real_pnr_variant`'s docstring.
+_REAL_GF180MCU_PNR_VARIANT = _find_real_pnr_variant(
+    _GF180MCU_CELL_LIBRARY,
+    required_layers=("Metal2", "Metal3", "Metal4", "Metal5"),
+)
 
 
 @pytest.mark.skipif(
@@ -5366,7 +5422,8 @@ def test_integration_real_openroad_gcd_worked_example(tmp_path, monkeypatch):
 @pytest.mark.skipif(
     _REAL_GF180MCU_PNR_VARIANT is None,
     reason=(
-        "no real gf180mcu_fd_sc_mcu9t5v0 LEF/liberty/GDS set resolves via list_pdks()"
+        "no real gf180mcu_fd_sc_mcu9t5v0 LEF/liberty/GDS set on a 5LM "
+        "(Metal1-Metal5) variant resolves via list_pdks()"
     ),
 )
 def test_integration_real_openroad_gcd_worked_example_gf180mcu(tmp_path, monkeypatch):

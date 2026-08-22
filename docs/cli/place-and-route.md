@@ -161,6 +161,84 @@ only two designs with a committed, reviewed fixture-regeneration recipe
 `modexp` fixture, and real `modexp`/fleet-canary validation is tracked
 separately (issue #1329).
 
+## Live verification
+
+Both supported standard-cell libraries have now been driven through this
+command end to end against a real `openroad` binary and a real PDK install.
+Neither run is reproducible in CI (see "CI" above); each is recorded here so
+a reader can tell which claims rest on a live tool run and which rest on
+stubbed tests.
+
+### `sky130_fd_sc_hd` (issue #425)
+
+`openroad/orfs` Docker image against a real volare-fetched `sky130A`
+install: the GCD worked example, floorplan through a full detailed route
+with 0 routing DRC violations, followed by a real DEF→GDS merge producing a
+valid GDS. Automated as
+`tests/test_place_and_route.py::test_integration_real_openroad_gcd_worked_example`,
+which is skipped unless both halves of the toolchain are present.
+
+### `gf180mcu_fd_sc_mcu9t5v0` (issues #637, #1331)
+
+Run 2026-08-22 with `openroad 26Q3-1080-gab6fd26351` (from
+`openroad/orfs:latest` via the wrapper recipe above) against a real volare
+`gf180mcuC` install (`open_pdks
+c6d73a35f524070e85faff4a6a9eef49553ebc2b`), on the same GCD worked example —
+`klt synthesize` → `klt place-and-route`, floorplan through a full detailed
+route. Automated as
+`tests/test_place_and_route.py::test_integration_real_openroad_gcd_worked_example_gf180mcu`;
+that test **passed**, not skipped, in this environment.
+
+**Routing result** (from the run's own `-metrics` dump): `route__drc_errors:
+0`, `flow__errors__count: 0`, `antenna__violating__nets: 0`,
+`antenna__violating__pins: 0`, 350 standard-cell instances over 382 nets on a
+186.045 um square die, and a valid merged GDS. This closes issue #637's "one
+real synthesized gf180mcu netlist reaches a routed GDS end-to-end" claim with
+an actual tool run rather than corrected configuration data alone.
+
+Two things that run surfaced, both of which a stubbed test could not have
+caught:
+
+**1. gf180mcu needs a 5LM variant — asset presence is not enough.** A stock
+volare/open_pdks gf180mcu install ships four sibling variants that differ
+**only** in metal-stack depth — `gf180mcuA` is 3LM (`Metal1`..`Metal3`),
+`gf180mcuB` 4LM, `gf180mcuC`/`gf180mcuD` 5LM — and all four ship a complete
+`gf180mcu_fd_sc_mcu9t5v0` liberty/LEF/GDS set. This command's gf180mcu
+signal-routing range is `Metal2-Metal5` (`_ROUTING_LAYER_RANGE`, tabulated
+under "Stage granularity and invocation shape" below) and the worked
+example's IO layers are `Metal3`/`Metal4`, so a 3LM variant dies in
+the `place` stage with `[ERROR PPL-0051] Layer Metal4 not found.` — verified
+directly against `gf180mcuA`. Pin `--pdk gf180mcuC` (or `gf180mcuD`) rather
+than letting variant discovery pick the alphabetically-first install.
+
+**2. A DRC-clean gf180mcu result requires `request.power`, which this
+command cannot currently emit a GDS for.** The routed GDS produced *without*
+`request.power` is not DRC-clean: `klt drc --deck gf180mcu` reports **19
+`nwell.space.1` violations**, every one an identical 0.260 um horizontal
+nwell gap — i.e. unfilled standard-cell row gaps, exactly the consequence the
+"Power delivery" section below already documents for omitting power
+delivery. Re-running the same design **with** `request.power` (gf180's own
+ORFS `pdn_grid_strategy_9t_6M.cfg` strap geometry, so `tapcell` +
+`pdngen` + `filler_placement` all run) routes just as cleanly
+(`route__drc_errors: 0`, 0 antenna violations, 697 filler and 88
+endcap/filltie instances placed) and **is `klt drc --deck gf180mcu` clean, 0
+violations** — but `klt place-and-route` raises instead of writing that GDS,
+because the DEF→GDS merge's DIEAREA bounding-box guard rejects it. gf180mcu
+standard cells deliberately draw geometry outside their LEF abutment box
+(every cell by 0.43/0.45 um; `gf180mcu_fd_sc_mcu9t5v0__endcap` by 2.93 um on
+its left), so a `tapcell`-placed endcap at the core edge pushes the merged
+bbox past DIEAREA even though every placement is strictly inside it. Tracked
+in **#1335**; the 0-violation DRC number above was obtained by re-running the
+merge with only that guard's own documented skip path taken.
+
+**LVS was not verified, and cannot be today.** `klt lvs` compares SPICE
+netlists, and nothing in `klt` converts this command's own as-built
+`verilog_path` into the matching SPICE reference (see "As-built netlist
+(`verilog_path`)" below and `docs/cli/extract.md`'s deferred-capability
+note). There is no
+failing LVS run to report — there is no available code path to run. Tracked
+in **#1336**.
+
 ## Stage granularity and invocation shape
 
 The contract names exactly four stages, in execution order:
