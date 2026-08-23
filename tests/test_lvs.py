@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -7822,6 +7823,96 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
     assert report["mismatch_count"] == 0
 
 
+#: The same design with power pins on the LAYOUT side only -- the real
+#: shape `klt extract --abstract-cells` produces against sky130/gf180mcu
+#: standard cells, whose own definitions draw in-cell `VPWR`/`VGND`/well-tie
+#: labels. The Verilog reference cannot carry them (`verilog_path` is
+#: written without `-include_pwr_gnd`), so this asymmetry is the normal
+#: case for this form, not an edge case.
+_GATE_LEVEL_LAYOUT_SPICE_WITH_POWER = """
+.subckt top in mid out VPWR VGND
+X1 in mid VGND VPWR mylib__inv_1
+X2 mid out VGND VPWR mylib__buf_1
+.ends
+.subckt mylib__inv_1 A Y VGND VPWR
+.ends
+.subckt mylib__buf_1 A Y VGND VPWR
+.ends
+"""
+
+_GATE_LEVEL_LIBRARY_SPICE_WITH_POWER = (
+    ".subckt mylib__inv_1 A Y VGND VPWR\n.ends\n"
+    ".subckt mylib__buf_1 A Y VGND VPWR\n.ends\n"
+)
+
+
+def test_run_lvs_gate_level_verilog_tolerates_layout_side_power_pins(tmp_path):
+    """The layout side carries `VPWR`/`VGND` pins and nets the Verilog
+    reference structurally cannot; the compare is still `"match"`.
+
+    This is the documented behaviour of `docs/cli/lvs.md`'s "No power/ground
+    pins" note (issue #1336) and the reason this form is usable at all
+    against a real `klt extract --abstract-cells` layout netlist: KLayout's
+    comparer matches the black-box cell circuits on their common,
+    name-matched signal pins and tolerates the layout's extra pins/nets,
+    rather than reporting a `pin.unmatched` per standard-cell instance.
+    """
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    assert "pin.unmatched" not in report["category_counts"]
+
+
+def test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable(tmp_path):
+    """The other side of the coin above, pinned deliberately: a layout whose
+    `VGND` pin is wired to the power rail still reports `"match"`.
+
+    A gate-level-Verilog reference has no power connectivity to contradict
+    the layout's, so this compare proves *signal* connectivity only. This
+    test exists so the limitation is a measured, enforced fact rather than a
+    prose caveat -- if a future change made power connectivity comparable,
+    this test fails and the claim in `docs/cli/lvs.md` must be updated with
+    it.
+    """
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    miswired = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VPWR mylib__inv_1"
+    )
+    layout_path = _write(tmp_path / "layout.spice", miswired)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
 def test_run_lvs_gate_level_verilog_reference_via_cdl_fallback(tmp_path):
     # `.cdl` (no `spice/` asset at all) -- exercises the fallback resolution
     # path, and gf180mcu's own real pin-naming convention (`I`/`ZN`).
@@ -7935,3 +8026,105 @@ def test_run_lvs_gate_level_verilog_pdk_not_found_errors(tmp_path):
     }
     with pytest.raises(LvsError, match="no supported-layout PDK install"):
         run_lvs(json.dumps(request))
+
+
+# --- real-PDK pin-order resolution ------------------------------------------ #
+#
+# The tests above pin pin-order *parsing* against `.subckt` header lines
+# copied verbatim out of real installs, which keeps them hermetic. These two
+# additionally exercise the real resolution path end to end --
+# `lvs._resolve_gate_level_pin_order_lookup` -> `pdk.find_pdk` ->
+# `libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}` -> the real file's
+# own bytes -- on any machine with a real volare/ciel install, and skip
+# cleanly where none is present (the same `list_pdks()`-search convention
+# `tests/test_synthesize.py`'s `_find_real_sky130_variant` established for
+# its own real-PDK integration tier). Issue #1336's acceptance criterion is
+# that pin order comes from the library, never a hardcoded table, for BOTH
+# supported standard-cell libraries -- and the two libraries disagree on
+# both pin names and pin order (`A ... Y` vs `I ZN ...`), so a hardcoded
+# table could not satisfy both.
+
+
+def _find_real_library_pin_order_variant(library: str) -> tuple[str, str] | None:
+    """Search every install/variant `list_pdks()` discovers for one shipping
+    a real `libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}` file.
+    Returns ``(root, variant)`` or ``None``."""
+    try:
+        result = pdk.list_pdks()
+    except Exception:
+        return None
+    for install in result["installs"]:
+        for variant in install["variants"]:
+            for asset, extension in (("spice", "spice"), ("cdl", "cdl")):
+                candidate = os.path.join(
+                    install["root"],
+                    variant["name"],
+                    "libs.ref",
+                    library,
+                    asset,
+                    f"{library}.{extension}",
+                )
+                if os.path.isfile(candidate):
+                    return install["root"], variant["name"]
+    return None
+
+
+_REAL_SKY130_HD_VARIANT = _find_real_library_pin_order_variant("sky130_fd_sc_hd")
+_REAL_GF180MCU_9T5V0_VARIANT = _find_real_library_pin_order_variant(
+    "gf180mcu_fd_sc_mcu9t5v0"
+)
+
+
+@pytest.mark.skipif(
+    _REAL_SKY130_HD_VARIANT is None,
+    reason="no real sky130_fd_sc_hd .spice/.cdl library resolves via list_pdks()",
+)
+def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
+    root, variant = _REAL_SKY130_HD_VARIANT
+    lookup = lvs._resolve_gate_level_pin_order_lookup("sky130_fd_sc_hd", variant, root)
+    # sky130's own declared order for a 1x inverter: signal `A`, the four
+    # supply/well pins, then the output `Y` -- alphabetical, with the
+    # supplies interleaved between the signal pins rather than grouped at
+    # either end, which is exactly why it cannot be guessed.
+    assert lookup("sky130_fd_sc_hd__inv_1") == ["A", "VGND", "VNB", "VPB", "VPWR", "Y"]
+    # A sequential cell too, so the assertion is not resting on one
+    # trivially-small cell -- and it shows the same alphabetical
+    # interleaving (`Q` lands *after* all four supplies, not next to `D`).
+    assert lookup("sky130_fd_sc_hd__dfxtp_1") == [
+        "CLK",
+        "D",
+        "VGND",
+        "VNB",
+        "VPB",
+        "VPWR",
+        "Q",
+    ]
+    # An unresolvable cell type returns None -- the signal
+    # `convert_gate_level_verilog` turns into its own hard error.
+    assert lookup("sky130_fd_sc_hd__not_a_real_cell") is None
+
+
+@pytest.mark.skipif(
+    _REAL_GF180MCU_9T5V0_VARIANT is None,
+    reason=(
+        "no real gf180mcu_fd_sc_mcu9t5v0 .spice/.cdl library resolves via list_pdks()"
+    ),
+)
+def test_real_gf180mcu_library_resolves_pin_order_from_the_installed_file():
+    root, variant = _REAL_GF180MCU_9T5V0_VARIANT
+    lookup = lvs._resolve_gate_level_pin_order_lookup(
+        "gf180mcu_fd_sc_mcu9t5v0", variant, root
+    )
+    # gf180mcu's own convention differs from sky130's on BOTH axes: pin
+    # names (`I`/`ZN`, not `A`/`Y`) and order (signals first, supplies
+    # last). Resolving both libraries correctly from one code path is the
+    # "never hardcoded" acceptance criterion.
+    assert lookup("gf180mcu_fd_sc_mcu9t5v0__inv_1") == [
+        "I",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS",
+    ]
+    assert lookup("gf180mcu_fd_sc_mcu9t5v0__not_a_real_cell") is None

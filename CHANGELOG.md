@@ -14,7 +14,6 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-<<<<<<< HEAD
 - `klt place-and-route`'s post-merge DIEAREA bounding-box guard (issue
   #1090) no longer rejects every gf180mcu `request.power` run (issue
   #1335). open_pdks' gf180mcu standard-cell library deliberately draws GDS
@@ -44,7 +43,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   existing `libs_ref` resolution (`reference.pdk`/`reference.pdk_root`
   mirror `klt extract`'s `--pdk`/`--pdk-root`), never a hardcoded table. See
   `docs/cli/lvs.md`'s "Digital gate-level LVS" section for the full
-  contract, including the disclosed no-power-pins limitation.
+  contract. `scripts/place-and-route-smoke.sh` (the `workflow_dispatch`
+  place-and-route smoke job) gains a matching second LVS stage per design —
+  routed GDS via `klt extract --abstract-cells` against that same run's own
+  `verilog_path` — which its earlier revisions documented as impossible.
+  **Scope of the verdict:** a layout side carrying `VPWR`/`VGND` pins (what
+  `klt extract --abstract-cells` normally produces) compares cleanly, but
+  because `verilog_path` carries no power connectivity at all, a power-net
+  defect is *invisible* to this form — it establishes signal connectivity
+  only, never power-grid correctness.
 
 - `klt signoff` recognizes a new `"power"` evidence kind (issue #1321, Phase
   2 of epic #712): a `klt power --format json` envelope, detected

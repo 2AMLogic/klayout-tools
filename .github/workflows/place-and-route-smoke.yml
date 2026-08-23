@@ -10,9 +10,11 @@ name: Place-and-route smoke (LVS/DRC)
 # full open_pdks-layout sky130A PDK, then runs the pipeline through
 # scripts/place-and-route-smoke.sh -- which asserts `klt lvs`'s and `klt
 # drc`'s own JSON `status`/`violation_count`/`error_count` fields, not just
-# that the processes exited 0. See that script's own header comment for the
-# LVS self-compare methodology and why it does not (yet) compare against
-# `klt place-and-route`'s `verilog_path`.
+# that the processes exited 0. See that script's own header comment for both
+# LVS methodologies it runs per design: the routed-GDS self-compare, and
+# (issue #1336) the gate-level compare against `klt place-and-route`'s own
+# as-built `verilog_path`, read through `klt lvs`'s
+# `reference.form: "gate-level-verilog"`.
 #
 # Scoped to `gcd`/`mult8` only -- the only two designs with a committed,
 # reviewed fixture-regeneration recipe

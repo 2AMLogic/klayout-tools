@@ -23,16 +23,26 @@
 # extraction at macro scale does not silently drop/misconnect devices, and
 # is a real `klt lvs status` assertion, not a "did not error" check.
 #
-# A true gate-level LVS against the as-built (`verilog_path`) netlist is
-# NOT used here: `klt lvs` compares SPICE netlists only, and converting
-# `verilog_path`'s gate-level Verilog into a matching SPICE reference is a
-# documented, still-deferred capability -- see docs/cli/place-and-route.md's
-# "As-built netlist (verilog_path)" section, particularly its closing note,
-# before changing this script to use `verilog_path` directly. That section
-# also documents why comparing against `klt synthesize`'s PRE-route netlist
-# produces mismatches that are not real defects (CTS buffers, timing-repair
-# resizes, antenna diodes all post-date synthesis) -- so this script does
-# not do that either.
+# Gate-level LVS methodology (issue #1336): a SECOND, independent LVS stage
+# runs per design, against the as-built (`verilog_path`) gate-level Verilog
+# netlist `klt place-and-route` itself wrote -- the compare the self-compare
+# above cannot make, because a self-compare's two sides come from the same
+# artifact and therefore cannot catch a layout that disagrees with the
+# netlist it was built from. The layout side is `klt extract
+# --abstract-cells 'sky130_fd_sc_hd__*'` (issue #620: every standard cell a
+# pin-only black box); the reference side is `verilog_path` itself, read
+# through `klt lvs`'s `reference.form: "gate-level-verilog"` (issue #1336),
+# which converts it to matching black-box SPICE in-process. Before #1336
+# this stage was impossible -- `klt lvs` compares SPICE netlists only and
+# nothing converted the Verilog -- which is why this script's earlier
+# revisions documented it as deferred.
+#
+# Comparing against `klt synthesize`'s PRE-route netlist is still NOT done,
+# and is not what this stage is: docs/cli/place-and-route.md's "As-built
+# netlist (verilog_path)" section documents why a pre-route netlist produces
+# mismatches that are not real defects (CTS buffers, timing-repair resizes,
+# antenna diodes all post-date synthesis). `verilog_path` is written from
+# the same linked design `write_def` dumped, so it has no such divergence.
 #
 # Requires, on $PATH:
 #   - a real `yosys` (`klt synthesize`)
@@ -194,6 +204,55 @@ JSON
         die "$DESIGN: klt lvs status='$LVS_STATUS' error_count=$LVS_ERROR_COUNT (expected status='match' error_count=0)"
     fi
 
+    # --- gate-level LVS against the as-built netlist (issue #1336) --------- #
+    VERILOG_PATH="$(jq -r '.verilog_path' "$PAR_JSON")"
+    [[ -n "$VERILOG_PATH" && "$VERILOG_PATH" != "null" ]] || die "$DESIGN: place-and-route did not report a verilog_path at stage_reached='route'"
+    [[ -f "$VERILOG_PATH" ]] || die "$DESIGN: place-and-route's reported verilog_path '$VERILOG_PATH' does not exist"
+
+    echo "--> klt extract $DESIGN (gate-level layout side, standard cells abstracted)"
+    GATE_LAYOUT_SPICE="$SCRATCH/$DESIGN.gate.spice"
+    GATE_EXTRACT_JSON="$SCRATCH/gate_extract_report.json"
+    # `--abstract-cells` makes every standard cell a pin-only black box
+    # (issue #620) so the layout side has the same shape as the converted
+    # Verilog reference -- comparing a real-devices extraction against a
+    # gate-level reference could never be clean. `--def-net-names` (issue
+    # #951) recovers the design's own DEF net names from the routed GDS, so
+    # the layout's top-level boundary pins carry the same names the Verilog
+    # module's ports do.
+    run_klt "$SCRATCH" extract "$GDS_PATH" --deck sky130 \
+        --abstract-cells 'sky130_fd_sc_hd__*' --def-net-names \
+        -o "$GATE_LAYOUT_SPICE" --format json >"$GATE_EXTRACT_JSON"
+    GATE_EXTRACT_TOP="$(jq -r '.top' "$GATE_EXTRACT_JSON")"
+    [[ -f "$GATE_LAYOUT_SPICE" ]] || die "$DESIGN: klt extract --abstract-cells did not write $GATE_LAYOUT_SPICE"
+    ABSTRACTED_INSTANCES="$(jq -r '[.abstracted_cells[].instance_count] | add // 0' "$GATE_EXTRACT_JSON")"
+    [[ "$ABSTRACTED_INSTANCES" -gt 0 ]] || die "$DESIGN: klt extract --abstract-cells abstracted 0 instances -- the layout side would be an empty gate-level netlist (see $GATE_EXTRACT_JSON)"
+
+    cat >"$SCRATCH/gate_lvs_request.json" <<JSON
+{
+  "schema": "klt.lvs.request/1",
+  "engine": "klayout",
+  "layout": { "netlist": "$GATE_LAYOUT_SPICE", "top": "$GATE_EXTRACT_TOP" },
+  "reference": {
+    "netlist": "$VERILOG_PATH",
+    "top": "$DESIGN",
+    "form": "gate-level-verilog",
+    "library": "sky130_fd_sc_hd"
+  }
+}
+JSON
+
+    echo "--> klt lvs $DESIGN (gate-level: routed GDS vs. as-built verilog_path)"
+    GATE_LVS_JSON="$SCRATCH/gate_lvs_report.json"
+    run_klt "$SCRATCH" lvs gate_lvs_request.json --format json >"$GATE_LVS_JSON"
+
+    GATE_LVS_STATUS="$(jq -r '.status' "$GATE_LVS_JSON")"
+    GATE_LVS_ERROR_COUNT="$(jq -r '.error_count' "$GATE_LVS_JSON")"
+    if [[ "$GATE_LVS_STATUS" != "match" || "$GATE_LVS_ERROR_COUNT" != "0" ]]; then
+        echo "$DESIGN: klt lvs (gate-level) report:" >&2
+        jq '.' "$GATE_LVS_JSON" >&2 || true
+        die "$DESIGN: gate-level klt lvs status='$GATE_LVS_STATUS' error_count=$GATE_LVS_ERROR_COUNT (expected status='match' error_count=0)"
+    fi
+
     echo "--> klt drc $DESIGN (merged routed GDS)"
     DRC_JSON="$SCRATCH/drc_report.json"
     run_klt "$SCRATCH" drc "$GDS_PATH" --deck sky130 --format json >"$DRC_JSON"
@@ -206,7 +265,7 @@ JSON
         die "$DESIGN: klt drc status='$DRC_STATUS' violation_count=$DRC_VIOLATION_COUNT (expected status='clean' violation_count=0)"
     fi
 
-    echo "$DESIGN: OK -- place-and-route reached 'route', LVS status='match' error_count=0, DRC status='clean' violation_count=0"
+    echo "$DESIGN: OK -- place-and-route reached 'route', LVS status='match' error_count=0 (self-compare AND gate-level vs. verilog_path), DRC status='clean' violation_count=0"
 
     rm -rf "$SCRATCH"
     trap - EXIT

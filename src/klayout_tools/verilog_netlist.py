@@ -48,12 +48,18 @@ with or without `request.power` -- there is nothing in the Verilog to
 recover them from. Each stub's declared pin list is therefore the *signal*
 subset of the real PDK pin order: whichever of that cell type's real pins
 actually appear in at least one Verilog instance connection across the
-whole netlist, in the PDK's own declared relative order. A caller comparing
-against a layout-side abstraction that *does* carry power pins (e.g. an
-in-cell-label or LEF-macro abstraction with `VPWR`/`VGND` pins) will see
-those flagged as `pin.unmatched` on the reference side -- a real, disclosed
-limitation of Verilog-derived references, not a defect in this converter
-(see `docs/cli/lvs.md`).
+whole netlist, in the PDK's own declared relative order.
+
+A layout-side abstraction that *does* carry power pins (which `klt extract
+--abstract-cells` normally will) still compares cleanly: KLayout's comparer
+matches these black-box cell circuits on their common, name-matched signal
+pins and tolerates the layout's extra pins and extra power nets (measured
+on a real routed sky130 `gcd`: `status: "match"`, no `pin.unmatched`). The
+real, disclosed cost is the other side of that coin -- **a power-net defect
+is invisible to a Verilog-derived compare**, since the reference has no
+power connectivity to contradict it. See `docs/cli/lvs.md`'s "No
+power/ground pins" note; power-grid correctness belongs to `klt power`/`klt
+drc`, not here.
 
 **Deliberately narrow, deliberately loud** (mirrors
 `klayout_tools.netlist_normalize`'s own discipline for the sibling

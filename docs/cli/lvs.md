@@ -318,20 +318,47 @@ netlist, but the reference side had no code path at all. Setting
 plain-element-shaped SPICE first, exactly like `"subckt-call"` converts a
 schematic flow's simulation-form SPICE.
 
+**The layout side must be abstracted too.** Both sides of this compare
+describe a standard cell as a pin-only black box, so the layout netlist has
+to come from `klt extract --abstract-cells`, not a default extraction — a
+default extraction recognises the real transistors inside every cell and
+would compare thousands of real devices against device-less stubs, which
+can never be clean. The full worked sequence, on a `klt place-and-route`
+result (this is exactly what `scripts/place-and-route-smoke.sh` runs per
+design, and what was measured live for `gcd` in issue #1336):
+
+```bash
+# 1. place-and-route -> routed GDS (gds_path) + as-built netlist (verilog_path)
+klt place-and-route par_request.json --format json >par.json
+
+# 2. layout side: every standard cell a pin-only black box, with the
+#    design's own DEF net names recovered so top-level pin names line up
+klt extract "$(jq -r .gds_path par.json)" --deck sky130 \
+  --abstract-cells 'sky130_fd_sc_hd__*' --def-net-names \
+  -o gcd.gate.spice --format json >extract.json
+
+# 3. compare against the same run's own verilog_path
+klt lvs lvs_request.json --format json
+```
+
 ```json
 {
-  "layout": {
-    "file": "gcd.gds",
-    "deck": "sky130",
-    "top_cell_pins": true
-  },
+  "layout": { "netlist": "gcd.gate.spice", "top": "gcd" },
   "reference": {
-    "netlist": "gcd.v",
+    "netlist": ".klt/place-and-route/gcd.v",
+    "top": "gcd",
     "form": "gate-level-verilog",
     "library": "sky130_fd_sc_hd"
   }
 }
 ```
+
+For `gf180mcu`, the only changes are the deck and the library — `--deck
+gf180mcu --abstract-cells 'gf180mcu_fd_sc_mcu9t5v0__*'` on the layout side
+and `"library": "gf180mcu_fd_sc_mcu9t5v0"` on the reference side. Nothing
+else in the request differs: the pin names and pin order that library uses
+(`I`/`ZN` and signals-before-supplies, versus sky130's `A`/`Y` and
+alphabetical interleaving) are read out of its own `.spice`/`.cdl` file.
 
 `reference.library` (required for this form) names the standard-cell
 library (e.g. `"sky130_fd_sc_hd"`, `"gf180mcu_fd_sc_mcu9t5v0"`) whose real
@@ -354,19 +381,35 @@ distinct instantiated cell type — the same shape `klt extract
 sides describe a standard cell as a pin-only black box rather than a real-
 devices-vs-black-box mismatch that could never be clean.
 
-**No power/ground pins.** `docs/cli/place-and-route.md`'s "As-built
-netlist" section documents that `verilog_path` is written without
-`-include_pwr_gnd`, so it never carries `VPWR`/`VGND`/well-tie connections
-— there is nothing in the Verilog to recover them from. Each converted
-stub's declared pin list is therefore the real library pin order's
-*signal-only* subset. A layout-side abstraction that *does* carry power
-pins (e.g. an in-cell-label or `--abstract-cell-lef` abstraction with
-`VPWR`/`VGND` pins) will report those as `pin.unmatched` on the reference
-side for every standard-cell instance — a real, disclosed limitation of a
-Verilog-derived reference, not a defect in the conversion. Narrow the
-layout-side pin resolution to signal pins only (e.g. a LEF macro/in-cell
-label set that does not declare power pins) for a clean compare, or expect
-and filter the resulting `pin.unmatched` entries.
+**No power/ground pins — this compare is signal-connectivity only.**
+`docs/cli/place-and-route.md`'s "As-built netlist" section documents that
+`verilog_path` is written without `-include_pwr_gnd`, so it never carries
+`VPWR`/`VGND`/well-tie connections — there is nothing in the Verilog to
+recover them from, and this converter deliberately does not invent them.
+Each converted stub's declared pin list is therefore the real library pin
+order's *signal-only* subset.
+
+A layout side that *does* carry power pins (which `klt extract
+--abstract-cells` normally will, since sky130's and gf180mcu's own cells
+draw in-cell `VPWR`/`VGND`/well-tie labels) still compares **cleanly**:
+KLayout's comparer matches the black-box cell circuits on their common,
+name-matched signal pins and tolerates the layout's extra pins and extra
+power nets — measured on the real routed `gcd` sequence above (506
+abstracted `sky130_fd_sc_hd` instances): `status: "match"`,
+`mismatch_count: 0`, with no `pin.unmatched` entry. You
+do **not** need to narrow the layout-side pin resolution to signal pins to
+get a verdict.
+
+What that costs is real and must not be misread: **a power-net defect is
+invisible to this compare**. A standard cell whose `VGND` pin is wired to
+the power rail in the layout still reports `status: "match"`, because the
+reference has no power connectivity to contradict it (verified directly —
+see `tests/test_lvs.py`'s
+`test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable`). A
+gate-level-Verilog reference proves the routed layout implements the
+netlist's *signal* connectivity; power-grid correctness is a separate
+check (`klt power`'s IR-drop/EM analysis, `klt drc`'s deck rules), not
+something this form can or claims to establish.
 
 **Deliberately narrow, deliberately loud**, mirroring `"subckt-call"`'s own
 discipline: only the constructs a flattened, technology-mapped netlist
