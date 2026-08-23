@@ -73,6 +73,7 @@ def test_cell_config_signal_roles_match_family(slug):
         assert pin in cfg.ports
 
 
+@_SKIP_NO_NETLISTS
 @pytest.mark.parametrize("slug", ALL_SLUGS)
 def test_build_request_shape(slug):
     cfg = gs.CELL_CONFIGS[slug]
@@ -90,6 +91,7 @@ def test_build_request_shape(slug):
         assert "\nVdd vdd_net 0 DC {vdd}" in netlist_text
 
 
+@_SKIP_NO_NETLISTS
 def test_gf180_cells_get_documented_device_substitution():
     for slug in ALL_SLUGS:
         cfg = gs.CELL_CONFIGS[slug]
@@ -106,6 +108,7 @@ def test_netlists_available_false_for_missing_root(tmp_path, monkeypatch):
     assert gs.netlists_available() is False
 
 
+@_SKIP_NO_NETLISTS
 @pytest.mark.parametrize("slug", ALL_SLUGS)
 def test_corner_matrix_is_extremes_plus_nominal(slug):
     """3 process x (4 PVT extremes + 1 nominal point) = 15 corners, with the
@@ -134,6 +137,7 @@ def test_corner_matrix_is_extremes_plus_nominal(slug):
         assert point.supply_v["vdd"] != round(cfg.vdd_nominal, 4)
 
 
+@_SKIP_NO_NETLISTS
 @pytest.mark.parametrize("slug", ALL_SLUGS)
 def test_request_captures_waveforms_for_the_viewer(slug):
     """Issue #100's viewer needs real waveform artifacts, so the sweep must

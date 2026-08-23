@@ -170,6 +170,22 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
+4. **Regenerate the deck history table** now that the new tag exists (the
+   generator can only see tags that have already been pushed — see
+   `docs/cli/deck.md`'s "Regenerating" section):
+
+   ```bash
+   python scripts/generate_deck_history.py
+   git add src/klayout_tools/decks/_history.json
+   git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
+   git push origin main
+   ```
+
+   Skipping this step leaves `src/klayout_tools/decks/_history.json` stale
+   relative to `git tag`, which fails
+   `tests/test_deck_history.py::test_checked_in_history_table_covers_every_release`
+   on the next `main` checkout.
+
 ## Verifying a release
 
 - Watch the run under the repo's **Actions** tab (`Publish to PyPI` workflow).
@@ -185,3 +201,5 @@ Let `X.Y.Z` be the new version.
 - [ ] Bump commit merged to `main` via a PR.
 - [ ] Annotated tag `vX.Y.Z` created on the merged commit on `main`.
 - [ ] `git push origin vX.Y.Z` — confirm `publish.yml` runs and succeeds.
+- [ ] `src/klayout_tools/decks/_history.json` regenerated
+      (`python scripts/generate_deck_history.py`) and committed to `main`.

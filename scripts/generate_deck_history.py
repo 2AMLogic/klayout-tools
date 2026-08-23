@@ -52,9 +52,14 @@ DECKS_DIR = REPO_ROOT / "src" / "klayout_tools" / "decks"
 HISTORY_PATH = DECKS_DIR / "_history.json"
 
 #: Deck modules are plain per-PDK sibling files under decks/ -- anything
-#: that isn't the package init or an underscore-prefixed data/private file
-#: (like this script's own output, `_history.json`) is a deck module.
-_SKIP_MODULES = {"__init__.py"}
+#: that isn't the package init, a non-deck support module colocated in the
+#: same directory, or an underscore-prefixed data/private file (like this
+#: script's own output, `_history.json`) is a deck module. `history.py` is
+#: this feature's own resolver module (see its docstring), not a per-PDK
+#: rule table, so it must be excluded the same way `decks/__init__.py`'s
+#: `deck_names()` excludes it from the *live* registry -- otherwise it gets
+#: hashed and recorded as a bogus "history" deck (see issue #1338).
+_SKIP_MODULES = {"__init__.py", "history.py"}
 
 _VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 

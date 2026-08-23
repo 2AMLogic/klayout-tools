@@ -405,10 +405,13 @@ def test_cli_info_unknown_deck_error_envelope(capsys):
 
 def test_checked_in_history_table_covers_every_release():
     """Sanity check on the real, generated table -- not the synthetic
-    fixture above. Every known deck must have an entry for every known
-    release (the "one entry per deck per release" invariant
-    `scripts/generate_deck_history.py` and `resolve_deck`'s content-hash
-    "newest wins" behavior both depend on)."""
+    fixture above. Every deck must have an entry for every release from the
+    one it first shipped in onward (the "one entry per deck per release"
+    invariant `scripts/generate_deck_history.py` and `resolve_deck`'s
+    content-hash "newest wins" behavior both depend on) -- a deck is allowed
+    to be *absent* from releases that predate it (e.g. `sg13g2`, first
+    shipped in v0.3.0; see `history.py`'s "a deck added after the last tag"
+    note), but once present it must never disappear from a later release."""
     import subprocess
     from pathlib import Path
 
@@ -422,12 +425,25 @@ def test_checked_in_history_table_covers_every_release():
     assert tags, "expected at least one release tag in the checked-in table"
     assert decks, "expected at least one deck in the checked-in table"
 
+    seen_so_far: set[str] = set()
     for tag in tags:
         decks_at_tag = {e["deck"] for e in entries if e["git_tag"] == tag}
-        assert decks_at_tag == set(decks), (
-            f"{tag} is missing an entry for one of {decks} -- rerun "
+        assert decks_at_tag, (
+            f"{tag} has no deck entries at all -- rerun "
             "scripts/generate_deck_history.py"
         )
+        missing = seen_so_far - decks_at_tag
+        assert not missing, (
+            f"{tag} is missing {sorted(missing)}, present in an earlier "
+            "release -- a deck must never disappear from the table once "
+            "shipped; rerun scripts/generate_deck_history.py"
+        )
+        seen_so_far |= decks_at_tag
+
+    assert seen_so_far == set(decks), (
+        "the newest release does not include every deck ever recorded in "
+        "the table -- rerun scripts/generate_deck_history.py"
+    )
 
     # The table is a well-formed, up-to-date reflection of *tagged* history
     # -- it need not (and for an unreleased dev checkout, generally won't)
