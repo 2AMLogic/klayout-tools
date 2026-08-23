@@ -338,6 +338,74 @@ PEX_PASS_ENVELOPE = {
 
 PEX_FAIL_ENVELOPE = {**PEX_PASS_ENVELOPE, "status": "fail", "passed": 2, "failed": 1}
 
+#: `klt power` (issues #844/#845/#846, Epic #712 Phase 1) JSON report shape
+#: -- hand-built here exactly like every other kind's fixture (see
+#: docs/cli/power.md's JSON schema). Unlike every kind above, it carries no
+#: top-level `status` field and no `provenance` block at all; `klt signoff`
+#: (issue #1321, Phase 2 of epic #712) derives pass/fail from `em_verdict`
+#: instead -- see signoff.py's "`klt power` (IR-drop/EM) evidence ingestion"
+#: docstring section.
+POWER_PASS_ENVELOPE = {
+    "schema_version": 1,
+    "file": "routed.gds",
+    "spec": "power.json",
+    "power_nets": ["VPWR", "VGND"],
+    "networks": [
+        {
+            "net": "VPWR",
+            "island_count": 1,
+            "node_count": 2,
+            "edge_count": 1,
+            "islands": [],
+        }
+    ],
+    "node_count": 2,
+    "edge_count": 1,
+    "island_count": 1,
+    "ir_drop_map": {"worst_case": {"droop_mv": 12.5}, "nets": []},
+    "worst_case_droop_mv": 12.5,
+    "em_verdict": {
+        "status": "pass",
+        "checked_edge_count": 1,
+        "unchecked_edge_count": 0,
+        "fail_count": 0,
+        "worst_case": None,
+        "nets": [],
+    },
+    "warnings": [],
+}
+
+#: A checked edge exceeded its declared current-density limit -- the
+#: rolled-up `em_verdict.status` is `"fail"`.
+POWER_EM_FAIL_ENVELOPE = {
+    **POWER_PASS_ENVELOPE,
+    "em_verdict": {
+        **POWER_PASS_ENVELOPE["em_verdict"],
+        "status": "fail",
+        "fail_count": 1,
+    },
+}
+
+#: No edge in the whole spec had both a declared current limit and a solved
+#: current, so nothing was actually EM-verified -- rolled-up `"not_checked"`.
+POWER_EM_NOT_CHECKED_ENVELOPE = {
+    **POWER_PASS_ENVELOPE,
+    "em_verdict": {
+        **POWER_PASS_ENVELOPE["em_verdict"],
+        "status": "not_checked",
+    },
+}
+
+#: A spec declaring neither `pads` nor `current_model` runs extraction only
+#: -- no IR-drop solve at all, so both `ir_drop_map`/`worst_case_droop_mv`
+#: and `em_verdict` are `null` (docs/cli/power.md).
+POWER_NO_SOLVE_ENVELOPE = {
+    **POWER_PASS_ENVELOPE,
+    "ir_drop_map": None,
+    "worst_case_droop_mv": None,
+    "em_verdict": None,
+}
+
 #: "generic" (issue #1152) -- an opt-in, non-`klt`-native evidence envelope:
 #: the ingestion path for T1 item 8 ("Characterization report"), the one
 #: item whose own checklist text names no specific `klt` verb. Classified
@@ -511,6 +579,86 @@ def test_error_envelope_never_passes(tmp_path):
     assert check["provenance"] is None
     assert check["detail"]["command"] == "drc"
     assert check["detail"]["message"] == "file not found: missing.gds"
+
+
+# --------------------------------------------------------------------------- #
+# "power" evidence kind (issue #1321, Phase 2 of epic #712)
+# --------------------------------------------------------------------------- #
+
+
+def test_power_em_pass_check_passes(tmp_path):
+    """`em_verdict.status == "pass"` -- a static IR-drop solve ran and every
+    EM-checked edge stayed under its declared current-density limit."""
+    path = _write(tmp_path, "power.json", POWER_PASS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["status"] is None  # klt power has no top-level status field
+    assert check["passed"] is True
+    assert check["detail"]["worst_case_droop_mv"] == 12.5
+    assert check["detail"]["em_verdict_status"] == "pass"
+    assert check["detail"]["em_verdict_fail_count"] == 0
+    assert check["detail"]["em_verdict_checked_edge_count"] == 1
+    assert check["provenance"] is None
+
+
+def test_power_em_fail_check_fails(tmp_path):
+    """`em_verdict.status == "fail"` -- a checked edge exceeded its declared
+    current-density limit."""
+    path = _write(tmp_path, "power.json", POWER_EM_FAIL_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["passed"] is False
+    assert check["detail"]["em_verdict_status"] == "fail"
+    assert check["detail"]["em_verdict_fail_count"] == 1
+
+
+def test_power_em_not_checked_does_not_pass(tmp_path):
+    """`em_verdict.status == "not_checked"` -- nothing in the spec had both a
+    declared current limit and a solved current, so nothing was actually
+    verified; this must not be treated as a pass."""
+    path = _write(tmp_path, "power.json", POWER_EM_NOT_CHECKED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["passed"] is False
+
+
+def test_power_no_solve_does_not_pass(tmp_path):
+    """A spec declaring neither `pads` nor `current_model` runs extraction
+    only -- `em_verdict` is `null`, and a missing verdict must not be
+    fabricated into a pass."""
+    path = _write(tmp_path, "power.json", POWER_NO_SOLVE_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["passed"] is False
+    assert check["detail"]["worst_case_droop_mv"] is None
+    assert check["detail"]["em_verdict_status"] is None
+
+
+def test_power_evidence_excluded_from_provenance_consistency(tmp_path):
+    """A `klt power` envelope carries no `provenance` block at all -- it
+    must never participate in (or be able to trigger) the cross-check, the
+    same way an unprovenanced `klt yield`/`generic` envelope doesn't."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    power_path = _write(tmp_path, "power.json", POWER_PASS_ENVELOPE)
+
+    result = build_signoff([drc_path, power_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["status"] == "pass"
 
 
 # --------------------------------------------------------------------------- #
@@ -802,8 +950,8 @@ def test_no_sources_raises():
 
 
 def test_valid_json_matching_no_recognized_kind_still_raises(tmp_path):
-    """AC: a file that is valid JSON but matches none of the seven kinds
-    (six native + generic) still raises SignoffError naming the mismatch --
+    """AC: a file that is valid JSON but matches none of the eight kinds
+    (seven native + generic) still raises SignoffError naming the mismatch --
     unchanged behavior."""
     path = _write(
         tmp_path,
@@ -1538,6 +1686,58 @@ def test_unprovenanced_generic_evidence_cannot_satisfy_a_pinned_content_hash(tmp
     assert item_8["status"] == "unmet"
     assert item_8["reason"] == "stale_evidence"
     assert item_8["citation"] is None
+
+
+# --------------------------------------------------------------------------- #
+# "power" evidence never satisfies any tier-report item (issue #1321)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+def test_power_evidence_never_satisfies_any_tier_item(tmp_path, item_id):
+    """`docs/design-evidence-tiers.md`'s T1 checklist has no item for
+    power-grid IR-drop/EM evidence -- unlike "generic" (scoped to item 8), a
+    genuinely passing `klt power` citation must render "unmet"/"wrong_kind"
+    for every item, including item 8, never a borrowed pass."""
+    power_path = _write(tmp_path, "power.json", POWER_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): power_path}))
+
+    item = next(item for item in result["items"] if item["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+def test_command_evidence_power_wrong_kind_renders_unmet(monkeypatch):
+    """The restriction applies to command-backed evidence exactly like
+    file-backed evidence -- a `klt power` invocation cited for any item
+    still renders "unmet", even though the run itself passed."""
+
+    def fake_run(command, **kwargs):
+        return fake_completed(returncode=0, stdout=json.dumps(POWER_PASS_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"3": {"command": ["klt", "power", "routed.gds", "power.json"]}}
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "wrong_kind"
+    assert item_3["citation"] is None
+
+
+def test_no_backing_power_evidence_renders_unmet_never_assumed_met():
+    result = build_tier_report(_manifest(evidence={}))
+
+    for item_id in range(1, 11):
+        item = next(item for item in result["items"] if item["id"] == item_id)
+        assert item["status"] == "unmet"
+        assert item["citation"] is None
 
 
 def test_generic_evidence_with_matching_provenance_content_hash_renders_met(tmp_path):

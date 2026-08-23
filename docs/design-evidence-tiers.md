@@ -209,6 +209,26 @@ every block.
     and how to reproduce every result; a license; CI that at minimum
     keeps the harness and evidence formats valid.
 
+## Power/IR-drop + EM evidence (not yet a T1 item)
+
+`klt power` (Epic #712, issues #844/#845/#846 —
+[`docs/cli/power.md`](cli/power.md)) reports a routed design's static
+IR-drop map (`worst_case_droop_mv`) and a per-net electromigration (EM)
+current-density verdict (`em_verdict`). None of the T1 items above name
+power-grid IR-drop/EM evidence — it is orthogonal to the DRC/LVS/corner/
+Monte-Carlo/post-layout checklist, and extending the itemized T1 list to
+cover it is a separate, larger decision this doc does not make yet.
+
+`klt signoff` (issue #1321, Phase 2 of epic #712) recognises a `klt power`
+JSON envelope as a `"power"`-kind check **in envelope-aggregation mode
+only** (`klt signoff drc.json ... power.json`) — passing on
+`em_verdict.status: "pass"` — so a `klt power` run at least counts toward a
+signoff bundle's own pass/fail verdict even though it satisfies no T1
+checklist item yet. `--manifest`/`--fleet` tier-verdict mode does not accept
+a `"power"`-kind citation for any item (including item 8): see
+[`docs/cli/signoff.md`](cli/signoff.md)'s "No T1 item accepts `power`
+evidence" section.
+
 ## Area-efficiency spec convention (AREA-EFF)
 
 An absolute area bound alone cannot tell **area a block needs** from **area
