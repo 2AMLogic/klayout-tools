@@ -644,6 +644,120 @@ def test_solver_success_mocked_is_equivalent_not_inconclusive(tmp_path, monkeypa
     assert report["diagnostics"] == []
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1349 AC1: a solver-reported counterexample whose own iverilog/vvp
+# replay does NOT reproduce a diverging output must be reported
+# `"inconclusive"`, never `"counterexample"` -- the engine already computes
+# `confirmed_by_simulation: False` and appends `counterexample_not_reproduced`
+# to `diagnostics`, it just did not act on it (the defect this issue tracks,
+# discovered live against a real post-route netlist pair -- see the issue
+# body's own evidence). Forced deterministically here by faking
+# `_confirm_counterexample`/`_confirm_sequential_counterexample` themselves
+# (the smallest surface that exercises `run_equiv`'s own status-downgrade
+# decision) rather than every downstream iverilog/vvp subprocess call --
+# portable to any CI environment, no real `iverilog` install required.
+# --------------------------------------------------------------------------- #
+
+
+def test_unconfirmed_combinational_counterexample_downgrades_to_inconclusive(
+    tmp_path, monkeypatch
+):
+    """Combinational (`"yosys"`) engine path -- `run_equiv`'s block that
+    calls `_confirm_counterexample` right after `_classify_sat_result`
+    reports `"counterexample"` (`src/klayout_tools/equiv.py`, near the
+    `"engine": "icarus"`/confirmation block)."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_yosys_run(run_stdout=_SAT_FAIL_TEXT)
+    )
+
+    def _fake_confirm_not_reproduced(
+        *, counterexample, netlist_path, output_dir, diagnostics
+    ):
+        # Mirrors the real `_confirm_counterexample`'s own "not reproduced"
+        # outcome shape (a simulation that ran, but found no divergence).
+        counterexample["simulation"] = {
+            "engine": "icarus",
+            "engine_version": "12.0",
+            "gold_outputs": {"y": "0"},
+            "gate_outputs": {"y": "0"},
+            "diverging_outputs": [],
+        }
+        counterexample["confirmed_by_simulation"] = False
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "counterexample_not_reproduced",
+                "message": "re-running the solver's counterexample through "
+                "the flattened netlists via iverilog/vvp did not reproduce "
+                "a diverging output -- treat this counterexample with "
+                "suspicion",
+            }
+        )
+
+    monkeypatch.setattr(equiv, "_confirm_counterexample", _fake_confirm_not_reproduced)
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "counterexample"
+    # The counterexample object itself is preserved (issue #1349: it's still
+    # useful evidence for a human to inspect why the run is inconclusive) --
+    # only the top-level verdict changes.
+    assert report["counterexample"] is not None
+    assert report["counterexample"]["confirmed_by_simulation"] is False
+    assert any(
+        diag["code"] == "counterexample_not_reproduced"
+        for diag in report["diagnostics"]
+    )
+
+
+def test_confirmed_by_simulation_none_keeps_combinational_counterexample_status(
+    tmp_path, monkeypatch
+):
+    """Regression guard for the downgrade above: `confirmed_by_simulation is
+    None` (simulation could not be attempted at all, e.g. no `iverilog` on
+    `$PATH`) must NOT be downgraded -- there is no simulation evidence
+    either way, so the solver's own `"counterexample"` verdict stands."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_yosys_run(run_stdout=_SAT_FAIL_TEXT)
+    )
+
+    def _fake_confirm_unavailable(
+        *, counterexample, netlist_path, output_dir, diagnostics
+    ):
+        counterexample["confirmed_by_simulation"] = None
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": "iverilog not found on $PATH -- counterexample "
+                "reported by the solver only, not independently confirmed "
+                "by simulation",
+            }
+        )
+
+    monkeypatch.setattr(equiv, "_confirm_counterexample", _fake_confirm_unavailable)
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    assert report["counterexample"]["confirmed_by_simulation"] is None
+
+
 def test_cli_solver_internal_timeout_mocked_exits_four_never_zero(
     tmp_path, capsys, monkeypatch
 ):
@@ -1295,6 +1409,189 @@ def test_sequential_engine_timeout_is_inconclusive_never_equivalent(tmp_path):
     assert report["diagnostics"][0]["code"] == "process_timeout"
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1349 AC1, sequential-engine counterpart: `_run_sequential`'s stage-2
+# path (`src/klayout_tools/equiv.py`, the block that calls
+# `_confirm_sequential_counterexample` right after stage 2's own
+# `_classify_sat_result` reports `"counterexample"`) must apply the identical
+# `confirmed_by_simulation`-gated downgrade the combinational engine's tests
+# above cover. This is exactly the false-verdict shape the issue's own real
+# post-route evidence describes: a stage-2 bounded-SAT counterexample whose
+# solver-reported trace does not reproduce via iverilog/vvp.
+#
+# Deterministic and toolchain-independent: `subprocess.run` is mocked for
+# both yosys stages (stage 1 reports "not all proven" so stage 2 runs; stage
+# 2 reports a SAT `FAIL!` verdict), `_parse_module_ports` is faked to avoid
+# needing a real Yosys-written netlist file on disk, and
+# `_confirm_sequential_counterexample` is faked exactly as the combinational
+# test above fakes `_confirm_counterexample` -- no real `yosys`/`iverilog`
+# install required.
+# --------------------------------------------------------------------------- #
+
+
+def _mock_sequential_yosys_run(stage1_stdout: str, stage2_stdout: str):
+    """`subprocess.run` stand-in for `_run_sequential`'s two `yosys -s
+    <script>` stages plus the `yosys -V` version probe -- distinguishes the
+    two stages by their generated script filename (`equiv_seq_stage1.ys` /
+    `equiv_seq_stage2.ys`, per `_run_sequential`'s own naming), mirroring
+    `_mock_yosys_run`'s combinational-engine precedent above."""
+
+    def _run(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"]:
+            script_path = cmd[2]
+            if script_path.endswith("stage1.ys"):
+                return fake_completed(stdout=stage1_stdout, returncode=0)
+            if script_path.endswith("stage2.ys"):
+                return fake_completed(stdout=stage2_stdout, returncode=0)
+            raise AssertionError(f"unexpected yosys script in mock: {script_path!r}")
+        if cmd == ["yosys", "-V"]:
+            return fake_completed(stdout="Yosys 0.67 (git sha1 deadbeef)\n")
+        raise AssertionError(f"unexpected subprocess.run call in mock: {cmd!r}")
+
+    return _run
+
+
+# Stage 1: at least one unproven `$equiv` cell -- matches neither
+# `_EQUIV_NONE_FOUND_RE` nor `_EQUIV_ALL_PROVEN_RE`, so `_run_sequential`
+# falls through to stage 2 (real Yosys's own wording for this case, per this
+# module's own docstring).
+_SEQ_STAGE1_PARTIALLY_UNPROVEN_TEXT = """
+Found 3 unproven $equiv cells (3 groups) in equiv:
+Proved 1 previously unproven $equiv cells.
+  Of those cells 1 are proven and 2 are unproven.
+"""
+
+
+def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
+    tmp_path, monkeypatch
+):
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_sequential_yosys_run(
+            stage1_stdout=_SEQ_STAGE1_PARTIALLY_UNPROVEN_TEXT,
+            stage2_stdout=_SAT_FAIL_TEXT,
+        ),
+    )
+    monkeypatch.setattr(
+        equiv,
+        "_parse_module_ports",
+        lambda netlist_path, module_name: {
+            "clk": "input",
+            "rst": "input",
+            "d": "input",
+            "q": "output",
+        },
+    )
+
+    def _fake_confirm_not_reproduced(
+        *, counterexample, ports, netlist_path, output_dir, diagnostics
+    ):
+        counterexample["simulation"] = {
+            "engine": "icarus",
+            "engine_version": "12.0",
+            "cycles": [],
+            "diverging_outputs": [],
+        }
+        counterexample["confirmed_by_simulation"] = False
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "counterexample_not_reproduced",
+                "message": "re-running the solver's counterexample trace "
+                "through the flattened netlists via iverilog/vvp did not "
+                "reproduce a diverging output on any replayed cycle -- "
+                "treat this counterexample with suspicion",
+            }
+        )
+
+    monkeypatch.setattr(
+        equiv, "_confirm_sequential_counterexample", _fake_confirm_not_reproduced
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "counterexample"
+    assert report["counterexample"] is not None
+    assert report["counterexample"]["confirmed_by_simulation"] is False
+    assert any(
+        diag["code"] == "counterexample_not_reproduced"
+        for diag in report["diagnostics"]
+    )
+
+
+def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
+    tmp_path, monkeypatch
+):
+    """Regression guard, sequential counterpart of the combinational
+    `confirmed_by_simulation is None` guard above: no simulation evidence
+    either way must NOT be downgraded."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_sequential_yosys_run(
+            stage1_stdout=_SEQ_STAGE1_PARTIALLY_UNPROVEN_TEXT,
+            stage2_stdout=_SAT_FAIL_TEXT,
+        ),
+    )
+    monkeypatch.setattr(
+        equiv,
+        "_parse_module_ports",
+        lambda netlist_path, module_name: {
+            "clk": "input",
+            "rst": "input",
+            "d": "input",
+            "q": "output",
+        },
+    )
+
+    def _fake_confirm_unavailable(
+        *, counterexample, ports, netlist_path, output_dir, diagnostics
+    ):
+        counterexample["confirmed_by_simulation"] = None
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": "iverilog not found on $PATH -- counterexample "
+                "reported by the solver only, not independently confirmed "
+                "by simulation",
+            }
+        )
+
+    monkeypatch.setattr(
+        equiv, "_confirm_sequential_counterexample", _fake_confirm_unavailable
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    assert report["counterexample"]["confirmed_by_simulation"] is None
+
+
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
 def test_sequential_engine_accepts_combinational_design_too(tmp_path):
     """The sequential engine is a superset, not a narrower scope: a purely
@@ -1454,16 +1751,20 @@ _REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
     reason=(
         "issue #1323 ran this for real (openroad 26Q3-1499-g46ab99414e via "
         "Docker + a real volare sky130A install) and found the "
-        "yosys-sequential engine reports 'counterexample', not "
+        "yosys-sequential engine reported 'counterexample', not "
         "'equivalent' -- OpenROAD's real fanout/hold-repair buffer "
         "insertion (e.g. sky130_fd_sc_hd__buf_4 'place<N>' instances) "
         "renames intermediate nets, defeating equiv_make's literal "
-        "wire-name correspondence (159 'Unproven $equiv' cells). The "
-        "counterexample itself is NOT reproduced by simulation "
-        "(confirmed_by_simulation: false) -- a real engine capability gap "
-        "against genuine P&R output, not a P&R correctness bug. Root-cause "
-        "and fix tracked by issue #1350; remove this xfail once fixed "
-        "(pytest will then report XPASS as the signal)."
+        "wire-name correspondence (159 'Unproven $equiv' cells). Issue "
+        "#1349 fixed the *reporting* half of this: as of #1349, that "
+        "unreproduced counterexample is correctly reported 'inconclusive' "
+        "(confirmed_by_simulation: false), never the unsound "
+        "'counterexample' verdict it used to be -- re-verified live against "
+        "the same real toolchain, 2026-08-23. The underlying *proof-"
+        "strength* gap (equiv_induct not converging on this netlist's "
+        "159 name-mismatched internal $equiv cells) is unfixed and tracked "
+        "by issue #1353; remove this xfail once that lands (pytest will "
+        "then report XPASS as the signal)."
     ),
     strict=False,
 )
@@ -1473,12 +1774,13 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
     """`klt synthesize`'s pre-P&R netlist vs. `klt place-and-route`'s real,
     post-route `verilog_path` (issue #996) on the GCD worked example.
 
-    As of issue #1323 (2026-08-22), this is confirmed to run for real
-    against a genuine `openroad`/sky130A toolchain but NOT yet reach
-    `"equivalent"` -- see the `xfail` reason above and issue #1350 for the
-    full root-cause evidence. The intent (once #1350 lands) is still to
-    prove `"equivalent"`, the direct real-P&R validation this issue's own
-    acceptance criteria requires."""
+    As of issue #1349 (2026-08-23), this is confirmed to run for real
+    against a genuine `openroad`/sky130A toolchain and correctly reports
+    `"inconclusive"` (not the false `"counterexample"` #1349 fixed), but
+    does NOT yet reach `"equivalent"` -- see the `xfail` reason above and
+    issue #1353 for the full root-cause evidence. The intent (once #1353
+    lands) is still to prove `"equivalent"`, the direct real-P&R validation
+    this issue's own acceptance criteria requires."""
     root, variant = _REAL_SKY130_PNR_VARIANT
     cell_library, corner = "sky130_fd_sc_hd", "tt_025C_1v80"
     monkeypatch.setenv("PDK_ROOT", root)
