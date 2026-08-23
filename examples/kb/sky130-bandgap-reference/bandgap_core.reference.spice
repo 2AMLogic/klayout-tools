@@ -1,0 +1,94 @@
+* bandgap_core.reference.spice -- issue #1325's real, hand-sized,
+* transistor-level reference for kb/entries/sky130-bandgap-reference.json's
+* companion in-repo block, blocks/sky130-bandgap. That block's own
+* `output/layout.json` (ingested via scripts/ingest-canary.py) carries only
+* layout-metrics/renders/spec-summary data, and this KB entry's own
+* `testbench.spice` deliberately models the PTAT/CTAT current-summing
+* method with ideal diodes (no MOSFETs) -- neither is a transistor-level
+* netlist `klt size` can size against. This file fills that gap: the
+* error amplifier's own device-level netlist (differential PMOS input
+* pair, folded NMOS/PMOS mirror stage, PMOS bias/output mirror, PNP pair,
+* divider resistors), elaborated from the real design and transcribed here
+* as netlist BODY only (no .lib/.control/.end -- the reproduction test in
+* tests/test_size.py supplies those, the same convention
+* examples/design-pipeline/ota_5t.spice uses).
+*
+* PROVENANCE: transcribed (parameter substitution only; no values changed)
+* from the xschem-elaborated netlist snapshot
+*   sim/quiescent-current/netlist-snapshots/20260816-085818-69a8867.spice
+* in the public 2AMLogic/sky130-bandgap repo
+* (https://github.com/2AMLogic/sky130-bandgap) at commit
+* 69a88677f301ae842948e70f1ef74e1973e53883 (2026-08-16), itself elaborated
+* by xschem from that repo's design/bandgap_core.sch + design/error_amp.sch
+* -- the design-of-record schematic for the same block
+* blocks/sky130-bandgap ingests (layout.json's `source.ref`). Licensed
+* Apache License 2.0 (see that repo's LICENSE); reproduced here as circuit
+* data (device list, node names, W/L/mult), not as the schematic's own
+* prose. 2AMLogic/klayout-tools and 2AMLogic/sky130-bandgap are sibling
+* repos under the same org.
+*
+* KNOWN DIVERGENCE FROM THE CURRENTLY-INGESTED LAYOUT (disclosed, not
+* silently reconciled): this snapshot's divider ladder is sized at
+* n_r2=50 (the source repo's issue #99/DR-003 sizing). The source repo's
+* NEWER `layout/bandgap-core/reference.spice` (LVS reference, cited by
+* blocks/sky130-bandgap/NOTE.md's ingested `layout.json`) carries n_r2=51
+* (issue #178's re-centring) -- a <2% change to the divider resistance
+* that does not materially move the error amp's own operating point this
+* file is used to size (the divider only sets VOUT's absolute level, not
+* the amp's internal bias currents). Re-vendoring against the n_r2=51
+* revision is a mechanical follow-up, not required for this reproduction.
+*
+* The self-biased loop's degenerate (all-zero-current) DC solution is
+* real and is why the source repo's own testbench needs a `.nodeset`
+* solver seed (silicon relies on a startup circuit instead, out of scope
+* here) -- carried by tests/test_size.py's own wrapper deck.
+
+.subckt bandgap_core VOUT GDRV VDD VSS
+.param n_pnp_ctat=8
+.param n_pnp_ptat=8
+.param r_w=1
+.param r_lseg=5
+.param n_r1=7
+.param n_r2=50
+.param m_out=2
+.param m_ampbias=2
+.param n_r2_trim=0
+.param r_lseg_trim=0.5
+* ---- core PMOS mirror: output stage (MPOUT) and amp bias tail (MPAMP) ----
+XMPOUT VOUT GDRV VDD VDD sky130_fd_pr__pfet_g5v0d10v5 L=2 W=8 nf=1 ad=2.32 as=2.32 pd=16.58 ps=16.58 nrd=0.03625 nrs=0.03625 sa=0 sb=0
++ sd=0 mult='m_out' m='m_out'
+XMPAMP TAIL GDRV VDD VDD sky130_fd_pr__pfet_g5v0d10v5 L=2 W=8 nf=1 ad=2.32 as=2.32 pd=16.58 ps=16.58 nrd=0.03625 nrs=0.03625 sa=0 sb=0
++ sd=0 mult='m_ampbias' m='m_ampbias'
+* ---- error amplifier (flattened; the amp's own output IS this core's ----
+* ---- gate-drive node GDRV) --------------------------------------------
+XAMP VB VA GDRV TAIL VDD VSS error_amp
+* ---- divider legs (VOUT sensed through R2A/R2B onto the amp inputs) ----
+XR2A VA VOUT VSS sky130_fd_pr__res_high_po W='r_w' L='r_lseg*n_r2+r_lseg_trim*n_r2_trim' mult=1 m=1
+XR2B VB VOUT VSS sky130_fd_pr__res_high_po W='r_w' L='r_lseg*n_r2+r_lseg_trim*n_r2_trim' mult=1 m=1
+* ---- PTAT dVBE leg (R1) and diode-connected PNP pair -------------------
+XQ1 VSS VSS VA sky130_fd_pr__pnp_05v5_W0p68L0p68 m='n_pnp_ctat' mult='n_pnp_ctat'
+XR1 VBQ VB VSS sky130_fd_pr__res_high_po W='r_w' L='r_lseg*n_r1' mult=1 m=1
+XQ2 VSS VSS VBQ sky130_fd_pr__pnp_05v5_W3p40L3p40 m='n_pnp_ptat' mult='n_pnp_ptat'
+.ends
+
+.subckt error_amp VINP VINN AOUT ITAIL VDD VSS
+* Unit geometry is fixed on the instances below; mult is the matching
+* axis (sigma(Vth) scales as 1/sqrt(W*L*mult) in the PDK's own model).
+* amp_m_in    : input-pair PMOS units   (W=20u L=10u each)
+* amp_m_nmirr : NMOS load/mirror units  (W=8u  L=20u each)
+* amp_m_pmirr : PMOS mirror units       (W=6u  L=20u each)
+* amp_m_cc    : MOS-capacitor units     (W=30u L=20u each)
+.param amp_m_in=8
+.param amp_m_nmirr=4
+.param amp_m_pmirr=8
+.param amp_m_cc=16
+XMP1 D1 VINP ITAIL VDD sky130_fd_pr__pfet_g5v0d10v5 L=10 W=20 nf=1 ad=5.8 as=5.8 pd=40.58 ps=40.58 nrd=0.0145 nrs=0.0145 sa=0 sb=0 sd=0 mult='amp_m_in' m='amp_m_in'
+XMP2 D2 VINN ITAIL VDD sky130_fd_pr__pfet_g5v0d10v5 L=10 W=20 nf=1 ad=5.8 as=5.8 pd=40.58 ps=40.58 nrd=0.0145 nrs=0.0145 sa=0 sb=0 sd=0 mult='amp_m_in' m='amp_m_in'
+XMN1 D1 D1 VSS VSS sky130_fd_pr__nfet_g5v0d10v5 L=20 W=8 nf=1 ad=2.32 as=2.32 pd=16.58 ps=16.58 nrd=0.03625 nrs=0.03625 sa=0 sb=0 sd=0 mult='amp_m_nmirr' m='amp_m_nmirr'
+XMN2 D2 D2 VSS VSS sky130_fd_pr__nfet_g5v0d10v5 L=20 W=8 nf=1 ad=2.32 as=2.32 pd=16.58 ps=16.58 nrd=0.03625 nrs=0.03625 sa=0 sb=0 sd=0 mult='amp_m_nmirr' m='amp_m_nmirr'
+XMN3 AOUT D1 VSS VSS sky130_fd_pr__nfet_g5v0d10v5 L=20 W=8 nf=1 ad=2.32 as=2.32 pd=16.58 ps=16.58 nrd=0.03625 nrs=0.03625 sa=0 sb=0 sd=0 mult='amp_m_nmirr' m='amp_m_nmirr'
+XMN4 PN D2 VSS VSS sky130_fd_pr__nfet_g5v0d10v5 L=20 W=8 nf=1 ad=2.32 as=2.32 pd=16.58 ps=16.58 nrd=0.03625 nrs=0.03625 sa=0 sb=0 sd=0 mult='amp_m_nmirr' m='amp_m_nmirr'
+XMP4 AOUT PN VDD VDD sky130_fd_pr__pfet_g5v0d10v5 L=20 W=6 nf=1 ad=1.74 as=1.74 pd=12.58 ps=12.58 nrd=0.0483333333333333 nrs=0.0483333333333333 sa=0 sb=0 sd=0 mult='amp_m_pmirr' m='amp_m_pmirr'
+XMP3 PN PN VDD VDD sky130_fd_pr__pfet_g5v0d10v5 L=20 W=6 nf=1 ad=1.74 as=1.74 pd=12.58 ps=12.58 nrd=0.0483333333333333 nrs=0.0483333333333333 sa=0 sb=0 sd=0 mult='amp_m_pmirr' m='amp_m_pmirr'
+XMCC VDD AOUT VDD VDD sky130_fd_pr__pfet_g5v0d10v5 L=20 W=30 nf=1 ad=8.7 as=8.7 pd=60.58 ps=60.58 nrd=0.00966666666666667 nrs=0.00966666666666667 sa=0 sb=0 sd=0 mult='amp_m_cc' m='amp_m_cc'
+.ends
