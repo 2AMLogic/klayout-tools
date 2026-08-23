@@ -803,6 +803,100 @@ def test_ground_return_bounces_above_the_ground_pad(tmp_path):
     assert island["nodes"][0]["injected_current_a"] == pytest.approx(1e-3)
 
 
+# --- Activity-weighted current mode (issue #1320, epic #712 Phase 2) -------
+#
+# Additive to the static `current_a` model above: a `current_model.instances[]`
+# entry may set an `activity` object instead -- `toggle_rate_hz *
+# capacitance_f * vdd_v`, a synthesis/P&R switching-activity estimate.
+
+
+def _activity_pad_and_load_report(tmp_path, *, activity, model_vdd_v=None):
+    """The same `_basic_fixture` VPWR rail `_pad_and_load_report` loads with a
+    static 1 mA, but with the load computed from an `activity` object
+    instead."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "ir.power.json"
+    _basic_fixture(gds)
+    instance = {"name": "u1", "x_um": 10.0, "y_um": 0.5, "activity": activity}
+    current_model = {"supply_net": "VPWR", "instances": [instance]}
+    if model_vdd_v is not None:
+        current_model["vdd_v"] = model_vdd_v
+    _ir_spec(
+        spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8},
+            {"name": "vss", "net": "VGND", "x_um": 30.0, "y_um": 0.5, "voltage_v": 0.0},
+        ],
+        current_model=current_model,
+    )
+    return run_power(str(gds), str(spec))
+
+
+def test_activity_weighted_current_matches_hand_computed_value(tmp_path):
+    """Hand-computed: a node toggling at 500 MHz, switching 1 pF at 2.0 V,
+    draws an average current of `toggle_rate_hz * capacitance_f * vdd_v` =
+    `500e6 * 1e-12 * 2.0` = 1e-3 A -- exactly the static 1 mA
+    `_pad_and_load_report` already exercises on this same 1.0 ohm rail, so
+    the two current models must agree on the reported droop bit for bit."""
+    activity = {"toggle_rate_hz": 500e6, "capacitance_f": 1e-12, "vdd_v": 2.0}
+    expected_current_a = (
+        activity["toggle_rate_hz"] * activity["capacitance_f"] * activity["vdd_v"]
+    )
+    assert expected_current_a == pytest.approx(1e-3)
+
+    report = _activity_pad_and_load_report(tmp_path, activity=activity)
+
+    assert report["ir_drop_map"]["total_current_a"] == pytest.approx(expected_current_a)
+    assert report["worst_case_droop_mv"] == pytest.approx(1.0)
+    worst = report["ir_drop_map"]["worst_case"]
+    island = _island(report, "VPWR", worst["island_id"])
+    assert island["pad_current_a"] == pytest.approx(expected_current_a)
+    assert island["edges"][0]["current_a"] == pytest.approx(expected_current_a)
+
+
+def test_activity_weighted_current_with_fractional_inputs(tmp_path):
+    """A second hand-computed example with non-round numbers: 250 MHz *
+    0.4 pF * 0.9 V = 9e-5 A, checked against the same closed-form Ohm's-law
+    droop (`I * R`) on the rail's single 1.0 ohm edge."""
+    activity = {"toggle_rate_hz": 250e6, "capacitance_f": 0.4e-12, "vdd_v": 0.9}
+    expected_current_a = 250e6 * 0.4e-12 * 0.9
+    assert expected_current_a == pytest.approx(9e-5)
+
+    report = _activity_pad_and_load_report(tmp_path, activity=activity)
+
+    assert report["ir_drop_map"]["total_current_a"] == pytest.approx(expected_current_a)
+    # Ohm's law on the rail's single 1.0 ohm edge: droop_mv = I * R * 1000.
+    assert report["worst_case_droop_mv"] == pytest.approx(
+        expected_current_a * 1.0 * 1e3
+    )
+
+
+def test_activity_current_falls_back_to_model_level_vdd_v_default(tmp_path):
+    """An instance's `activity` may omit `vdd_v` entirely and inherit
+    `current_model.vdd_v` -- the same per-model-default-with-per-instance-
+    override convention `supply_net`/`ground_net` already use."""
+    report = _activity_pad_and_load_report(
+        tmp_path,
+        activity={"toggle_rate_hz": 500e6, "capacitance_f": 1e-12},
+        model_vdd_v=2.0,
+    )
+
+    assert report["ir_drop_map"]["total_current_a"] == pytest.approx(1e-3)
+    assert report["worst_case_droop_mv"] == pytest.approx(1.0)
+
+
+def test_activity_instance_vdd_v_overrides_model_default(tmp_path):
+    """A per-instance `activity.vdd_v` wins over `current_model.vdd_v` --
+    same override precedence as `supply_net`/`ground_net`."""
+    report = _activity_pad_and_load_report(
+        tmp_path,
+        activity={"toggle_rate_hz": 500e6, "capacitance_f": 1e-12, "vdd_v": 2.0},
+        model_vdd_v=99.0,
+    )
+
+    assert report["ir_drop_map"]["total_current_a"] == pytest.approx(1e-3)
+
+
 def test_islands_without_a_pad_are_reported_unsolved_with_one_summary_warning(
     tmp_path,
 ):
@@ -983,6 +1077,95 @@ def test_pads_alone_hold_the_whole_net_at_the_pad_voltage(tmp_path):
                 }
             ),
             "missing 'current_a'",
+        ),
+        # --- Activity-weighted current mode (issue #1320, epic #712 Phase 2)
+        (
+            lambda s: s.update(
+                current_model={
+                    "supply_net": "VPWR",
+                    "instances": [
+                        {
+                            "x_um": 0,
+                            "y_um": 0,
+                            "current_a": 1e-3,
+                            "activity": {
+                                "toggle_rate_hz": 1e6,
+                                "capacitance_f": 1e-12,
+                                "vdd_v": 1.8,
+                            },
+                        }
+                    ],
+                }
+            ),
+            "sets both 'current_a' and 'activity'",
+        ),
+        (
+            lambda s: s.update(
+                current_model={
+                    "supply_net": "VPWR",
+                    "instances": [
+                        {
+                            "x_um": 0,
+                            "y_um": 0,
+                            "activity": {"capacitance_f": 1e-12, "vdd_v": 1.8},
+                        }
+                    ],
+                }
+            ),
+            r"activity missing 'toggle_rate_hz'",
+        ),
+        (
+            lambda s: s.update(
+                current_model={
+                    "supply_net": "VPWR",
+                    "instances": [
+                        {
+                            "x_um": 0,
+                            "y_um": 0,
+                            "activity": {
+                                "toggle_rate_hz": -1e6,
+                                "capacitance_f": 1e-12,
+                                "vdd_v": 1.8,
+                            },
+                        }
+                    ],
+                }
+            ),
+            "toggle_rate_hz must be >= 0",
+        ),
+        (
+            lambda s: s.update(
+                current_model={
+                    "supply_net": "VPWR",
+                    "instances": [
+                        {
+                            "x_um": 0,
+                            "y_um": 0,
+                            "activity": {
+                                "toggle_rate_hz": 1e6,
+                                "capacitance_f": 1e-12,
+                            },
+                        }
+                    ],
+                }
+            ),
+            r"activity has no 'vdd_v' and 'current_model\.vdd_v' sets no default",
+        ),
+        (
+            lambda s: s.update(
+                current_model={
+                    "supply_net": "VPWR",
+                    "vdd_v": "not-a-number",
+                    "instances": [
+                        {
+                            "x_um": 0,
+                            "y_um": 0,
+                            "activity": {"toggle_rate_hz": 1e6, "capacitance_f": 1e-12},
+                        }
+                    ],
+                }
+            ),
+            r"current_model\.vdd_v must be a number",
         ),
     ],
 )
