@@ -436,10 +436,9 @@ so it is silently skipped — not run — in this repo's ordinary `ci.yml`
 > construction change, not a reporting change); this canary's `xfail`
 > marker stays in place until it lands.
 
-PR #1347 (issue #1324, Epic #707 Phase 3, open as of this writing) adds
-`.github/workflows/equiv-canary.yml` to give that canary a repeatable,
-`CI`-runnable execution path once merged: it provisions `openroad` and a
-full sky130A PDK the same way
+[`.github/workflows/equiv-canary.yml`](../../.github/workflows/equiv-canary.yml)
+(issue #1324, Epic #707 Phase 3) gives that canary a repeatable, `CI`-runnable
+execution path: it provisions `openroad` and a full sky130A PDK the same way
 [`place-and-route-smoke.yml`](../../.github/workflows/place-and-route-smoke.yml)
 already does for Epic #700 (see `docs/cli/place-and-route.md`'s "CI"
 section — the provisioning steps are reused, not reinvented), then runs the
