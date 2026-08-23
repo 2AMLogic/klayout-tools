@@ -25,6 +25,16 @@ from klayout_tools.power import PowerError, run_power
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
+#: A real, fleet-canary routed digital block -- `sky130-modexp`'s own
+#: `layout/modexp.gds` (issue #1322, Phase 2 of epic #712's acceptance
+#: criterion 3: "validated ... on a real routed canary", not only the `gcd`
+#: corpus fixture above). Vendored verbatim (Apache-2.0, see
+#: `tests/corpus/README.md`'s "`modexp_canary.gds.gz`" section for full
+#: provenance) from the public `2AMLogic/sky130-modexp` repo, produced by a
+#: real `klt synthesize` + `klt place-and-route` (OpenROAD) run, `seed: 42`,
+#: `sky130_fd_sc_hd`/`tt_025C_1v80`, 718 cells -- an order of magnitude
+#: larger than `gcd`'s 69.
+MODEXP_CANARY_GDS = CORPUS_DIR / "place_and_route" / "modexp_canary.gds.gz"
 
 
 def _um(v: float) -> int:
@@ -1842,3 +1852,317 @@ def test_gcd_fixture_em_verdict_passes_on_real_rails(tmp_path):
     # every edge is checked, none unchecked.
     assert em["checked_edge_count"] == report["edge_count"]
     assert em["unchecked_edge_count"] == 0
+
+
+# --- Acceptance: a real fleet canary, not just the `gcd` fixture (#1322) ----
+#
+# Epic #712's acceptance criterion 3 asks for `klt power` "validated ... on
+# a real routed canary (post-#700)", not only the `gcd` corpus fixture every
+# test above uses. `sky130-modexp` (`2AMLogic/sky130-modexp`) is that fleet
+# canary: a real digital block carried through `klt synthesize` + `klt
+# place-and-route` (real OpenROAD) to a routed GDS, independent of this
+# repo's own `gcd` worked-example netlist. The three tests below mirror the
+# `gcd` acceptance tests above -- extraction, IR-drop solve, EM verdict --
+# on `MODEXP_CANARY_GDS`.
+#
+# The per-instance current model below is grounded in a real measured
+# number rather than an arbitrary pick: `sky130-modexp`'s own
+# `verification/records/place-and-route/records/20260814-203901-c741877.md`
+# reports `estimated power 0.876 mW` for this exact GDS at the nominal
+# `tt_025C_1v80` corner (1.8 V). `total_current_a = 0.876 mW / 1.8 V`
+# is spread evenly across every `VPWR` island's far end -- the same
+# "one load per island" shape the `gcd` worked example uses, except the
+# *total* is a real measured figure instead of a hand-picked 0.2 mA per
+# island. This is a coarse proxy, not a per-instance activity model: the
+# real per-instance switching activity `klt place-and-route`/OpenROAD's STA
+# report does not break down per standard cell in a form `klt power`'s
+# `current_model.instances[].activity` (issue #1320) can consume today --
+# see `docs/cli/power.md`'s "Worked example: a real fleet canary" section
+# for this caveat spelled out for a reader who did not read this comment.
+
+_MODEXP_ESTIMATED_POWER_W = 0.876e-3
+_MODEXP_VDD_V = 1.8
+_MODEXP_BASE_SPEC = {
+    "power_nets": ["VPWR", "VGND"],
+    "stackup": [
+        {
+            "name": "met1",
+            "layer": "68/20",
+            "label_layer": "68/5",
+            "sheet_resistance_ohm_per_sq": 0.125,
+        },
+        {
+            "name": "met2",
+            "layer": "69/20",
+            "label_layer": "69/5",
+            "sheet_resistance_ohm_per_sq": 0.125,
+        },
+    ],
+    "vias": [
+        {
+            "name": "via1",
+            "layer": "68/44",
+            "between": ["met1", "met2"],
+            "resistance_ohm": 4.5,
+        }
+    ],
+}
+
+
+@pytest.mark.skipif(
+    not MODEXP_CANARY_GDS.is_file(),
+    reason="no vendored sky130-modexp fleet-canary GDS checked in",
+)
+def test_modexp_canary_extracts_a_real_power_grid(tmp_path):
+    """`klt power` extraction-only against the real `sky130-modexp` canary:
+    like `gcd` (88/105 `VPWR`/`VGND` islands), this larger, PDN-free design
+    resolves to many more small disconnected islands than one mesh -- a
+    regression pin against this specific, static, vendored fixture."""
+    probe = tmp_path / "modexp.probe.json"
+    probe.write_text(json.dumps(_MODEXP_BASE_SPEC))
+    report = run_power(str(MODEXP_CANARY_GDS), str(probe))
+
+    assert report["warnings"] == []
+    by_net = {n["net"]: n for n in report["networks"]}
+    assert by_net["VPWR"]["island_count"] == 216
+    assert by_net["VGND"]["island_count"] == 228
+    assert report["node_count"] == 888
+    assert report["edge_count"] == 444
+    assert report["island_count"] == 444
+
+
+def _modexp_pads_and_vpwr_instances(extracted, *, per_instance_current_a):
+    """Build one pad per island (fed from its own left-hand end, held at
+    1.8 V/0.0 V) plus one `VPWR`-only load at each island's far end -- the
+    same "feed left, load right" shape the `gcd` IR-drop worked example
+    (`test_gcd_fixture_solves_for_a_real_ir_drop_map` above) uses."""
+    pads = []
+    instances = []
+    for net_entry in extracted["networks"]:
+        for island in net_entry["islands"]:
+            first, last = island["nodes"][0], island["nodes"][-1]
+            pads.append(
+                {
+                    "name": f"pad_{island['island_id']}",
+                    "net": net_entry["net"],
+                    "x_um": first["x_um"],
+                    "y_um": first["y_um"],
+                    "voltage_v": _MODEXP_VDD_V if net_entry["net"] == "VPWR" else 0.0,
+                }
+            )
+            if net_entry["net"] == "VPWR":
+                instances.append(
+                    {
+                        "name": f"load_{island['island_id']}",
+                        "x_um": last["x_um"],
+                        "y_um": last["y_um"],
+                        "current_a": per_instance_current_a,
+                    }
+                )
+    return pads, instances
+
+
+@pytest.mark.skipif(
+    not MODEXP_CANARY_GDS.is_file(),
+    reason="no vendored sky130-modexp fleet-canary GDS checked in",
+)
+def test_modexp_canary_solves_for_real_ir_drop_map(tmp_path):
+    """The full IR-drop solve on the real fleet canary, with the total
+    current grounded in `sky130-modexp`'s own measured `estimated power
+    0.876 mW` (see module-level comment above for the full derivation)."""
+    probe = tmp_path / "modexp.ir.probe.json"
+    probe.write_text(json.dumps(_MODEXP_BASE_SPEC))
+    extracted = run_power(str(MODEXP_CANARY_GDS), str(probe))
+
+    vpwr_island_count = sum(
+        n["island_count"] for n in extracted["networks"] if n["net"] == "VPWR"
+    )
+    total_current_a = _MODEXP_ESTIMATED_POWER_W / _MODEXP_VDD_V
+    per_instance_current_a = total_current_a / vpwr_island_count
+    pads, instances = _modexp_pads_and_vpwr_instances(
+        extracted, per_instance_current_a=per_instance_current_a
+    )
+
+    spec = tmp_path / "modexp.ir.power.json"
+    spec.write_text(
+        json.dumps(
+            {
+                **_MODEXP_BASE_SPEC,
+                "pads": pads,
+                "current_model": {
+                    "supply_net": "VPWR",
+                    "ground_net": "VGND",
+                    "instances": instances,
+                },
+            }
+        )
+    )
+    report = run_power(str(MODEXP_CANARY_GDS), str(spec))
+    ir_drop = report["ir_drop_map"]
+
+    # Every one of the 444 islands got a pad -- nothing stranded.
+    assert ir_drop["unsolved_node_count"] == 0
+    assert ir_drop["solved_node_count"] == report["node_count"]
+    assert ir_drop["unsolved_current_a"] == 0.0
+    assert report["warnings"] == []
+    assert ir_drop["total_current_a"] == pytest.approx(total_current_a)
+
+    # A real, non-trivial (if tiny -- ~2.25 uA/island vs `gcd`'s hand-picked
+    # 0.2 mA/island) droop, well inside a generous physical ceiling: no
+    # rail here is more than ~500 squares, so even at 10x this canary's own
+    # per-island current, 2.25e-5 A * 0.125 ohm/sq * 500 = 1.4 mV bounds it.
+    assert 0.0 < report["worst_case_droop_mv"] < 1.4
+    assert report["worst_case_droop_mv"] == pytest.approx(0.04426376, rel=1e-3)
+
+
+@pytest.mark.skipif(
+    not MODEXP_CANARY_GDS.is_file(),
+    reason="no vendored sky130-modexp fleet-canary GDS checked in",
+)
+def test_modexp_canary_em_verdict_passes_on_real_rails(tmp_path):
+    """Real sky130 `DCCURRENTDENSITY` limits (2.8 mA/um met1/met2, 0.29 mA
+    via -- the same numbers `test_gcd_fixture_em_verdict_passes_on_real_rails`
+    above cites) against this canary's own real (tiny) rail currents: every
+    checked edge passes comfortably, same conclusion as `gcd`."""
+    stackup = [
+        {
+            **_MODEXP_BASE_SPEC["stackup"][0],
+            "current_limit_a_per_um": 0.0028,
+            "current_limit_source": (
+                "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+            ),
+        },
+        {
+            **_MODEXP_BASE_SPEC["stackup"][1],
+            "current_limit_a_per_um": 0.0028,
+            "current_limit_source": (
+                "sky130_fd_sc_hd__nom.tlef met2 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+            ),
+        },
+    ]
+    vias = [
+        {
+            **_MODEXP_BASE_SPEC["vias"][0],
+            "current_limit_a": 0.00029,
+            "current_limit_source": (
+                "sky130_fd_sc_hd__nom.tlef via1 DCCURRENTDENSITY 0.29 mA"
+            ),
+        }
+    ]
+    base = {**_MODEXP_BASE_SPEC, "stackup": stackup, "vias": vias}
+    probe = tmp_path / "modexp.em.probe.json"
+    probe.write_text(json.dumps(base))
+    extracted = run_power(str(MODEXP_CANARY_GDS), str(probe))
+
+    vpwr_island_count = sum(
+        n["island_count"] for n in extracted["networks"] if n["net"] == "VPWR"
+    )
+    total_current_a = _MODEXP_ESTIMATED_POWER_W / _MODEXP_VDD_V
+    per_instance_current_a = total_current_a / vpwr_island_count
+    pads, instances = _modexp_pads_and_vpwr_instances(
+        extracted, per_instance_current_a=per_instance_current_a
+    )
+
+    spec = tmp_path / "modexp.em.power.json"
+    spec.write_text(
+        json.dumps(
+            {
+                **base,
+                "pads": pads,
+                "current_model": {
+                    "supply_net": "VPWR",
+                    "ground_net": "VGND",
+                    "instances": instances,
+                },
+            }
+        )
+    )
+    report = run_power(str(MODEXP_CANARY_GDS), str(spec))
+    em = report["em_verdict"]
+
+    assert em is not None
+    assert em["status"] == "pass"
+    assert em["fail_count"] == 0
+    assert em["checked_edge_count"] == report["edge_count"]
+    assert em["unchecked_edge_count"] == 0
+
+
+@pytest.mark.skipif(
+    not MODEXP_CANARY_GDS.is_file(),
+    reason="no vendored sky130-modexp fleet-canary GDS checked in",
+)
+def test_modexp_canary_klt_signoff_reports_pass(tmp_path):
+    """Epic #712's acceptance criterion 3, closed end to end: once `klt
+    power`'s IR-drop/EM verdict is a `klt signoff`-consumable evidence kind
+    (issue #1321, merged), `klt signoff` reports pass/fail on this real
+    fleet canary's own envelope -- not a hand-built fixture, the real
+    `run_power` output for `MODEXP_CANARY_GDS`, fed straight into
+    `build_signoff`."""
+    from klayout_tools.signoff import build_signoff
+
+    stackup = [
+        {
+            **_MODEXP_BASE_SPEC["stackup"][0],
+            "current_limit_a_per_um": 0.0028,
+            "current_limit_source": (
+                "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+            ),
+        },
+        {
+            **_MODEXP_BASE_SPEC["stackup"][1],
+            "current_limit_a_per_um": 0.0028,
+            "current_limit_source": (
+                "sky130_fd_sc_hd__nom.tlef met2 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+            ),
+        },
+    ]
+    vias = [
+        {
+            **_MODEXP_BASE_SPEC["vias"][0],
+            "current_limit_a": 0.00029,
+            "current_limit_source": (
+                "sky130_fd_sc_hd__nom.tlef via1 DCCURRENTDENSITY 0.29 mA"
+            ),
+        }
+    ]
+    base = {**_MODEXP_BASE_SPEC, "stackup": stackup, "vias": vias}
+    probe = tmp_path / "modexp.signoff.probe.json"
+    probe.write_text(json.dumps(base))
+    extracted = run_power(str(MODEXP_CANARY_GDS), str(probe))
+
+    vpwr_island_count = sum(
+        n["island_count"] for n in extracted["networks"] if n["net"] == "VPWR"
+    )
+    total_current_a = _MODEXP_ESTIMATED_POWER_W / _MODEXP_VDD_V
+    per_instance_current_a = total_current_a / vpwr_island_count
+    pads, instances = _modexp_pads_and_vpwr_instances(
+        extracted, per_instance_current_a=per_instance_current_a
+    )
+
+    spec = tmp_path / "modexp.signoff.power.json"
+    spec.write_text(
+        json.dumps(
+            {
+                **base,
+                "pads": pads,
+                "current_model": {
+                    "supply_net": "VPWR",
+                    "ground_net": "VGND",
+                    "instances": instances,
+                },
+            }
+        )
+    )
+    report = run_power(str(MODEXP_CANARY_GDS), str(spec))
+    report_path = tmp_path / "modexp.power.report.json"
+    report_path.write_text(json.dumps(report))
+
+    result = build_signoff([str(report_path)])
+
+    assert result["status"] == "pass"
+    assert result["check_count"] == 1
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["passed"] is True
+    assert check["detail"]["em_verdict_status"] == "pass"
+    assert check["detail"]["em_verdict_fail_count"] == 0

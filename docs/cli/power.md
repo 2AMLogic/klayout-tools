@@ -718,6 +718,103 @@ be just over vs. just under a declared limit) is validated on the smaller
 synthetic fixtures in "EM current-density verdict" above, not on this
 real-fixture scale check.
 
+## Worked example: a real fleet canary (`sky130-modexp`, issue #1322)
+
+The `gcd` worked example above is `klt power`'s own in-repo worked-example
+netlist — real `klt place-and-route` output, but not a *fleet canary*, the
+class of design epic #712's own acceptance criterion 3 asks `klt power` to
+be "validated ... on" (Phase 2, issue #1322). `2AMLogic/sky130-modexp` is
+that fleet canary: a real, separately-maintained digital block carried
+through `klt synthesize` + `klt place-and-route` (real OpenROAD) to a
+routed GDS, vendored into this repo as
+`tests/corpus/place_and_route/modexp_canary.gds.gz` (see
+`tests/corpus/README.md`'s own section on it for full provenance) — an
+order of magnitude larger than `gcd` (718 cells vs. 69).
+
+```bash
+klt power tests/corpus/place_and_route/modexp_canary.gds.gz modexp.power.json --format json
+```
+
+with the same sky130 met1/met2/via1 stackup the `gcd` example above uses.
+Extraction alone resolves this larger, still-PDN-free design (same "no PDN
+generation" v1 scope note as `gcd`) into **216 separate `VPWR` islands and
+228 separate `VGND` islands** (888 nodes, 444 edges, zero warnings) — more
+islands than `gcd`, in proportion to its larger cell count, the same
+"why a named net is usually several islands" story playing out at a
+different scale.
+
+**Grounding the current model in a real measured number, not a hand pick.**
+The `gcd` example above hangs an arbitrary `2e-4` A on each `VPWR` rail;
+this canary instead uses `sky130-modexp`'s own measured `estimated power
+0.876 mW` (`tt_025C_1v80`, 1.8 V — its
+`verification/records/place-and-route/records/20260814-203901-c741877.md`
+record) — `total_current_a = 0.876 mW / 1.8 V ≈ 0.487 mA`, spread evenly
+across all 216 `VPWR` islands' own far ends (`≈2.25 µA` each). Every
+island solves (`unsolved_current_a: 0.0`), and the worst-case droop is
+**0.0443 mV** — much smaller than `gcd`'s 4.84 mV, because this canary's
+per-island current is ~90x smaller than `gcd`'s hand-picked figure (a real
+design's *average* current spread across many more, mostly lightly-loaded
+rails, versus `gcd`'s single made-up per-rail load). Adding the same real
+sky130 `DCCURRENTDENSITY` limits (2.8 mA/µm met1/met2, 0.29 mA via) as the
+`gcd` example turns this into a full EM check: every one of the 444 solved
+edges passes comfortably (`em_verdict.status: "pass"`, `fail_count: 0`).
+Pinned as regressions in `tests/test_power.py`'s "Acceptance: a real fleet
+canary" section (`test_modexp_canary_extracts_a_real_power_grid`,
+`test_modexp_canary_solves_for_real_ir_drop_map`,
+`test_modexp_canary_em_verdict_passes_on_real_rails`).
+
+**`klt signoff` reports pass/fail on this canary** (epic #712's acceptance
+criterion 3's remaining clause, closed by issue #1321 landing before this
+phase): feeding this exact `klt power --format json` envelope to `klt
+signoff` reports `status: "pass"` (`em_verdict.status: "pass"`,
+`fail_count: 0`) — see [`docs/cli/signoff.md`](signoff.md)'s "`klt power`
+evidence (envelope aggregation only)" section for the pass/fail rule itself, and
+`tests/test_power.py`'s `test_modexp_canary_klt_signoff_reports_pass` for
+this exact run pinned end to end (`run_power` → `build_signoff`).
+
+**Gaps and caveats this run surfaces, stated plainly (epic #712 acceptance
+criterion 4):**
+
+- **No power-delivery network exists to analyse.** `klt place-and-route`
+  (issue #700) generates no PDN in its v1 scope — the 216/228-island
+  fragmentation above is not a `klt power` artifact, it is what a
+  PDN-free routed design's power grid actually looks like: every
+  standard-cell row's own rail segment, disconnected from every other
+  row's. A real IR-drop/EM signoff needs a real PDN (straps + rings +
+  a via-stitched mesh from pad to every row) before its droop number means
+  anything close to what a chip-level supply actually sees; this run's
+  0.0443 mV is a lower bound on a PDN-free design's own rail resistance,
+  not a chip-level droop prediction.
+  - **Also true for `gcd`** — this is not new information issue #1322
+    itself discovered, since `docs/cli/power.md` already documented it
+    for `gcd` above; recorded again here because it is the single most
+    consequential caveat for *this* run's own headline numbers.
+- **The current model is a coarse, uniform proxy, not per-instance
+  activity.** `sky130-modexp`'s own place-and-route record reports one
+  *aggregate* `estimated power` figure for the whole design, not a
+  per-standard-cell breakdown — there is no `toggle_rate_hz`/
+  `capacitance_f` per instance to feed Phase 2's activity-weighted mode
+  (`current_model.instances[].activity`, issue #1320) with. Spreading the
+  aggregate evenly across every `VPWR` island is a defensible order-of-
+  magnitude proxy (grounded in a real measured total, unlike `gcd`'s
+  hand-picked constant), but it assumes every row draws the same current,
+  which is almost certainly false for a real design with a non-uniform
+  logic distribution (e.g. the multiplier/adder-heavy datapath rows
+  `docs/design/sky130-modexp-canary-signoff-status.md`'s critical-path
+  analysis names). A real per-instance current model needs either a
+  gate-level power tool's own per-cell breakdown or a VCD/SAIF-derived
+  toggle-rate report feeding Phase 2's activity mode — both out of scope
+  for this issue.
+- **DRC/LVS signoff on this exact GDS is a separate, not-yet-closed
+  question**, tracked in `sky130-modexp`'s own repo and Epic #700's phase
+  tracking (`docs/design/sky130-modexp-canary-signoff-status.md`): DRC is
+  clean, but LVS is not (1324 mismatches, attributed to extraction-
+  methodology gaps, not a real connectivity defect). `klt power` does not
+  depend on LVS-clean geometry (it only needs power/ground metal and via
+  connectivity, not full device-level correctness), so this run's own
+  IR-drop/EM verdict stands on its own — but a full T1 claim for this
+  canary is still gated on that separate, already-tracked LVS gap.
+
 ## Scope and limitations
 
 - **No device recognition, wire/via connectivity only (by design).** Unlike
@@ -788,8 +885,10 @@ real-fixture scale check.
 ## See also
 
 - [#712](https://github.com/2AMLogic/klayout-tools/issues/712) — the parent
-  power/IR-drop + EM signoff epic (remaining phases: signoff integration and
-  canary validation).
+  power/IR-drop + EM signoff epic. Acceptance criterion 3 ("validated ... on
+  at least one routed canary") is closed by #1321 (signoff integration) and
+  #1322 (the real `sky130-modexp` canary run, this document's "Worked
+  example: a real fleet canary" section above).
 - [#845](https://github.com/2AMLogic/klayout-tools/issues/845) — Phase 1b,
   the static IR-drop solve this command's resistive network feeds
   (`klayout_tools/ir_solver.py`, validated in `tests/test_ir_solver.py` and
@@ -800,6 +899,16 @@ real-fixture scale check.
 - [#1320](https://github.com/2AMLogic/klayout-tools/issues/1320) — Phase 2,
   the activity-weighted current mode (`current_model.instances[].activity`,
   this document's "Activity-weighted current mode" section above).
+- [#1321](https://github.com/2AMLogic/klayout-tools/issues/1321) — the
+  `klt signoff` `"power"` evidence kind this document's "Worked example: a
+  real fleet canary" section's `klt signoff` run depends on (see
+  [`docs/cli/signoff.md`](signoff.md)'s "`klt power` evidence (envelope
+  aggregation only)" section).
+- [#1322](https://github.com/2AMLogic/klayout-tools/issues/1322) — Phase 2
+  of epic #712's acceptance criterion 3, closed by this document's "Worked
+  example: a real fleet canary (`sky130-modexp`, issue #1322)" section
+  above: `klt power` run end to end on a real routed digital canary, not
+  only the `gcd` corpus fixture.
 - [`docs/cli/place-and-route.md`](place-and-route.md) — `klt place-and-route`,
   the source of the routed layouts this command analyses (and of the "no
   PDN generation in this v1" fact "Why a named net is usually several
