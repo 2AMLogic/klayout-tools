@@ -1,0 +1,101 @@
+[
+  {
+    "design": "tt_um_LFSR_shivam",
+    "synthesize": {
+      "instance_count": 38,
+      "area_um2": 352.8384
+    },
+    "place_and_route": {
+      "engine": "openroad",
+      "engine_version": "26Q3-1080-gab6fd26351",
+      "stage_reached": "route",
+      "clock_period_ns": 1.0,
+      "die_area_um2": 1135.69,
+      "core_area_um2": 788.256,
+      "utilization_pct": 47.619,
+      "wirelength_um": 624,
+      "worst_slack_ns": 0.32827,
+      "total_negative_slack_ns": 0,
+      "setup_violation_count": 0,
+      "hold_violation_count": 0,
+      "antenna_violation_count": 0,
+      "route_drc_violation_count": 0,
+      "estimated_power_mw": 0.7002
+    },
+    "klt_drc": {
+      "status": "clean",
+      "violation_count": 0
+    },
+    "post_route_equivalence": {
+      "method": "directed RTL-vs-routed-netlist dual-DUT co-simulation diff (post-route verilog_path, not the pre-route synthesis netlist)",
+      "passed": true,
+      "log_tail": "DIFF_TB: ALL 200 CYCLES MATCHED\n/var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T/tmpkc4x_j87/diff_tb.v:73: $finish called at 3756000 (1ps)"
+    }
+  },
+  {
+    "design": "tt_um_8bitALU",
+    "synthesize": {
+      "instance_count": 110,
+      "area_um2": 760.7296
+    },
+    "place_and_route": {
+      "engine": "openroad",
+      "engine_version": "26Q3-1080-gab6fd26351",
+      "stage_reached": "route",
+      "clock_period_ns": 3.0,
+      "die_area_um2": 2266.71,
+      "core_area_um2": 1764.19,
+      "utilization_pct": 44.6099,
+      "wirelength_um": 2161,
+      "worst_slack_ns": 2.3283,
+      "total_negative_slack_ns": 0,
+      "setup_violation_count": 0,
+      "hold_violation_count": 0,
+      "antenna_violation_count": 0,
+      "route_drc_violation_count": 0,
+      "estimated_power_mw": 0.2687
+    },
+    "klt_drc": {
+      "status": "clean",
+      "violation_count": 0
+    },
+    "post_route_equivalence": {
+      "method": "directed RTL-vs-routed-netlist dual-DUT co-simulation diff (post-route verilog_path, not the pre-route synthesis netlist)",
+      "passed": true,
+      "log_tail": "DIFF_TB: ALL 200 CYCLES MATCHED\n/var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T/tmplznc06wf/diff_tb.v:73: $finish called at 3756000 (1ps)"
+    }
+  },
+  {
+    "design": "tt_um_CKPope_top",
+    "synthesize": {
+      "instance_count": 169,
+      "area_um2": 1493.9328
+    },
+    "place_and_route": {
+      "engine": "openroad",
+      "engine_version": "26Q3-1080-gab6fd26351",
+      "stage_reached": "route",
+      "clock_period_ns": 2.0,
+      "die_area_um2": 4239.96,
+      "core_area_um2": 3633.48,
+      "utilization_pct": 45.1446,
+      "wirelength_um": 3351,
+      "worst_slack_ns": -0.10895,
+      "total_negative_slack_ns": -0.31946,
+      "setup_violation_count": 5,
+      "hold_violation_count": 0,
+      "antenna_violation_count": 0,
+      "route_drc_violation_count": 0,
+      "estimated_power_mw": 0.8243
+    },
+    "klt_drc": {
+      "status": "clean",
+      "violation_count": 0
+    },
+    "post_route_equivalence": {
+      "method": "directed RTL-vs-routed-netlist dual-DUT co-simulation diff (post-route verilog_path, not the pre-route synthesis netlist)",
+      "passed": true,
+      "log_tail": "DIFF_TB: ALL 200 CYCLES MATCHED\n/var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T/tmp7r3hstwe/diff_tb.v:73: $finish called at 3756000 (1ps)"
+    }
+  }
+]
