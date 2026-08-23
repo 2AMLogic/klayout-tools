@@ -62,6 +62,7 @@ test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-cpu-budget.sh
 test-create-pr-superseded-issue.sh
+test-create-pr-version-check.sh
 test-default-branch.sh
 test-dependency-parse.sh
 test-detect-dependency-cycle.sh
@@ -145,6 +146,7 @@ test-provision-hooks.sh
 test-provision-skills.sh
 test-random-file.sh
 test-rebase-stacked-children.sh
+test-record-noop-release.sh
 test-recover-orphaned-shepherds-diagnostics.sh
 test-reconcile-stack.sh
 test-require-complexity-marker.sh
