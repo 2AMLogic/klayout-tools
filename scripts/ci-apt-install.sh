@@ -173,7 +173,13 @@ sanitize_sources() {
         if grep -q "${FLAKY_MIRROR}" "$file" 2>/dev/null; then
             matched=1
             log "rewriting ${FLAKY_MIRROR} -> ${GOOD_MIRROR} in $file"
-            as_root sed -i "s#${FLAKY_MIRROR//./\\.}#${GOOD_MIRROR}#g" "$file"
+            # `-i.bak` (suffix attached, no space) is the one in-place form
+            # both GNU and BSD/macOS sed accept identically -- bare `-i`
+            # means "edit in place" on GNU but "use the next arg as the
+            # backup suffix" on BSD, which silently eats the sed script as
+            # that suffix and the file path as the script (issue #1337).
+            as_root sed -i.bak "s#${FLAKY_MIRROR//./\\.}#${GOOD_MIRROR}#g" "$file"
+            as_root rm -f "${file}.bak"
         elif grep -q "${GOOD_MIRROR}" "$file" 2>/dev/null; then
             already_clean=1
         fi
