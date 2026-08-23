@@ -67,7 +67,18 @@ Two subprocesses are actually run:
    transistor-level netlist) and is not the right tool for a gate-level RTL
    vector; ``iverilog``/``vvp`` is the digital equivalent already wired up
    as a first-class dependency by ``klt functional-verification``
-   (``functional_verification.py``) -- reused here, not SPICE.
+   (``functional_verification.py``) -- reused here, not SPICE. **When that
+   independent replay does *not* reproduce a divergence
+   (``confirmed_by_simulation: False``), the reported ``status`` is
+   downgraded to ``"inconclusive"``, never left as ``"counterexample"``**
+   (issue #1349) -- an unreproduced solver counterexample is not a
+   demonstrated functional difference, it is evidence of an unsound
+   miter/``$equiv`` artifact, and reporting it as a proven refutation would
+   violate this module's own "a counterexample is executable" discipline
+   rather than satisfy it. ``confirmed_by_simulation: None`` (simulation
+   could not be attempted at all, e.g. no ``iverilog`` on ``$PATH``) is left
+   alone -- there is no simulation evidence either way in that case, so the
+   solver's own verdict stands.
 
 ## Engine: ``"yosys-sequential"`` -- register-correspondence sequential
 equivalence (Phase 2, #1313)
@@ -146,7 +157,14 @@ solver-reported divergence reproduces somewhere in the trace -- see
 :func:`_confirm_sequential_counterexample`'s own docstring for why "somewhere
 in the trace" rather than "at the identical cycle index" (the same
 X-vs-zero-init mismatch between a real Verilog simulation's own default
-register reset value and ``-set-init-zero``'s SAT-side assumption).
+register reset value and ``-set-init-zero``'s SAT-side assumption). Exactly
+as the combinational engine does, an unreproduced stage-2 counterexample
+(``confirmed_by_simulation: False``) downgrades the reported ``status`` to
+``"inconclusive"`` rather than the unsound ``"counterexample"`` (issue
+#1349) -- verified live against a real ``equiv_make``-name-mismatch case
+this engine's own bounded search can otherwise trip on (a real post-route
+netlist's resizer/repair-buffer-renamed internal wires; see
+``docs/cli/equiv.md``'s "Re-running the real pre/post-route canary").
 """
 
 from __future__ import annotations
@@ -476,6 +494,20 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
             output_dir=output_dir,
             diagnostics=diagnostics,
         )
+        if counterexample["confirmed_by_simulation"] is False:
+            # The solver reported a counterexample, but re-running its own
+            # trace through the flattened netlists via iverilog/vvp did not
+            # reproduce a diverging output (`counterexample_not_reproduced`,
+            # appended above) -- an unsound `$equiv`/miter artifact, not a
+            # demonstrated functional difference. "inconclusive" is the
+            # honest verdict here, matching the downgrade the sequential
+            # engine's own stage-2 path already applies for its analogous
+            # "unproven, no counterexample either" case below. Never
+            # reported when `confirmed_by_simulation` is `None` (simulation
+            # could not be attempted at all, e.g. no `iverilog` on $PATH) --
+            # that case has no evidence either way, so the solver's own
+            # verdict stands.
+            status = "inconclusive"
 
     return _build_report(
         engine=engine,
@@ -1891,10 +1923,26 @@ def _run_sequential(
         diagnostics=diagnostics2,
     )
 
+    # Mirrors the combinational engine's own downgrade (see `run_equiv`
+    # above): a stage-2 counterexample whose own iverilog/vvp replay does
+    # not reproduce a diverging output on any cycle is not a demonstrated
+    # functional difference -- it is an unproven-`$equiv`-cell artifact of
+    # `equiv_make`'s name-based wire matching (see this module's own
+    # docstring and issue #1349). Reporting it as "counterexample" would be
+    # unsound: "inconclusive" is the honest verdict. `confirmed_by_simulation
+    # is None` (simulation could not be attempted at all) is left alone --
+    # that case has no evidence either way, so the solver's own verdict
+    # stands, exactly as the combinational path does.
+    status3 = (
+        "inconclusive"
+        if counterexample["confirmed_by_simulation"] is False
+        else "counterexample"
+    )
+
     return _build_sequential_report(
         engine=engine,
         engine_version=engine_version,
-        status="counterexample",
+        status=status3,
         gold=gold,
         gate=gate,
         port_map=port_map or None,

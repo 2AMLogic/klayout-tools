@@ -238,12 +238,12 @@ before `equiv_make` runs.
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`). `engine_version` is `null` if unresolvable. |
-| `status` | string | `"equivalent"`, `"counterexample"` (proven non-equivalent), or `"inconclusive"` (solver/process timeout — **never** `"equivalent"`). See "Timeout and the inconclusive verdict" below. |
+| `status` | string | `"equivalent"`, `"counterexample"` (proven non-equivalent **and** independently reproduced by simulation), or `"inconclusive"` (solver/process timeout, or a solver-reported counterexample that simulation did *not* reproduce — **never** `"equivalent"`). See "Timeout and the inconclusive verdict" below and "Counterexample shape" for the simulation-confirmation downgrade. |
 | `gold` / `gate` | object | Echo of the resolved request side: `{top, sources, liberty}` (absolute paths; `liberty` is `null` when not given). |
 | `port_map` | object \| null | Echo of the request field. |
 | `timeout_s` | number | The effective timeout used (request field, or `--timeout-s`, or the `60` default). |
 | `elapsed_s` | number | Wall-clock time the Yosys subprocess actually ran, in seconds. |
-| `counterexample` | object \| null | Present only when `status == "counterexample"`. See "Counterexample shape" below. |
+| `counterexample` | object \| null | Present when `status == "counterexample"`, and also (issue #1349) when a solver-reported counterexample was downgraded to `status: "inconclusive"` because `counterexample.confirmed_by_simulation` came back `false` — the object itself is unchanged either way, it is only the top-level `status` that reflects whether the divergence was actually demonstrated. `null` for every other `"inconclusive"` cause (timeout, unproven-by-induction) and for `"equivalent"`. See "Counterexample shape" below. |
 | `diagnostics` | array\<object\> | `{severity, code, message}` entries — a timeout's own explanation, or a degraded (but non-fatal) counterexample-confirmation outcome (e.g. `iverilog` unavailable). Empty on a clean `"equivalent"`/`"counterexample"` run. |
 | `artifacts` | object | `{script_path, netlist_path, log_path}` — the generated `.ys` script, the flattened combined `gold`/`gate` Verilog netlist, and the raw Yosys log, all absolute paths under `.klt/equiv/` next to the request file. `netlist_path`/`log_path` are `null` when the run timed out before they were written. Never deleted — kept as debuggable artifacts, the same convention `klt synthesize`'s `.klt/synthesize/` uses. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `pdk`/`deck` are always `null` (no PDK/deck resolution — a liberty file, when given, is a plain input file, not a "deck"); `input` is the content hash of every `sources` file across both sides (a combined, order-independent hash when more than one file is given). |
@@ -255,7 +255,7 @@ before `equiv_make` runs.
 | `inputs` | object\<string, object\> | `{name: {bin, width, value}}` for every top-level input port — the concrete vector the SAT solver found (and, on a successful confirmation, the exact vector `iverilog`/`vvp` re-ran). `bin` is the exact-width bit string; `value` is the decoded unsigned integer, or `null` if any bit is undefined. |
 | `gold_outputs` / `gate_outputs` | object\<string, object\> | Same `{bin, width, value}` shape, per output port, as reported by the SAT solver for `gold`/`gate` respectively under `inputs`. |
 | `diverging_outputs` | array\<string\> | Output port names where `gold_outputs`/`gate_outputs` actually differ (a bus can legally share some bits and diverge on others). |
-| `confirmed_by_simulation` | boolean \| null | `true` when `iverilog`/`vvp` independently reproduced the divergence; `false` when the re-simulation ran but did **not** reproduce it (treat the counterexample with suspicion — see `diagnostics`); `null` when confirmation could not be attempted at all (e.g. `iverilog` not installed — see `diagnostics`). |
+| `confirmed_by_simulation` | boolean \| null | `true` when `iverilog`/`vvp` independently reproduced the divergence (top-level `status` stays `"counterexample"`); `false` when the re-simulation ran but did **not** reproduce it — the top-level `status` is downgraded to `"inconclusive"` in this case (issue #1349: an unproven-`$equiv`/miter artifact is not a demonstrated functional difference), and `diagnostics` carries the `counterexample_not_reproduced` explanation; `null` when confirmation could not be attempted at all (e.g. `iverilog` not installed — see `diagnostics`), in which case `status` is left as the solver's own `"counterexample"` verdict since there is no simulation evidence either way. |
 | `simulation` | object \| null | `{engine, engine_version, gold_outputs, gate_outputs, diverging_outputs}` from the independent `iverilog`/`vvp` run — `gold_outputs`/`gate_outputs` here are raw `{name: bin_string}`, not the richer `{bin, width, value}` shape above. `null` when confirmation could not be attempted. |
 
 ### Response additions for `"yosys-sequential"`
@@ -272,9 +272,11 @@ stage 1, always run):
 
 ### Sequential counterexample shape (`"yosys-sequential"` only)
 
-Present only when `status == "counterexample"` — replaces the single-vector
-shape above with a **multi-cycle** one, generalising it for a genuinely
-sequential trace:
+Present when `status == "counterexample"`, and also — exactly as the
+combinational shape above — when a stage-2 counterexample was downgraded to
+`status: "inconclusive"` because `confirmed_by_simulation` came back `false`
+(issue #1349). Replaces the single-vector shape above with a **multi-cycle**
+one, generalising it for a genuinely sequential trace:
 
 ```json
 {
@@ -308,7 +310,7 @@ sequential trace:
 | `cycles` | array\<object\> | One entry per captured cycle (`induction_depth` entries), each the same `{time, inputs, gold_outputs, gate_outputs, diverging_outputs}` shape a single combinational vector has (see "Counterexample shape" above), plus `time` (the 1-indexed cycle number). |
 | `diverging_outputs` | array\<string\> | The union of every cycle's own `diverging_outputs` — every output that diverged on *any* captured cycle. |
 | `first_diverging_cycle` | integer \| null | The `time` of the earliest cycle with a nonempty `diverging_outputs`. |
-| `confirmed_by_simulation` | boolean \| null | Same meaning as the combinational shape, but "confirmed" means the reported divergence reproduces on *some* replayed cycle, not necessarily the identical cycle index — see the `"yosys-sequential"` engine's own "Engine" section above for why (a real Verilog simulation's registers start at `x`, unlike the solver's own `-set-init-zero` assumption). |
+| `confirmed_by_simulation` | boolean \| null | Same meaning (and same `status`-downgrade-to-`"inconclusive"`-on-`false` behavior, issue #1349) as the combinational shape, but "confirmed" means the reported divergence reproduces on *some* replayed cycle, not necessarily the identical cycle index — see the `"yosys-sequential"` engine's own "Engine" section above for why (a real Verilog simulation's registers start at `x`, unlike the solver's own `-set-init-zero` assumption). |
 | `simulation.cycles` | array\<object\> | The independent `iverilog`/`vvp` run's own per-cycle `{time, gold_outputs, gate_outputs, diverging_outputs}` (raw `{name: bin_string}` values, not the richer `{bin, width, value}` shape). |
 | `simulation.diverging_outputs` | array\<string\> | The union of every simulated cycle's own divergence. |
 
@@ -335,7 +337,7 @@ caller should rely on.
 | `1` | Failed to run at all — bad request, unresolvable/unreadable RTL or liberty source, unsupported engine, a sequential design given to the `"yosys"` engine (out of its combinational-only scope), a Yosys elaboration/miter-construction error, or a missing `yosys` binary. |
 | `2` | Usage error (missing argument, bad `--format`/`--timeout-s` value) — from argparse. |
 | `3` | Ran successfully, proven non-equivalent (`status: "counterexample"`). |
-| `4` | Ran, but the proof is inconclusive — solver or process timeout (`status: "inconclusive"`). Never `0`. |
+| `4` | Ran, but the proof is inconclusive — solver/process timeout, an induction-bound proof with no confirming or refuting counterexample, or a solver-reported counterexample that simulation did not reproduce (`status: "inconclusive"`, issue #1349). Never `0`. |
 
 This is `klt sim`'s 0/1/2/3/4 precedent (not `klt lvs`'s 0/1/2/3): a formal
 equivalence proof has the same third "ran, but the result isn't
@@ -395,6 +397,62 @@ multi-cycle counterexample (`status: "counterexample"`,
 `counterexample.confirmed_by_simulation: true`) — see
 `tests/test_equiv.py`'s `yosys-sequential` engine tests for the full
 request/response pair.
+
+## Re-running the real pre/post-route canary
+
+Whether `"yosys-sequential"` finds a real, live `klt place-and-route`
+transformation `"equivalent"` (not just the buffer-inserted synthetic mutant
+above) is exercised by
+`tests/test_equiv.py::test_sequential_engine_real_pnr_register_preserving_transformation`
+— `klt synthesize`'s pre-route GCD netlist (from
+`examples/functional-verification/gcd.v`) vs. the real, post-route
+`verilog_path` `klt place-and-route` produces via a real `openroad` binary
+and a real sky130 PDK install — issue #1313's acceptance criterion. Like
+`test_place_and_route.py`'s own live-`openroad` integration tests, it is
+`skipif`-guarded on `yosys`/`openroad`/a real sky130 PDK all being present,
+so it is silently skipped — not run — in this repo's ordinary `ci.yml`
+`test` job.
+
+> **Status: `xfail`, tracked by #1353 — no longer a false `"counterexample"`
+> (fixed by #1349), still not `"equivalent"`.** Re-verified live
+> (2026-08-23, `openroad/orfs:latest` + a real pinned volare `sky130A`
+> install, this repo's pinned Yosys `0.68+post`): the P&R transformation
+> *is* register-preserving (50 `sky130_fd_sc_hd__dfrtp_1` flops on both
+> sides), `equiv_induct` still leaves 159 of 1521 `$equiv` cells unproven
+> (name-mismatched internal wires OpenROAD's own resizer/repair-buffer
+> insertion and cloning legitimately renamed — not required for output
+> equivalence, but `equiv_make`'s name-based wire matching still creates
+> proof obligations for them), and stage 2's bounded SAT search still finds
+> a "violation" among those 159 cells. **Before #1349, that made this
+> command report a false `status: "counterexample"` about a genuinely
+> equivalent design — issue #1349 fixed exactly this: the same run now
+> re-plays that stage-2 trace through both netlists via `iverilog`/`vvp`,
+> finds it does not reproduce a diverging `done`/`result` output on any
+> replayed cycle (`confirmed_by_simulation: false`), and correctly reports
+> the honest `status: "inconclusive"` instead.** Closing the remaining gap
+> — making `equiv_induct`'s proof recipe itself converge on a netlist this
+> size, so the verdict is `"equivalent"` rather than merely "not proven
+> non-equivalent" — is tracked by issue #1353 (a wire-correspondence/miter-
+> construction change, not a reporting change); this canary's `xfail`
+> marker stays in place until it lands.
+
+PR #1347 (issue #1324, Epic #707 Phase 3, open as of this writing) adds
+`.github/workflows/equiv-canary.yml` to give that canary a repeatable,
+`CI`-runnable execution path once merged: it provisions `openroad` and a
+full sky130A PDK the same way
+[`place-and-route-smoke.yml`](../../.github/workflows/place-and-route-smoke.yml)
+already does for Epic #700 (see `docs/cli/place-and-route.md`'s "CI"
+section — the provisioning steps are reused, not reinvented), then runs the
+canary test and asserts it actually *ran* — a skipped canary is failed, not
+passed, so a missing binary or PDK can never masquerade as a green verdict.
+It is `workflow_dispatch`-only, for the identical reason
+`place-and-route-smoke.yml` is: the Docker/PDK pull is multi-GB of one-time
+cost on a cache miss, too heavy to gate every PR. Trigger it manually from
+the Actions tab, or `gh workflow run equiv-canary.yml`, whenever `klt
+equiv`'s `"yosys-sequential"` engine, `klt synthesize`, or `klt
+place-and-route` change, or before a release, to check the verdict against a
+real OpenROAD/sky130 pipeline — distinct from the fixture-based
+`"yosys-sequential"` unit tests that already run in ordinary CI.
 
 ## Out of scope
 
