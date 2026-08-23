@@ -302,6 +302,35 @@ completed; merges the routed DEF with the resolved standard-cell GDS view
 (and the tech+cell LEF, for layer/pin geometry) into a single top-level-only
 GDS, the same "0 missing/orphan cells" check `def2stream.py` performs.
 
+**DIEAREA bounding-box guard, and its gf180mcu `request.power` tolerance
+(issue #1335).** After the merge, a top cell whose bounding box extends
+beyond the DEF's own `DIEAREA` is treated as a defect — this is exactly the
+symptom a DBU mismatch between the DEF-derived geometry and a subsequently
+merged GDS view produces (a doubled/halved coordinate system silently blows
+the merged extent past the die). Originally this guard used a fixed 0.01 um
+tolerance, which rejected **every** gf180mcu `request.power` run: open_pdks'
+gf180mcu standard-cell library deliberately draws GDS geometry beyond its
+own LEF abutment box (so abutting cells' wells/implants merge across a
+row) — e.g. `gf180mcu_fd_sc_mcu9t5v0__endcap` overhangs by 2.93 um on its
+left, every other cell in that library by ~0.43/0.45 um — and `tapcell`
+places `__endcap` instances flush at each row end, so that legitimate
+per-cell overhang reaches the die boundary itself once `request.power` is
+set. The guard's tolerance is now the merged cell library's own *measured*
+GDS-vs-LEF abutment-box overhang (capped at the tech LEF's own row/`SITE`
+height, since well/implant-merge geometry never spans multiple rows) rather
+than a fixed constant — wide enough to admit a real standard-cell library's
+own deliberate overhang, but still bounded well below the die-sized
+excursion a doubling/halving DBU defect produces, so the doubling/halving
+regression this guard exists to catch is still rejected. sky130hd's cells
+have no such overhang and are unaffected either way.
+
+This closes the blocking half of issue #1331's "confirm the routed GDS is
+DRC-clean" acceptance criterion for gf180mcu: **without** `request.power`,
+the merge succeeds but the resulting GDS has unfilled standard-cell row gaps
+(`klt drc --deck gf180mcu` reports `nwell.space.1` violations); **with**
+`request.power`, the same design's merged GDS is `klt drc --deck gf180mcu`
+clean.
+
 ## Hard-macro placement (`request.macros`)
 
 Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line

@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt place-and-route`'s post-merge DIEAREA bounding-box guard (issue
+  #1090) no longer rejects every gf180mcu `request.power` run (issue
+  #1335). open_pdks' gf180mcu standard-cell library deliberately draws GDS
+  geometry beyond its own LEF abutment box so abutting cells' wells/
+  implants merge across a row, and `tapcell`'s row-end `__endcap`
+  placements reach the die boundary once `request.power` is set — a
+  legitimate overhang the guard's previous fixed 0.01 um tolerance could
+  not distinguish from a genuine DBU doubling/halving defect. The guard's
+  tolerance is now the merged cell library's own measured GDS-vs-LEF
+  abutment-box overhang, capped at the tech LEF's own row (`SITE`) height
+  so it can never mask a real doubling/halving-scale defect; the existing
+  fixed 0.01 um tolerance remains the fallback when the tech LEF declares
+  no `SITE`. sky130hd is unaffected (its cells have no such overhang). See
+  `docs/cli/place-and-route.md`'s "DEF→GDS merge" section.
+
 - `klt signoff` recognizes a new `"power"` evidence kind (issue #1321, Phase
   2 of epic #712): a `klt power --format json` envelope, detected
   structurally (`power_nets` + `networks`) since it carries no top-level
