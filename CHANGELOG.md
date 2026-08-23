@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt signoff` recognizes a new `"power"` evidence kind (issue #1321, Phase
+  2 of epic #712): a `klt power --format json` envelope, detected
+  structurally (`power_nets` + `networks`) since it carries no top-level
+  `status` field and no `provenance` block, unlike every other recognized
+  kind. In envelope-aggregation mode (`klt signoff drc.json ... power.json`)
+  it passes on `em_verdict.status == "pass"` — a `null` `em_verdict` (no
+  IR-drop solve requested) or a rolled-up `"fail"`/`"not_checked"` does not
+  pass — with `worst_case_droop_mv` surfaced informationally in
+  `checks[].detail`, not itself compared (the envelope declares no droop
+  limit to check it against). `docs/design-evidence-tiers.md`'s T1
+  checklist has no item for power-grid IR-drop/EM evidence yet, so a
+  `"power"`-kind citation is never graded `"met"` by `--manifest`/`--fleet`
+  tier-verdict mode, for any item. See `docs/cli/signoff.md`'s "`klt power`
+  evidence (envelope aggregation only)" and "No T1 item accepts `power`
+  evidence" sections.
+
 - `klt layout-metrics` gains an optional **`--pdk`** flag and a matching
   optional **`pdk`** field in `layout.json` — issue #1285, the deferred
   follow-up from #943/#1060. The value is one of `klt`'s own PDK-family

@@ -203,6 +203,57 @@ touch items 3-6's separate, pre-existing permissiveness toward *other*
 recognised native kinds (:data:`_ITEM_ALLOWED_KINDS` still names only item
 7) -- closing that wider gap is out of this issue's scope.
 
+## `klt power` (IR-drop/EM) evidence ingestion (issue #1321, Phase 2 of epic #712)
+
+`klt power` (Epic #712 Phase 1, issues #844/#845/#846) emits a routed
+design's resistive power-grid extraction, static IR-drop solve
+(``worst_case_droop_mv``), and a per-net electromigration (EM)
+current-density verdict (``em_verdict``) -- see ``docs/cli/power.md``.
+Before this phase, `klt signoff`'s envelope-aggregation mode had no path
+to consume that output at all: :func:`_classify` recognised the six native
+`klt` verb shapes above plus the opt-in ``"generic"`` kind, but not `klt
+power`'s -- so epic #712's own acceptance criterion 3 ("consumable by the
+signoff aggregator as a signoff-completeness item") had no first-class
+implementation.
+
+This phase adds an eighth kind, ``"power"``, detected structurally like
+every other native kind (a top-level ``power_nets`` list plus a
+``networks`` list -- unique to this shape; it cannot collide with ``drc``'s
+``violations``, ``lvs``'s ``mismatches``, ``sim``'s
+``measurements``+``corner_count``, ``yield``'s
+``measurements``+``measurement_count``+``source``, ``extract``'s
+``device_count``+``nets``, or ``pex``'s ``delta``+``reference_netlist``).
+Unlike every other kind, a `klt power` envelope carries no top-level
+``status`` field and no ``provenance`` block at all (``docs/cli/power.md``'s
+JSON schema) -- so :func:`_check_passed` derives a pass/fail verdict from
+``em_verdict`` instead: ``"met"`` only when a static IR-drop solve actually
+ran (``em_verdict`` is not ``None`` -- a spec declaring neither ``pads`` nor
+a ``current_model`` produces no solve at all, per ``docs/cli/power.md``, and
+proves nothing) *and* that solve's own EM verdict rolled up to
+``em_verdict["status"] == "pass"``. A rolled-up ``"fail"`` (a checked edge
+exceeded its declared current-density limit) or ``"not_checked"`` (nothing
+in the whole spec had both a declared current limit and a solved current,
+so nothing was actually verified) does not pass, exactly like a missing
+``em_verdict`` -- this module never infers a passing verdict from
+``worst_case_droop_mv`` alone, since the envelope declares no droop
+*limit* to compare it against (that binding is left to a future phase, per
+issue #1321's own "Dependencies" note on the still-open activity-weighted-
+current-model work). ``worst_case_droop_mv`` is still surfaced, verbatim,
+in :func:`_detail` -- informational, not itself a pass/fail input.
+
+**Not (yet) a T1 checklist item.** ``docs/design-evidence-tiers.md``'s T1
+checklist (items 1-10) has no item for power-grid IR-drop/EM evidence --
+unlike ``"generic"`` (which item 8 alone accepts), no T1 item names `klt
+power` at all, and mechanically extending the parsed item list is a
+separate, larger decision this phase does not make (see
+:mod:`.design_evidence_tiers`'s own "tightly coupled to the doc's current
+prose structure" caveat). So a ``"power"``-kind citation is recognised by
+:func:`build_signoff` (envelope-aggregation mode) but never satisfies any
+:func:`build_tier_report`/:func:`build_fleet_report` item --
+:data:`_ITEMS_ACCEPTING_POWER_EVIDENCE` is deliberately empty, mirroring
+how :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` scopes ``"generic"`` to item
+8 alone, just with an empty accept-set instead of ``{8}`` today.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -294,6 +345,19 @@ _ITEM_ALLOWED_KINDS: dict[int, set[str]] = {
 #: generic, could ever stand in for (items 1, 2, 9, 10), so none of them
 #: opt in.
 _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({8})
+
+#: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
+#: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
+#: satisfy in :func:`build_tier_report`/:func:`build_fleet_report`.
+#: Deliberately **empty**: ``docs/design-evidence-tiers.md``'s T1 checklist
+#: has no item for power-grid IR-drop/EM evidence at all today, unlike
+#: ``"generic"`` (scoped to item 8 via :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE`
+#: above) -- so a ``"power"`` citation is recognised by :func:`build_signoff`
+#: (envelope-aggregation mode) but is never accepted as ``"met"`` evidence
+#: for any tier-report item, even one with ``allowed_kinds is None``. Checked
+#: the same way :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` is, in
+#: :func:`_build_tier_item`.
+_ITEMS_ACCEPTING_POWER_EVIDENCE: frozenset[int] = frozenset()
 
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
@@ -395,7 +459,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                 {
                     "source": <str, the entry from `sources`>,
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
-                            | "generic" | "error",
+                            | "power" | "generic" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -517,7 +581,7 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     reason every native kind is checked *after* it: a hand-rolled, non-`klt`
     envelope could plausibly carry any field name by coincidence (e.g. a
     caller-chosen ``"violations"`` key that has nothing to do with `klt
-    drc`), so it is never inferred structurally like the six kinds below --
+    drc`), so it is never inferred structurally like the seven kinds below --
     only an explicit, literal ``"kind": "generic"`` self-declaration
     classifies as ``"generic"``, checked first so no such coincidence can
     ever misroute it into a native kind instead.
@@ -576,13 +640,25 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if isinstance(envelope.get("delta"), list) and "reference_netlist" in envelope:
         return "pex"
 
+    # `klt power` (issue #1321, Phase 2 of epic #712; shape from #844/#845/
+    # #846): a top-level `power_nets` list plus a `networks` list is unique
+    # to this shape -- it cannot collide with `sim` (`measurements`+
+    # `corner_count`), `yield` (`measurements`+`measurement_count`+`source`),
+    # `extract` (`device_count`+`nets`), or `pex` (`delta`+
+    # `reference_netlist`), all checked above. See this module's "`klt
+    # power` (IR-drop/EM) evidence ingestion" docstring section.
+    if isinstance(envelope.get("power_nets"), list) and isinstance(
+        envelope.get("networks"), list
+    ):
+        return "power"
+
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield/pex success or error envelope, and not a generic evidence "
-        'envelope ("kind": "generic") either -- klt signoff aggregates '
-        "those six verbs' output plus opt-in generic evidence today (see "
-        "docs/cli/signoff.md)"
+        "yield/pex/power success or error envelope, and not a generic "
+        'evidence envelope ("kind": "generic") either -- klt signoff '
+        "aggregates those seven verbs' output plus opt-in generic evidence "
+        "today (see docs/cli/signoff.md)"
     )
 
 
@@ -625,6 +701,22 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     - ``pex`` (issue #871; shape ratified by #801, `klt pex`) passes on
       ``status == "pass"`` -- mirrors ``sim``: every graded delta row met
       its tolerance.
+    - ``power`` (issue #1321) has no top-level ``status`` field at all
+      (unlike every kind above -- ``docs/cli/power.md``'s JSON schema), so
+      this derives a verdict from ``em_verdict`` instead: passes only when
+      a static IR-drop solve actually ran (``em_verdict`` is not ``None`` --
+      a spec declaring neither ``pads`` nor a ``current_model`` produces no
+      solve at all, per ``docs/cli/power.md``, and proves nothing) *and*
+      that solve's own EM current-density verdict rolled up to
+      ``em_verdict["status"] == "pass"``. A rolled-up ``"fail"`` (a checked
+      edge exceeded its declared current-density limit) or
+      ``"not_checked"`` (nothing in the whole spec had both a declared
+      current limit and a solved current, so nothing was actually
+      verified) does not pass, same as a missing ``em_verdict``.
+      ``worst_case_droop_mv`` is not itself compared here -- the envelope
+      declares no droop *limit* to check it against (see this module's
+      "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
+      it is surfaced informationally in :func:`_detail` instead.
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -643,6 +735,9 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
         return True
     if kind == "pex":
         return envelope.get("status") == "pass"
+    if kind == "power":
+        em_verdict = envelope.get("em_verdict")
+        return isinstance(em_verdict, dict) and em_verdict.get("status") == "pass"
     if kind == "generic":
         return envelope.get("status") == "pass"
     return False  # kind == "error"
@@ -699,6 +794,16 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "passed": envelope.get("passed"),
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
+        }
+    if kind == "power":
+        em_verdict = envelope.get("em_verdict") or {}
+        return {
+            "file": envelope.get("file"),
+            "spec": envelope.get("spec"),
+            "worst_case_droop_mv": envelope.get("worst_case_droop_mv"),
+            "em_verdict_status": em_verdict.get("status"),
+            "em_verdict_fail_count": em_verdict.get("fail_count"),
+            "em_verdict_checked_edge_count": em_verdict.get("checked_edge_count"),
         }
     if kind == "generic":
         return {
@@ -904,8 +1009,11 @@ def build_tier_report(
 
     An item's ``status`` is ``"met"`` only when its ``evidence`` entry
     resolves to a *readable* ``klt`` JSON envelope, classifiable as one of
-    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex``/``generic``
+    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex``/``power``/``generic``
     (:func:`_classify`), whose own check passed (:func:`_check_passed`) --
+    though a ``"power"``-classified citation never actually reaches
+    ``"met"`` for any item today (see "No T1 item accepts 'power' evidence"
+    below) --
     and, if the evidence entry pinned an expected ``content_hash``, whose
     input content hash matches it (``provenance.input.content_hash`` for
     drc/lvs/extract/sim/pex/generic -- a ``generic`` envelope populates this
@@ -942,6 +1050,16 @@ def build_tier_report(
     loosen items 3-7's own evidence requirements, only adds a new kind item
     8 alone may satisfy.
 
+    **No T1 item accepts ``"power"`` evidence** (issue #1321): `klt power`'s
+    IR-drop/EM verdict (see this module's "`klt power` (IR-drop/EM) evidence
+    ingestion" docstring section) is a recognised envelope kind, but no T1
+    item's checklist text names it -- unlike ``"generic"``, which item 8
+    alone accepts, :data:`_ITEMS_ACCEPTING_POWER_EVIDENCE` is empty, so a
+    ``"power"`` citation for *any* item, including item 8, renders
+    ``"unmet"`` with ``reason: "wrong_kind"``. `klt power` evidence is
+    consumed only by :func:`build_signoff`'s envelope-aggregation mode
+    today.
+
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
     item was skipped or actually failed:
@@ -974,14 +1092,15 @@ def build_tier_report(
       ``provenance.input.content_hash`` does not match the manifest's
       pinned ``content_hash`` -- the check ran against a different layout
       revision than the one being claimed.
-    - ``"wrong_kind"`` (issue #871, extended by issue #1152) -- the evidence
-      resolved to a recognised, *passing* envelope, but its classified kind
-      is not one this item accepts: either item 7's ``"pex"``-only
-      restriction (see "Item 7 is kind-restricted" above), or a
-      ``"generic"``-kind citation for any item other than item 8 (see "Only
-      item 8 accepts 'generic' evidence" above). The cited check did not
-      fail on its own terms; it simply does not prove what this item
-      requires.
+    - ``"wrong_kind"`` (issue #871, extended by issue #1152, extended by
+      issue #1321) -- the evidence resolved to a recognised, *passing*
+      envelope, but its classified kind is not one this item accepts:
+      either item 7's ``"pex"``-only restriction (see "Item 7 is
+      kind-restricted" above), a ``"generic"``-kind citation for any item
+      other than item 8 (see "Only item 8 accepts 'generic' evidence"
+      above), or a ``"power"``-kind citation for *any* item (see "No T1
+      item accepts 'power' evidence" above). The cited check did not fail
+      on its own terms; it simply does not prove what this item requires.
     - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
       repository has no mechanism to run a T2+ check at all.
 
@@ -1387,6 +1506,12 @@ def _build_tier_item(
     unrestricted ``allowed_kinds=None`` (which was written for the six
     `klt`-verb-native kinds, before ``"generic"`` existed, and would
     otherwise happily accept it too).
+
+    A ``"power"``-kind citation (issue #1321) is gated the same way, against
+    :data:`_ITEMS_ACCEPTING_POWER_EVIDENCE` -- deliberately empty today, since
+    no T1 item names `klt power`'s IR-drop/EM evidence (see this module's
+    "`klt power` (IR-drop/EM) evidence ingestion" docstring section), so a
+    passing ``"power"`` citation never satisfies any tier-report item.
     """
     citation = None
     status = "unmet"
@@ -1403,6 +1528,14 @@ def _build_tier_item(
                 status == "met"
                 and citation["kind"] == "generic"
                 and item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE
+            ):
+                status = "unmet"
+                reason = _REASON_WRONG_KIND
+                citation = None
+            elif (
+                status == "met"
+                and citation["kind"] == "power"
+                and item_id not in _ITEMS_ACCEPTING_POWER_EVIDENCE
             ):
                 status = "unmet"
                 reason = _REASON_WRONG_KIND
