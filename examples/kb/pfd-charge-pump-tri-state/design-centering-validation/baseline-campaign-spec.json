@@ -1,0 +1,52 @@
+{
+  "netlist": "../charge_pump.spice",
+  "engine": "ngspice",
+  "backend": "local-parallel",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt_mm"
+    ]
+  },
+  "monte_carlo": {
+    "n": 32,
+    "seed": 20260822,
+    "vary": "mismatch"
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "1n 2n"
+  },
+  "measurements": [
+    {
+      "name": "i_up",
+      "spice": ".meas tran i_up find i(Vctrlp) at=1n",
+      "unit": "A"
+    },
+    {
+      "name": "i_down",
+      "spice": ".meas tran i_down find par('-1*i(Vctrln)') at=1n",
+      "unit": "A"
+    },
+    {
+      "name": "i_mismatch_pct",
+      "spice": ".meas tran i_mismatch_pct find par('100*(i(Vctrlp)-(-1*i(Vctrln)))/((i(Vctrlp)+(-1*i(Vctrln)))/2)') at=1n",
+      "unit": "%",
+      "limits": {
+        "min": -3.0,
+        "max": 3.0,
+        "target_yield": 0.9
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 240,
+    "keep_artifacts": false,
+    "max_workers": 8
+  },
+  "confidence": 0.9,
+  "target_ci_halfwidth": 0.1
+}

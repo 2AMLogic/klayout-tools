@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- Ran the full `klt yield-campaign` -> `klt yield-sensitivity` -> yield-aware
+  `klt size` pipeline end to end against the PLL charge-pump canary (issue
+  #1327, epic #705 Phase 2), validating that `klt size`'s design-centering
+  objective (#1326, below) actually improves measured yield/margin, not
+  just that it runs. A real sky130 `tt_mm` mismatch-corner Monte Carlo
+  (`n=32`) on the as-authored charge pump measured 40.6% empirical UP/DOWN
+  current-mismatch yield (stddev 4.89%, `target_yield=0.9`); a bespoke
+  sensitivity harness (`klt sim`'s mismatch MC does not expose per-device
+  parameter draws, so this is a caller-side harness per
+  `docs/cli/yield-sensitivity.md`'s own documented fallback) ranked the
+  DOWN leg's Vth mismatch as dominant; the yield-aware `klt size` request
+  grew that device's `mult` to 48x; re-measuring the re-centered circuit
+  raised empirical yield to 56.25% and cut stddev by ~37% to 3.08% -- a
+  real, measured improvement, though neither run clears the 90% target
+  (the remaining gap is a systematic Vds-mismatch bias
+  `charge_pump.sizing.json` already documents, which `mult` growth cannot
+  address -- see `examples/kb/pfd-charge-pump-tri-state/
+  design-centering-validation/README.md`'s "Result" section for the full,
+  honest writeup including confidence-interval overlap at this sample
+  size). No code change to `klt size`/`klt yield-campaign`/`klt
+  yield-sensitivity` themselves (already complete as of #1326/#906/#923);
+  the new evidence bundle plus `tests/test_design_centering_validation.py`
+  guard the committed numbers.
+
 - `klt size` gains a design-centering/yield-aware objective mode (issue
   #1326, epic #705 Phase 2), wiring `klt design-centering`'s
   `ranking[].parameter`/`ranking[].contribution` contract (#924/#710)

@@ -1,0 +1,1591 @@
+{
+  "schema_version": 3,
+  "netlist": {
+    "path": "examples/kb/pfd-charge-pump-tri-state/charge_pump.spice",
+    "scope": "repo"
+  },
+  "status": "fail",
+  "corner_count": 32,
+  "passed": 13,
+  "failed": 19,
+  "errored": 0,
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "47",
+    "models_lib": {
+      "path": null,
+      "scope": "external"
+    },
+    "models_lib_sha256": "17c208a699228f5acb87bf59c09c22a4c4d3937b6766b4957737d34e8e075f64",
+    "netlist_sha256": "d2b8b0a99d6d5f07c45ed7ee9c7a4efcc0456de65aa393d3306fc6e636a54eaa",
+    "monte_carlo": {
+      "n": 32,
+      "seed": 20260822,
+      "vary": "mismatch",
+      "family_mismatch": [
+        {
+          "family": "mosfet",
+          "active": true,
+          "note": "MOS per-instance mismatch is active in any _mm-suffixed process-corner section (e.g. tt_mm) -- select that section via corners.process to sample it (see docs/cli/sim.md's 'Known-good mismatch mechanisms')."
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "klt_version": "0.3.0",
+    "klayout_version": "0.30.10",
+    "pdk": {
+      "name": "sky130A",
+      "source": "search root: ~/.volare",
+      "version": "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+    },
+    "deck": {
+      "name": "sky130.lib.spice",
+      "content_hash": "sha256:17c208a699228f5acb87bf59c09c22a4c4d3937b6766b4957737d34e8e075f64",
+      "released": false
+    },
+    "input": null
+  },
+  "measurements": [
+    {
+      "name": "i_up",
+      "unit": "A",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "tt_mm/novdd/27C/mc0",
+        "value": 1.85764e-05,
+        "margin": null
+      },
+      "monte_carlo": {
+        "n": 32,
+        "errored": 0,
+        "mean": 1.97882625e-05,
+        "stddev": 5.950826083884922e-07,
+        "min": 1.85764e-05,
+        "max": 2.07211e-05,
+        "quantiles": {
+          "p5": 1.875273e-05,
+          "p50": 1.9875200000000002e-05,
+          "p95": 2.0597164999999997e-05
+        },
+        "sigma_window": null,
+        "by_corner": [
+          {
+            "corner_id": "tt_mm/novdd/27C",
+            "n": 32,
+            "errored": 0,
+            "mean": 1.97882625e-05,
+            "stddev": 5.950826083884922e-07,
+            "min": 1.85764e-05,
+            "max": 2.07211e-05,
+            "quantiles": {
+              "p5": 1.875273e-05,
+              "p50": 1.9875200000000002e-05,
+              "p95": 2.0597164999999997e-05
+            },
+            "sigma_window": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "i_down",
+      "unit": "A",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "tt_mm/novdd/27C/mc0",
+        "value": 1.93406e-05,
+        "margin": null
+      },
+      "monte_carlo": {
+        "n": 32,
+        "errored": 0,
+        "mean": 2.0276496875e-05,
+        "stddev": 7.766175944790563e-07,
+        "min": 1.89654e-05,
+        "max": 2.20539e-05,
+        "quantiles": {
+          "p5": 1.926527e-05,
+          "p50": 2.0059949999999998e-05,
+          "p95": 2.1585755000000003e-05
+        },
+        "sigma_window": null,
+        "by_corner": [
+          {
+            "corner_id": "tt_mm/novdd/27C",
+            "n": 32,
+            "errored": 0,
+            "mean": 2.0276496875e-05,
+            "stddev": 7.766175944790563e-07,
+            "min": 1.89654e-05,
+            "max": 2.20539e-05,
+            "quantiles": {
+              "p5": 1.926527e-05,
+              "p50": 2.0059949999999998e-05,
+              "p95": 2.1585755000000003e-05
+            },
+            "sigma_window": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "i_mismatch_pct",
+      "unit": "%",
+      "limits": {
+        "min": -3.0,
+        "max": 3.0,
+        "target_yield": 0.9
+      },
+      "status": "fail",
+      "worst_case": {
+        "corner_id": "tt_mm/novdd/27C/mc11",
+        "value": -11.2473,
+        "margin": -8.2473
+      },
+      "monte_carlo": {
+        "n": 32,
+        "errored": 0,
+        "mean": -2.409842940625,
+        "stddev": 4.888427138161221,
+        "min": -11.2473,
+        "max": 8.66344,
+        "quantiles": {
+          "p5": -10.855619999999998,
+          "p50": -2.64322,
+          "p95": 5.1413215
+        },
+        "sigma_window": null,
+        "by_corner": [
+          {
+            "corner_id": "tt_mm/novdd/27C",
+            "n": 32,
+            "errored": 0,
+            "mean": -2.409842940625,
+            "stddev": 4.888427138161221,
+            "min": -11.2473,
+            "max": 8.66344,
+            "quantiles": {
+              "p5": -10.855619999999998,
+              "p50": -2.64322,
+              "p95": 5.1413215
+            },
+            "sigma_window": null
+          }
+        ]
+      }
+    }
+  ],
+  "corners": [
+    {
+      "corner_id": "tt_mm/novdd/27C/mc0",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 98.921,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.85764e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.93406e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -4.03091,
+          "unit": "%",
+          "status": "fail",
+          "margin": -1.0309100000000004
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 0,
+        "seed": 1861277669,
+        "process_seed": 491127894,
+        "mismatch_seed": 1439506144
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc1",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 97.218,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.90015e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.11242e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -10.5804,
+          "unit": "%",
+          "status": "fail",
+          "margin": -7.580399999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 1,
+        "seed": 874357357,
+        "process_seed": 491127894,
+        "mismatch_seed": 382088919
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc2",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 98.875,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.96487e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.04393e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -3.94387,
+          "unit": "%",
+          "status": "fail",
+          "margin": -0.94387
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 2,
+        "seed": 1899791464,
+        "process_seed": 491127894,
+        "mismatch_seed": 177775874
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc3",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 98.154,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.02638e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.99849e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 1.38592,
+          "unit": "%",
+          "status": "pass",
+          "margin": 1.61408
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 3,
+        "seed": 2037218438,
+        "process_seed": 491127894,
+        "mismatch_seed": 412599745
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc4",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 99.07,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.02411e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.09542e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -3.46182,
+          "unit": "%",
+          "status": "fail",
+          "margin": -0.4618199999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 4,
+        "seed": 1204599175,
+        "process_seed": 491127894,
+        "mismatch_seed": 557037765
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc5",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 98.91,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.99365e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.20539e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -10.0853,
+          "unit": "%",
+          "status": "fail",
+          "margin": -7.0853
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 5,
+        "seed": 1115507188,
+        "process_seed": 491127894,
+        "mismatch_seed": 1591554644
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc6",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 98.246,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.94373e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.0545e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -5.54131,
+          "unit": "%",
+          "status": "fail",
+          "margin": -2.54131
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 6,
+        "seed": 720447273,
+        "process_seed": 491127894,
+        "mismatch_seed": 667220573
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc7",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 97.139,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.01789e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.02521e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -0.361978,
+          "unit": "%",
+          "status": "pass",
+          "margin": 2.638022
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 7,
+        "seed": 1273242548,
+        "process_seed": 491127894,
+        "mismatch_seed": 1570656378
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc8",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 108.783,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.99987e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.02983e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -1.48725,
+          "unit": "%",
+          "status": "pass",
+          "margin": 1.51275
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 8,
+        "seed": 397174823,
+        "process_seed": 491127894,
+        "mismatch_seed": 1202094680
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc9",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 108.571,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.99836e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.02063e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -1.10803,
+          "unit": "%",
+          "status": "pass",
+          "margin": 1.89197
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 9,
+        "seed": 1524043688,
+        "process_seed": 491127894,
+        "mismatch_seed": 932711744
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc10",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 108.286,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.05022e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.94385e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 5.32649,
+          "unit": "%",
+          "status": "fail",
+          "margin": -2.3264899999999997
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 10,
+        "seed": 1295621075,
+        "process_seed": 491127894,
+        "mismatch_seed": 1978673232
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc11",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 107.752,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.92409e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.15339e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -11.2473,
+          "unit": "%",
+          "status": "fail",
+          "margin": -8.2473
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 11,
+        "seed": 1803993051,
+        "process_seed": 491127894,
+        "mismatch_seed": 1571574795
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc12",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 107.119,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.95412e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.00127e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -2.3838,
+          "unit": "%",
+          "status": "pass",
+          "margin": 0.6162000000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 12,
+        "seed": 2021633723,
+        "process_seed": 491127894,
+        "mismatch_seed": 1472050335
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc13",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 107.792,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.95809e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.01072e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -2.65239,
+          "unit": "%",
+          "status": "pass",
+          "margin": 0.34761
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 13,
+        "seed": 647352188,
+        "process_seed": 491127894,
+        "mismatch_seed": 1188490441
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc14",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 106.938,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.01852e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.00114e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 0.864867,
+          "unit": "%",
+          "status": "pass",
+          "margin": 2.1351329999999997
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 14,
+        "seed": 28660814,
+        "process_seed": 491127894,
+        "mismatch_seed": 293782078
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc15",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 106.641,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.01543e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.14276e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -6.12424,
+          "unit": "%",
+          "status": "fail",
+          "margin": -3.1242400000000004
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 15,
+        "seed": 118401152,
+        "process_seed": 491127894,
+        "mismatch_seed": 2075576244
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc16",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 108.643,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.01797e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.00021e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 0.883998,
+          "unit": "%",
+          "status": "pass",
+          "margin": 2.116002
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 16,
+        "seed": 1913834430,
+        "process_seed": 491127894,
+        "mismatch_seed": 1321153630
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc17",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 109.777,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.9808e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.16286e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -8.7873,
+          "unit": "%",
+          "status": "fail",
+          "margin": -5.7873
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 17,
+        "seed": 1873947064,
+        "process_seed": 491127894,
+        "mismatch_seed": 290902357
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc18",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 108.19,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.03658e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.93743e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 4.98982,
+          "unit": "%",
+          "status": "fail",
+          "margin": -1.98982
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 18,
+        "seed": 1232476527,
+        "process_seed": 491127894,
+        "mismatch_seed": 880018981
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc19",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 108.527,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.05271e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.97049e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 4.08747,
+          "unit": "%",
+          "status": "fail",
+          "margin": -1.0874699999999997
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 19,
+        "seed": 270871043,
+        "process_seed": 491127894,
+        "mismatch_seed": 1951533180
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc20",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 109.136,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.07211e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.9979e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 3.64654,
+          "unit": "%",
+          "status": "fail",
+          "margin": -0.6465399999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 20,
+        "seed": 1657028861,
+        "process_seed": 491127894,
+        "mismatch_seed": 1063965767
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc21",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 108.352,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.97986e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.04704e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -3.33618,
+          "unit": "%",
+          "status": "fail",
+          "margin": -0.33618000000000015
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 21,
+        "seed": 814095789,
+        "process_seed": 491127894,
+        "mismatch_seed": 276415011
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc22",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 108.594,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.92108e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.97656e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -2.84699,
+          "unit": "%",
+          "status": "pass",
+          "margin": 0.1530100000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 22,
+        "seed": 1633875936,
+        "process_seed": 491127894,
+        "mismatch_seed": 1913690838
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc23",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 107.754,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.98139e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.03428e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -2.63405,
+          "unit": "%",
+          "status": "pass",
+          "margin": 0.3659500000000002
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 23,
+        "seed": 957897085,
+        "process_seed": 491127894,
+        "mismatch_seed": 1579859763
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc24",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 106.983,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.91309e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.91732e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -0.220785,
+          "unit": "%",
+          "status": "pass",
+          "margin": 2.7792149999999998
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 24,
+        "seed": 139647708,
+        "process_seed": 491127894,
+        "mismatch_seed": 1907105040
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc25",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 106.836,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.87818e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.10085e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -11.192,
+          "unit": "%",
+          "status": "fail",
+          "margin": -8.192
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 25,
+        "seed": 1210707510,
+        "process_seed": 491127894,
+        "mismatch_seed": 1110329172
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc26",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 106.529,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.99584e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.99396e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 0.0946439,
+          "unit": "%",
+          "status": "pass",
+          "margin": 2.9053561
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 26,
+        "seed": 204661259,
+        "process_seed": 491127894,
+        "mismatch_seed": 2018132628
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc27",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 104.461,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.95079e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.97084e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -1.02253,
+          "unit": "%",
+          "status": "pass",
+          "margin": 1.97747
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 27,
+        "seed": 1354880340,
+        "process_seed": 491127894,
+        "mismatch_seed": 710255173
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc28",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 106.488,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.90274e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.97643e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -3.79961,
+          "unit": "%",
+          "status": "fail",
+          "margin": -0.7996099999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 28,
+        "seed": 207449263,
+        "process_seed": 491127894,
+        "mismatch_seed": 846226959
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc29",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 104.447,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 1.87172e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.974e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -5.31888,
+          "unit": "%",
+          "status": "fail",
+          "margin": -2.31888
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 29,
+        "seed": 1964807134,
+        "process_seed": 491127894,
+        "mismatch_seed": 529958531
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc30",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 105.932,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.06828e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 1.89654e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": 8.66344,
+          "unit": "%",
+          "status": "fail",
+          "margin": -5.66344
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 30,
+        "seed": 424700628,
+        "process_seed": 491127894,
+        "mismatch_seed": 450015750
+      }
+    },
+    {
+      "corner_id": "tt_mm/novdd/27C/mc31",
+      "process": "tt_mm",
+      "supply_v": {},
+      "temperature_c": 27,
+      "status": "fail",
+      "runtime_s": 105.5,
+      "measurements": [
+        {
+          "name": "i_up",
+          "value": 2.05218e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_down",
+          "value": 2.15507e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "i_mismatch_pct",
+          "value": -4.89124,
+          "unit": "%",
+          "status": "fail",
+          "margin": -1.8912399999999998
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": {
+        "sample_index": 31,
+        "seed": 1951614040,
+        "process_seed": 491127894,
+        "mismatch_seed": 474956449
+      }
+    }
+  ]
+}

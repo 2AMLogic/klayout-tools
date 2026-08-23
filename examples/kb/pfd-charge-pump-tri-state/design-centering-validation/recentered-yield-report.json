@@ -1,0 +1,138 @@
+{
+  "samples": "raw-campaign/recentered/sample-set.json",
+  "limits": null,
+  "source": {
+    "kind": "sim-report",
+    "netlist": "examples/kb/pfd-charge-pump-tri-state/charge_pump_recentered.spice",
+    "monte_carlo": {
+      "n": 32,
+      "seed": 20260822,
+      "vary": "mismatch",
+      "family_mismatch": [
+        {
+          "family": "mosfet",
+          "active": true,
+          "note": "MOS per-instance mismatch is active in any _mm-suffixed process-corner section (e.g. tt_mm) -- select that section via corners.process to sample it (see docs/cli/sim.md's 'Known-good mismatch mechanisms')."
+        }
+      ]
+    },
+    "sample_count": 32
+  },
+  "schema_version": 1,
+  "confidence": 0.9,
+  "target_ci_halfwidth": 0.1,
+  "min_samples": 2,
+  "status": "fail",
+  "measurement_count": 1,
+  "measurements": [
+    {
+      "name": "i_mismatch_pct",
+      "unit": "%",
+      "n": 32,
+      "errored": 0,
+      "failed_unmeasurable": 0,
+      "limits": {
+        "min": -3.0,
+        "max": 3.0,
+        "target_yield": 0.9
+      },
+      "source_corners": [
+        "tt_mm/novdd/27C"
+      ],
+      "distribution": {
+        "model": "normal",
+        "mean": -2.432099875,
+        "stddev": 3.084201309838858,
+        "min": -8.12616,
+        "max": 2.99056,
+        "median": -2.391825,
+        "skewness": -0.20997893900434933,
+        "excess_kurtosis": -0.7981610225766764,
+        "normality": {
+          "test": "anderson-darling",
+          "statistic": 0.2615867513229712,
+          "critical_value": 0.787,
+          "significance": 0.05,
+          "verdict": "consistent"
+        }
+      },
+      "yield": {
+        "empirical": {
+          "method": "clopper-pearson",
+          "estimate": 0.5625,
+          "confidence": 0.9,
+          "confidence_interval": {
+            "low": 0.40316838447912207,
+            "high": 0.7127250834083634
+          },
+          "n": 32
+        },
+        "normal": {
+          "method": "normal-delta",
+          "estimate": 0.5339483751706604,
+          "confidence": 0.9,
+          "confidence_interval": {
+            "low": 0.4335948405427095,
+            "high": 0.6343019097986113
+          },
+          "n": 32
+        },
+        "variance_reduced": null
+      },
+      "capability": {
+        "cp": 0.32423305080959436,
+        "cpk": 0.061377330027966664,
+        "cpk_confidence_interval": {
+          "low": -0.036390964405725354,
+          "high": 0.1591456244616587
+        },
+        "sigma_to_spec": 0.1841319900839,
+        "sigma_to_spec_confidence_interval": {
+          "low": -0.10917289321717606,
+          "high": 0.4774368733849761
+        },
+        "limiting_side": "lower"
+      },
+      "sample_size": {
+        "n": 32,
+        "observed_ci_halfwidth": 0.15477834946462066,
+        "target_ci_halfwidth": 0.1,
+        "required_n": 67,
+        "required_n_for_target": null,
+        "verdict": "insufficient",
+        "method": "normal-approximation",
+        "variance_reduced": null
+      },
+      "negative_control": null,
+      "analytic_cross_check": null,
+      "sampling": {
+        "strategy": "plain_random",
+        "replicates": null,
+        "effective_sample_size": null
+      },
+      "status": "fail",
+      "warnings": [
+        "measurement 'i_mismatch_pct': N = 32 resolves the yield only to +/-0.1548 at 90% confidence; 67 samples are needed for the requested +/-0.1",
+        "measurement 'i_mismatch_pct': the observed pass rate (0.562500) is at or below the 0.9 target, so no sample count can support the claim -- this is the design falling short, not the campaign"
+      ]
+    }
+  ],
+  "warnings": [
+    "measurement 'i_up' declares no spec limits and was skipped; supply limits via --limits to include it",
+    "measurement 'i_down' declares no spec limits and was skipped; supply limits via --limits to include it",
+    "no measurement declared a negative_control -- this campaign has no seeded, known-bad variant demonstrating that the statistics above can actually detect a degraded design; see docs/cli/yield.md#negative-control"
+  ],
+  "campaign": {
+    "spec": "recentered-campaign-spec.json",
+    "seed": 20260822,
+    "seed_source": "spec",
+    "requested_samples": 32,
+    "vary": "mismatch",
+    "backend": "local-parallel",
+    "hosts": 1,
+    "sim_status": "fail",
+    "corner_count": 32,
+    "sim_report_path": "raw-campaign/recentered/sample-set.json",
+    "request_path": "raw-campaign/recentered/sim-request.json"
+  }
+}

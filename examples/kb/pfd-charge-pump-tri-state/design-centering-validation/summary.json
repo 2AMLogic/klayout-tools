@@ -1,0 +1,35 @@
+{
+  "dominant_leg": "down",
+  "mult_after": 48,
+  "sensitivity_top_parameters": [
+    "vth_mismatch_down_mv",
+    "vth_mismatch_up_mv"
+  ],
+  "design_centering_applied": true,
+  "baseline_yield": {
+    "status": "fail",
+    "n": 32,
+    "empirical_estimate": 0.40625,
+    "empirical_ci": {
+      "low": 0.2596619649420151,
+      "high": 0.5665126270105416
+    },
+    "mean_pct": -2.409842940625001,
+    "stddev_pct": 4.888427138161221,
+    "cpk": 0.040241782117604014,
+    "sigma_to_spec": 0.12072534635281204
+  },
+  "recentered_yield": {
+    "status": "fail",
+    "n": 32,
+    "empirical_estimate": 0.5625,
+    "empirical_ci": {
+      "low": 0.40316838447912207,
+      "high": 0.7127250834083634
+    },
+    "mean_pct": -2.432099875,
+    "stddev_pct": 3.084201309838858,
+    "cpk": 0.061377330027966664,
+    "sigma_to_spec": 0.1841319900839
+  }
+}
