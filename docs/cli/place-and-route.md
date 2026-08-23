@@ -1304,17 +1304,18 @@ Typical use:
 klt place-and-route pnr_request.json --format json   # -> verilog_path, gds_path
 klt extract "$gds_path" --deck sky130 --abstract-cells 'sky130_fd_sc_hd__*' \
   -o layout.spice                                    # layout side
-# reference side: build from $verilog_path, not from klt synthesize's netlist
+# reference side: klt lvs itself converts $verilog_path (reference.form:
+# "gate-level-verilog"), not klt synthesize's pre-place-and-route netlist
 klt lvs lvs_request.json
 ```
 
-> **Note.** `klt lvs` compares SPICE netlists, and `klt extract
-> --abstract-cells` emits a hierarchical SPICE subcircuit netlist for the
-> layout side. Converting `verilog_path`'s gate-level Verilog into the
-> matching SPICE reference is a separate, still-deferred capability (see
-> `docs/cli/extract.md`'s "Gate-level Verilog output" limitation). This field
-> removes the *structural* blocker — an as-built netlist now exists at all —
-> it does not by itself complete the Verilog→SPICE reference path.
+`klt lvs` compares SPICE netlists, and `klt extract --abstract-cells` emits
+a hierarchical SPICE subcircuit netlist for the layout side.
+`verilog_path`'s gate-level Verilog itself is not SPICE — set
+`lvs_request.json`'s `reference.form` to `"gate-level-verilog"` (issue
+#1336; see `docs/cli/lvs.md`'s "Digital gate-level LVS" section) to have
+`klt lvs` convert it to the matching SPICE reference in-process before
+comparing.
 
 **Flags.** The command is written plain: `write_verilog <path>`.
 `-include_pwr_gnd` is deliberately not passed, matching ORFS's own

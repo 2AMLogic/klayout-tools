@@ -3873,7 +3873,11 @@ above, issue #217). The following remain out of scope:
 - **Gate-level Verilog output.** `--abstract-cells` (issue #620) emits a
   hierarchical **SPICE subcircuit** netlist only. A gate-level Verilog
   netlist (module instantiations, port-connected by name) is a deliberately
-  deferred follow-up — see "Cell-level (black-box + pins) abstraction".
+  deferred follow-up — see "Cell-level (black-box + pins) abstraction". The
+  *opposite* direction — converting a `klt place-and-route` `verilog_path`
+  gate-level Verilog netlist into SPICE for use as `klt lvs`'s reference —
+  is not deferred: see `docs/cli/lvs.md`'s `reference.form:
+  "gate-level-verilog"` (issue #1336).
 
 Netlist comparison (`klt lvs`) is a separate command; this command only
 produces the layout-side netlist half of that comparison.

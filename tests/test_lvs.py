@@ -7468,3 +7468,470 @@ def test_cli_lvs_no_request_no_check_is_a_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["lvs", "--format", "json"])
     assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Reference netlist form: gate-level-verilog -> plain-element conversion
+# (issue #1336)
+# --------------------------------------------------------------------------- #
+
+from klayout_tools.verilog_netlist import (  # noqa: E402
+    VerilogNetlistError,
+    convert_gate_level_verilog,
+    parse_gate_level_verilog,
+    parse_subckt_pin_orders,
+)
+
+#: A small, structurally-representative gate-level netlist -- the shape
+#: OpenROAD's own `write_verilog` produces for `klt place-and-route`'s
+#: `verilog_path` (module instantiations, named-port-connected, a multi-bit
+#: bus port expanded to per-bit connections at each instance, no
+#: behavioral statements).
+_GATE_LEVEL_VERILOG = """
+// as-built gate-level netlist
+module top(clk, rst_n, a_in, y_out);
+  input clk;
+  input rst_n;
+  input [1:0] a_in;
+  output [1:0] y_out;
+  wire n1;
+
+  mylib__inv_1 u1 (.A(a_in[0]), .Y(n1));
+  mylib__buf_1 u2 (.A(n1), .Y(y_out[0]));
+  mylib__inv_1 u3 (.A(a_in[1]), .Y(y_out[1]));
+endmodule
+"""
+
+_MYLIB_SPICE = """
+.subckt mylib__inv_1 A VGND VNB VPB VPWR Y
+M1 Y A VGND VGND nfet L=0.15U W=0.5U
+.ends
+.subckt mylib__buf_1 A VGND VNB VPB VPWR Y
+.ends
+"""
+
+
+def test_parse_gate_level_verilog_expands_bus_ports_and_connections():
+    modules = parse_gate_level_verilog(_GATE_LEVEL_VERILOG)
+    assert len(modules) == 1
+    top = modules[0]
+    assert top["name"] == "top"
+    assert top["ports"] == [
+        "clk",
+        "rst_n",
+        "a_in[1]",
+        "a_in[0]",
+        "y_out[1]",
+        "y_out[0]",
+    ]
+    assert [inst["cell"] for inst in top["instances"]] == [
+        "mylib__inv_1",
+        "mylib__buf_1",
+        "mylib__inv_1",
+    ]
+    assert top["instances"][0]["connections"] == {"A": "a_in[0]", "Y": "n1"}
+    assert top["instances"][1]["connections"] == {"A": "n1", "Y": "y_out[0]"}
+
+
+def test_parse_gate_level_verilog_strips_comments():
+    text = """
+    /* block
+       comment */
+    module m(a, y); // trailing
+      input a;
+      output y;
+      cellx u0 (.A(a), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["instances"][0]["cell"] == "cellx"
+
+
+def test_parse_gate_level_verilog_resolves_escaped_identifiers():
+    text = r"""
+    module m(a, y);
+      input a;
+      output y;
+      \my.cell u0 (.A(a), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["instances"][0]["cell"] == "my.cell"
+
+
+def test_parse_gate_level_verilog_resolves_assign_alias():
+    text = """
+    module m(a, y);
+      input a;
+      output y;
+      assign n1 = a;
+      cellx u0 (.A(n1), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["instances"][0]["connections"]["A"] == "a"
+
+
+def test_parse_gate_level_verilog_resolves_bit_constants():
+    text = """
+    module m(y);
+      output y;
+      cellx u0 (.A(1'b0), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["instances"][0]["connections"]["A"] == "__CONST0__"
+
+
+def test_parse_gate_level_verilog_no_module_fails():
+    with pytest.raises(VerilogNetlistError, match="no 'module'"):
+        parse_gate_level_verilog("// nothing here\n")
+
+
+def test_parse_gate_level_verilog_ansi_style_port_list_rejected():
+    text = "module m(input a, output y);\n  cellx u0 (.A(a), .Y(y));\nendmodule\n"
+    with pytest.raises(VerilogNetlistError, match="ANSI-style"):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_positional_connection_rejected():
+    text = "module m(a, y);\n  input a;\n  output y;\n  cellx u0 (a, y);\nendmodule\n"
+    with pytest.raises(VerilogNetlistError, match="positional"):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_range_slice_connection_rejected():
+    text = (
+        "module m(a, y);\n  input [3:0] a;\n  output [3:0] y;\n"
+        "  cellx u0 (.A(a[3:0]), .Y(y));\nendmodule\n"
+    )
+    with pytest.raises(VerilogNetlistError, match="range slice"):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_concatenation_rejected():
+    text = (
+        "module m(a, b, y);\n  input a;\n  input b;\n  output y;\n"
+        "  cellx u0 (.A({a, b}), .Y(y));\nendmodule\n"
+    )
+    with pytest.raises(VerilogNetlistError):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_unconnected_pin_is_dropped():
+    text = (
+        "module m(a, y);\n  input a;\n  output y;\n"
+        "  cellx u0 (.A(a), .Y());\nendmodule\n"
+    )
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["instances"][0]["connections"] == {"A": "a"}
+
+
+def test_parse_subckt_pin_orders_basic():
+    orders = parse_subckt_pin_orders(_MYLIB_SPICE)
+    assert orders == {
+        "mylib__inv_1": ["A", "VGND", "VNB", "VPB", "VPWR", "Y"],
+        "mylib__buf_1": ["A", "VGND", "VNB", "VPB", "VPWR", "Y"],
+    }
+
+
+def test_parse_subckt_pin_orders_continuation_line():
+    text = ".subckt wide_cell A B C\n+ D E\n.ends\n"
+    assert parse_subckt_pin_orders(text) == {"wide_cell": ["A", "B", "C", "D", "E"]}
+
+
+def test_parse_subckt_pin_orders_uppercase_directive():
+    text = ".SUBCKT foo A B\n.ENDS\n"
+    assert parse_subckt_pin_orders(text) == {"foo": ["A", "B"]}
+
+
+def test_parse_subckt_pin_orders_real_sky130_header():
+    # Copied verbatim from a real, volare-fetched `sky130A` install's own
+    # `libs.ref/sky130_fd_sc_hd/spice/sky130_fd_sc_hd.spice`, line 8426
+    # (verified 2026-08-23) -- confirms real-PDK pin-order resolution without
+    # this test itself depending on a real PDK install being present.
+    real_header = ".subckt sky130_fd_sc_hd__inv_1 A VGND VNB VPB VPWR Y\n.ends\n"
+    orders = parse_subckt_pin_orders(real_header)
+    assert orders["sky130_fd_sc_hd__inv_1"] == ["A", "VGND", "VNB", "VPB", "VPWR", "Y"]
+
+
+def test_parse_subckt_pin_orders_real_gf180mcu_header():
+    # Copied verbatim from a real, volare-fetched `gf180mcuC` install's own
+    # `libs.ref/gf180mcu_fd_sc_mcu9t5v0/{spice,cdl}/gf180mcu_fd_sc_mcu9t5v0.
+    # {spice,cdl}` (byte-identical headers, verified 2026-08-23) -- a
+    # different pin-naming convention (`I`/`ZN`, not `A`/`Y`) than sky130's,
+    # confirming pin order/names are read from the file, never hardcoded.
+    real_header = ".SUBCKT gf180mcu_fd_sc_mcu9t5v0__inv_1 I ZN VDD VNW VPW VSS\n.ENDS\n"
+    orders = parse_subckt_pin_orders(real_header)
+    assert orders["gf180mcu_fd_sc_mcu9t5v0__inv_1"] == [
+        "I",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS",
+    ]
+
+
+def test_convert_gate_level_verilog_writes_expected_spice():
+    orders = parse_subckt_pin_orders(_MYLIB_SPICE)
+    out = convert_gate_level_verilog(_GATE_LEVEL_VERILOG, pin_order_lookup=orders.get)
+    # Power/ground pins never appear -- `verilog_path` never carries them
+    # (see the module docstring's "No power/ground pins carried" section).
+    assert "VGND" not in out and "VPWR" not in out
+    assert ".SUBCKT mylib__inv_1 A Y" in out
+    assert ".SUBCKT mylib__buf_1 A Y" in out
+    assert "Xu1 a_in[0] n1 mylib__inv_1" in out
+    assert "Xu2 n1 y_out[0] mylib__buf_1" in out
+    assert "Xu3 a_in[1] y_out[1] mylib__inv_1" in out
+
+
+def test_convert_gate_level_verilog_unresolvable_cell_errors():
+    with pytest.raises(VerilogNetlistError, match="no resolvable pin order"):
+        convert_gate_level_verilog(
+            _GATE_LEVEL_VERILOG, pin_order_lookup=lambda _c: None
+        )
+
+
+def test_convert_gate_level_verilog_unknown_pin_connection_errors():
+    text = (
+        "module m(a, y);\n  input a;\n  output y;\n"
+        "  cellx u0 (.NOPE(a), .Y(y));\nendmodule\n"
+    )
+    with pytest.raises(VerilogNetlistError, match="not in its resolved PDK pin list"):
+        convert_gate_level_verilog(text, pin_order_lookup=lambda _c: ["A", "Y"])
+
+
+def test_convert_gate_level_verilog_hierarchical_submodule_reference():
+    text = """
+    module leaf(a, y);
+      input a;
+      output y;
+      cellx u0 (.A(a), .Y(y));
+    endmodule
+    module top(a, y);
+      input a;
+      output y;
+      leaf u1 (.a(a), .y(y));
+    endmodule
+    """
+    out = convert_gate_level_verilog(text, pin_order_lookup=lambda _c: ["A", "Y"])
+    assert ".SUBCKT leaf a y" in out
+    assert "Xu1 a y leaf" in out
+
+
+def test_convert_gate_level_verilog_unconnected_pin_synthesizes_fresh_net():
+    # `u0` leaves `Y` unconnected, but `u1` (same cell type) does connect
+    # `Y` -- so the black-box stub's declared pin list includes `Y` (the
+    # union across every instance of that cell type), and `u0`'s own call
+    # gets a synthesized, unique disconnected net for it.
+    text = (
+        "module m(a, b);\n  input a;\n  output b;\n"
+        "  cellx u0 (.A(a), .Y());\n"
+        "  cellx u1 (.A(b), .Y(b));\n"
+        "endmodule\n"
+    )
+    out = convert_gate_level_verilog(text, pin_order_lookup=lambda _c: ["A", "Y"])
+    assert "Xu0 a __NC_u0_Y__ cellx" in out
+    assert "Xu1 b b cellx" in out
+
+
+# --- integration through run_lvs -------------------------------------------- #
+
+
+def _make_fake_pdk_library(
+    tmp_path: Path,
+    variant: str,
+    library: str,
+    subckt_text: str,
+    *,
+    asset: str = "spice",
+) -> str:
+    """A minimal, hermetic fake PDK install (no dependency on a real PDK
+    being installed) shaped exactly like a real open_pdks/volare/ciel
+    install -- `<root>/<variant>/{libs.tech,libs.ref/<library>/<asset>/
+    <library>.<asset>}` -- so `find_pdk`'s real resolver (never a shortcut)
+    is exercised end to end. Mirrors `test_extract.py`'s own
+    `_make_pdk_install` helper, extended with the `libs.ref` asset this
+    issue's pin-order resolution needs."""
+    root = tmp_path / "pdk_install"
+    (root / variant / "libs.tech").mkdir(parents=True, exist_ok=True)
+    lib_dir = root / variant / "libs.ref" / library / asset
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    (lib_dir / f"{library}.{asset}").write_text(subckt_text)
+    return str(root)
+
+
+#: Layout side, hand-written to mirror exactly what `klt extract
+#: --abstract-cells` would write for this design (issue #620's own black-box
+#: `.SUBCKT ... .ENDS` shape): two pin-only standard-cell stubs plus a top
+#: circuit calling them.
+_GATE_LEVEL_LAYOUT_SPICE = """
+.subckt top in mid out
+X1 in mid mylib__inv_1
+X2 mid out mylib__buf_1
+.ends
+.subckt mylib__inv_1 A Y
+.ends
+.subckt mylib__buf_1 A Y
+.ends
+"""
+
+#: The same design's connectivity with one real defect: instance `X2`'s
+#: connections are swapped (`out mid` instead of `mid out`), matching this
+#: doc/test suite's "negative control" convention elsewhere in this file --
+#: a real, catchable connectivity defect, not merely a parameter change.
+_GATE_LEVEL_LAYOUT_SPICE_BROKEN = _GATE_LEVEL_LAYOUT_SPICE.replace(
+    "X2 mid out mylib__buf_1", "X2 out mid mylib__buf_1"
+)
+
+_GATE_LEVEL_REFERENCE_VERILOG = """
+module top(in, mid, out);
+  input in;
+  output mid;
+  output out;
+  mylib__inv_1 u1 (.A(in), .Y(mid));
+  mylib__buf_1 u2 (.A(mid), .Y(out));
+endmodule
+"""
+
+_GATE_LEVEL_LIBRARY_SPICE = (
+    ".subckt mylib__inv_1 A Y\n.ends\n.subckt mylib__buf_1 A Y\n.ends\n"
+)
+
+
+def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+
+def test_run_lvs_gate_level_verilog_reference_via_cdl_fallback(tmp_path):
+    # `.cdl` (no `spice/` asset at all) -- exercises the fallback resolution
+    # path, and gf180mcu's own real pin-naming convention (`I`/`ZN`).
+    root = _make_fake_pdk_library(
+        tmp_path,
+        "gf180mcuC",
+        "gf180mcu_fd_sc_mcu9t5v0",
+        ".SUBCKT gf180mcu_fd_sc_mcu9t5v0__inv_1 I ZN\n.ENDS\n",
+        asset="cdl",
+    )
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt top a y\nX1 a y gf180mcu_fd_sc_mcu9t5v0__inv_1\n.ends\n"
+        ".subckt gf180mcu_fd_sc_mcu9t5v0__inv_1 I ZN\n.ends\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.v",
+        "module top(a, y);\n  input a;\n  output y;\n"
+        "  gf180mcu_fd_sc_mcu9t5v0__inv_1 u1 (.I(a), .ZN(y));\nendmodule\n",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "gf180mcu_fd_sc_mcu9t5v0",
+            "pdk": "gf180mcuC",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_gate_level_verilog_reference_detects_defect(tmp_path):
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_BROKEN)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    assert report["mismatch_count"] >= 1
+
+
+def test_run_lvs_gate_level_verilog_missing_library_errors(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+        },
+    }
+    with pytest.raises(LvsError, match="reference.library is required"):
+        run_lvs(json.dumps(request))
+
+
+def test_run_lvs_gate_level_verilog_unknown_cell_errors(tmp_path):
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.v",
+        "module top(in, out);\n  input in;\n  output out;\n"
+        "  mylib__nope_1 u1 (.A(in), .Y(out));\nendmodule\n",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    with pytest.raises(LvsError, match="could not convert gate-level-verilog"):
+        run_lvs(json.dumps(request))
+
+
+def test_run_lvs_gate_level_verilog_pdk_not_found_errors(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": str(tmp_path / "does-not-exist"),
+        },
+    }
+    with pytest.raises(LvsError, match="no supported-layout PDK install"):
+        run_lvs(json.dumps(request))

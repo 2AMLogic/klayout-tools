@@ -304,6 +304,88 @@ consistently, but produces a nonsensical absolute value in a
 `device.property` mismatch's reported numbers. Always write reference
 netlists with explicit unit suffixes on `W`/`L`.
 
+## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
+
+`klt place-and-route`'s `verilog_path` (issue #996) writes the as-built,
+gate-level Verilog netlist of a routed digital design — module
+instantiations of standard-cell library types, port-connected by name. `klt
+lvs` compares SPICE netlists only, so nothing in `klt` could turn that
+Verilog into a comparable reference: `klt extract --abstract-cells` (issue
+#620) gives the *layout* side of a digital gate-level LVS a black-box SPICE
+netlist, but the reference side had no code path at all. Setting
+`reference.form` to `"gate-level-verilog"` closes that gap: `klt lvs` reads
+`reference.netlist` as Verilog instead of SPICE and converts it to
+plain-element-shaped SPICE first, exactly like `"subckt-call"` converts a
+schematic flow's simulation-form SPICE.
+
+```json
+{
+  "layout": {
+    "file": "gcd.gds",
+    "deck": "sky130",
+    "top_cell_pins": true
+  },
+  "reference": {
+    "netlist": "gcd.v",
+    "form": "gate-level-verilog",
+    "library": "sky130_fd_sc_hd"
+  }
+}
+```
+
+`reference.library` (required for this form) names the standard-cell
+library (e.g. `"sky130_fd_sc_hd"`, `"gf180mcu_fd_sc_mcu9t5v0"`) whose real
+`libs.ref/<library>/spice/<library>.spice` (falling back to
+`.../cdl/<library>.cdl` when no `spice/` asset exists — both are byte-
+identical `.SUBCKT` headers on a PDK that ships both, e.g. gf180mcu)
+resolves each instantiated cell type's real pin order — via the same
+`libs_ref` asset `klt pdk`/`klt place-and-route` already resolve, never a
+second, hardcoded pin-order table. `reference.pdk`/`reference.pdk_root`
+select the PDK install exactly like `klt extract`'s own `--pdk`/`--pdk-root`
+flags (omit both to fall back to `klt pdk find`'s usual `$PDK_ROOT`/store
+resolution). A cell type the resolved library does not define is an
+application error (exit 1) naming the missing cell — never a silent skip.
+
+**Each standard-cell instance becomes a black-box subcircuit call on both
+sides.** The conversion writes `X<inst> <nets...> <cell_type>` for every
+instance, with a pin-only `.SUBCKT <cell_type> ... .ENDS` stub for every
+distinct instantiated cell type — the same shape `klt extract
+--abstract-cells` already writes for the layout side (issue #620), so both
+sides describe a standard cell as a pin-only black box rather than a real-
+devices-vs-black-box mismatch that could never be clean.
+
+**No power/ground pins.** `docs/cli/place-and-route.md`'s "As-built
+netlist" section documents that `verilog_path` is written without
+`-include_pwr_gnd`, so it never carries `VPWR`/`VGND`/well-tie connections
+— there is nothing in the Verilog to recover them from. Each converted
+stub's declared pin list is therefore the real library pin order's
+*signal-only* subset. A layout-side abstraction that *does* carry power
+pins (e.g. an in-cell-label or `--abstract-cell-lef` abstraction with
+`VPWR`/`VGND` pins) will report those as `pin.unmatched` on the reference
+side for every standard-cell instance — a real, disclosed limitation of a
+Verilog-derived reference, not a defect in the conversion. Narrow the
+layout-side pin resolution to signal pins only (e.g. a LEF macro/in-cell
+label set that does not declare power pins) for a clean compare, or expect
+and filter the resulting `pin.unmatched` entries.
+
+**Deliberately narrow, deliberately loud**, mirroring `"subckt-call"`'s own
+discipline: only the constructs a flattened, technology-mapped netlist
+actually needs are supported — `module`/`endmodule`, `input`/`output`/
+`inout` port declarations (with an optional `[msb:lsb]` bus range, expanded
+to one boundary pin per bit), named (`.PORT(NET)`) instance connections
+only (a plain net, a single-index bit-select `bus[3]`, a `1'b0`/`1'b1`
+constant, or `.PORT()` for an explicit no-connect), and a simple `assign
+<net> = <net>;` alias. A hierarchical module (uncommon for `verilog_path`,
+which is always a single flat module post-place-and-route, but not assumed
+away) converts correctly too — an instantiated cell type that matches
+another parsed `module` in the same file is treated as a genuine
+subcircuit reference, never confused with a library cell of the same name.
+Anything else — positional (non-named) instance connections, concatenation,
+a multi-bit range-slice connection, a general expression, `always`/`case`/
+other behavioral statements, an ANSI-style inline port declaration — is an
+application error (exit 1) naming the offending construct, never a silent
+best-effort guess.
+
 ## Negative controls: two independent corruptions
 
 Per this issue's field notes, "LVS clean" alone is not evidence — a
@@ -472,9 +554,11 @@ each resolves relative paths inside the document.
 | `layout.deck_options` | object\<string, string\> | Optional `{"<key>": "<value>"}` pairs, the JSON-request-document counterpart of `klt extract --deck-option <key>=<value>` (issue #600/#595) — selects a caller-visible sheet-rho flavour of a shared-geometry resistor family (e.g. gf180mcu's `poly_res`, one of `1k`/`2k`/`3k`). Honored for both `layout` shapes wherever `layout.deck` is given — inline extraction (`layout.file`) and the pre-extracted `layout.netlist` shape (issue #585). Omitting it (or giving `{}`) resolves every deck exactly as before this field existed. An unrecognised key or value is an application error (exit 1), not a silent no-op or a silently-kept default; giving it without `layout.deck` is likewise an application error (there is no deck to apply it to). The resolved mapping is echoed under `provenance.deck.options` when non-empty — see "`layout` shapes" below and the `provenance` row further down. |
 | `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory (or the current working directory for the `-`/inline-JSON request forms — see the `<request>` bullet above). |
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
-| `reference.form` | string | `"plain-element"` (default) or `"subckt-call"`. `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. |
+| `reference.form` | string | `"plain-element"` (default), `"subckt-call"`, or `"gate-level-verilog"` (issue #1336). `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. `"gate-level-verilog"` reads `reference.netlist` as a `klt place-and-route` `verilog_path` gate-level Verilog netlist instead of SPICE and converts it to plain-element-shaped SPICE first — see "Digital gate-level LVS" above. |
 | `reference.deck` | string | Only used with `form: "subckt-call"`. `"sky130"`/`"gf180mcu"` — selects that deck's curated device-name map for the conversion (and validates device names against it). Omit to auto-resolve each device subcircuit name against the whole curated table. |
 | `reference.device_map` | object\<string, string \| object\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": <override> }` overrides, merged on top of `reference.deck`'s map — for a device subcircuit name the curated table does not cover. Two `<override>` shapes (issue #1271): a bare string (`"<nfet\|pfet>"`, e.g. `"nfet"`) always means a 4-terminal MOS (`d g s b`) `l`/`w` binding — the original shape, unchanged, so every existing caller's `device_map` keeps working exactly as before. An object `{ "kind": "mos"\|"resistor"\|"capacitor"\|"bipolar", "class": "<device-class>", "length_param": "<param>", "width_param": "<param>" }` opts into an explicit non-MOS (or MOS) binding: `kind` and `class` (the plain-element device-class label, e.g. `"res_generic_po"`) are required; `length_param`/`width_param` (the real subcircuit's own call-site geometry parameter spellings, e.g. gf180mcu's `"r_length"`/`"r_width"`) default to `"l"`/`"w"` and are ignored for `kind: "bipolar"` (no geometry call-site parameter at all) and `kind: "mos"` (the MOS conversion always reads the literal `l`/`w` parameter keys). A malformed object entry (an unrecognised `kind`, a missing/empty `class`, or an empty `length_param`/`width_param`) is an application error (exit 1) naming the offending entry, never a silent fallback. A bare-string entry naming a subcircuit that is not actually MOS-shaped (wrong terminal count) still fails with the original `device_map only supports MOS-shaped ...` error — pass the object form naming the real `kind` instead, or `reference.deck` when the device is one of a registered deck's curated classes. |
+| `reference.library` | string | Required with `form: "gate-level-verilog"` (issue #1336); ignored otherwise. Names the standard-cell library (e.g. `"sky130_fd_sc_hd"`, `"gf180mcu_fd_sc_mcu9t5v0"`) whose real `libs.ref/<library>/spice/<library>.spice` (falling back to `.../cdl/<library>.cdl`) file resolves each instantiated cell type's pin order. Omitting it is an application error (exit 1). |
+| `reference.pdk` / `reference.pdk_root` | string | Only used with `form: "gate-level-verilog"`. Forwarded verbatim to `klt pdk`'s resolver (`find_pdk(variant=reference.pdk, root=reference.pdk_root)`) exactly like `klt extract`'s own `--pdk`/`--pdk-root` flags — see `docs/cli/pdk.md`. Omit both to fall back to `$PDK_ROOT`/the ciel/volare store search. An unresolvable PDK, or a resolved variant with no `libs.ref` asset, is an application error (exit 1). |
 | `reference.device_bulk` | object\<string, string\> | Optional `{ "<device-class / model name>": "<reference net name>" }` — declares that the reference netlist's device class of that name carries an *implicit* bulk/well/collector terminal on the named net, which the layout side's same-named class declares explicitly (issue #506). `klt lvs` adds that one terminal to the reference class and ties it to the named net on every reference-side instance before `NetlistComparer.compare()` runs, so a deck's bulk-terminal device flavour can match a schematic reference that does not model the terminal at all — the reconciliation `device.class_arity` only diagnoses. The net is looked up on each circuit that instantiates the class (matched exactly, then case-insensitively) and **created** there when the reference does not model that node; to bind the added terminal to a layout-side net of a different name, compose with a `hints.same_nets` pair. Every reconciled class emits a `severity: "warning"`, `category: "device.bulk_reconciled"` disclosure entry — see "`device.bulk_reconciled`" below. Model names are matched exactly first and then case-insensitively (`NetlistSpiceReader` upper-cases `res_x` to `RES_X`). A name that resolves on neither side, a class the reference is *not* actually missing a terminal from, and a class two or more terminals apart (this hook reconciles exactly one extra terminal per class, since the entry names exactly one net) are each an application error (exit 1), not a silent no-op. `"engine": "klayout"` only. |
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. |
 | `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |

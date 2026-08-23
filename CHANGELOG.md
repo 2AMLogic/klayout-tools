@@ -14,6 +14,7 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+<<<<<<< HEAD
 - `klt place-and-route`'s post-merge DIEAREA bounding-box guard (issue
   #1090) no longer rejects every gf180mcu `request.power` run (issue
   #1335). open_pdks' gf180mcu standard-cell library deliberately draws GDS
@@ -28,6 +29,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   fixed 0.01 um tolerance remains the fallback when the tech LEF declares
   no `SITE`. sky130hd is unaffected (its cells have no such overhang). See
   `docs/cli/place-and-route.md`'s "DEF→GDS merge" section.
+
+- `klt lvs` gains a new `reference.form` value, `"gate-level-verilog"`
+  (issue #1336), closing the gap that left `klt lvs` with no code path to
+  run against a `klt place-and-route` result: `reference.netlist` is read
+  as a gate-level Verilog netlist (the shape `verilog_path`, issue #996,
+  writes) instead of SPICE, and converted in-process to plain-element-
+  shaped SPICE before comparing — each standard-cell instance becomes an
+  `X<inst>`/pin-only-`.SUBCKT` black-box call, mirroring `klt extract
+  --abstract-cells`'s own layout-side shape (issue #620). The new
+  `reference.library` field (required with this form) names the standard-
+  cell library whose real `libs.ref/<library>/{spice,cdl}/<library>.
+  {spice,cdl}` file resolves each cell's pin order — via `klt pdk`'s
+  existing `libs_ref` resolution (`reference.pdk`/`reference.pdk_root`
+  mirror `klt extract`'s `--pdk`/`--pdk-root`), never a hardcoded table. See
+  `docs/cli/lvs.md`'s "Digital gate-level LVS" section for the full
+  contract, including the disclosed no-power-pins limitation.
 
 - `klt signoff` recognizes a new `"power"` evidence kind (issue #1321, Phase
   2 of epic #712): a `klt power --format json` envelope, detected
