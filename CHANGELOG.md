@@ -29,6 +29,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   no `SITE`. sky130hd is unaffected (its cells have no such overhang). See
   `docs/cli/place-and-route.md`'s "DEF→GDS merge" section.
 
+- `klt lvs` gains a new `reference.form` value, `"gate-level-verilog"`
+  (issue #1336), closing the gap that left `klt lvs` with no code path to
+  run against a `klt place-and-route` result: `reference.netlist` is read
+  as a gate-level Verilog netlist (the shape `verilog_path`, issue #996,
+  writes) instead of SPICE, and converted in-process to plain-element-
+  shaped SPICE before comparing — each standard-cell instance becomes an
+  `X<inst>`/pin-only-`.SUBCKT` black-box call, mirroring `klt extract
+  --abstract-cells`'s own layout-side shape (issue #620). The new
+  `reference.library` field (required with this form) names the standard-
+  cell library whose real `libs.ref/<library>/{spice,cdl}/<library>.
+  {spice,cdl}` file resolves each cell's pin order — via `klt pdk`'s
+  existing `libs_ref` resolution (`reference.pdk`/`reference.pdk_root`
+  mirror `klt extract`'s `--pdk`/`--pdk-root`), never a hardcoded table. See
+  `docs/cli/lvs.md`'s "Digital gate-level LVS" section for the full
+  contract. `scripts/place-and-route-smoke.sh` (the `workflow_dispatch`
+  place-and-route smoke job) gains a matching second LVS stage per design —
+  routed GDS via `klt extract --abstract-cells` against that same run's own
+  `verilog_path` — which its earlier revisions documented as impossible.
+  **Scope of the verdict:** a layout side carrying `VPWR`/`VGND` pins (what
+  `klt extract --abstract-cells` normally produces) compares cleanly, but
+  because `verilog_path` carries no power connectivity at all, a power-net
+  defect is *invisible* to this form — it establishes signal connectivity
+  only, never power-grid correctness.
+
 - `klt signoff` recognizes a new `"power"` evidence kind (issue #1321, Phase
   2 of epic #712): a `klt power --format json` envelope, detected
   structurally (`power_nets` + `networks`) since it carries no top-level

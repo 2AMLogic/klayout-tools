@@ -134,6 +134,12 @@ from .extract import (
     extract_netlist_from_layout,
     spice_safe_net_name,
 )
+from .pdk import PdkNotFoundError, find_pdk
+from .verilog_netlist import (
+    VerilogNetlistError,
+    convert_gate_level_verilog,
+    parse_subckt_pin_orders,
+)
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -148,11 +154,13 @@ SCHEMA_VERSION = 1
 #: for the scope boundary the accepted spike drew around it.
 SUPPORTED_ENGINES = ("klayout", "netgen")
 
-#: Accepted ``request.reference.form`` values (issue #280).
-#: ``"plain-element"`` (default) is the schematic-equivalent form ``klt lvs``
-#: has always required; ``"subckt-call"`` opts into converting a PDK
-#: schematic flow's simulation-form netlist first (see ``docs/cli/lvs.md``).
-_REFERENCE_FORMS = ("plain-element", "subckt-call")
+#: Accepted ``request.reference.form`` values (issue #280, extended by issue
+#: #1336). ``"plain-element"`` (default) is the schematic-equivalent form
+#: ``klt lvs`` has always required; ``"subckt-call"`` opts into converting a
+#: PDK schematic flow's simulation-form netlist first; ``"gate-level-verilog"``
+#: opts into converting a `klt place-and-route` `verilog_path` gate-level
+#: Verilog netlist first (see ``docs/cli/lvs.md``).
+_REFERENCE_FORMS = ("plain-element", "subckt-call", "gate-level-verilog")
 
 #: Stable mismatch-category ids (spike section 2b). Never renumbered/
 #: repurposed once shipped -- the same contract guarantee a DRC rule id
@@ -566,11 +574,23 @@ def run_lvs(request: str) -> dict[str, Any]:
             "device-class/model name to the reference net its implicit bulk "
             "terminal carries"
         )
+    if reference_form == "gate-level-verilog" and not reference_spec.get("library"):
+        raise LvsError(
+            "request.reference.library is required with "
+            'form: "gate-level-verilog" -- it names the standard-cell '
+            "library (e.g. 'sky130_fd_sc_hd', 'gf180mcu_fd_sc_mcu9t5v0') "
+            "whose own .spice/.cdl subcircuit declarations resolve each "
+            "instantiated cell's pin order (see docs/cli/lvs.md, \"Netlist "
+            'form")'
+        )
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
         deck=reference_spec.get("deck"),
         device_map=reference_device_map,
+        library=reference_spec.get("library"),
+        pdk_variant=reference_spec.get("pdk"),
+        pdk_root=reference_spec.get("pdk_root"),
     )
 
     if flatten_reference:
@@ -1581,9 +1601,12 @@ def _read_reference_netlist(
     form: str = "plain-element",
     deck: str | None = None,
     device_map: dict[str, object] | None = None,
+    library: str | None = None,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
-    declared ``form`` (issue #280).
+    declared ``form`` (issue #280, extended by issue #1336).
 
     ``form="plain-element"`` (default) reads the file as-is -- the
     schematic-equivalent form ``klt lvs`` requires (see ``docs/cli/lvs.md``).
@@ -1599,6 +1622,16 @@ def _read_reference_netlist(
     :mod:`klayout_tools.netlist_normalize`), resolving device names through the
     curated :mod:`klayout_tools.pdk_models` table (via ``deck`` and/or
     ``device_map``), then reads the converted text.
+
+    ``form="gate-level-verilog"`` (issue #1336) treats ``path`` as a `klt
+    place-and-route` `verilog_path` gate-level Verilog netlist instead of
+    SPICE, and converts it to plain-element-shaped SPICE first (see
+    :mod:`klayout_tools.verilog_netlist`). ``library`` (required for this
+    form) names the standard-cell library whose real
+    ``libs.ref/<library>/spice/<library>.spice`` (or ``.../cdl/<library>.cdl``)
+    file resolves each instantiated cell's pin order; ``pdk_variant``/
+    ``pdk_root`` are forwarded to :func:`klayout_tools.pdk.find_pdk` exactly
+    like `klt extract`'s own ``--pdk``/``--pdk-root`` flags.
 
     Note: on genuinely malformed input, ``NetlistSpiceReader`` does not raise
     -- it prints a ``"Warning: Line ignored..."`` diagnostic (to the
@@ -1648,6 +1681,27 @@ def _read_reference_netlist(
             tmp.write(converted)
             tmp_path = tmp.name
         read_path = tmp_path
+    elif form == "gate-level-verilog":
+        pin_order_lookup = _resolve_gate_level_pin_order_lookup(
+            library, pdk_variant, pdk_root
+        )
+        try:
+            converted = convert_gate_level_verilog(
+                text, pin_order_lookup=pin_order_lookup
+            )
+        except VerilogNetlistError as exc:
+            raise LvsError(
+                f"could not convert gate-level-verilog reference netlist "
+                f"'{path}' to plain-element form: {exc}"
+            ) from exc
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".spice", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(converted)
+            tmp_path = tmp.name
+        read_path = tmp_path
     else:
         offending = detect_subckt_call_devices(text)
         if offending:
@@ -1676,6 +1730,79 @@ def _read_reference_netlist(
             except OSError:
                 pass
     return netlist
+
+
+#: `<library>`'s pin-order source, in resolution order (issue #1336) --
+#: mirrors the real open_pdks/volare/ciel layout `klt pdk`'s own `libs_ref`
+#: resolution already assumes (see `klayout_tools.pdk`'s module docstring).
+#: `.cdl` is a fallback, not a second convention: gf180mcu ships both views
+#: with byte-identical `.subckt` headers (verified against a real installed
+#: `gf180mcuC` variant), and a library that ships only one of the two (e.g.
+#: sky130, `.spice` only) still resolves.
+_LIBRARY_PIN_ORDER_ASSETS: tuple[tuple[str, str], ...] = (
+    ("spice", "spice"),
+    ("cdl", "cdl"),
+)
+
+
+def _resolve_gate_level_pin_order_lookup(
+    library: str | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+):
+    """Build the ``pin_order_lookup`` callback
+    :func:`klayout_tools.verilog_netlist.convert_gate_level_verilog` needs,
+    from a resolved PDK install's own ``libs.ref/<library>/{spice,cdl}/
+    <library>.{spice,cdl}`` file (issue #1336) -- never a hardcoded pin-order
+    table.
+
+    Resolves the PDK exactly like `klt extract --pdk`/`klt place-and-route`
+    do (:func:`klayout_tools.pdk.find_pdk`, the same ``variant``/``root``
+    resolution order documented in ``docs/cli/pdk.md``), then reads whichever
+    of that library's ``spice/<library>.spice`` / ``cdl/<library>.cdl`` files
+    exists first (see :data:`_LIBRARY_PIN_ORDER_ASSETS`). Raises
+    :class:`LvsError` -- never lets a lower-level exception escape this
+    command's JSON-envelope contract -- when the PDK does not resolve, the
+    resolved variant ships no ``libs_ref`` asset at all, or neither file
+    exists for ``library``.
+    """
+    if not library:
+        raise LvsError(
+            'request.reference.library is required with form: "gate-level-verilog"'
+        )
+    try:
+        pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
+    except PdkNotFoundError as exc:
+        raise LvsError(str(exc)) from exc
+
+    libs_ref = pdk_info["assets"]["libs_ref"]
+    if libs_ref is None:
+        raise LvsError(
+            f"PDK variant '{pdk_info['variant']}' (root '{pdk_info['root']}') "
+            "ships no 'libs.ref' asset -- cannot resolve "
+            f"'{library}''s pin order"
+        )
+
+    lib_dir = os.path.join(libs_ref, library)
+    tried: list[str] = []
+    for subdir, extension in _LIBRARY_PIN_ORDER_ASSETS:
+        candidate = os.path.join(lib_dir, subdir, f"{library}.{extension}")
+        tried.append(candidate)
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, encoding="utf-8", errors="replace") as handle:
+                    library_text = handle.read()
+            except OSError as exc:
+                raise LvsError(
+                    f"could not read library pin-order source '{candidate}': {exc}"
+                ) from exc
+            pin_orders = parse_subckt_pin_orders(library_text)
+            return pin_orders.get
+
+    raise LvsError(
+        f"library '{library}' has no pin-order source under PDK variant "
+        f"'{pdk_info['variant']}' -- tried: {', '.join(tried)}"
+    )
 
 
 def _combine_devices_safely(

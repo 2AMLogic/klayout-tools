@@ -61,6 +61,21 @@ acceptance data keyed on `category_counts`), key that pin off the shared
 fields below — not `klt --version` — until `klt` reaches `1.0` and this
 caveat is retired.
 
+The same rule applies on the **request** side for the commands that take a
+JSON request document (`klt lvs`, `klt place-and-route`, `klt synthesize`,
+…): a new accepted value for an already-shipped request enum — e.g. `klt
+lvs`'s `request.reference.form` gaining `"gate-level-verilog"` alongside
+`"plain-element"`/`"subckt-call"` (issue #1336), together with the optional
+`reference.library`/`reference.pdk`/`reference.pdk_root` fields that value
+requires — is additive and earns no `schema_version` bump: every request
+document that was valid before is still valid, and means exactly what it
+meant before. A request document written against the newer value set is
+simply rejected (exit 1, with the usual error envelope) by an older `klt`,
+never silently mis-executed. Each such addition is recorded in
+`CHANGELOG.md` and documented in that command's own
+`docs/cli/<verb>.md` — for the example above, `docs/cli/lvs.md`'s "Digital
+gate-level LVS" section and its `request` field table.
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
