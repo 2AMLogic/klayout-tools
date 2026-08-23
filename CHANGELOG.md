@@ -69,6 +69,53 @@ not `klt --version`, if you need to detect this kind of drift. See
   evidence (envelope aggregation only)" and "No T1 item accepts `power`
   evidence" sections.
 
+- `klt place-and-route`'s gf180mcu path is now **live-verified end to end**
+  (issue #1331, closing Epic #700's acceptance criterion 4 with a real tool
+  run rather than the corrected configuration data #637/PR #639 delivered).
+  Run 2026-08-22 with `openroad 26Q3-1080-gab6fd26351` from
+  `openroad/orfs:latest` against a real volare `gf180mcuC` install
+  (`open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b`): the GCD worked
+  example goes `klt synthesize` → `klt place-and-route` floorplan through
+  full detailed route with `route__drc_errors: 0`, `flow__errors__count: 0`,
+  and 0 antenna-violating nets/pins, producing a valid merged GDS. The
+  previously skip-only gated test
+  `test_integration_real_openroad_gcd_worked_example_gf180mcu` ran to
+  completion and passed. No behavior change to any command; results and
+  their two caveats are recorded in `docs/cli/place-and-route.md`'s new
+  "Live verification" section.
+
+  That run surfaced two things stubbed tests could not:
+
+  - **The gated test's own PDK-variant gate was wrong** and is fixed here.
+    A stock volare gf180mcu install ships four variants differing only in
+    metal-stack depth (`gf180mcuA` 3LM, `gf180mcuB` 4LM, `gf180mcuC`/
+    `gf180mcuD` 5LM), all shipping a complete `gf180mcu_fd_sc_mcu9t5v0`
+    asset set, so asset presence alone selected `gf180mcuA` — which cannot
+    serve this command's `Metal2-Metal5` routing range and dies in the
+    `place` stage with `[ERROR PPL-0051] Layer Metal4 not found.`
+    `_find_real_pnr_variant` now additionally requires the variant's tech
+    LEF to declare each routing layer the request references. Test-only
+    change; no `src/` change was needed, so #637's shipped
+    `_ROUTING_LAYER_RANGE`/`_CTS_BUFFER_CELLS` values are confirmed correct
+    against a real install.
+  - **DRC-clean requires `request.power`, and at the time of this run that
+    configuration could not emit a GDS.** Without `request.power` the routed
+    GDS carries 19 `nwell.space.1` violations under `klt drc --deck
+    gf180mcu` (unfilled standard-cell row gaps — the documented consequence
+    of omitting power delivery). With `request.power` the same design is
+    **DRC-clean, 0 violations**, but `klt place-and-route` raised instead of
+    writing the GDS: its DEF→GDS merge DIEAREA bbox guard did not account
+    for gf180mcu cells drawing geometry outside their LEF abutment box
+    (`__endcap` by 2.93 um). That was issue #1335, **fixed by #1342** — see
+    the DIEAREA guard-tolerance entry above in this `## Unreleased` section.
+    The run's 0-violation number required a manual guard bypass then; it
+    reproduces without one now.
+
+  **LVS remains unverified** for this path: nothing in `klt` converts the
+  flow's as-built `verilog_path` into the SPICE reference `klt lvs`
+  requires, so there is no LVS code path to run rather than a failing one.
+  Tracked in #1336.
+
 - `klt layout-metrics` gains an optional **`--pdk`** flag and a matching
   optional **`pdk`** field in `layout.json` — issue #1285, the deferred
   follow-up from #943/#1060. The value is one of `klt`'s own PDK-family
