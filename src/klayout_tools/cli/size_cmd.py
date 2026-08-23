@@ -104,6 +104,8 @@ def _print_text(report: dict) -> None:
                 f"{entry_status}{margin_str}"
             )
 
+    _print_design_centering(report)
+
     method = report["method"]
     print()
     print(f"method: {method['name']}")
@@ -118,6 +120,36 @@ def _print_text(report: dict) -> None:
     # outside the repo prints `<outside repo>`, never an absolute home path
     # (and never a raw dict repr).
     print(f"models_lib: {render_path_field(env['models_lib'])}")
+
+
+def _print_design_centering(report: dict) -> None:
+    """``report['design_centering']`` (issue #1326) -- present only when
+    the request opted in via ``request.design_centering``, shared between
+    single-device and topology text rendering."""
+    dc = report.get("design_centering")
+    if dc is None:
+        return
+    print()
+    print(f"design centering: applied={dc['applied']}")
+    for candidate in dc.get("candidates") or []:
+        multiplier = candidate["suggested_area_multiplier"]
+        multiplier_str = f"{multiplier:.3g}x" if multiplier is not None else "n/a"
+        grown_marker = "grown" if candidate["applied"] else "not grown"
+        print(
+            f"  #{candidate['rank']} {candidate['parameter']} -> "
+            f"{candidate['instance']}: area_multiplier={multiplier_str} "
+            f"({grown_marker})"
+        )
+    for key, entry in (dc.get("grown") or {}).items():
+        print(
+            f"  {key}: mult {entry['mult_before']:g} -> {entry['mult_after']:g} "
+            f"(x{entry['area_multiplier_applied']:.3g} suggested)"
+        )
+    if dc.get("note"):
+        print(f"  note: {dc['note']}")
+    if dc.get("unmapped_parameters"):
+        names = ", ".join(u["parameter"] for u in dc["unmapped_parameters"])
+        print(f"  unmapped: {names}")
 
 
 def _print_topology_text(report: dict) -> None:
@@ -189,6 +221,8 @@ def _print_topology_text(report: dict) -> None:
                 f"{role}={w:g}um" for role, w in step["widths_um"].items()
             )
             print(f"  #{step['index']} {widths}  worst|gm/Id err|={worst_str}")
+
+    _print_design_centering(report)
 
     method = report.get("method")
     if method is not None:

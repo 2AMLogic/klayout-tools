@@ -198,6 +198,63 @@ request through the new code path unless the request explicitly opts in via
 ``corners.objective`` -- the legacy ``request.corner`` shape has no
 ``objective`` field at all, so a single-corner request is bit-for-bit
 unaffected by this feature (issue #769's regression requirement).
+
+Design-centering objective (issue #1326)
+-------------------------------------------
+The objectives above all optimize *this device's own width* against a
+gm/Id target -- they have no notion of which device, among several, is the
+one a mismatch/yield analysis says is actually worth growing.
+``design_centering.py`` (issue #924, Phase 3 of the statistical/yield epic
+#710) already defines that contract -- a ``klt yield-sensitivity``-shaped
+``ranking[].parameter``/``ranking[].contribution`` array plus a
+``parameter_map`` bridging each ranked mismatch parameter to a sized-device
+instance -- but shipped with no consumer: its own docstring explicitly
+reserved this wiring for #705 once it grew a real design-centering stage.
+
+Setting ``request.design_centering: {"ranking": [...], "parameter_map":
+{...}}`` opts a sizing run into that stage: **additive** to
+``corners.objective`` above (an independent request field a caller may set
+alongside any objective, not a new ``corners.objective`` value), it grows
+whichever instance(s) the ranking flags as the dominant mismatch
+contributor(s) and re-solves at the grown geometry, all inside this one
+``klt size`` invocation -- rather than requiring a caller to run ``klt
+size``, then ``klt design-centering`` on the result, then hand-edit and
+re-run ``klt size`` a second time.
+
+Method: reuse the ranking bridge, grow by MULT, re-verify with ngspice
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. This module's own just-solved geometry stands in for the ``sized_device``
+   payload a standalone ``klt design-centering`` call would need supplied
+   separately -- there is nothing to load, the run already has it.
+2. :func:`design_centering.rank_mapped_parameters` and
+   :func:`design_centering.suggested_area_multiplier` -- the same pure
+   ranking-bridge and Pelgrom-law area-multiplier helpers
+   ``design_centering.py``'s own reference consumer uses -- resolve each
+   mapped candidate's suggested area multiplier against the sized geometry
+   from step 1 (:func:`_apply_design_centering`).
+3. Every candidate whose multiplier exceeds ``1x`` grows that instance's
+   ``mult`` (parallel-device count) -- never its ``W``, so the growth never
+   perturbs the gm/Id target the search already met -- rounded up to the
+   next whole device (:func:`_grow_mult`). Single-device mode has exactly
+   one instance to grow; topology mode (see below) may grow more than one
+   role at once when the ranking flags instances in different roles.
+4. The **whole sizing search re-runs** at the grown geometry (a second full
+   sweep+confirm, or a second full joint solve in topology mode) -- turning
+   Pelgrom's law's own "first-pass, order-of-magnitude heuristic, re-verify
+   with a fresh sizing pass" caveat (``design_centering.py``'s docstring)
+   into an actual ngspice-confirmed operating point, not an unverified
+   number. The response's top-level device/operating-point/margins fields
+   are this **grown** run's own result; a ``design_centering`` block
+   reports what was flagged, what was grown, and by how much.
+
+Cost: one extra full solve (the same cost as the base objective already
+ran) only when ``request.design_centering`` opts in and at least one mapped
+candidate's multiplier exceeds ``1x`` -- a request that does not set this
+field pays nothing extra, and a request that sets it but whose ranking's
+top mapped candidate is already the weakest (multiplier ``1.0``, nothing to
+grow) also pays nothing extra. See ``docs/cli/size.md``'s "Design-centering
+objective" section for the full request/response shape.
+
 Coupled multi-device topology sizing (issue #768)
 --------------------------------------------------
 Everything above sizes **one** device. A request may instead declare a
@@ -269,6 +326,7 @@ section for the full request/response shape and worked example.
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -276,7 +334,7 @@ import subprocess
 import tempfile
 from typing import Any
 
-from . import env_provenance
+from . import design_centering, env_provenance
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
@@ -297,6 +355,12 @@ SCHEMA_VERSION = 2
 
 #: ``ngspice`` is the only implemented engine, mirroring ``sim.py``.
 SUPPORTED_ENGINES = ("ngspice",)
+
+#: ``response.design_centering``'s own schema version (issue #1326) --
+#: independently versioned from `SCHEMA_VERSION` per docs/json-contract.md's
+#: "per command, not globally" convention, mirroring how `design_centering.py`
+#: versions its own payload independently of every other `klt` command's.
+DESIGN_CENTERING_SCHEMA_VERSION = 1
 
 #: A request names which terminal the target current flows through and
 #: which node ties to the supply -- see this module's docstring's "Method"
@@ -882,7 +946,14 @@ def _run_size_impl(
 ) -> dict[str, Any]:
     """The former body of :func:`run_size` -- split out so
     :func:`_validate_device_rationale` has exactly one call site to guard,
-    regardless of which of this function's several return points fired."""
+    regardless of which of this function's several return points fired.
+
+    Dispatches to single-device or topology mode, then layers the
+    additive, opt-in design-centering objective (issue #1326,
+    :func:`_apply_design_centering`) on top of whichever payload that
+    solve produced -- see this module's docstring's "Design-centering
+    objective" section.
+    """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1274: `environment.models_lib` is normalised against this one
@@ -897,8 +968,22 @@ def _run_size_impl(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
 
+    # Fail fast on a malformed `request.design_centering` block before
+    # paying for any ngspice invocation -- see `_parse_design_centering`'s
+    # own docstring. The result is discarded here; `_apply_design_centering`
+    # (below) parses it again once it actually has a payload to act on.
+    _parse_design_centering(request)
+
     if "topology" in request:
-        return _run_topology_size(
+        payload = _run_topology_size(
+            request,
+            request_dir,
+            repo_root=repo_root,
+            artifacts_dir=artifacts_dir,
+            timeout_s=timeout_s,
+        )
+    else:
+        payload = _run_single_device_size(
             request,
             request_dir,
             repo_root=repo_root,
@@ -906,6 +991,31 @@ def _run_size_impl(
             timeout_s=timeout_s,
         )
 
+    return _apply_design_centering(
+        request,
+        request_dir,
+        payload,
+        repo_root=repo_root,
+        artifacts_dir=artifacts_dir,
+        timeout_s=timeout_s,
+    )
+
+
+def _run_single_device_size(
+    request: dict[str, Any],
+    request_dir: str,
+    *,
+    repo_root: str | None,
+    artifacts_dir: str | None,
+    timeout_s: float | None,
+) -> dict[str, Any]:
+    """Single-device mode's own solve (the ``"sizing_corner"``/
+    ``"worst_case_margin"`` objectives, issues #721/#729/#769) -- split out
+    of :func:`_run_size_impl` so :func:`_apply_design_centering` (issue
+    #1326) can re-invoke exactly this solve a second time, at a grown
+    device geometry, without re-parsing the request from a file path a
+    second time.
+    """
     device = _parse_device(request["device"])
     corner_points, sizing_index = _parse_corner_set(request)
     sizing_corner = corner_points[sizing_index]
@@ -1251,6 +1361,248 @@ def _run_size_impl(
         _cleanup_dir(work_dir)
 
     return payload
+
+
+def _parse_design_centering(request: dict[str, Any]) -> dict[str, Any] | None:
+    """``request.design_centering`` (issue #1326) --
+    ``{"ranking": [...], "parameter_map": {...}}``, the same
+    ``ranking[].parameter``/``ranking[].contribution`` contract
+    ``design_centering.py`` defines, consumed directly rather than
+    reshaped -- see this module's docstring's "Design-centering objective"
+    section. Additive to ``corners.objective``: an independent request
+    field, not a new ``corners.objective`` value, so it composes with any
+    objective (or none).
+
+    Returns ``None`` when the request does not opt in (the overwhelmingly
+    common case). Raises :class:`SizeError` for a malformed block -- called
+    once, up front, from :func:`_run_size_impl` purely to fail fast before
+    any ngspice invocation runs (a malformed block would otherwise only
+    surface after the first full solve, in :func:`_apply_design_centering`,
+    which parses it again to actually act on it). ``design_centering.py``
+    itself validates the ranking array's own per-entry shape once this
+    module hands it off.
+    """
+    spec = request.get("design_centering")
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise SizeError("request.design_centering must be a JSON object")
+
+    ranking = spec.get("ranking")
+    if not isinstance(ranking, list) or not ranking:
+        raise SizeError(
+            "request.design_centering.ranking must be a non-empty array of "
+            "{parameter, contribution} entries -- the same 'ranking' shape "
+            "klt yield-sensitivity/klt design-centering produce"
+        )
+
+    parameter_map = spec.get("parameter_map")
+    if not isinstance(parameter_map, dict) or not parameter_map:
+        raise SizeError(
+            "request.design_centering.parameter_map must be a non-empty "
+            "JSON object mapping ranked parameter names to sized-device "
+            "instance names"
+        )
+    for key, value in parameter_map.items():
+        if not isinstance(value, str) or not value:
+            raise SizeError(
+                f"request.design_centering.parameter_map['{key}'] must be "
+                "a non-empty instance name string"
+            )
+        if "topology" in request and value not in _INSTANCE_TO_ROLE:
+            raise SizeError(
+                f"request.design_centering.parameter_map['{key}'] names "
+                f"sized-device instance '{value}', which is not one of "
+                "this topology's own instances (available: "
+                f"{', '.join(sorted(_INSTANCE_TO_ROLE))})"
+            )
+
+    return {"ranking": ranking, "parameter_map": parameter_map}
+
+
+def _grow_mult(current_mult: float, area_multiplier: float) -> float:
+    """Grow a device's ``mult`` (parallel-instance count, an ``X``-element
+    param -- see :func:`_write_sweep_deck`/:func:`_write_topology_deck`) by
+    ``area_multiplier``, rounded **up** to the next whole device: ``mult``
+    is a literal parallel-device count, so a fractional value is not
+    physically realizable. Growing ``mult`` rather than ``w_um`` is what
+    lets the design-centering objective (issue #1326) add area without
+    perturbing the gm/Id operating point the search already solved for --
+    see this module's docstring's "Design-centering objective" section.
+    Never shrinks below ``current_mult`` (the caller only reaches this
+    helper when ``area_multiplier > 1.0``, but this stays a hard floor
+    regardless).
+    """
+    grown = current_mult * area_multiplier
+    return float(max(current_mult, math.ceil(grown - 1e-9)))
+
+
+def _apply_design_centering(
+    request: dict[str, Any],
+    request_dir: str,
+    payload: dict[str, Any],
+    *,
+    repo_root: str | None,
+    artifacts_dir: str | None,
+    timeout_s: float | None,
+) -> dict[str, Any]:
+    """Wire ``design_centering.py``'s ranking/parameter_map contract into a
+    sizing run's own objective (issue #1326, epic #705 Phase 2): grow
+    whichever instance(s) ``request.design_centering`` flags as the
+    dominant mismatch contributor(s), then re-solve at the grown geometry
+    so the returned payload's device/operating-point/margins fields are
+    already a re-verified, grown design -- see this module's docstring's
+    "Design-centering objective" section for the full method and cost.
+
+    A no-op (returns ``payload`` unchanged) when the request did not
+    declare ``request.design_centering`` -- the common case, and why this
+    wrapping happens *after* the normal solve rather than folding into it.
+
+    This function never re-solves more than once, regardless of how many
+    ranked parameters are mapped: every candidate whose suggested area
+    multiplier exceeds ``1x`` is applied in a single follow-up solve (one
+    ``mult`` bump per affected role/device), not one re-solve per
+    candidate -- "the same pass" the issue calls for, not an iterative
+    re-centering loop.
+    """
+    spec = _parse_design_centering(request)
+    if spec is None:
+        return payload
+
+    is_topology = "topology" in request
+    try:
+        mapped, unmapped = design_centering.rank_mapped_parameters(
+            spec["ranking"], spec["parameter_map"]
+        )
+    except design_centering.DesignCenteringError as exc:
+        raise SizeError(f"request.design_centering: {exc}") from exc
+
+    if payload.get("status") == "error":
+        payload["design_centering"] = {
+            "schema_version": DESIGN_CENTERING_SCHEMA_VERSION,
+            "requested": True,
+            "applied": False,
+            "candidates": [],
+            "unmapped_parameters": unmapped,
+            "grown": {},
+            "note": (
+                "sizing itself errored before any device geometry was "
+                "confirmed -- no design-centering growth attempted"
+            ),
+        }
+        return payload
+
+    # `mapped` preserves `ranking`'s own descending-|contribution| order
+    # (design_centering.py's own contract), so `mapped[i+1]` is always the
+    # next-lower mapped contributor -- exactly what
+    # `suggested_area_multiplier` needs.
+    candidates: list[dict[str, Any]] = []
+    growth: dict[str, float] = {}  # role (topology) or "device" (single) -> multiplier
+    for i, item in enumerate(mapped):
+        instance = item["instance"]
+        multiplier = design_centering.suggested_area_multiplier(mapped, i)
+        applied = False
+        if multiplier is not None and multiplier > 1.0:
+            # `_parse_design_centering` already checked every mapped
+            # instance name against `_INSTANCE_TO_ROLE` in topology mode
+            # (fail-fast, before any ngspice invocation) -- this lookup
+            # cannot miss here.
+            key = _INSTANCE_TO_ROLE[instance] if is_topology else "device"
+            growth[key] = max(growth.get(key, 1.0), multiplier)
+            applied = True
+        candidates.append(
+            {
+                "rank": item["rank"],
+                "parameter": item["parameter"],
+                "contribution": item["contribution"],
+                "instance": instance,
+                "suggested_area_multiplier": multiplier,
+                "applied": applied,
+            }
+        )
+
+    if not growth:
+        payload["design_centering"] = {
+            "schema_version": DESIGN_CENTERING_SCHEMA_VERSION,
+            "requested": True,
+            "applied": False,
+            "candidates": candidates,
+            "unmapped_parameters": unmapped,
+            "grown": {},
+            "note": (
+                "no mapped candidate outranked its next-lower mapped "
+                "contributor by a finite area multiplier > 1x -- nothing "
+                "to grow"
+            ),
+        }
+        return payload
+
+    # Growing only ever changes `mult` (never `w_um`/`nf`), so the second
+    # solve is a fresh, independent search -- not a continuation of the
+    # first -- against the same request otherwise unchanged. Re-runs
+    # against a distinct artifacts directory when the request keeps
+    # artifacts, so the grown pass's decks/logs never silently overwrite
+    # the first pass's own (both would otherwise share the same file
+    # names).
+    grown_request = copy.deepcopy(request)
+    grown_request.pop("design_centering", None)
+    grown_artifacts_dir = artifacts_dir
+    keep_artifacts = bool((request.get("options") or {}).get("keep_artifacts", False))
+    if keep_artifacts:
+        base = (
+            artifacts_dir
+            if artifacts_dir is not None
+            else os.path.join(request_dir, ".klt", "size")
+        )
+        grown_artifacts_dir = base + "-design-centering-grown"
+
+    grown_summary: dict[str, Any] = {}
+    if is_topology:
+        for role, multiplier in growth.items():
+            role_device = grown_request["devices"][role]
+            before = role_device.get("mult", 1)
+            after = _grow_mult(before, multiplier)
+            role_device["mult"] = after
+            grown_summary[role] = {
+                "mult_before": before,
+                "mult_after": after,
+                "area_multiplier_applied": multiplier,
+            }
+        grown_payload = _run_topology_size(
+            grown_request,
+            request_dir,
+            repo_root=repo_root,
+            artifacts_dir=grown_artifacts_dir,
+            timeout_s=timeout_s,
+        )
+    else:
+        multiplier = growth["device"]
+        device_spec = grown_request["device"]
+        before = device_spec.get("mult", 1)
+        after = _grow_mult(before, multiplier)
+        device_spec["mult"] = after
+        grown_summary["device"] = {
+            "mult_before": before,
+            "mult_after": after,
+            "area_multiplier_applied": multiplier,
+        }
+        grown_payload = _run_single_device_size(
+            grown_request,
+            request_dir,
+            repo_root=repo_root,
+            artifacts_dir=grown_artifacts_dir,
+            timeout_s=timeout_s,
+        )
+
+    grown_payload["design_centering"] = {
+        "schema_version": DESIGN_CENTERING_SCHEMA_VERSION,
+        "requested": True,
+        "applied": True,
+        "candidates": candidates,
+        "unmapped_parameters": unmapped,
+        "grown": grown_summary,
+    }
+    return grown_payload
 
 
 def _op_point_from_confirmed(
@@ -2078,6 +2430,15 @@ _INSTANCE_DESCRIPTION = {
 #: The instance whose measured gm/Id drives each role's width update.
 _ROLE_CONTROL_INSTANCE = {
     role: key for key, _instance, role, is_control in TOPOLOGY_INSTANCES if is_control
+}
+
+#: Instance key (`design_centering.py`'s own geometry key, e.g. `"input_a"`)
+#: -> the role that instance's width is solved under (issue #1326) -- the
+#: bridge the design-centering objective mode needs to turn a
+#: `request.design_centering.parameter_map` instance name into the
+#: `request.devices` key it actually grows.
+_INSTANCE_TO_ROLE = {
+    key: role for key, _instance, role, _is_control in TOPOLOGY_INSTANCES
 }
 
 

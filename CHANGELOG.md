@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt size` gains a design-centering/yield-aware objective mode (issue
+  #1326, epic #705 Phase 2), wiring `klt design-centering`'s
+  `ranking[].parameter`/`ranking[].contribution` contract (#924/#710)
+  directly into the sizing loop: setting `request.design_centering`
+  ({`ranking`, `parameter_map`}, additive to `corners.objective` #769)
+  grows whichever instance(s) the ranking flags as the dominant mismatch
+  contributor(s) (by `mult`, rounded up to the next whole device, never
+  `w_um`) and re-solves at the grown geometry -- all inside one `klt size`
+  call, in both single-device and topology mode, instead of requiring a
+  manual `klt design-centering` re-run. See `docs/cli/size.md`'s
+  "Design-centering objective" section.
+
 - `klt place-and-route`'s post-merge DIEAREA bounding-box guard (issue
   #1090) no longer rejects every gf180mcu `request.power` run (issue
   #1335). open_pdks' gf180mcu standard-cell library deliberately draws GDS

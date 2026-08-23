@@ -73,6 +73,25 @@ Pure library: :func:`build_recentering_proposal` returns plain Python data
 (a JSON-serialisable ``dict``) and never prints -- serialisation and
 human-readable formatting live in ``cli/design_centering_cmd.py``, matching
 every other ``klt`` verb.
+
+A real consumer, at last (issue #1326, epic #705 Phase 2)
+------------------------------------------------------------
+The "producer-side reference contract" section above is now half true:
+``klt size`` gained a design-centering/yield-aware objective mode
+(``request.design_centering``, additive to the worst-corner-margin
+objective #769 shipped) that consumes exactly this module's
+``ranking[].parameter``/``ranking[].contribution`` bridge -- not by calling
+:func:`build_recentering_proposal` itself (that function needs an
+*already-produced* ``klt size`` payload to resolve geometry from, which does
+not exist yet when a sizing run is starting), but by importing this
+module's two pure, sized-device-agnostic helpers,
+:func:`rank_mapped_parameters` and :func:`suggested_area_multiplier`, and
+applying them against the geometry its own run just solved. See
+``klayout_tools/size.py``'s ``_apply_design_centering`` docstring for the
+grow-then-re-verify method. This module's own CLI verb and
+:func:`build_recentering_proposal` are unchanged and remain useful on their
+own (e.g. against a sizing result produced by an older ``klt size`` that
+predates this wiring, or by another tool entirely).
 """
 
 from __future__ import annotations
@@ -272,6 +291,80 @@ def _recommendation(
     )
 
 
+def rank_mapped_parameters(
+    ranking: list[dict[str, Any]], parameter_map: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a ``klt yield-sensitivity``-shaped ``ranking`` array
+    (``ranking[].parameter``/``ranking[].contribution``, already sorted
+    descending by |contribution| -- the producer's own contract) into
+    ``(mapped, unmapped)`` against ``parameter_map``
+    (``{mismatch_parameter: instance_name}``), preserving the ranking's own
+    order in both lists.
+
+    This is the *sized-device-agnostic* half of this module's contract --
+    the geometry lookup and area-multiplier math a caller that already has
+    a ``klt size`` payload handy layers on top (this module's own
+    :func:`build_recentering_proposal`, or ``klt size``'s own
+    design-centering objective mode, issue #1326 -- see this module's
+    docstring's "A real consumer, at last" section) are kept out of this
+    function so a caller without one (or one mid-solve, still producing
+    its own) can reuse this bridge directly.
+
+    Each ``mapped`` entry is ``{"rank", "parameter", "contribution",
+    "instance"}``; each ``unmapped`` entry is ``{"rank", "parameter",
+    "contribution"}`` (no ``instance`` -- nothing in ``parameter_map``
+    named it). Raises :class:`DesignCenteringError` on a malformed ranking
+    entry (missing/mistyped ``parameter``/``contribution``).
+    """
+    mapped: list[dict[str, Any]] = []
+    unmapped: list[dict[str, Any]] = []
+    for entry in ranking:
+        parameter = entry.get("parameter")
+        contribution = entry.get("contribution")
+        if not isinstance(parameter, str) or not isinstance(contribution, (int, float)):
+            raise DesignCenteringError(
+                "the 'ranking' array has a malformed entry (missing "
+                "'parameter'/'contribution')"
+            )
+        if parameter not in parameter_map:
+            unmapped.append(
+                {
+                    "rank": entry.get("rank"),
+                    "parameter": parameter,
+                    "contribution": contribution,
+                }
+            )
+            continue
+        mapped.append(
+            {
+                "rank": entry.get("rank"),
+                "parameter": parameter,
+                "contribution": contribution,
+                "instance": parameter_map[parameter],
+            }
+        )
+    return mapped, unmapped
+
+
+def suggested_area_multiplier(mapped: list[dict[str, Any]], index: int) -> float | None:
+    """Pelgrom-law area multiplier for ``mapped[index]`` against the
+    next-lower-ranked mapped contributor ``mapped[index + 1]`` -- see this
+    module's docstring's "Re-centering heuristic" section for the
+    derivation.
+
+    Returns ``1.0`` when ``mapped[index]`` is already the weakest mapped
+    candidate (nothing lower-ranked to reach parity with -- no re-centering
+    action needed), or ``None`` when the next contributor's own
+    contribution is exactly zero (no finite multiplier reaches parity with
+    a zero target).
+    """
+    if index == len(mapped) - 1:
+        return 1.0
+    this_c = abs(mapped[index]["contribution"])
+    next_c = abs(mapped[index + 1]["contribution"])
+    return (this_c / next_c) ** 2 if next_c > 0 else None
+
+
 def build_recentering_proposal(
     request: dict[str, Any], *, measurement: str | None = None
 ) -> dict[str, Any]:
@@ -318,50 +411,18 @@ def build_recentering_proposal(
             "pass the JSON payload klt yield-sensitivity produces"
         )
 
-    mapped: list[dict[str, Any]] = []
-    unmapped: list[dict[str, Any]] = []
-    for entry in ranking:
-        parameter = entry.get("parameter")
-        contribution = entry.get("contribution")
-        if not isinstance(parameter, str) or not isinstance(contribution, (int, float)):
-            raise DesignCenteringError(
-                "the selected measurement's 'ranking' has a malformed entry "
-                "(missing 'parameter'/'contribution')"
-            )
-        if parameter not in parameter_map:
-            unmapped.append(
-                {
-                    "rank": entry.get("rank"),
-                    "parameter": parameter,
-                    "contribution": contribution,
-                }
-            )
-            continue
-        instance = parameter_map[parameter]
-        geometry = _geometry_for_instance(sized_device, instance)
-        mapped.append(
-            {
-                "rank": entry.get("rank"),
-                "parameter": parameter,
-                "contribution": contribution,
-                "instance": instance,
-                "geometry": geometry,
-            }
-        )
+    mapped, unmapped = rank_mapped_parameters(ranking, parameter_map)
+    for item in mapped:
+        item["geometry"] = _geometry_for_instance(sized_device, item["instance"])
 
     # `ranking` is already sorted descending by |contribution| (the
     # producer's own contract) -- filtering to mapped entries preserves that
-    # order, so `mapped[i+1]` is always the next-lower mapped contributor.
+    # order, so `mapped[i+1]` is always the next-lower mapped contributor
+    # (see `rank_mapped_parameters`).
     candidates: list[dict[str, Any]] = []
     for i, item in enumerate(mapped):
         is_weakest = i == len(mapped) - 1
-        area_multiplier: float | None
-        if is_weakest:
-            area_multiplier = 1.0
-        else:
-            this_c = abs(item["contribution"])
-            next_c = abs(mapped[i + 1]["contribution"])
-            area_multiplier = (this_c / next_c) ** 2 if next_c > 0 else None
+        area_multiplier = suggested_area_multiplier(mapped, i)
 
         candidates.append(
             {

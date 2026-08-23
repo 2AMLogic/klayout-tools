@@ -2969,3 +2969,418 @@ def test_reproduces_canary_pll_charge_pump(tmp_path):
             f"{leg}: sized W={sized_w_um:.3g}um is not within a factor of "
             f"two of the canary's hand-sized W={hand_sized_w_um}um"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Design-centering objective (issue #1326, Epic #705 Phase 2)
+#
+# `request.design_centering` consumes `design_centering.py`'s own
+# `ranking[].parameter`/`ranking[].contribution` bridge directly (see that
+# module's `rank_mapped_parameters`/`suggested_area_multiplier`), additive to
+# `corners.objective` -- so a sizing run can grow the flagged mismatch-
+# sensitive instance(s)' `mult` and re-solve in the same `klt size` call.
+# --------------------------------------------------------------------------- #
+
+
+def _sensitivity_ranking(*entries: tuple[str, float]) -> list[dict]:
+    """``[{"rank": i+1, "parameter": p, "contribution": c}, ...]`` -- the
+    same ``ranking[].parameter``/``ranking[].contribution`` shape ``klt
+    yield-sensitivity``/``klt design-centering`` produce. Callers pass
+    entries already sorted descending by ``|contribution|``, matching that
+    contract."""
+    return [
+        {"rank": i + 1, "parameter": parameter, "contribution": contribution}
+        for i, (parameter, contribution) in enumerate(entries)
+    ]
+
+
+# --- _parse_design_centering (pure validation, no ngspice) ----------------- #
+
+
+def test_parse_design_centering_absent_returns_none():
+    assert size._parse_design_centering({}) is None
+
+
+def test_parse_design_centering_requires_object():
+    with pytest.raises(size.SizeError, match="design_centering must be"):
+        size._parse_design_centering({"design_centering": "nope"})
+
+
+def test_parse_design_centering_requires_non_empty_ranking():
+    with pytest.raises(size.SizeError, match="ranking must be"):
+        size._parse_design_centering(
+            {
+                "design_centering": {
+                    "ranking": [],
+                    "parameter_map": {"a": "device"},
+                }
+            }
+        )
+
+
+def test_parse_design_centering_requires_non_empty_parameter_map():
+    with pytest.raises(size.SizeError, match="parameter_map must be"):
+        size._parse_design_centering(
+            {
+                "design_centering": {
+                    "ranking": _sensitivity_ranking(("a", 1.0)),
+                    "parameter_map": {},
+                }
+            }
+        )
+
+
+def test_parse_design_centering_parameter_map_value_must_be_a_string():
+    with pytest.raises(size.SizeError, match=r"parameter_map\['a'\]"):
+        size._parse_design_centering(
+            {
+                "design_centering": {
+                    "ranking": _sensitivity_ranking(("a", 1.0)),
+                    "parameter_map": {"a": 5},
+                }
+            }
+        )
+
+
+def test_parse_design_centering_topology_mode_unknown_instance_raises():
+    with pytest.raises(size.SizeError, match="not one of this topology"):
+        size._parse_design_centering(
+            {
+                "topology": "diff_pair_mirror_tail",
+                "design_centering": {
+                    "ranking": _sensitivity_ranking(("a", 1.0)),
+                    "parameter_map": {"a": "not_a_real_instance"},
+                },
+            }
+        )
+
+
+def test_parse_design_centering_topology_mode_accepts_a_real_instance():
+    spec = size._parse_design_centering(
+        {
+            "topology": "diff_pair_mirror_tail",
+            "design_centering": {
+                "ranking": _sensitivity_ranking(("a", 1.0)),
+                "parameter_map": {"a": "input_a"},
+            },
+        }
+    )
+    assert spec["parameter_map"] == {"a": "input_a"}
+
+
+def test_parse_design_centering_valid_round_trips():
+    ranking = _sensitivity_ranking(("a", 1.0), ("b", 0.5))
+    spec = size._parse_design_centering(
+        {
+            "design_centering": {
+                "ranking": ranking,
+                "parameter_map": {"a": "device"},
+            }
+        }
+    )
+    assert spec == {"ranking": ranking, "parameter_map": {"a": "device"}}
+
+
+# --- _grow_mult (pure math) -------------------------------------------------- #
+
+
+def test_grow_mult_rounds_up_to_the_next_whole_device():
+    assert size._grow_mult(1, 1.42) == 2.0
+    assert size._grow_mult(2, 2.0) == 4.0
+    assert size._grow_mult(1, 1.0) == 1.0
+
+
+def test_grow_mult_never_shrinks_below_current():
+    assert size._grow_mult(3, 0.5) == 3.0
+
+
+# --- single-device mode: growth via the synthetic square-law model --------- #
+
+
+def test_run_size_design_centering_grows_dominant_candidate(tmp_path, monkeypatch):
+    """Two mapped ranked parameters against a single device: the dominant
+    one's suggested area multiplier (the same Pelgrom-law squared-ratio
+    formula `design_centering.py`'s own reference consumer reports) grows
+    the device's `mult`, and the response's device/operating_point already
+    reflect a fresh, ngspice-confirmed solve at the grown geometry -- all
+    inside this one `run_size` call (no separate `klt design-centering`
+    re-run)."""
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": _sensitivity_ranking(
+                ("vth_mismatch", 4.0), ("beta_mismatch", 2.0)
+            ),
+            "parameter_map": {
+                "vth_mismatch": "device",
+                "beta_mismatch": "device",
+            },
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request_path))
+
+    assert report["status"] == "pass"
+    dc = report["design_centering"]
+    assert dc["schema_version"] == size.DESIGN_CENTERING_SCHEMA_VERSION
+    assert dc["requested"] is True
+    assert dc["applied"] is True
+    assert [c["parameter"] for c in dc["candidates"]] == [
+        "vth_mismatch",
+        "beta_mismatch",
+    ]
+    top, second = dc["candidates"]
+    assert top["instance"] == "device"
+    assert top["suggested_area_multiplier"] == pytest.approx((4.0 / 2.0) ** 2)
+    assert top["applied"] is True
+    # `beta_mismatch` is already the weakest mapped candidate -- multiplier
+    # 1.0, nothing further to grow for it.
+    assert second["suggested_area_multiplier"] == 1.0
+    assert second["applied"] is False
+    assert dc["unmapped_parameters"] == []
+
+    grown = dc["grown"]["device"]
+    assert grown["mult_before"] == 1
+    assert grown["mult_after"] == math.ceil((4.0 / 2.0) ** 2)
+    assert grown["area_multiplier_applied"] == pytest.approx((4.0 / 2.0) ** 2)
+    assert report["device"]["mult"] == grown["mult_after"]
+    # The synthetic square-law model's `mult` param is not wired into its
+    # own electrical behavior (see `_write_models_lib`) -- exactly like a
+    # real PDK's `mult`, growing it does not change the *target* gm/Id this
+    # run re-verified against, only the device's own reported geometry.
+    assert report["operating_point"]["gm_id"] == pytest.approx(8.0, rel=0.05)
+    assert report["status"] == "pass"
+
+
+def test_run_size_design_centering_single_mapped_candidate_is_already_weakest(
+    tmp_path, monkeypatch
+):
+    """A single mapped candidate has nothing lower-ranked to reach parity
+    with -- `suggested_area_multiplier` is `1.0` by definition, so nothing
+    is grown and the base solve's own result is returned unchanged (aside
+    from the added `design_centering` block)."""
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": _sensitivity_ranking(("vth_mismatch", 4.0)),
+            "parameter_map": {"vth_mismatch": "device"},
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request_path))
+
+    dc = report["design_centering"]
+    assert dc["applied"] is False
+    assert dc["candidates"][0]["suggested_area_multiplier"] == 1.0
+    assert dc["candidates"][0]["applied"] is False
+    assert dc["grown"] == {}
+    assert dc["note"]
+    assert report["device"]["mult"] == 1
+
+
+def test_run_size_design_centering_unmapped_parameters_are_reported(
+    tmp_path, monkeypatch
+):
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": _sensitivity_ranking(
+                ("vth_mismatch", 4.0), ("process_only", 3.0)
+            ),
+            "parameter_map": {"vth_mismatch": "device"},
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request_path))
+
+    dc = report["design_centering"]
+    assert [u["parameter"] for u in dc["unmapped_parameters"]] == ["process_only"]
+    # Only one mapped candidate remains once `process_only` is filtered out
+    # -- already the weakest, nothing to grow.
+    assert dc["applied"] is False
+
+
+def test_run_size_design_centering_absent_field_is_a_no_op(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request_path = _write_request(tmp_path, _base_request())
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request_path))
+
+    assert "design_centering" not in report
+
+
+def test_run_size_design_centering_malformed_ranking_raises(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": [{"parameter": "vth_mismatch"}],  # no 'contribution'
+            "parameter_map": {"vth_mismatch": "device"},
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    with pytest.raises(size.SizeError, match="malformed entry"):
+        size.run_size(str(request_path))
+
+
+def test_run_size_design_centering_bad_block_raises_before_any_ngspice_call(
+    tmp_path, monkeypatch
+):
+    """A malformed `request.design_centering` block is rejected up front
+    (`_parse_design_centering`, called from `_run_size_impl` before either
+    solve dispatches) -- never even reaching `subprocess.run`, so the
+    caller does not pay for a full sweep only to have it discarded."""
+    request = _base_request(design_centering={"parameter_map": {"a": "device"}})
+    request_path = _write_request(tmp_path, request)
+
+    def _unexpected_run(*args, **kwargs):
+        raise AssertionError("ngspice should never be invoked")
+
+    monkeypatch.setattr(size.subprocess, "run", _unexpected_run)
+
+    with pytest.raises(size.SizeError, match="ranking must be"):
+        size.run_size(str(request_path))
+
+
+def test_run_size_design_centering_error_status_skips_growth(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": _sensitivity_ranking(("vth_mismatch", 4.0), ("b", 1.0)),
+            "parameter_map": {"vth_mismatch": "device", "b": "device"},
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _stub_subprocess_run(monkeypatch, log_text="")
+
+    report = size.run_size(str(request_path))
+
+    assert report["status"] == "error"
+    dc = report["design_centering"]
+    assert dc["applied"] is False
+    assert dc["candidates"] == []
+    assert dc["grown"] == {}
+    assert "errored" in dc["note"]
+
+
+# --- topology mode: growth via real ngspice --------------------------------- #
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_design_centering_grows_two_roles_in_one_pass(tmp_path):
+    """A ranking flagging instances in two different roles (`input_a` in
+    `input_pair`, `mirror_a` in `mirror`) grows both roles' `mult` in a
+    single follow-up joint solve -- not one re-solve per candidate -- and
+    the returned `devices`/`roles` are that grown, re-verified solve's own
+    result."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_topology_request(
+            design_centering={
+                "ranking": _sensitivity_ranking(
+                    ("input_pair_mismatch", 5.0),
+                    ("mirror_mismatch", 3.0),
+                    ("tail_mismatch", 1.0),
+                ),
+                "parameter_map": {
+                    "input_pair_mismatch": "input_a",
+                    "mirror_mismatch": "mirror_a",
+                    "tail_mismatch": "tail",
+                },
+            }
+        ),
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", report["method"]["rationale"]
+    dc = report["design_centering"]
+    assert dc["requested"] is True
+    assert dc["applied"] is True
+    assert set(dc["grown"]) == {"input_pair", "mirror"}
+    assert dc["grown"]["input_pair"]["mult_before"] == 1
+    assert dc["grown"]["input_pair"]["mult_after"] >= 2
+    assert dc["grown"]["mirror"]["mult_after"] >= 2
+    # `tail_mismatch` is the weakest mapped candidate -- not grown.
+    tail_candidate = next(
+        c for c in dc["candidates"] if c["parameter"] == "tail_mismatch"
+    )
+    assert tail_candidate["applied"] is False
+
+    assert (
+        report["devices"]["input_a"]["device"]["mult"]
+        == (dc["grown"]["input_pair"]["mult_after"])
+    )
+    assert (
+        report["devices"]["mirror_a"]["device"]["mult"]
+        == (dc["grown"]["mirror"]["mult_after"])
+    )
+    # `tail`'s own device is untouched.
+    assert report["devices"]["tail"]["device"]["mult"] == 1
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_design_centering_unknown_instance_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_topology_request(
+            design_centering={
+                "ranking": _sensitivity_ranking(("a", 1.0)),
+                "parameter_map": {"a": "not_a_real_instance"},
+            }
+        ),
+    )
+
+    with pytest.raises(size.SizeError, match="not one of this topology"):
+        size.run_size(str(request))
+
+
+# --- CLI -------------------------------------------------------------------- #
+
+
+def test_cli_design_centering_json_envelope(tmp_path, monkeypatch, capsys):
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": _sensitivity_ranking(("vth_mismatch", 4.0), ("b", 1.0)),
+            "parameter_map": {"vth_mismatch": "device", "b": "device"},
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    exit_code = main(["size", str(request_path), "--format", "json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["design_centering"]["applied"] is True
+
+
+def test_cli_design_centering_text_output(tmp_path, monkeypatch, capsys):
+    _write_models_lib(tmp_path)
+    request = _base_request(
+        design_centering={
+            "ranking": _sensitivity_ranking(("vth_mismatch", 4.0), ("b", 1.0)),
+            "parameter_map": {"vth_mismatch": "device", "b": "device"},
+        }
+    )
+    request_path = _write_request(tmp_path, request)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    main(["size", str(request_path), "--format", "text"])
+    captured = capsys.readouterr()
+
+    assert "design centering: applied=True" in captured.out
+    assert "vth_mismatch -> device" in captured.out
+    assert "device: mult 1" in captured.out

@@ -28,21 +28,30 @@ unlike `klt yield`/`klt yield-sensitivity`, this command does no numeric
 fitting; it only reads two already-computed reports and applies a stated
 heuristic (see "What is computed" below).
 
-## Producer-side reference contract, not a wired #705 sizing loop
+## Producer-side reference contract, now with a wired #705 consumer too
 
-Epic [#705](https://github.com/2AMLogic/klayout-tools/issues/705) (the
-analog-sizing engine) is still Phase 1 as of this command shipping and has
-no design-centering stage to wire into (verified against `klt size`'s own
-response shape: a geometric sizing result, no re-centering/iteration loop).
-This command therefore ships the **contract**
+This command shipped as a **contract**
 [`docs/cli/yield-sensitivity.md`](yield-sensitivity.md)'s own "Downstream
-consumers" section already reserves for it (`ranking[].parameter`/
+consumers" section already reserved (`ranking[].parameter`/
 `ranking[].contribution`, read verbatim -- no new field was added to that
 contract) plus a **reference consumer** that exercises it end-to-end: this
-command itself. If #705 grows a real design-centering stage later, that
-stage should wire into `ranking[].parameter`/`ranking[].contribution`
-directly -- this command's proposal shape is a worked example of *one* way
-to consume it, not the only one.
+command itself. At the time, epic [#705](https://github.com/2AMLogic/klayout-tools/issues/705)
+(the analog-sizing engine) was still Phase 1 and had no design-centering
+stage to wire into.
+
+That changed with [#1326](https://github.com/2AMLogic/klayout-tools/issues/1326)
+(epic #705 Phase 2): [`klt size`](size.md) now has its own
+design-centering/yield-aware objective (`request.design_centering`, see
+that command's "Design-centering objective" section) that consumes exactly
+this contract -- not by calling this command, but by importing the two
+pure helpers this command's own `build_recentering_proposal` is itself
+built from (`design_centering.rank_mapped_parameters`/
+`design_centering.suggested_area_multiplier`) and applying them against the
+geometry a sizing run just produced, so it can grow the flagged instance(s)
+and re-verify with ngspice in the same pass. This command and
+`build_recentering_proposal` are unchanged and remain useful standalone --
+e.g. against a `klt size` payload produced by an older release, or by any
+other tool that produces the same JSON shape.
 
 ## Input
 

@@ -9,16 +9,19 @@ in-loop evaluator, never a closed-form surrogate as the final word.
 klt size <request.json> [-o|--outdir <dir>] [--timeout-s <seconds>] [--format text|json]
 ```
 
-This is Phase 0/1 of the analog-sizing epic
+This is Phase 0/1/2 of the analog-sizing epic
 ([#705](https://github.com/2AMLogic/klayout-tools/issues/705)): define the
 `klt size` request/response interface, wire `ngspice` in as the in-loop
 evaluator, solve the single-device gm/Id MVP (#721), add PVT corner sets
 (#729) and a worst-corner margin objective (#769), extend the engine to a
 **coupled multi-device joint solve** (#768 -- see "Coupled multi-device
-topology sizing" below), and add a **fixed-`Vds` bias mode** (#1015 -- see
-"Fixed-Vds bias mode" below) alongside the original diode-connected method.
-Later phases add a real optimizer core and system-level (gain/UGF/phase-
-margin) objectives -- see epic #705.
+topology sizing" below), add a **fixed-`Vds` bias mode** (#1015 -- see
+"Fixed-Vds bias mode" below) alongside the original diode-connected method,
+and add a **design-centering/yield-aware objective** (#1326 -- see
+"Design-centering objective" below) that wires `klt design-centering`'s
+ranking contract directly into the sizing loop. Later phases add a real
+optimizer core and system-level (gain/UGF/phase-margin) objectives -- see
+epic #705.
 
 - `<request.json>` -- path to a request document (see "Request" below). A
   *reference*, not inline JSON on the command line, mirroring every other
@@ -758,6 +761,125 @@ differ in the real circuit (different drain nodes, hence different `Vds`).
   with the per-device rationale showing why. Raise `bias.vcm_v`, or pick a
   higher-gm/Id (weaker-inversion, lower `Vgs`) target for `input_pair`
   and/or `tail`.
+
+## Design-centering objective (`request.design_centering`, issue #1326)
+
+[`klt design-centering`](design-centering.md) (#924, Phase 3 of the
+statistical/yield epic #710) defines a contract for turning a `klt
+yield-sensitivity`-shaped mismatch-parameter `ranking` into re-centering
+candidates against a sized device -- but shipped with no consumer inside
+`klt size` itself, requiring a caller to run `klt size`, then `klt
+design-centering` on the result, then hand-edit and re-run `klt size` a
+second time. Setting `request.design_centering` closes that loop: it grows
+the ranking's flagged mismatch-sensitive instance(s) and re-solves, all
+inside one `klt size` invocation.
+
+**Additive**, not a new `corners.objective` value: an independent request
+field a caller may combine with any objective (`"sizing_corner"` or
+`"worst_case_margin"`), or with none (topology mode, which has no
+`corners.objective` of its own -- see "Known limitations" above). Available
+in both single-device and topology mode.
+
+```json
+{
+  "design_centering": {
+    "ranking": [
+      { "rank": 1, "parameter": "vth_mismatch_input_a", "contribution": 0.041 },
+      { "rank": 2, "parameter": "beta_mismatch_mirror_a", "contribution": 0.018 }
+    ],
+    "parameter_map": {
+      "vth_mismatch_input_a": "input_a",
+      "beta_mismatch_mirror_a": "mirror_a"
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `design_centering.ranking` | array, required | The same `ranking[].parameter`/`ranking[].contribution` shape `klt yield-sensitivity`/`klt design-centering` produce -- pass a `klt yield-sensitivity` measurement's own `ranking` array (or the equivalent from another producer) verbatim, already sorted descending by `\|contribution\|`. |
+| `design_centering.parameter_map` | object, required | `{mismatch_parameter: instance_name}`, the same bridge `klt design-centering`'s own request field defines. In topology mode, `instance_name` must be one of that topology's six instance keys (`tail_ref`/`tail`/`input_a`/`input_b`/`mirror_a`/`mirror_b`); an unknown instance is a request error, checked before any ngspice invocation runs. In single-device mode there is exactly one device, so `instance_name` is carried through as a display label only (matching `klt design-centering`'s own single-device-mode behavior). |
+
+### Method
+
+1. **Rank.** [`klayout_tools.design_centering.rank_mapped_parameters`](design-centering.md)
+   splits `ranking` into mapped candidates (an entry in `parameter_map`) and
+   unmapped ones (echoed back, not silently dropped), preserving `ranking`'s
+   own order.
+2. **Score.** [`suggested_area_multiplier`](design-centering.md) computes
+   each mapped candidate's Pelgrom-law area multiplier against the
+   next-lower-ranked mapped candidate -- the same formula `klt
+   design-centering`'s own reference consumer reports, applied here
+   directly against the geometry *this run itself* just solved (there is no
+   separate `sized_device` payload to load).
+3. **Grow.** Every candidate whose multiplier exceeds `1x` grows that
+   instance's `mult` (parallel-device count) -- **never** `w_um` or `nf`,
+   so the growth cannot perturb the gm/Id target the search already met --
+   rounded up to the next whole device. Topology mode may grow more than
+   one role at once when the ranking flags instances in different roles;
+   single-device mode has exactly one instance to grow. This is a single
+   batched growth step, not one re-solve per candidate.
+4. **Re-verify.** The whole search re-runs once at the grown geometry (a
+   second full sweep+confirm in single-device mode, a second full joint
+   solve in topology mode) -- turning Pelgrom's law's own "first-pass
+   heuristic, re-verify with a fresh sizing pass" caveat into an actual
+   ngspice-confirmed operating point.
+
+### Response
+
+```json
+{
+  "design_centering": {
+    "schema_version": 1,
+    "requested": true,
+    "applied": true,
+    "candidates": [
+      {
+        "rank": 1, "parameter": "vth_mismatch_input_a", "contribution": 0.041,
+        "instance": "input_a", "suggested_area_multiplier": 5.185, "applied": true
+      },
+      {
+        "rank": 2, "parameter": "beta_mismatch_mirror_a", "contribution": 0.018,
+        "instance": "mirror_a", "suggested_area_multiplier": 1.0, "applied": false
+      }
+    ],
+    "unmapped_parameters": [],
+    "grown": {
+      "input_pair": { "mult_before": 1, "mult_after": 6, "area_multiplier_applied": 5.185 }
+    }
+  }
+}
+```
+
+- `design_centering.requested` -- always `true` once `request.design_centering`
+  is present (this field's own presence already implies it; kept for a
+  caller iterating response fields generically).
+- `design_centering.applied` -- `true` only when at least one candidate was
+  actually grown and the search re-ran; `false` when nothing outranked its
+  next-lower mapped contributor by more than `1x` (`grown` is then `{}`,
+  and `note` explains why), or when the base solve itself errored before
+  any device geometry was confirmed (in which case `candidates` is also
+  `[]` -- there is nothing to grow yet).
+- `design_centering.candidates` -- one entry per *mapped* ranked parameter,
+  each carrying its own `suggested_area_multiplier` and whether it was
+  `applied`.
+- `design_centering.unmapped_parameters` -- ranked parameters absent from
+  `parameter_map`, same shape as `klt design-centering`'s own field of the
+  same name.
+- `design_centering.grown` -- keyed by `"device"` (single-device mode) or
+  role name (topology mode, e.g. `"input_pair"`), each entry reporting the
+  `mult` before/after and the multiplier that drove it. **When present,
+  every other top-level response field (`device`/`operating_point`/
+  `margins`, or `devices`/`roles`/`joint_solve` in topology mode) is that
+  grown, re-verified solve's own result** -- not the pre-growth solve.
+
+### Cost
+
+One extra full solve (the same cost as the base objective already paid)
+only when `request.design_centering` opts in **and** at least one mapped
+candidate's multiplier exceeds `1x`. A request that omits the field, or
+whose top mapped candidate is already the weakest (multiplier `1.0`,
+nothing to grow), pays nothing extra.
 
 ## Exit codes
 
