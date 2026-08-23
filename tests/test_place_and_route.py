@@ -26,12 +26,15 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
   end against a real install" check. There is one per supported
   standard-cell library: `sky130_fd_sc_hd` (issue #425) and
   `gf180mcu_fd_sc_mcu9t5v0` (issue #637), both gated the same way via
-  `_find_real_pnr_variant()`. Neither is required for CI (CI installs
-  neither `openroad` nor a real standard-cell PDK today, matching `klt
-  synthesize`'s own noted CI gap) but each runs on any machine with both
-  halves of its toolchain. **This repo's own worked example for issue #425
-  instead verified the identical code path manually via a real
-  `openroad/orfs` Docker image** (`openroad -no_init -exit -metrics ...`
+  `_find_real_pnr_variant()`. Neither is required for CI (`ci.yml`'s
+  PR-gating `test` job installs neither `openroad` nor a real
+  standard-cell PDK; the `workflow_dispatch`-only
+  `place-and-route-smoke.yml` job added by issue #1328 does provision
+  both, but for sky130A only and never on a PR) but each runs on any
+  machine with both halves of its toolchain. **This repo's own worked
+  example for issue #425 instead verified the identical code path
+  manually via a real `openroad/orfs` Docker
+  image** (`openroad -no_init -exit -metrics ...`
   against a real volare-fetched `sky130A` install, floorplan through a full
   detailed route with 0 DRC violations, followed by a real DEF->GDS merge
   via this module's own `_merge_def_to_gds` producing a valid GDS) -- see

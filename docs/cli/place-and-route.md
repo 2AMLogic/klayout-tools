@@ -165,9 +165,13 @@ separately (issue #1329).
 
 Both supported standard-cell libraries have now been driven through this
 command end to end against a real `openroad` binary and a real PDK install.
-Neither run is reproducible in CI (see "CI" above); each is recorded here so
-a reader can tell which claims rest on a live tool run and which rest on
-stubbed tests.
+Neither run is PR-gating, and only one of the two has a CI equivalent at
+all: the sky130 pipeline is reproducible on demand via the
+`workflow_dispatch`-only `place-and-route-smoke.yml` job (see "CI" above),
+which provisions `openroad` and fetches a real sky130A install; the
+gf180mcu run is not reproducible in CI, since that workflow fetches sky130A
+only. Each is recorded here so a reader can tell which claims rest on a
+live tool run and which rest on stubbed tests.
 
 ### `sky130_fd_sc_hd` (issue #425)
 
