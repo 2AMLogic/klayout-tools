@@ -4,13 +4,27 @@ name: Real-P&R sequential-equivalence canary
 # path for the real pre/post-route sequential-equivalence canary --
 # `tests/test_equiv.py::test_sequential_engine_real_pnr_register_preserving_transformation`.
 # That test runs `klt synthesize` -> `klt place-and-route` (real `openroad`
-# engine, GCD worked example) and proves `klt equiv`'s `"yosys-sequential"`
+# engine, GCD worked example) and asserts `klt equiv`'s `"yosys-sequential"`
 # engine finds the pre-route and post-route netlists `"equivalent"` -- the
-# direct, real-P&R validation issue #1313's own acceptance criteria required
-# (evidenced once, manually, by issue #1323). Before this workflow existed,
-# re-running that proof required a manual local `openroad`/sky130 PDK setup;
-# this job automates that setup so the canary is durable, repeatable
-# evidence rather than a one-off manual run.
+# direct, real-P&R validation issue #1313's own acceptance criteria required.
+# Before this workflow existed, re-running that check required a manual local
+# `openroad`/sky130 PDK setup; this job automates that setup so the canary is
+# durable, repeatable evidence rather than a one-off manual run.
+#
+# STATUS: `xfail` (strict=False), tracked by issue #1353 -- no longer a false
+# `"counterexample"` (fixed by #1349), still not `"equivalent"`. A real local
+# run (`openroad/orfs:latest` + sky130A) confirms the P&R transformation is
+# register-preserving and that the two netlists are functionally identical
+# (0 mismatches over 20,000 randomized Icarus cycles), but the
+# `"yosys-sequential"` engine's `equiv_induct` stage does not converge at
+# this netlist size and its bounded-SAT fallback still finds a violation
+# among the unproven cells -- one the engine's own
+# `counterexample_not_reproduced` diagnostic already flags as unreproducible,
+# so the test now correctly reports `"inconclusive"`, wrapped in the `xfail`
+# marker above. This job is therefore expected to *pass* (xfailed, not a hard
+# failure) until #1353 lands, at which point pytest will report XPASS as the
+# signal to remove the marker. Do not "fix" that XPASS by relaxing the
+# anti-skip step below.
 #
 # Provisioning is deliberately NOT reinvented here: OpenROAD/PDK provisioning
 # is epic #700's (place-and-route's) infrastructure concern. This job copies

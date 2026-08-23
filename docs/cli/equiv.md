@@ -405,7 +405,8 @@ transformation `"equivalent"` (not just the buffer-inserted synthetic mutant
 above) is exercised by
 `tests/test_equiv.py::test_sequential_engine_real_pnr_register_preserving_transformation`
 — `klt synthesize`'s pre-route GCD netlist (from
-`examples/functional-verification/gcd.v`) vs. the real, post-route
+`examples/functional-verification/gcd.v`, the same GCD source of truth
+`tests/corpus/place_and_route/regenerate.sh` uses) vs. the real, post-route
 `verilog_path` `klt place-and-route` produces via a real `openroad` binary
 and a real sky130 PDK install — issue #1313's acceptance criterion. Like
 `test_place_and_route.py`'s own live-`openroad` integration tests, it is
