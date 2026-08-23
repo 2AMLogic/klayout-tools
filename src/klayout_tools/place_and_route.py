@@ -3979,6 +3979,55 @@ def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
     main_layout.read_bytes(scratch.write_bytes(save_opts), kdb.LoadLayoutOptions())
 
 
+def _cell_library_max_overhang_um(
+    top_only: Any, cell_lef_macros: list[dict[str, Any]]
+) -> float:
+    """The largest amount any standard-cell definition merged into
+    ``top_only`` draws its own GDS-view geometry beyond its own LEF
+    ``SIZE`` box, measured from that box's own origin -- LEF's own
+    convention: a macro's ``(0, 0)`` is its ``SIZE`` box's lower-left
+    corner.
+
+    Real open_pdks standard-cell libraries deliberately draw geometry
+    outside their own LEF abutment box so that abutting cells' wells/
+    implants merge across a row (issue #1335): gf180mcu's own
+    ``gf180mcu_fd_sc_mcu9t5v0__endcap`` overhangs by 2.93 um on its left,
+    every other cell in that library by ~0.43/0.45 um. This is the
+    *actual*, measured overhang for whichever cells this specific merge
+    used -- :func:`_merge_def_to_gds`'s own DIEAREA guard bounds it against
+    a technology-scaled ceiling (the tech LEF's own row height) before
+    trusting it as a tolerance, so a corrupted/implausible measurement
+    (e.g. from a cell GDS view that is itself the defect under test) can
+    never mask a genuine doubling/halving-scale DBU-mismatch defect.
+
+    Returns ``0.0`` when no merged cell's name matches a declared macro
+    with a known ``SIZE`` (e.g. every placed cell is a via/fill cell, or
+    the library declares no ``SIZE`` at all) -- callers fall back to the
+    existing fixed tolerance in that case, matching this module's
+    "malformed/absent input never raises" convention elsewhere.
+    """
+    macros_by_name = {
+        macro["name"]: macro
+        for macro in cell_lef_macros
+        if macro["width_um"] is not None and macro["height_um"] is not None
+    }
+    max_overhang_um = 0.0
+    for cell in top_only.each_cell():
+        macro = macros_by_name.get(cell.name)
+        if macro is None or cell.is_empty():
+            continue
+        bbox_um = cell.bbox().to_dtype(top_only.dbu)
+        overhang_um = max(
+            0.0,
+            -bbox_um.left,
+            -bbox_um.bottom,
+            bbox_um.right - macro["width_um"],
+            bbox_um.top - macro["height_um"],
+        )
+        max_overhang_um = max(max_overhang_um, overhang_um)
+    return max_overhang_um
+
+
 def _merge_def_to_gds(
     *,
     def_path: str,
@@ -4039,7 +4088,11 @@ def _merge_def_to_gds(
     # regex-based parser can't extract it), fall back to KLayout's existing
     # default DBU behavior -- `read_lef_header` never raises on malformed
     # input, so `database_microns is None` is a normal, expected case here.
-    database_microns = read_lef_header(tech_lef)["database_microns"]
+    # Captured as the full header (not just `database_microns`) so the
+    # post-merge DIEAREA guard below can reuse its own `sites` entry rather
+    # than re-parsing `tech_lef` a second time.
+    tech_lef_header = read_lef_header(tech_lef)
+    database_microns = tech_lef_header["database_microns"]
     if database_microns is not None:
         lefdef_config.dbu = 1.0 / database_microns
 
@@ -4136,7 +4189,43 @@ def _merge_def_to_gds(
         # A small absolute tolerance (not a DBU-doubling-scale-sized one)
         # absorbs ordinary OFFGRID/rounding overhang at the die boundary
         # without masking the doubling/halving this check exists to catch.
+        #
+        # Issue #1335: that fixed 0.01 um tolerance rejected every gf180mcu
+        # `request.power` run, even though it is the only gf180mcu
+        # configuration that is actually DRC-clean. open_pdks standard-cell
+        # libraries (gf180mcu in particular) deliberately draw geometry
+        # beyond their own LEF abutment box so abutting cells' wells/
+        # implants merge -- a legitimate overhang a fixed few-hundredths-of-
+        # a-micron tolerance cannot tell apart from a DBU-doubling/halving
+        # defect (which blows the merged extent past the die by an amount
+        # on the order of the die's own size, not a single cell/row).
+        # Expand the tolerance by the merged cell library's own *measured*
+        # overhang (:func:`_cell_library_max_overhang_um`), but cap that
+        # measurement at the tech LEF's own row (`SITE`) height: an
+        # overhang beyond one row already means something else is wrong --
+        # well/implant-merge geometry never spans multiple rows -- so the
+        # tolerance stays physically bounded regardless of what the
+        # measurement itself reports, and can never absorb a doubling/
+        # halving-scale defect. Falls back to the fixed 0.01 um tolerance
+        # (today's behavior, unchanged) when the tech LEF declares no
+        # `SITE` to derive that ceiling from.
         tolerance_um = 0.01
+        overhang_ceiling_um = max(
+            (
+                site["height_um"]
+                for site in tech_lef_header["sites"]
+                if site["height_um"] is not None
+            ),
+            default=None,
+        )
+        if overhang_ceiling_um is not None:
+            cell_lef_macros = read_lef_header(cell_lef)["macros"]
+            measured_overhang_um = _cell_library_max_overhang_um(
+                top_only, cell_lef_macros
+            )
+            tolerance_um = max(
+                tolerance_um, min(measured_overhang_um, overhang_ceiling_um)
+            )
         if (
             bbox_um.left < die_x0 - tolerance_um
             or bbox_um.bottom < die_y0 - tolerance_um
@@ -4148,7 +4237,10 @@ def _merge_def_to_gds(
                 f"({bbox_um.left:.4f}, {bbox_um.bottom:.4f}) .. "
                 f"({bbox_um.right:.4f}, {bbox_um.top:.4f}) um that extends "
                 f"beyond the DEF's own DIEAREA ({die_x0:.4f}, {die_y0:.4f}) "
-                f".. ({die_x1:.4f}, {die_y1:.4f}) um -- possible DBU "
+                f".. ({die_x1:.4f}, {die_y1:.4f}) um by more than this "
+                f"merge's own {tolerance_um:.4f} um tolerance (the fixed "
+                "0.01 um default, or the merged cell library's own measured "
+                "abutment-box overhang when larger) -- possible DBU "
                 "mismatch between the DEF-derived geometry and a merged GDS "
                 "view"
             )

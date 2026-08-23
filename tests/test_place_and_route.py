@@ -5128,7 +5128,16 @@ def test_merge_def_to_gds_rejects_merged_bbox_outside_diearea(tmp_path):
     wrong GDS. Engineered directly (a standard-cell GDS view whose own drawn
     geometry sits far outside the die boundary) rather than via an actual
     DBU mismatch, so this test exercises the sanity check itself,
-    independent of whether the read-side fix above is doing its job."""
+    independent of whether the read-side fix above is doing its job.
+
+    Issue #1335 made the guard's tolerance the merged cell library's own
+    *measured* abutment-box overhang (capped at the tech LEF's own row
+    height, see `test_merge_def_to_gds_caps_measured_overhang_at_site_height`
+    below) rather than a fixed 0.01 um -- this fixture's own shape is so far
+    outside the die (tens of thousands of microns) that even a
+    measurement taken directly from it, before any capping, would still
+    leave the merged bbox far outside the expanded die, so this stays a
+    valid regression guard for the doubling/halving symptom either way."""
     root = tmp_path / "install"
     cell_name = "testcell"
     tech_lef = tmp_path / "tech.tlef"
@@ -5148,6 +5157,99 @@ def test_merge_def_to_gds_rejects_merged_bbox_outside_diearea(tmp_path):
     cell.shapes(layer).insert(
         kdb.Box(100_000_000, 100_000_000, 200_000_000, 200_000_000)
     )
+    layout.write(str(gds_dir / "sky130_fd_sc_hd.gds"))
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    with pytest.raises(PlaceAndRouteError, match="DIEAREA"):
+        place_and_route._merge_def_to_gds(
+            def_path=str(def_path),
+            tech_lef=str(tech_lef),
+            cell_lef=str(cell_lef),
+            pdk_info=_fake_pdk_info(root),
+            cell_library="sky130_fd_sc_hd",
+            hdl_toplevel="top",
+            macros=[],
+            out_path=str(tmp_path / "out.gds"),
+        )
+
+
+def test_merge_def_to_gds_tolerates_cell_library_abutment_overhang(tmp_path):
+    """Issue #1335: open_pdks standard-cell libraries (gf180mcu in
+    particular) deliberately draw geometry beyond their own LEF abutment
+    box so abutting cells' wells/implants merge across a row -- e.g.
+    gf180mcu_fd_sc_mcu9t5v0's own cells overhang by ~0.43/0.45 um, its
+    `__endcap` cell by 2.93 um. A merge whose only "defect" is this kind of
+    legitimate, small, library-declared overhang must succeed, not raise --
+    before this fix, the guard's fixed 0.01 um tolerance rejected it."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)  # SITE unithd SIZE 0.46 BY 2.72
+    _write_tiny_cell_lef(cell_lef, cell_name)  # MACRO testcell SIZE 0.46 BY 2.72
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    # A cell GDS view that draws 0.1 um beyond its own LEF `SIZE` box on the
+    # low edges -- the same shape as open_pdks' own deliberate well/implant-
+    # merge overhang, just smaller in magnitude than gf180mcu's real
+    # ~0.43 um (a 0.1 um overhang already exceeds the fixed 0.01 um
+    # tolerance this test would have tripped on before this fix).
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell(cell_name)
+    layer = layout.layer(kdb.LayerInfo(68, 20))
+    cell.shapes(layer).insert(kdb.Box(-100, -100, 460, 2720))
+    layout.write(str(gds_dir / "sky130_fd_sc_hd.gds"))
+
+    def_path = tmp_path / "design.def"
+    # A single instance placed flush at the DEF's own origin (matching
+    # `DIEAREA ( 0 0 ) ( 4600 2720 )`), so the cell's own left/bottom
+    # overhang lands exactly at (and slightly past) the die boundary.
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root),
+        cell_library="sky130_fd_sc_hd",
+        hdl_toplevel="top",
+        macros=[],
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+
+
+def test_merge_def_to_gds_caps_measured_overhang_at_site_height(tmp_path):
+    """Issue #1335: the DIEAREA guard's tolerance is the merged cell
+    library's own measured abutment-box overhang, but capped at the tech
+    LEF's own row (`SITE`) height -- well/implant-merge geometry never
+    spans multiple rows, so a measurement larger than that (however it
+    arose) must not blindly widen the tolerance far enough to accept a
+    genuinely out-of-die placement."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)  # SITE unithd SIZE 0.46 BY 2.72 -> 2.72 um cap
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    # A cell GDS view that overhangs its own LEF `SIZE` box by 5 um on the
+    # left -- larger than the 2.72 um row-height cap, so a die-edge
+    # instance below must still be rejected rather than have its tolerance
+    # widened to accept a 5 um excursion.
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell(cell_name)
+    layer = layout.layer(kdb.LayerInfo(68, 20))
+    cell.shapes(layer).insert(kdb.Box(-5_000, 0, 460, 2_720))
     layout.write(str(gds_dir / "sky130_fd_sc_hd.gds"))
 
     def_path = tmp_path / "design.def"
