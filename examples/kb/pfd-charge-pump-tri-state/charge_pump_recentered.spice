@@ -1,0 +1,42 @@
+* klt design-centering validation (issue #1327) -- re-centered variant
+* of charge_pump.spice: design-centering-result.json flagged the DOWN leg's
+* Vth/beta mismatch as dominant and suggested growing its device by 48x. Applied to
+* *both* XMBN (bias diode) and XMDN (output device) to preserve the
+* mirror's 1:1 ratio -- see run_validation.py's 'Applying the multiplier to the real
+* circuit' docstring section for why single-device `klt size` growth cannot do this on
+* its own. Everything else is identical to charge_pump.spice.
+* Tri-state PFD charge pump -- minimal transistor-level current-source/sink
+* stage, authored for issue #1325 (Epic #705 Phase 2's PLL canary) per
+* kb/entries/pfd-charge-pump-tri-state.json's own sizing_approach, since
+* that entry had no `artifacts.netlist` (no runnable reference existed).
+* The PFD's own D-flip-flop/AND-gate reset logic is standard-cell-portable
+* digital logic (see that entry's pdk_portability note) and out of scope
+* for `klt size`'s MOSFET gm/Id sizing -- only the UP/DOWN current-
+* source/sink devices are modelled here, each mirrored 1:1 from an ideal
+* reference current and held at the loop-filter's mid-rail control
+* voltage (the standard current-mirror matching testbench: the loop
+* filter's control node sits mid-rail at lock, the worst-case Vds point
+* for UP/DOWN mirror-current matching per the entry's own sizing_approach).
+* sky130 schematic-level netlist BODY -- no .lib/.control/.end (the
+* reproduction test in tests/test_size.py supplies those, matching
+* examples/design-pipeline/ota_5t.spice's convention).
+.param vdd=1.8
+.param icp=20u
+.param vctrl=0.9
+
+Vdd    vdd 0 DC {vdd}
+* Loop-filter control node, held fixed at mid-rail for UP/DOWN branch
+* characterization.
+Vctrlp ctrl_up 0 DC {vctrl}
+Vctrln ctrl_dn 0 DC {vctrl}
+* Ideal reference currents setting the UP/DOWN mirrors' bias.
+Iref   nbiasp 0   DC {icp}
+Iref2  vdd nbiasn DC {icp}
+
+* --- UP path: PMOS current source, mirrored 1:1 from the ideal reference ---
+XMBP nbiasp nbiasp vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XMUP ctrl_up nbiasp vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+
+* --- DOWN path: NMOS current sink, mirrored 1:1 from the ideal reference ---
+XMBN nbiasn nbiasn 0 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=48
+XMDN ctrl_dn nbiasn 0 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=48

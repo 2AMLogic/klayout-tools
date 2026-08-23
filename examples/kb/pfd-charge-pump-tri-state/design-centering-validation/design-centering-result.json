@@ -1,0 +1,175 @@
+{
+  "schema_version": 2,
+  "status": "pass",
+  "device": {
+    "kind": "nmos",
+    "model": "sky130_fd_pr__nfet_01v8",
+    "l_um": 1.0,
+    "w_min_um": 1.0,
+    "w_max_um": 40.0,
+    "nf": 1,
+    "mult": 48.0,
+    "op_point_element": "msky130_fd_pr__nfet_01v8"
+  },
+  "corner": {
+    "corner_id": "tt/27C",
+    "process": "tt",
+    "vdd_v": 1.8,
+    "temperature_c": 27.0
+  },
+  "corners": {
+    "declared": [
+      {
+        "corner_id": "tt/27C",
+        "process": "tt",
+        "vdd_v": 1.8,
+        "temperature_c": 27.0
+      }
+    ],
+    "sizing": {
+      "corner_id": "tt/27C",
+      "process": "tt",
+      "vdd_v": 1.8,
+      "temperature_c": 27.0
+    },
+    "objective": "sizing_corner",
+    "hold_across_corners": false,
+    "results": [
+      {
+        "corner_id": "tt/27C",
+        "process": "tt",
+        "temperature_c": 27.0,
+        "is_sizing": true,
+        "status": "pass",
+        "operating_point": {
+          "w_um": 8.040949570120498,
+          "l_um": 1.0,
+          "nf": 1,
+          "mult": 48.0,
+          "id_a": 2.026655e-05,
+          "gm_s": 0.0002652796,
+          "gm_id": 13.08952929827721,
+          "vgs_v": 0.7108011,
+          "vds_v": null,
+          "vth_v": 0.5827562,
+          "vov_v": 0.12804490000000002,
+          "vdsat_v": 0.1337827,
+          "inversion_level": "strong"
+        },
+        "margins": {
+          "gm_id_rel_error": 7.507619251252324e-05,
+          "id_rel_error": 2.9605521232738967e-06
+        },
+        "diagnostic": null
+      }
+    ],
+    "worst_case": null
+  },
+  "target": {
+    "id_a": 2.026649e-05,
+    "gm_id": 13.088546660028452
+  },
+  "gm_id_target": 13.088546660028452,
+  "gm_id_achieved": 13.08952929827721,
+  "inversion_level": "strong",
+  "tolerance": {
+    "gm_id_rel": 0.03
+  },
+  "operating_point": {
+    "w_um": 8.040949570120498,
+    "l_um": 1.0,
+    "nf": 1,
+    "mult": 48.0,
+    "id_a": 2.026655e-05,
+    "gm_s": 0.0002652796,
+    "gm_id": 13.08952929827721,
+    "vgs_v": 0.7108011,
+    "vds_v": null,
+    "vth_v": 0.5827562,
+    "vov_v": 0.12804490000000002,
+    "vdsat_v": 0.1337827,
+    "inversion_level": "strong"
+  },
+  "margins": {
+    "gm_id_rel_error": 7.507619251252324e-05,
+    "id_rel_error": 2.9605521232738967e-06
+  },
+  "method": {
+    "name": "gm/Id lookup via diode-connected bias sweep",
+    "bias": "diode-connected (gate tied to drain, Vds=Vgs)",
+    "rationale": "gm/Id lookup via a diode-connected bias sweep (Vds=Vgs): nmos 'sky130_fd_pr__nfet_01v8' at L=1.0um, current fixed at 2.02665e-05A by an ideal bias source, width swept from 1.0um to 40.0um (12 points) to bracket the target gm/Id=13.0885, then confirmed by a fresh ngspice operating-point run at the interpolated width (never trusting the sweep grid or interpolation alone). Inversion level 'strong' from Vov=Vgs-Vth=0.128V (Vov<=0: weak; 0<Vov<0.1V: moderate; Vov>=0.1V: strong -- a standard rule-of-thumb threshold, not a precise inversion-coefficient computation).",
+    "sweep_points": 12,
+    "valid_sweep_points": 12,
+    "bracket_w_um": [
+      7.479126939682152,
+      10.459061622046235
+    ],
+    "interpolated_w_um": 8.040949570120498,
+    "feasible": true
+  },
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "47",
+    "models_lib": {
+      "path": null,
+      "scope": "external"
+    }
+  },
+  "provenance": {
+    "klt_version": "0.3.0",
+    "klayout_version": "0.30.10",
+    "pdk": {
+      "name": "sky130A",
+      "source": "search root: ~/.volare",
+      "version": "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+    },
+    "deck": {
+      "name": "sky130.lib.spice",
+      "content_hash": "sha256:17c208a699228f5acb87bf59c09c22a4c4d3937b6766b4957737d34e8e075f64",
+      "released": false
+    },
+    "input": null
+  },
+  "design_centering": {
+    "schema_version": 1,
+    "requested": true,
+    "applied": true,
+    "candidates": [
+      {
+        "rank": 1,
+        "parameter": "vth_mismatch_down_mv",
+        "contribution": -0.8033404415258021,
+        "instance": "device",
+        "suggested_area_multiplier": 47.20549653197306,
+        "applied": true
+      },
+      {
+        "rank": 4,
+        "parameter": "beta_mismatch_down_pct",
+        "contribution": -0.11692391419948187,
+        "instance": "device",
+        "suggested_area_multiplier": 1.0,
+        "applied": false
+      }
+    ],
+    "unmapped_parameters": [
+      {
+        "rank": 2,
+        "parameter": "vth_mismatch_up_mv",
+        "contribution": -0.3973327868291665
+      },
+      {
+        "rank": 3,
+        "parameter": "beta_mismatch_up_pct",
+        "contribution": 0.19957056402665643
+      }
+    ],
+    "grown": {
+      "device": {
+        "mult_before": 1,
+        "mult_after": 48.0,
+        "area_multiplier_applied": 47.20549653197306
+      }
+    }
+  }
+}

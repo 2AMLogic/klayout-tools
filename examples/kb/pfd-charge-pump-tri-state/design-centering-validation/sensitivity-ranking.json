@@ -1,0 +1,60 @@
+{
+  "samples": "sensitivity-samples.json",
+  "schema_version": 1,
+  "measurement_count": 1,
+  "measurements": [
+    {
+      "name": "i_mismatch_pct",
+      "unit": "%",
+      "n": 24,
+      "parameter_count": 4,
+      "method": {
+        "primary": "standardized_regression_coefficient",
+        "description": "standardized OLS regression coefficients: each parameter's coefficient in a multiple linear regression of the (z-scored) output on every (z-scored) parameter jointly, solved via the parameter-parameter correlation matrix (the closed form for a regression on standardized variables -- Draper & Smith, 'Applied Regression Analysis', 3rd ed., ch. 6). Unlike a bare pairwise correlation, this controls for correlation with the other parameters. pearson_r and spearman_rho are reported per parameter alongside it as single-parameter corroborating measures.",
+        "limitations": [
+          "linear/monotonic effects only -- captures neither interaction effects between parameters nor curvature in the response. A full variance-based (Sobol) decomposition would; issue #923 deliberately defers it as a heavier, sample-hungrier method than this campaign size needs to justify",
+          "standardized coefficients can become unstable (large magnitude, unstable sign) under strong collinearity between parameters, even when each is individually well-behaved -- cross-check against pearson_r when parameters are known to be correlated",
+          "point estimates only -- no confidence interval on the ranking or its coefficients (unlike `klt yield`'s yield/Cpk numbers). A close 1st/2nd contribution gap can reorder under a different campaign seed; re-run with more samples before treating it as decisive"
+        ],
+        "regression_solvable": true
+      },
+      "r_squared": 0.8769368289334509,
+      "ranking": [
+        {
+          "rank": 1,
+          "parameter": "vth_mismatch_down_mv",
+          "contribution": -0.8033404415258021,
+          "standardized_coefficient": -0.8033404415258021,
+          "pearson_r": -0.810881972659352,
+          "spearman_rho": -0.7599999999999999
+        },
+        {
+          "rank": 2,
+          "parameter": "vth_mismatch_up_mv",
+          "contribution": -0.3973327868291665,
+          "standardized_coefficient": -0.3973327868291665,
+          "pearson_r": -0.4997218390732123,
+          "spearman_rho": -0.58
+        },
+        {
+          "rank": 3,
+          "parameter": "beta_mismatch_up_pct",
+          "contribution": 0.19957056402665643,
+          "standardized_coefficient": 0.19957056402665643,
+          "pearson_r": 0.1366239336099032,
+          "spearman_rho": 0.07130434782608694
+        },
+        {
+          "rank": 4,
+          "parameter": "beta_mismatch_down_pct",
+          "contribution": -0.11692391419948187,
+          "standardized_coefficient": -0.11692391419948187,
+          "pearson_r": 0.002560977012281269,
+          "spearman_rho": 0.027826086956521733
+        }
+      ],
+      "warnings": []
+    }
+  ],
+  "warnings": []
+}
