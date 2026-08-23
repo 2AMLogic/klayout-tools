@@ -52,6 +52,17 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "size"
 CANARY_DIR = Path(__file__).parent.parent / "examples" / "design-pipeline"
+#: Epic #705 Phase 2 (issue #1325) canary fixtures -- the bandgap and PLL
+#: reproduction targets, neither of which is the 5T OTA `CANARY_DIR` above.
+BANDGAP_KB_DIR = (
+    Path(__file__).parent.parent / "examples" / "kb" / "sky130-bandgap-reference"
+)
+LDO_KB_DIR = (
+    Path(__file__).parent.parent / "examples" / "kb" / "ldo-pmos-pass-error-amp"
+)
+PLL_KB_DIR = (
+    Path(__file__).parent.parent / "examples" / "kb" / "pfd-charge-pump-tri-state"
+)
 
 
 #: sky130A's *ngspice* model library, the one the canary-reproduction test
@@ -2611,3 +2622,350 @@ def test_reproduces_canary_5t_ota_topology_jointly(tmp_path):
         }
         assert "gm/Id" in entry["rationale"]
         assert "Inversion level" in entry["rationale"]
+
+
+# --- Epic #705 Phase 2 (issue #1325): bandgap + LDO/PLL canary reproduction #
+#
+# Acceptance criterion 2 of epic #705 needs at least two of {bandgap, LDO,
+# PLL} reproduced or beaten. Neither the bandgap nor the LDO has an in-repo
+# transistor-level reference netlist as filed (see the two flag tests
+# below), so this reproduces the bandgap (via a vendored real-design
+# transcription) and substitutes the PLL charge pump for the LDO, exactly
+# as issue #1325's own acceptance criteria pre-authorize.
+
+
+def _measure_bandgap_bias_mirror_gm_id(tmp_path: Path) -> dict[str, float]:
+    """Measure the real bandgap error amp's own tail/bias current-source
+    device (MMPAMP -- the amp-side half of the core PMOS mirror,
+    `bandgap_core.reference.spice`'s `XMPAMP`) in-circuit, by running the
+    real, hand-sized, transistor-level reference netlist (vendored from
+    2AMLogic/sky130-bandgap -- see that file's own provenance header)
+    through ngspice at the `tt`/27C/3.3V corner.
+
+    The self-biased loop's own degenerate (all-zero-current) DC solution is
+    real -- the source repo's own testbench avoids it with a `.nodeset`
+    solver seed rather than a startup circuit (out of scope here); this
+    wrapper carries the identical seed.
+
+    Returns the per-unit (mult divided out) gm/Id and Id this device
+    achieves in the real, closed-loop circuit -- never the widths -- which
+    is the spec `test_reproduces_canary_bandgap_bias_mirror` then hands to
+    `klt size` as a single-device target.
+    """
+    deck = tmp_path / "bandgap_ref.cir"
+    log = tmp_path / "bandgap_ref.log"
+    body = (BANDGAP_KB_DIR / "bandgap_core.reference.spice").read_text()
+    lines = [
+        "* klt size test -- hand-sized bandgap core reference operating point",
+        f".lib {SKY130_NGSPICE_LIB} tt",
+        ".temp 27",
+        ".param vsup=3.3",
+        "Vdd VDD 0 DC {vsup}",
+        "XBG VREF GDRV VDD 0 bandgap_core",
+        # DC-solver seed, not a forced solution -- see the reference
+        # netlist's own header note on the self-biased loop's degenerate
+        # zero-current state.
+        ".nodeset v(vref)=1.2 v(gdrv)=2.2",
+        body,
+        ".control",
+        "op",
+        "echo KLT_SIZE_INSTANCE tail",
+        "print @m.xbg.xmpamp.msky130_fd_pr__pfet_g5v0d10v5[gm]",
+        "print @m.xbg.xmpamp.msky130_fd_pr__pfet_g5v0d10v5[id]",
+        "quit",
+        ".endc",
+        ".end",
+    ]
+    deck.write_text("\n".join(lines) + "\n")
+
+    subprocess.run(
+        ["ngspice", "-b", str(deck), "-o", str(log)],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    values: dict[str, dict[str, float]] = {}
+    current: str | None = None
+    for raw in log.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        marker = size._INSTANCE_MARKER_RE.match(line)
+        if marker:
+            current = marker.group(1)
+            values[current] = {}
+            continue
+        match = size._OP_VALUE_RE.match(line)
+        if match and current is not None:
+            values[current][match.group(1)] = float(match.group(2))
+    tail = values.get("tail", {})
+    if "gm" not in tail or not tail.get("id"):
+        return {}
+    # MMPAMP carries mult='m_ampbias' (=2 in this snapshot) -- gm/Id is
+    # intensive (unaffected by mult, since both scale identically), but the
+    # per-unit current the single-device request must target is the total
+    # divided by the multiplicity.
+    total_id = abs(tail["id"])
+    return {"gm_id": abs(tail["gm"]) / total_id, "id_a": total_id / 2}
+
+
+@_SKIP_NO_SKY130_NGSPICE
+def test_reproduces_canary_bandgap_bias_mirror(tmp_path):
+    """Reproduce a hand-sized single-stage reference from the real,
+    corner-verified sky130 bandgap canary (issue #1325, Epic #705 Phase 2's
+    first of two required reproductions).
+
+    `blocks/sky130-bandgap`'s own `output/layout.json` (ingested from the
+    public 2AMLogic/sky130-bandgap canary repo) carries only layout-metrics/
+    renders/spec-summary data -- no transistor-level netlist -- and this
+    KB entry's own `testbench.spice` deliberately models the PTAT/CTAT
+    current-summing method with ideal diodes, not MOSFETs. Neither is a
+    `klt size` reproduction target as filed. `bandgap_core.reference.spice`
+    (vendored in this same directory, from the real design, with full
+    provenance in its own header) fills that gap.
+
+    The target device is the error amp's own tail/bias current source
+    (MMPAMP, the amp-side half of the core PMOS mirror) rather than the
+    input pair: the input pair (L=10um, a high-Vth 5V-tolerant PMOS) is
+    measured in-circuit at gm/Id ~12.6 S/A, which `klt size`'s
+    diode-connected single-device search cannot reach within a numerically
+    stable width range for this device/current combination (plateaus
+    around gm/Id ~10.4 near W~90um even with `w_max_um` raised to 250um) --
+    a real, reported limitation of the search's reachable range, not a
+    reproduction this test claims. See `bandgap_core.sizing.json`'s
+    `reproduction` field for the full record of both findings.
+
+    Measured when this test was written (sky130A `open_pdks c6d73a35f524`,
+    ngspice 47): W=7.95um against the hand-sized W=8.00um, i.e. 0.994x --
+    reproduced to within 1%. Checked here within a generous factor-of-two
+    band (matching `test_reproduces_canary_5t_ota_input_pair`'s own
+    precedent), since a tighter band would encode PDK-release-specific
+    numbers as a regression bar.
+    """
+    sizing = json.loads((BANDGAP_KB_DIR / "bandgap_core.sizing.json").read_text())
+    hand_sized_w_um = sizing["devices"]["MMPAMP"]["w_um"]
+    l_um = sizing["devices"]["MMPAMP"]["l_um"]
+    model = sizing["devices"]["MMPAMP"]["model"]
+
+    reference = _measure_bandgap_bias_mirror_gm_id(tmp_path)
+    assert reference, (
+        "could not measure the hand-sized bandgap's own tail-mirror operating point"
+    )
+
+    request = _write_request(
+        tmp_path,
+        {
+            "device": {
+                "kind": "pmos",
+                "model": model,
+                "l_um": l_um,
+                "w_min_um": 1.0,
+                "w_max_um": 40.0,
+            },
+            "models": {
+                "pdk": "sky130A",
+                "lib": "libs.tech/ngspice/sky130.lib.spice",
+            },
+            "corner": {"process": "tt", "vdd_v": 3.3, "temperature_c": 27},
+            "target": reference,
+            "options": {
+                # Real sky130A deck, generous ceiling for a busy host (#730).
+                "sweep_points": 12,
+                "timeout_s": 900,
+            },
+        },
+        name="bandgap_canary.json",
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", (
+        f"status={report['status']!r}, rationale="
+        f"{report.get('method', {}).get('rationale')!r}"
+    )
+    assert report["operating_point"]["gm_id"] == pytest.approx(
+        reference["gm_id"], rel=0.05
+    )
+    assert report["operating_point"]["id_a"] == pytest.approx(
+        reference["id_a"], rel=1e-3
+    )
+
+    sized_w_um = report["operating_point"]["w_um"]
+    assert hand_sized_w_um / 2 <= sized_w_um <= hand_sized_w_um * 2, (
+        f"sized W={sized_w_um:.3g}um is not within a factor of two of the "
+        f"canary's hand-sized W={hand_sized_w_um}um"
+    )
+
+
+def test_ldo_error_amp_reference_is_behavioral_not_transistor_level():
+    """Issue #1325's own acceptance criteria anticipate this: the LDO error
+    amp's committed netlist (`kb/entries/ldo-pmos-pass-error-amp.json`'s
+    `artifacts.netlist`) may model its error amp behaviorally rather than
+    at the transistor level, in which case the issue pre-authorizes
+    substituting the PLL charge pump as the second reproduced canary
+    instead (see `test_reproduces_canary_pll_charge_pump` below).
+
+    This asserts that finding stays true rather than only asserting it in
+    prose: the committed testbench drives the pass device's gate from a
+    behavioral `B` source (a finite-gain block), not from any transistor
+    -- there is no MOSFET anywhere in the error-amp signal path for
+    `klt size` to size against. If a future revision replaces this with a
+    transistor-level error amp, this test should be replaced with a real
+    `klt size` reproduction against it (closing the epic's bandgap+LDO
+    pair instead of bandgap+PLL).
+    """
+    testbench = (LDO_KB_DIR / "testbench.spice").read_text()
+    # The error amp's gate drive is a behavioral B-source (a finite-gain
+    # block), not a transistor.
+    assert re.search(r"^Bea\s", testbench, re.M), (
+        "expected the error amp's gate drive to be modelled by a "
+        "behavioral B-source (Bea) -- the behavioral-only finding this "
+        "test guards may now be stale; see this test's own docstring"
+    )
+    # No PDK (real sky130) MOSFET subcircuit is instantiated anywhere in
+    # this testbench -- the only MOSFET is the pass device, and it uses a
+    # generic (non-PDK) level=1 model, not a real transistor-level error
+    # amp `klt size` could size against.
+    assert not re.search(r"sky130_fd_pr__\w*fet\w*", testbench), (
+        "found a real sky130 PDK MOSFET model in the LDO testbench -- the "
+        "behavioral-only finding this test guards may now be stale"
+    )
+
+
+def _measure_pll_charge_pump_gm_id(tmp_path: Path) -> dict[str, dict[str, float]]:
+    """Measure the authored PLL charge pump's UP (PMOS) and DOWN (NMOS)
+    current-source/sink devices in-circuit, by running
+    `charge_pump.spice` (this directory) through ngspice at the
+    `tt`/27C/1.8V corner with the loop-filter control node held at its
+    mid-rail lock voltage (the worst-case Vds point for mirror matching --
+    see that file's own header).
+    """
+    deck = tmp_path / "charge_pump_ref.cir"
+    log = tmp_path / "charge_pump_ref.log"
+    body = (PLL_KB_DIR / "charge_pump.spice").read_text()
+    lines = [
+        "* klt size test -- hand-sized PLL charge pump reference operating point",
+        f".lib {SKY130_NGSPICE_LIB} tt",
+        ".temp 27",
+        body,
+        ".control",
+        "op",
+        "echo KLT_SIZE_INSTANCE up",
+        "print @m.xmup.msky130_fd_pr__pfet_01v8[gm]",
+        "print @m.xmup.msky130_fd_pr__pfet_01v8[id]",
+        "echo KLT_SIZE_INSTANCE down",
+        "print @m.xmdn.msky130_fd_pr__nfet_01v8[gm]",
+        "print @m.xmdn.msky130_fd_pr__nfet_01v8[id]",
+        "quit",
+        ".endc",
+        ".end",
+    ]
+    deck.write_text("\n".join(lines) + "\n")
+
+    subprocess.run(
+        ["ngspice", "-b", str(deck), "-o", str(log)],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    values: dict[str, dict[str, float]] = {}
+    current: str | None = None
+    for raw in log.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        marker = size._INSTANCE_MARKER_RE.match(line)
+        if marker:
+            current = marker.group(1)
+            values[current] = {}
+            continue
+        match = size._OP_VALUE_RE.match(line)
+        if match and current is not None:
+            values[current][match.group(1)] = float(match.group(2))
+    result = {}
+    for role, entry in values.items():
+        if entry.get("gm") is not None and entry.get("id"):
+            result[role] = {
+                "gm_id": abs(entry["gm"]) / abs(entry["id"]),
+                "id_a": abs(entry["id"]),
+            }
+    return result
+
+
+@_SKIP_NO_SKY130_NGSPICE
+def test_reproduces_canary_pll_charge_pump(tmp_path):
+    """Reproduce the PLL charge pump's hand-sized UP and DOWN current-
+    source/sink devices (issue #1325, Epic #705 Phase 2's second required
+    reproduction, substituting for the LDO per
+    `test_ldo_error_amp_reference_is_behavioral_not_transistor_level`'s
+    finding).
+
+    `kb/entries/pfd-charge-pump-tri-state.json` had no `artifacts.netlist`
+    at all before this issue -- `charge_pump.spice` (this directory) is a
+    minimal, hand-sized, transistor-level reference authored per that
+    entry's own `sizing_approach` ("closely matched ... UP/DOWN current
+    sources"), matching the `05-sizing.json`/`ota_5t.spice` convention.
+
+    Both legs are reproduced independently (each is a single-device gm/Id
+    sizing problem -- `klt size` has no charge-pump-shaped coupled
+    topology): the PMOS UP current source and the NMOS DOWN current sink,
+    each mirrored 1:1 from an ideal reference and measured at the loop-
+    filter's mid-rail lock voltage.
+
+    Measured when this test was written (sky130A `open_pdks c6d73a35f524`,
+    ngspice 47): UP W=7.90um against the hand-sized W=8.00um (0.987x);
+    DOWN W=8.04um against the hand-sized W=8.00um (1.005x) -- both
+    reproduced to within 1.5%. Checked within the same generous
+    factor-of-two band as the other canary-reproduction tests in this
+    file, for the same PDK-release-independence reason.
+    """
+    sizing = json.loads((PLL_KB_DIR / "charge_pump.sizing.json").read_text())
+    reference = _measure_pll_charge_pump_gm_id(tmp_path)
+    assert set(reference) == {"up", "down"}, (
+        f"could not measure both charge-pump legs' operating points: {reference}"
+    )
+
+    leg_to_kind = {"up": "pmos", "down": "nmos"}
+    leg_to_device = {"up": "MUP", "down": "MDN"}
+
+    for leg, kind in leg_to_kind.items():
+        device_key = leg_to_device[leg]
+        hand_sized_w_um = sizing["devices"][device_key]["w_um"]
+        l_um = sizing["devices"][device_key]["l_um"]
+        model = sizing["devices"][device_key]["model"]
+
+        request = _write_request(
+            tmp_path,
+            {
+                "device": {
+                    "kind": kind,
+                    "model": model,
+                    "l_um": l_um,
+                    "w_min_um": 1.0,
+                    "w_max_um": 40.0,
+                },
+                "models": {
+                    "pdk": "sky130A",
+                    "lib": "libs.tech/ngspice/sky130.lib.spice",
+                },
+                "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+                "target": reference[leg],
+                "options": {"sweep_points": 12, "timeout_s": 900},
+            },
+            name=f"pll_canary_{leg}.json",
+        )
+
+        report = size.run_size(str(request))
+
+        assert report["status"] == "pass", (
+            f"{leg}: status={report['status']!r}, rationale="
+            f"{report.get('method', {}).get('rationale')!r}"
+        )
+        assert report["operating_point"]["gm_id"] == pytest.approx(
+            reference[leg]["gm_id"], rel=0.05
+        )
+        assert report["operating_point"]["id_a"] == pytest.approx(
+            reference[leg]["id_a"], rel=1e-3
+        )
+
+        sized_w_um = report["operating_point"]["w_um"]
+        assert hand_sized_w_um / 2 <= sized_w_um <= hand_sized_w_um * 2, (
+            f"{leg}: sized W={sized_w_um:.3g}um is not within a factor of "
+            f"two of the canary's hand-sized W={hand_sized_w_um}um"
+        )

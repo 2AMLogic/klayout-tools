@@ -1,0 +1,25 @@
+{
+  "schema": "klt.pipeline.sizing/1",
+  "note": "Hand-sized reference for issue #1325 (Epic #705 Phase 2's PLL canary substitute -- see the issue body's pre-authorized fallback: the LDO error amp reference is behavioral-only, kb/entries/ldo-pmos-pass-error-amp.json's testbench.spice models it with a B-source, so the PLL charge pump substitutes as the second reproduced canary). Device W/L are in microns (sky130_fd_pr subckt convention).",
+  "block": "pfd_charge_pump",
+  "topology_ref": "kb:pfd-charge-pump-tri-state",
+  "devices": {
+    "MBP": { "role": "PMOS bias diode (UP mirror reference)", "model": "sky130_fd_pr__pfet_01v8", "w_um": 8, "l_um": 1, "nf": 1, "m": 1 },
+    "MUP": { "role": "PMOS current source (UP, sources charge onto the loop filter)", "model": "sky130_fd_pr__pfet_01v8", "w_um": 8, "l_um": 1, "nf": 1, "m": 1 },
+    "MBN": { "role": "NMOS bias diode (DOWN mirror reference)", "model": "sky130_fd_pr__nfet_01v8", "w_um": 8, "l_um": 1, "nf": 1, "m": 1 },
+    "MDN": { "role": "NMOS current sink (DOWN, removes charge from the loop filter)", "model": "sky130_fd_pr__nfet_01v8", "w_um": 8, "l_um": 1, "nf": 1, "m": 1 }
+  },
+  "bias": {
+    "supply_v": 1.8,
+    "reference_current_ua": 20,
+    "loop_filter_ctrl_v": 0.9,
+    "mirror_ratio": "1:1 (bias diode : output device, both UP and DOWN)"
+  },
+  "sizing_rationale": {
+    "device_size": "W/L = 8/1 um matched 1:1 mirrors for both UP and DOWN legs, per the KB entry's own sizing_approach ('closely matched, ideally cascoded' UP/DOWN currents) -- no cascode added here (kept minimal, matching the 'minimal transistor-level reference' the issue asks for), so the achieved match is set purely by Vds-mismatch between the diode-connected bias leg and the output leg.",
+    "verification": "Nominal tt/27C ngspice .op: UP delivers 19.797uA (-1.0% vs the 20uA target), DOWN delivers 20.266uA (+1.3%) at the loop-filter's mid-rail 0.9V control voltage -- both within a few percent of the ideal 1:1 mirror, consistent with ordinary Vds-mismatch channel-length-modulation error at L=1um, not a sizing defect."
+  },
+  "last_sim_result": {
+    "note": "Nominal-corner-only verification (tt/27C/1.8V) via a direct ngspice .op run in tests/test_size.py's `test_reproduces_canary_pll_charge_pump` -- not a full PVT corner sweep. Documented here as a known scope limit of this 'minimal' reference; a full corner sweep is a natural follow-up if this canary needs promotion beyond a `klt size` reproduction target."
+  }
+}

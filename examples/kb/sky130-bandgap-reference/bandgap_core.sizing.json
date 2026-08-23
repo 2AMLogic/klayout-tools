@@ -1,0 +1,29 @@
+{
+  "schema": "klt.pipeline.sizing/1",
+  "note": "Hand-sized, real-design reference for issue #1325 (Epic #705 Phase 2's bandgap canary). Device W/L are in microns (sky130_fd_pr subckt convention). Transcribed from the same source snapshot cited in bandgap_core.reference.spice's own header -- see that file for full provenance (2AMLogic/sky130-bandgap @ 69a88677f301ae842948e70f1ef74e1973e53883, Apache-2.0).",
+  "block": "bandgap_core (error_amp sub-block)",
+  "topology_ref": "kb:sky130-bandgap-reference",
+  "devices": {
+    "MMPOUT": { "role": "core PMOS mirror -- output stage", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 8, "l_um": 2, "nf": 1, "m": 2 },
+    "MMPAMP": { "role": "core PMOS mirror -- amp bias/tail current source", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 8, "l_um": 2, "nf": 1, "m": 2 },
+    "MMP1": { "role": "error amp input pair (VINP leg)", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 20, "l_um": 10, "nf": 1, "m": 8 },
+    "MMP2": { "role": "error amp input pair (VINN leg)", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 20, "l_um": 10, "nf": 1, "m": 8 },
+    "MMN1": { "role": "NMOS load/mirror (diode-connected, D1 leg)", "model": "sky130_fd_pr__nfet_g5v0d10v5", "w_um": 8, "l_um": 20, "nf": 1, "m": 4 },
+    "MMN2": { "role": "NMOS load/mirror (diode-connected, D2 leg)", "model": "sky130_fd_pr__nfet_g5v0d10v5", "w_um": 8, "l_um": 20, "nf": 1, "m": 4 },
+    "MMN3": { "role": "NMOS mirror output -> GDRV", "model": "sky130_fd_pr__nfet_g5v0d10v5", "w_um": 8, "l_um": 20, "nf": 1, "m": 4 },
+    "MMN4": { "role": "NMOS mirror output -> PN (fold node)", "model": "sky130_fd_pr__nfet_g5v0d10v5", "w_um": 8, "l_um": 20, "nf": 1, "m": 4 },
+    "MMP3": { "role": "PMOS mirror (diode-connected, PN leg)", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 6, "l_um": 20, "nf": 1, "m": 8 },
+    "MMP4": { "role": "PMOS mirror output -> GDRV", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 6, "l_um": 20, "nf": 1, "m": 8 },
+    "MMCC": { "role": "MOS compensation capacitor", "model": "sky130_fd_pr__pfet_g5v0d10v5", "w_um": 30, "l_um": 20, "nf": 1, "m": 16 }
+  },
+  "bias": {
+    "supply_v": 3.3,
+    "notes": "Self-biased loop (Kuijk/Banba-style): no externally-forced bias current. The absolute current level is set by the PTAT mechanism (delta-Vbe across R1), which is why a DC solver .nodeset seed is needed to avoid the degenerate zero-current solution (see bandgap_core.reference.spice's header)."
+  },
+  "reproduction": {
+    "issue": 1325,
+    "target_device": "MMPAMP",
+    "why_not_input_pair": "MMP1/MMP2 (L=10um, a high-Vth 5V-tolerant PMOS) is measured in-circuit at gm/Id ~12.63 S/A -- `klt size`'s diode-connected single-device search on this device/L/current combination does not reach that gm/Id within a numerically stable width range (plateaus around gm/Id ~10.4 near W~90um even with w_max_um raised to 250), so it is not used as the reproduction target. This is a real, reported finding about the search's reachable range for this specific device, not a `klt size` defect: the device's real in-circuit bias also differs from a diode-connected bias (Vgs=1.452V vs Vds=1.142V measured in-circuit), which the docs/cli/size.md 'Known limitation' already anticipates.",
+    "why_mmpamp": "MMPAMP (L=2um, W=8um, m=2 -- the amp's own tail/bias current source, mirrored 1:1 in the core PMOS pair) reproduces cleanly: measured in-circuit gm/Id and Id (per-unit, m=2 divided out) handed to `klt size` as a single-device gm_id/id_a target reproduces W=8.00um to within ~0.6% (see tests/test_size.py's `test_reproduces_canary_bandgap_bias_mirror`)."
+  }
+}
