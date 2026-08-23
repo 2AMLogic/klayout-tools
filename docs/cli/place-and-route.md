@@ -215,25 +215,30 @@ the `place` stage with `[ERROR PPL-0051] Layer Metal4 not found.` — verified
 directly against `gf180mcuA`. Pin `--pdk gf180mcuC` (or `gf180mcuD`) rather
 than letting variant discovery pick the alphabetically-first install.
 
-**2. A DRC-clean gf180mcu result requires `request.power`, which this
-command cannot currently emit a GDS for.** The routed GDS produced *without*
-`request.power` is not DRC-clean: `klt drc --deck gf180mcu` reports **19
-`nwell.space.1` violations**, every one an identical 0.260 um horizontal
-nwell gap — i.e. unfilled standard-cell row gaps, exactly the consequence the
+**2. A DRC-clean gf180mcu result requires `request.power` — which the
+DEF→GDS merge guard rejected at the time of this run (since fixed by
+#1342).** The routed GDS produced *without* `request.power` is not
+DRC-clean: `klt drc --deck gf180mcu` reports **19 `nwell.space.1`
+violations**, every one an identical 0.260 um horizontal nwell
+gap — i.e. unfilled standard-cell row gaps, exactly the consequence the
 "Power delivery" section below already documents for omitting power
 delivery. Re-running the same design **with** `request.power` (gf180's own
 ORFS `pdn_grid_strategy_9t_6M.cfg` strap geometry, so `tapcell` +
 `pdngen` + `filler_placement` all run) routes just as cleanly
 (`route__drc_errors: 0`, 0 antenna violations, 697 filler and 88
 endcap/filltie instances placed) and **is `klt drc --deck gf180mcu` clean, 0
-violations** — but `klt place-and-route` raises instead of writing that GDS,
-because the DEF→GDS merge's DIEAREA bounding-box guard rejects it. gf180mcu
-standard cells deliberately draw geometry outside their LEF abutment box
-(every cell by 0.43/0.45 um; `gf180mcu_fd_sc_mcu9t5v0__endcap` by 2.93 um on
-its left), so a `tapcell`-placed endcap at the core edge pushes the merged
-bbox past DIEAREA even though every placement is strictly inside it. Tracked
-in **#1335**; the 0-violation DRC number above was obtained by re-running the
-merge with only that guard's own documented skip path taken.
+violations** — but at the time of this run `klt place-and-route` raised
+instead of writing that GDS, because the DEF→GDS merge's DIEAREA
+bounding-box guard rejected it. gf180mcu standard cells deliberately draw
+geometry outside their LEF abutment box (every cell by 0.43/0.45 um;
+`gf180mcu_fd_sc_mcu9t5v0__endcap` by 2.93 um on its left), so a
+`tapcell`-placed endcap at the core edge pushed the merged bbox past DIEAREA
+even though every placement was strictly inside it. That was issue #1335,
+**since fixed on `main` by #1342** — the guard's tolerance is now the merged
+cell library's own measured GDS-vs-LEF abutment-box overhang, described under
+"DEF→GDS merge" below. The 0-violation DRC number above was obtained *at run
+time* by re-running the merge with only that guard's own documented skip path
+taken; it now reproduces with no manual bypass.
 
 **LVS was not verified, and cannot be today.** `klt lvs` compares SPICE
 netlists, and nothing in `klt` converts this command's own as-built

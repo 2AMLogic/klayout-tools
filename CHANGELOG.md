@@ -74,15 +74,18 @@ not `klt --version`, if you need to detect this kind of drift. See
     change; no `src/` change was needed, so #637's shipped
     `_ROUTING_LAYER_RANGE`/`_CTS_BUFFER_CELLS` values are confirmed correct
     against a real install.
-  - **DRC-clean requires `request.power`, and that configuration cannot
-    currently emit a GDS.** Without `request.power` the routed GDS carries
-    19 `nwell.space.1` violations under `klt drc --deck gf180mcu` (unfilled
-    standard-cell row gaps — the documented consequence of omitting power
-    delivery). With `request.power` the same design is **DRC-clean, 0
-    violations**, but `klt place-and-route` raises instead of writing the
-    GDS: its DEF→GDS merge DIEAREA bbox guard does not account for
-    gf180mcu cells drawing geometry outside their LEF abutment box
-    (`__endcap` by 2.93 um). Tracked in #1335.
+  - **DRC-clean requires `request.power`, and at the time of this run that
+    configuration could not emit a GDS.** Without `request.power` the routed
+    GDS carries 19 `nwell.space.1` violations under `klt drc --deck
+    gf180mcu` (unfilled standard-cell row gaps — the documented consequence
+    of omitting power delivery). With `request.power` the same design is
+    **DRC-clean, 0 violations**, but `klt place-and-route` raised instead of
+    writing the GDS: its DEF→GDS merge DIEAREA bbox guard did not account
+    for gf180mcu cells drawing geometry outside their LEF abutment box
+    (`__endcap` by 2.93 um). That was issue #1335, **fixed by #1342** — see
+    the DIEAREA guard-tolerance entry above in this `## Unreleased` section.
+    The run's 0-violation number required a manual guard bypass then; it
+    reproduces without one now.
 
   **LVS remains unverified** for this path: nothing in `klt` converts the
   flow's as-built `verilog_path` into the SPICE reference `klt lvs`

@@ -5426,7 +5426,7 @@ def test_integration_real_openroad_gcd_worked_example(tmp_path, monkeypatch):
     _REAL_GF180MCU_PNR_VARIANT is None,
     reason=(
         "no real gf180mcu_fd_sc_mcu9t5v0 LEF/liberty/GDS set on a 5LM "
-        "(Metal1-Metal5) variant resolves via list_pdks()"
+        "variant (tech LEF declaring Metal2-Metal5) resolves via list_pdks()"
     ),
 )
 def test_integration_real_openroad_gcd_worked_example_gf180mcu(tmp_path, monkeypatch):
