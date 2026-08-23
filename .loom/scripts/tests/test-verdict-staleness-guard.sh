@@ -84,9 +84,11 @@ STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
 # --- Stub gh on PATH ---------------------------------------------------
-#   gh pr view <N> --json headRefOid,labels,state,merged
+#   gh pr view <N> --json headRefOid,labels,state
 #                                           -> cat $STUB_DIR/pr-<N>.json
 #                                              (fails if pr-view-fail-<N> exists)
+#                                              (fails like real gh if the --json
+#                                               list asks for `merged`, #1356)
 #   gh api repos/{owner}/{repo}/issues/<N>/comments --paginate
 #                                           -> cat $STUB_DIR/comments-<N>.json (or "[]")
 #                                              (fails if comments-fail-<N> exists)
@@ -102,6 +104,28 @@ case "$1" in
     case "$2" in
       view)
         pr_num="$3"
+        # Record the exact invocation so a test can assert WHICH --json fields
+        # were requested (#1356).
+        printf 'PR_VIEW %s\n' "$*" >> "$STUB_DIR_FROM_ENV/pr-view-args.log"
+        # Real `gh` validates the --json field list up front and fails the
+        # WHOLE call on an unknown field — it never reaches the API. `merged`
+        # is not a `gh pr view` field (verified on gh 2.96.0 / 2.98.0), so
+        # requesting it took out step 0 of every Judge pass (#1356). Reproduce
+        # that rejection here so the guard can never silently regress to
+        # asking for it again.
+        prev=""
+        for arg in "$@"; do
+          if [[ "$prev" == "--json" ]]; then
+            for f in ${arg//,/ }; do
+              if [[ "$f" == "merged" ]]; then
+                echo 'Unknown JSON field: "merged"' >&2
+                printf 'Available fields:\n  headRefOid\n  labels\n  mergeable\n  mergedAt\n  state\n' >&2
+                exit 1
+              fi
+            done
+          fi
+          prev="$arg"
+        done
         if [[ -f "$STUB_DIR_FROM_ENV/pr-view-fail-$pr_num" ]]; then
           echo "stub gh: pr view failed" >&2
           exit 1
@@ -113,7 +137,7 @@ case "$1" in
           echo "gh: A new release of gh is available: 2.0.0 -> 2.1.0" >&2
         fi
         canned="$STUB_DIR_FROM_ENV/pr-$pr_num.json"
-        if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"headRefOid":"0000000000000000000000000000000000000000","state":"OPEN","merged":false,"labels":[]}'; fi
+        if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"headRefOid":"0000000000000000000000000000000000000000","state":"OPEN","labels":[]}'; fi
         exit 0
         ;;
       comment)
@@ -184,6 +208,11 @@ labels_json() {
 
 pr_json_state() {
     # pr_json_state <pr-number> <head-sha> <state> <merged:true|false> [label ...]
+    #
+    # The REST-ish shape a forge shim volunteers: `state` PLUS an explicit
+    # `merged` boolean. Real `gh pr view` has no `merged` field and the guard
+    # never requests one (#1356) — it still honors the field when a shim
+    # supplies it anyway, which is what (p6)/(p7) below cover.
     local num="$1" sha="$2" state="$3" merged="$4"; shift 4
     printf '{"headRefOid":"%s","state":"%s","merged":%s,"labels":[%s]}' \
         "$sha" "$state" "$merged" "$(labels_json "$@")" > "$STUB_DIR/pr-$num.json"
@@ -191,9 +220,12 @@ pr_json_state() {
 
 pr_json() {
     # pr_json <pr-number> <head-sha> [label ...] — an OPEN, unmerged PR (the
-    # only shape that may reach the FRESH/STALE comparison since #6781).
+    # only shape that may reach the FRESH/STALE comparison since #6781), in
+    # the shape real `gh pr view --json headRefOid,labels,state` returns: no
+    # `merged` key at all (#1356).
     local num="$1" sha="$2"; shift 2
-    pr_json_state "$num" "$sha" "OPEN" "false" "$@"
+    printf '{"headRefOid":"%s","state":"OPEN","labels":[%s]}' \
+        "$sha" "$(labels_json "$@")" > "$STUB_DIR/pr-$num.json"
 }
 
 pr_json_no_state() {
@@ -218,6 +250,7 @@ reset_state() {
     rm -f "$STUB_DIR"/pr-view-stderr-* "$STUB_DIR"/comments-stderr-*
     rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR"/edit-fail-*
     rm -f "$STUB_DIR"/comment-writes.log "$STUB_DIR"/edit-writes.log
+    rm -f "$STUB_DIR"/pr-view-args.log
 }
 
 run_guard() {
@@ -226,6 +259,7 @@ run_guard() {
     ERR="$(cat "$STUB_DIR/stderr.log" 2>/dev/null || true)"
     WRITES="$(cat "$STUB_DIR/edit-writes.log" 2>/dev/null || true)"
     COMMENTS_POSTED="$(cat "$STUB_DIR/comment-writes.log" 2>/dev/null || true)"
+    PR_VIEW_ARGS="$(cat "$STUB_DIR/pr-view-args.log" 2>/dev/null || true)"
 }
 
 get_field() {
@@ -722,6 +756,41 @@ pr_json_no_state 235 "$SHA_C" "loom:pr"
 run_guard 235 --clear
 assert_eq "12" "$RC" "(p9) Absent state field -> pre-#6781 behavior (exit 12)"
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(p9) Stale approval still cleared when state is unknown"
+
+# --- #1356: the --json field list must stay valid for real `gh` ------------
+#
+# THE #1356 INCIDENT (2026-08-23): the guard requested
+# `--json headRefOid,labels,state,merged`, but `gh pr view` has no `merged`
+# field. Real `gh` (2.96.0, 2.98.0) validates the field list up front and
+# fails the whole call with `Unknown JSON field: "merged"`, so step 0 of every
+# Judge pass — the Stale-Verdict Sweep — exited 1 for EVERY verdict-bearing PR
+# and silently never cleared a stale verdict. The stub `gh` above reproduces
+# that rejection, so every case in this file also guards the field list; these
+# two assert it directly.
+
+# (q) The requested --json list never contains `merged`, and the call succeeds.
+reset_state
+pr_json 236 "$SHA_A" "loom:changes-requested"
+{ echo "["; verdict_comment "2026-08-23T06:00:00Z" "$SHA_A" "changes-requested"; echo "]"; } > "$STUB_DIR/comments-236.json"
+run_guard 236 --clear
+assert_eq "0" "$RC" "(q) Real-gh-shaped field list -> exit 0, not a gh/env error"
+assert_contains "$PR_VIEW_ARGS" "--json headRefOid,labels,state" "(q) Requests headRefOid,labels,state"
+assert_not_contains "$PR_VIEW_ARGS" "merged" "(q) Never requests the nonexistent 'merged' field"
+assert_not_contains "$ERR" "Unknown JSON field" "(q) No 'Unknown JSON field' error"
+
+# (q2) A merged PR is still recognized from `state` alone — the real GitHub
+#      shape, with no `merged` key anywhere in the response. This is the case
+#      #1356's fix has to keep working without the removed field: the NOT_OPEN
+#      short-circuit must fire AND still say "merged", not "closed without
+#      merging".
+reset_state
+printf '{"headRefOid":"%s","state":"MERGED","labels":[{"name":"loom:pr"}]}' "$SHA_B" > "$STUB_DIR/pr-237.json"
+{ echo "["; verdict_comment "2026-08-23T06:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-237.json"
+run_guard 237 --clear
+assert_eq "14" "$RC" "(q2) state=MERGED with no 'merged' key -> exit 14"
+assert_eq "NOT_OPEN" "$(get_field "$OUT" DECISION)" "(q2) DECISION=NOT_OPEN"
+assert_contains "$OUT" "PR is merged" "(q2) REASON says merged, not 'closed without merging'"
+assert_eq "" "$WRITES" "(q2) No label writes on a merged PR"
 
 # --- Summary -------------------------------------------------------------
 echo ""

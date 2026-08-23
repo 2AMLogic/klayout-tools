@@ -83,3 +83,21 @@ commands/loom/hermit-patterns.md
 # resynced normally.
 scripts/lib/forge-helpers.sh
 scripts/merge-pr.sh
+
+# #1356: verdict-staleness-guard.sh (and its test) carry a local-only fix
+# dropping the nonexistent `merged` field from its `gh pr view --json` request
+# and deriving merged-ness from `state == "MERGED"` instead. `gh pr view` has
+# no `merged` field and `gh` validates the field list up front, so upstream's
+# `--json headRefOid,labels,state,merged` fails the WHOLE call with
+# `Unknown JSON field: "merged"` on every currently shipping `gh` (reproduced
+# on 2.96.0 and 2.98.0) — which silently darkened step 0 of every Judge pass
+# (the Stale-Verdict Sweep) and Champion's verdict-freshness check for every
+# verdict-bearing PR. The companion test stubs `gh`'s field-list validation so
+# the regression cannot return. This fix was never upstreamed into
+# rjwalters/loom's own templates, so an unpinned resync would silently revert
+# it — the same reversion that already happened to #606 (commit 71d46d0),
+# #662 (commit 1ae78c6), and #1316 (commit 1edbd2b). If the upstream Loom
+# project ever adopts an equivalent fix, these pins can be dropped and the
+# files resynced normally.
+scripts/verdict-staleness-guard.sh
+scripts/tests/test-verdict-staleness-guard.sh
