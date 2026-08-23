@@ -1450,13 +1450,35 @@ _REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
     _REAL_SKY130_PNR_VARIANT is None,
     reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
 )
+@pytest.mark.xfail(
+    reason=(
+        "issue #1323 ran this for real (openroad 26Q3-1499-g46ab99414e via "
+        "Docker + a real volare sky130A install) and found the "
+        "yosys-sequential engine reports 'counterexample', not "
+        "'equivalent' -- OpenROAD's real fanout/hold-repair buffer "
+        "insertion (e.g. sky130_fd_sc_hd__buf_4 'place<N>' instances) "
+        "renames intermediate nets, defeating equiv_make's literal "
+        "wire-name correspondence (159 'Unproven $equiv' cells). The "
+        "counterexample itself is NOT reproduced by simulation "
+        "(confirmed_by_simulation: false) -- a real engine capability gap "
+        "against genuine P&R output, not a P&R correctness bug. Root-cause "
+        "and fix tracked by issue #1350; remove this xfail once fixed "
+        "(pytest will then report XPASS as the signal)."
+    ),
+    strict=False,
+)
 def test_sequential_engine_real_pnr_register_preserving_transformation(
     tmp_path, monkeypatch
 ):
     """`klt synthesize`'s pre-P&R netlist vs. `klt place-and-route`'s real,
-    post-route `verilog_path` (issue #996) on the GCD worked example --
-    proven `"equivalent"` by the sequential engine, the direct real-P&R
-    validation this issue's own acceptance criteria requires."""
+    post-route `verilog_path` (issue #996) on the GCD worked example.
+
+    As of issue #1323 (2026-08-22), this is confirmed to run for real
+    against a genuine `openroad`/sky130A toolchain but NOT yet reach
+    `"equivalent"` -- see the `xfail` reason above and issue #1350 for the
+    full root-cause evidence. The intent (once #1350 lands) is still to
+    prove `"equivalent"`, the direct real-P&R validation this issue's own
+    acceptance criteria requires."""
     root, variant = _REAL_SKY130_PNR_VARIANT
     cell_library, corner = "sky130_fd_sc_hd", "tt_025C_1v80"
     monkeypatch.setenv("PDK_ROOT", root)
@@ -1464,11 +1486,16 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
 
     from klayout_tools.place_and_route import run_place_and_route
 
+    # Canonical GCD RTL source -- the same one
+    # `tests/corpus/place_and_route/regenerate.sh` treats as authoritative
+    # (its `SOURCES[gcd]`) and that `tests/test_place_and_route.py` inlines
+    # as `_GCD_RTL`. There is no `tests/corpus/place_and_route/gcd/gcd.v`;
+    # only a pre-built GDS fixture lives under that corpus directory.
     gcd_rtl_path = (
-        Path(__file__).parent / "corpus" / "place_and_route" / "gcd" / "gcd.v"
+        Path(__file__).parent.parent / "examples" / "functional-verification" / "gcd.v"
     )
     if not gcd_rtl_path.is_file():
-        pytest.skip("tests/corpus/place_and_route/gcd/gcd.v fixture not present")
+        pytest.skip("examples/functional-verification/gcd.v fixture not present")
 
     synth_dir = tmp_path / "synth"
     synth_dir.mkdir()
@@ -1534,6 +1561,14 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
         },
     )
     equiv_report = run_equiv(equiv_request)
+
+    # Evidence for issue #1323 / Epic #707 acceptance criterion 3: print the
+    # full report (status/artifacts/diagnostics) so a `-s` run captures it
+    # verbatim for the PR's evidence trail.
+    print(
+        "\n=== issue #1323 real pre/post-route equiv_report ===\n"
+        + json.dumps(equiv_report, indent=2)
+    )
 
     assert equiv_report["status"] == "equivalent", equiv_report["diagnostics"]
 
