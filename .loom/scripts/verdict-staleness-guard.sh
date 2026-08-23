@@ -226,11 +226,19 @@ GH_STDERR="$(mktemp)"
 trap 'rm -f "$GH_STDERR" 2>/dev/null || true' EXIT
 
 # --- Step 1: current head SHA + current labels + open/closed state ----------
-# `state` and `merged` are fetched in the SAME call as the head SHA, not a
-# second round trip: the whole point is that the PR may finish between any two
-# reads, so the state must come from the same snapshot the SHA came from.
-PR_JSON="$(gh pr view "$PR" --json headRefOid,labels,state,merged 2>"$GH_STDERR")" || {
-  echo "ERROR: 'gh pr view $PR --json headRefOid,labels,state,merged' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+# `state` is fetched in the SAME call as the head SHA, not a second round
+# trip: the whole point is that the PR may finish between any two reads, so
+# the state must come from the same snapshot the SHA came from.
+#
+# `merged` is deliberately NOT requested (#1356). `gh pr view` has no such
+# field, and `gh` validates the --json list up front: asking for it fails the
+# WHOLE call with `Unknown JSON field: "merged"` before any API request, which
+# made step 0 of every Judge pass (the Stale-Verdict Sweep) exit 1 for every
+# verdict-bearing PR. `state` already answers the question — it reports
+# OPEN | CLOSED | MERGED — and a forge shim that volunteers a REST-shaped
+# `merged` boolean anyway is still honored below.
+PR_JSON="$(gh pr view "$PR" --json headRefOid,labels,state 2>"$GH_STDERR")" || {
+  echo "ERROR: 'gh pr view $PR --json headRefOid,labels,state' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1
 }
 
@@ -285,9 +293,18 @@ current_verdict_label() {
 # against mislabeling PRs that are already finished. The former is far worse.
 PR_STATE="$(jq -r '.state // empty' <<<"$PR_JSON" 2>/dev/null || true)"
 PR_STATE_UC="$(printf '%s' "$PR_STATE" | tr '[:lower:]' '[:upper:]')"
-# `.merged // false` (not `// empty`): jq's `//` also swallows a literal
-# `false`, so the alternative supplies the default for BOTH null and false.
-PR_MERGED="$(jq -r 'if (.merged // false) then "true" else "false" end' <<<"$PR_JSON" 2>/dev/null || true)"
+# Merged-ness comes from `state == "MERGED"` — the field `gh` actually
+# reports (#1356). A forge shim that returns the REST shape instead
+# (state=closed, or even a not-yet-flipped state=open, alongside a literal
+# `merged: true`) is still honored, even though the field is never requested:
+# `.merged // false` (not `// empty`) because jq's `//` also swallows a
+# literal `false`, so the alternative supplies the default for BOTH null and
+# false — and an absent field (the real `gh` shape) reads as false.
+if [[ "$PR_STATE_UC" == "MERGED" ]]; then
+  PR_MERGED="true"
+else
+  PR_MERGED="$(jq -r 'if (.merged // false) then "true" else "false" end' <<<"$PR_JSON" 2>/dev/null || true)"
+fi
 
 if [[ "$PR_MERGED" == "true" || ( -n "$PR_STATE_UC" && "$PR_STATE_UC" != "OPEN" ) ]]; then
   NOT_OPEN_WHAT="merged"
