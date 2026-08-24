@@ -40,6 +40,14 @@
       "pdk_snapshot": "gf180mcu-2026.08.08",
       "ngspice_version": "46",
       "built_at": "2026-08-08T06:02:25Z"
+    },
+    {
+      "pdk": "gf180mcu",
+      "region": "us-west-2",
+      "ami_id": "ami-0e566be6c3ba02559",
+      "pdk_snapshot": "gf180mcu-2026.08.24",
+      "ngspice_version": "46",
+      "built_at": "2026-08-24T20:11:51Z"
     }
   ]
 }
