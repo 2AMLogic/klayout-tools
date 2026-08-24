@@ -166,13 +166,18 @@ fi
 
 **Action** (single authoritative policy — implemented in `champion-pr-merge.md` → "PR Rejection Workflow → Stale PR"): post the stale notice **once per episode**, guarded by an idempotency marker keyed on `$LAST_ACTIVITY` — the same "most recent commit or non-Champion comment" timestamp the recency check above just computed (`<!-- champion:stale-pr-notice:$LAST_ACTIVITY -->`, mirroring the reject/park markers' own per-episode keying, #6860) — so the 10-minute cron does not spam the PR within one still-stale episode, while a PR that cycles back to `loom:pr` with a new commit or a human/Judge comment and then goes stale *again* gets a fresh notice instead of being silently suppressed forever by a marker from a past episode. **Swap `loom:pr` → `loom:changes-requested`** to route the PR to Doctor for a rebase/refresh. This removes `loom:pr` (unlike the transient-failure path, which keeps it), because a stale PR cannot clear itself and must leave the auto-merge queue. See `champion-pr-merge.md` for the exact commands.
 
-**A merge-risk hold does not exempt a PR from this (#6720).** The route fires
-from a held state too — it is the only automated path from `loom:pr` to Doctor,
-and gating it behind the hold left 20 of 21 held PRs conflicting with Doctor's
-queue empty. On the held variant the `champion:merge-risk-hold` marker is
-**preserved** and `loom:operator` is **kept** (the human merge decision is still
-outstanding); on the unheld variant `loom:operator` is cleared as before
-(#5802). See `champion-pr-merge.md` → "Held-PR Health Pass".
+**A merge-risk hold does not exempt a PR from this (#6720), UNLESS the hold is
+the PR's only blocker (#6852).** The route fires from a held state too — it is
+the only automated path from `loom:pr` to Doctor, and gating it behind the hold
+left 20 of 21 held PRs conflicting with Doctor's queue empty. On the held
+**hold-plus-feedback** variant (a failing required check, unrelated to the
+hold) the `champion:merge-risk-hold` marker is **preserved** and
+`loom:operator` is **kept** (the human merge decision is still outstanding);
+on the unheld variant `loom:operator` is cleared as before (#5802). On the held
+**hold-only** variant (no failing check, nothing else red) the PR is left in
+place instead — routing it would not resolve anything the hold isn't already
+the resolution for, and `main` moving again would just repeat the cycle (the
+"rebase treadmill"). See `champion-pr-merge.md` → "Held-PR Health Pass".
 
 ---
 
@@ -357,6 +362,16 @@ fi
 **Maintenance**: Review and update critical file patterns periodically as codebase evolves.
 
 **Recommended**: Add repository-specific `.loom/champion-critical-files.txt` for custom patterns (future enhancement).
+
+---
+
+### Edge Case 10b: Critical-File Match Is a Durable Hold, Not a Retry (#6879)
+
+**Scenario**: A PR touches a file matching `CRITICAL_PATTERNS` (e.g. a new `.github/workflows/*.yml` job), with no version-only carve-out applicable. Before #6879, this FAIL routed through the same generic "Transient failures — keep `loom:pr`, retry next tick" template as `label-check`/`size-check`/`ci-status`, even though nothing about a diff's critical-file-ness ever clears without a human decision or a force-push that narrows the diff — one fleet PR was re-evaluated and re-rejected ~59 times over 36 hours this way, at 200-300s per tick.
+
+**Handling**: Criterion #3 now mirrors criterion #2's merge-risk-hold pattern (see Edge Case 11b below): on FAIL, comment once behind a `<!-- champion:critical-file-hold -->` idempotency marker and add `loom:operator` (#5502), instead of the shared transient-failure template. Unlike criterion #2, this hold needs no sticky-hold precheck machinery — the pattern match is deterministic, not a judgment call, so there is nothing for a later re-read of the *same* diff to score differently. Release fires the moment a later push narrows the diff so it no longer matches any critical-file pattern: `loom:operator` is removed and a one-time `<!-- champion:critical-file-hold-cleared -->` notice is posted. `loom:auto-merge-ok` does **not** release this hold — it is scoped to criterion #2 only (see Edge Case 11's rationale).
+
+**Decision**: **Durable hold, not a retry** — `loom:operator` joins the PR, and the Held-PR Census (`loom:operator`-keyed) counts it alongside merge-risk holds for free. The exact commands live in `champion-pr-merge.md` → "Safety Criteria → 3. Critical File Exclusion Check → Durable hold on FAIL".
 
 ---
 
@@ -584,6 +599,7 @@ EXISTING=$(gh issue list --search "Follow-on from PR #$PR_NUMBER" --limit 500)
 | Multiple linked issues | Allow | Verify all closed |
 | Mixed-state CI | Fail on `fail`/`cancel` | `pending` defers; `skipping` is OK |
 | Unknown critical file | Miss | Needs pattern update |
+| Critical file matched (no version-only carve-out) | **Durable hold, not a retry** (#6879) | Comment once behind `<!-- champion:critical-file-hold -->`, add `loom:operator`, keep `loom:pr`; releases (removes `loom:operator`, posts `<!-- champion:critical-file-hold-cleared -->`) only when a later push no longer matches any critical-file pattern — `loom:auto-merge-ok` does not release it |
 | Large but low-risk PR (e.g. mostly tests) | Allow | Judged on the 4 risk axes, not line count |
 | Small but high-blast-radius PR | Hold for human | Comment names the specific concern, keep `loom:pr`, retry next tick |
 | Prior merge-risk hold, later tick scores the same diff green | **Hold stands (sticky)** | Skip silently, post nothing (anti-spam guard already covers it). Release only on `loom:auto-merge-ok`, an explicit operator clearing comment after the hold (leading-clause instruction, not a negation or a question), a new head SHA, or a new Judge review |
