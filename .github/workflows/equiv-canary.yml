@@ -2,29 +2,30 @@ name: Real-P&R sequential-equivalence canary
 
 # Epic #707 Phase 3 (issue #1324): a manually-triggered, CI-runnable execution
 # path for the real pre/post-route sequential-equivalence canary --
-# `tests/test_equiv.py::test_sequential_engine_real_pnr_register_preserving_transformation`.
-# That test runs `klt synthesize` -> `klt place-and-route` (real `openroad`
-# engine, GCD worked example) and asserts `klt equiv`'s `"yosys-sequential"`
-# engine finds the pre-route and post-route netlists `"equivalent"` -- the
-# direct, real-P&R validation issue #1313's own acceptance criteria required.
-# Before this workflow existed, re-running that check required a manual local
-# `openroad`/sky130 PDK setup; this job automates that setup so the canary is
-# durable, repeatable evidence rather than a one-off manual run.
+# `tests/test_equiv.py::test_sequential_engine_real_pnr_register_preserving_transformation`
+# (GCD) and, since issue #1353,
+# `test_sequential_engine_real_pnr_mult8_register_preserving_transformation`
+# (`mult8`, that issue's own second-corpus-design verification). Each test
+# runs `klt synthesize` -> `klt place-and-route` (real `openroad` engine)
+# and asserts `klt equiv`'s `"yosys-sequential"` engine finds the pre-route
+# and post-route netlists `"equivalent"` -- the direct, real-P&R validation
+# issue #1313's own acceptance criteria required. Before this workflow
+# existed, re-running that check required a manual local `openroad`/sky130
+# PDK setup; this job automates that setup so the canary is durable,
+# repeatable evidence rather than a one-off manual run.
 #
-# STATUS: `xfail` (strict=False), tracked by issue #1353 -- no longer a false
-# `"counterexample"` (fixed by #1349), still not `"equivalent"`. A real local
-# run (`openroad/orfs:latest` + sky130A) confirms the P&R transformation is
-# register-preserving and that the two netlists are functionally identical
-# (0 mismatches over 20,000 randomized Icarus cycles), but the
-# `"yosys-sequential"` engine's `equiv_induct` stage does not converge at
-# this netlist size and its bounded-SAT fallback still finds a violation
-# among the unproven cells -- one the engine's own
-# `counterexample_not_reproduced` diagnostic already flags as unreproducible,
-# so the test now correctly reports `"inconclusive"`, wrapped in the `xfail`
-# marker above. This job is therefore expected to *pass* (xfailed, not a hard
-# failure) until #1353 lands, at which point pytest will report XPASS as the
-# signal to remove the marker. Do not "fix" that XPASS by relaxing the
-# anti-skip step below.
+# STATUS (since issue #1353): both tests are expected to be genuine,
+# unmarked passes -- no `xfail` marker remains on either. The GCD canary
+# carried one from #1323 until #1353: `equiv_make`'s name-based pairing left
+# 93 of 1521 `$equiv` cells unproven on the real post-route netlist (all of
+# them same-named *internal* wires OpenROAD's resizer/repair/cloning passes
+# repurposed), so the engine reported `"counterexample"` (unsound, fixed by
+# #1349) and then `"inconclusive"`. #1353's stage-1 cut-point refinement
+# loop drops exactly those wrongly-paired internal wires -- never a
+# top-level port -- and the proof converges: 1428/1428 cells proven,
+# `"equivalent"`, in a single refinement pass. A failure of this job is
+# therefore a real regression, not an expected-failure bookkeeping change.
+# Do not "fix" a failure by relaxing the anti-skip step below.
 #
 # Provisioning is deliberately NOT reinvented here: OpenROAD/PDK provisioning
 # is epic #700's (place-and-route's) infrastructure concern. This job copies
@@ -59,7 +60,7 @@ concurrency:
 
 jobs:
   equiv-canary:
-    name: Real pre/post-route sequential-equivalence canary (gcd)
+    name: Real pre/post-route sequential-equivalence canary (gcd, mult8)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -145,13 +146,13 @@ jobs:
           scripts/install-openroad-docker.sh "$HOME/.cache/openroad-docker/bin"
           echo "$HOME/.cache/openroad-docker/bin" >>"$GITHUB_PATH"
 
-      - name: Run the real pre/post-route sequential-equivalence canary (gcd)
+      - name: Run the real pre/post-route sequential-equivalence canary (gcd, mult8)
         env:
           PDK: sky130A
           PDK_ROOT: ${{ github.workspace }}/.pdk-cache
         run: |
           uv run --frozen --extra dev pytest tests/test_equiv.py \
-            -k test_sequential_engine_real_pnr_register_preserving_transformation \
+            -k register_preserving_transformation \
             -v -rs | tee pytest-equiv-canary.log
 
       - name: Confirm the canary ran to completion, not skipped
@@ -163,9 +164,10 @@ jobs:
         # `-rs` short-skip-summary this job's pytest step already requested
         # and fail explicitly if the canary was skipped anyway, matching
         # issue #1323's "confirmed not SKIPPED" evidence bar. The `-k`
-        # filter above selects exactly one test (verified by
-        # `--collect-only` in this issue's PR), so any "SKIPPED"/"skipped"
-        # in the log unambiguously refers to *this* canary, not some other
+        # filter above selects exactly two tests -- the GCD canary and the
+        # `mult8` canary issue #1353 added (verified by `--collect-only` in
+        # that issue's PR) -- so any "SKIPPED"/"skipped" in the log
+        # unambiguously refers to one of these two canaries, not some other
         # test.
         run: |
           if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-equiv-canary.log; then

@@ -128,6 +128,52 @@ technique, not a counterexample-*finding* one: "unproven" honestly means
    can with plain per-cell SAT; ``equiv_induct`` resolves the rest by
    temporal induction over the design's own state elements; ``equiv_status``
    reports the final tally. All ``$equiv`` cells proven -> ``"equivalent"``.
+   Stage 1 re-runs itself under **cut-point refinement** when it does not --
+   see the next section.
+
+### Stage 1 cut-point refinement (issue #1353)
+
+``equiv_make`` pairs wires **by name**, and a physical-design transformation
+is under no obligation to preserve internal wire names: OpenROAD's own
+resizing, repair-buffer insertion and gate cloning routinely leave a
+same-named internal wire carrying a *different* Boolean value on the two
+sides, even though the two designs are output-equivalent. Each such pair
+becomes an internal ``$equiv`` cell that can never be proven -- not because
+the designs differ, but because the pairing itself was wrong. Because a
+``$equiv`` cell is also a **cut point** (downstream cones on both sides read
+the ``$equiv`` output rather than their own driver), a wrongly-paired wire
+does not merely add noise: it injects a false assumption into every proof
+downstream of it, which is exactly why Yosys refuses to call the run proven
+while any ``$equiv`` cell is unproven.
+
+Stage 1 therefore runs as a small **counterexample-guided refinement loop**
+(bounded by :data:`_MAX_STAGE1_REFINEMENTS`, sharing one ``timeout_s``
+budget across all of its passes):
+
+1. Run the recipe above. If every ``$equiv`` cell is proven -> ``"equivalent"``.
+2. Otherwise, collect the wire names Yosys reported unproven, **drop every
+   name that is a top-level port**, and re-run ``equiv_make`` with the
+   remainder passed via ``-blacklist`` so no ``$equiv`` cell (and so no cut
+   point) is created for them at all.
+3. Repeat until proven, until no new name is added, or until the iteration
+   cap is hit -- then fall through to stage 2 exactly as before.
+
+**This is sound, and strictly stronger than not doing it.** Blacklisting
+only ever *removes* cut points, i.e. removes assumptions: every obligation
+that survives is proven from more of the two designs' real logic, never
+less. Top-level ports are never blacklisted, so the obligations that
+actually define equivalence -- "gold and gate produce the same outputs" --
+are always still proven, never dropped. A genuinely-broken gate netlist
+cannot be laundered into ``"equivalent"`` by this loop: with the port
+obligations retained, the loop simply fails to converge and stage 2's
+bounded SAT search runs as before (verified live against a deliberately
+mutated real post-route netlist -- see ``docs/cli/equiv.md``'s
+"Re-running the real pre/post-route canary").
+
+``artifacts.stage1_blacklist_path`` records exactly which wires were
+dropped, so a reader can audit the weakened obligation set rather than
+having to trust it; an ``equiv_cutpoint_refinement`` info diagnostic reports
+the count.
 2. **Stage 2 (only runs when stage 1 leaves cells unproven):** rebuilds the
    same gold/gate pairing with ``equiv_make -make_assert`` (turning each
    matched pair into an ``$assert`` instead of an ``$equiv`` cell), then
@@ -259,6 +305,21 @@ _SEQ_SIM_DISPLAY_RE = re.compile(r"^EQUIV_SIM_CYCLE (\d+) (gold|gate) (\S+) ([01
 _PORT_DECL_RE = re.compile(r"^\s*(input|output|inout)\s+(?:\[[^\]]+\]\s+)?(\S+?);\s*$")
 _MODULE_START_RE = re.compile(r"^\s*module\s+(\S+)\s*\(")
 _MODULE_END_RE = re.compile(r"^\s*endmodule\s*$")
+
+#: One `equiv_status` "unproven cell" report line, e.g.
+#: `  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$10212:
+#:  \_560_.B_gold \_560_.B_gate` -- the trailing group holds the gold/gate
+#: signals the unproven `$equiv` cell pairs (see
+#: `_parse_unproven_equiv_signals`).
+_UNPROVEN_EQUIV_RE = re.compile(r"^\s*Unproven \$equiv \S+: (.+)$", re.MULTILINE)
+
+#: How many times stage 1 may re-run `equiv_make` with a widened
+#: `-blacklist` before giving up and falling through to stage 2 (issue
+#: #1353's cut-point refinement loop -- see this module's docstring). The
+#: real post-route netlists this engine targets converge in a single
+#: refinement pass; the cap exists so a pathological design cannot spin, and
+#: every pass shares the one `timeout_s` budget regardless.
+_MAX_STAGE1_REFINEMENTS = 3
 
 
 class EquivError(Exception):
@@ -593,7 +654,11 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
 
 def _side_prep_lines(
-    label: str, side: dict[str, Any], port_map: dict[str, str]
+    label: str,
+    side: dict[str, Any],
+    port_map: dict[str, str],
+    *,
+    extra_opt: bool = False,
 ) -> list[str]:
     """Build the ``.ys`` script lines that read, elaborate, flatten, and
     stash one side (``"gold"``/``"gate"``) of an equivalence request --
@@ -601,6 +666,38 @@ def _side_prep_lines(
     (:func:`_write_script`) and the ``"yosys-sequential"`` engine's
     ``equiv_make``-based scripts (:func:`_write_sequential_stage1_script`/
     :func:`_write_sequential_stage2_script`).
+
+    ``extra_opt`` (issue #1353): runs a real ``opt -noff`` pass (the full
+    ``opt_expr``/``opt_muxtree``/``opt_reduce``/``opt_merge``/``opt_clean``
+    convergence loop, ``-noff`` skipping only the ``opt_dff`` sub-pass)
+    after ``flatten``, in addition to the plain dead-code-only ``opt_clean``
+    both engines already ran. Only the ``"yosys-sequential"`` engine's own
+    script writers pass ``extra_opt=True`` -- the combinational engine
+    (:func:`_write_script`) keeps its original, narrower ``opt_clean``-only
+    normalization unchanged.
+
+    **What it buys, measured rather than assumed.** Every liberty cell here
+    was already expanded into real primitive logic by ``read_liberty``'s own
+    ``function``/``ff`` group parsing (no ``-lib``, see the ``liberty``
+    branch above) *before* ``flatten`` inlines it, so a resizer-inserted
+    identity buffer chain or a same-function drive-strength swap
+    (``a21oi_1`` -> ``a21oi_2``, an inserted ``buf_4``) becomes ordinary
+    foldable primitive logic that ``opt`` collapses, where ``opt_clean``
+    alone would only have removed already-dead cells. On the real GCD
+    pre/post-route pair this repo's own canary runs, that takes stage 1's
+    residual unproven-``$equiv``-cell count from 98 to 93 (controlled A/B on
+    one netlist pair, ``openroad`` 26Q3-1510-g6cb3f2b704 + sky130A, Yosys
+    ``0.67+post``, 2026-08-24). It does **not** on its own make that design
+    converge -- what closes the remaining gap is stage 1's cut-point
+    refinement loop (see this module's docstring); the value of this pass is
+    that fewer wrongly-paired wires survive to be blacklisted there, so the
+    proof that does converge drops fewer obligations.
+
+    ``-noff`` (skip the ``opt_dff`` sub-pass) is deliberate, not incidental:
+    it keeps every flip-flop cell and name **completely untouched** by this
+    normalization -- ``opt_dff`` can merge/retime/remove registers, which
+    would undercut the register-name correspondence ``equiv_make``'s
+    name-based matching (and so this whole engine) depends on.
     """
     lines: list[str] = []
     if side.get("liberty"):
@@ -622,6 +719,8 @@ def _side_prep_lines(
         "flatten",
         "opt_clean",
     ]
+    if extra_opt:
+        lines.append("opt -noff")
     if label == "gate" and port_map:
         lines.append(f"select -module {side['top']}")
         for gate_port, gold_port in port_map.items():
@@ -1143,11 +1242,19 @@ def _write_sequential_stage1_script(
     port_map: dict[str, str],
     netlist_path: str,
     induction_depth: int,
+    blacklist_path: str | None = None,
 ) -> None:
     """Generate stage 1's ``.ys`` script: the named register-correspondence
     technique (``equiv_make``/``equiv_simple``/``equiv_induct``/
     ``equiv_status``) -- see this module's docstring "Engine:
     yosys-sequential" section for the full recipe rationale.
+
+    ``blacklist_path``, when given, is passed to ``equiv_make -blacklist``:
+    the wire names listed in that file are not paired, so no ``$equiv``
+    cell -- and so no cut point -- is created for them. It is written by
+    stage 1's own cut-point refinement loop (:func:`_run_sequential`, issue
+    #1353) and never contains a top-level port; see this module's docstring,
+    "Stage 1 cut-point refinement", for why removing cut points is sound.
 
     Also writes ``netlist_path`` (the plain, flattened, still-really-clocked
     gold/gate netlist, *before* ``equiv_make``/``clk2fflogic`` run) --
@@ -1159,12 +1266,15 @@ def _write_sequential_stage1_script(
     """
     lines: list[str] = []
     for label, side in (("gold", gold), ("gate", gate)):
-        lines += _side_prep_lines(label, side, port_map)
+        lines += _side_prep_lines(label, side, port_map, extra_opt=True)
 
     lines.append(f"design -copy-from gold_design -as gold {gold['top']}")
     lines.append(f"design -copy-from gate_design -as gate {gate['top']}")
     lines.append(f"write_verilog -noattr {netlist_path}")
-    lines.append("equiv_make gold gate equiv")
+    if blacklist_path:
+        lines.append(f"equiv_make -blacklist {blacklist_path} gold gate equiv")
+    else:
+        lines.append("equiv_make gold gate equiv")
     lines.append("hierarchy -top equiv")
     # `clk2fflogic` (not `async2sync`): handles single- and multi-clock,
     # sync- and async-reset designs uniformly via Yosys's own formal-
@@ -1208,7 +1318,7 @@ def _write_sequential_stage2_script(
     """
     lines: list[str] = []
     for label, side in (("gold", gold), ("gate", gate)):
-        lines += _side_prep_lines(label, side, port_map)
+        lines += _side_prep_lines(label, side, port_map, extra_opt=True)
 
     lines.append(f"design -copy-from gold_design -as gold {gold['top']}")
     lines.append(f"design -copy-from gate_design -as gate {gate['top']}")
@@ -1269,6 +1379,44 @@ def _parse_module_ports(netlist_path: str, module_name: str) -> dict[str, str]:
             direction, name = match.groups()
             ports.setdefault(name, direction)
     return ports
+
+
+def _parse_unproven_equiv_signals(stdout: str) -> set[str]:
+    """Extract the *original* wire names behind ``equiv_status``'s own
+    ``Unproven $equiv ...: \\foo_gold \\foo_gate`` report lines -- the input
+    to stage 1's cut-point refinement loop (:func:`_run_sequential`, issue
+    #1353).
+
+    ``equiv_make`` renames each side's copy of a paired wire by appending
+    ``_gold``/``_gate``, so the name to feed back to ``equiv_make
+    -blacklist`` is the reported signal with that suffix (and Yosys's
+    leading ``\\`` escape) stripped. Bit-select tokens (``[3]``) and the
+    synthetic ``$auto$...`` names Yosys generates for its own internal cells
+    carry no such suffix and are ignored: only real, named wires can be
+    blacklisted by name, and it is exactly the real, named wires a P&R tool
+    renames or repurposes.
+    """
+    names: set[str] = set()
+    for match in _UNPROVEN_EQUIV_RE.finditer(stdout):
+        for token in match.group(1).split():
+            token = token.lstrip("\\")
+            for suffix in ("_gold", "_gate"):
+                if token.endswith(suffix):
+                    base = token[: -len(suffix)]
+                    if base:
+                        names.add(base)
+                    break
+    return names
+
+
+def _write_equiv_blacklist(path: str, names: set[str]) -> None:
+    """Write ``names``, one per line, as an ``equiv_make -blacklist`` file."""
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            for name in sorted(names):
+                handle.write(f"{name}\n")
+    except OSError as exc:
+        raise EquivError(f"could not write equiv blacklist '{path}': {exc}") from exc
 
 
 def _parse_multicycle_signal_table(stdout: str) -> dict[str, dict[str, str]]:
@@ -1646,6 +1794,7 @@ def _build_sequential_report(
     stage2_script_path: str | None,
     stage2_log_path: str | None,
     netlist_path: str,
+    stage1_blacklist_path: str | None = None,
 ) -> dict[str, Any]:
     """The ``"yosys-sequential"`` engine's own report builder -- mirrors
     :func:`_build_report`'s shape (``schema_version``/``engine``/``status``/
@@ -1659,6 +1808,11 @@ def _build_sequential_report(
     keep referring to stage 1 (always run), matching the combinational
     engine's own singular ``script_path``/``log_path`` field names so a
     caller that only reads those two fields still gets a meaningful path.
+
+    ``artifacts.stage1_blacklist_path`` (issue #1353) is the
+    ``equiv_make -blacklist`` file stage 1's cut-point refinement loop wrote,
+    or ``None`` when no refinement was needed -- the auditable record of
+    exactly which internal wire pairings the proof dropped.
     """
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
@@ -1690,6 +1844,12 @@ def _build_sequential_report(
                 if stage2_log_path is not None and os.path.isfile(stage2_log_path)
                 else None
             ),
+            "stage1_blacklist_path": (
+                stage1_blacklist_path
+                if stage1_blacklist_path is not None
+                and os.path.isfile(stage1_blacklist_path)
+                else None
+            ),
         },
         "provenance": provenance,
     }
@@ -1712,30 +1872,94 @@ def _run_sequential(
     script1_path = os.path.join(output_dir, "equiv_seq_stage1.ys")
     netlist_path = os.path.join(output_dir, "equiv_seq_netlist.v")
     log1_path = os.path.join(output_dir, "equiv_seq_stage1.log")
+    blacklist_path = os.path.join(output_dir, "equiv_seq_blacklist.txt")
 
     int_timeout = max(1, round(effective_timeout_s))
-
-    _write_sequential_stage1_script(
-        script_path=script1_path,
-        gold=gold,
-        gate=gate,
-        port_map=port_map,
-        netlist_path=netlist_path,
-        induction_depth=induction_depth,
-    )
-
-    stage1 = _run_yosys_subprocess(script1_path, effective_timeout_s)
-    try:
-        with open(log1_path, "w", encoding="utf-8") as handle:
-            handle.write(stage1.stdout)
-            if stage1.stderr:
-                handle.write("\n--- stderr ---\n")
-                handle.write(stage1.stderr)
-    except OSError:
-        pass
-
     engine_version = _yosys_version()
-    total_elapsed_s = stage1.elapsed_s
+
+    # Stage 1, run as a bounded cut-point refinement loop: each pass drops
+    # the wrongly-paired *internal* wires the previous pass could not prove
+    # (never a top-level port) from `equiv_make`'s matching, so their false
+    # cut points stop poisoning every downstream proof. See this module's
+    # docstring, "Stage 1 cut-point refinement" (issue #1353).
+    blacklisted: set[str] = set()
+    refinements = 0
+    total_elapsed_s = 0.0
+    active_blacklist_path: str | None = None
+
+    while True:
+        _write_sequential_stage1_script(
+            script_path=script1_path,
+            gold=gold,
+            gate=gate,
+            port_map=port_map,
+            netlist_path=netlist_path,
+            induction_depth=induction_depth,
+            blacklist_path=active_blacklist_path,
+        )
+
+        # Every refinement pass shares the single `timeout_s` budget (the
+        # first pass gets all of it, since `total_elapsed_s` is still 0), so
+        # the loop can never push stage 1 past the one-stage budget the JSON
+        # contract documents.
+        stage1 = _run_yosys_subprocess(
+            script1_path, effective_timeout_s - total_elapsed_s
+        )
+        total_elapsed_s = round(total_elapsed_s + stage1.elapsed_s, 3)
+        try:
+            with open(log1_path, "w", encoding="utf-8") as handle:
+                handle.write(stage1.stdout)
+                if stage1.stderr:
+                    handle.write("\n--- stderr ---\n")
+                    handle.write(stage1.stderr)
+        except OSError:
+            pass
+
+        if (
+            stage1.timed_out
+            or stage1.returncode != 0
+            or _EQUIV_NONE_FOUND_RE.search(stage1.stdout)
+            or _EQUIV_ALL_PROVEN_RE.search(stage1.stdout)
+            or refinements >= _MAX_STAGE1_REFINEMENTS
+            or effective_timeout_s - total_elapsed_s <= 0
+        ):
+            break
+
+        try:
+            ports = _parse_module_ports(netlist_path, "gold")
+        except EquivError:
+            break
+        candidates = {
+            name
+            for name in _parse_unproven_equiv_signals(stage1.stdout)
+            if name not in ports
+        }
+        if candidates <= blacklisted:
+            # Nothing new to drop -- either every unproven obligation is a
+            # top-level port (a real output difference, stage 2's job) or
+            # refinement has reached its fixpoint.
+            break
+        blacklisted |= candidates
+        _write_equiv_blacklist(blacklist_path, blacklisted)
+        active_blacklist_path = blacklist_path
+        refinements += 1
+
+    refinement_diagnostics: list[dict[str, str]] = []
+    if blacklisted:
+        refinement_diagnostics.append(
+            {
+                "severity": "info",
+                "code": "equiv_cutpoint_refinement",
+                "message": (
+                    f"stage 1 re-ran equiv_make {refinements}x with "
+                    f"{len(blacklisted)} internal wire(s) blacklisted -- "
+                    "same-named gold/gate wires that could not be proven "
+                    "equivalent and so were dropped as cut points (no "
+                    "top-level port is ever dropped; see "
+                    "artifacts.stage1_blacklist_path for the exact list)"
+                ),
+            }
+        )
 
     if stage1.timed_out:
         return _build_sequential_report(
@@ -1749,7 +1973,8 @@ def _run_sequential(
             elapsed_s=total_elapsed_s,
             induction_depth=induction_depth,
             counterexample=None,
-            diagnostics=[
+            diagnostics=refinement_diagnostics
+            + [
                 {
                     "severity": "error",
                     "code": "process_timeout",
@@ -1765,6 +1990,7 @@ def _run_sequential(
             stage2_script_path=None,
             stage2_log_path=None,
             netlist_path=netlist_path,
+            stage1_blacklist_path=active_blacklist_path,
         )
 
     if stage1.returncode != 0:
@@ -1796,12 +2022,13 @@ def _run_sequential(
             elapsed_s=total_elapsed_s,
             induction_depth=induction_depth,
             counterexample=None,
-            diagnostics=[],
+            diagnostics=refinement_diagnostics,
             stage1_script_path=script1_path,
             stage1_log_path=log1_path,
             stage2_script_path=None,
             stage2_log_path=None,
             netlist_path=netlist_path,
+            stage1_blacklist_path=active_blacklist_path,
         )
 
     # Stage 1 left one or more $equiv cells unproven -- register-
@@ -1847,7 +2074,8 @@ def _run_sequential(
             elapsed_s=total_elapsed_s,
             induction_depth=induction_depth,
             counterexample=None,
-            diagnostics=[
+            diagnostics=refinement_diagnostics
+            + [
                 {
                     "severity": "error",
                     "code": "process_timeout",
@@ -1864,6 +2092,7 @@ def _run_sequential(
             stage2_script_path=script2_path,
             stage2_log_path=log2_path,
             netlist_path=netlist_path,
+            stage1_blacklist_path=active_blacklist_path,
         )
 
     if stage2.returncode != 0:
@@ -1905,12 +2134,13 @@ def _run_sequential(
             elapsed_s=total_elapsed_s,
             induction_depth=induction_depth,
             counterexample=None,
-            diagnostics=diagnostics2,
+            diagnostics=refinement_diagnostics + diagnostics2,
             stage1_script_path=script1_path,
             stage1_log_path=log1_path,
             stage2_script_path=script2_path,
             stage2_log_path=log2_path,
             netlist_path=netlist_path,
+            stage1_blacklist_path=active_blacklist_path,
         )
 
     cycles = _parse_multicycle_signal_table(stage2.stdout)
@@ -1950,10 +2180,11 @@ def _run_sequential(
         elapsed_s=total_elapsed_s,
         induction_depth=induction_depth,
         counterexample=counterexample,
-        diagnostics=diagnostics2,
+        diagnostics=refinement_diagnostics + diagnostics2,
         stage1_script_path=script1_path,
         stage1_log_path=log1_path,
         stage2_script_path=script2_path,
         stage2_log_path=log2_path,
         netlist_path=netlist_path,
+        stage1_blacklist_path=active_blacklist_path,
     )
