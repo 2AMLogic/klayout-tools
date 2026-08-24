@@ -1,0 +1,44 @@
+{
+  "design": "modexp",
+  "drc": {
+    "status": "clean",
+    "violation_count": 0
+  },
+  "extract": {
+    "net_count": 1221,
+    "pin_count": 753,
+    "warning_count": 2
+  },
+  "lvs": {
+    "category_counts": {
+      "topology": 4
+    },
+    "error_count": 0,
+    "mismatch_count": 4,
+    "status": "match"
+  },
+  "place_and_route": {
+    "antenna_violation_count": 0,
+    "core_area_um2": 19781.5,
+    "die_area_um2": 22761.8,
+    "engine_version": "26Q3-1278-g4421880472",
+    "fmax_mhz": 180.292,
+    "hold_violation_count": 0,
+    "route_drc_violation_count": 0,
+    "setup_violation_count": 0,
+    "stage_reached": "route",
+    "utilization_pct": 37.0335,
+    "wirelength_um": 19412,
+    "worst_slack_ns": 4.45344
+  },
+  "source": {
+    "commit": "1b38ab4f1c5dc5b3396b50fcdf983f8768775e7b",
+    "license": "Apache-2.0",
+    "path": "rtl/modexp.v",
+    "repo": "2AMLogic/sky130-modexp"
+  },
+  "synthesize": {
+    "area_um2": 7144.352,
+    "instance_count": 717
+  }
+}
