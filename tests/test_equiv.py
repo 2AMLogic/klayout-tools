@@ -1788,16 +1788,24 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
 
     from klayout_tools.place_and_route import run_place_and_route
 
-    # Canonical GCD RTL source -- the same one
-    # `tests/corpus/place_and_route/regenerate.sh` treats as authoritative
-    # (its `SOURCES[gcd]`) and that `tests/test_place_and_route.py` inlines
-    # as `_GCD_RTL`. There is no `tests/corpus/place_and_route/gcd/gcd.v`;
-    # only a pre-built GDS fixture lives under that corpus directory.
+    # The canonical GCD RTL is the committed worked example -- the same file
+    # `tests/corpus/place_and_route/regenerate.sh` treats as the GCD source of
+    # truth (its `[gcd]="$REPO_ROOT/examples/functional-verification/gcd.v"`
+    # mapping), and the same one `test_functional_verification.py` reads via its
+    # own `EXAMPLE_DIR`. An earlier revision of this test pointed at a
+    # `tests/corpus/place_and_route/gcd/gcd.v` fixture that was never committed
+    # (there is no such per-design subdirectory convention in this repo), so the
+    # test unconditionally skipped before reaching openroad/PDK/yosys-sequential.
+    # This path is tracked in git, so a missing file is a repo bug, not an
+    # environment condition -- assert rather than skip, so the miss can never
+    # again masquerade as a legitimately-skipped environment gate.
     gcd_rtl_path = (
-        Path(__file__).parent.parent / "examples" / "functional-verification" / "gcd.v"
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "functional-verification"
+        / "gcd.v"
     )
-    if not gcd_rtl_path.is_file():
-        pytest.skip("examples/functional-verification/gcd.v fixture not present")
+    assert gcd_rtl_path.is_file(), f"tracked GCD RTL missing: {gcd_rtl_path}"
 
     synth_dir = tmp_path / "synth"
     synth_dir.mkdir()
