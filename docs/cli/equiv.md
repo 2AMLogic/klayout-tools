@@ -487,6 +487,16 @@ so they are silently skipped — not run — in this repo's ordinary `ci.yml`
 > same instance names), so it already converged before #1353. It is kept as a
 > second-design regression guard over the whole `synthesize` →
 > `place-and-route` → `equiv` path.
+>
+> **Independently reconfirmed (2026-08-24, issue #1323) against `origin/main`
+> post-#1360-merge** — a fresh `pytest tests/test_equiv.py -k
+> register_preserving_transformation -v -rs -s` run (not a citation of #1360's
+> own numbers) against `openroad 26Q3-1510-g6cb3f2b704`
+> (`openroad/orfs:latest`) and a real pinned volare `sky130A` install:
+> `2 passed, 79 deselected` — both the GCD and `mult8` canaries report
+> `status: "equivalent"`, confirmed not `SKIPPED` and not `XPASS` (no `xfail`
+> marker present). This closes epic #707's acceptance criterion 3 for the
+> P&R half; see issue #1323 and epic #707 for the full evidence trail.
 
 [`.github/workflows/equiv-canary.yml`](../../.github/workflows/equiv-canary.yml)
 (issue #1324, Epic #707 Phase 3) gives that canary a repeatable, `CI`-runnable
