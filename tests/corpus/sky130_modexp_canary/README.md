@@ -16,7 +16,7 @@ every number below, and the last-measured snapshot (`results.json`).
 designs and, because at the time nothing in `klt` could turn a `verilog_path`
 gate-level netlist into an LVS-comparable reference, substitutes a directed
 GLS co-simulation diff for a real `klt lvs` round-trip. Issue
-[#1336](https://github.com/2AMLogic/klayout-tools/pull/1336) (merged
+[#1336](https://github.com/2AMLogic/klayout-tools/issues/1336) (merged
 2026-08-23, *after* that validation) closed that gap:
 `reference.form: "gate-level-verilog"` now converts a `klt place-and-route`
 as-built netlist directly, so this directory runs the actual oracle Epic

@@ -20,7 +20,7 @@ the time) was **DRC-clean, LVS-mismatched** (1324 mismatches, PR #65,
 closed by fresh evidence as of 2026-08-24, using this repo's *current* `klt`
 (not `sky130-modexp`'s own pinned, older revision):
 
-- **LVS is now clean.** Issue [#1336](https://github.com/2AMLogic/klayout-tools/pull/1336)
+- **LVS is now clean.** Issue [#1336](https://github.com/2AMLogic/klayout-tools/issues/1336)
   (merged 2026-08-23 — *after* PR #65's attempt) added `klt lvs`'s
   `reference.form: "gate-level-verilog"` converter, closing exactly the gap
   PR #65's hand-rolled `build_reference_netlist.py` was working around. A
