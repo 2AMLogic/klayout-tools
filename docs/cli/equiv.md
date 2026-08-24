@@ -269,6 +269,38 @@ stage 1, always run):
 | --- | --- | --- |
 | `induction_depth` | integer | Echo of the effective `induction_depth` used (request field, or the `4` default). |
 | `artifacts.stage2_script_path` / `artifacts.stage2_log_path` | string \| null | The stage-2 (bounded counterexample search) `.ys` script and raw Yosys log, when stage 2 ran (i.e. stage 1 alone did not reach `"equivalent"`) — `null` when stage 2 never ran. |
+| `artifacts.stage1_blacklist_path` | string \| null | The `equiv_make -blacklist` file stage 1's cut-point refinement loop wrote (issue #1353) — one internal wire name per line, the exact set of same-named `gold`/`gate` wires whose pairing was dropped. `null` when the run converged without refinement. Top-level ports are never listed here. |
+
+#### Stage 1 cut-point refinement (issue #1353)
+
+`equiv_make` pairs `gold`/`gate` wires **by name**, and a place-and-route
+tool is under no obligation to preserve internal wire names: OpenROAD's
+resizing, repair-buffer insertion and gate cloning routinely leave a
+same-named internal wire carrying a *different* value on the two sides.
+Each such pair becomes an unprovable `$equiv` cell — and, because a
+`$equiv` cell is also a **cut point** (both sides' downstream cones read
+its output instead of their own driver), a wrongly-paired wire injects a
+false assumption into every proof downstream of it. That is why a real
+~50-flop post-route netlist used to report `"inconclusive"` even though the
+two designs were genuinely equivalent.
+
+Stage 1 therefore re-runs itself as a bounded, counterexample-guided
+refinement loop: whatever `equiv_status` reports unproven is fed back into
+`equiv_make -blacklist` (minus any top-level port) so no `$equiv` cell —
+and so no cut point — is created for those wires at all, then the recipe
+runs again. Up to three refinement passes are attempted, all sharing the
+single `timeout_s` budget, before falling through to stage 2 as before.
+
+This is **sound, and strictly stronger than not doing it**: blacklisting
+only ever *removes* assumptions, so every surviving obligation is proven
+from more of the two designs' real logic. Top-level ports are never
+blacklisted, so "`gold` and `gate` produce the same outputs" is always
+still proven, never dropped — a genuinely-broken `gate` netlist simply
+fails to converge and stage 2's bounded search runs as before. When
+refinement ran, `diagnostics` carries an `equiv_cutpoint_refinement` info
+entry with the count and `artifacts.stage1_blacklist_path` records the
+exact list, so the weakened obligation set can be audited rather than
+taken on trust.
 
 ### Sequential counterexample shape (`"yosys-sequential"` only)
 
@@ -402,40 +434,59 @@ request/response pair.
 
 Whether `"yosys-sequential"` finds a real, live `klt place-and-route`
 transformation `"equivalent"` (not just the buffer-inserted synthetic mutant
-above) is exercised by
-`tests/test_equiv.py::test_sequential_engine_real_pnr_register_preserving_transformation`
-— `klt synthesize`'s pre-route GCD netlist (from
+above) is exercised by two real-toolchain tests in
+`tests/test_equiv.py`: `test_sequential_engine_real_pnr_register_preserving_transformation`
+(GCD — `klt synthesize`'s pre-route netlist from
 `examples/functional-verification/gcd.v`, the same GCD source of truth
-`tests/corpus/place_and_route/regenerate.sh` uses) vs. the real, post-route
-`verilog_path` `klt place-and-route` produces via a real `openroad` binary
-and a real sky130 PDK install — issue #1313's acceptance criterion. Like
-`test_place_and_route.py`'s own live-`openroad` integration tests, it is
+`tests/corpus/place_and_route/regenerate.sh` uses, vs. the real, post-route
+`verilog_path` `klt place-and-route` produces) and
+`test_sequential_engine_real_pnr_mult8_register_preserving_transformation`
+(the `mult8` corpus design, added by issue #1353 to verify its own fix
+against a second design) — both via a real `openroad` binary and a real
+sky130 PDK install, issue #1313's acceptance criterion. Like
+`test_place_and_route.py`'s own live-`openroad` integration tests, both are
 `skipif`-guarded on `yosys`/`openroad`/a real sky130 PDK all being present,
-so it is silently skipped — not run — in this repo's ordinary `ci.yml`
+so they are silently skipped — not run — in this repo's ordinary `ci.yml`
 `test` job.
 
-> **Status: `xfail`, tracked by #1353 — no longer a false `"counterexample"`
-> (fixed by #1349), still not `"equivalent"`.** Re-verified live
-> (2026-08-23, `openroad/orfs:latest` + a real pinned volare `sky130A`
-> install, this repo's pinned Yosys `0.68+post`): the P&R transformation
-> *is* register-preserving (50 `sky130_fd_sc_hd__dfrtp_1` flops on both
-> sides), `equiv_induct` still leaves 159 of 1521 `$equiv` cells unproven
-> (name-mismatched internal wires OpenROAD's own resizer/repair-buffer
-> insertion and cloning legitimately renamed — not required for output
-> equivalence, but `equiv_make`'s name-based wire matching still creates
-> proof obligations for them), and stage 2's bounded SAT search still finds
-> a "violation" among those 159 cells. **Before #1349, that made this
-> command report a false `status: "counterexample"` about a genuinely
-> equivalent design — issue #1349 fixed exactly this: the same run now
-> re-plays that stage-2 trace through both netlists via `iverilog`/`vvp`,
-> finds it does not reproduce a diverging `done`/`result` output on any
-> replayed cycle (`confirmed_by_simulation: false`), and correctly reports
-> the honest `status: "inconclusive"` instead.** Closing the remaining gap
-> — making `equiv_induct`'s proof recipe itself converge on a netlist this
-> size, so the verdict is `"equivalent"` rather than merely "not proven
-> non-equivalent" — is tracked by issue #1353 (a wire-correspondence/miter-
-> construction change, not a reporting change); this canary's `xfail`
-> marker stays in place until it lands.
+> **Status (2026-08-24, issue #1353): both canaries report `"equivalent"`
+> against the real toolchain, and neither carries an `xfail` marker any
+> more.** Verified live on `openroad` 26Q3-1510-g6cb3f2b704
+> (`openroad/orfs:latest`), a real pinned volare `sky130A` install, and this
+> repo's pinned Yosys `0.67+post`:
+>
+> - The GCD P&R transformation *is* register-preserving (50
+>   `sky130_fd_sc_hd__dfrtp_1` flops on both sides).
+> - Stage 1's **first** pass leaves 93 of 1521 `$equiv` cells unproven (98
+>   without the engine's `opt -noff` normalization pass — a controlled A/B on
+>   one netlist pair). Every one of those 93 is a same-named *internal* wire
+>   OpenROAD's resizer/repair-buffer/cloning passes repurposed, not an output
+>   difference.
+> - Stage 1's cut-point refinement loop (see "Stage 1 cut-point refinement"
+>   above) blacklists exactly those 93 wires and re-runs: **1428 of 1428
+>   `$equiv` cells proven, `"Equivalence successfully proven!"`, one
+>   refinement pass, ~28 s total.** The reported verdict is `"equivalent"`,
+>   with an `equiv_cutpoint_refinement` info diagnostic and the blacklist
+>   itself kept at `artifacts.stage1_blacklist_path`.
+>
+> Historically this canary reported a false `status: "counterexample"` (fixed
+> by #1349, which replays the stage-2 trace through `iverilog`/`vvp` and
+> downgrades an unreproduced trace to `"inconclusive"`), then `"inconclusive"`
+> until #1353 closed the proof-strength gap.
+>
+> **Negative control, run the same way:** mutating a single cell in that same
+> real post-route netlist (`sky130_fd_sc_hd__nand2_1 _382_` →
+> `..._nor2_1`) does *not* converge — refinement exhausts its three passes
+> and the run reports `"inconclusive"`, never `"equivalent"`. Refinement
+> drops only internal wires, so a real functional break cannot be laundered
+> into a pass.
+>
+> `mult8` also reports `"equivalent"`, though it does not itself exercise the
+> refinement loop: OpenROAD's route-stage output for that design is
+> instance-for-instance identical to its pre-route netlist (same 260 cells,
+> same instance names), so it already converged before #1353. It is kept as a
+> second-design regression guard over the whole `synthesize` →
+> `place-and-route` → `equiv` path.
 
 [`.github/workflows/equiv-canary.yml`](../../.github/workflows/equiv-canary.yml)
 (issue #1324, Epic #707 Phase 3) gives that canary a repeatable, `CI`-runnable

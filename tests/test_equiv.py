@@ -1117,6 +1117,56 @@ module top(input clk, input rst, input d, output reg q);
 endmodule
 """
 
+# Issue #1353: a *miniature* of the real post-route failure mode -- two
+# genuinely equivalent designs that share an internal wire *name* (`n1`)
+# carrying opposite polarity on the two sides, exactly as OpenROAD's
+# resizing/repair/cloning passes leave same-named internal wires meaning
+# different things. `equiv_make` pairs `n1` by name, that pairing can never
+# be proven, and (because a `$equiv` cell is also a cut point) the false
+# pairing poisons the `y`/`z` output obligations downstream of it too. The
+# `(* keep *)` attributes stop Yosys's own `opt_clean` from folding the
+# wires away before `equiv_make` runs, which is what makes this small RTL
+# stand in for a real gate-level netlist's named cell-pin wires.
+_SEQ_GOLD_RENAMED_INTERNAL_RTL = """\
+module top(input clk, input rst, input a, input b, input c,
+           output reg y, output reg z);
+  (* keep *) wire n1;
+  assign n1 = a & b;
+  always @(posedge clk) begin
+    if (rst) begin y <= 1'b0; z <= 1'b0; end
+    else begin y <= n1 | c; z <= n1 & c; end
+  end
+endmodule
+"""
+
+_SEQ_GATE_RENAMED_INTERNAL_RTL = """\
+module top(input clk, input rst, input a, input b, input c,
+           output reg y, output reg z);
+  (* keep *) wire n1;
+  assign n1 = ~(a & b);
+  always @(posedge clk) begin
+    if (rst) begin y <= 1'b0; z <= 1'b0; end
+    else begin y <= (~n1) | c; z <= (~n1) & c; end
+  end
+endmodule
+"""
+
+# Issue #1353 negative control: same same-named-internal-wire shape as the
+# pair above, but `z` is genuinely broken (`|` where the gold has `&`). Cut-
+# point refinement must NOT launder this into `"equivalent"` -- the `z`
+# obligation is a top-level port, so it is never blacklisted.
+_SEQ_GATE_RENAMED_INTERNAL_BROKEN_RTL = """\
+module top(input clk, input rst, input a, input b, input c,
+           output reg y, output reg z);
+  (* keep *) wire n1;
+  assign n1 = ~(a & b);
+  always @(posedge clk) begin
+    if (rst) begin y <= 1'b0; z <= 1'b0; end
+    else begin y <= (~n1) | c; z <= (~n1) | c; end
+  end
+endmodule
+"""
+
 # Seeded-broken: `d` is inverted before the register -- a real "polarity
 # flip" bug class, not a synthetic/arbitrary corruption. Same register set
 # as `_SEQ_GOLD_SIMPLE_DFF_RTL`, so this is exactly the shape register
@@ -1635,6 +1685,203 @@ def test_sequential_engine_custom_induction_depth(tmp_path):
     assert report["induction_depth"] == 2
 
 
+def test_sequential_engine_scripts_include_extra_opt_pass(tmp_path):
+    """Issue #1353: both `"yosys-sequential"` script stages run a real
+    `opt -noff` pass (beyond the plain dead-code-only `opt_clean` both
+    engines already ran) after `flatten` and before `equiv_make`, so
+    OpenROAD-inserted identity buffer/repair chains collapse before
+    `equiv_make`'s name-based wire matching runs (see
+    `_side_prep_lines`'s own `extra_opt` docstring for the full
+    rationale). No subprocess/real `yosys` needed -- this only inspects
+    the generated `.ys` script text, mirroring this module's other
+    pure-generation unit tests."""
+    gold = _side([_write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)])
+    gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
+
+    stage1_path = str(tmp_path / "stage1.ys")
+    equiv._write_sequential_stage1_script(
+        script_path=stage1_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        netlist_path=str(tmp_path / "netlist.v"),
+        induction_depth=4,
+    )
+    stage1_lines = Path(stage1_path).read_text(encoding="utf-8").splitlines()
+    assert stage1_lines.count("opt -noff") == 2  # once per gold/gate side
+    # Must run after `flatten` (the normalization this pass strengthens)
+    # and before `equiv_make` (the pass it exists to help converge).
+    flatten_idx = stage1_lines.index("flatten")
+    opt_idx = stage1_lines.index("opt -noff")
+    equiv_make_idx = next(
+        i for i, line in enumerate(stage1_lines) if line.startswith("equiv_make ")
+    )
+    assert flatten_idx < opt_idx < equiv_make_idx
+
+    stage2_path = str(tmp_path / "stage2.ys")
+    equiv._write_sequential_stage2_script(
+        script_path=stage2_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        ports={"clk": "input", "d": "input", "q": "output"},
+        bmc_depth=4,
+        sat_timeout_s=60,
+    )
+    stage2_lines = Path(stage2_path).read_text(encoding="utf-8").splitlines()
+    assert stage2_lines.count("opt -noff") == 2
+
+    # The combinational engine's own script is deliberately unchanged --
+    # `extra_opt` defaults to `False` and only the sequential engine's
+    # writers pass `extra_opt=True` (see `_write_script` -- unaffected by
+    # this issue's fix, zero regression risk to its own already-shipped
+    # miter/SAT recipe).
+    comb_path = str(tmp_path / "comb.ys")
+    equiv._write_script(
+        script_path=comb_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        netlist_path=str(tmp_path / "comb_netlist.v"),
+        sat_timeout_s=60,
+    )
+    comb_lines = Path(comb_path).read_text(encoding="utf-8").splitlines()
+    assert "opt -noff" not in comb_lines
+
+
+def test_sequential_stage1_script_emits_blacklist_when_given(tmp_path):
+    """Issue #1353: stage 1's cut-point refinement loop re-runs the same
+    script with an `equiv_make -blacklist <file>` flag; without a blacklist
+    the emitted line stays byte-identical to what shipped before. No
+    subprocess needed -- this inspects the generated `.ys` text only."""
+    gold = _side([_write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)])
+    gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
+
+    plain_path = str(tmp_path / "plain.ys")
+    equiv._write_sequential_stage1_script(
+        script_path=plain_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        netlist_path=str(tmp_path / "netlist.v"),
+        induction_depth=4,
+    )
+    plain_lines = Path(plain_path).read_text(encoding="utf-8").splitlines()
+    assert "equiv_make gold gate equiv" in plain_lines
+
+    blacklist_path = str(tmp_path / "bl.txt")
+    refined_path = str(tmp_path / "refined.ys")
+    equiv._write_sequential_stage1_script(
+        script_path=refined_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        netlist_path=str(tmp_path / "netlist.v"),
+        induction_depth=4,
+        blacklist_path=blacklist_path,
+    )
+    refined_lines = Path(refined_path).read_text(encoding="utf-8").splitlines()
+    assert f"equiv_make -blacklist {blacklist_path} gold gate equiv" in refined_lines
+    assert "equiv_make gold gate equiv" not in refined_lines
+
+
+def test_parse_unproven_equiv_signals_strips_gold_gate_suffixes():
+    """Issue #1353: the refinement loop's input parser, against real
+    `equiv_status` output shapes (copied verbatim from a live GCD
+    pre/post-route run's own `equiv_seq_stage1.log`)."""
+    stdout = "\n".join(
+        [
+            "24. Executing EQUIV_STATUS pass.",
+            "Found 1521 $equiv cells in equiv:",
+            "  Of those cells 1428 are proven and 93 are unproven.",
+            "  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$10212: "
+            "\\_560_.B_gold \\_560_.B_gate",
+            "  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$29: "
+            "\\result_gold [3] \\result_gate [3]",
+            "Found a total of 93 unproven $equiv cells.",
+        ]
+    )
+
+    names = equiv._parse_unproven_equiv_signals(stdout)
+
+    # Bit-select tokens (`[3]`) carry no `_gold`/`_gate` suffix and are
+    # dropped; the multi-bit port itself is still reported by its base name
+    # so the caller can recognise (and refuse to blacklist) it.
+    assert names == {"_560_.B", "result"}
+    assert equiv._parse_unproven_equiv_signals("nothing to see here") == set()
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_refines_false_internal_cutpoints(tmp_path):
+    """Issue #1353 (the bug this issue is about, in miniature): two
+    genuinely equivalent designs that share an internal wire *name*
+    carrying opposite polarity -- the shape OpenROAD's resizing/repair/
+    cloning passes produce on a real post-route netlist.
+
+    Before stage 1's cut-point refinement loop, `equiv_make`'s name-based
+    pairing made `n1` an unprovable obligation *and* a false cut point,
+    leaving even the `y`/`z` output obligations unproven (verified directly
+    against Yosys: 3 unproven `$equiv` cells, 0 proven) so the engine could
+    not report `"equivalent"`. With refinement, `n1` is dropped from the
+    pairing and both output obligations are proven from the two designs'
+    own real logic."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_RENAMED_INTERNAL_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_RENAMED_INTERNAL_RTL)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent", report["diagnostics"]
+    assert report["counterexample"] is None
+
+    # The weakened obligation set is reported, not silently applied.
+    codes = [d["code"] for d in report["diagnostics"]]
+    assert codes == ["equiv_cutpoint_refinement"]
+    assert all(d["severity"] == "info" for d in report["diagnostics"])
+
+    blacklist_path = report["artifacts"]["stage1_blacklist_path"]
+    assert blacklist_path is not None and os.path.isfile(blacklist_path)
+    blacklisted = Path(blacklist_path).read_text(encoding="utf-8").split()
+    assert "n1" in blacklisted
+    # Top-level ports are never dropped -- they are the obligations that
+    # define equivalence.
+    assert not {"clk", "rst", "a", "b", "c", "y", "z"} & set(blacklisted)
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_refinement_cannot_launder_broken_gate(tmp_path):
+    """Issue #1353's soundness guard: the same same-named-internal-wire
+    shape as the test above, but with a genuinely broken `z` output. Cut-
+    point refinement drops only internal wires, never a top-level port, so
+    the broken output obligation survives and the run must not report
+    `"equivalent"`."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_RENAMED_INTERNAL_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_RENAMED_INTERNAL_BROKEN_RTL)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] != "equivalent"
+    blacklist_path = report["artifacts"]["stage1_blacklist_path"]
+    if blacklist_path is not None:
+        blacklisted = Path(blacklist_path).read_text(encoding="utf-8").split()
+        assert "z" not in blacklisted
+
+
 @pytest.mark.parametrize("bad_depth", [0, -1, "4", 1.5, True])
 def test_sequential_engine_bad_induction_depth_is_error(tmp_path, bad_depth):
     _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
@@ -1747,40 +1994,23 @@ _REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
     _REAL_SKY130_PNR_VARIANT is None,
     reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
 )
-@pytest.mark.xfail(
-    reason=(
-        "issue #1323 ran this for real (openroad 26Q3-1499-g46ab99414e via "
-        "Docker + a real volare sky130A install) and found the "
-        "yosys-sequential engine reported 'counterexample', not "
-        "'equivalent' -- OpenROAD's real fanout/hold-repair buffer "
-        "insertion (e.g. sky130_fd_sc_hd__buf_4 'place<N>' instances) "
-        "renames intermediate nets, defeating equiv_make's literal "
-        "wire-name correspondence (159 'Unproven $equiv' cells). Issue "
-        "#1349 fixed the *reporting* half of this: as of #1349, that "
-        "unreproduced counterexample is correctly reported 'inconclusive' "
-        "(confirmed_by_simulation: false), never the unsound "
-        "'counterexample' verdict it used to be -- re-verified live against "
-        "the same real toolchain, 2026-08-23. The underlying *proof-"
-        "strength* gap (equiv_induct not converging on this netlist's "
-        "159 name-mismatched internal $equiv cells) is unfixed and tracked "
-        "by issue #1353; remove this xfail once that lands (pytest will "
-        "then report XPASS as the signal)."
-    ),
-    strict=False,
-)
 def test_sequential_engine_real_pnr_register_preserving_transformation(
     tmp_path, monkeypatch
 ):
     """`klt synthesize`'s pre-P&R netlist vs. `klt place-and-route`'s real,
     post-route `verilog_path` (issue #996) on the GCD worked example.
 
-    As of issue #1349 (2026-08-23), this is confirmed to run for real
-    against a genuine `openroad`/sky130A toolchain and correctly reports
-    `"inconclusive"` (not the false `"counterexample"` #1349 fixed), but
-    does NOT yet reach `"equivalent"` -- see the `xfail` reason above and
-    issue #1353 for the full root-cause evidence. The intent (once #1353
-    lands) is still to prove `"equivalent"`, the direct real-P&R validation
-    this issue's own acceptance criteria requires."""
+    Carried an `xfail` marker from issue #1323 until issue #1353: the
+    50-flop post-route netlist left 93 `$equiv` cells unproven (98 before
+    this engine's `opt -noff` normalization pass), all of them same-named
+    *internal* wires OpenROAD's resizing/repair/cloning legitimately
+    repurposed, so the engine reported `"inconclusive"`. #1353's stage-1
+    cut-point refinement loop drops exactly those wrongly-paired internal
+    wires (never a top-level port) and the run converges to `"equivalent"`
+    in a single refinement pass -- verified live 2026-08-24 against
+    `openroad` 26Q3-1510-g6cb3f2b704 (`openroad/orfs:latest`), a real
+    pinned volare sky130A install, and this repo's pinned Yosys
+    `0.67+post`, so the marker is gone and this is now a genuine pass."""
     root, variant = _REAL_SKY130_PNR_VARIANT
     cell_library, corner = "sky130_fd_sc_hd", "tt_025C_1v80"
     monkeypatch.setenv("PDK_ROOT", root)
@@ -1877,6 +2107,127 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
     # verbatim for the PR's evidence trail.
     print(
         "\n=== issue #1323 real pre/post-route equiv_report ===\n"
+        + json.dumps(equiv_report, indent=2)
+    )
+
+    assert equiv_report["status"] == "equivalent", equiv_report["diagnostics"]
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    shutil.which("openroad") is None, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_sequential_engine_real_pnr_mult8_register_preserving_transformation(
+    tmp_path, monkeypatch
+):
+    """Issue #1353's acceptance criterion 3: run the engine against a
+    *second* `tests/corpus/place_and_route` design, not just GCD --
+    `mult8` (`tests/corpus/statime/mult8.v`), the same source
+    `tests/corpus/place_and_route/regenerate.sh` uses for its own `mult8`
+    fixture.
+
+    **What this test does and does not establish, stated plainly.** `mult8`
+    is purely combinational (no clock, no registers -- "No handshake, no
+    clock: `p` is a pure combinational function of `a`/`b`" per `mult8.v`'s
+    own header comment; `regenerate.sh` names an *output* port `p[15]` as
+    `DESIGN_CLOCK_PORT` purely to satisfy `klt place-and-route`'s
+    `constraints.clock_port` requirement, not because the design has real
+    sequential state). Measured live on 2026-08-24, OpenROAD's route-stage
+    output for this design is *instance-for-instance identical* to the
+    pre-route netlist (same 260 cells, same instance names) -- so this pair
+    already converged before #1353 and does not itself exercise the
+    cut-point refinement loop. It is kept as a genuine second-design
+    regression guard: it proves the whole `klt synthesize` ->
+    `klt place-and-route` -> `klt equiv --engine yosys-sequential` path
+    still reports `"equivalent"` on a second real, independently-P&R'd
+    corpus design, and would catch a refinement change that broke the
+    already-converging case. The design that actually exercises the fix is
+    the GCD canary above."""
+    root, variant = _REAL_SKY130_PNR_VARIANT
+    cell_library, corner = "sky130_fd_sc_hd", "tt_025C_1v80"
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.place_and_route import run_place_and_route
+
+    mult8_rtl_path = (
+        Path(__file__).resolve().parents[1] / "tests" / "corpus" / "statime" / "mult8.v"
+    )
+    assert mult8_rtl_path.is_file(), f"tracked mult8 RTL missing: {mult8_rtl_path}"
+
+    synth_dir = tmp_path / "synth"
+    synth_dir.mkdir()
+    _write(synth_dir / "mult8.v", mult8_rtl_path.read_text(encoding="utf-8"))
+    synth_request = _write_request(
+        synth_dir / "synth.json",
+        {
+            "sources": ["mult8.v"],
+            "hdl_toplevel": "mult8",
+            "pdk": {"cell_library": cell_library, "corner": corner},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+    assert synth_report["status"] == "ok"
+
+    pnr_dir = tmp_path / "pnr"
+    pnr_dir.mkdir()
+    # Mirrors `tests/corpus/place_and_route/regenerate.sh`'s own `mult8`
+    # request shape (`DESIGN_CLOCK_PORT[mult8]="p[15]"`,
+    # `DESIGN_CLOCK_PERIOD_NS[mult8]="6.0"`).
+    pnr_request = _write_request(
+        pnr_dir / "pnr.json",
+        {
+            "engine": "openroad",
+            "netlist": synth_report["netlist_path"],
+            "hdl_toplevel": "mult8",
+            "pdk": {"cell_library": cell_library, "corner": corner},
+            "floorplan": {
+                "method": "utilization",
+                "utilization_pct": 38,
+                "aspect_ratio": 1.0,
+                "core_margin_um": 2.0,
+                "site": "unithd",
+            },
+            "io": {"layer_h": "met3", "layer_v": "met2"},
+            "constraints": {"clock_port": "p[15]", "clock_period_ns": 6.0},
+            "seed": 1,
+            "target_stage": "route",
+        },
+    )
+    pnr_report = run_place_and_route(pnr_request)
+    assert pnr_report["status"] == "ok"
+    assert pnr_report["verilog_path"] is not None
+
+    liberty_path, _corner, _pdk_info = synthesize_module._resolve_liberty(
+        cell_library, corner
+    )
+
+    equiv_dir = tmp_path / "equiv"
+    equiv_dir.mkdir()
+    equiv_request = _write_request(
+        equiv_dir / "equiv.json",
+        {
+            "gold": _side(
+                [synth_report["netlist_path"]], top="mult8", liberty=liberty_path
+            ),
+            "gate": _side(
+                [pnr_report["verilog_path"]], top="mult8", liberty=liberty_path
+            ),
+            "engine": "yosys-sequential",
+            "timeout_s": 300,
+        },
+    )
+    equiv_report = run_equiv(equiv_request)
+
+    # Evidence for issue #1353's own acceptance criterion 3: print the full
+    # report (status/artifacts/diagnostics) so a `-s` run captures it
+    # verbatim for the PR's evidence trail.
+    print(
+        "\n=== issue #1353 real pre/post-route mult8 equiv_report ===\n"
         + json.dumps(equiv_report, indent=2)
     )
 

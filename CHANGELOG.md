@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt equiv --engine yosys-sequential` now converges on real post-route
+  netlists (issue #1353). `equiv_make` pairs `gold`/`gate` wires by name, and
+  OpenROAD's resizing/repair-buffer/cloning passes legitimately leave
+  same-named *internal* wires meaning different things; each such pair became
+  an unprovable `$equiv` obligation *and* a false cut point poisoning every
+  proof downstream of it, so a real 50-flop GCD pre/post-route pair reported
+  `"inconclusive"` (and, before #1349, a false `"counterexample"`). Stage 1
+  now runs as a bounded counterexample-guided refinement loop: the wires
+  `equiv_status` reports unproven are fed back through `equiv_make
+  -blacklist` -- **never a top-level port** -- and the recipe re-runs, up to
+  three passes sharing the one `timeout_s` budget. Blacklisting only removes
+  cut points (assumptions), so this is strictly stronger than not doing it,
+  and the output obligations that define equivalence are always retained.
+  Measured live against `openroad` 26Q3-1510-g6cb3f2b704 + a pinned volare
+  sky130A + Yosys `0.67+post`: the GCD canary goes from 93 unproven cells /
+  `"inconclusive"` to 1428/1428 proven / `"equivalent"` in one refinement
+  pass (~28 s); a single-cell mutation of the same post-route netlist still
+  does *not* converge. The engine's script also gained an `opt -noff`
+  normalization pass (98 -> 93 unproven before refinement; `-noff` keeps
+  every flip-flop untouched). Additive JSON: `artifacts.stage1_blacklist_path`
+  (the auditable list of dropped pairings, `null` when unused) and an
+  `equiv_cutpoint_refinement` info diagnostic. The GCD real-P&R canary test
+  and `.github/workflows/equiv-canary.yml` no longer carry an `xfail`.
 - Ran the full `klt yield-campaign` -> `klt yield-sensitivity` -> yield-aware
   `klt size` pipeline end to end against the PLL charge-pump canary (issue
   #1327, epic #705 Phase 2), validating that `klt size`'s design-centering
