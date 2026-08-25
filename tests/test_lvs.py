@@ -7400,6 +7400,57 @@ def test_netgen_engine_real_binary_against_sg13g2_shaped_install(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# netgen engine against an SG13CMOS5L-shaped install (issue #1399)
+#
+# Mirrors `test_netgen_engine_real_binary_against_sg13g2_shaped_install`
+# directly above, one PDK variant over. SG13CMOS5L is installed the
+# identical flat, single-PDK way SG13G2 is (verified against a real
+# fleet-host install, `~/share/pdk/ihp-sg13cmos5l`, commit `607e18d`,
+# 2026-08-25) and its own `netgen_setup_file` resolution needs no change --
+# `libs.tech/netgen/ihp-sg13cmos5l_setup.tcl` matches the same
+# `<variant>_setup.tcl` convention SG13G2 uses (confirmed against a real
+# fetched install; see `test_flat_layout_netgen_setup_file_matches_ihp_
+# sg13cmos5l_naming` in `tests/test_pdk.py`). Real-binary-gated like the
+# SG13G2 test above: skips cleanly without a local `netgen`, runs for real
+# wherever `netgen` is installed.
+# --------------------------------------------------------------------------- #
+
+
+@_SKIP_NO_NETGEN
+def test_netgen_engine_real_binary_against_sg13cmos5l_shaped_install(tmp_path):
+    pdk_root = tmp_path / "ihp-sg13cmos5l"
+    (pdk_root / "libs.tech" / "netgen").mkdir(parents=True)
+    # A trivial, syntactically-valid Tcl script standing in for the real
+    # `ihp-sg13cmos5l_setup.tcl` -- see the SG13G2 test above for why a
+    # comment-only script is a legitimate netgen setup, not a stub.
+    (pdk_root / "libs.tech" / "netgen" / "ihp-sg13cmos5l_setup.tcl").write_text(
+        "# minimal SG13CMOS5L setup stand-in (test fixture, issue #1399)\n"
+    )
+
+    setup_path = pdk.netgen_setup_file(root=str(pdk_root))
+    assert setup_path == str(
+        pdk_root / "libs.tech" / "netgen" / "ihp-sg13cmos5l_setup.tcl"
+    )
+
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "netgen",
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"netgen_setup": setup_path},
+        },
+    )
+
+    report = run_lvs(request_path)
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+
+
+# --------------------------------------------------------------------------- #
 # `klt lvs --check` / `--rerun` (issue #1106): verify a committed report
 # --------------------------------------------------------------------------- #
 

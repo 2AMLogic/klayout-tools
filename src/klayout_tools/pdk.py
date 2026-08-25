@@ -417,12 +417,24 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     ``run_drc.py --macro_gen`` ahead of time) can still reach it via `klt
     drc`'s ``--deck-file`` override, which bypasses this resolver entirely.
 
+    A single-PDK flat install (:func:`_probe_flat_variant`, e.g. IHP-Open-
+    PDK's SG13G2/SG13CMOS5L) nests its ``drc/`` one directory deeper, at
+    ``libs.tech/klayout/tech/drc/`` rather than ``libs.tech/klayout/drc/``
+    directly (verified against a real fetched ``ihp-sg13g2``/
+    ``ihp-sg13cmos5l`` install, issue #1399) -- both still ship a single
+    ready-to-run, variant-named file at that nested location (e.g.
+    ``ihp-sg13cmos5l.drc``). This function tries the open_pdks-shaped
+    ``drc/`` first and falls back to the nested ``tech/drc/`` only when the
+    former does not exist, so a real open_pdks install (which always has the
+    former) never pays for the extra probe and a flat IHP-shaped install
+    resolves without a PDK-name special case.
+
     Returns the absolute path to the resolved script, or ``None`` when the
-    variant ships no ``klayout`` asset directory at all, no ``drc/``
-    subdirectory, or that directory contains neither expected filename --
-    never guessed or fabricated, matching this module's existing
-    ``None``-means-absent convention (see :func:`_asset_dirs`/
-    :func:`netgen_setup_file`).
+    variant ships no ``klayout`` asset directory at all, neither the ``drc/``
+    nor the nested ``tech/drc/`` subdirectory, or the resolved directory
+    contains neither expected filename -- never guessed or fabricated,
+    matching this module's existing ``None``-means-absent convention (see
+    :func:`_asset_dirs`/:func:`netgen_setup_file`).
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all
     (the same condition :func:`find_pdk` raises for).
@@ -434,7 +446,10 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
 
     drc_dir = os.path.join(klayout_dir, "drc")
     if not os.path.isdir(drc_dir):
-        return None
+        nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
+        if not os.path.isdir(nested_drc_dir):
+            return None
+        drc_dir = nested_drc_dir
 
     for name in (f"{info['variant']}.lydrc", f"{info['variant']}.drc"):
         candidate = os.path.join(drc_dir, name)
@@ -482,12 +497,27 @@ def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     it structurally (same "single file present" check as sky130), a future
     caller is free to attempt it.
 
+    A single-PDK flat install (:func:`_probe_flat_variant`, e.g. IHP-Open-
+    PDK's SG13G2/SG13CMOS5L) nests its ``lvs/`` one directory deeper, at
+    ``libs.tech/klayout/tech/lvs/`` rather than ``libs.tech/klayout/lvs/``
+    directly -- the same nesting :func:`drc_deck_file` falls back to for its
+    own ``drc/`` (verified against a real fetched ``ihp-sg13g2``/
+    ``ihp-sg13cmos5l`` install, issue #1399). It also drops the variant's
+    vendor-prefix segment entirely rather than just its trailing suite
+    letter: a real ``ihp-sg13cmos5l`` install's deck is named
+    ``sg13cmos5l.lvs`` (bare process name, no ``ihp-`` prefix), and
+    ``ihp-sg13g2`` ships ``sg13g2.lvs`` the same way. Generalized as "also
+    try the variant name with its leading, hyphen-delimited vendor-prefix
+    segment stripped" -- not a literal ``ihp-sg13cmos5l`` special case, so
+    any future vendor-prefixed variant name (``vendor-processname``)
+    benefits the same way.
+
     Returns the absolute path to the resolved script, or ``None`` when the
-    variant ships no ``klayout`` asset directory at all, no ``lvs/``
-    subdirectory, or that directory contains neither expected filename --
-    never guessed or fabricated, matching this module's existing
-    ``None``-means-absent convention (see :func:`_asset_dirs`/
-    :func:`drc_deck_file`).
+    variant ships no ``klayout`` asset directory at all, neither the
+    ``lvs/`` nor the nested ``tech/lvs/`` subdirectory, or the resolved
+    directory contains none of the expected filenames -- never guessed or
+    fabricated, matching this module's existing ``None``-means-absent
+    convention (see :func:`_asset_dirs`/:func:`drc_deck_file`).
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all
     (the same condition :func:`find_pdk` raises for).
@@ -499,7 +529,10 @@ def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | 
 
     lvs_dir = os.path.join(klayout_dir, "lvs")
     if not os.path.isdir(lvs_dir):
-        return None
+        nested_lvs_dir = os.path.join(klayout_dir, "tech", "lvs")
+        if not os.path.isdir(nested_lvs_dir):
+            return None
+        lvs_dir = nested_lvs_dir
 
     resolved_variant = info["variant"]
     # Strip a trailing single uppercase PDK-suite designator (sky130A ->
@@ -514,7 +547,15 @@ def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     if len(family) > 1 and family[-1].isupper():
         family = family[:-1]
 
-    for name in (f"{resolved_variant}.lvs", f"{family}.lvs"):
+    candidates = [f"{resolved_variant}.lvs", f"{family}.lvs"]
+    # Also drop a leading, hyphen-delimited vendor-prefix segment
+    # (`ihp-sg13cmos5l` -> `sg13cmos5l`) -- a distinct mismatch shape from
+    # the trailing-suite-letter case above (a missing prefix, not a suffix
+    # letter), verified against a real IHP-Open-PDK install (issue #1399).
+    if "-" in resolved_variant:
+        candidates.append(f"{resolved_variant.rsplit('-', 1)[-1]}.lvs")
+
+    for name in candidates:
         candidate = os.path.join(lvs_dir, name)
         if os.path.isfile(candidate):
             return candidate
