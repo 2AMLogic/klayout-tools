@@ -1,6 +1,11 @@
 {
   "version": "2",
   "offlineMode": false,
+  "autonomous": {
+    "workFinder": {
+      "extraSkipLabels": ["loom:epic"]
+    }
+  },
   "forge": {
     "type": "auto",
     "gitea": {
