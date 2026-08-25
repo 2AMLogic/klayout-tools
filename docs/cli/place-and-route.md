@@ -1239,6 +1239,30 @@ live re-measurement above.
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
 | `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
 
+### `io.layer_h`/`io.layer_v` and downstream `klt extract`/`klt lvs` (#1385)
+
+`io.layer_h`/`io.layer_v` are passed straight through to OpenROAD's
+`place_pins -hor_layers`/`-ver_layers` (and to `set_wire_rc -layer`) — this
+command does not itself validate them against anything beyond "non-empty
+string", and there is no cross-check here against which GDS layers a
+downstream `klt extract --deck <name>` run will actually scan for pin-name
+text. Choosing a layer the target deck does not treat as a label layer (e.g.
+sky130's own `metal_labels` covers `li1`–`met5`; see
+[`decks/sky130.py`](../../src/klayout_tools/decks/sky130.py)) produces a
+merged GDS with **zero** usable top-level pin labels for `klt extract`/`klt
+lvs` to work with — this command does not currently warn about that
+up front. `klt extract` itself now surfaces the failure once it actually
+happens (a `warnings[]` entry naming the deck's label layers when zero
+pin-name text is found anywhere in the merged layout, and a second,
+cause-agnostic entry whenever zero top-level pins end up promoted for any
+reason) — see [`docs/cli/extract.md`](extract.md)'s "DEF→GDS-merged (`klt
+place-and-route`) layouts" section for the full writeup, including why
+`--top-cell-pins` cannot fix a DEF-merged layout's promoted-pin set on its
+own. Until this command validates `io.layer_h`/`io.layer_v` itself, choose a
+layer known to be within the target `--deck`'s own label-layer coverage
+(cross-check with `klt layers` against the merged GDS after the fact if
+unsure).
+
 ## Response
 
 ```json

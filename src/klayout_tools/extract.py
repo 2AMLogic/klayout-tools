@@ -717,6 +717,19 @@ def run_extract(
     demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
     kept internal.
 
+    Two additional cause-agnostic ``warnings`` entries (issue #1385) fire
+    independent of any flag above: one when the layout carries zero text on
+    any of ``deck``'s own label layers anywhere in the cell tree (no net can
+    be named at all -- the observed real-world trigger is a ``klt
+    place-and-route`` request whose ``io.layer_h``/``io.layer_v`` choice
+    lands on a GDS layer ``deck`` never scans for pin labels), and one after
+    every promotion/demotion pass above has run, when the top circuit ends
+    up with zero top-level pins regardless of cause. Both exist because
+    ``klt lvs``'s ``NetlistComparer`` has no net/device anchor to seed
+    correspondence with zero top-level pins, and reports a full mismatch
+    with no hint the root cause is upstream pin promotion rather than device
+    extraction.
+
     ``apply_resistor_fixed_offset`` (issue #559/#585, exposed on the CLI as
     ``klt extract --defer-resistor-fixed-offset`` by issue #588): when
     ``True`` (the default, the behavior every existing caller and every
@@ -3505,7 +3518,15 @@ def _exclude_capacitor_top_via_overlap(
     bottom plate keeps the rest of its footprint in the generic connectivity
     graph, and any *other* via shape drawn on the same physical via layer
     elsewhere in the layout -- ordinary routing unrelated to this capacitor
-    -- is left untouched.
+    -- is left untouched. That last guarantee requires narrowing
+    ``bottom_region`` to ``interacting(top_region)`` before intersecting it
+    with the via footprint (issue #1388): for a deck with
+    ``bottom_plate_oversize_um == 0`` (e.g. sky130's MiM stacks),
+    :func:`_capacitor_plate_regions` hands back the bottom conductor's
+    *entire* drawn region on that metal, not just the part under this
+    capacitor's own top plate, so without the narrowing a single drawn
+    capacitor would exclude every via on the shared via layer chip-wide --
+    including ordinary routing vias nowhere near a capacitor.
 
     Returns a new ``vias`` list (the input list/regions are not mutated); a
     deck with no capacitor declaring ``top_plate_via``, or whose declared
@@ -3533,31 +3554,33 @@ def _exclude_capacitor_top_via_overlap(
         top_region, bottom_region = _capacitor_plate_regions(
             layout, top_cell, capacitor
         )
-        # Same "no PDK cap marker drawn anywhere on this layout" guard the
-        # main capacitor-recognition loop below applies before registering a
-        # device (issue #775 regression finding): for a deck whose
-        # `bottom_plate` is *not* clipped to the top plate's own footprint
-        # (`bottom_plate_oversize_um == 0`, e.g. sky130's MiM stacks --
-        # `_capacitor_plate_regions`'s zero-oversize branch returns the
-        # bottom conductor's *entire* drawn region, unscoped by whether any
-        # top-plate mark exists at all), `bottom_region` stays non-empty even
-        # when this capacitor's `top_plate` marker is never drawn on the
-        # layout -- the overwhelmingly common case for any digital/macro
-        # design that draws ordinary routing on the declared `bottom_plate`
-        # metal but no MiM cap. Without this check, `top_via_region` (every
-        # shape on the declared `top_plate_via` layer, e.g. sky130's real
-        # `via3`/`via4` routing vias used throughout ordinary signal
-        # routing) intersected with that unscoped, chip-wide `bottom_region`
-        # excludes essentially every legitimate via on that layer from the
-        # deck's generic `vias[]` connectivity -- a false disconnect across
-        # the whole design, not the narrow false-short exclusion this
-        # function exists to apply. gf180mcu's stack never hit this because
-        # its nonzero `bottom_plate_oversize_um` branch already derives
-        # `bottom_region` from `interacting(top_region)`, which is itself
-        # empty whenever `top_region` is.
-        if top_region.is_empty() or bottom_region.is_empty():
+        # For a deck whose `bottom_plate` is *not* clipped to the top
+        # plate's own footprint (`bottom_plate_oversize_um == 0`, e.g.
+        # sky130's MiM stacks), `_capacitor_plate_regions`'s zero-oversize
+        # branch returns the bottom conductor's *entire* drawn region --
+        # every shape on that metal layer anywhere in the layout, not just
+        # this capacitor's own plate. Narrowing to `interacting(top_region)`
+        # here (issue #1388) keeps only the bottom-plate shape(s) that
+        # actually sit under *this* capacitor's top-plate marker, the same
+        # scoping the nonzero-oversize branch above already applies when it
+        # derives `bottom_region` itself. This both restores the issue #775
+        # guard (an empty `top_region` -- no cap marker drawn anywhere --
+        # makes `scoped_bottom_region` empty too, so a digital/macro layout
+        # that only routes on the declared `bottom_plate` metal is
+        # untouched) *and* fixes the case #775 didn't cover: a layout that
+        # draws both a real capacitor and ordinary routing between the
+        # bottom-plate metal and the metal above elsewhere on the chip.
+        # Without this narrowing, `top_via_region` (every shape on the
+        # declared `top_plate_via` layer, e.g. sky130's real `via3`/`via4`
+        # routing vias used throughout ordinary signal routing) intersected
+        # against the unscoped, chip-wide `bottom_region` excludes every
+        # legitimate via on that layer from the deck's generic `vias[]`
+        # connectivity -- a false disconnect across the whole design, not
+        # the narrow false-short exclusion this function exists to apply.
+        scoped_bottom_region = bottom_region.interacting(top_region)
+        if top_region.is_empty() or scoped_bottom_region.is_empty():
             continue
-        overlap = top_via_region & bottom_region
+        overlap = top_via_region & scoped_bottom_region
         if overlap.is_empty():
             continue
         exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap
@@ -4927,6 +4950,23 @@ def _extract_netlist(
             layout, top_cell, capacitor
         )
 
+        # Dummy-device suppression (issue #295, extended to resistors and
+        # bipolars in #462, to diodes in #542, to capacitors here): count and
+        # cut whole recognised top-plate components covered by the deck's
+        # `dummy` marker. Counting (and cutting) is scoped to `top_region`
+        # alone -- the device-defining plate, mirroring the diode block's
+        # single-region precedent above -- rather than `bottom_region`, which
+        # a matched cap array typically shares across multiple devices (a
+        # dummy-covered bottom plate would still be a live node for its
+        # non-dummy neighbours). A top-plate component only partially covered
+        # survives as a clean geometric cut, matching the MOS/bipolar/diode
+        # behaviour.
+        if not dummy.is_empty():
+            for component in top_region.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            top_region = top_region - dummy
+
         if top_region.is_empty() or bottom_region.is_empty():
             # No PDK cap marker drawn anywhere on this layout -- the common
             # case. Registering/extracting an empty device would be a no-op
@@ -5296,6 +5336,33 @@ def _extract_netlist(
     )
     below_top_labels = all_label_strings - top_label_strings
 
+    # Issue #1385: a layout that carries zero text on every one of `deck`'s
+    # own label layers (`well_label`/`poly_label`/`metal_labels`) anywhere in
+    # the whole cell tree cannot name a single net -- `make_top_level_pins()`
+    # below promotes only *named* nets, so this silently zeroes out the
+    # entire top-level pin interface with no error of any kind (extraction
+    # itself succeeds; DRC against the same layout is unaffected). The
+    # observed real-world trigger is a `klt place-and-route` request whose
+    # `io.layer_h`/`io.layer_v` choice lands on a GDS layer/datatype `deck`
+    # does not scan for pin-name text at all -- but this check is
+    # cause-agnostic: it fires for any layout, from any source, that reaches
+    # this point with no recognisable pin-name text.
+    if not all_label_strings:
+        scanned = ", ".join(
+            f"{layer[0]}/{layer[1]}" for layer in label_layers if layer is not None
+        )
+        warnings.append(
+            "found 0 pin-name label(s) on any of this deck's label layers "
+            f"({scanned}) anywhere in '{top_cell.name}' -- no net can be "
+            "named, so 0 top-level pins will be promoted below and `klt "
+            "lvs` will have no net/device anchor to seed a match against a "
+            "reference netlist. Compare the layers `klt layers` reports for "
+            "this GDS against the list above; for a `klt place-and-route` "
+            "layout in particular, check that request.io.layer_h/layer_v "
+            "chose a layer this --deck actually scans for pin labels "
+            "(issue #1385)"
+        )
+
     netlist.make_top_level_pins()
     _promote_orphan_named_nets(netlist)
     demoted = _reconcile_top_pins(
@@ -5358,6 +5425,32 @@ def _extract_netlist(
                 f"layout.declared_pins) matched no promoted net in the "
                 f"layout: {joined}"
             )
+
+    # Issue #1385: the final, cause-agnostic check -- after every promotion
+    # and demotion pass above (`make_top_level_pins()`, `--top-cell-pins`,
+    # `--pins`/`declared_pins`) has run, does the top circuit have *any*
+    # top-level pin left at all? A zero-pin top circuit means `klt lvs`'s
+    # `NetlistComparer` has no net/device anchor to seed correspondence
+    # against a reference netlist and will report a full mismatch even when
+    # the two sides' device populations genuinely agree -- and that failure
+    # mode gives no hint the root cause is upstream in pin promotion, not
+    # device extraction. This subsumes (but does not replace) the
+    # label-layer-specific warning above: it also catches an
+    # otherwise-labelled layout that `--top-cell-pins`/`--pins` demoted down
+    # to nothing between them.
+    final_top_circuit = netlist.circuit_by_name(top_cell.name)
+    if final_top_circuit is not None and final_top_circuit.pin_count() == 0:
+        warnings.append(
+            f"0 top-level pins are promoted on '{top_cell.name}' after "
+            "extraction -- `klt lvs` has no net/device anchor to seed "
+            "correspondence against a reference netlist and will report a "
+            "full mismatch regardless of device-count agreement. If this "
+            "design genuinely has zero top-level pins by intent, this "
+            "warning can be ignored; otherwise see the pin-name-label "
+            "warning above (if present) or check that "
+            "--top-cell-pins/--pins did not demote every promoted pin "
+            "(issue #1385)"
+        )
 
     # `Netlist.purge()` (used by `_purge_preserving_named_nets` below) judges
     # a net "floating" -- and, transitively, a whole circuit/subcircuit chain

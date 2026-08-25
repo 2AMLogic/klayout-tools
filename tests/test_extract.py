@@ -1631,6 +1631,76 @@ def test_declared_pins_applied_after_top_cell_pins_only(tmp_path):
     assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
 
 
+# --------------------------------------------------------------------------- #
+# Zero-promoted-pins diagnostics (issue #1385)
+# --------------------------------------------------------------------------- #
+
+
+def test_zero_label_layer_text_warns(tmp_path):
+    """A layout with no text at all on any of the deck's label layers (the
+    real-world trigger: a `klt place-and-route` request whose
+    `io.layer_h`/`io.layer_v` choice lands on a GDS layer this deck never
+    scans for pin labels) gets a clear, cause-agnostic warning instead of
+    silently promoting zero top-level pins -- issue #1385, root cause 1."""
+    layout = _make_inverter_layout()
+    top = layout.top_cell()
+    # Strip every label this deck's sky130 label layers use in this fixture
+    # (li1.pin 67/5, nwell.pin 64/5, poly.pin 66/5) -- geometry (and
+    # therefore device recognition) is left untouched, only the naming text
+    # is removed.
+    for layer_spec in [(67, 5), (64, 5), (66, 5)]:
+        top.shapes(layout.layer(*layer_spec)).clear()
+    path = _write_gds(layout, tmp_path / "no_labels.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "no_labels.spice"))
+
+    warning = next(
+        (w for w in report["warnings"] if "found 0 pin-name label" in w), None
+    )
+    assert warning is not None
+    assert "io.layer_h/layer_v" in warning
+    # Device extraction itself is unaffected -- both transistors are still
+    # recognised even though nothing is named.
+    assert report["device_count"] == 2
+
+
+def test_zero_promoted_pins_warns_even_when_labels_present(tmp_path):
+    """The final, cause-agnostic zero-pins check fires even when the layout
+    *does* carry pin-name labels, if `--pins`/`declared_pins` demotes every
+    one of them -- distinct from (and not redundant with) the zero-label-text
+    warning above, since it also catches over-restriction downstream of a
+    perfectly normal, fully-labelled layout (issue #1385, root cause 3's
+    actionable diagnostic)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "declared.spice"),
+        declared_pins=frozenset(),  # demotes every promoted pin, incl. vsubs
+    )
+
+    assert not any("found 0 pin-name label" in w for w in report["warnings"])
+    warning = next(
+        (w for w in report["warnings"] if "0 top-level pins are promoted" in w),
+        None,
+    )
+    assert warning is not None
+    assert not any(n["pin"] for n in report["nets"])
+
+
+def test_pin_count_nonzero_does_not_warn(tmp_path):
+    """The ordinary, fully-labelled fixture (real pins promoted) never
+    triggers either new zero-pins warning -- a plain regression guard so a
+    normal `klt extract` run's `warnings[]` stays unchanged."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert not any("found 0 pin-name label" in w for w in report["warnings"])
+    assert not any("0 top-level pins are promoted" in w for w in report["warnings"])
+    assert any(n["pin"] for n in report["nets"])
+
+
 def test_cli_pins_flag_demotes_undeclared_label(tmp_path, capsys):
     """The `--pins` flag wires through the CLI: a top-cell-drawn label ("A")
     absent from the declared set is not promoted to a top-level pin, while
@@ -2515,6 +2585,45 @@ def _make_sky130_mim_layout(*, met4: bool = False) -> kdb.Layout:
     return layout
 
 
+def _make_sky130_mim_pair_layout(*, dummy_marker: str = "none") -> kdb.Layout:
+    """Two disjoint sky130 MiM caps (see `_make_sky130_mim_layout`) far
+    enough apart on `met3`/`capm` that each recognises as its own device.
+    ``dummy_marker`` controls a `_DUMMY_MARKER` (100/0) shape drawn over the
+    *second* cap's top plate only (issue #1387's dummy-suppression tests):
+
+    - ``"full"``    -- covers the whole 10x5um top plate; fully consumed by
+      the dummy subtraction, so that device is dropped and counted.
+    - ``"partial"`` -- covers only half the top plate; the remaining top
+      plate area survives the clean geometric cut, so the device is *not*
+      counted as dropped.
+    - ``"none"``    -- no marker shape at all (control).
+
+    The marker layer is the same one `_add_dummy_nfet`/`_add_dummy_marker`
+    use below -- drawn regardless of mode, so the geometry is identical
+    across dummy-configured and unconfigured decks; only `deck.dummy` being
+    set makes it have any effect."""
+    layout = _make_sky130_mim_layout()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Second cap, offset 30um in x so its bottom-plate conductor and top
+    # plate never touch the first cap's -- each recognises as its own
+    # device.
+    draw(70, 20, _box_um(30, -20, 70, 20))  # met3.drawing (bottom plate)
+    draw(89, 44, _box_um(30, 0, 40, 5))  # capm.drawing (top plate)
+
+    if dummy_marker == "full":
+        draw(*_DUMMY_MARKER, _box_um(29, -1, 41, 6))  # fully covers
+    elif dummy_marker == "partial":
+        draw(*_DUMMY_MARKER, _box_um(29, -1, 35, 6))  # half coverage
+    elif dummy_marker != "none":
+        raise ValueError(f"bad dummy_marker mode: {dummy_marker!r}")
+
+    return layout
+
+
 def test_gf180mcu_synthetic_mim_extracts_one_capacitor_device(tmp_path):
     """The synthetic marked FuseTop-over-Metal4 layout extracts exactly one
     `cap_mim_2f0_m4m5_noshield` device: `C = A * area_cap + P * perim_cap`
@@ -2824,6 +2933,106 @@ def test_exclude_capacitor_top_via_overlap_is_noop_with_no_top_plate_marker_draw
     assert excluded_via3.area() == pytest.approx(original_via3.area())
 
 
+def _make_sky130_mim_layout_with_far_away_routing() -> kdb.Layout:
+    """Issue #1388's minimal repro: a real, DRM-legal `capm`/met3 MiM cap
+    (co-extensive `met3.drawing`/`capm.drawing` boxes, `via3.drawing`
+    landing inside both, per `_make_sky130_mim_layout_with_drm_legal_top_via`)
+    plus a *disjoint*, far-away `met3.drawing` -> `via3.drawing` ->
+    `met4.drawing` routing stack that has nothing to do with the capacitor --
+    no `capm.drawing` drawn anywhere near it. `bottom_plate_oversize_um == 0`
+    for sky130's met3 MiM stack (unlike gf180mcu's virtual-bottom-plate
+    derivation), so `_capacitor_plate_regions`'s zero-oversize branch is the
+    one under test: before the #1388 fix, its unscoped `bottom_region` (the
+    *entire* drawn `met3.drawing`, both islands) makes
+    `_exclude_capacitor_top_via_overlap` cut the far-away `via3` too, even
+    though it is nowhere near the capacitor's own plates."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, _trans_um(x, y))
+        )
+
+    # The capacitor: met3 bottom plate, capm top-plate marker, and a via3
+    # landing legally inside both -- the false short this function must
+    # still catch.
+    draw(70, 20, _box_um(0, 0, 10, 5))  # met3.drawing (bottom plate)
+    draw(89, 44, _box_um(0, 0, 10, 5))  # capm.drawing (top plate)
+    draw(70, 44, _box_um(4, 1, 6, 4))  # via3.drawing, inside both plates
+    draw(71, 20, _box_um(3, 0, 7, 5))  # met4.drawing pad, touches only via3
+
+    # A disjoint, far-away met3<->via3<->met4 routing stack -- ordinary
+    # interconnect, no capacitor marker drawn anywhere near it -- labelled on
+    # both ends so a purely interconnect (device-free) net still survives
+    # `_purge_preserving_named_nets` and shows up in the report.
+    draw(70, 20, _box_um(100, 100, 110, 105))  # met3.drawing, far away
+    draw(70, 44, _box_um(104, 101, 106, 103))  # via3.drawing, far away
+    draw(71, 20, _box_um(103, 100, 107, 105))  # met4.drawing, far away
+    label(70, 5, "FARBOT", 102, 102)  # met3.pin
+    label(71, 5, "FARTOP", 104, 102)  # met4.pin
+
+    return layout
+
+
+def test_exclude_capacitor_top_via_overlap_leaves_far_away_routing_via_alone():
+    """Issue #1388, function-level regression: with a real capacitor drawn
+    (`bottom_plate_oversize_um == 0`, sky130's met3 MiM stack), the via3
+    shape belonging to a completely unrelated, far-away met3<->met4 routing
+    stack must stay in `vias[]` -- only the via3 shape actually under this
+    capacitor's own plates is excluded."""
+    layout = _make_sky130_mim_layout_with_far_away_routing()
+    deck = get_extraction_deck("sky130")
+    top_cell = layout.top_cell()
+    vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+    via3_index = deck.vias.index((70, 44))
+    original_via3 = vias[via3_index]
+
+    excluded = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
+    excluded_via3 = excluded[via3_index]
+
+    cap_via = kdb.Region(_box_um(4, 1, 6, 4))
+    far_via = kdb.Region(_box_um(104, 101, 106, 103))
+
+    # The capacitor's own via is cut (the false-short exclusion this
+    # function exists for still works)...
+    assert (excluded_via3 & cap_via).is_empty()
+    # ...but the far-away, unrelated routing via is untouched.
+    assert (excluded_via3 & far_via).area() == pytest.approx(far_via.area())
+    assert excluded_via3.area() == pytest.approx(original_via3.area() - cap_via.area())
+
+
+def test_sky130_capacitor_does_not_disconnect_unrelated_routing_elsewhere(tmp_path):
+    """Issue #1388 end-to-end: drawing one legal MiM capacitor
+    (`bottom_plate_oversize_um == 0`) must not disconnect an ordinary,
+    far-away met3<->via3<->met4 routing stack that has nothing to do with
+    the capacitor. Before the fix, `_exclude_capacitor_top_via_overlap`'s
+    zero-oversize branch excluded *every* via3 shape on the chip once any
+    capm marker existed anywhere, so the two labelled pads on either side of
+    the far-away via3 extracted as two distinct nets (`FARBOT`, `FARTOP`)
+    instead of one -- the exact `net.unmatched` false disconnect the issue
+    describes."""
+    path = _write_gds(
+        _make_sky130_mim_layout_with_far_away_routing(),
+        tmp_path / "mim_far_routing.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_far_routing.spice"))
+
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+
+    net_names = {n["name"] for n in report["nets"]}
+    # The far-away routing's two labelled pads merge into a single net
+    # (KLayout's own "|"-joined duplicate-pin-name convention) -- proof
+    # met3 and met4 are still connected there, not split into "FARBOT" and
+    # "FARTOP" as two separate nets.
+    assert "FARBOT|FARTOP" in net_names
+    assert "FARBOT" not in net_names
+    assert "FARTOP" not in net_names
+
+
 @pytest.mark.parametrize(
     "met4, expected_class",
     [
@@ -3054,6 +3263,61 @@ def test_sky130_unmarked_metal_has_no_capacitor_device(tmp_path):
 
     assert report["device_count"] == 0
     assert report["device_counts"] == {}
+
+
+def test_dummy_marker_drops_a_whole_capacitor(tmp_path, monkeypatch):
+    """A capacitor whose recognised top-plate component is fully covered by
+    the deck's `dummy` marker is dropped from the extracted netlist and
+    counted once in `dummy_devices_dropped` -- extending #295/#462/#542's
+    dummy suppression (MOS/resistors/bipolars/diodes) to capacitors, which
+    it had never reached (issue #1387)."""
+    layout = _make_sky130_mim_pair_layout(dummy_marker="full")
+    path = _write_gds(layout, tmp_path / "mim_pair_dummy.gds")
+
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    assert baseline["device_counts"] == {"sky130_fd_pr__model__cap_mim": 2}
+    assert baseline["dummy_devices_dropped"] == 0
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    suppressed = run_extract(path, "sky130", output=str(tmp_path / "dummy.spice"))
+
+    assert suppressed["dummy_devices_dropped"] == 1
+    # Only the first (unmarked) cap survives.
+    assert suppressed["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+
+
+def test_dummy_capacitor_would_extract_without_the_marker(tmp_path, monkeypatch):
+    """Control for the previous test: the same pair with no marker drawn
+    extracts both caps normally under the `dummy`-aware deck -- proving the
+    exclusion is the marker's doing, not a side effect of the deck itself
+    declaring `dummy` (issue #1387)."""
+    layout = _make_sky130_mim_pair_layout(dummy_marker="none")
+    path = _write_gds(layout, tmp_path / "mim_pair_nomark.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 2}
+
+
+def test_partial_dummy_marker_on_capacitor_is_a_clean_cut_not_a_drop(
+    tmp_path, monkeypatch
+):
+    """A `dummy` marker that only partially covers a capacitor's recognised
+    top plate is a clean geometric cut, not an all-or-nothing
+    misclassification: the top plate is not fully consumed, so the
+    capacitor is *not* counted as dropped and still extracts -- the
+    capacitor analogue of `test_partial_marker_coverage_is_a_clean_cut_not_a_drop`
+    (issue #1387)."""
+    layout = _make_sky130_mim_pair_layout(dummy_marker="partial")
+    path = _write_gds(layout, tmp_path / "mim_pair_partial.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 2}
 
 
 # --------------------------------------------------------------------------- #
