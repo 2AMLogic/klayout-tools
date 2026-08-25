@@ -542,6 +542,53 @@ pin — the same "warn on a per-instance geometric miss, don't hard-fail the
 whole extraction" convention this module already uses elsewhere (e.g.
 `unbiased_pmos_body_nets`).
 
+**A pin with several candidate access points** — a LEF `PIN` declaring more
+than one disjoint `PORT` rectangle, a pin name labelled more than once, or a
+label whose own metal fragment is tied to a second fragment only through the
+cell's own (abstraction-erased) poly/diffusion — is probed at *every*
+candidate, and the results are ranked. The ranking is deliberately narrow
+(issue #1366):
+
+- a **named** net beats an unnamed one, since by this point extraction (and
+  `--def-net-names`, if given) has already named every externally-routed
+  net, while an unrouted in-cell fragment is a fresh island that earns no
+  name from either source;
+- among unnamed candidates only, one carrying more **device terminals**
+  wins — a fixed property of the drawn layout;
+- **everything else ties**, and a tie is resolved in favour of the *earlier*
+  candidate, which is always the pin's own primary access point (its drawn
+  label, or its first-declared LEF `PORT`) rather than a fragment discovered
+  by walking the cell's internal connectivity.
+
+In particular, the ranking never counts how many abstracted-cell pins have
+already been wired onto a candidate net. That count grows as the wiring pass
+itself runs, so ranking on it made the outcome a function of the order pins
+happened to be resolved in rather than of the drawn layout — a
+rich-get-richer loop that, on a dense fully-routed block, bound ground-role
+pins to the power net (`VDD` is wired before `VSS` on every instance, so the
+power rail is always a pin ahead) and output pins to one of their own
+instance's input nets (the input is wired first, for the same reason). Two
+*named* candidates are likewise never ranked against each other by
+connectivity: both are already real, externally-routed nets, and which one is
+larger says nothing about which one this pin's geometry belongs to.
+
+**Self-check: two declared pins on one net.** After wiring, any abstracted
+instance that resolved two or more of its *separately declared* pins onto
+the same net produces one aggregated `warnings[]` entry naming the instance,
+the pins and the net (up to five instances spelled out, then a count). This
+is a warning, never an error — a deliberately tied-off pin is legal — but on
+a black box the caller has no interior to inspect and no devices to
+cross-check against, so the condition is worth surfacing: a ground pin
+resolved onto the power net and an output resolved onto one of its own
+instance's inputs both show up as exactly this shape (issue #1366).
+
+Expect this entry to appear — legitimately — on any library whose cells
+declare separate body-tie pins that the layout ties to the rails, e.g.
+sky130's `VPB`/`VPWR` and `VNB`/`VGND` pairs. That is the design's own
+intent, not a fault; the entry is aggregated into a single `warnings[]`
+string (with a count for the remainder) precisely so a whole-block flow that
+trips it everywhere stays readable.
+
 **Mirrored/rotated instances** resolve their pins correctly: each
 occurrence's own instance transform (rotation, mirroring, array
 displacement) is applied to the cell-local access point before probing, so

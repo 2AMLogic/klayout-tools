@@ -14,6 +14,37 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt extract --abstract-cells` no longer mis-binds abstracted-cell pins on a
+  dense, fully-routed digital block (issue #1366, a regression introduced
+  between 0.2.0 and 0.3.0 by the multi-candidate pin probing added in #1182 /
+  #1184). When one pin resolved several candidate access points,
+  `_abstract_pin_net_score` broke ties on *how connected* each candidate net
+  was (`terminal_count + subcircuit_pin_count + pin_count`).
+  `subcircuit_pin_count()` is incremented by the wiring pass itself, once per
+  pin it wires, so on a fully abstracted block (no devices, so the other two
+  terms are 0) the score measured nothing but how many pins had already been
+  resolved onto each candidate — a rich-get-richer feedback loop whose winners
+  are exactly the two impossible bindings reported: an output pin bound to one
+  of its own instance's input nets (that input sorts first, so its net banked a
+  pin before the output was scored) and a ground-role pin bound to the power
+  net (`VDD` sorts before `VSS`, so the power rail was always one pin ahead of
+  the ground rail) — 126 impossible bindings across 1339 instances in the
+  reported repro, on a byte-identical input that 0.2.0 extracted correctly.
+  Two named candidates are now never ranked against each other, and among
+  unnamed candidates only `terminal_count()` (a fixed property of the drawn
+  layout) breaks the tie; anything still tied resolves in favour of the pin's
+  own primary access point — its drawn label or first-declared LEF `PORT` —
+  rather than a fragment discovered by walking the cell's internal
+  connectivity. `.SUBCKT` headers, pin names/order, instance names and cell
+  types are unaffected; only net assignment changes.
+- `klt extract --abstract-cells` gained a post-wiring self-check (issue
+  #1366): any abstracted instance that resolves two or more of its separately
+  declared pins onto one net now produces an aggregated `warnings[]` entry
+  naming the instance, pins and net. It is a warning, not a failure — a
+  deliberately tied-off pin is legal — but it is the single observable
+  signature both impossible bindings above collapse to, and previously such a
+  netlist reported a completely healthy run right up until a downstream
+  `klt lvs` read the fault as a design error.
 - `klt equiv --engine yosys-sequential` now converges on real post-route
   netlists (issue #1353). `equiv_make` pairs `gold`/`gate` wires by name, and
   OpenROAD's resizing/repair-buffer/cloning passes legitimately leave
