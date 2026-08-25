@@ -74,6 +74,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from klayout_tools.decks import (  # noqa: E402
     DrcRule,  # noqa: E402
     gf180mcu,
+    sg13cmos5l,
     sg13g2,
     sky130,
 )
@@ -82,6 +83,7 @@ DECKS: dict[str, list[DrcRule]] = {
     "sky130": sky130.DECK,
     "gf180mcu": gf180mcu.DECK,
     "sg13g2": sg13g2.DECK,
+    "sg13cmos5l": sg13cmos5l.DECK,
 }
 
 #: Per-deck set of `DrcRule.check` kinds this manifest covers -- see the
@@ -94,6 +96,9 @@ ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
     # separation rules ship as hand-written violate/clean pairs directly in
     # `tests/test_drc.py` instead -- see that deck's own module docstring.
     "sg13g2": ("width", "space"),
+    # sg13cmos5l (issue #1400): a MOS-only starter, width/space rules only
+    # (Activ/GatPoly/Metal1) -- see that deck's own module docstring.
+    "sg13cmos5l": ("width", "space"),
 }
 
 #: Fixed bar dimensions (database units), independent of any individual

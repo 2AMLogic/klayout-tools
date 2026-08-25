@@ -22,9 +22,9 @@ per bound device instead of KLayout's default ``M`` card.
 resolver ``docs/design/pdk-device-corner-metadata-spike.md`` proposes as a
 follow-up epic -- see issue #209's Curator enhancement). As of issue #339 the
 binding covers, per PDK family (``sky130``, ``gf180mcu``, and -- MOS only, as
-of issue #1231 -- ``sg13g2``):
+of issue #1231 -- ``sg13g2``; MOS only, as of issue #1400 -- ``sg13cmos5l``):
 
-- **MOS** (all three decks) -- the deck's default voltage flavor per family,
+- **MOS** (all four decks) -- the deck's default voltage flavor per family,
   plus (issue #1111 for gf180mcu, issue #1231 for sg13g2, issue #1369 for
   sky130) any additional marker-scoped flavor its
   ``ExtractionDeck.mos_flavours`` declares (``nfet_06v0``/``pfet_06v0`` for a
@@ -258,6 +258,23 @@ _MOS_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "nfet": "sg13_lv_nmos",
         "pfet": "sg13_lv_pmos",
     },
+    # sg13cmos5l's thin-oxide ("-LV") core devices (issue #1400). cmos5l's
+    # own `libs.tech/ngspice/models/sg13g2_moslv_mod.lib` is a literal
+    # symlink into a sibling `ihp-sg13g2` checkout (see
+    # `decks/sg13cmos5l.py`'s module docstring for the full symlink-chain
+    # provenance) -- independently fetched at the exact commit
+    # `ihp-sg13cmos5l/.github/ihp-sg13g2.ref` pins
+    # (`d2cc0355f26235c777dfcc6867b390fa1e78083f`) and confirmed to declare
+    # `.subckt sg13_lv_nmos d g s b` / `.subckt sg13_lv_pmos d g s b`,
+    # byte-identical names/terminal order/parameter set to sg13g2's own pair
+    # above. cmos5l's own `mos_extraction.lvs` (also a resolved symlink to
+    # the same sibling) extracts the matching layout devices under exactly
+    # these names, which is what `decks/sg13cmos5l.py`'s
+    # `nfet_provenance`/`pfet_provenance` cite.
+    ("sg13cmos5l", "sg13cmos5l"): {
+        "nfet": "sg13_lv_nmos",
+        "pfet": "sg13_lv_pmos",
+    },
 }
 
 #: The KLayout device-property key `extract.py` sets (`kdb.Device.set_property`)
@@ -359,8 +376,9 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
 #: name into (e.g. "sky130A"/"sky130B" -> "sky130", "gf180mcuA".."D" ->
 #: "gf180mcu") -- the same family prefixes `klayout_tools.decks`' registry
 #: uses as deck names. Order matters only in that no family here is a prefix
-#: of another.
-_KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2")
+#: of another (`"sg13g2"` and `"sg13cmos5l"` share the `"sg13"` stem but
+#: neither is a prefix of the other, so both are safe to list).
+_KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l")
 
 #: Resolved `--pdk` variant names whose family is *not* a prefix of the
 #: variant name, and so cannot be recovered by the prefix scan below (issue
@@ -369,8 +387,14 @@ _KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2")
 #: name for it is `sg13g2` (`klayout_tools.decks.sg13g2`); an explicit alias
 #: keeps families named after decks, the invariant `_KNOWN_PDK_FAMILIES`'
 #: own comment states, rather than introducing a family spelled differently
-#: from every table key around it.
-_PDK_VARIANT_FAMILY_ALIASES: dict[str, str] = {"ihp-sg13g2": "sg13g2"}
+#: from every table key around it. `ihp-sg13cmos5l` (issue #1400) is the
+#: same shape: the standalone `ihp-sg13cmos5l` clone's own directory name is
+#: the resolved variant, while this repo's deck/family name is
+#: `sg13cmos5l` (`klayout_tools.decks.sg13cmos5l`).
+_PDK_VARIANT_FAMILY_ALIASES: dict[str, str] = {
+    "ihp-sg13g2": "sg13g2",
+    "ihp-sg13cmos5l": "sg13cmos5l",
+}
 
 #: Geometry-literal style: write an explicit SPICE unit suffix (``L=0.5U``,
 #: ``AS=0.84P``), i.e. an absolute SI value that does not depend on the

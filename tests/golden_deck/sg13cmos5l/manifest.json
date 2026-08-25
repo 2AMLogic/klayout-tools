@@ -1,0 +1,320 @@
+{
+  "activ.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            1,
+            0
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      1,
+      0
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            1,
+            0
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            1,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "activ.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      1,
+      0
+    ],
+    "threshold_dbu": 150,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            100,
+            4000
+          ],
+          "layer": [
+            1,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "gatpoly.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            5,
+            0
+          ]
+        },
+        {
+          "box": [
+            2240,
+            0,
+            4240,
+            4000
+          ],
+          "layer": [
+            5,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      5,
+      0
+    ],
+    "threshold_dbu": 180,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            5,
+            0
+          ]
+        },
+        {
+          "box": [
+            2120,
+            0,
+            4120,
+            4000
+          ],
+          "layer": [
+            5,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "gatpoly.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            170,
+            4000
+          ],
+          "layer": [
+            5,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      5,
+      0
+    ],
+    "threshold_dbu": 130,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            90,
+            4000
+          ],
+          "layer": [
+            5,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            8,
+            0
+          ]
+        },
+        {
+          "box": [
+            2240,
+            0,
+            4240,
+            4000
+          ],
+          "layer": [
+            8,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      8,
+      0
+    ],
+    "threshold_dbu": 180,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            8,
+            0
+          ]
+        },
+        {
+          "box": [
+            2120,
+            0,
+            4120,
+            4000
+          ],
+          "layer": [
+            8,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            210,
+            4000
+          ],
+          "layer": [
+            8,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      8,
+      0
+    ],
+    "threshold_dbu": 160,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            110,
+            4000
+          ],
+          "layer": [
+            8,
+            0
+          ]
+        }
+      ]
+    }
+  }
+}

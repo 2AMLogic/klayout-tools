@@ -1694,18 +1694,24 @@ def deck_names() -> list[str]:
 
 
 def _registry() -> dict[str, list[DrcRule]]:
-    from . import gf180mcu, sg13g2, sky130
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
-    return {"sky130": sky130.DECK, "gf180mcu": gf180mcu.DECK, "sg13g2": sg13g2.DECK}
+    return {
+        "sky130": sky130.DECK,
+        "gf180mcu": gf180mcu.DECK,
+        "sg13g2": sg13g2.DECK,
+        "sg13cmos5l": sg13cmos5l.DECK,
+    }
 
 
 def _layer_name_registry() -> dict[str, dict[tuple[int, int], str]]:
-    from . import gf180mcu, sg13g2, sky130
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
         "sky130": sky130.LAYER_NAMES,
         "gf180mcu": gf180mcu.LAYER_NAMES,
         "sg13g2": sg13g2.LAYER_NAMES,
+        "sg13cmos5l": sg13cmos5l.LAYER_NAMES,
     }
 
 
@@ -1737,12 +1743,13 @@ def get_layer_names(name: str) -> dict[tuple[int, int], str]:
 
 
 def _unmodeled_voltage_marker_registry() -> dict[str, dict[tuple[int, int], str]]:
-    from . import gf180mcu, sg13g2, sky130
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
         "sky130": sky130.UNMODELED_VOLTAGE_MARKERS,
         "gf180mcu": gf180mcu.UNMODELED_VOLTAGE_MARKERS,
         "sg13g2": sg13g2.UNMODELED_VOLTAGE_MARKERS,
+        "sg13cmos5l": sg13cmos5l.UNMODELED_VOLTAGE_MARKERS,
     }
 
 
@@ -1794,12 +1801,13 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
 
 
 def _nominal_dbu_registry() -> dict[str, float]:
-    from . import gf180mcu, sg13g2, sky130
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
         "sky130": sky130.NOMINAL_DBU_UM,
         "gf180mcu": gf180mcu.NOMINAL_DBU_UM,
         "sg13g2": sg13g2.NOMINAL_DBU_UM,
+        "sg13cmos5l": sg13cmos5l.NOMINAL_DBU_UM,
     }
 
 
@@ -1824,12 +1832,13 @@ def get_nominal_dbu(name: str) -> float:
 
 
 def _extraction_registry() -> dict[str, ExtractionDeck]:
-    from . import gf180mcu, sg13g2, sky130
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
         "sky130": sky130.EXTRACTION_DECK,
         "gf180mcu": gf180mcu.EXTRACTION_DECK,
         "sg13g2": sg13g2.EXTRACTION_DECK,
+        "sg13cmos5l": sg13cmos5l.EXTRACTION_DECK,
     }
 
 
