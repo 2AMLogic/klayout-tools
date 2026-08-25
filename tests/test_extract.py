@@ -2515,6 +2515,45 @@ def _make_sky130_mim_layout(*, met4: bool = False) -> kdb.Layout:
     return layout
 
 
+def _make_sky130_mim_pair_layout(*, dummy_marker: str = "none") -> kdb.Layout:
+    """Two disjoint sky130 MiM caps (see `_make_sky130_mim_layout`) far
+    enough apart on `met3`/`capm` that each recognises as its own device.
+    ``dummy_marker`` controls a `_DUMMY_MARKER` (100/0) shape drawn over the
+    *second* cap's top plate only (issue #1387's dummy-suppression tests):
+
+    - ``"full"``    -- covers the whole 10x5um top plate; fully consumed by
+      the dummy subtraction, so that device is dropped and counted.
+    - ``"partial"`` -- covers only half the top plate; the remaining top
+      plate area survives the clean geometric cut, so the device is *not*
+      counted as dropped.
+    - ``"none"``    -- no marker shape at all (control).
+
+    The marker layer is the same one `_add_dummy_nfet`/`_add_dummy_marker`
+    use below -- drawn regardless of mode, so the geometry is identical
+    across dummy-configured and unconfigured decks; only `deck.dummy` being
+    set makes it have any effect."""
+    layout = _make_sky130_mim_layout()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Second cap, offset 30um in x so its bottom-plate conductor and top
+    # plate never touch the first cap's -- each recognises as its own
+    # device.
+    draw(70, 20, _box_um(30, -20, 70, 20))  # met3.drawing (bottom plate)
+    draw(89, 44, _box_um(30, 0, 40, 5))  # capm.drawing (top plate)
+
+    if dummy_marker == "full":
+        draw(*_DUMMY_MARKER, _box_um(29, -1, 41, 6))  # fully covers
+    elif dummy_marker == "partial":
+        draw(*_DUMMY_MARKER, _box_um(29, -1, 35, 6))  # half coverage
+    elif dummy_marker != "none":
+        raise ValueError(f"bad dummy_marker mode: {dummy_marker!r}")
+
+    return layout
+
+
 def test_gf180mcu_synthetic_mim_extracts_one_capacitor_device(tmp_path):
     """The synthetic marked FuseTop-over-Metal4 layout extracts exactly one
     `cap_mim_2f0_m4m5_noshield` device: `C = A * area_cap + P * perim_cap`
@@ -3054,6 +3093,61 @@ def test_sky130_unmarked_metal_has_no_capacitor_device(tmp_path):
 
     assert report["device_count"] == 0
     assert report["device_counts"] == {}
+
+
+def test_dummy_marker_drops_a_whole_capacitor(tmp_path, monkeypatch):
+    """A capacitor whose recognised top-plate component is fully covered by
+    the deck's `dummy` marker is dropped from the extracted netlist and
+    counted once in `dummy_devices_dropped` -- extending #295/#462/#542's
+    dummy suppression (MOS/resistors/bipolars/diodes) to capacitors, which
+    it had never reached (issue #1387)."""
+    layout = _make_sky130_mim_pair_layout(dummy_marker="full")
+    path = _write_gds(layout, tmp_path / "mim_pair_dummy.gds")
+
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    assert baseline["device_counts"] == {"sky130_fd_pr__model__cap_mim": 2}
+    assert baseline["dummy_devices_dropped"] == 0
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    suppressed = run_extract(path, "sky130", output=str(tmp_path / "dummy.spice"))
+
+    assert suppressed["dummy_devices_dropped"] == 1
+    # Only the first (unmarked) cap survives.
+    assert suppressed["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+
+
+def test_dummy_capacitor_would_extract_without_the_marker(tmp_path, monkeypatch):
+    """Control for the previous test: the same pair with no marker drawn
+    extracts both caps normally under the `dummy`-aware deck -- proving the
+    exclusion is the marker's doing, not a side effect of the deck itself
+    declaring `dummy` (issue #1387)."""
+    layout = _make_sky130_mim_pair_layout(dummy_marker="none")
+    path = _write_gds(layout, tmp_path / "mim_pair_nomark.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 2}
+
+
+def test_partial_dummy_marker_on_capacitor_is_a_clean_cut_not_a_drop(
+    tmp_path, monkeypatch
+):
+    """A `dummy` marker that only partially covers a capacitor's recognised
+    top plate is a clean geometric cut, not an all-or-nothing
+    misclassification: the top plate is not fully consumed, so the
+    capacitor is *not* counted as dropped and still extracts -- the
+    capacitor analogue of `test_partial_marker_coverage_is_a_clean_cut_not_a_drop`
+    (issue #1387)."""
+    layout = _make_sky130_mim_pair_layout(dummy_marker="partial")
+    path = _write_gds(layout, tmp_path / "mim_pair_partial.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 2}
 
 
 # --------------------------------------------------------------------------- #

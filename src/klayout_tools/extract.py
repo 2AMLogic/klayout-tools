@@ -4927,6 +4927,23 @@ def _extract_netlist(
             layout, top_cell, capacitor
         )
 
+        # Dummy-device suppression (issue #295, extended to resistors and
+        # bipolars in #462, to diodes in #542, to capacitors here): count and
+        # cut whole recognised top-plate components covered by the deck's
+        # `dummy` marker. Counting (and cutting) is scoped to `top_region`
+        # alone -- the device-defining plate, mirroring the diode block's
+        # single-region precedent above -- rather than `bottom_region`, which
+        # a matched cap array typically shares across multiple devices (a
+        # dummy-covered bottom plate would still be a live node for its
+        # non-dummy neighbours). A top-plate component only partially covered
+        # survives as a clean geometric cut, matching the MOS/bipolar/diode
+        # behaviour.
+        if not dummy.is_empty():
+            for component in top_region.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            top_region = top_region - dummy
+
         if top_region.is_empty() or bottom_region.is_empty():
             # No PDK cap marker drawn anywhere on this layout -- the common
             # case. Registering/extracting an empty device would be a no-op
