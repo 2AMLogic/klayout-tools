@@ -4417,6 +4417,46 @@ def test_merge_def_to_gds_success(tmp_path):
     assert result_info == {"path": None, "resolution": "none"}
 
 
+def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
+    """Issue #1367: the merged GDS's BGNLIB/BGNSTR records must not carry
+    KLayout's default wall-clock timestamp, so re-running an identical merge
+    twice produces byte-identical output. Before the fix, this assertion
+    could fail reliably -- or, if both runs happened to land within the same
+    wall-clock second, merely be flaky rather than a deterministic failure;
+    the fix removes the wall-clock dependency entirely, so this is reliable
+    either way."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", cell_name)
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    out_path_1 = tmp_path / "out1.gds"
+    out_path_2 = tmp_path / "out2.gds"
+
+    for out_path in (out_path_1, out_path_2):
+        place_and_route._merge_def_to_gds(
+            def_path=str(def_path),
+            tech_lef=str(tech_lef),
+            cell_lef=str(cell_lef),
+            pdk_info=_fake_pdk_info(root),
+            cell_library="sky130_fd_sc_hd",
+            hdl_toplevel="top",
+            macros=[],
+            out_path=str(out_path),
+        )
+
+    assert out_path_1.read_bytes() == out_path_2.read_bytes()
+
+
 def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_path):
     """A real gf180mcuC/gf180mcuD open_pdks install ships only the
     family-level `libs.tech/klayout/tech/gf180mcu.map`, never a

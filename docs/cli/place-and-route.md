@@ -418,6 +418,13 @@ the merge succeeds but the resulting GDS has unfilled standard-cell row gaps
 `request.power`, the same design's merged GDS is `klt drc --deck gf180mcu`
 clean.
 
+**Reproducible output (issue #1367).** The merge writes with
+`SaveLayoutOptions.gds2_write_timestamps = False`, so the merged GDS's
+`BGNLIB`/`BGNSTR` record timestamps are always zeroed rather than stamped
+with the merge's own wall-clock time — running the same request twice in a
+row produces a byte-identical `gds_path`, not just a byte-identical
+`def_path`.
+
 ## Hard-macro placement (`request.macros`)
 
 Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line

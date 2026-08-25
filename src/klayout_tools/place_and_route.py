@@ -483,6 +483,7 @@ import subprocess
 from collections.abc import Iterable
 from typing import Any
 
+from ._layout import write_layout
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
@@ -4245,12 +4246,11 @@ def _merge_def_to_gds(
                 "view"
             )
 
-    try:
-        top_only.write(out_path)
-    except OSError as exc:
-        raise PlaceAndRouteError(
-            f"could not write merged GDS '{out_path}': {exc}"
-        ) from exc
+    # write_layout() (see _layout.py, #320) always disables KLayout's default
+    # wall-clock GDS2 BGNLIB/BGNSTR timestamps, so re-running an identical
+    # place-and-route request twice produces a byte-identical merged GDS --
+    # not just a byte-identical DEF (#1367).
+    write_layout(top_only, out_path, PlaceAndRouteError)
 
     return {"path": layer_map_path, "resolution": layer_map_resolution}
 
