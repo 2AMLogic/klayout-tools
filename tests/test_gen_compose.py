@@ -2475,7 +2475,7 @@ def test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected(
         gate = blocks[block_id]["ports"]["U0_G"]
         return round(gate["x_um"] + offsets[block_id]["x"], 6)
 
-    def _reject_b1_b2(points_um, via_drops=None, stub_widen=None):
+    def _reject_b1_b2(points_um, via_drops=None, stub_widen=None, layer=None):
         endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
         if endpoints == {_gate_x("b1"), _gate_x("b2")}:
             return "simulated collision with an already-routed net"
@@ -2561,7 +2561,9 @@ def test_route_bundle_draws_the_routable_legs_of_a_4_pin_net_when_the_bridge_fai
     def _block_of(x):
         return next(block_id for block_id in ids if _gate_x(block_id) == x)
 
-    def _reject_cross_half_bridge(points_um, via_drops=None, stub_widen=None):
+    def _reject_cross_half_bridge(
+        points_um, via_drops=None, stub_widen=None, layer=None
+    ):
         endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
         blocks_touched = {_block_of(x) for x in endpoints}
         if any(blocks_touched <= half for half in halves):
@@ -2610,7 +2612,7 @@ def test_route_bundle_reports_unrouted_not_partial_when_zero_legs_drawn(
         _route_bundle_row_fixture(tmp_path, pdk_root, 3)
     )
 
-    def _reject_everything(points_um, via_drops=None, stub_widen=None):
+    def _reject_everything(points_um, via_drops=None, stub_widen=None, layer=None):
         return "simulated collision with an already-routed net"
 
     result = gen_compose.route_bundle(
@@ -4728,6 +4730,82 @@ def test_compose_allows_disjoint_routes_on_the_same_layer(tmp_path, pdk_root):
     assert report["unrouted_nets"] == []
     assert report["nets"][0]["routed"] is True
     assert report["nets"][1]["routed"] is True
+
+
+def test_compose_rejects_route_closer_than_the_decks_own_min_spacing(
+    tmp_path, pdk_root
+):
+    # Issue #1386: #1057's original route-vs-route collision check only ever
+    # caught a literal footprint *overlap* -- two legs that never touch but
+    # sit closer together than the resolved deck's own same-layer minimum-
+    # spacing rule (sky130's `li1.space.1`, 0.17um) both composed
+    # `routed: true` while the resulting GDS still failed `klt drc`. Two
+    # independent west-to-east legs, both steered by `waypoints_um` into the
+    # same x-range at y=0.0/y=0.27 (0.10um edge-to-edge gap at
+    # width_um=0.17 -- inside li1.space.1, but the backbones themselves never
+    # overlap), reproduce that gap directly; each pair's own blocks sit far
+    # away in y (+/-50um) so no block-obstacle check is what rejects the
+    # second leg.
+    width_um = 0.17
+    bw1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw1", num=1)
+    be1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "be1", num=1)
+    bw2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw2", num=1)
+    be2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "be2", num=1)
+    output = tmp_path / "close_spacing.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "bw1", "generator_report": bw1},
+                {"id": "be1", "generator_report": be1},
+                {"id": "bw2", "generator_report": bw2},
+                {"id": "be2", "generator_report": be2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["bw1", "be1", "bw2", "be2"],
+                "origins_um": {
+                    "bw1": {"x": 0.0, "y": -50.0},
+                    "be1": {"x": 60.0, "y": -50.0},
+                    "bw2": {"x": 0.0, "y": 50.0},
+                    "be2": {"x": 60.0, "y": 50.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "NET_1",
+                    "pins": [
+                        {"block": "bw1", "port": "P2"},
+                        {"block": "be1", "port": "P1"},
+                    ],
+                    "waypoints_um": [[10.0, 0.0], [50.0, 0.0]],
+                },
+                {
+                    "net": "NET_2",
+                    "pins": [
+                        {"block": "bw2", "port": "P2"},
+                        {"block": "be2", "port": "P1"},
+                    ],
+                    "waypoints_um": [[10.0, 0.27], [50.0, 0.27]],
+                },
+            ],
+            "routing": {"layer_role": "metal", "width_um": width_um},
+            "options": {"cell_name": "close_spacing", "output": str(output)},
+        }
+    )
+
+    assert report["nets"][0]["net"] == "NET_1"
+    assert report["nets"][0]["routed"] is True
+
+    assert report["nets"][1]["net"] == "NET_2"
+    assert report["nets"][1]["routed"] is False
+    blocker_leg = report["nets"][1]["legs"][0]
+    # The spacing-aware rejection text (not the plain overlap message) --
+    # names the deck's own rule id and the reason it isn't a literal overlap.
+    assert "li1.space.1" in blocker_leg["reason"]
+    assert "NET_1" in blocker_leg["reason"]
+    assert "no literal overlap" in blocker_leg["reason"]
+    assert "crosses already-routed net" not in blocker_leg["reason"]
 
 
 def test_compose_route_dbu_probe_wraps_bad_gds_path_in_gen_compose_error(
