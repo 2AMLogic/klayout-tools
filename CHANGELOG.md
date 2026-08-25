@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt lvs`'s `reference.form: "gate-level-verilog"` conversion now reads a
+  Verilog **escaped identifier** the way Verilog defines it — one atomic
+  token from the backslash to the next whitespace (issue #1371). A
+  backend-emitted name that embeds a flattened `generate`/`genvar` hierarchy
+  path, e.g. `\my_array[0].u_inst/_01_`, previously failed the whole run
+  with `connection '...' is not a plain net reference, a single-index
+  bit-select, or a '1'b0'/'1'b1' constant`, because the embedded `[0]` was
+  re-read against the plain-identifier bit-select grammar; it now resolves
+  to the literal net `my_array[0].u_inst/_01_`. A genuine bit-select of an
+  escaped net (`\bus [3]`, with Verilog's terminating whitespace explicit)
+  is accepted too. Purely additive: unescaped plain names, unescaped
+  bit-selects (`bus[3]`), and the loud rejection of range slices
+  (`bus[7:0]`) and general expressions are unchanged.
+
 - `klt lvs`'s `options.combine_devices` gained three caller-side escape
   hatches for the case where KLayout's own `Netlist.combine_devices()` trips
   its internal-consistency error *deterministically* rather than at the ~20%

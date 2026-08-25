@@ -69,8 +69,13 @@ gate-level, already-flattened netlist actually needs are supported --
 optional `[msb:lsb]` bus range), plain instance calls with **named**
 (`.PORT(NET)`) connections, a bare identifier or single-index bit-select
 (`net`/`bus[3]`) or `1'b0`/`1'b1` constant as a connection expression, and a
-simple `assign <net> = <net>;` alias. Anything else -- positional instance
-connections, concatenation, a multi-bit range slice, a non-constant
+simple `assign <net> = <net>;` alias. A Verilog escaped identifier
+(`\\name`) is accepted wherever a name is, as the single atomic token
+Verilog's own whitespace-terminated escape rule defines -- so a
+place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
+the literal net name `my_array[0].u_inst/_01_`, never re-read as a
+bit-select of a bus `my_array` (issue #1371). Anything else -- positional
+instance connections, concatenation, a multi-bit range slice, a non-constant
 expression, `always`/`case`/other behavioral statements -- raises
 :class:`VerilogNetlistError` naming the offending construct, never a silent
 best-effort guess (the same "a wrong conversion in a sign-off tool must
@@ -97,16 +102,37 @@ _ENDMODULE_RE = re.compile(r"\bendmodule\b")
 #: An identifier: a plain Verilog identifier, or an escaped identifier
 #: (`\name`, terminated by whitespace -- Verilog's own escape convention for
 #: identifiers containing characters that would otherwise be delimiters).
+#: The post-backslash character class here is deliberately the *plain*
+#: identifier one: this pattern validates module/port/direction-statement
+#: names, where the escape only ever guards against a keyword collision.
+#: Connection expressions do **not** use it for an escaped name -- see
+#: :data:`_ESCAPED_IDENT_RE`.
 _IDENT_RE = re.compile(r"\\?[A-Za-z_$][A-Za-z0-9_$]*")
 
+#: A Verilog escaped identifier in its full generality: a leading backslash
+#: followed by a run of non-whitespace characters, terminated by whitespace
+#: (or the end of the expression). Verilog's escape convention makes *every*
+#: printable, non-whitespace character up to that terminator part of the
+#: literal name -- including `[`, `]`, `.` and `/`, which synthesis/
+#: place-and-route emits when it flattens a `generate`/`genvar` hierarchy
+#: into one net name (`\my_array[0].u_inst/_01_`, issue #1371). Such a name
+#: is one atomic token and must never be re-parsed for an embedded
+#: bit-select: the `[0]` in it is part of the name, not a bus index.
+_ESCAPED_IDENT_RE = re.compile(r"\\\S+")
+
 #: A connection expression this module accepts as a plain net reference:
-#: an identifier, optionally followed by a single-index bit-select
+#: a *plain* identifier, optionally followed by a single-index bit-select
 #: (`bus[3]`) -- never a range slice (`bus[7:0]`), which is rejected
-#: explicitly (see :func:`_parse_connection_expr`).
+#: explicitly (see :func:`_parse_connection_expr`). Escaped identifiers
+#: never reach these patterns; :func:`_parse_escaped_connection_expr`
+#: handles them first, using the select suffixes below for the one shape
+#: that *is* a select on an escaped base (`\bus [3]`, whitespace-separated).
 _BIT_SELECT_RE = re.compile(
-    r"^(?P<base>\\?[A-Za-z_$][A-Za-z0-9_$]*)\[(?P<index>[^\]:]+)\]$"
+    r"^(?P<base>[A-Za-z_$][A-Za-z0-9_$]*)\[(?P<index>[^\]:]+)\]$"
 )
-_RANGE_SELECT_RE = re.compile(r"^\\?[A-Za-z_$][A-Za-z0-9_$]*\[[^\]]*:[^\]]*\]$")
+_RANGE_SELECT_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*\[[^\]]*:[^\]]*\]$")
+_INDEX_SUFFIX_RE = re.compile(r"^\[(?P<index>[^\]:]+)\]$")
+_RANGE_SUFFIX_RE = re.compile(r"^\[[^\]]*:[^\]]*\]$")
 
 #: A `<width>'b<bits>` constant, e.g. `1'b0`/`1'b1` -- the only constant
 #: shape this module recognises (see the module docstring's "no power/
@@ -289,6 +315,53 @@ def _parse_direction_statement(
             port_widths.setdefault(name, [name])
 
 
+def _parse_escaped_connection_expr(expr: str) -> str:
+    """Resolve a connection expression that opens with a Verilog escaped
+    identifier (`\\...`) to a net name.
+
+    Verilog terminates an escaped identifier at the first whitespace, so the
+    whole non-whitespace run after the backslash is one literal net name --
+    `[`, `]`, `.` and `/` included (a place-and-route tool writes exactly
+    this when it flattens a `generate`/`genvar` hierarchy path into a single
+    name, `\\my_array[0].u_inst/_01_`; issue #1371). It is therefore never
+    re-parsed against the plain-identifier bit-select grammar, which would
+    misread that embedded `[0]` as a bus index and reject the connection.
+
+    A select on an escaped name is written with the terminating whitespace
+    made explicit (`\\bus [3]`), so anything left after the escaped token is
+    handled here: a single-index select is folded into the same
+    `<net>[<index>]` flat name every other net uses, and a multi-bit range
+    slice stays as loudly unsupported as it is for a plain base name.
+    """
+    match = _ESCAPED_IDENT_RE.match(expr)
+    if match is None:
+        # A lone backslash: the escape opened a name and the terminating
+        # whitespace arrived immediately, so there is no name at all.
+        raise VerilogNetlistError(
+            f"connection {expr!r} opens a Verilog escaped identifier that "
+            "names nothing -- an escaped name must have at least one "
+            "character between its backslash and the terminating whitespace"
+        )
+    name = _unescape(match.group(0))
+    rest = expr[match.end() :].strip()
+    if not rest:
+        return name
+    if _RANGE_SUFFIX_RE.match(rest):
+        raise VerilogNetlistError(
+            f"connection {expr!r} is a multi-bit range slice -- only a plain "
+            "net name or a single-index bit-select ('bus[3]') is supported "
+            "for an instance port connection"
+        )
+    index_match = _INDEX_SUFFIX_RE.match(rest)
+    if index_match:
+        return f"{name}[{index_match.group('index').strip()}]"
+    raise VerilogNetlistError(
+        f"connection {expr!r} is not a plain net reference, a single-index "
+        "bit-select, or a '1'b0'/'1'b1' constant -- concatenation and "
+        "general expressions are not supported"
+    )
+
+
 def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> str:
     """Resolve one `.PORT(<expr>)` connection expression to a net name, or
     raise :class:`VerilogNetlistError` for anything this narrow grammar does
@@ -297,6 +370,8 @@ def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> 
     const_match = _CONST_RE.match(expr)
     if const_match:
         return _CONST_NET_NAMES[const_match.group(1)]
+    if expr.startswith("\\"):
+        return _parse_escaped_connection_expr(expr)
     if _RANGE_SELECT_RE.match(expr):
         raise VerilogNetlistError(
             f"connection {expr!r} is a multi-bit range slice -- only a plain "

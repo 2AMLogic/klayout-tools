@@ -8119,6 +8119,135 @@ def test_parse_gate_level_verilog_resolves_escaped_identifiers():
     assert modules[0]["instances"][0]["cell"] == "my.cell"
 
 
+def test_parse_gate_level_verilog_escaped_identifier_connection_hierarchy_path():
+    r"""A backend-emitted escaped identifier that embeds a flattened
+    `generate`/`genvar` hierarchy path -- `[`, `]`, `.` and `/` all inside
+    one Verilog escaped identifier -- is one atomic net name, never a bus
+    bit-select (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(a, y);",
+            r"  input a;",
+            r"  output y;",
+            r"  wire \my_array[0].u_inst/_01_ ;",
+            r"  sky130_fd_sc_hd__inv_2 \my_array[0].u_inst/_13_  "
+            r"(.A(a), .Y(\my_array[0].u_inst/_01_ ));",
+            r"  sky130_fd_sc_hd__buf_2 \my_array[0].u_inst/_14_  "
+            r"(.A(\my_array[0].u_inst/_01_ ), .X(y));",
+            r"endmodule",
+        ]
+    )
+    instances = parse_gate_level_verilog(text)[0]["instances"]
+    assert [inst["name"] for inst in instances] == [
+        "my_array[0].u_inst/_13_",
+        "my_array[0].u_inst/_14_",
+    ]
+    assert instances[0]["connections"] == {"A": "a", "Y": "my_array[0].u_inst/_01_"}
+    assert instances[1]["connections"] == {"A": "my_array[0].u_inst/_01_", "X": "y"}
+
+
+def test_parse_gate_level_verilog_escaped_identifier_bit_select_needs_whitespace():
+    r"""Verilog's escape rule is whitespace-terminated: `\a.b[3]` is one
+    literal name, while `\c.d [3]` is a real single-index bit-select of the
+    escaped net `c.d` (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  cellx u0 (.A(\a.b[3] ), .B(\c.d [3]), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    assert parse_gate_level_verilog(text)[0]["instances"][0]["connections"] == {
+        "A": "a.b[3]",
+        "B": "c.d[3]",
+        "Y": "y",
+    }
+
+
+def test_parse_gate_level_verilog_escaped_identifier_range_slice_rejected():
+    """An escaped base name does not buy a multi-bit range slice past this
+    module's deliberately narrow grammar (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  cellx u0 (.A(\c.d [3:0]), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    with pytest.raises(VerilogNetlistError, match="range slice"):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_escaped_identifier_expression_rejected():
+    """Trailing content after a whitespace-terminated escaped identifier is
+    still an unsupported expression, and still fails loudly (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  cellx u0 (.A(\a.b + \c.d ), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    with pytest.raises(VerilogNetlistError, match="not a plain net reference"):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_lone_backslash_connection_rejected():
+    """A backslash whose escaped name is empty fails as a conversion error,
+    not as an unhandled crash (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  cellx u0 (.A(\ ), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    with pytest.raises(VerilogNetlistError, match="names nothing"):
+        parse_gate_level_verilog(text)
+
+
+def test_parse_gate_level_verilog_escaped_identifier_assign_alias():
+    r"""The same atomic-escaped-identifier rule applies to an `assign`
+    alias's two operands (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  assign \n[0].a = \n[1].b ;",
+            r"  cellx u0 (.A(\n[0].a ), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections["A"] == "n[1].b"
+
+
+def test_convert_gate_level_verilog_writes_escaped_hierarchy_path_nets():
+    r"""End-to-end: an escaped-identifier net survives conversion as the
+    literal name, so the SPICE reference `klt lvs` compares against carries
+    the same net the layout side does (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(a, y);",
+            r"  input a;",
+            r"  output y;",
+            r"  wire \my_array[0].u_inst/_01_ ;",
+            r"  mylib__inv_1 \my_array[0].u_inst/_13_  "
+            r"(.A(a), .Y(\my_array[0].u_inst/_01_ ));",
+            r"  mylib__buf_1 u2 (.A(\my_array[0].u_inst/_01_ ), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    orders = parse_subckt_pin_orders(_MYLIB_SPICE)
+    out = convert_gate_level_verilog(text, pin_order_lookup=orders.get)
+    assert "Xmy_array_0__u_inst__13_ a my_array[0].u_inst/_01_ mylib__inv_1" in out
+    assert "Xu2 my_array[0].u_inst/_01_ y mylib__buf_1" in out
+
+
 def test_parse_gate_level_verilog_resolves_assign_alias():
     text = """
     module m(a, y);
@@ -8366,6 +8495,63 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
     )
     layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
     reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+
+#: The same design whose internal net and one instance name are Verilog
+#: escaped identifiers embedding a place-and-route-flattened
+#: `generate`/`genvar` hierarchy path -- `[`, `]`, `.` and `/` all inside a
+#: single escaped name, which is exactly what a backend tool emits for a
+#: module-instance array (issue #1371).
+_GATE_LEVEL_REFERENCE_VERILOG_ESCAPED = "\n".join(
+    [
+        r"module top(in, out);",
+        r"  input in;",
+        r"  output out;",
+        r"  wire \my_array[0].u_inst/_01_ ;",
+        r"  mylib__inv_1 \my_array[0].u_inst/_13_  "
+        r"(.A(in), .Y(\my_array[0].u_inst/_01_ ));",
+        r"  mylib__buf_1 u2 (.A(\my_array[0].u_inst/_01_ ), .Y(out));",
+        r"endmodule",
+        r"",
+    ]
+)
+
+_GATE_LEVEL_LAYOUT_SPICE_ESCAPED = """
+.subckt top in out
+X1 in my_array[0].u_inst/_01_ mylib__inv_1
+X2 my_array[0].u_inst/_01_ out mylib__buf_1
+.ends
+.subckt mylib__inv_1 A Y
+.ends
+.subckt mylib__buf_1 A Y
+.ends
+"""
+
+
+def test_run_lvs_gate_level_verilog_reference_escaped_hierarchy_names(tmp_path):
+    """End to end: a reference netlist whose escaped identifiers carry a
+    flattened hierarchy path converts and compares, instead of failing the
+    whole run with "could not convert gate-level-verilog reference netlist"
+    (issue #1371)."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_ESCAPED)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG_ESCAPED)
     request = {
         "layout": {"netlist": layout_path, "top": "top"},
         "reference": {
