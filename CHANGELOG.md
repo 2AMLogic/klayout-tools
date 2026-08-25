@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt pdk find`/`env`'s JSON payload now reports `broken_symlinks`
+  — every dangling symlink found under any resolved `assets` directory
+  (issue #1406). Some upstream PDKs (e.g. IHP-Open-PDK's `ihp-sg13cmos5l`
+  standalone, without its documented sibling `ihp-sg13g2` checkout) ship
+  most of their device-symbol/model library as symlinks into a sibling PDK
+  checkout; a standalone install leaves those dangling, and the install
+  otherwise looks complete (`ls` shows every filename) until a downstream
+  tool actually tries to open one. Also adds `klt pdk check`, a thin wrapper
+  around `find_pdk()` that exits `4` when `broken_symlinks` is non-empty
+  (`0` when clean) so this condition can gate CI, mirroring `cells
+  --supply`'s dedicated exit code. Additive — no `schema_version` bump.
 - `klt gen-compose` now routes **more than one** same-block self-net that
   needs `routing.cross_block_layer_role`'s fallback (issue #1393). Before
   this, `#1168`'s fallback only fired from the self-net pad-crossing /

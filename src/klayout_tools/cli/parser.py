@@ -2897,6 +2897,29 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     env_parser.set_defaults(func=pdk_cmd.run_env)
 
+    check_parser = pdk_sub.add_parser(
+        "check",
+        help="resolve one PDK install/variant and flag dangling symlinks",
+        description=(
+            "Resolve a single PDK install/variant (same paths `find` emits) "
+            "and additionally exit non-zero when any of its asset "
+            "directories contain a dangling symlink -- a symlink whose "
+            "target does not exist, e.g. a standalone `ihp-sg13cmos5l` "
+            "install whose xschem device symbols are relative symlinks into "
+            "a sibling `ihp-sg13g2` checkout the install does not contain. "
+            "`find`/`list` already resolve such an install (it looks "
+            "complete on disk); `check` is the scriptable CI gate that "
+            "catches part of it being unusable."
+        ),
+    )
+    _add_pdk_args(
+        check_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(check_parser)
+    check_parser.set_defaults(func=pdk_cmd.run_check)
+
     cells_parser = pdk_sub.add_parser(
         "cells",
         help="report standard-cell library device flavor(s) / nominal supply",

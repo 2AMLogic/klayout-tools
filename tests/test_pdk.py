@@ -297,6 +297,172 @@ def test_assets_present_and_absent(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Dangling symlinks in asset directories (issue #1406) -- a standalone
+# `ihp-sg13cmos5l` install's `libs.tech/xschem/sg13cmos5l_pr/*.sym` device
+# symbols are relative symlinks into a sibling `ihp-sg13g2` checkout the
+# install does not contain, so they never resolve.
+# --------------------------------------------------------------------------- #
+
+
+def test_find_reports_empty_broken_symlinks_for_healthy_install(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice", "xschem"))
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["broken_symlinks"] == []
+
+
+def test_find_reports_dangling_symlink_in_asset_dir(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem",))
+    xschem_dir = variant_dir / "libs.tech" / "xschem"
+    dangling = xschem_dir / "sg13_hv_pmos.sym"
+    dangling.symlink_to(
+        xschem_dir / ".." / ".." / ".." / "ihp-sg13g2" / "sg13_hv_pmos.sym"
+    )
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling)}]
+
+
+def test_find_reports_dangling_symlink_nested_in_subdirectory(tmp_path):
+    # Mirrors the real layout: the broken symlinks live under a nested
+    # `sg13cmos5l_pr/` subdirectory of the `xschem` asset, not directly in it.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem",))
+    nested = variant_dir / "libs.tech" / "xschem" / "sg13cmos5l_pr"
+    nested.mkdir()
+    dangling = nested / "sg13_hv_pmos.sym"
+    dangling.symlink_to(nested / ".." / ".." / ".." / ".." / "nonexistent.sym")
+    # A real file alongside it (mirrors the two real MoM-cap symbols) must
+    # not be flagged.
+    (nested / "cap_cmomf.sym").write_text("* real file\n", encoding="utf-8")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling)}]
+
+
+def test_find_does_not_flag_a_symlink_that_resolves(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("netgen",))
+    netgen_dir = variant_dir / "libs.tech" / "netgen"
+    (netgen_dir / "sky130A_setup.tcl").write_text("# real setup\n", encoding="utf-8")
+    # Mirrors open_pdks' own generic `setup.tcl` -> `<variant>_setup.tcl`
+    # symlink -- relative, and it resolves fine.
+    (netgen_dir / "setup.tcl").symlink_to("sky130A_setup.tcl")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["broken_symlinks"] == []
+
+
+def test_find_reports_dangling_directory_symlink(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem",))
+    xschem_dir = variant_dir / "libs.tech" / "xschem"
+    dangling_dir = xschem_dir / "sg13g2_pr"
+    dangling_dir.symlink_to(xschem_dir / ".." / ".." / "does-not-exist")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling_dir)}]
+
+
+def test_find_broken_symlinks_across_multiple_assets_sorted(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem", "ngspice"))
+    xschem_broken = variant_dir / "libs.tech" / "xschem" / "b.sym"
+    xschem_broken.symlink_to("does-not-exist-1")
+    ngspice_broken = variant_dir / "libs.tech" / "ngspice" / "a.lib"
+    ngspice_broken.symlink_to("does-not-exist-2")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["broken_symlinks"] == [
+        {"asset": "ngspice", "path": str(ngspice_broken)},
+        {"asset": "xschem", "path": str(xschem_broken)},
+    ]
+
+
+def test_cli_check_exits_zero_for_healthy_install(tmp_path, capsys):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("xschem",))
+
+    exit_code = main(["pdk", "check", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["broken_symlinks"] == []
+
+
+def test_cli_check_exits_nonzero_for_dangling_symlink(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem",))
+    xschem_dir = variant_dir / "libs.tech" / "xschem"
+    dangling = xschem_dir / "sg13_hv_pmos.sym"
+    dangling.symlink_to("does-not-exist")
+
+    exit_code = main(["pdk", "check", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling)}]
+
+
+def test_cli_check_text_output_reports_broken_symlinks(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem",))
+    xschem_dir = variant_dir / "libs.tech" / "xschem"
+    dangling = xschem_dir / "sg13_hv_pmos.sym"
+    dangling.symlink_to("does-not-exist")
+
+    exit_code = main(["pdk", "check", "--pdk-root", str(root)])
+
+    assert exit_code == 4
+    out = capsys.readouterr().out
+    assert "broken_symlinks: 1" in out
+    assert str(dangling) in out
+
+
+def test_cli_check_text_output_healthy_install(tmp_path, capsys):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("xschem",))
+
+    exit_code = main(["pdk", "check", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    assert "broken_symlinks: none" in capsys.readouterr().out
+
+
+def test_cli_check_no_install_error_envelope(tmp_path, capsys):
+    exit_code = main(
+        ["pdk", "check", "--pdk-root", str(tmp_path / "nope"), "--format", "json"]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["error"]["command"] == "pdk check"
+
+
+def test_cli_find_text_surfaces_broken_symlink_count(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("xschem",))
+    xschem_dir = variant_dir / "libs.tech" / "xschem"
+    xschem_dir.joinpath("sg13_hv_pmos.sym").symlink_to("does-not-exist")
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root)])
+
+    assert exit_code == 0  # `find` still resolves; it is not the CI gate
+    out = capsys.readouterr().out
+    assert "broken_symlinks: 1" in out
+
+
+# --------------------------------------------------------------------------- #
 # Flat single-PDK layout (issue #522 -- IHP-Open-PDK's SG13G2)
 #
 # Layout verified against a real IHP-Open-PDK v0.3.0 release tarball
