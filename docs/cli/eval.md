@@ -44,7 +44,7 @@ itself, per this repo's "wrap the proven engine" convention.
 
 An agent wanting to answer "is this candidate better than the last one?"
 otherwise has to fan out four subprocesses, reconcile four separate exit-code
-vocabularies (`drc` 0/1/2/3, `sim` 0/1/2/3/4, `lvs` 0/1/2/3,
+vocabularies (`drc` 0/1/2/3, `sim` 0/1/2/3/4, `lvs` 0/1/2/3 plus `4`,
 `layout-metrics` 0/1/2 with no pass/fail concept of its own), and hand-roll
 the scoring — glue every block repo would otherwise write again, slightly
 differently. `klt eval` returns one envelope: a hard `valid` gate that can't
@@ -251,7 +251,7 @@ pass a literal `"${name}"` string to the underlying check.**
 | `check` | string | Which underlying `klt` subcommand produced this gate — cites the check for debuggability, even when `name` differs. |
 | `name` | string | This gate's declared (or default) name. |
 | `status` | `"pass"` \| `"fail"` | This gate's verdict. |
-| `exit_code` | integer | The exit code the cited `check` would itself have returned for this report (e.g. `3` for a `drc` gate with violations) — `0` for a threshold-derived gate (the underlying check itself ran and reported successfully; the threshold comparison, not that check's own exit-code vocabulary, produced `status`). Lets a human debugging a `valid: false` run trace it back to the specific `klt <check>` invocation and outcome. |
+| `exit_code` | integer | The exit code the cited `check` would itself have returned for this report (e.g. `3` for a `drc` gate with violations) — `0` for a threshold-derived gate (the underlying check itself ran and reported successfully; the threshold comparison, not that check's own exit-code vocabulary, produced `status`). Lets a human debugging a `valid: false` run trace it back to the specific `klt <check>` invocation and outcome. A `4` means the check ran but could not reach a trustworthy verdict, so `status: "fail"` there is "did not clear the gate", not "the design is bad": `sim`'s broken-corner `status: "error"`, and (issue #1370) an `lvs` gate whose report is `status: "inconclusive"` — `options.combine_devices` exhausted its retry budget, so the compare never ran. Both are distinguished from `3` deliberately; `3` alone would claim the design differs. |
 | `count` | integer \| number | Present when the underlying check (or threshold) has a natural headline count/value: `violation_count` for `drc`, `mismatch_count` for `lvs`, failed/errored corner count for `sim`, the threshold's extracted metric value for a threshold-derived gate. Absent otherwise. |
 
 ## Trajectory logging

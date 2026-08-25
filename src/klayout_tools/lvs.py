@@ -213,6 +213,35 @@ CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
 #: ``RuntimeError`` some other code path might raise.
 _COMBINE_DEVICES_ERROR_MARKER = "Netlist.combine_devices"
 
+#: The identifier fields KLayout embeds in the message of the error
+#: :data:`_COMBINE_DEVICES_ERROR_MARKER` matches -- e.g. "``... device
+#: combination: name=, circuit=<top>, terminal=E in
+#: Netlist.combine_devices``" (issue #1370). ``name`` is the failing
+#: device's own name (frequently empty: the device is mid-removal when the
+#: invariant trips, so KLayout has nothing to print), ``circuit`` is the
+#: circuit that device lives in, and ``terminal`` is the terminal that was
+#: still connected. Parsed -- rather than passed through as a raw string --
+#: so a ``device.combine_incomplete`` entry carries the machine-readable
+#: ``circuit``/``device``/``net`` identifiers every other ``mismatches[]``
+#: entry carries, instead of only prose a caller has to regex itself.
+_COMBINE_DEVICES_ERROR_FIELDS_RE = re.compile(
+    r"name=(?P<device>[^,]*),\s*circuit=(?P<circuit>[^,]*),\s*"
+    r"terminal=(?P<terminal>[^\s,]*)"
+)
+
+#: Third ``status`` value (issue #1370), alongside ``"match"``/
+#: ``"mismatch"``: the compare the caller asked for could not be performed,
+#: so no verdict about the design was reached. Emitted only when
+#: ``options.combine_devices`` was requested and
+#: :func:`_combine_devices_safely` exhausted its retry budget on at least one
+#: side -- see :func:`run_lvs`'s symmetric-degrade block. Mirrors ``klt
+#: equiv``'s own ``"inconclusive"`` vocabulary and its dedicated exit code
+#: (``cli/equiv_cmd.py``'s ``EXIT_INCONCLUSIVE = 4``, ``docs/cli/equiv.md``'s
+#: "Timeout and the inconclusive verdict"): a run that could not reach a
+#: trustworthy verdict must never be reported under one of the two verdict
+#: values a caller gates on.
+STATUS_INCONCLUSIVE = "inconclusive"
+
 #: Bounded retry budget for :func:`_combine_devices_safely` (issue #1185).
 #:
 #: KLayout's own ``Netlist.combine_devices()``/``Circuit.combine_devices()``
@@ -476,6 +505,29 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``"match"`` reached after flattening is never silently indistinguishable
     from one reached against the netlist's original hierarchy. See
     :func:`_flatten_netlist_safely`.
+
+    ``options.combine_devices`` (issue #261) accepts a bool **or**, since
+    issue #1370, a list of device-class names restricting combining to those
+    classes -- the escape hatch for a netlist where KLayout's own
+    ``combine_devices()`` trips its internal-consistency invariant
+    deterministically on one class's partial-match group (see
+    :func:`_parse_combine_devices`). Naming a class present on neither side is
+    a clean :class:`LvsError`, never a silent no-op.
+
+    That option is also the sole source of this command's third ``status``
+    value, ``"inconclusive"`` (:data:`STATUS_INCONCLUSIVE`, issue #1370).
+    When :func:`_combine_devices_safely` exhausts its retry budget on either
+    side, both netlists are rolled back to ``Netlist.dup()`` snapshots taken
+    before combining (a **symmetric degrade** -- never a partially-folded
+    layout compared against a fully-folded reference), and a resulting
+    ``"mismatch"`` is reported as ``"inconclusive"`` instead: the compare the
+    caller asked for did not run, so its outcome is not a statement about the
+    design. A ``"match"`` reached that way is left alone -- the engine's
+    verdict is always authoritative here, and an uncombined compare that
+    still matched is strictly stronger evidence than a combined one. The
+    ``device.combine_incomplete`` warning is present in ``mismatches[]``
+    either way, now carrying the failing attempt's own
+    ``circuit``/``device``/``net`` identifiers.
     """
     request, request_dir = load_request_arg(request)
 
@@ -519,7 +571,18 @@ def run_lvs(request: str) -> dict[str, Any]:
 
     options = request.get("options") or {}
     keep_extracted = bool(options.get("keep_extracted", False))
-    combine_devices = bool(options.get("combine_devices", False))
+    # Issue #1370: `true`/`false` (the original shape) or a list of
+    # device-class names restricting which classes are combined at all --
+    # see `_parse_combine_devices`. `combine_devices` below is the resolved
+    # value (echoed back verbatim in the response's `options` block);
+    # `combine_device_classes` is the restriction (`None` for the bool
+    # shape), and `combine_devices_enabled` is the plain "does combining run
+    # at all" predicate every downstream branch already keyed on.
+    combine_devices = _parse_combine_devices(options)
+    combine_device_classes = (
+        combine_devices if isinstance(combine_devices, list) else None
+    )
+    combine_devices_enabled = bool(combine_devices)
     parameter_tolerance = _parse_parameter_tolerance(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -542,7 +605,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         layout_hash_source,
         extracted_netlist_path,
     ) = _resolve_layout(
-        layout_spec, request_dir, keep_extracted, combine_devices, deck_options
+        layout_spec,
+        request_dir,
+        keep_extracted,
+        combine_devices_enabled,
+        deck_options,
     )
 
     flatten_warnings: list[dict[str, Any]] = []
@@ -639,7 +706,8 @@ def run_lvs(request: str) -> dict[str, Any]:
         raise LvsError(str(exc)) from exc
 
     combine_warnings: list[dict[str, Any]] = []
-    if combine_devices:
+    combine_incomplete = False
+    if combine_devices_enabled:
         # Opt-in (issue #261): `Netlist.combine_devices()` merges devices
         # that a device class's own `combine_devices` logic recognises as
         # combinable (e.g. parallel/series MOSFETs with matching gate/S/D/B
@@ -684,12 +752,53 @@ def run_lvs(request: str) -> dict[str, Any]:
         # them.
         layout_circuit_name = layout_circuit.name
         reference_circuit_name = reference_circuit.name
-        layout_warning = _combine_devices_safely(layout_netlist, "layout")
+
+        # Issue #1370: a list-valued `options.combine_devices` restricts
+        # combining to the named device classes. Validated against *both*
+        # netlists' actual device classes first, so naming a class that
+        # exists on neither side is a clean request error rather than a
+        # silent no-op that looks like "combining ran and found nothing".
+        if combine_device_classes is not None:
+            _validate_combine_device_classes(
+                combine_device_classes,
+                {"layout": layout_netlist, "reference": reference_netlist},
+            )
+
+        # Issue #1370, symmetric degrade: snapshot both sides *before* either
+        # combine runs. When a side exhausts its retry budget the compare the
+        # caller asked for cannot be performed on that side, and the
+        # status-quo behaviour (leave that side partially folded, leave the
+        # other side fully folded) compares a partially-folded netlist against
+        # a fully-folded one -- an unfair comparison whose every downstream
+        # `device.property`/`device.unmatched` finding is cascade, not a real
+        # design difference. Restoring *both* snapshots instead puts the two
+        # sides back on equal terms (exactly the state
+        # `options.combine_devices: false` would have produced), and the
+        # verdict is reported as `status: "inconclusive"` further down rather
+        # than as a design mismatch. Only paid for when combining is opted in.
+        layout_snapshot = layout_netlist.dup()
+        reference_snapshot = reference_netlist.dup()
+
+        layout_warning = _combine_devices_safely(
+            layout_netlist, "layout", device_classes=combine_device_classes
+        )
         if layout_warning is not None:
             combine_warnings.append(layout_warning)
-        reference_warning = _combine_devices_safely(reference_netlist, "reference")
+        reference_warning = _combine_devices_safely(
+            reference_netlist, "reference", device_classes=combine_device_classes
+        )
         if reference_warning is not None:
             combine_warnings.append(reference_warning)
+
+        combine_incomplete = bool(combine_warnings)
+        if combine_incomplete:
+            # Asymmetric failure (one side combined cleanly, the other did
+            # not) is handled by the same restore as the both-sides case: the
+            # side that *did* combine is rolled back too, so neither side
+            # carries a fold the other could not.
+            layout_netlist.assign(layout_snapshot)
+            reference_netlist.assign(reference_snapshot)
+
         layout_circuit = layout_netlist.circuit_by_name(layout_circuit_name)
         reference_circuit = reference_netlist.circuit_by_name(reference_circuit_name)
 
@@ -705,8 +814,15 @@ def run_lvs(request: str) -> dict[str, Any]:
         # not combine_devices()'s internal bookkeeping. Scoped to genuinely
         # empty nets only, so a real (if unused) top-level pin's net is never
         # dropped and counts.pins.* is unaffected.
-        _purge_emptied_nets(layout_netlist)
-        _purge_emptied_nets(reference_netlist)
+        #
+        # Skipped entirely after a symmetric degrade (issue #1370): nothing
+        # was folded on either side, so there is no combine-emptied net to
+        # purge, and skipping keeps the degraded run's `counts.nets.*`
+        # byte-identical to what `options.combine_devices: false` reports for
+        # the same inputs -- which is the whole point of the degrade.
+        if not combine_incomplete:
+            _purge_emptied_nets(layout_netlist)
+            _purge_emptied_nets(reference_netlist)
 
         if layout_deck is not None:
             # Issue #559/#585: apply the deferred resistor `fixed_offset_ohm`
@@ -743,6 +859,14 @@ def run_lvs(request: str) -> dict[str, Any]:
             # (issue #585). The reference netlist never receives this
             # correction: it is a layout-deck-specific geometric correction,
             # not a property of the schematic reference.
+            #
+            # Still applied after a symmetric degrade (issue #1370), unlike
+            # the net purge above: a deferred extraction wrote raw body `R`
+            # values that are simply *wrong* until the offset is added, and
+            # with nothing folded this adds it exactly once per drawn
+            # primitive -- which is precisely what a non-deferred extraction
+            # would have produced. Skipping it here would leave the degraded
+            # run reporting under-valued resistances.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
 
     bulk_warnings: list[dict[str, Any]] = []
@@ -1039,6 +1163,27 @@ def run_lvs(request: str) -> dict[str, Any]:
     ):
         mismatches.sort(key=_sort_key)
 
+    if combine_incomplete and status == "mismatch":
+        # Issue #1370: `options.combine_devices` was requested, at least one
+        # side exhausted its retry budget, and both sides were rolled back to
+        # their pre-combine state (the symmetric degrade above). The compare
+        # that actually ran is therefore *not* the compare the caller asked
+        # for -- a folded layout compared uncombined against a lumped
+        # reference mismatches by construction, so this "mismatch" says
+        # nothing about whether the design differs. Report it as
+        # `"inconclusive"` instead, mirroring `klt equiv`'s own
+        # never-report-an-unreachable-verdict rule (see
+        # `STATUS_INCONCLUSIVE`).
+        #
+        # Deliberately only downgrades `"mismatch"`, never `"match"`: this
+        # module never re-derives a verdict the engine did not reach (see the
+        # module docstring), and an uncombined compare that still matched is
+        # a real, strictly-stronger match -- the fold turned out to be
+        # unnecessary. `mismatches[]` keeps the `device.combine_incomplete`
+        # warning either way, so a caller can always see that combining did
+        # not apply.
+        status = STATUS_INCONCLUSIVE
+
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
     # entries of the same category into one number (e.g. `"topology": 8`
@@ -1096,6 +1241,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         # netlist is also written to disk, and is already visible as
         # `environment.extracted_netlist`) and `options.netgen_timeout_s` (a
         # runtime guard, not a compare input). Neither can change a verdict.
+        #
+        # `combine_devices` echoes the *resolved* request value, so it is a
+        # boolean for the bool shape and the (normalised) list of device-class
+        # names for issue #1370's list shape -- the same round-trip discipline
+        # every other key here follows.
         "options": {
             "combine_devices": combine_devices,
             "flatten_layout": flatten_layout,
@@ -1281,8 +1431,15 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         # every option's own default, and omitting it keeps the
         # reconstructed request document as close to the original as the
         # echo allows.
-        if echoed.get(flag):
-            options[flag] = True
+        value = echoed.get(flag)
+        if not value:
+            continue
+        # Issue #1370: `combine_devices` may be a list of device-class names,
+        # not just `true` -- re-assert it verbatim so `--rerun` reproduces the
+        # *restricted* combine the committed report was produced under,
+        # rather than an unrestricted one whose difference it would then
+        # report as drift.
+        options[flag] = list(value) if isinstance(value, list) else True
     netgen_setup = echoed.get("netgen_setup")
     if netgen_setup is not None:
         options["netgen_setup"] = netgen_setup
@@ -1805,10 +1962,227 @@ def _resolve_gate_level_pin_order_lookup(
     )
 
 
+def _parse_combine_devices(options: Mapping[str, Any]) -> bool | list[str]:
+    """Resolve ``options.combine_devices`` into either a bool (the original
+    shape, unchanged) or a normalised list of device-class names (issue
+    #1370).
+
+    The list shape restricts combining to only the named device classes --
+    the escape hatch for a netlist where KLayout's own
+    ``Netlist.combine_devices()`` trips its internal-consistency invariant
+    *deterministically* on one device class's partial-match group, leaving
+    :func:`_combine_devices_safely`'s retry budget (issue #1185) with nothing
+    to resample. Naming only the classes that actually need folding lets the
+    compare the caller wanted run at all, instead of degrading the whole run.
+
+    A wrong-shaped value is a clean request error rather than a silent
+    coercion, mirroring how ``layout.declared_pins``/``layout.deck_options``
+    are validated: ``bool(...)`` would happily turn ``"nfet"``, ``0``, or
+    ``{}`` into a verdict-shaping flag the caller never meant. An empty list
+    is rejected for the same reason ``declared_pins`` rejects one -- it reads
+    as "combine nothing", which is what ``false`` already means, so it is far
+    more likely a mistake than an intent.
+    """
+    value = options.get("combine_devices", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, list):
+        if not value or not all(
+            isinstance(name, str) and name.strip() for name in value
+        ):
+            raise LvsError(
+                "options.combine_devices, when given as a list, must be a "
+                "non-empty list of non-empty device-class name strings (e.g. "
+                '["NMOS", "PMOS"]) -- use `false` to disable combining '
+                "entirely"
+            )
+        return [name.strip() for name in value]
+    raise LvsError(
+        "options.combine_devices must be a boolean or a list of device-class "
+        f"name strings; got {type(value).__name__}"
+    )
+
+
+def _validate_combine_device_classes(
+    class_names: list[str],
+    netlists: Mapping[str, kdb.Netlist],
+) -> None:
+    """Reject a list-valued ``options.combine_devices`` naming a device class
+    that exists on **neither** side (issue #1370).
+
+    Without this, a typo (``"nfet_o1v8"`` for ``"nfet_01v8"``) silently
+    restricts combining to nothing at all and the run reports a full
+    ``device.unmatched`` cascade that looks exactly like a real design error
+    -- the "silently no-op" failure mode this option exists to avoid. Matched
+    case-insensitively against every device class registered on either
+    netlist, because ``NetlistSpiceReader`` upper-cases class names read back
+    from SPICE (``RES_HIGH_PO``) while an in-process extraction deck writes
+    them as declared (``res_high_po``) -- the same case-insensitive
+    convention :func:`~klayout_tools.extract.apply_resistor_fixed_offset_corrections`
+    already uses (issue #585).
+
+    Only "on neither side" is an error: a class present on just one side is
+    legitimate (a layout-only parasitic flavour, a reference-only lumped
+    model), and restricting to it there is exactly the asymmetry a caller
+    reaching for this option may be trying to express.
+    """
+    known: dict[str, str] = {}
+    for netlist in netlists.values():
+        for device_class in netlist.each_device_class():
+            known.setdefault(device_class.name.lower(), device_class.name)
+    unknown = [name for name in class_names if name.lower() not in known]
+    if not unknown:
+        return
+    available = ", ".join(sorted(known.values())) or "(none)"
+    raise LvsError(
+        "options.combine_devices names device class(es) present in neither "
+        f"the layout nor the reference netlist: {', '.join(sorted(unknown))} "
+        f"-- device classes available across both sides: {available}"
+    )
+
+
+def _restrict_device_combination(netlist: kdb.Netlist, class_names: list[str]) -> None:
+    """Disable device combination on every device class of ``netlist`` that
+    is *not* named in ``class_names`` (issue #1370).
+
+    ``klayout.db.Netlist.combine_devices()`` takes no arguments and offers no
+    per-class filter (verified against ``klayout==0.30.10``), but each
+    ``DeviceClass`` carries the two predicates its combination passes consult
+    -- ``supports_parallel_combination`` and ``supports_serial_combination``.
+    Clearing both on the other classes makes KLayout's own pass skip them, so
+    only the named classes are folded. Matched case-insensitively for the
+    same ``NetlistSpiceReader``-upper-cases-class-names reason
+    :func:`_validate_combine_device_classes` documents.
+
+    Deliberately one-way: both predicates are **write-only** in KLayout's
+    Python bindings (reading either raises ``AttributeError: ... is not
+    readable``), so their prior values cannot be saved and restored. That is
+    safe here because the only consumers of these predicates are
+    ``Circuit::combine_devices()`` -- which is exactly what this is scoping --
+    and the device *extractor*, which has already finished by the time
+    ``run_lvs`` reaches this point. ``NetlistComparer`` never reads them, and
+    every netlist this touches is a per-run, in-memory object discarded when
+    ``run_lvs`` returns. ``run_lvs`` additionally holds an untouched
+    ``Netlist.dup()`` snapshot of each side taken *before* combining, which is
+    what the symmetric degrade restores, so even the predicates come back
+    unmodified on that path.
+    """
+    wanted = {name.lower() for name in class_names}
+    for device_class in netlist.each_device_class():
+        if device_class.name.lower() in wanted:
+            continue
+        device_class.supports_parallel_combination = False
+        device_class.supports_serial_combination = False
+
+
+def _combine_failure_identifiers(
+    netlist: kdb.Netlist, side: str, message: str
+) -> dict[str, Any]:
+    """Turn KLayout's own ``combine_devices()`` internal-consistency error
+    *message* into the machine-readable ``circuit``/``device``/``net``
+    ``mismatches[]`` fields (issue #1370), resolving each against ``netlist``
+    where the message alone is not enough.
+
+    The message embeds three fields --
+    ``name=<device>, circuit=<circuit>, terminal=<terminal>`` (see
+    :data:`_COMBINE_DEVICES_ERROR_FIELDS_RE`) -- which are parsed and then
+    resolved as far as the (partially combined) netlist allows:
+
+    * ``circuit`` -- taken straight from the message, on ``side``'s key.
+    * ``device`` -- the named device, when KLayout printed a name *and* that
+      device is still present in the named circuit; its ``class`` is that
+      device's device-class name.
+    * ``net`` -- the net wired to the reported terminal of that device.
+
+    KLayout frequently reports an **empty** ``name=`` (the device is mid-
+    removal when the invariant trips, so there is nothing to print). In that
+    case the device's own name is unrecoverable, but the *class* usually is
+    not: if exactly one device class present in the named circuit declares a
+    terminal with the reported name, that class is the failing group's class,
+    and it is reported as ``device.class`` with both name keys ``null`` (the
+    same shape ``device.body_unverified`` already uses for a class-level,
+    instance-less finding). Anything that cannot be resolved this way stays
+    ``null`` -- never guessed.
+
+    Returns the ``_mismatch`` keyword arguments as a dict, always including
+    a ``details`` block with the parsed terminal name and KLayout's raw
+    message, so a caller has the unparsed original too.
+    """
+    match = _COMBINE_DEVICES_ERROR_FIELDS_RE.search(message)
+    device_name = (match.group("device").strip() if match else "") or None
+    circuit_name = (match.group("circuit").strip() if match else "") or None
+    terminal_name = (match.group("terminal").strip() if match else "") or None
+
+    other = "reference" if side == "layout" else "layout"
+    circuit_field: dict[str, Any] | None = None
+    device_field: dict[str, Any] | None = None
+    net_field: dict[str, Any] | None = None
+
+    circuit = netlist.circuit_by_name(circuit_name) if circuit_name else None
+    if circuit_name:
+        circuit_field = {side: circuit_name, other: None}
+
+    device = None
+    if circuit is not None and device_name:
+        device = circuit.device_by_name(device_name)
+    if device is not None:
+        device_class = device.device_class()
+        device_field = {
+            side: device.expanded_name(),
+            other: None,
+            "class": device_class.name,
+        }
+        if terminal_name:
+            net = _net_for_terminal_or_none(device, terminal_name)
+            if net is not None:
+                net_field = {side: net.expanded_name(), other: None}
+    elif circuit is not None and terminal_name:
+        class_names = _device_classes_declaring_terminal(circuit, terminal_name)
+        if len(class_names) == 1:
+            device_field = {side: None, other: None, "class": class_names[0]}
+
+    return {
+        "circuit": circuit_field,
+        "device": device_field,
+        "net": net_field,
+        "details": {"terminal": terminal_name, "klayout_error": message},
+    }
+
+
+def _net_for_terminal_or_none(device: Any, terminal_name: str) -> Any:
+    """``device.net_for_terminal(terminal_name)``, or ``None`` when this
+    device's class declares no such terminal (KLayout raises rather than
+    returning ``nil`` for an unknown terminal name)."""
+    try:
+        return device.net_for_terminal(terminal_name)
+    except Exception:  # pragma: no cover -- defensive: unknown terminal name
+        return None
+
+
+def _device_classes_declaring_terminal(
+    circuit: kdb.Circuit, terminal_name: str
+) -> list[str]:
+    """The distinct device-class names used by devices in ``circuit`` that
+    declare a terminal called ``terminal_name`` -- the fallback identifier
+    :func:`_combine_failure_identifiers` uses when KLayout reported an empty
+    device ``name=``. Sorted for determinism."""
+    names: set[str] = set()
+    for device in circuit.each_device():
+        device_class = device.device_class()
+        if any(
+            terminal.name == terminal_name
+            for terminal in device_class.terminal_definitions()
+        ):
+            names.add(device_class.name)
+    return sorted(names)
+
+
 def _combine_devices_safely(
     netlist: kdb.Netlist,
     side: str,
     max_attempts: int = _COMBINE_DEVICES_MAX_ATTEMPTS,
+    *,
+    device_classes: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Call ``netlist.combine_devices()``, retrying against independent
     netlist copies to counter its run-to-run nondeterminism, and degrading
@@ -1861,12 +2235,28 @@ def _combine_devices_safely(
     before hitting the error on that final attempt stays merged; this
     netlist's remaining, not-yet-combined devices are simply left as
     individual devices for the rest of this run, exactly as they would be
-    with ``options.combine_devices: false``.
+    with ``options.combine_devices: false``. (``run_lvs`` no longer *ships*
+    that partially-combined state to the comparer -- issue #1370's symmetric
+    degrade rolls both sides back to their pre-combine snapshots when this
+    function reports a failure -- but this function's own contract is
+    unchanged, so a direct caller still gets exactly the issue #466 shape.)
+
+    ``device_classes`` (issue #1370) restricts combining to the named device
+    classes, via :func:`_restrict_device_combination` applied to whichever
+    netlist this attempt runs against. ``None`` (the default) combines every
+    class, i.e. the plain ``options.combine_devices: true`` behaviour.
+    Applied per attempt rather than once up front so a retry against a fresh
+    ``Netlist.dup()`` copy -- which carries its own, unrestricted copies of
+    the device classes -- is restricted the same way the first attempt was.
 
     Returns a ``severity: "warning"`` ``mismatches[]`` entry
     (``category: "device.combine_incomplete"``) to append to the report when
     every attempt hit the error, or ``None`` when some attempt (usually the
-    first) completed cleanly. Only catches this one KLayout-internal error
+    first) completed cleanly. That entry carries the failing attempt's own
+    ``circuit``/``device``/``net`` identifiers wherever KLayout's message and
+    the netlist can supply them (issue #1370, see
+    :func:`_combine_failure_identifiers`) -- not just the raw exception text
+    in ``description``. Only catches this one KLayout-internal error
     shape (matched narrowly on ``_COMBINE_DEVICES_ERROR_MARKER``, the
     ``"...in Netlist.combine_devices"`` suffix every instance of it
     carries) -- any other ``RuntimeError``, on any attempt, propagates
@@ -1881,6 +2271,8 @@ def _combine_devices_safely(
         # so each non-final attempt is a genuinely independent trial of
         # KLayout's internal ordering, not a retry-from-partial-damage.
         candidate = netlist if is_last_attempt else netlist.dup()
+        if device_classes is not None:
+            _restrict_device_combination(candidate, device_classes)
         try:
             candidate.combine_devices()
         except RuntimeError as exc:
@@ -1894,11 +2286,17 @@ def _combine_devices_safely(
                 if max_attempts > 1
                 else ""
             )
+            restriction_disclosure = (
+                f" (restricted to device class(es) {', '.join(device_classes)})"
+                if device_classes is not None
+                else ""
+            )
             return _mismatch(
                 CATEGORY_DEVICE_COMBINE_INCOMPLETE,
                 "warning",
                 "options.combine_devices could not fully combine devices on "
-                f"the {side} netlist{attempts_disclosure}: KLayout's "
+                f"the {side} netlist{restriction_disclosure}"
+                f"{attempts_disclosure}: KLayout's "
                 "Netlist.combine_devices() hit an internal-consistency error "
                 "on a partial-match device group (instances sharing only "
                 "some, not all, of their matching terminals) and stopped -- "
@@ -1906,6 +2304,10 @@ def _combine_devices_safely(
                 "combined, but the rest of this netlist's devices were left "
                 f"uncombined ({exc})",
                 side,
+                # Issue #1370: the failing attempt's own machine-readable
+                # identifiers, resolved against `candidate` (the netlist the
+                # error was actually raised on) rather than left `None`.
+                **_combine_failure_identifiers(candidate, side, str(exc)),
             )
         else:
             if candidate is not netlist:

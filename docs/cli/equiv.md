@@ -371,11 +371,13 @@ caller should rely on.
 | `3` | Ran successfully, proven non-equivalent (`status: "counterexample"`). |
 | `4` | Ran, but the proof is inconclusive — solver/process timeout, an induction-bound proof with no confirming or refuting counterexample, or a solver-reported counterexample that simulation did not reproduce (`status: "inconclusive"`, issue #1349). Never `0`. |
 
-This is `klt sim`'s 0/1/2/3/4 precedent (not `klt lvs`'s 0/1/2/3): a formal
-equivalence proof has the same third "ran, but the result isn't
-trustworthy" outcome a PVT corner sweep has (a timeout) — which a binary
-netlist comparison (LVS, an exact structural match/mismatch with no solver
-involved) does not.
+This is `klt sim`'s 0/1/2/3/4 precedent: a formal equivalence proof has the
+same third "ran, but the result isn't trustworthy" outcome a PVT corner sweep
+has (a timeout), which a plain netlist comparison does not have from its own
+compare engine. `klt lvs` has since adopted the same `4` for the one case
+where it, too, cannot reach a verdict (`options.combine_devices` exhausting
+its retry budget — issue #1370, see [`docs/cli/lvs.md`](lvs.md)'s "Exit
+codes"); the numeric value is deliberately shared across both verbs.
 
 On error (exit `1`), a concise message is written to **stderr** and
 nothing is written to stdout. No Python traceback is ever emitted.

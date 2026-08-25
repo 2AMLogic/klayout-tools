@@ -553,6 +553,59 @@ def test_lvs_gate_mismatch(tmp_path, monkeypatch):
     assert report["valid"] is False
 
 
+def test_lvs_gate_inconclusive_reports_exit_code_4(tmp_path, monkeypatch):
+    """Issue #1370: an `lvs` report with `status: "inconclusive"` gates as
+    `fail` (the candidate has not cleared the gate) but carries **exit code
+    `4`**, not `3` -- `exit_code` is documented as the code the cited check
+    would itself have returned, and `klt lvs` exits `4` there. `3` would
+    tell a human the design differs, when the compare never ran.
+
+    `combine_devices()` is forced to fail on every attempt, which is exactly
+    the deterministic failure #1370 was filed against.
+    """
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(
+            "Internal error: Terminal still connected after removing device "
+            "in device combination: name=, circuit=INV, terminal=D in "
+            "Netlist.combine_devices"
+        )
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "layout.spice").write_text(_INVERTER_SPICE)
+    (tmp_path / "ref.spice").write_text(_INVERTER_SPICE_MISMATCH)
+
+    descriptor = {
+        "gates": [
+            {
+                "check": "lvs",
+                "args": {
+                    "request": {
+                        "layout": {"netlist": "layout.spice", "top": "inv"},
+                        "reference": {"netlist": "ref.spice", "top": "inv"},
+                        "options": {"combine_devices": True},
+                    }
+                },
+            }
+        ],
+        "objective": {
+            "check": "layout-metrics",
+            "metric": "status",
+            "args": {"block": str(tmp_path)},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    report = run_eval(path)
+    (gate,) = report["gates"]
+    assert gate["check"] == "lvs"
+    assert gate["status"] == "fail"
+    assert gate["exit_code"] == 4
+    assert report["valid"] is False
+
+
 # --------------------------------------------------------------------------- #
 # sim gate (real ngspice, gated -- and the 4-gate composition test)
 # --------------------------------------------------------------------------- #
