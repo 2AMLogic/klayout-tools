@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt gen-compose`'s route-vs-route collision check (#1057) is now
+  spacing-aware, not just overlap-aware (issue #1386): two accepted
+  `connectivity[]` legs on the same effective drawing layer that never
+  literally overlap, but sit closer together than the resolved deck's own
+  same-layer minimum-spacing rule (e.g. sky130's `li1.space.1`/
+  `met1.space.1`), are now rejected (`unrouted_nets[]`, a `legs[].reason`
+  naming both the other net and the violated rule id) instead of both
+  silently composing `routed: true` over a real `klt drc` violation. The
+  same check is also now layer-aware: two accepted legs on genuinely
+  different physical layers (e.g. one fell back to
+  `routing.cross_block_layer_role` while another stayed on the primary
+  `routing.layer_role`) are no longer compared against each other at all. A
+  layer with no matching `"space"` rule in the resolved deck keeps the
+  pre-#1386 overlap-only behavior unchanged. Purely additive: a
+  request/response that was never affected by this check is unchanged; see
+  `docs/cli/gen-compose.md`'s "Route-vs-route collision is spacing-aware"
+  section.
 - `klt lvs`'s `reference.form: "gate-level-verilog"` conversion now reads a
   Verilog **escaped identifier** the way Verilog defines it — one atomic
   token from the backslash to the next whitespace (issue #1371). A

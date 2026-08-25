@@ -1927,7 +1927,12 @@ def create_parser() -> argparse.ArgumentParser:
             "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
             "'CLI shape' note for why. Runs fully headless via KLayout's "
             "native pya -- no GUI, no Qt. Takes a request-document path (like "
-            "`klt sim`/`klt lvs`), not positional block file args."
+            "`klt sim`/`klt lvs`), not positional block file args. "
+            "`nets[].legs[].routed: true` is NOT a DRC-clean guarantee -- "
+            "it means this command's own routability heuristics found no "
+            "problem, not that none exists; always re-run `klt drc` on the "
+            "composed output before treating it as sign-off ready, see "
+            "docs/cli/gen-compose.md's 'Geometry is advisory' note."
         ),
     )
     gen_compose_parser.add_argument(

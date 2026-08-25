@@ -154,7 +154,13 @@ from typing import Any
 
 from ._layout import write_layout
 from ._paths import _resolve_relative
-from .decks import ExtractionDeck, get_extraction_deck
+from .decks import (
+    ExtractionDeck,
+    UnknownDeckError,
+    get_deck,
+    get_extraction_deck,
+    get_nominal_dbu,
+)
 from .gen import (
     _PDK_ROLE_LAYERS,
     CONTACT_SIZE_UM,
@@ -3534,16 +3540,20 @@ def route_bundle(
     per-block cache); it is consulted only for a leg whose two pins sit on the
     same block, exactly as ``compose()`` did for a two-pin self-net before
     this function existed. ``leg_conflict`` is an optional callable taking a
-    candidate leg's drawn ``points_um``, ``via_drops``, and ``stub_widen``
-    (the same three fields :func:`route_two_pin` returns for it -- issue
-    #1197 widened this from ``points_um`` alone, since a leg's via-drop
-    landing pad or stub-widen box can extend past its bare backbone far
-    enough to collide with another net even when the two backbones never
-    touch) and returning a rejection reason (or ``None`` to accept) --
-    ``compose()`` passes its route-vs-route collision check (#1057) here, so
-    a leg colliding with an *already-routed other net* is rejected as a
-    candidate and an alternative leg is tried, rather than failing the whole
-    net.
+    candidate leg's drawn ``points_um``, ``via_drops``, ``stub_widen``, and
+    (issue #1386) its effective ``route_layer`` (the same four fields
+    :func:`route_two_pin` returns for it -- issue #1197 widened this from
+    ``points_um`` alone, since a leg's via-drop landing pad or stub-widen box
+    can extend past its bare backbone far enough to collide with another net
+    even when the two backbones never touch; #1386 added the layer so the
+    callback can tell two legs on genuinely different physical layers apart
+    and, when it has a same-layer minimum-spacing rule to consult, reject a
+    leg that comes too *close* to an already-accepted one, not only one that
+    literally overlaps it) and returning a rejection reason (or ``None`` to
+    accept) -- ``compose()`` passes its route-vs-route collision check
+    (#1057) here, so a leg colliding with an *already-routed other net* is
+    rejected as a candidate and an alternative leg is tried, rather than
+    failing the whole net.
 
     ``cross_block_route_layer``/``cross_block_geometry_for`` (issue #1168)
     mirror ``route_layer``/``block_geometry_for`` for an optional second,
@@ -3664,6 +3674,7 @@ def route_bundle(
                 result["points_um"],
                 result.get("via_drops", []),
                 result.get("stub_widen", []),
+                result.get("route_layer"),
             )
 
         if reason is None and result["routed"]:
@@ -4224,7 +4235,52 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # entirely (see the "shared pin" skip below). kdb.Region objects are not
     # JSON-serialisable, so this stays a private side list rather than living
     # on routed_geometry/nets[] themselves.
-    accepted_route_regions: list[tuple[str, frozenset[tuple[str, str]], Any]] = []
+    accepted_route_regions: list[
+        tuple[str, frozenset[tuple[str, str]], tuple[int, int] | None, Any]
+    ] = []
+
+    # Minimum same-layer spacing cache (issue #1386): looked up at most once
+    # per distinct effective route layer actually used, from the *same*
+    # curated DRC deck `klt drc --deck <family>` runs -- never a second,
+    # private threshold table. Feeds the spacing-aware half of
+    # `_leg_conflict` below: #1057's original route-vs-route check only ever
+    # caught a literal footprint *overlap*, which is a strict subset of what
+    # a same-layer minimum-spacing rule (e.g. sky130's `li1.space.1`/
+    # `met1.space.1`) actually forbids -- two legs whose footprints never
+    # touch can still sit closer together than that rule allows, and #1057
+    # reported both `routed: true` for it. A layer with no matching `"space"`
+    # rule in the resolved deck (or an unresolvable PDK family) caches
+    # ``None`` and this check degrades to exactly its pre-#1386 overlap-only
+    # behaviour for that layer.
+    _min_spacing_um_cache: dict[tuple[int, int], tuple[float, str] | None] = {}
+
+    def _min_spacing_um_for_layer(
+        layer: tuple[int, int] | None,
+    ) -> tuple[float, str] | None:
+        if layer is None:
+            return None
+        if layer not in _min_spacing_um_cache:
+            try:
+                family = _pdk_family(pdk_info["variant"])
+                deck_rules = get_deck(family)
+                nominal_dbu_um = get_nominal_dbu(family)
+            except (GenError, UnknownDeckError):
+                _min_spacing_um_cache[layer] = None
+                return None
+            best: tuple[float, str] | None = None
+            for rule in deck_rules:
+                if (
+                    rule.check == "space"
+                    and rule.layer == layer
+                    and rule.other_layer is None
+                    and rule.derived_layer is None
+                ):
+                    threshold_um = rule.threshold_dbu * nominal_dbu_um
+                    if best is None or threshold_um > best[0]:
+                        best = (threshold_um, rule.id)
+            _min_spacing_um_cache[layer] = best
+        return _min_spacing_um_cache[layer]
+
     for entry in connectivity:
         net_label = entry["net"]
         pins = entry["pins"]
@@ -4234,23 +4290,34 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             points_um: list[tuple[float, float]],
             via_drops: list[dict[str, Any]],
             stub_widen: list[dict[str, Any]],
+            layer: tuple[int, int] | None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
         ) -> str | None:
-            """Route-vs-route collision check (#1057) for one candidate leg.
+            """Route-vs-route collision check (#1057, spacing-aware since
+            #1386) for one candidate leg.
 
             ``route_two_pin``'s checks 1-6 only ever compare a leg's own
-            backbone against *block* geometry -- a positive-area overlap with
-            a route already accepted earlier in this same request is caught
-            here instead, the one place with visibility across nets. Mirrors
-            check 4's "positive area only, not a mere edge touch" rule: a
-            ``kdb.Region`` boolean AND between two backbones already yields an
-            empty region for a mere edge touch, so no separate area threshold
-            is needed. Nets sharing a literal pin are exempt (an intended
-            merge, not a short); the *current* net's own other legs are never
-            in ``accepted_route_regions`` yet, since a net is committed only
+            backbone against *block* geometry -- a conflict with a route
+            already accepted earlier in this same request is caught here
+            instead, the one place with visibility across nets. Nets sharing
+            a literal pin are exempt (an intended merge, not a short); the
+            *current* net's own other legs are never in
+            ``accepted_route_regions`` yet, since a net is committed only
             once every one of its legs is accepted -- so two legs of one
             bundle net converging on their shared node are never compared
             against each other either.
+
+            ``layer`` (issue #1386) is the *candidate*'s own effective
+            drawing layer -- an already-accepted leg on a genuinely different
+            physical layer (e.g. one leg fell back to
+            ``routing.cross_block_layer_role`` while another stayed on the
+            primary ``routing.layer_role``) can neither overlap nor violate a
+            same-layer spacing rule against this one, so it is skipped
+            entirely rather than compared. ``None`` (a caller that predates
+            #1386, or a candidate whose layer genuinely could not be
+            resolved) falls back to comparing against every accepted region
+            regardless of its layer, preserving this check's pre-#1386
+            behaviour exactly.
 
             The compared region is built by :func:`_drawn_leg_footprint_region`,
             not the bare backbone alone (issue #1197): a via-drop's landing
@@ -4262,15 +4329,60 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             comparison (candidate and ``accepted_route_regions`` alike) is
             what let that pair compose ``routed: true`` while `klt extract`
             silently merged them onto one node.
+
+            A literal positive-area overlap is still always rejected first
+            (mirrors check 4's "positive area only, not a mere edge touch"
+            rule: a ``kdb.Region`` boolean AND between two backbones already
+            yields an empty region for a mere edge touch). When the two
+            regions do *not* overlap but sit closer together than the
+            resolved deck's own same-layer ``"space"`` rule for ``layer``
+            (:func:`_min_spacing_um_for_layer`), one side is grown by that
+            threshold (``kdb.Region.sized`` -- the standard "distance < d"
+              Minkowski-sum test, symmetric regardless of which side grows)
+            before the same intersection test -- catching the class of
+            violation issue #1386 reported (`nets[].legs[].routed: true`
+            legs that still failed `klt drc`'s `li1.space.1`/`met1.space.1`)
+            that the overlap-only version of this check could not see. A
+            layer with no known ``"space"`` rule keeps the overlap-only test.
             """
             region = _drawn_leg_footprint_region(
                 points_um, width_um, via_drops, stub_widen, _route_dbu()
             )
-            for other_net, other_pins, other_region in accepted_route_regions:
+            spacing = _min_spacing_um_for_layer(layer)
+            inflated_region = None
+            if spacing is not None:
+                spacing_um, _rule_id = spacing
+                spacing_dbu = int(round(spacing_um / _route_dbu()))
+                if spacing_dbu > 0:
+                    inflated_region = region.sized(spacing_dbu)
+            for (
+                other_net,
+                other_pins,
+                other_layer,
+                other_region,
+            ) in accepted_route_regions:
                 if _net_pin_set & other_pins:
                     continue  # shared pin -- an intended merge, not a short
+                if (
+                    layer is not None
+                    and other_layer is not None
+                    and layer != other_layer
+                ):
+                    continue  # different physical layers can't touch or short
                 if not (region & other_region).is_empty():
                     return f"crosses already-routed net '{other_net}'"
+                if (
+                    inflated_region is not None
+                    and not (inflated_region & other_region).is_empty()
+                ):
+                    spacing_um, rule_id = spacing  # type: ignore[misc]
+                    return (
+                        f"comes within {spacing_um:.4g}um of already-routed "
+                        f"net '{other_net}' -- closer than the resolved "
+                        f"deck's own '{rule_id}' minimum same-layer spacing "
+                        "rule (no literal overlap, but still a real `klt "
+                        "drc` violation on the composed layout)"
+                    )
             return None
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
@@ -4325,10 +4437,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # legs do, or a later net's own collision check would miss them.
         drawn_legs = [leg for leg in result["legs"] if leg["routed"]]
         for leg_index, leg in enumerate(drawn_legs):
+            # route_layer (#1168): the effective layer this leg actually
+            # drew on -- route_layer (the primary) unless the leg fell
+            # back to cross_route_layer (route_two_pin's same-layer-short
+            # retry). label_layer follows the same choice, so a leg's net
+            # label lands on the layer klt extract actually expects it on.
+            # Resolved per *leg*, which is what makes this correct for a
+            # partially-routed net too (#1169): the drawn legs of one net
+            # need not all have landed on the same layer. Recorded here
+            # (rather than after the `accepted_route_regions.append` below)
+            # so `_leg_conflict`'s own layer-aware comparison (#1386) has it
+            # for every accepted entry.
+            leg_route_layer = leg.get("route_layer") or route_layer
             accepted_route_regions.append(
                 (
                     net_label,
                     net_pin_set,
+                    leg_route_layer,
                     _drawn_leg_footprint_region(
                         leg["points_um"],
                         width_um,
@@ -4338,15 +4463,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     ),
                 )
             )
-            # route_layer (#1168): the effective layer this leg actually
-            # drew on -- route_layer (the primary) unless the leg fell
-            # back to cross_route_layer (route_two_pin's same-layer-short
-            # retry). label_layer follows the same choice, so a leg's net
-            # label lands on the layer klt extract actually expects it on.
-            # Resolved per *leg*, which is what makes this correct for a
-            # partially-routed net too (#1169): the drawn legs of one net
-            # need not all have landed on the same layer.
-            leg_route_layer = leg.get("route_layer") or route_layer
             leg_label_layer = (
                 cross_label_layer
                 if cross_route_layer is not None

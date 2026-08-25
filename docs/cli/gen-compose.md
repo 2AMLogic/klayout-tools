@@ -210,7 +210,21 @@ cleanly.
   the tightest spacing actually used across placement and routing.
 - **Geometry is advisory.** A routed net (`routed: true`) is *not* a DRC-clean
   guarantee — `klt drc` remains the rule-compliance authority on the composed
-  output, exactly as it is on any single generator's output.
+  output, exactly as it is on any single generator's output. **This is not a
+  theoretical caveat: run `klt drc` after every composition that draws
+  metal, unconditionally.** `nets[].legs[].routed: true` means route_two_pin's
+  own routability heuristics and the route-vs-route collision check (#1057,
+  spacing-aware since #1386 — see "Route-vs-route collision is spacing-aware"
+  below) found no *problem they know how to look for*; it is not an
+  exhaustive DRC pass, and every `klt gen-compose` release to date has fixed
+  at least one class of violation that heuristic set previously missed (#453,
+  #1057, #1197, #1386). Two independently DRC-clean input blocks composed
+  together, or two individually-routed nets that each look fine in
+  isolation, are not guaranteed to stay DRC-clean together once placed
+  side by side — a caller pipeline that treats `routed: true` as "this leg
+  needs no further check" and skips the follow-up `klt drc` run is not
+  supported and will eventually compose a violation this command did not
+  catch.
 
 ## Known limitations (found during phase 3 bring-up, #196)
 
@@ -506,6 +520,33 @@ into the circuit.)
   do — are exempt from this check: both backbones necessarily converge on
   the identical point from the identical direction there, so the resulting
   overlap is the caller's intended merge, not an accidental short.
+- **Route-vs-route collision is spacing-aware, not just overlap-aware
+  (#1386, fixed).** #1057 above only ever caught a literal positive-area
+  overlap between two accepted backbones (plus their via-drop landing pads
+  and stub-widen boxes, #1197) — two legs that never touch but are drawn
+  *closer together* than the resolved deck's own same-layer minimum-spacing
+  rule (e.g. sky130's `li1.space.1`/`met1.space.1`) both composed
+  `routed: true` while the resulting GDS still failed `klt drc`, precisely
+  because "do these two footprints overlap" is a strictly narrower question
+  than "does the deck's own spacing rule allow this gap." The same check now
+  also looks up that rule for each candidate leg's own effective drawing
+  layer (`klt drc --deck <family>`'s own rule table — never a second,
+  private threshold; a layer with no matching `"space"` rule keeps the
+  pre-#1386 overlap-only behaviour unchanged) and inflates one side of the
+  comparison by that threshold before re-testing — the standard "distance
+  less than d" Minkowski-sum trick, so a false-negative "not touching, but
+  too close" pair is now rejected (`unrouted_nets[]`, a
+  `drc_hints.notes[]`/`legs[].reason` entry naming both the other net and
+  the deck's own rule id, e.g. `"comes within 0.17um of already-routed net
+  'NET_1' -- closer than the resolved deck's own 'li1.space.1' minimum
+  same-layer spacing rule"`) instead of silently composing. This check is
+  also now **layer-aware**: two accepted legs on genuinely different
+  physical layers (e.g. one fell back to
+  `routing.cross_block_layer_role` while another stayed on the primary
+  `routing.layer_role`) can neither overlap nor violate a same-layer
+  spacing rule against each other, so they are no longer compared at all.
+  Like #1057, this remains an advisory heuristic, not a substitute for
+  `klt drc` — see "Geometry is advisory" above.
 
 ## Via-drop routing (metal2/via, #454)
 
@@ -714,6 +755,41 @@ time (exit 1, matching every other `routing.*` validation error):
   by a single via hop — the same non-adjacent-metals-stack and
   no-declared-via cases "Via-drop routing" documents for a pin's own layer,
   applied here to the two layer roles themselves.
+
+**Known limitation: at most one same-block self-net crossing per block is
+reliably resolvable (issue #1386).** `routing.cross_block_layer_role`'s
+retry above only ever fires from the two checks it names ("Self-net
+pad-crossing" and "Self-net drawn-metal" above) — a leg that falls back to
+the cross layer because it crosses another of the block's own *pads* on
+`routing.layer_role`. It has no visibility into, and is never retried for, a
+route-vs-route collision (#1057/#1386 above) with a *different* self-net on
+the *same* block that also needed the cross layer: when two same-block
+self-nets are symmetric enough that `manhattan_backbone()`'s fixed one-jog
+shape draws the identical (or overlapping) backbone for both — e.g. two
+independent gate-bussing nets on a `splits`-interleaved cell, each tying
+together its own two rows' legs — the first one processed (`connectivity[]`
+order) claims the cross layer and the second is rejected outright
+(`"crosses already-routed net '<first net>'"`, or, since #1386, the
+spacing-aware wording above), regardless of which net is declared first.
+There is no automatic "stack the second bus at a different height on the
+cross layer" retry (unlike the bounded detour search #1167 already performs
+for a *third*, unrelated block sitting between two pins) — adding one is
+tracked as a follow-up, not yet implemented.
+
+The available workaround is `connectivity[].waypoints_um` (#634): supply an
+explicit path for the second self-net that clears the first net's already-
+accepted footprint (and the deck's own minimum spacing beyond it) rather
+than relying on the automatic fixed-shape jog. This is not always
+mechanically simple — the two nets' own approach stubs still leave each pin
+in its reported `direction_deg`, so a waypoint path that merely shifts the
+jog's *height* without also clearing the columns each stub occupies can
+still collide (both checks above, and #1057/#1386's route-vs-route check,
+still run against whatever path is supplied); routing the second net's
+waypoints around the outside of the block's own bbox entirely, rather than
+stacking a parallel jog directly above the first net's, is the more reliable
+shape. As with every other check in this document, the composed output must
+still be re-verified with `klt drc` regardless of which net a caller
+resolves this way.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
