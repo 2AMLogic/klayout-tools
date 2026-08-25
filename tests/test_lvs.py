@@ -4018,6 +4018,115 @@ def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
 
 
 # --------------------------------------------------------------------------- #
+# options.combine_devices_max_attempts (issue #1412): the caller-configurable
+# retry budget behind `_combine_devices_safely`'s bounded-retry mitigation
+# (issue #1185), threaded through `run_lvs` end-to-end.
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_combine_devices_max_attempts_defaults_to_module_constant():
+    """Omitting `options.combine_devices_max_attempts` resolves to the
+    unchanged pre-#1412 default (`_COMBINE_DEVICES_MAX_ATTEMPTS`, `5`)."""
+    assert (
+        lvs._parse_combine_devices_max_attempts({}) == lvs._COMBINE_DEVICES_MAX_ATTEMPTS
+    )
+    assert lvs._parse_combine_devices_max_attempts({"combine_devices": True}) == 5
+
+
+def test_parse_combine_devices_max_attempts_honors_explicit_value():
+    """An explicit `options.combine_devices_max_attempts` overrides the
+    default, both above and below it."""
+    assert (
+        lvs._parse_combine_devices_max_attempts({"combine_devices_max_attempts": 12})
+        == 12
+    )
+    assert (
+        lvs._parse_combine_devices_max_attempts({"combine_devices_max_attempts": 1})
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, 1.5, "5", True, False, None],
+)
+def test_parse_combine_devices_max_attempts_rejects_malformed_values(value):
+    """Anything that is not a positive `int` is a clean `LvsError` -- never a
+    silent fallback to the default, matching this module's other
+    request-side options (issue #1412). `bool` is explicitly rejected even
+    though `isinstance(True, int)` is true in Python -- a caller passing
+    `true`/`false` almost certainly meant `options.combine_devices` itself,
+    not this budget. `None` is likewise rejected (unlike
+    `options.parameter_tolerance`, where `null` means "omitted") because the
+    key must be *absent*, not explicitly nulled, to get the default."""
+    with pytest.raises(LvsError, match="combine_devices_max_attempts"):
+        lvs._parse_combine_devices_max_attempts({"combine_devices_max_attempts": value})
+
+
+def test_run_lvs_honors_combine_devices_max_attempts_option(tmp_path, monkeypatch):
+    """End-to-end: a request-level `options.combine_devices_max_attempts`
+    actually bounds the number of `combine_devices()` calls `run_lvs` makes
+    per side, not just the module-level default (issue #1412). Forcing every
+    attempt to fail and setting the budget to `2` must cost exactly 2 calls
+    per side (4 total across layout+reference) -- not the default budget's 5
+    per side (10 total) -- and the resulting `device.combine_incomplete`
+    warning must disclose that smaller attempt count."""
+    import klayout.db as kdb
+
+    call_count = 0
+
+    def _always_raise(self):
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _always_raise)
+
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True, "combine_devices_max_attempts": 2},
+        },
+    )
+
+    report = run_lvs(path)  # must not raise
+
+    assert call_count == 4  # 2 attempts * 2 sides
+    combine_warnings = [
+        m for m in report["mismatches"] if m["category"] == "device.combine_incomplete"
+    ]
+    assert {m["side"] for m in combine_warnings} == {"layout", "reference"}
+    assert all("after 2 attempts" in m["description"] for m in combine_warnings)
+    assert report["status"] == lvs.STATUS_INCONCLUSIVE
+
+
+def test_run_lvs_combine_devices_max_attempts_rejects_malformed_value(tmp_path):
+    """A malformed `options.combine_devices_max_attempts` is a clean
+    application error (exit 1 via `LvsError`), surfaced even when
+    `options.combine_devices` itself is left at its default `false` -- the
+    option is validated unconditionally, the same discipline
+    `options.flatten_layout`/`options.flatten_reference` already follow
+    (issue #1412)."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices_max_attempts": 0},
+        },
+    )
+
+    with pytest.raises(LvsError, match="combine_devices_max_attempts"):
+        run_lvs(path)
+
+
+# --------------------------------------------------------------------------- #
 # options.combine_devices escape hatches (issue #1370): a device-class
 # restriction, a symmetric degrade + `status: "inconclusive"` on retry
 # exhaustion, and identifier-carrying `device.combine_incomplete` entries
