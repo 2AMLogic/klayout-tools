@@ -324,9 +324,7 @@ def test_find_reports_dangling_symlink_in_asset_dir(tmp_path):
 
     report = pdk.find_pdk(root=str(root))
 
-    assert report["broken_symlinks"] == [
-        {"asset": "xschem", "path": str(dangling)}
-    ]
+    assert report["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling)}]
 
 
 def test_find_reports_dangling_symlink_nested_in_subdirectory(tmp_path):
@@ -344,9 +342,7 @@ def test_find_reports_dangling_symlink_nested_in_subdirectory(tmp_path):
 
     report = pdk.find_pdk(root=str(root))
 
-    assert report["broken_symlinks"] == [
-        {"asset": "xschem", "path": str(dangling)}
-    ]
+    assert report["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling)}]
 
 
 def test_find_does_not_flag_a_symlink_that_resolves(tmp_path):
@@ -372,9 +368,7 @@ def test_find_reports_dangling_directory_symlink(tmp_path):
 
     report = pdk.find_pdk(root=str(root))
 
-    assert report["broken_symlinks"] == [
-        {"asset": "xschem", "path": str(dangling_dir)}
-    ]
+    assert report["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling_dir)}]
 
 
 def test_find_broken_symlinks_across_multiple_assets_sorted(tmp_path):
@@ -415,9 +409,7 @@ def test_cli_check_exits_nonzero_for_dangling_symlink(tmp_path, capsys):
 
     assert exit_code == 4
     payload = json.loads(capsys.readouterr().out)
-    assert payload["broken_symlinks"] == [
-        {"asset": "xschem", "path": str(dangling)}
-    ]
+    assert payload["broken_symlinks"] == [{"asset": "xschem", "path": str(dangling)}]
 
 
 def test_cli_check_text_output_reports_broken_symlinks(tmp_path, capsys):
