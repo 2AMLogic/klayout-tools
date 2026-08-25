@@ -1019,7 +1019,9 @@ geometry sits on an ordinary checked layer (e.g. `Comp`), it shows up in
 `coverage.layers_checked`, not `layers_in_stream_without_rules`: a `"clean"`
 status with no other signal that anything is off.
 
-Whenever a deck-registered marker (today, only gf180mcu's `Dualgate`) is
+Whenever a deck-registered marker (today gf180mcu's `Dualgate` 55/0,
+sg13g2's `ThickGateOx` 44/0, and — as of issue #1369 — sky130's `hvi`
+75/20) is
 present in the input stream *and* its geometry geometrically interacts with
 geometry an **unscoped rule actually checked on this run**, one entry is
 added, naming the marker and the concrete consequence:
@@ -1049,9 +1051,12 @@ marker. A marker shape that never overlaps any unscoped checked geometry
 (e.g. one drawn only over a device this deck already scopes to it correctly,
 such as a `Dualgate`-narrowed ESD diode) likewise produces no entry —
 avoiding a warning with nothing behind it. Always a list, empty for a deck
-that registers no such marker (sky130's curated deck registers none today —
-it does not yet name an `hvi`-equivalent layer at all) or a layout that
-draws none of it overlapping unscoped checked geometry.
+that registers no such marker, or a layout that draws none of it overlapping
+unscoped checked geometry. sky130's curated deck registers `hvi` (75/20) as
+of issue #1369 — unlike gf180mcu's partially-modelled `Dualgate`, *no* rule
+in that deck reads `hvi`, so any `hvi` shape overlapping checked geometry
+warns (e.g. `diff.width.1` checks `difftap.1`'s 0.15 µm where the DRM's
+medium-voltage column, `difftap.14`, requires 0.29 µm).
 
 **What this field does and does not guarantee**: it flags that the checked
 thresholds may be the wrong column for geometry the *remaining, unscoped*

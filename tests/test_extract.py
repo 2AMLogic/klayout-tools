@@ -3245,6 +3245,69 @@ def test_gf180mcu_extract_binds_nfet_03v3_outside_dualgate(tmp_path):
     assert not any(" nfet_06v0 " in line for line in device_lines)
 
 
+def test_pdk_resolved_writes_x_card_model_binding_sky130_hvi(tmp_path):
+    """--pdk sky130A resolves against a MOS device drawn entirely inside
+    sky130's `hvi` (75/20) marker -> the per-flavour MOS marker this issue
+    added (#1369) binds `sky130_fd_pr__nfet_g5v0d10v5` instead of the
+    default `sky130_fd_pr__nfet_01v8` -- see
+    `test_sky130_extract_binds_nfet_01v8_outside_hvi` below for the
+    thin-oxide counterpart."""
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=True), tmp_path / "hv_mos.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "hv_mos.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert device_lines
+    assert all(line.startswith("X") for line in device_lines)
+    assert any("sky130_fd_pr__nfet_g5v0d10v5" in line for line in device_lines)
+    assert not any("sky130_fd_pr__nfet_01v8" in line for line in device_lines)
+
+
+def test_sky130_extract_binds_nfet_01v8_outside_hvi(tmp_path):
+    """Regression counterpart of the flavoured test above: a MOS device
+    drawn entirely outside `hvi` still binds the deck's default 1.8V-core
+    model under `--pdk` (issue #1369 acceptance criterion) -- no change for
+    the common thin-oxide case."""
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=False), tmp_path / "lv_mos.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "lv_mos.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert device_lines
+    assert any("sky130_fd_pr__nfet_01v8" in line for line in device_lines)
+    assert not any("sky130_fd_pr__nfet_g5v0d10v5" in line for line in device_lines)
+
+
 def test_pdk_resolved_x_card_carries_l_w_with_unit_suffix(tmp_path):
     """The emitted `X` card's `L`/`W` use the same explicit micrometre unit
     suffix `klt extract`'s own `M`-card writer already uses (see
@@ -5894,6 +5957,144 @@ def test_gf180mcu_deck_declares_full_metal_stack():
     assert deck.vias == ((35, 0), (38, 0), (40, 0), (41, 0))
     assert deck.metal_labels == ((34, 10), (36, 10), (42, 10), (46, 10), (81, 10))
     assert len(deck.vias) == len(deck.metals) - 1
+
+
+# --------------------------------------------------------------------------- #
+# sky130's `hvi` (75/20) per-flavour MOS marker (issue #1369, mirroring
+# gf180mcu's `Dualgate` tests above and sg13g2's `ThickGateOx` tests)
+# --------------------------------------------------------------------------- #
+
+
+def _make_sky130_hvi_mos_layout(*, hvi_overlap: bool) -> kdb.Layout:
+    """One sky130 NMOS (`_draw_sky130_nmos`) with an `hvi` (75/20) marker
+    drawn either directly over it (``hvi_overlap=True`` -- issue #1369's own
+    extraction reproducer: a transistor drawn entirely inside the
+    5V-gate/10.5V-drain marker) or far away (``hvi_overlap=False`` --
+    present in the stream, but overlapping no MOS device geometry, the
+    false-positive-avoidance counterfactual)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    if hvi_overlap:
+        d(75, 20, kdb.Box(-500, -500, 2500, 1500))  # hvi, covers the NMOS
+    else:
+        d(75, 20, kdb.Box(100_000, 100_000, 101_000, 101_000))  # far away
+
+    return layout
+
+
+def test_sky130_extract_no_warning_mos_inside_hvi_marker(tmp_path):
+    """A transistor drawn entirely inside `hvi` (the 5V-gate/10.5V-drain
+    marker) still extracts as an ordinary `nfet` device
+    (`device_counts`/`devices[].class` unaffected by flavour -- see
+    `MOSFlavour`'s own docstring for why), and `voltage_domain_warnings`
+    does not fire for it -- MOS recognition for this marker is flavour-aware
+    (see `test_pdk_resolved_writes_x_card_model_binding_sky130_hvi` for the
+    corresponding `g5v0d10v5` model-binding assertion)."""
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=True),
+        tmp_path / "hv_mos.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "hv_mos.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+    assert not any("75/20" in warning for warning in report["warnings"])
+
+
+def test_sky130_extract_no_warning_without_hvi_overlap(tmp_path):
+    """Counterfactual: `hvi` present in the stream but drawn far away from
+    any MOS device geometry produces no warning -- the gate is "overlaps
+    extracted MOS device geometry", not bare presence in the stream, so a
+    marker shape with nothing behind it never produces a false-positive
+    warning."""
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=False),
+        tmp_path / "hv_mos_far.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "hv_mos_far.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+
+
+def test_sky130_unmodeled_voltage_marker_registry_reports_hvi_gap():
+    """Issue #1369 registers `hvi` (75/20) in sky130's
+    `UNMODELED_VOLTAGE_MARKERS` (issue #552/#577's registry, previously
+    empty for sky130): the description names the MOS binding this deck now
+    models (`--pdk` -> `g5v0d10v5`) and the DRC-rule gap that remains
+    (no rule reads `hvi` at all)."""
+    description = get_unmodeled_voltage_markers("sky130")[(75, 20)]
+    assert "g5v0d10v5" in description
+    assert "DRC" in description
+
+
+def test_sky130_deck_declares_hvi_mos_flavour():
+    """The sky130 extraction deck declares one `mos_flavours` entry keyed on
+    `hvi` (75/20) -- the deck-data half of issue #1369."""
+    deck = get_extraction_deck("sky130")
+    assert len(deck.mos_flavours) == 1
+    flavour = deck.mos_flavours[0]
+    assert flavour.marker == (75, 20)
+    assert flavour.flavour == "hvi"
+
+
+def _make_sky130_straddling_hvi_mos_layout() -> kdb.Layout:
+    """One sky130 NMOS (`_draw_sky130_nmos`) with an `hvi` (75/20) marker
+    overlapping only *part* of its active geometry -- the source pad is
+    inside the marker, the drain pad is not. `MOSFlavour`'s documented
+    policy (`decks/__init__.py`) is "any overlap claims the whole active
+    island for that flavour" (the DRM does not contemplate a transistor
+    legally straddling a voltage-domain boundary), so this should extract
+    the same as `hvi_overlap=True` above -- entirely the flavoured class --
+    not split into two partial devices."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Covers only the source half (x in [0, 1000)) of the NMOS drawn by
+    # `_draw_sky130_nmos` (active spans x in [0, 2000)) -- not the drain.
+    d(75, 20, kdb.Box(-500, -500, 1000, 1500))
+    return layout
+
+
+def test_sky130_extract_straddling_hvi_claims_whole_device(tmp_path):
+    """A transistor whose active geometry only *partially* overlaps `hvi` is
+    claimed entirely by the flavour (documented policy, see `MOSFlavour`'s
+    own docstring) -- it extracts as one ordinary `nfet` device (not split
+    into two), with no `voltage_domain_warnings`, and binds
+    `sky130_fd_pr__nfet_g5v0d10v5` under `--pdk` like a fully-inside device
+    would."""
+    path = _write_gds(
+        _make_sky130_straddling_hvi_mos_layout(),
+        tmp_path / "straddle.gds",
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "straddle.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert len(device_lines) == 1
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in device_lines[0]
 
 
 # --------------------------------------------------------------------------- #

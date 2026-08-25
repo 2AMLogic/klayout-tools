@@ -25,11 +25,13 @@ binding covers, per PDK family (``sky130``, ``gf180mcu``, and -- MOS only, as
 of issue #1231 -- ``sg13g2``):
 
 - **MOS** (all three decks) -- the deck's default voltage flavor per family,
-  plus (issue #1111 for gf180mcu, issue #1231 for sg13g2) any additional
-  marker-scoped flavor its ``ExtractionDeck.mos_flavours`` declares
-  (``nfet_06v0``/``pfet_06v0`` for a transistor recognised inside
-  ``Dualgate``; ``sg13_hv_nmos``/``sg13_hv_pmos`` for one inside
-  ``ThickGateOx``) -- see :data:`MOS_FLAVOUR_PROPERTY` and
+  plus (issue #1111 for gf180mcu, issue #1231 for sg13g2, issue #1369 for
+  sky130) any additional marker-scoped flavor its
+  ``ExtractionDeck.mos_flavours`` declares (``nfet_06v0``/``pfet_06v0`` for a
+  transistor recognised inside ``Dualgate``; ``sg13_hv_nmos``/
+  ``sg13_hv_pmos`` for one inside ``ThickGateOx``;
+  ``sky130_fd_pr__nfet_g5v0d10v5``/``sky130_fd_pr__pfet_g5v0d10v5`` for one
+  inside sky130's ``hvi``) -- see :data:`MOS_FLAVOUR_PROPERTY` and
   :data:`_MOS_MODEL_FLAVOURS` below, and ``klayout_tools.extract``'s module
   docstring.
 - **Resistor** (sky130/gf180mcu) -- every ``ResistorDevice`` class each deck
@@ -310,6 +312,33 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: `mos_extraction.lvs` (`extract_devices(mos4('sg13_hv_nmos'), ...)` keyed
 #: off `general_derivations.lvs`'s `ngate_hv_base = ngate.and(thickgateox_drw)`)
 #: -- the derivation `decks/sg13g2.py`'s `mos_flavours` entry transcribes.
+#:
+#: sky130's 5V-gate/10.5V-drain thick-oxide pair (issue #1369) is confirmed in
+#: the same real fetched sky130A install (volare,
+#: `c6d73a35f524070e85faff4a6a9eef49553ebc2b`) the module docstring's `01v8`
+#: entry above cites -- `libs.tech/combined/continuous/models_fet.spice:15382`
+#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and `:36917`
+#: (the `pfet` analogue), each followed by the identical
+#: `.param  l = 1 w = 1 nf = 1 ad = 0 as = 0 pd = 0 ps = 0 ...` line the
+#: `01v8` pair carries at `:10037`, i.e. the same `d g s b` terminal order
+#: and `l`/`w`/`as`/`ad`/`ps`/`pd` call-site convention
+#: :func:`create_model_binding_delegate` already writes for the default pair.
+#: Extracted under exactly those names by the PDK's own
+#: `libs.tech/klayout/lvs/sky130.lvs:2085`
+#: (`extract_devices(mos4("sky130_fd_pr__nfet_g5v0d10v5"), { "SD" => nsd,
+#: "G" => ngate_5p0v_hv, ... })`; the PMOS analogue at `:2059`, on
+#: `pgate_5p0v_hv`), whose gate regions are keyed off `hvi` at `:941`
+#: (`hvi         = polygons(75 , 20 )`) via `:1213`
+#: (`ngate_high_voltage = ngate.and(hvi)...`, feeding `ngate_5p0v_hv` at
+#: `:1229`) and `:1190`/`:1202` for the PMOS side -- the derivation
+#: `decks/sky130.py`'s `mos_flavours` entry transcribes (as the same
+#: any-overlap-counts approximation every other `mos_flavours` entry in this
+#: table uses, see `MOSFlavour`'s own docstring in `decks/__init__.py`). The
+#: `hvi` layer/datatype pair itself is cross-checked against two further
+#: independent sources in the same install: the KLayout layer-properties
+#: file `libs.tech/klayout/tech/sky130A.lyp:3127`
+#: (`<name>hvi.drawing - 75/20</name>`) and the magic technology file
+#: `libs.tech/magic/sky130A.tech:3980` (`calma HVI 75 20`).
 _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("gf180mcu", "gf180mcu"): {
         "06v0": {
@@ -321,6 +350,12 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
         "hv": {
             "nfet": "sg13_hv_nmos",
             "pfet": "sg13_hv_pmos",
+        },
+    },
+    ("sky130", "sky130"): {
+        "hvi": {
+            "nfet": "sky130_fd_pr__nfet_g5v0d10v5",
+            "pfet": "sky130_fd_pr__pfet_g5v0d10v5",
         },
     },
 }
