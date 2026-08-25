@@ -92,6 +92,7 @@ def _make_inverter_layout(
     top_name: str = "TOP",
     a_label_in_subcell: bool = False,
     extra_y_label: str | list[str] | None = None,
+    extra_a_label: str | list[str] | None = None,
     substrate_tap_label: str | None = None,
 ) -> kdb.Layout:
     """A minimal inverter: one NMOS (active outside nwell) and one PMOS
@@ -114,6 +115,17 @@ def _make_inverter_layout(
     case (and issue #470's `merged_net_labels[]` detection target). A single
     string adds one extra label; a list adds one per element (for 3+-label
     edge cases).
+
+    ``extra_a_label`` is the same mechanism applied to the shared poly gate's
+    ``A`` net instead of ``Y`` -- e.g. ``A,clk`` -- for a DEF->GDS-merge-style
+    collision fixture (issue #1390): a genuine top-level DEF ``PINS`` label
+    (``clk``) landing on the same electrical net as an ordinary internal
+    instance's own local pin label (``A``), exactly how KLayout's own
+    connectivity extraction joins them once flattened, mirroring
+    ``extra_y_label``'s own single-string-or-list shape. Ignored when
+    ``a_label_in_subcell`` is set (the ``A`` label lives in a sub-cell in
+    that case, a different fixture axis this one is not meant to combine
+    with).
 
     When ``substrate_tap_label`` is given, an additional `tap.drawing` ring
     is drawn well outside the `nwell` (below the NMOS active strip, never
@@ -174,6 +186,12 @@ def _make_inverter_layout(
         top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(0, 0)))
     else:
         label(67, 5, "A", 1000, 1500)
+        if extra_a_label is not None:
+            extra_a_labels = (
+                [extra_a_label] if isinstance(extra_a_label, str) else extra_a_label
+            )
+            for i, extra_label_text in enumerate(extra_a_labels):
+                label(67, 5, extra_label_text, 950 + i * 10, 1500)
 
     # NMOS body: no drawn tap in this synthetic fixture -- exercises the
     # substrate-global fallback. PMOS body: an nwell tap (tap.drawing inside
@@ -1629,6 +1647,190 @@ def test_declared_pins_applied_after_top_cell_pins_only(tmp_path):
     assert "A" in net_names
     assert "A" not in pins
     assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
+
+
+# --------------------------------------------------------------------------- #
+# DEF-derived declared pins (`--def-pins`, issue #1390)
+#
+# `--top-cell-pins` cannot help a DEF->GDS-merged (`klt place-and-route`)
+# layout: that merge flattens the whole design into the top cell, so its
+# below-top-label set is always empty (issue #1385's documented gap). The
+# fixture below (mirroring `_make_inverter_layout`'s existing
+# `extra_y_label`/`a_label_in_subcell` axes) simulates the DEF-merge
+# collision directly: both the "Y" and "A" nets carry two distinct labels
+# each, as they would once routing joins a genuine DEF `PINS`-declared
+# top-level port label to an internal instance's own local pin label (or two
+# internal instances' local pin labels to each other, with no top-level port
+# at all). Plain exact-string `declared_pins` cannot recognise "clk" as
+# matching the joined "Y,clk" net name -- `def_pins`'s own per-label
+# matching can.
+# --------------------------------------------------------------------------- #
+
+
+def test_def_pins_promotes_only_genuine_ports_on_collided_labels(tmp_path):
+    """The core regression fixture: `def_pins={"clk", ...}` keeps the
+    collided "Y,clk" net promoted (it carries the genuine DEF PINS label
+    "clk", even though the *whole* joined name never appears in `def_pins`
+    verbatim) while demoting the collided "A,B" net (an internal-only
+    collision -- neither "A" nor "B" is a declared DEF pin)."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk", extra_a_label="B"),
+        tmp_path / "def_merge_style.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "def_merge_style.spice"),
+        def_pins=frozenset({"clk", "VGND", "VPWR", "VPB"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    # The real port net keeps its collided name and stays promoted.
+    assert "Y|clk" in net_names
+    assert "Y|clk" in pins
+
+    # The purely-internal collision (no DEF PINS label at all) is demoted.
+    assert "A|B" in net_names
+    assert "A|B" not in pins
+
+    assert {"VGND", "VPWR", "VPB"}.issubset(pins)
+
+    demote_warning = next(
+        (w for w in report["warnings"] if "no drawn label on the net matches" in w),
+        None,
+    )
+    assert demote_warning is not None
+    assert "A,B" in demote_warning
+
+    # Every declared DEF pin name matched some promoted net -- no "matched
+    # no promoted net's label set" warning.
+    assert not any(
+        "matched no promoted net's label set" in w for w in report["warnings"]
+    )
+
+
+def test_def_pins_none_default_is_unchanged(tmp_path):
+    """Omitted `def_pins` (the default) is byte-for-byte identical to
+    today's behaviour, same invariant `declared_pins`'s own default
+    preserves."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    explicit_none = run_extract(
+        path, "sky130", output=str(tmp_path / "none.spice"), def_pins=None
+    )
+
+    base_pins = {n["name"] for n in base["nets"] if n["pin"]}
+    explicit_pins = {n["name"] for n in explicit_none["nets"] if n["pin"]}
+    assert base_pins == explicit_pins
+    assert base["pin_count"] == explicit_none["pin_count"]
+    assert not any("--def-pins" in w for w in explicit_none["warnings"])
+
+
+def test_def_pins_unmatched_name_warns(tmp_path):
+    """A `def_pins` name that matches no promoted net's label set is
+    reported in `warnings`, not silently ignored (a likely typo) -- mirrors
+    `declared_pins`'s own unmatched-name diagnostic."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "declared.spice"),
+        def_pins=frozenset({"VGND", "VPWR", "VPB", "Y", "A", "NOPE"}),
+    )
+
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert {"VGND", "VPWR", "VPB", "Y", "A"}.issubset(pins)
+    warning = next(
+        (w for w in report["warnings"] if "matched no promoted net's label set" in w),
+        None,
+    )
+    assert warning is not None
+    assert "NOPE" in warning
+
+
+def test_def_pins_applied_after_declared_pins(tmp_path):
+    """`def_pins` is applied *after* `declared_pins`'s own reconciliation
+    (when both are given), and can only further restrict -- it never
+    re-promotes a net `declared_pins` already kept internal."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "both.spice"),
+        # `declared_pins` demotes "A" first (an exact-match miss)...
+        declared_pins=frozenset({"VGND", "VPWR", "VPB", "Y"}),
+        # ...and `def_pins` declares "A" as wanted, but it is already
+        # internal by the time this pass runs.
+        def_pins=frozenset({"VGND", "VPWR", "VPB", "Y", "A"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "A" in net_names
+    assert "A" not in pins
+    assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
+
+
+def test_cli_def_pins_flag_derives_pins_from_a_def_file(tmp_path, capsys):
+    """The `--def-pins` flag wires through the CLI, parsing a routed DEF's
+    own `PINS` section instead of requiring a hand-derived `--pins` list."""
+    path = str(
+        _write_gds(
+            _make_inverter_layout(extra_y_label="clk", extra_a_label="B"),
+            tmp_path / "def_merge_style.gds",
+        )
+    )
+    def_path = tmp_path / "design.def"
+    def_path.write_text(
+        "DESIGN top ;\nPINS 1 ;\n    - clk + NET clk ;\nEND PINS\nEND DESIGN\n"
+    )
+
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--def-pins",
+            str(def_path),
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    pins = {n["name"] for n in payload["nets"] if n["pin"]}
+    assert "Y|clk" in pins
+    assert "A|B" not in pins
+
+
+def test_cli_def_pins_flag_errors_on_unparseable_def(tmp_path, capsys):
+    """A `--def-pins` path with no parseable DEF `PINS` section is a clean
+    error (exit 1), not a silent "no restriction" no-op -- unlike
+    `def_net_instance_pins`'s own tolerant absence handling, a caller
+    passing this flag has explicitly asked for the restriction to apply."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    def_path = tmp_path / "bad.def"
+    def_path.write_text("DESIGN top ;\nEND DESIGN\n")
+
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--def-pins",
+            str(def_path),
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert "no parseable DEF" in payload["error"]["message"]
 
 
 # --------------------------------------------------------------------------- #

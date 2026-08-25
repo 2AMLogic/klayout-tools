@@ -652,6 +652,7 @@ def run_extract(
     mom_rlc_capacitance_ff: float | None = None,
     mom_rlc_inductance_nh: float | None = None,
     matched_device_groups: Mapping[str, Sequence[str]] | None = None,
+    def_pins: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -716,6 +717,43 @@ def run_extract(
     ``top_cell_pins_only``'s own reconciliation, and only ever *further*
     demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
     kept internal.
+
+    ``def_pins`` (the ``--def-pins`` flag, issue #1390) is the **automatic**
+    counterpart to ``declared_pins``, for a layout produced by ``klt
+    place-and-route``'s own DEF->GDS merge. That merge flattens the whole
+    design into the top cell, so DEF's ``NETS``-section connection points
+    end up geometrically indistinguishable from a genuine DEF
+    ``PINS``-section top-level port -- ``top_cell_pins_only``'s below-top
+    set is always empty against such a layout (see its own paragraph
+    above), so it cannot help here (issue #1385's own documented gap).
+    ``def_pins`` is the design's genuine top-level port *net* names, parsed
+    directly off a routed DEF's own ``PINS`` section
+    (``place_and_route.def_pin_names``, the CLI's ``--def-pins <path>``) --
+    the same data source ``declared_pins`` needs a caller to have separately
+    derived and passed by hand.
+
+    A caller cannot reuse ``declared_pins``'s plain exact-string match for
+    this: KLayout's flat extraction joins every distinct text label found on
+    one electrical net into a single, comma-separated ``Net.name`` (see
+    :func:`spice_safe_net_name`'s docstring), and in a densely-routed
+    DEF-merged layout *most* nets -- port or not -- carry two or more such
+    labels once routing connects a driver's local output-pin label to a
+    receiver's local input-pin label (or, for a genuine port, the DEF
+    ``PINS``-declared label to whichever local pin it connects into)
+    -- exactly the "collided, comma-joined names" #1390's own issue text
+    describes (measured on this repo's own routed `gcd` corpus fixture: 494
+    of 752 promoted pins carry 2+ joined labels). So a promoted net is kept
+    when *any* of its comma-joined component labels is in ``def_pins``, not
+    only when the whole joined name matches verbatim -- every other
+    currently-promoted net is demoted, exactly as ``declared_pins`` demotes
+    on a plain miss. A ``warnings`` entry lists any net demoted this way,
+    and a separate entry lists any ``def_pins`` name that matched no
+    promoted net's label set. Applied *after* ``declared_pins``'s own
+    reconciliation (when both are given), so it can only further restrict.
+    ``None`` (the default) skips this reconciliation entirely --
+    byte-identical to today's behavior. See ``docs/cli/extract.md``'s
+    "DEF-derived declared pins" section for a worked example against the
+    real `gcd` corpus fixture.
 
     Two additional cause-agnostic ``warnings`` entries (issue #1385) fire
     independent of any flag above: one when the layout carries zero text on
@@ -1542,6 +1580,7 @@ def run_extract(
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
+        def_pins=def_pins,
     )
 
     if mom_net is not None:
@@ -2370,6 +2409,7 @@ def extract_netlist_from_layout(
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
+    def_pins: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -2447,6 +2487,14 @@ def extract_netlist_from_layout(
     named in this set is demoted back to an internal net (it keeps its
     name). ``None`` skips this reconciliation. See :func:`run_extract` for
     the full rationale.
+
+    ``def_pins`` (issue #1390): the automatic, DEF-merge-aware counterpart
+    to ``declared_pins`` -- forwarded to :func:`_extract_netlist`, which
+    keeps a promoted net whenever *any* of its comma-joined component
+    labels is in this set (not only an exact whole-name match, since a
+    DEF-merged layout's net names routinely collide two or more labels onto
+    one net). ``None`` skips this reconciliation. See :func:`run_extract`
+    for the full rationale.
 
     ``parasitics_deck`` is optional: when ``None`` (the default, and what
     ``klt lvs``'s inline-extraction path always passes -- LVS is topological
@@ -2584,6 +2632,7 @@ def extract_netlist_from_layout(
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
         critical_nets=critical_nets,
+        def_pins=def_pins,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -4111,6 +4160,7 @@ def _extract_netlist(
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
+    def_pins: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -4202,6 +4252,14 @@ def _extract_netlist(
     mask the metal regions) and applied straight after ``extract_netlist()``,
     before pin promotion and the purge passes read any net name -- see
     :func:`_def_net_name_probes` / :func:`_apply_def_net_name_overrides`.
+
+    ``def_pins`` (issue #1390): the design's genuine top-level port net
+    names, parsed off a routed DEF's own ``PINS`` section
+    (``place_and_route.def_pin_names``) -- when given, applied as a
+    reconciliation pass right after ``declared_pins``'s own, matching a
+    promoted net's comma-joined label set (not just a whole-string match --
+    see :func:`run_extract`'s own docstring for why) against this set and
+    demoting every net with no intersection. ``None`` skips this entirely.
 
     ``abstract_cell_patterns``/``abstract_instances``/``lef_macros`` (issue
     #620): ``abstract_instances`` is the already-collected
@@ -5426,18 +5484,86 @@ def _extract_netlist(
                 f"layout: {joined}"
             )
 
+    # Issue #1390: `def_pins`'s own DEF-merge-aware declared-pin
+    # reconciliation -- the *automatic* counterpart to `declared_pins`
+    # above, for a layout `klt place-and-route`'s DEF->GDS merge produced.
+    # That merge flattens the whole design into the top cell, so
+    # `top_cell_pins_only`'s below-top set is always empty against it (see
+    # its own comment above) -- it structurally cannot distinguish a genuine
+    # DEF `PINS`-section top-level port from an internal DEF `NETS`-section
+    # connection point, both of which land "in the top cell" once flattened
+    # (issue #1385's own documented gap). `def_pins` is that design's
+    # genuine top-level port *net* names, parsed directly off the routed
+    # DEF's own `PINS` section (`place_and_route.def_pin_names`).
+    #
+    # Plain exact-string matching (`declared_pins`'s own convention, just
+    # above) does not work here: KLayout joins every distinct text label
+    # found on one electrical net into a single, comma-separated `Net.name`
+    # (see `spice_safe_net_name`'s docstring) -- and in a densely-routed
+    # DEF-merged layout *most* nets, port or not, carry two or more such
+    # labels once routing connects a driver's local output-pin label to a
+    # receiver's local input-pin label (or, for a genuine port, the DEF
+    # `PINS`-declared label to whichever local pin it connects into) --
+    # exactly the "collided, comma-joined names" #1390's own issue text
+    # describes (measured on this repo's own routed `gcd` corpus fixture:
+    # 494 of 752 promoted pins carry 2+ joined labels). So a promoted net's
+    # comma-joined label set is checked for *any* intersection with
+    # `def_pins`, not a whole-string match -- everything else is demoted,
+    # same as `declared_pins`'s plain-miss case. Applied after
+    # `declared_pins`'s own pass (when both are given), so it can only
+    # further restrict -- it never re-promotes a net that pass already kept
+    # internal.
+    if def_pins is not None:
+        top_circuit = netlist.circuit_by_name(top_cell.name)
+        promoted_names = set()
+        if top_circuit is not None:
+            for pin in top_circuit.each_pin():
+                pin_net = top_circuit.net_for_pin(pin.id())
+                if pin_net is not None and pin_net.name:
+                    promoted_names.add(pin_net.name)
+
+        matched_def_pins: set[str] = set()
+        non_matching_def_pins: set[str] = set()
+        for name in promoted_names:
+            hit = set(name.split(",")) & def_pins
+            if hit:
+                matched_def_pins |= hit
+            else:
+                non_matching_def_pins.add(name)
+
+        demoted_by_def_pins = _reconcile_top_pins(
+            netlist, top_cell.name, non_matching_def_pins, demote=True
+        )
+        if demoted_by_def_pins:
+            joined = ", ".join(demoted_by_def_pins)
+            warnings.append(
+                f"kept {len(demoted_by_def_pins)} net(s) internal: no drawn "
+                f"label on the net matches the DEF's own declared PINS set "
+                f"(--def-pins) ({joined}) -- issue #1390"
+            )
+
+        unmatched_def_pins = sorted(def_pins - matched_def_pins)
+        if unmatched_def_pins:
+            joined = ", ".join(unmatched_def_pins)
+            count = len(unmatched_def_pins)
+            plural = "s" if count != 1 else ""
+            warnings.append(
+                f"{count} declared DEF PINS name{plural} (--def-pins) "
+                f"matched no promoted net's label set in the layout: {joined}"
+            )
+
     # Issue #1385: the final, cause-agnostic check -- after every promotion
     # and demotion pass above (`make_top_level_pins()`, `--top-cell-pins`,
-    # `--pins`/`declared_pins`) has run, does the top circuit have *any*
-    # top-level pin left at all? A zero-pin top circuit means `klt lvs`'s
-    # `NetlistComparer` has no net/device anchor to seed correspondence
-    # against a reference netlist and will report a full mismatch even when
-    # the two sides' device populations genuinely agree -- and that failure
-    # mode gives no hint the root cause is upstream in pin promotion, not
-    # device extraction. This subsumes (but does not replace) the
-    # label-layer-specific warning above: it also catches an
-    # otherwise-labelled layout that `--top-cell-pins`/`--pins` demoted down
-    # to nothing between them.
+    # `--pins`/`declared_pins`, `--def-pins`, issue #1390) has run, does the
+    # top circuit have *any* top-level pin left at all? A zero-pin top
+    # circuit means `klt lvs`'s `NetlistComparer` has no net/device anchor to
+    # seed correspondence against a reference netlist and will report a full
+    # mismatch even when the two sides' device populations genuinely agree
+    # -- and that failure mode gives no hint the root cause is upstream in
+    # pin promotion, not device extraction. This subsumes (but does not
+    # replace) the label-layer-specific warning above: it also catches an
+    # otherwise-labelled layout that `--top-cell-pins`/`--pins`/`--def-pins`
+    # demoted down to nothing between them.
     final_top_circuit = netlist.circuit_by_name(top_cell.name)
     if final_top_circuit is not None and final_top_circuit.pin_count() == 0:
         warnings.append(
@@ -5448,8 +5574,8 @@ def _extract_netlist(
             "design genuinely has zero top-level pins by intent, this "
             "warning can be ignored; otherwise see the pin-name-label "
             "warning above (if present) or check that "
-            "--top-cell-pins/--pins did not demote every promoted pin "
-            "(issue #1385)"
+            "--top-cell-pins/--pins/--def-pins did not demote every "
+            "promoted pin (issue #1385)"
         )
 
     # `Netlist.purge()` (used by `_purge_preserving_named_nets` below) judges

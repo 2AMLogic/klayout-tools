@@ -5547,6 +5547,116 @@ def test_integration_real_openroad_gcd_worked_example_gf180mcu(tmp_path, monkeyp
     assert report["core_area_um2"] is not None
 
 
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_integration_real_openroad_def_pins_extract_lvs_pipeline(tmp_path, monkeypatch):
+    """The end-to-end `klt place-and-route` -> `klt extract --def-pins` ->
+    `klt lvs` pipeline (issue #1390's own acceptance criterion), against a
+    real `openroad` binary and a real, host-resolved sky130 PDK install.
+
+    Feeds OpenROAD a pre-synthesized structural netlist directly
+    (`tests/corpus/statime/gcd_netlist.v`, already mapped to real
+    `sky130_fd_sc_hd` cells) rather than going through `klt synthesize`'s own
+    Yosys step -- issue #1390's own gap is in the DEF->GDS-merged layout's
+    pin promotion, independent of how the gate-level netlist reaching `klt
+    place-and-route` was produced (and this sandbox's own `yosys` happens to
+    be a WASI-sandboxed build that cannot read a script path under
+    `/tmp` -- a pre-existing, unrelated environment limitation this test
+    sidesteps rather than depends on).
+
+    Confirms `def_pins` -- derived automatically from the routed DEF's own
+    `PINS` section via `place_and_route.def_pin_names`, *never* a
+    hand-derived `--pins` list -- both (a) restricts the promoted pin set to
+    the design's real 52-port interface on this real, densely-routed macro
+    (unlike the unrestricted default, which -- measured live against this
+    same fixture while implementing this test -- promotes several hundred
+    spurious, collided/comma-joined pins from internal DEF `NETS`
+    connection points) and (b) still reaches a clean `klt lvs` `match`
+    verdict, mirroring `tests/test_lvs.py`'s own
+    `test_pnr_gcd_fixture_self_compare_matches_cleanly`'s self-compare
+    convention for a macro-scale corpus fixture.
+    """
+    root, variant = _REAL_SKY130_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    netlist_src = Path(__file__).parent / "corpus" / "statime" / "gcd_netlist.v"
+    netlist_path = tmp_path / "gcd_synth.v"
+    netlist_path.write_text(netlist_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(netlist=str(netlist_path)),
+    )
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    def_path = report["def_path"]
+    gds_path = report["gds_path"]
+    assert def_path is not None and os.path.isfile(def_path)
+    assert gds_path is not None and os.path.isfile(gds_path)
+
+    def_pins = place_and_route.def_pin_names(def_path)
+    assert def_pins is not None
+    # `gcd`'s real interface: clk, rst_n, start, done, plus 3 16-bit buses
+    # (a_in/b_in/result).
+    assert len(def_pins) == 52
+
+    # The unrestricted default confirms the collision problem this issue
+    # fixes is real on this fixture: a majority of promoted pins carry a
+    # `|`-joined name (KLayout's own comma-join, rewritten to `|` for the
+    # JSON report/written netlist by `spice_safe_net_name`).
+    default_report = extract_module.run_extract(
+        gds_path, "sky130", output=str(tmp_path / "gcd_default.spice")
+    )
+    default_pins = {n["name"] for n in default_report["nets"] if n["pin"]}
+    collided_default = {name for name in default_pins if "|" in name}
+    assert len(collided_default) > 100
+
+    restricted_path = tmp_path / "gcd_def_pins.spice"
+    restricted_report = extract_module.run_extract(
+        gds_path, "sky130", output=str(restricted_path), def_pins=def_pins
+    )
+    restricted_pins = {n["name"] for n in restricted_report["nets"] if n["pin"]}
+
+    # Every declared DEF port resolved to a real promoted net -- nothing
+    # silently missing.
+    assert not any(
+        "matched no promoted net's label set" in w
+        for w in restricted_report["warnings"]
+    )
+    # Every promoted pin's own label set actually contains a real declared
+    # DEF port name -- no leftover, purely-internal DEF `NETS` collision
+    # slipped through.
+    for name in restricted_pins:
+        assert set(name.split("|")) & def_pins, name
+
+    from klayout_tools.lvs import run_lvs
+
+    lvs_request_path = _write_request(
+        tmp_path / "lvs_request.json",
+        {
+            "layout": {
+                "netlist": str(restricted_path),
+                "top": restricted_report["top"],
+            },
+            "reference": {
+                "netlist": str(restricted_path),
+                "top": restricted_report["top"],
+            },
+        },
+    )
+    lvs_report = run_lvs(lvs_request_path)
+
+    assert lvs_report["status"] == "match"
+
+
 # Sanity: `subprocess` really is the module this file's stubs patch (guards
 # against a future refactor silently making the stubs a no-op).
 def test_place_and_route_uses_stdlib_subprocess():

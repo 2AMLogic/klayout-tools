@@ -1223,6 +1223,30 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--def-pins",
+        dest="def_pins",
+        default=None,
+        metavar="PATH",
+        help=(
+            "derive the declared pin set automatically from this routed "
+            "DEF file's own PINS section (issue #1390), instead of "
+            "requiring --pins to be hand-derived. The automatic counterpart "
+            "to --top-cell-pins for a `klt place-and-route`-produced "
+            "(DEF->GDS-merged) layout: that merge flattens the whole "
+            "design into the top cell, so --top-cell-pins's below-top-label "
+            "heuristic cannot tell a genuine top-level port from an "
+            "internal DEF NETS connection point (both land 'in the top "
+            "cell'). Reuses --pins' own per-net reconciliation, but matches "
+            "on any of a promoted net's comma-joined labels rather than "
+            "the whole joined name -- a DEF-merged layout routinely joins "
+            "2+ labels onto one net (a driver's local pin name, a "
+            "receiver's, and/or the DEF PINS name), which plain --pins "
+            "exact matching cannot see through. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'DEF-derived declared pins' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--deck-option",
         dest="deck_options",
         action="append",
