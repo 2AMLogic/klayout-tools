@@ -51,10 +51,38 @@ rather than assuming it. If the family instead uses an open_pdks-style
 nested, multi-variant layout, that shape already resolves too; only a
 genuinely new *third* install shape would need resolver changes.
 
+**Then check for cross-PDK symlinks before trusting the install.** A
+checkout can be structurally complete — resolver-visible, right deck
+filenames, right directory shape — and still be functionally broken.
+**[verified]**: most of `ihp-sg13cmos5l`'s rule source is *relative
+symlinks into a sibling `ihp-sg13g2` checkout* (46 of 51
+`libs.tech/klayout/tech/lvs/rule_decks/*.lvs`, 10 of 34
+`.../drc/rule_decks/*.drc`), pointing six or seven levels up at
+`../../../../../../ihp-sg13g2/...`. Fetch CMOS5L on its own and every one
+of those symlinks dangles — which is exactly the state of the
+`~/share/pdk/ihp-sg13cmos5l` install Part 2 below was checked against, on
+a host with no sibling G2 checkout at that relative path. `klt pdk find`
+still resolves it; a *native*-deck `klt drc`/`klt lvs` run would die on
+the first `%include`. The PDK ships the fix as a CI convention rather than
+a runtime one: `.github/ihp-sg13g2.ref` pins the exact
+`IHP-GmbH/IHP-Open-PDK` commit to pair with, and
+`.github/actions/setup-pdk/action.yml` checks that commit out and places
+`ihp-sg13g2` next to the CMOS5L checkout before any regression runs. So,
+for any family whose install may be assembled this way:
+
+- Run `find <install> -xtype l` (dangling symlinks only) as part of
+  install validation, not just `klt pdk find`.
+- Make the fetch script reproduce the sibling layout the vendor's own CI
+  builds — for CMOS5L that means honouring `.github/ihp-sg13g2.ref`
+  rather than cloning the family alone (this repo has no
+  `scripts/fetch-ihp-sg13cmos5l.sh` yet; see #1400).
+- Smoke-test by actually *reading a rule file through a symlink*, not by
+  `stat`ing the top-level deck.
+
 ### 2. Source every rule from the new PDK's own deck — never by analogy
 
 Even when a PDK vendor states two families' rules are "aligned" (see
-"DRC/LVS: aligned but independently authored" in Part 2 for why this
+"DRC/LVS: shared by symlink, overridden locally" in Part 2 for why this
 phrase deserves skepticism), transcribe values from the new family's own
 `.drc`/`.lvs` source files, not from an existing curated deck's Python. A
 value that happens to match is fine to note as such; a value assumed to
@@ -147,16 +175,39 @@ prefix entirely — verify this generalizes correctly for any new family
 rather than re-deriving it per port (issue #1399 is the sub-issue that
 verified/extended this for CMOS5L specifically).
 
-### Pitfall B: "rules aligned with X" is a release-notes claim about *values*, not *source*
+### Pitfall B: "rules aligned with X" says nothing about *how* the source is shared
 
-See "DRC/LVS: aligned but independently authored" in Part 2 below — even
-when a vendor states two families share DRC rule values, the LVS/
-device-recognition *source files* are commonly maintained as independent
-copies (not symlinks, not includes), and can diverge in structure even
-where individual rule groups are byte-identical. Diff the new family's
-source against the nearest existing curated family's source before
-assuming parity anywhere it matters (device recognition, forbidden-layer
-handling, non-MOS device stacks).
+See "DRC/LVS: shared by symlink, overridden locally" in Part 2 below. A
+vendor line like "DRC aligned with G2" is a claim about rule *values*; it
+tells you nothing about how the `.drc`/`.lvs` source is assembled on
+disk, and the plausible mechanisms — a symlink into a sibling checkout,
+an independent copy, or a plain `%include` — each fail differently.
+CMOS5L uses all three at once **[verified]**: the majority of its
+`rule_decks/*.lvs` and several of its `rule_decks/*.drc` files are
+symlinks into a sibling `ihp-sg13g2` checkout, a handful of files are
+genuinely CMOS5L-specific source, and one
+(`forbidden/3_2_forbidden.drc`) is a deliberate local *copy* of a G2
+file. So, before you diff anything:
+
+- **Run `find -type l` / `readlink` first, not `diff`.** A
+  "byte-identical" result across two families may just mean you diffed
+  one file against itself through a symlink. That is a *stronger* fact
+  than "the values agree" — but it is not evidence of independent
+  maintenance, and it means an upstream change on the G2 side lands in
+  CMOS5L with no diff to review.
+- **Don't trust the PDK's own prose about which files are symlinks.** In
+  this install `forbidden/3_2_forbidden_cmos5l.drc:44` refers to "the
+  symlinked `3_2_forbidden.drc` file", while that file's own header says
+  *"Local copy (not symlinked to G2)"* — and `readlink` agrees with the
+  header, not the cross-reference.
+- **Symlinked source is a dependency you have to reproduce** in any
+  fetch script or CI fixture — see step 1 above.
+
+Then still diff the specific file a port depends on against the nearest
+existing curated family's source before assuming parity anywhere it
+matters (device recognition, forbidden-layer handling, non-MOS device
+stacks); shared-by-symlink for most files does not imply parity for the
+ones that matter to you.
 
 ## Part 2: SG13G2 → CMOS5L, what's actually different
 
@@ -165,18 +216,28 @@ IHP publishes SG13G2 (this repo's first IHP-family curated deck,
 ([IHP-GmbH/ihp-sg13cmos5l](https://github.com/IHP-GmbH/ihp-sg13cmos5l),
 Apache-2.0, v0.2.0) as two open PDKs on the same underlying 130nm-class
 process. CMOS5L is not a drop-in variant of SG13G2 — it forbids several
-layer classes SG13G2 uses and ships its own independently-maintained
-LVS/DRC source. Everything below was checked against a real, on-disk
-`ihp-sg13cmos5l` install (`~/share/pdk/ihp-sg13cmos5l`, IHP release v0.2.0
-per its own `ReleaseNote.md`/`versions.txt`) side-by-side with the
-equivalent `ihp-sg13g2` install, both present on this environment's fleet
-host at authoring time — re-verify against whatever install is available
-by build time, paths and versions may have moved.
+layer classes SG13G2 uses, and rather than duplicating G2's rule decks it
+*consumes them by symlink* and layers its own DRC/LVS content on top (see
+"DRC/LVS: shared by symlink, overridden locally" below). Everything below
+was checked against a real, on-disk `ihp-sg13cmos5l` install
+(`~/share/pdk/ihp-sg13cmos5l`, IHP release v0.2.0 per its own
+`ReleaseNote.md`/`versions.txt`) plus an `ihp-sg13g2` install for the
+cross-family comparisons, both present on this environment's fleet host
+at authoring time — re-verify against whatever install is available by
+build time, paths and versions may have moved. Note that the CMOS5L
+checkout is *standalone* there: it has no sibling `ihp-sg13g2` at the
+relative path its symlinks expect, so those symlinks are dangling on that
+host and the G2-side files were read from the separate `ihp-sg13g2`
+install instead.
 
 **No `scripts/fetch-ihp-sg13cmos5l.sh` exists in this repo yet** (unlike
 `scripts/fetch-ihp-sg13g2.sh` for SG13G2, see `pdks/README.md`) — a real
 gap for a future CI-reproducible CMOS5L fixture, out of this issue's scope
 to fill but worth flagging for whoever builds the curated deck (#1400).
+Whoever writes it must place a sibling `ihp-sg13g2` checkout at the
+commit `.github/ihp-sg13g2.ref` pins, the way CMOS5L's own
+`.github/actions/setup-pdk` action does, or the fixture will be a pile of
+dangling symlinks.
 
 ### Metal stack — **[verified]**
 
@@ -289,20 +350,40 @@ consistent with it depending on `nBuLay` the same way isolated NMOS does
 "investigated, declined" recognition gap for unrelated extractor-shape
 reasons — see `sg13g2.py`).
 
-### DRC/LVS: aligned but independently authored — **[verified]**
+### DRC/LVS: shared by symlink, overridden locally — **[verified]**
 
-IHP's release notes describe CMOS5L's DRC as "aligned with G2." That is
-true for individual rule *values and groups* — but not proof the *source
-files* are shared, and downstream tooling should not assume rule-file
-parity from it. Two direct pieces of evidence, both from this
-environment's real installs:
+IHP's release notes describe CMOS5L's DRC as "aligned with G2." The
+on-disk mechanism behind that alignment is **symlinks**: most of CMOS5L's
+rule decks *are* G2's rule decks, and everything CMOS5L-specific lives in
+a small set of real files plus overrides in the top-level deck. Three
+direct pieces of evidence from this environment's real install:
 
-1. **A rule group can be byte-identical.** `mos_extraction.lvs` (77
-   lines) diffs as **zero changes** between the two families' LVS rule
-   decks — the shared MOSFET recognition logic really is identical
-   source, not just aligned values.
-2. **The top-level deck that assembles those groups is not.** Diffing
-   `sg13g2.lvs` against `sg13cmos5l.lvs` shows CMOS5L's version:
+1. **Most rule files are literally G2's files.** 46 of the 51
+   `libs.tech/klayout/tech/lvs/rule_decks/*.lvs` files and 10 of the 34
+   `libs.tech/klayout/tech/drc/rule_decks/*.drc` files are relative
+   symlinks into a sibling `ihp-sg13g2` checkout. `mos_extraction.lvs`
+   (77 lines) diffs as **zero changes** between the families for exactly
+   that reason — `readlink` on CMOS5L's copy returns
+   `../../../../../../ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs`.
+   "Byte-identical" here means *the same file*, not two converged copies:
+   a change on the G2 side reaches CMOS5L with no diff to review, and the
+   PDK manages that exposure by pinning a G2 commit in
+   `.github/ihp-sg13g2.ref` (whose own comment explains the design:
+   *"Most of this PDK is symlinked into a sibling ihp-sg13g2 checkout, so
+   CI needs one to exist"*).
+2. **The genuinely CMOS5L-specific rule files are few, and named.** On
+   the LVS side only `cmos5l_forbidden_check.lvs`,
+   `cap_svaricap_cmos5l.lvs`, `bjt_derivations.lvs`,
+   `esd_derivations.lvs` and `general_connections.lvs` are real files
+   under `rule_decks/`, plus the top-level `sg13cmos5l.lvs`. On the DRC
+   side, `forbidden/3_2_forbidden_cmos5l.drc` is CMOS5L's own
+   forbidden-layer table, and `forbidden/3_2_forbidden.drc` is a
+   deliberate local *copy* of the G2 file rather than a symlink — its own
+   header calls that out as the exception: *"IHP-SG13CMOS5L version -
+   Local copy (not symlinked to G2) / Base forbidden layers inherited
+   from G2 PDK."*
+3. **The top-level deck that assembles those groups is CMOS5L's own.**
+   Diffing `sg13g2.lvs` against `sg13cmos5l.lvs` shows CMOS5L's version:
    - adds a `DISABLE_TAP_EXTRACTION` option not present in SG13G2's deck;
    - adds a forbidden-layer-check hook (`cmos5l_forbidden_check.lvs`);
    - **overrides the inductor's winding/crossing metals** — SG13G2's
@@ -314,17 +395,21 @@ environment's real installs:
      needed to avoid two `IND:pin` rectangles shorting across an
      unrelated Metal3/Metal4 shape — a piece of independent reasoning
      that only makes sense once TopMetal2 is gone, not something SG13G2's
-     deck needed.
-   - CMOS5L's forbidden-layer DRC file
-     (`rule_decks/forbidden/3_2_forbidden_cmos5l.drc`) even says so in
-     its own header comment: *"IHP-SG13CMOS5L version - Local copy (not
-     symlinked to G2)."*
+     deck needed. Note *where* that override has to live: CMOS5L's own
+     `rule_decks/general_derivations.lvs` is one of the symlinks into
+     G2, so it cannot be edited in place — the divergence is expressed as
+     a post-include override in the top-level deck instead. Expect that
+     shape wherever a symlinked family needs to differ.
 
-**Takeaway**: "aligned" is a claim about rule *content* at the group
-level, checked and confirmed for at least the MOS extraction group above
-— it is not a claim that CMOS5L's deck is SG13G2's deck with a find/
-replace. Diff the specific file a port depends on; don't infer its shape
-from either family's release notes or from another file's diff.
+**Takeaway**: "aligned" is accurate, and the mechanism is stronger than
+alignment — for most rule groups CMOS5L and SG13G2 share the *same file*
+via symlink. What that does **not** license is inferring the shape of any
+particular file: the divergence is concentrated in the top-level deck and
+a handful of real files (forbidden layers, ESD/BJT derivations, tap
+extraction, the inductor override), and one file is a local copy that
+looks symlinked but isn't. Resolve the file you actually depend on
+(`readlink` it), then diff it; don't infer from either family's release
+notes or from another file's result.
 
 ## Verified vs. release-notes-only summary
 
@@ -339,7 +424,9 @@ from either family's release notes or from another file's diff.
 | CMOS5L process spec still tabulates iNMOS/HV-iNMOS parameters | **[verified]** | `SG13CMOS5L_os_process_spec.pdf` §2.1.3/§2.1.6 |
 | CMOS5L bipolar reduced to `pnpMPA` only | **[verified]** | forbidden-layer list + symbol library diff |
 | LV/HV NMOS/PMOS/RF, diodes, resistors, ESD devices at parity | **[verified]** | symbol-library + LVS test-fixture name diff |
-| `mos_extraction.lvs` byte-identical between families | **[verified]** | direct `diff` |
+| Most CMOS5L rule files are symlinks into a sibling `ihp-sg13g2` checkout (46/51 `rule_decks/*.lvs`, 10/34 `rule_decks/*.drc`) — so `mos_extraction.lvs` is byte-identical because it *is* the same file | **[verified]** | `find -type l` + `readlink` on the real install |
+| A standalone CMOS5L checkout (no sibling G2 at the expected relative path) has dangling symlinks for those files | **[verified]** | `find -xtype l` on `~/share/pdk/ihp-sg13cmos5l` + `.github/ihp-sg13g2.ref` / `.github/actions/setup-pdk` |
+| `forbidden/3_2_forbidden.drc` is a local copy, not a symlink (and `3_2_forbidden_cmos5l.drc` mis-describes it as symlinked) | **[verified]** | `readlink` + both files' header comments |
 | Top-level `.lvs` deck independently authored (tap/forbidden/inductor overrides) | **[verified]** | direct `diff` + in-file authorship comment |
 | DRC deck filename carries `ihp-` prefix, LVS deck filename does not (both families) | **[verified]** | directory listing of both installs |
 
