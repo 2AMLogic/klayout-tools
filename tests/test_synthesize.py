@@ -681,6 +681,72 @@ def test_run_synthesize_stubbed_elaboration_error(tmp_path, monkeypatch):
         run_synthesize(request_path)
 
 
+def test_run_synthesize_stubbed_wasi_sandbox_script_not_found_hint(
+    tmp_path, monkeypatch
+):
+    """When yosys reports it could not read a script file that verifiably
+    exists on the host filesystem, the raised error names the WASI-sandbox
+    (e.g. yowasp-yosys) hypothesis -- see issue #1368."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    existing_script = tmp_path / "synth_gcd.ys"
+    existing_script.write_text("read_verilog gcd.v\n", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        assert cmd[:2] == ["yosys", "-s"]
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"ERROR: Can't open script file `{existing_script}' for "
+                "reading: No such file or directory\n"
+            ),
+        )
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    with pytest.raises(SynthesizeError) as exc_info:
+        run_synthesize(request_path)
+
+    message = str(exc_info.value)
+    assert "yosys synthesis failed:" in message
+    assert "WASI-sandboxed build" in message
+    assert "yowasp-yosys" in message
+    assert "$PATH" in message
+
+
+def test_run_synthesize_stubbed_missing_script_no_hint(tmp_path, monkeypatch):
+    """The same 'script file ... for reading' message is left unchanged --
+    no WASI-sandbox hint appended -- when the referenced path genuinely does
+    not exist on the host filesystem (a different failure)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    missing_script = tmp_path / "does-not-exist" / "synth_gcd.ys"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        assert cmd[:2] == ["yosys", "-s"]
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"ERROR: Can't open script file `{missing_script}' for "
+                "reading: No such file or directory\n"
+            ),
+        )
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    with pytest.raises(SynthesizeError) as exc_info:
+        run_synthesize(request_path)
+
+    message = str(exc_info.value)
+    assert message == (
+        "yosys synthesis failed: ERROR: Can't open script file "
+        f"`{missing_script}' for reading: No such file or directory"
+    )
+    assert "WASI" not in message
+
+
 def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
 

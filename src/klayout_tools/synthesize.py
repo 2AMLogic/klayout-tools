@@ -1071,6 +1071,18 @@ def _run_yosys(script_path: str) -> None:
         raise SynthesizeError(_synthesis_error_message(completed))
 
 
+_WASI_SANDBOX_SCRIPT_NOT_FOUND_RE = re.compile(
+    r"Can't open script file `(.+)' for reading: No such file or directory"
+)
+
+_WASI_SANDBOX_HINT = (
+    "; the script file exists on disk but yosys could not read it -- this "
+    "usually means the 'yosys' on $PATH is a WASI-sandboxed build (e.g. "
+    "yowasp-yosys) whose sandbox does not preopen this path. Try prepending "
+    "a native yosys build's directory to $PATH."
+)
+
+
 def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     """Build an actionable error message from a failed ``yosys -s`` run.
 
@@ -1078,11 +1090,23 @@ def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     lines go to stderr -- verified live, Yosys survey worked example), on
     either stream; falls back to a generic exit-code message with a short
     tail of captured output when no ``ERROR:`` line is found.
+
+    When the error line is the ``Can't open script file `<path>' for
+    reading: No such file or directory`` shape *and* ``<path>`` verifiably
+    exists on the host filesystem, appends a hint that the ``yosys`` on
+    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
+    sandbox does not preopen that path -- see issue #1368. A script path
+    that genuinely does not exist is a different failure and is left
+    unchanged.
     """
     for stream in (completed.stderr or "", completed.stdout or ""):
         error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
         if error_lines:
-            return f"yosys synthesis failed: {error_lines[-1]}"
+            message = f"yosys synthesis failed: {error_lines[-1]}"
+            match = _WASI_SANDBOX_SCRIPT_NOT_FOUND_RE.search(error_lines[-1])
+            if match and os.path.isfile(match.group(1)):
+                message += _WASI_SANDBOX_HINT
+            return message
 
     tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
     snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
