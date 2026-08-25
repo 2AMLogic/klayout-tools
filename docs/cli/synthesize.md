@@ -67,6 +67,21 @@ binding for Yosys the way `klayout.db` already is for `klt lvs`/`klt
 extract`. Requires a `yosys` binary on `$PATH`; a missing binary is a clear,
 actionable error (exit 1), never a traceback.
 
+**Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
+(WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
+install --user` and installed to `~/.local/bin/yosys`, shadowing a native
+distro-packaged `yosys` later on `$PATH` — the run fails with a confusing
+`Can't open script file '<path>' for reading: No such file or directory`
+error for the generated `.ys` script even though the file demonstrably
+exists on disk. This is because the WASI sandbox only preopens a fixed set
+of directories and rejects the absolute paths `klt synthesize` always
+writes into its generated script, regardless of the invoking process's
+cwd. `klt synthesize` detects this exact shape (an existing script path
+reported as missing) and appends a hint naming the WASI sandbox as the
+likely cause; the fix is to ensure a native `yosys` build precedes the
+WASI-sandboxed one on `$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize
+...`).
+
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
 in process — see "`sta`" below) analyzes that netlist's timing graph. It is
