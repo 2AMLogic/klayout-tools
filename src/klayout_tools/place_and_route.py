@@ -3095,6 +3095,12 @@ def _def_pin_net_names(def_path: str) -> frozenset[str] | None:
     least a clock port (``constraints.clock_port`` is required from
     ``target_stage: "place"`` on), so an empty result here is always a parse
     failure, never a real design with no I/O.
+
+    Also exported under the public name :data:`def_pin_names` (issue #1390):
+    ``klt extract --def-pins <path>`` reuses this same parser to derive the
+    declared top-level port set automatically from a routed DEF, for a
+    caller who has not separately hand-derived a ``--pins`` list -- see
+    ``docs/cli/extract.md``'s "DEF-derived declared pins" section.
     """
     try:
         with open(def_path, encoding="utf-8", errors="replace") as handle:
@@ -3134,6 +3140,19 @@ def _def_pin_net_names(def_path: str) -> frozenset[str] | None:
             _flush()
 
     return frozenset(names) if names else None
+
+
+#: Public alias for :func:`_def_pin_net_names` (issue #1390): ``klt extract
+#: --def-pins <path>`` reuses this exact DEF ``PINS``-section parser to
+#: derive the declared top-level port set automatically from a routed DEF,
+#: instead of requiring a caller to hand-list it via ``--pins``. Exported
+#: under a public name (no leading underscore) because it is now a
+#: cross-module entry point (``cli/extract_cmd.py`` imports it), while
+#: ``_def_pin_net_names`` itself stays as the name this module's own
+#: internal call site (:func:`_post_route_spef_metrics`) and its existing
+#: direct-import tests (``tests/test_place_and_route.py``) already use --
+#: same function object, two names, no behavior difference either way.
+def_pin_names = _def_pin_net_names
 
 
 def _post_route_spef_metrics(
@@ -4262,4 +4281,5 @@ __all__ = [
     "PlaceAndRouteError",
     "load_request",
     "run_place_and_route",
+    "def_pin_names",
 ]

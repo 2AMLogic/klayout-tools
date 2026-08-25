@@ -1776,7 +1776,7 @@ cell, has an empty below-top set: `--top-cell-pins` is then a no-op and no
 warning fires. `klt lvs` exposes the same control as the `layout.top_cell_pins`
 request field (see [`docs/cli/lvs.md`](lvs.md)).
 
-### DEF→GDS-merged (`klt place-and-route`) layouts (#1385)
+### DEF→GDS-merged (`klt place-and-route`) layouts (#1385, #1390)
 
 `--top-cell-pins`'s "only labels drawn directly in the top cell" heuristic is
 sized for a **hand-drawn hierarchical** layout, where a sub-cell's own
@@ -1793,14 +1793,18 @@ promotes every one of those DEF-`NETS` connection-point labels right
 alongside the real top-level ports, including collided, comma-joined names
 where two or more distinct labels land on the same electrical net (surfaced
 separately as `merged_net_labels[]`, see
-["Merged net labels"](#merged-net-labels-issue-470) above). There is
-currently no flatten-aware promotion heuristic that fixes this — carrying DEF
-`PINS`-vs-`NETS` provenance through as GDS metadata during the merge is the
-leading candidate design, but is not yet implemented; track this gap under
-issue #1385's own follow-up.
+["Merged net labels"](#merged-net-labels-issue-470) above).
 
-What **is** implemented today, so this failure mode is at least never
-silent:
+**`--def-pins` (issue #1390, below) is the automatic fix for this**: it
+derives the design's genuine top-level port set directly from the routed
+DEF's own `PINS` section — the same file `klt place-and-route` already wrote
+— and applies it as a per-net reconciliation, no hand-derived `--pins` list
+required. See ["DEF-derived declared pins"](#def-derived-declared-pins---def-pins-issue-1390)
+below for the full mechanism and a worked example against a real macro-scale
+corpus fixture.
+
+What else is implemented, so this failure mode is never silent even without
+`--def-pins`:
 
 - If the layout carries **zero** text on any of the target `--deck`'s own
   label layers anywhere in the cell tree, `warnings[]` says so explicitly and
@@ -1810,22 +1814,20 @@ silent:
   target deck never scans for pin-name text at all (issue #1385's root
   cause). This is a whole-layout check, independent of any flag.
 - After every promotion/demotion pass above has run (`make_top_level_pins()`,
-  `--top-cell-pins`, `--pins`/`declared_pins`), if the top circuit ends up
-  with **zero** top-level pins for *any* reason, `warnings[]` says so — `klt
-  lvs`'s `NetlistComparer` has no net/device anchor to seed correspondence
-  with zero top-level pins, and otherwise reports a full mismatch with no
-  hint the root cause is upstream pin promotion rather than device
-  extraction disagreement.
+  `--top-cell-pins`, `--pins`/`declared_pins`, `--def-pins`), if the top
+  circuit ends up with **zero** top-level pins for *any* reason, `warnings[]`
+  says so — `klt lvs`'s `NetlistComparer` has no net/device anchor to seed
+  correspondence with zero top-level pins, and otherwise reports a full
+  mismatch with no hint the root cause is upstream pin promotion rather than
+  device extraction disagreement.
 - `merged_net_labels[]` (issue #470, see below) already reports every net —
   promoted to a pin or not — whose name is a multi-label collision, which is
   usually the first visible symptom of the DEF-`NETS`-vs-`PINS` ambiguity
   above.
 
-Neither of these makes a DEF-merged layout's promoted pin set *correct* —
-only diagnosable. `--pins`/`declared_pins` (below) is the practical
-workaround today when the DEF's own `PINS` list is available separately: pass
-it explicitly to demote every DEF-`NETS`-origin label back to an internal
-node, since `--top-cell-pins` structurally cannot help here.
+`--pins`/`declared_pins` (below) remains the manual fallback when the DEF is
+not available (or a caller wants a hand-curated interface list for some
+other reason) — it is unchanged by `--def-pins`'s addition.
 
 ## Declared pin set (`--pins`, #514)
 
@@ -1856,6 +1858,63 @@ named net still promotes to a pin, byte-for-byte identical to extraction
 before this flag existed. `klt lvs` exposes the same control as the
 `layout.declared_pins` request field (a JSON array of net name strings —
 see [`docs/cli/lvs.md`](lvs.md)).
+
+## DEF-derived declared pins (`--def-pins`, issue #1390)
+
+`--pins` needs the caller to already have the design's port list in hand.
+For a `klt place-and-route`-produced layout that list already exists — it is
+the routed DEF's own `PINS` section, the same file `klt place-and-route`
+wrote at `response.def_path`. `--def-pins <path-to-def>` parses that section
+directly (`place_and_route.def_pin_names`, the same scan `klt
+place-and-route`'s own internal post-route SPEF pipeline already relies on,
+issue #961) and applies it as the declared pin set — no hand-derived `--pins`
+list required. This is the automatic path issue #1385 left open (see
+["DEF→GDS-merged layouts"](#defgds-merged-klt-place-and-route-layouts-1385-1390)
+above): the practical fix for the "every DEF `NETS` connection point promotes
+right alongside the real top-level ports" failure mode, scoped specifically
+to a `klt place-and-route`-originated layout (it needs that DEF file to
+exist).
+
+`--def-pins` cannot reuse `--pins`'s plain exact-string match, though.
+KLayout's flat extraction joins every distinct text label found on one
+electrical net into a single, comma-separated net name (`Net.name` — see
+["Merged net labels"](#merged-net-labels-issue-470) above), and in a
+densely-routed DEF-merged layout *most* nets — port or not — carry two or
+more such labels: a genuine top-level port's net carries both the DEF
+`PINS`-declared label and whichever local instance pin label it physically
+connects into, and an ordinary internal net carries a driver's local
+output-pin label together with a receiver's local input-pin label. Measured
+live against this repo's own routed `gcd` corpus fixture: of 752 pins the
+unrestricted default promotes, 494 carry a joined name (e.g. `Y|clk` — `|`
+here and in the written netlist, `Net.name`'s own internal spelling is
+comma-joined, see `spice_safe_net_name`). So `--def-pins` keeps a promoted
+net whenever **any** of its joined component labels is a declared DEF pin
+name, not only when the whole joined name matches verbatim — every other
+currently-promoted net is demoted, exactly as `--pins` demotes on a plain
+miss. A `warnings` entry lists any net demoted this way, and a separate
+entry lists any `--def-pins` name that matched no promoted net's label set.
+
+```
+$ klt place-and-route pnr_request.json --format json | jq -r .def_path
+/path/to/gcd.def
+$ klt extract /path/to/gcd.gds --deck sky130 --def-pins /path/to/gcd.def --format json
+```
+
+Applied *after* `--pins`/`declared_pins`'s own reconciliation when both are
+given (an unusual combination — normally only one or the other is needed) —
+it can only further restrict, never re-promote a net `--pins` already kept
+internal. Omitting `--def-pins` (the default) skips this reconciliation
+entirely, byte-for-byte identical to extraction before this flag existed. A
+given path with no parseable DEF `PINS` section is a clean error (exit 1),
+not a silent no-op — unlike `--def-net-connections`'s tolerant "absence is
+not proof of zero" convention, a caller passing `--def-pins` has explicitly
+asked for its restriction to apply, and silently skipping it would demote
+*every* promoted pin instead of the intended subset.
+
+`--top-cell-pins` and `--def-pins` are not mutually exclusive — combining
+them is harmless (the below-top-label pass is a structural no-op on a
+DEF-merged layout, see above) but does not need to be done, since
+`--def-pins` alone already covers the DEF-merge case fully.
 
 ## Matched-device geometry check (`--matched-group`, issue #1018)
 

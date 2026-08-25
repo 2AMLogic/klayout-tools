@@ -425,6 +425,16 @@ with the merge's own wall-clock time — running the same request twice in a
 row produces a byte-identical `gds_path`, not just a byte-identical
 `def_path`.
 
+**Downstream `klt extract`/`klt lvs` pin promotion (issues #1385, #1390).**
+The merge flattens the whole design into the top cell, so a subsequent `klt
+extract --top-cell-pins` cannot tell a genuine DEF `PINS`-section top-level
+port from an internal DEF `NETS`-section connection point — both land "in
+the top cell" once flattened. `klt extract --def-pins <def_path>` (passing
+this stage's own `def_path`) is the fix: it derives the genuine top-level
+port set directly from the DEF's own `PINS` section, no hand-derived `--pins`
+list needed. See [`docs/cli/extract.md`](extract.md)'s "DEF→GDS-merged
+layouts" and "DEF-derived declared pins" sections for the full mechanism.
+
 ## Hard-macro placement (`request.macros`)
 
 Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line

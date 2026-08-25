@@ -156,6 +156,41 @@ def _parse_def_net_connections(
     return def_net_instance_pins(raw)
 
 
+def _parse_def_pins(raw: str | None) -> frozenset[str] | None:
+    """Parse the ``--def-pins`` flag's DEF path (issue #1390) into the
+    ``run_extract``/``def_pins`` declared-port-name set, or ``None`` when the
+    flag was omitted entirely.
+
+    Reuses ``place_and_route.def_pin_names`` -- the exact same DEF ``PINS``-
+    section scan ``klt place-and-route``'s own internal SPEF pipeline
+    already relies on (issue #961) -- imported locally so a plain ``klt
+    extract`` run (the overwhelming majority of invocations, which never
+    touch this flag) never pays ``place_and_route.py``'s own import cost.
+
+    Raises :class:`ExtractError` when the given path carries no parseable
+    DEF ``PINS`` section: unlike ``def_net_instance_pins`` (whose ``{}``
+    "absence is not proof of zero" default is safe because every lookup
+    site tolerates it), a caller passing ``--def-pins`` has explicitly
+    asked for its declared-pin-set reconciliation to run -- silently
+    skipping it here would demote *every* promoted pin instead of the
+    intended subset, the exact silent-zero-pins failure mode issue #1385
+    already treats as a hard warning elsewhere in this module.
+    """
+    if raw is None:
+        return None
+    from ..place_and_route import def_pin_names
+
+    names = def_pin_names(raw)
+    if names is None:
+        raise ExtractError(
+            f"--def-pins {raw!r} has no parseable DEF `PINS` section -- pass "
+            "the routed DEF `klt place-and-route` wrote for this layout "
+            "(its own response.def_path), or use --pins to declare pin "
+            "names by hand instead"
+        )
+    return names
+
+
 def run(args: argparse.Namespace) -> int:
     # `file` and `--check` are a required, mutually exclusive argparse group
     # (parser.py) -- omitting both, or giving both, is already a usage error
@@ -170,6 +205,7 @@ def run(args: argparse.Namespace) -> int:
         if not args.deck:
             raise ExtractError("argument --deck is required")
         declared_pins = _parse_declared_pins(args.pins)
+        def_pins = _parse_def_pins(args.def_pins)
         deck_options = _parse_deck_options(args.deck_options)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
@@ -245,6 +281,13 @@ def run(args: argparse.Namespace) -> int:
             # post-extraction for equal `params`. `None` when the flag was
             # never given, unchanged from every call site that predates it.
             matched_device_groups=matched_device_groups,
+            # `--def-pins` (issue #1390): the automatic, DEF-merge-aware
+            # counterpart to `--pins` -- derives the declared top-level
+            # port set from a routed DEF's own `PINS` section instead of
+            # requiring a caller to hand-derive it. `None` when the flag
+            # was never given, unchanged from every call site that
+            # predates it.
+            def_pins=def_pins,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
