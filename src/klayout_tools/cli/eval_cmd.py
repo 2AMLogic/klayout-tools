@@ -12,7 +12,7 @@ Exit codes (see ``docs/cli/eval.md`` for the full table):
         returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - ran successfully, valid: false (at least one gate failed)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. This mirrors ``klt drc``/``klt lvs``'s 0/1/2/3 split -- an
+subcommand. This mirrors ``klt drc``'s 0/1/2/3 split -- an
 optimizer must never mistake exit 1 (crash) for exit 3 (a real, if bad,
 score) -- see ``docs/cli/eval.md``'s "Exit codes" section.)
 

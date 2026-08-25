@@ -331,8 +331,24 @@ def _status_drc(report: dict[str, Any]) -> tuple[str, int, Any]:
 
 
 def _status_lvs(report: dict[str, Any]) -> tuple[str, int, Any]:
-    status = "pass" if report["status"] == "match" else "fail"
-    return status, (0 if status == "pass" else 3), report.get("mismatch_count")
+    """`klt lvs`'s three-outcome split (issue #1370), mirroring
+    :func:`_status_sim`'s: `"match"` -> `pass`/`0`, `"inconclusive"` ->
+    `fail`/`4`, anything else -> `fail`/`3`.
+
+    `"inconclusive"` gates as `fail` for the same reason `klt sim`'s
+    `"error"` does -- an `eval` gate is a "may this candidate proceed?"
+    question, and a compare that could not be performed has not cleared it.
+    But it carries **exit code `4`**, not `3`, because `exit_code` is
+    documented as "the exit code the cited check would itself have returned
+    for this report" (`docs/cli/eval.md`), and `klt lvs` itself now exits `4`
+    there. Reporting `3` would tell a human debugging a `valid: false` run
+    that the design differs, when in fact the comparison never ran.
+    """
+    if report["status"] == "match":
+        return "pass", 0, report.get("mismatch_count")
+    if report["status"] == "inconclusive":
+        return "fail", 4, report.get("mismatch_count")
+    return "fail", 3, report.get("mismatch_count")
 
 
 def _status_sim(report: dict[str, Any]) -> tuple[str, int, Any]:

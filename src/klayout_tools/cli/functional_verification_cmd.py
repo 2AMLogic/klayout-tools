@@ -13,7 +13,7 @@ Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
         ``output.ERROR_EXIT_CODE``
     3 - ran successfully, at least one test failed (``status: "fail"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. This is the same 0/1/2/3 trichotomy ``klt lvs``/``klt drc`` use,
+subcommand. This is the same 0/1/2/3 trichotomy ``klt drc`` uses,
 not ``klt sim``'s 3/4 split -- a cocotb regression has no "ran but part of
 the batch is untrustworthy" outcome; either the build+run pipeline produced
 a ``results.xml`` to report from, or it did not. See

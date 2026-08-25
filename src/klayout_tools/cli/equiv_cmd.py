@@ -17,11 +17,12 @@ Exit codes (see ``docs/cli/equiv.md`` for the full table):
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
 
-This is ``klt sim``'s 0/1/2/3/4 precedent (not ``klt lvs``'s 0/1/2/3): a
-formal-equivalence proof has the same third "ran but the result isn't
-trustworthy" outcome a PVT corner sweep has (a timeout), which a binary
-netlist comparison (LVS) does not -- see docs/cli/equiv.md's "Exit codes"
-section for the full reasoning.
+This is ``klt sim``'s 0/1/2/3/4 precedent: a formal-equivalence proof has the
+same third "ran but the result isn't trustworthy" outcome a PVT corner sweep
+has (a timeout), which a plain netlist comparison does not have from its own
+compare engine. ``klt lvs`` reuses this same ``4`` for the one case where it
+too cannot reach a verdict (issue #1370) -- see docs/cli/equiv.md's "Exit
+codes" section for the full reasoning.
 """
 
 import argparse

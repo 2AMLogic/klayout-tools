@@ -11,10 +11,16 @@ Exit codes (see ``docs/cli/lvs.md`` for the full table):
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - ran successfully, mismatches found (``status: "mismatch"``), or
         under --check, drifted (``status: "drifted"``)
+    4 - ran, but the compare the request asked for could not be performed, so
+        no verdict about the design was reached (``status: "inconclusive"``,
+        issue #1370 -- ``options.combine_devices`` exhausted its retry budget
+        and both sides were rolled back to their uncombined state); never
+        ``0``
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. This is the same 0/1/2/3 split as ``klt drc``, not ``klt sim``'s
-3/4 split -- LVS is a clean/dirty verdict like DRC, with no third "ran but
-untrustworthy" outcome; see docs/cli/lvs.md's "Exit codes" section.)
+subcommand. The 0/1/2/3 split is `klt drc`'s -- LVS is a clean/dirty verdict
+like DRC -- and `4` is `klt equiv`'s ``EXIT_INCONCLUSIVE`` reused verbatim for
+the one case where LVS genuinely cannot reach a verdict; see docs/cli/lvs.md's
+"Exit codes" section.)
 
 ``--check <report>`` (issue #1106) switches ``klt lvs`` from running a fresh
 compare into *verifying a previously committed* ``--format json`` report
@@ -36,10 +42,23 @@ from .output import emit_error, emit_success
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 3
+#: Issue #1370: "ran, but could not reach a verdict" -- deliberately the same
+#: numeric value as ``cli/equiv_cmd.py``'s own ``EXIT_INCONCLUSIVE``, so the
+#: two `klt` verbs that can report an unreachable verdict agree on the code a
+#: caller gates on. Never `0`, and never folded into `3`: an automation gate
+#: must be able to tell "the design differs" from "the comparison could not be
+#: performed".
+EXIT_INCONCLUSIVE = 4
 #: Aliases for the --check/--rerun outcome (issue #1106) -- same numeric
 #: values as a normal run's 0/3 split (see this module's docstring), just
 #: named for the "match"/"drifted" vocabulary those modes report under.
 EXIT_DRIFTED = EXIT_MISMATCH
+
+_EXIT_BY_STATUS = {
+    "match": EXIT_MATCH,
+    "mismatch": EXIT_MISMATCH,
+    "inconclusive": EXIT_INCONCLUSIVE,
+}
 
 
 def run(args: argparse.Namespace) -> int:
@@ -59,7 +78,9 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
 
-    return EXIT_MISMATCH if report["status"] == "mismatch" else EXIT_MATCH
+    # Unknown/unexpected status can only mean a future additive value this
+    # build predates -- never silently report it as a clean `0`.
+    return _EXIT_BY_STATUS.get(report["status"], EXIT_MISMATCH)
 
 
 def _run_check(args: argparse.Namespace) -> int:

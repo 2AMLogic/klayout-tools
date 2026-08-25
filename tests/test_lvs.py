@@ -3976,7 +3976,13 @@ def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
     the partial-match internal error -- it completes through the normal
     JSON-envelope return, with a `device.combine_incomplete` warning entry
     (one per side) recording that combine did not fully apply, instead of
-    the whole run aborting (issue #466)."""
+    the whole run aborting (issue #466).
+
+    Issue #1370 changed the *verdict* this run reports (and only that): the
+    engine still reports "the netlists differ", but because the compare the
+    caller asked for (a combined one) never ran on either side, that
+    difference is no longer reported as a design `"mismatch"` -- it is
+    `"inconclusive"`. Everything else here is unchanged from #466."""
     import klayout.db as kdb
 
     def _raise(self):
@@ -4008,7 +4014,453 @@ def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
     # (same counts as `test_multifinger_device_mismatches_without_combine_devices`).
     assert report["counts"]["devices"]["layout"] == 3
     assert report["counts"]["devices"]["reference"] == 2
-    assert report["status"] == "mismatch"
+    assert report["status"] == lvs.STATUS_INCONCLUSIVE
+
+
+# --------------------------------------------------------------------------- #
+# options.combine_devices escape hatches (issue #1370): a device-class
+# restriction, a symmetric degrade + `status: "inconclusive"` on retry
+# exhaustion, and identifier-carrying `device.combine_incomplete` entries
+# --------------------------------------------------------------------------- #
+
+# One inverter drawn with the NMOS folded into two parallel fingers *and* the
+# pull-up path drawn as two series resistors, against a reference that lumps
+# both. Combining everything matches; combining only `NMOS` folds the fingers
+# but leaves the resistor string as two devices.
+_MIXED_CLASS_LAYOUT_SPICE = """
+.subckt inv A Y VDD VSS
+M0 Y A VSS VSS NMOS L=0.15U W=0.325U
+M1 Y A VSS VSS NMOS L=0.15U W=0.325U
+R0 VDD mid 500
+R1 mid Y 500
+.ends
+"""
+
+_MIXED_CLASS_REFERENCE_SPICE = """
+.subckt inv A Y VDD VSS
+M0 Y A VSS VSS NMOS L=0.15U W=0.65U
+R0 VDD Y 1000
+.ends
+"""
+
+
+def test_combine_devices_list_restricts_to_named_device_classes(tmp_path):
+    """Issue #1370: a list-valued `options.combine_devices` combines *only*
+    the named device classes.
+
+    The same layout is compared three ways against the same fully-lumped
+    reference: `true` folds both the MOS fingers and the series resistor
+    string (2 devices, match); `["NMOS"]` folds only the fingers, leaving the
+    two resistors uncombined (3 devices, no match); `["RES"]` folds only the
+    resistors (3 devices, no match). Asserting the device *counts*, not just
+    the verdict, is what proves the restriction actually took effect rather
+    than combining being skipped or applied wholesale."""
+    layout_path = _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _MIXED_CLASS_REFERENCE_SPICE)
+
+    def _run(option, name):
+        path = _write_request(
+            tmp_path / f"request_{name}.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+                "options": {"combine_devices": option},
+            },
+        )
+        return run_lvs(path)
+
+    everything = _run(True, "all")
+    assert everything["counts"]["devices"]["layout"] == 2
+    assert everything["status"] == "match"
+
+    # Only the MOS fingers fold: 1 combined NMOS + 2 uncombined resistors.
+    nmos_only = _run(["NMOS"], "nmos")
+    assert nmos_only["counts"]["devices"]["layout"] == 3
+    assert nmos_only["status"] == "mismatch"
+    assert nmos_only["options"]["combine_devices"] == ["NMOS"]
+
+    # Only the resistor string folds: 2 uncombined NMOS + 1 combined resistor.
+    res_only = _run(["RES"], "res")
+    assert res_only["counts"]["devices"]["layout"] == 3
+    assert res_only["status"] == "mismatch"
+    assert res_only["options"]["combine_devices"] == ["RES"]
+
+
+def test_combine_devices_list_is_case_insensitive(tmp_path):
+    """`NetlistSpiceReader` upper-cases class names read back from SPICE
+    (`NMOS`) while an in-process extraction deck writes them as declared
+    (`nfet_01v8`) -- so the restriction matches case-insensitively, the same
+    convention `apply_resistor_fixed_offset_corrections` already uses (issue
+    #585)."""
+    layout_path = _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _MIXED_CLASS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": ["nmos"]},
+        },
+    )
+    report = run_lvs(path)
+    # Same outcome as the upper-cased `["NMOS"]` above: the fingers folded.
+    assert report["counts"]["devices"]["layout"] == 3
+
+
+def test_combine_devices_list_unknown_class_is_a_request_error(tmp_path):
+    """Issue #1370 edge case (a): a device class named in the list but
+    present in *neither* netlist must not silently no-op (which would look
+    exactly like a real `device.unmatched` cascade) -- it is a clean
+    `LvsError` naming the unknown class and the ones that do exist."""
+    layout_path = _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _MIXED_CLASS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": ["NMOS", "NOT_A_CLASS"]},
+        },
+    )
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(path)
+    message = str(excinfo.value)
+    assert "NOT_A_CLASS" in message
+    # The unknown class is named, the valid one is not reported as unknown,
+    # and the available classes are listed so the caller can fix the typo.
+    assert "NMOS" in message
+    assert "RES" in message
+
+
+def test_combine_devices_list_accepts_class_present_on_only_one_side(tmp_path):
+    """A class registered on just one side is legitimate (a layout-only
+    parasitic flavour, a reference-only lumped model) -- only "present on
+    neither side" is an error, so this must run rather than raise."""
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt inv A Y VDD VSS
+M0 Y A VSS VSS NMOS L=0.15U W=0.65U
+R0 VDD Y 1000
+.ends
+""",
+    )
+    layout_only = _write(
+        tmp_path / "layout_only.spice",
+        _MIXED_CLASS_LAYOUT_SPICE.replace("R1 mid Y 500", "C1 mid Y 1p"),
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_only, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            # `CAP` exists only on the layout side.
+            "options": {"combine_devices": ["CAP"]},
+        },
+    )
+    report = run_lvs(path)  # must not raise
+    assert report["options"]["combine_devices"] == ["CAP"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [[], ["NMOS", ""], ["NMOS", 3], "NMOS", 1, {}],
+)
+def test_combine_devices_rejects_wrong_shaped_values(tmp_path, value):
+    """`bool(...)` would happily coerce `"NMOS"`, `1`, `{}`, or an empty list
+    into a verdict-shaping flag the caller never meant -- each is a clean
+    request error instead (issue #1370), mirroring how `declared_pins` and
+    `deck_options` are validated."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": value},
+        },
+    )
+    with pytest.raises(LvsError, match="options.combine_devices"):
+        run_lvs(path)
+
+
+def test_combine_devices_safely_honors_device_class_restriction(tmp_path):
+    """Unit-level counterpart of the end-to-end restriction test: with
+    `device_classes=["NMOS"]`, `_combine_devices_safely` folds the two MOS
+    fingers and leaves the two series resistors alone."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+
+    assert (
+        lvs._combine_devices_safely(netlist, "layout", device_classes=["NMOS"]) is None
+    )
+
+    circuit = next(iter(netlist.each_circuit()))
+    classes = sorted(d.device_class().name for d in circuit.each_device())
+    # One folded NMOS plus the two still-separate resistors.
+    assert classes == ["NMOS", "RES", "RES"]
+
+
+# KLayout's own error text, but with a device name filled in -- the shape that
+# lets every identifier field resolve. `NetlistSpiceReader` strips the SPICE
+# element letter, so `_MULTIFINGER_LAYOUT_SPICE`'s `M1` is device `1` of
+# circuit `INV`. The empty-`name=` variant KLayout emits most often is
+# `_COMBINE_DEVICES_PARTIAL_MATCH_ERROR` above.
+_COMBINE_DEVICES_NAMED_DEVICE_ERROR = (
+    "Internal error: Terminal still connected after removing device in "
+    "device combination: name=1, circuit=INV, terminal=G in "
+    "Netlist.combine_devices"
+)
+
+
+def test_combine_incomplete_entry_carries_circuit_device_and_net(tmp_path, monkeypatch):
+    """Issue #1370 criterion 3: the `device.combine_incomplete` entry names
+    the failing circuit, device (and its class), and the net wired to the
+    reported terminal -- resolved against the netlist the error was raised
+    on, not left `null` with only the raw exception string in `description`.
+    """
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_NAMED_DEVICE_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+
+    warning = lvs._combine_devices_safely(netlist, "layout")
+
+    assert warning is not None
+    assert warning["circuit"] == {"layout": "INV", "reference": None}
+    # Device `1` of circuit INV is one of the NFET fingers...
+    assert warning["device"]["layout"] == "1"
+    assert warning["device"]["reference"] is None
+    assert warning["device"]["class"] == "NFET"
+    # ...and its gate terminal G is wired to net A.
+    assert warning["net"] == {"layout": "A", "reference": None}
+    # The raw KLayout message is still available verbatim.
+    assert warning["details"]["terminal"] == "G"
+    assert warning["details"]["klayout_error"] == _COMBINE_DEVICES_NAMED_DEVICE_ERROR
+
+
+def test_combine_incomplete_falls_back_to_device_class_when_name_is_empty(
+    tmp_path, monkeypatch
+):
+    """KLayout usually reports an *empty* `name=` (the device is mid-removal
+    when the invariant trips). The device's own name is then unrecoverable,
+    but the class is not: when exactly one device class in the named circuit
+    declares the reported terminal, that class is reported under
+    `device.class` with both name keys `null` -- never guessed beyond that.
+
+    `_MIXED_CLASS_LAYOUT_SPICE` has exactly the two classes that make this
+    testable: `NMOS` (S/G/D/B) and `RES` (A/B), so terminal `G` narrows to
+    one class while terminal `B` -- shared by the MOS bulk and the
+    resistor's second node -- would not."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(
+            "Internal error: Terminal still connected after removing device "
+            "in device combination: name=, circuit=INV, terminal=G in "
+            "Netlist.combine_devices"
+        )
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+
+    warning = lvs._combine_devices_safely(netlist, "reference")
+
+    assert warning["circuit"] == {"reference": "INV", "layout": None}
+    assert warning["device"] == {"reference": None, "layout": None, "class": "NMOS"}
+    # No device instance to hang a net off, so `net` stays honestly null.
+    assert warning["net"] is None
+    assert warning["details"]["terminal"] == "G"
+
+
+def test_combine_incomplete_leaves_ambiguous_device_class_null(tmp_path, monkeypatch):
+    """The empty-`name=` fallback never guesses: terminal `B` is declared by
+    both classes in `_MIXED_CLASS_LAYOUT_SPICE` (the MOS bulk and the
+    resistor's second node), so `device` stays `null` rather than picking
+    one. Only `circuit` -- which KLayout stated outright -- is populated."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(
+            "Internal error: Terminal still connected after removing device "
+            "in device combination: name=, circuit=INV, terminal=B in "
+            "Netlist.combine_devices"
+        )
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+
+    warning = lvs._combine_devices_safely(netlist, "layout")
+
+    assert warning["circuit"] == {"layout": "INV", "reference": None}
+    assert warning["device"] is None
+    assert warning["net"] is None
+
+
+def test_combine_devices_symmetric_degrade_on_asymmetric_failure(tmp_path, monkeypatch):
+    """Issue #1370 edge case (b): the retry budget is exhausted on the
+    *reference* side only (the layout side combines cleanly on its first
+    attempt).
+
+    Without the symmetric degrade, this compares a fully-folded layout
+    against an unfolded reference and reports the difference as design
+    errors. With it, the layout's successful fold is rolled back too, so both
+    sides are compared uncombined -- and because the requested compare never
+    ran, the verdict is `"inconclusive"`, not `"mismatch"`."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+    # The layout netlist is combined first (see `run_lvs`); every call after
+    # that belongs to the reference side, which always fails.
+    state = {"layout_done": False}
+
+    def _layout_ok_reference_always_fails(self):
+        if not state["layout_done"]:
+            state["layout_done"] = True
+            return real_combine_devices(self)
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(
+        kdb.Netlist, "combine_devices", _layout_ok_reference_always_fails
+    )
+
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == lvs.STATUS_INCONCLUSIVE
+    warnings = [
+        m for m in report["mismatches"] if m["category"] == "device.combine_incomplete"
+    ]
+    # Only the reference side failed -- exactly one warning, on that side.
+    assert [m["side"] for m in warnings] == ["reference"]
+    # ...but BOTH sides were rolled back: the layout's three drawn devices are
+    # back (not the two it had briefly folded into), matching what
+    # `options.combine_devices: false` reports for the same inputs.
+    assert report["counts"]["devices"]["layout"] == 3
+    assert report["counts"]["devices"]["reference"] == 2
+
+
+def test_combine_devices_degrade_keeps_a_match_verdict(tmp_path, monkeypatch):
+    """The downgrade is deliberately one-directional: only a `"mismatch"`
+    becomes `"inconclusive"`. An uncombined compare that still *matched* is
+    strictly stronger evidence than a combined one would have been (the fold
+    turned out to be unnecessary), and this module never re-derives a verdict
+    the engine did not reach -- so `"match"` survives the degrade, with the
+    `device.combine_incomplete` warning still disclosing that combining did
+    not apply."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    # Identical netlists: they match with or without any combining.
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["category_counts"]["device.combine_incomplete"] == 2
+
+
+def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
+    """Issue #1370: `status: "inconclusive"` gets its own exit code, `4` --
+    the same value `klt equiv` already uses for its own unreachable-verdict
+    outcome (`cli/equiv_cmd.py`'s `EXIT_INCONCLUSIVE`). Folding it into `3`
+    would leave an automation gate unable to tell "the design differs" from
+    "the comparison could not be performed"."""
+    import klayout.db as kdb
+
+    from klayout_tools.cli import equiv_cmd, lvs_cmd
+
+    # The two verbs agree on the numeric value, by construction.
+    assert lvs_cmd.EXIT_INCONCLUSIVE == equiv_cmd.EXIT_INCONCLUSIVE == 4
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+
+    import argparse
+
+    args = argparse.Namespace(request=path, format="json", check=None, rerun=False)
+    assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "inconclusive"
+
+
+def test_rerun_reconstructs_a_device_class_restricted_combine(tmp_path):
+    """A committed report whose `options.combine_devices` is a *list* must
+    round-trip back into the same restricted compare -- re-asserting a bare
+    `true` would re-run an unrestricted combine and then report the
+    difference as drift (issue #1370, layered on #1205's echo contract)."""
+    committed = {
+        "options": {"combine_devices": ["NMOS", "RES"]},
+        "layout": "layout.spice",
+        "reference": "ref.spice",
+        "top": "inv",
+    }
+    request = lvs._reconstruct_lvs_request(committed)
+    assert request["options"]["combine_devices"] == ["NMOS", "RES"]
+
+    # The bool shape still reconstructs as a bare `true`, unchanged.
+    committed["options"]["combine_devices"] = True
+    assert lvs._reconstruct_lvs_request(committed)["options"]["combine_devices"] is True
 
 
 # --------------------------------------------------------------------------- #

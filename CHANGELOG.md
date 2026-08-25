@@ -14,6 +14,44 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt lvs`'s `options.combine_devices` gained three caller-side escape
+  hatches for the case where KLayout's own `Netlist.combine_devices()` trips
+  its internal-consistency error *deterministically* rather than at the ~20%
+  per-attempt rate #1185's retry mitigation is sized for (issue #1370). All
+  three are additive — a request that does not set `options.combine_devices`
+  behaves exactly as before, and `combine_devices: true`/`false` still mean
+  what they meant.
+  1. **The field now also accepts an array of device-class names**
+     (`["nfet_01v8"]`) alongside `true`/`false`, combining only the named
+     classes. Names match case-insensitively against both netlists' registered
+     device classes. An empty array, a non-string entry, a bare string, or a
+     class name present in *neither* netlist is a clean request error (exit
+     `1`) rather than a silent no-op. The resolved value is echoed back
+     verbatim under `options.combine_devices`, so `--check --rerun` reproduces
+     the restricted compare.
+  2. **New `status: "inconclusive"` and exit code `4`**, plus a symmetric
+     degrade. When the retry budget is exhausted on *either* side, both
+     netlists are now rolled back to their pre-combine state (previously a
+     partially-folded layout was compared against a fully-folded reference,
+     and every resulting `device.property`/`device.unmatched` finding was
+     cascade). Because the compare the caller asked for never ran, a resulting
+     engine `"mismatch"` is reported as `"inconclusive"` — a `"match"` is not
+     downgraded. Exit `4` is the same numeric value `klt equiv` already uses
+     for its own unreachable-verdict outcome. This changes the reported
+     verdict for a `combine_devices` run that previously exited `3` with a
+     `device.combine_incomplete` warning; every other run is unaffected.
+  3. **`device.combine_incomplete` entries now carry
+     `circuit`/`device`/`net` identifiers** parsed from KLayout's own error
+     text and resolved against the failing netlist, plus a
+     `details.terminal` / `details.klayout_error` block — instead of only the
+     raw exception string embedded in `description`.
+
+  A `klt eval` `"lvs"` gate whose report is `"inconclusive"` still gates as
+  `status: "fail"` (the candidate has not cleared the gate) but now reports
+  `exit_code: 4` rather than `3`, mirroring how a `"sim"` gate already
+  distinguishes a broken corner from a failing one — `exit_code` is
+  documented as the code the cited check would itself have returned, and `3`
+  there would claim the design differs when the compare never ran.
 - `klt extract --abstract-cells` no longer mis-binds abstracted-cell pins on a
   dense, fully-routed digital block (issue #1366, a regression introduced
   between 0.2.0 and 0.3.0 by the multi-candidate pin probing added in #1182 /
