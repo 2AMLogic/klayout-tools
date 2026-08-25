@@ -812,10 +812,22 @@ def _prepare_extracted_request(
     ``"extracted"``). Returns the written request file's path, suitable for
     :func:`~klayout_tools.sim.run_sim`.
 
-    Any relative ``models.lib`` the original request declares is resolved
-    to an absolute path first -- the written copy lives in ``work_dir``,
-    not next to the original testbench file, so a relative reference would
-    otherwise resolve against the wrong directory.
+    A relative ``models.lib`` the original request declares *in the
+    request-dir-relative shape* (no ``models.pdk``/``models.pdk_root``) is
+    resolved to an absolute path first -- the written copy lives in
+    ``work_dir``, not next to the original testbench file, so a relative
+    reference would otherwise resolve against the wrong directory.
+
+    A ``models`` block that *does* carry ``pdk``/``pdk_root`` is copied
+    through **unmodified** (issue #1395): in that shape a relative ``lib``
+    is PDK-variant-relative, not request-dir-relative -- see
+    :func:`~klayout_tools.sim._resolve_models_lib`, the resolution both a
+    standalone ``klt sim`` run and this command's own schematic-side leg
+    use. Eagerly joining it against ``request_dir`` here produced a bogus
+    ``<request-dir>/libs.tech/.../sky130.lib.spice`` absolute path (which,
+    being absolute, then defeated the PDK branch entirely) and failed the
+    extracted-side leg alone with ``model library not found``. Leaving the
+    pair intact lets ``run_sim`` resolve both legs identically.
     """
     request = load_request(testbench_path)
     request_dir = os.path.dirname(os.path.abspath(testbench_path))
@@ -837,7 +849,14 @@ def _prepare_extracted_request(
 
     extracted_request = copy.deepcopy(request)
     models = extracted_request.get("models")
-    if isinstance(models, dict) and isinstance(models.get("lib"), str):
+    if (
+        isinstance(models, dict)
+        and isinstance(models.get("lib"), str)
+        # Issue #1395: only the no-`pdk`/no-`pdk_root` shape is
+        # request-dir-relative. Never rewrite the PDK-resolved shape.
+        and models.get("pdk") is None
+        and models.get("pdk_root") is None
+    ):
         models = dict(models)
         models["lib"] = _resolve_relative(models["lib"], request_dir)
         extracted_request["models"] = models

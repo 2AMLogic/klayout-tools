@@ -28,6 +28,7 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
+from klayout_tools import sim
 from klayout_tools.cli import main
 from klayout_tools.pex import (
     PexError,
@@ -39,6 +40,7 @@ from klayout_tools.pex import (
     _flat_dut_mismatch,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
+    _prepare_extracted_request,
     _rewrite_dut_include,
     _row_status,
     _subckt_interfaces,
@@ -1250,6 +1252,226 @@ def test_integration_run_pex_pin_count_mismatch(
     )
     assert mismatch["extracted"]["netlist"] == expected_extracted_netlist
     assert report["netlist"] == {"path": None, "scope": "external"}
+
+
+# --------------------------------------------------------------------------- #
+# Extracted-side request copy: `models.lib` resolution (issue #1395)
+# --------------------------------------------------------------------------- #
+
+
+def _write_models_request(path: Path, testbench_path: Path, models: dict) -> Path:
+    """A `klt sim` request carrying an explicit `models` block -- the shape
+    `_prepare_extracted_request` has to carry through to its extracted-side
+    copy without breaking the original's resolution semantics."""
+    path.write_text(
+        json.dumps(
+            {
+                "netlist": str(testbench_path),
+                "analysis": {"kind": "tran", "args": "1n 1u"},
+                "models": models,
+                "corners": {"process": ["tt"]},
+                "measurements": [
+                    {
+                        "name": "vout",
+                        "spice": ".meas tran vout FIND v(RB) AT=1u",
+                    }
+                ],
+            }
+        )
+    )
+    return path
+
+
+def _make_fake_pdk_install(root: Path, variant: str = "sky130A") -> Path:
+    """A minimal on-disk PDK install `pdk.find_pdk` recognises, with a
+    model library at `<variant>/libs.tech/combined/sky130.lib.spice`
+    carrying a single `tt` section.
+
+    Deliberately synthetic and content-free (no vendored PDK data): the
+    section holds only the generic resistor model `klt extract`'s sky130
+    deck names for a drawn poly resistor, which is all these tests' decks
+    reference.
+    """
+    variant_dir = root / variant
+    (variant_dir / "libs.tech" / "klayout").mkdir(parents=True)
+    combined = variant_dir / "libs.tech" / "combined"
+    combined.mkdir(parents=True)
+    (combined / "sky130.lib.spice").write_text(
+        ".lib tt\n.model res_generic_po r\n.endl tt\n"
+    )
+    return combined / "sky130.lib.spice"
+
+
+def _prepared_models(tmp_path: Path, models: dict) -> tuple[dict, Path, Path]:
+    """Run `_prepare_extracted_request` over a request declaring ``models``
+    and return `(extracted_models, request_dir, work_dir)`."""
+    request_dir = tmp_path / "design"
+    request_dir.mkdir(exist_ok=True)
+    dut = _write_schematic_dut(request_dir / "schematic_dut.spice")
+    tb = _write_testbench(request_dir / "testbench.spice", dut)
+    request = _write_models_request(request_dir / "request.json", tb, models)
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    extracted_request_path = _prepare_extracted_request(
+        testbench_path=str(request),
+        extracted_netlist_path=str(request_dir / "extracted.spice"),
+        work_dir=str(work_dir),
+        label="res",
+    )
+    with open(extracted_request_path, encoding="utf-8") as handle:
+        return json.load(handle)["models"], request_dir, work_dir
+
+
+def test_prepare_extracted_request_pdk_relative_lib_resolves_via_pdk(tmp_path):
+    """Issue #1395: a `{"pdk": ..., "lib": "<relative>"}` models block must
+    keep resolving against the *PDK-variant* directory on the extracted-side
+    leg, exactly as `sim._resolve_models_lib` does for the schematic-side
+    leg. Before the fix, `_prepare_extracted_request` unconditionally joined
+    the relative `lib` against the *request file's* directory, producing
+    `<request-dir>/libs.tech/combined/sky130.lib.spice` and a
+    `model library not found` failure on the extracted-side leg only."""
+    install_root = tmp_path / "install"
+    lib_path = _make_fake_pdk_install(install_root)
+    models = {
+        "pdk": "sky130A",
+        "pdk_root": str(install_root),
+        "lib": "libs.tech/combined/sky130.lib.spice",
+    }
+
+    extracted_models, request_dir, work_dir = _prepared_models(tmp_path, models)
+
+    # The extracted-side copy must resolve to the same library the original
+    # request does -- not to a request-dir-relative join.
+    assert sim._resolve_models_lib(
+        extracted_models, request_dir=str(work_dir)
+    ) == sim._resolve_models_lib(models, request_dir=str(request_dir))
+    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+        lib_path
+    )
+    assert str(request_dir) not in json.dumps(extracted_models)
+
+
+def test_prepare_extracted_request_literal_relative_lib_still_resolved_eagerly(
+    tmp_path,
+):
+    """Regression guard for the no-`pdk` shape: a plain relative `lib` (no
+    `models.pdk`/`models.pdk_root`) is genuinely request-dir-relative, so it
+    must still be rewritten to an absolute path -- the extracted-side copy
+    lives in `work_dir`, where the original relative string would resolve
+    against the wrong directory."""
+    request_dir = tmp_path / "design"
+    request_dir.mkdir(parents=True, exist_ok=True)
+    lib_path = request_dir / "corner.lib"
+
+    extracted_models, request_dir, work_dir = _prepared_models(
+        tmp_path, {"lib": "corner.lib"}
+    )
+    lib_path.write_text(".lib tt\n.endl tt\n")
+
+    assert extracted_models["lib"] == str(lib_path)
+    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+        lib_path
+    )
+
+
+def test_prepare_extracted_request_env_var_lib_left_expandable(tmp_path, monkeypatch):
+    """Regression guard for the documented workaround shape
+    (`"$PDK_ROOT/<variant>/<path>"`, no `models.pdk`): env-var expansion
+    happens in `_resolve_relative`, so the eagerly-resolved copy must still
+    point at the same absolute file."""
+    install_root = tmp_path / "install"
+    lib_path = _make_fake_pdk_install(install_root)
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    extracted_models, _request_dir, work_dir = _prepared_models(
+        tmp_path, {"lib": "$PDK_ROOT/sky130A/libs.tech/combined/sky130.lib.spice"}
+    )
+
+    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+        lib_path
+    )
+
+
+def test_prepare_extracted_request_absolute_lib_with_pdk_left_untouched(tmp_path):
+    """An already-absolute `lib` alongside `models.pdk` must survive
+    verbatim (`_resolve_models_lib`'s own `os.path.isabs` check)."""
+    install_root = tmp_path / "install"
+    lib_path = _make_fake_pdk_install(install_root)
+    models = {"pdk": "sky130A", "pdk_root": str(install_root), "lib": str(lib_path)}
+
+    extracted_models, _request_dir, work_dir = _prepared_models(tmp_path, models)
+
+    assert extracted_models["lib"] == str(lib_path)
+    assert sim._resolve_models_lib(extracted_models, request_dir=str(work_dir)) == str(
+        lib_path
+    )
+
+
+def test_prepare_extracted_request_without_models_block_is_unchanged(tmp_path):
+    """A request with no `models` block at all (no `corners.process` axis)
+    must not grow one."""
+    request_dir = tmp_path / "design"
+    request_dir.mkdir()
+    dut = _write_schematic_dut(request_dir / "schematic_dut.spice")
+    tb = _write_testbench(request_dir / "testbench.spice", dut)
+    request = _write_request(request_dir / "request.json", tb)
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    extracted_request_path = _prepare_extracted_request(
+        testbench_path=str(request),
+        extracted_netlist_path=str(request_dir / "extracted.spice"),
+        work_dir=str(work_dir),
+        label="res",
+    )
+    with open(extracted_request_path, encoding="utf-8") as handle:
+        extracted_request = json.load(handle)
+
+    assert "models" not in extracted_request
+    assert extracted_request["netlist_source"] == "extracted"
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_pdk_relative_models_lib_both_legs(
+    tmp_path, resistor_layout
+):
+    """Issue #1395 end to end, against real `ngspice`: the reported repro
+    shape -- a request with `models: {"pdk": ..., "lib": "<relative>"}` and a
+    `corners.process` axis. Before the fix the schematic-side leg passed and
+    the extracted-side leg alone failed with `model library not found:
+    <request-dir>/libs.tech/combined/sky130.lib.spice`, aborting the whole
+    run with a `PexError`. Both legs must now simulate."""
+    install_root = tmp_path / "install"
+    _make_fake_pdk_install(install_root)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    # No inline `.model` card: the model comes from the PDK-resolved library,
+    # which is the whole point of the `{"pdk": ..., "lib": ...}` shape.
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\nVdd RA 0 DC 1.8\nXres RA RB RES\nRload RB 0 1000.0\n'
+    )
+    request = _write_models_request(
+        tmp_path / "request.json",
+        tb,
+        {
+            "pdk": "sky130A",
+            "pdk_root": str(install_root),
+            "lib": "libs.tech/combined/sky130.lib.spice",
+        },
+    )
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "pass"
+    assert report["errored"] == 0
+    (row,) = report["delta"]
+    assert row["status"] == "pass"
+    assert row["schematic_value"] == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-3)
+    # Both legs actually ran: the extracted side has a real measured value.
+    assert row["extracted_value"] is not None
+    assert row["extracted_value"] < row["schematic_value"]
 
 
 # --------------------------------------------------------------------------- #

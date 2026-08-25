@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt pex`'s extracted-side leg no longer mis-resolves a PDK-relative
+  `models.lib` path (issue #1395). When the request's `models` block uses the
+  documented PDK-resolution shape (`{"pdk": "<variant>", "lib": "<relative
+  path>"}`, optionally `"pdk_root"` — see `docs/cli/sim.md`'s "Model library
+  resolution"), the generated extracted-side request copy now carries that
+  pair through unmodified so `klt sim` resolves it against the PDK-variant
+  directory, exactly as the schematic-side leg and a standalone `klt sim` run
+  already did. Previously the relative `lib` was eagerly joined against the
+  *original request file's* directory, producing a bogus absolute path and a
+  `model library not found` failure on the extracted-side leg alone. The
+  no-`pdk` shape (a plain relative or `$PDK_ROOT/…` literal `lib`) keeps its
+  existing eager request-dir resolution, which the copy in `--outdir` still
+  needs. No JSON shape change.
 - `klt gen-compose`'s route-vs-route collision check (#1057) is now
   spacing-aware, not just overlap-aware (issue #1386): two accepted
   `connectivity[]` legs on the same effective drawing layer that never
