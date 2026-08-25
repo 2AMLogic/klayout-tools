@@ -756,40 +756,65 @@ time (exit 1, matching every other `routing.*` validation error):
   no-declared-via cases "Via-drop routing" documents for a pin's own layer,
   applied here to the two layer roles themselves.
 
-**Known limitation: at most one same-block self-net crossing per block is
-reliably resolvable (issue #1386).** `routing.cross_block_layer_role`'s
-retry above only ever fires from the two checks it names ("Self-net
-pad-crossing" and "Self-net drawn-metal" above) — a leg that falls back to
-the cross layer because it crosses another of the block's own *pads* on
-`routing.layer_role`. It has no visibility into, and is never retried for, a
-route-vs-route collision (#1057/#1386 above) with a *different* self-net on
-the *same* block that also needed the cross layer: when two same-block
-self-nets are symmetric enough that `manhattan_backbone()`'s fixed one-jog
-shape draws the identical (or overlapping) backbone for both — e.g. two
-independent gate-bussing nets on a `splits`-interleaved cell, each tying
-together its own two rows' legs — the first one processed (`connectivity[]`
-order) claims the cross layer and the second is rejected outright
-(`"crosses already-routed net '<first net>'"`, or, since #1386, the
-spacing-aware wording above), regardless of which net is declared first.
-There is no automatic "stack the second bus at a different height on the
-cross layer" retry (unlike the bounded detour search #1167 already performs
-for a *third*, unrelated block sitting between two pins) — adding one is
-tracked as a follow-up, not yet implemented.
+### More than one same-block self-net per block (#1393)
 
-The available workaround is `connectivity[].waypoints_um` (#634): supply an
-explicit path for the second self-net that clears the first net's already-
-accepted footprint (and the deck's own minimum spacing beyond it) rather
-than relying on the automatic fixed-shape jog. This is not always
-mechanically simple — the two nets' own approach stubs still leave each pin
-in its reported `direction_deg`, so a waypoint path that merely shifts the
-jog's *height* without also clearing the columns each stub occupies can
-still collide (both checks above, and #1057/#1386's route-vs-route check,
-still run against whatever path is supplied); routing the second net's
-waypoints around the outside of the block's own bbox entirely, rather than
-stacking a parallel jog directly above the first net's, is the more reliable
-shape. As with every other check in this document, the composed output must
-still be re-verified with `klt drc` regardless of which net a caller
-resolves this way.
+`routing.cross_block_layer_role`'s retry above only ever fires from the two
+checks it names ("Self-net pad-crossing" and "Self-net drawn-metal" above) —
+a leg that falls back to the cross layer because it crosses another of the
+block's own *pads* on `routing.layer_role`. That fallback has no visibility
+into a route-vs-route collision (#1057/#1386 above) with a **different**
+self-net on the **same** block that independently needed the cross layer
+too. Until #1393, that made a block's *second* such self-net unroutable: two
+independent gate-bussing nets on a `splits`-interleaved `diff_pair`, each
+tying together its own device's two split legs, sit at the same pair of x
+columns swapped between the two rows, so `manhattan_backbone()`'s fixed
+one-jog shape draws the two diagonals of one rectangle — a real crossing.
+Whichever net `connectivity[]` declared first claimed the lane and the other
+was rejected outright (`"crosses already-routed net '<first net>'"`, or, since
+#1386, the spacing-aware wording above); reordering the two entries just moved
+the failure to the other net.
+
+`route_two_pin()` now retries that leg the same *way* the bounded detour
+search (#1167) already retries a leg blocked by a third, unrelated block —
+propose a small, fixed set of alternate paths, re-run every routability check
+against each drawn path, keep the first that passes — but with a lane shape
+suited to this case. A same-block self-net's two pins sit *inside* the very
+bbox that must be cleared, and a different self-net on the same block can own
+the identical columns, so an over/under lane at either pin's own column
+(#1167's shape) still runs through the other net's approach stub. Instead the
+retry loops the leg fully **around the outside of the block's own bbox**: one
+waypoint per bbox corner, each pushed clear of the block, shortest detour
+first (deterministic, so the composed GDS stays byte-reproducible, #320).
+Both gate nets in the example above now route, in either declaration order,
+DRC-clean, extracting as two distinct nodes.
+
+The retry is deliberately narrow — it is armed only for a leg that is all of:
+a same-block self-net, on its own fixed-shape attempt (never a
+caller-supplied `connectivity[].waypoints_um` path, and never a retry of a
+retry — recursion is bounded at one level exactly as #1167's is), and one
+that actually resolved onto `routing.cross_block_layer_role`. Every other
+leg — an inter-block net, a same-block self-net that never needed the
+fallback, a caller-routed path — reaches the route-vs-route collision check
+exactly as it did before, and that check remains the sole decision-maker
+there. Nothing is waived to make a lane fit: each candidate lane goes back
+through the *whole* of `route_two_pin()` (ring checks, pad crossings,
+drawn-metal shorts, obstacle overlap, via drops) plus the route-vs-route
+collision check again, and a leg whose every lane still conflicts is still
+reported `routed: false`, with the original collision wording plus a note
+that the detour was tried.
+
+One consequence worth knowing: a retried lane is **not** pinned to
+`routing.cross_block_layer_role`. Because it loops clear of the block, it no
+longer crosses the pads that forced the fallback, so the same checks
+naturally resolve it back onto the primary `routing.layer_role` — which is
+the intended outcome, leaving the cross layer to the first self-net that
+still needs it. Read `nets[].legs[]`'s drawn geometry (or the composed GDS)
+rather than assuming which layer a given leg landed on.
+
+`connectivity[].waypoints_um` (#634) remains available for a caller who wants
+to pick the path themselves — the retry only fires for a leg that supplied
+none. As with every other check in this document, the composed output must
+still be re-verified with `klt drc`.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
@@ -949,7 +974,7 @@ exit codes).
 | `routing` | object | Optional (#1188). **Absent or `{}`** with a non-empty `connectivity[]` is a **declare-only** request: every net's `pins[]` is still validated, but no metal is drawn — each net comes back in `nets[]` with `status: "unrouted"` and `reason: "routing not requested"`, and its label lands in `unrouted_nets[]` (partial-success exit code `3`; see "Response" below). Supplying **any** key of `routing` opts into routing instead, and both `routing.layer_role`/`routing.width_um` become required at that point (a `routing` object with only one of the two set is an application error, exit 1 — there is no unambiguous partial routing spec). A request with an empty `connectivity[]` ignores `routing` either way. |
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
-| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer exactly one via hop from `routing.layer_role` in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. |
+| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer exactly one via hop from `routing.layer_role` in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's — that retry can land the second leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 
 ### Response
