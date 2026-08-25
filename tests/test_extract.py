@@ -51,6 +51,7 @@ from klayout_tools.extract import (
     def_net_instance_pins,
     run_extract,
 )
+from klayout_tools.extract_abstract import _abstract_pin_net_score
 from klayout_tools.pdk_models import (
     _format_um,
     _format_um2,
@@ -7254,6 +7255,325 @@ def test_abstract_cells_local_candidate_does_not_bind_to_unrelated_instance(
     # bound to NEIGHBOR_PIN's unrelated net, no matter what it resolves to
     # instead (its own isolated/unnamed net, or nothing at all).
     assert x_lines["LSHAPE_PIN"][1] != "NET_B", x_lines["LSHAPE_PIN"]
+
+
+def test_abstract_pin_net_score_ignores_wiring_progress():
+    """Issue #1366's root cause, asserted directly on the ranking function.
+
+    `_wire_abstract_cells` picks among a pin's candidate access points by
+    `_abstract_pin_net_score`, and it wires pins onto nets *as it goes*. So
+    the score must be a property of the drawn layout only -- if it moves as
+    the pass runs, "best candidate" degenerates into "whichever net happened
+    to be resolved first", which is exactly the rich-get-richer loop that
+    produced this issue's impossible bindings on a real block.
+
+    Two invariants, one per reported symptom:
+
+    - **Wiring a subcircuit pin onto a net must not change that net's
+      score.** The pre-fix score summed `subcircuit_pin_count()`, which this
+      very pass increments once per wired pin -- so an instance's earlier
+      (alphabetically first) pin's net outranked its later pins' own correct
+      candidates. That is the reported "output pin bound to one of its own
+      instance's input nets".
+    - **All named nets score identically.** Two named candidates are both
+      already-real, externally-routed nets; ranking them against each other
+      by connectivity is what let the power rail outrank the ground rail
+      (`VDD` is wired before `VSS` on every instance), the reported
+      "ground-role pin bound to the power net".
+    """
+    netlist = kdb.Netlist()
+    top = kdb.Circuit()
+    top.name = "TOP"
+    netlist.add(top)
+    black_box = kdb.Circuit()
+    black_box.name = "BOX"
+    netlist.add(black_box)
+    pin = black_box.create_pin("A")
+
+    unnamed = top.create_net()
+    assert not unnamed.name
+    baseline = _abstract_pin_net_score(unnamed)
+    for index in range(5):
+        subcircuit = top.create_subcircuit(black_box, f"X{index}")
+        subcircuit.connect_pin(pin.id(), unnamed)
+    assert unnamed.subcircuit_pin_count() == 5
+    assert _abstract_pin_net_score(unnamed) == baseline
+
+    power = top.create_net("VDD")
+    ground = top.create_net("VSS")
+    for index in range(5, 12):
+        subcircuit = top.create_subcircuit(black_box, f"X{index}")
+        subcircuit.connect_pin(pin.id(), power)
+    assert power.subcircuit_pin_count() == 7
+    assert ground.subcircuit_pin_count() == 0
+    assert _abstract_pin_net_score(power) == _abstract_pin_net_score(ground)
+    # ...and a named net still outranks an unnamed one, the #1181 behaviour
+    # this fix deliberately keeps.
+    assert _abstract_pin_net_score(ground) > _abstract_pin_net_score(unnamed)
+
+
+def _dense_abstracted_block_layout(instance_count: int = 3) -> kdb.Layout:
+    """Issue #1366's reported repro shape, in miniature: a fully abstracted,
+    device-free digital row -- shared named power/ground rails, *unnamed*
+    routed signal nets, and abstracted cells whose pins each carry one extra
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`
+    candidate that lands on a different real net.
+
+    ``ZZZ_ROW`` is a standard-cell-shaped leaf with four li1-labelled pins
+    (``A`` input, ``ZN`` output, ``VDD``, ``VSS``) plus two internal poly
+    jumpers -- the exact "tied together only through the cell's own poly,
+    severed by ``--abstract-cells`` erasure" mechanism ``_local_pin_candidate_points``
+    exists to walk (see issues #1183/#1296 and their tests above):
+
+    - ``VSS``'s own li1 pad routes down to the ``VSS`` rail, but is also
+      poly-jumpered to an unlabelled li1 fragment ``F2`` that routes up to
+      the ``VDD`` rail. So pin ``VSS`` gets a second candidate resolving to
+      the (real, named) ``VDD`` net.
+    - ``ZN``'s own li1 pad is poly-jumpered straight to ``A``'s li1 pad, so
+      pin ``ZN`` gets a second candidate resolving to that same instance's
+      ``A`` net -- and vice versa.
+
+    ``AAA_TAP`` is a single-``VDD``-pin filler placed several times.
+    :func:`~klayout_tools.extract_abstract._collect_abstract_instances` sorts
+    by cell name, so every one of them is wired into ``VDD`` *before* any
+    ``ZZZ_ROW`` pin is resolved -- which is what made ``VDD`` the
+    highest-``subcircuit_pin_count()`` net in the block, the bias issue
+    #1366's pre-fix ``_abstract_pin_net_score`` tiebreak rewarded.
+
+    Signal nets deliberately carry **no** labels (they come out as KLayout's
+    anonymous ``$<n>``), matching the reported repro, where only the two
+    supply rails are named. That matters: it is what leaves the unnamed
+    candidates to be separated by the connectivity tiebreak alone.
+
+    The instances are chained ``ZN_i -> A_{i+1}`` on met2, so the correct
+    binding is checkable without relying on any net *name*: instance ``i``'s
+    ``ZN`` and instance ``i+1``'s ``A`` must be the same net, and neither
+    end may collapse onto anything else.
+    """
+    layout = kdb.Layout()
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(cell, layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # AAA_TAP: VDD-only filler, alphabetically ahead of ZZZ_ROW.
+    tap = layout.create_cell("AAA_TAP")
+    draw(tap, 67, 20, kdb.Box(100, 100, 400, 400))  # li1 pad
+    label(tap, 67, 5, "VDD", 250, 250)
+    draw(tap, 67, 44, kdb.Box(150, 150, 350, 350))  # mcon
+    draw(tap, 68, 20, kdb.Box(100, 100, 400, 6400))  # met1 riser -> VDD rail
+
+    row = layout.create_cell("ZZZ_ROW")
+
+    # VDD pin -- li1 pad + mcon + met1 riser to the VDD rail.
+    draw(row, 67, 20, kdb.Box(100, 100, 400, 400))
+    label(row, 67, 5, "VDD", 250, 250)
+    draw(row, 67, 44, kdb.Box(150, 150, 350, 350))
+    draw(row, 68, 20, kdb.Box(100, 100, 400, 6400))
+
+    # A (input) and ZN (output) -- bare li1 pads, routed only at top level.
+    draw(row, 67, 20, kdb.Box(600, 100, 900, 400))
+    label(row, 67, 5, "A", 750, 250)
+    draw(row, 67, 20, kdb.Box(1200, 100, 1500, 400))
+    label(row, 67, 5, "ZN", 1350, 250)
+    # ZN <-> A internal poly jumper (erased by abstraction).
+    draw(row, 66, 20, kdb.Box(700, 150, 1400, 350))  # poly.drawing
+    draw(row, 66, 44, kdb.Box(700, 150, 880, 350))  # licon1 on A's pad
+    draw(row, 66, 44, kdb.Box(1220, 150, 1400, 350))  # licon1 on ZN's pad
+
+    # VSS pin -- li1 pad + mcon + met1 drop to the VSS rail.
+    draw(row, 67, 20, kdb.Box(1800, 100, 2100, 400))
+    label(row, 67, 5, "VSS", 1950, 250)
+    draw(row, 67, 44, kdb.Box(1850, 150, 2050, 350))
+    draw(row, 68, 20, kdb.Box(1800, -400, 2100, 400))
+    # VSS <-> F2 internal poly jumper; F2 itself rises to the VDD rail.
+    draw(row, 66, 20, kdb.Box(1950, 150, 2750, 350))
+    draw(row, 66, 44, kdb.Box(1950, 150, 2090, 350))  # licon1 on VSS's pad
+    draw(row, 66, 44, kdb.Box(2620, 150, 2750, 350))  # licon1 on F2
+    draw(row, 67, 20, kdb.Box(2600, 100, 2900, 400))  # F2 li1 (unlabelled)
+    draw(row, 67, 44, kdb.Box(2650, 150, 2850, 350))  # F2 mcon
+    draw(row, 68, 20, kdb.Box(2600, 100, 2900, 6400))  # F2 met1 -> VDD rail
+
+    top = layout.create_cell("TOP")
+    draw(top, 68, 20, kdb.Box(-20000, 6000, 20000, 6400))  # VDD rail (met1)
+    label(top, 68, 5, "VDD", -15000, 6200)
+    draw(top, 68, 20, kdb.Box(-20000, -400, 20000, 0))  # VSS rail (met1)
+    label(top, 68, 5, "VSS", -15000, -200)
+
+    for index in range(6):
+        top.insert(
+            kdb.CellInstArray(tap.cell_index(), kdb.Trans(-3000 * (index + 1), 0))
+        )
+
+    pitch = 8000
+    for index in range(instance_count):
+        top.insert(kdb.CellInstArray(row.cell_index(), kdb.Trans(pitch * index, 0)))
+
+    # Chain ZN_i -> A_{i+1} on met2, so the long wire never runs on the same
+    # plane as the cells' own met1 risers. Each end gets its own
+    # mcon + met1 pad + via stack; no net-name label anywhere.
+    for index in range(instance_count - 1):
+        zn_x = pitch * index + 1200
+        a_x = pitch * (index + 1) + 600
+        for x0 in (zn_x, a_x):
+            draw(top, 67, 44, kdb.Box(x0 + 50, 150, x0 + 250, 350))  # mcon
+            draw(top, 68, 20, kdb.Box(x0, 100, x0 + 300, 400))  # met1 pad
+            draw(top, 68, 44, kdb.Box(x0 + 50, 150, x0 + 250, 350))  # via
+        draw(top, 69, 20, kdb.Box(zn_x, 150, a_x + 300, 350))  # met2 wire
+
+    return layout
+
+
+def test_abstract_cells_dense_block_pin_binding_follows_own_access_point(tmp_path):
+    """Issue #1366: on a dense, fully-routed, fully-abstracted block, no
+    abstracted-cell pin may be stolen from its own resolved access point by
+    a merely *better-connected* candidate net.
+
+    Guards both impossible bindings the issue reports, on a layout whose
+    correct answer is fixed by geometry alone (see
+    :func:`_dense_abstracted_block_layout`):
+
+    - **no ground-role pin bound to the power net** -- every instance's
+      ``VSS`` pin must resolve to ``VSS``, even though its
+      ``_local_pin_candidate_points`` extra candidate lands on the ``VDD``
+      rail and ``VDD`` is by far the most-connected net in the block;
+    - **no output pin bound to one of its own instance's input nets** --
+      every instance's ``ZN`` must differ from that same instance's ``A``,
+      even though ``ZN``'s extra candidate lands directly on ``A``'s pad and
+      ``A`` (resolved first, alphabetically) has already banked a
+      ``subcircuit_pin_count()`` of 1 by the time ``ZN`` is scored.
+
+    Before the fix this exact layout extracted as
+    ``XZZZ_ROW_0 $1 VDD VDD $1 ZZZ_ROW`` -- confirmed by direct
+    reproduction: ``VSS`` on the ``VDD`` net (a dead supply short) *and*
+    ``ZN`` on ``A``'s net (a shorted output), for all three instances, with
+    the routed ``ZN_i -> A_{i+1}`` chain never appearing in the netlist at
+    all.
+
+    ``.SUBCKT`` headers, instance names and cell types are asserted
+    unchanged alongside, since the issue's own diagnosis is that *only* net
+    assignment differed between the good and bad extractions.
+    """
+    layout = _dense_abstracted_block_layout(instance_count=3)
+    path = _write_gds(layout, tmp_path / "dense_block.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "dense_block.spice"),
+        abstract_cell_patterns=("AAA_TAP", "ZZZ_ROW"),
+    )
+
+    assert report["status"] == "extracted"
+    # A fully abstracted block: every cell is a black box, so nothing is
+    # left to recognise as a device.
+    assert report["device_count"] == 0
+    cells_by_name = {entry["cell"]: entry for entry in report["abstracted_cells"]}
+    assert cells_by_name["ZZZ_ROW"]["instance_count"] == 3
+    assert cells_by_name["ZZZ_ROW"]["pin_count"] == 4
+    assert cells_by_name["AAA_TAP"]["instance_count"] == 6
+
+    spice = Path(report["netlist_path"]).read_text()
+    # Headers and the instance list must be untouched by this fix.
+    assert ".SUBCKT ZZZ_ROW A VDD VSS ZN" in spice
+    assert ".SUBCKT AAA_TAP VDD" in spice
+
+    rows = [line.split() for line in spice.splitlines() if line.startswith("XZZZ_ROW")]
+    assert [tokens[0] for tokens in rows] == [
+        "XZZZ_ROW_0",
+        "XZZZ_ROW_1",
+        "XZZZ_ROW_2",
+    ]
+    # Pin order is the sorted `.SUBCKT` order: A, VDD, VSS, ZN.
+    bound = [
+        {"A": tokens[1], "VDD": tokens[2], "VSS": tokens[3], "ZN": tokens[4]}
+        for tokens in rows
+    ]
+
+    for index, pins in enumerate(bound):
+        assert pins["VDD"] == "VDD", (index, pins)
+        # Diagnostic 1: no supply short.
+        assert pins["VSS"] == "VSS", (index, pins)
+        # Diagnostic 2: no output on its own instance's input net.
+        assert pins["ZN"] != pins["A"], (index, pins)
+        # And no pin at all may land on a supply rail it does not belong to.
+        assert pins["A"] not in {"VDD", "VSS"}, (index, pins)
+        assert pins["ZN"] not in {"VDD", "VSS"}, (index, pins)
+
+    # The routed chain itself: ZN_i and A_{i+1} are one net, by geometry.
+    assert bound[0]["ZN"] == bound[1]["A"], bound
+    assert bound[1]["ZN"] == bound[2]["A"], bound
+    # ...and the three signal nets in that chain are genuinely distinct.
+    assert len({bound[0]["A"], bound[0]["ZN"], bound[1]["ZN"], bound[2]["ZN"]}) == 4
+
+    # The self-check below must stay quiet on a correctly bound block.
+    assert not any(
+        "separately declared pins onto the same net" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
+
+
+def test_abstract_cells_warns_when_one_instance_ties_two_declared_pins(tmp_path):
+    """Issue #1366: an abstracted instance that resolves two *separately
+    declared* pins onto one net gets a ``warnings[]`` entry.
+
+    This is the post-extraction self-check the issue asks for. It is a
+    warning, not an error, because a deliberately tied-off pin is legal --
+    which is exactly what this layout draws: ``TIED_PIN`` declares pins
+    ``A`` and ``B``, both labelled on the *same* li1 pad, so they are one
+    node by construction and there is no binding fault here at all. What
+    matters is that the condition is *reported* rather than silent: on a
+    black-boxed cell the caller has no interior to inspect and no devices to
+    cross-check against, and both of issue #1366's impossible bindings
+    (ground pin on the power net; output on its own input) collapse to this
+    same observable shape.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("TIED_PIN")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(leaf, 67, 20, kdb.Box(0, 0, 1200, 400))  # one li1 pad
+    leaf.shapes(layout.layer(67, 5)).insert(kdb.Text("A", kdb.Trans(200, 200)))
+    leaf.shapes(layout.layer(67, 5)).insert(kdb.Text("B", kdb.Trans(1000, 200)))
+    draw(leaf, 67, 44, kdb.Box(500, 100, 700, 300))  # mcon
+    draw(leaf, 68, 20, kdb.Box(400, 0, 800, 400))  # met1 pad
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    # External routing, so the tied node is a real, named net rather than a
+    # bare island.
+    draw(top, 68, 20, kdb.Box(400, 0, 4000, 400))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("TIED", kdb.Trans(3000, 200)))
+
+    path = _write_gds(layout, tmp_path / "tied_pin.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "tied_pin.spice"),
+        abstract_cell_patterns=("TIED_PIN",),
+    )
+
+    assert report["status"] == "extracted"
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 2
+
+    (warning,) = [
+        item
+        for item in report["warnings"]
+        if "separately declared pins onto the same net" in item
+    ]
+    assert "1 --abstract-cells instance(s)" in warning
+    assert "TIED_PIN_0 (cell 'TIED_PIN'): pins A, B -> net 'TIED'" in warning
+
+    # A warning, never a failure: both pins still land on the tied net.
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    assert x_line.split()[1:3] == ["TIED", "TIED"], x_line
 
 
 def test_abstract_cells_present_in_cli_json(tmp_path, capsys):

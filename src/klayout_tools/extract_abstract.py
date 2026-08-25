@@ -80,6 +80,13 @@ _DEF_NET_NAME_PROBE_CANDIDATES = 4
 #: see :func:`_sanitize_instance_name`.
 _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 
+#: How many concrete ``<instance>: <pins> -> <net>`` examples
+#: :func:`_tied_abstract_pin_warning` spells out before falling back to a bare
+#: count. A block whose pin binding has genuinely gone wrong produces one
+#: entry per affected instance (126 of them in issue #1366's reported repro),
+#: which is a diagnostic, not a message a caller should have to read in full.
+_ABSTRACT_TIED_PIN_WARNING_EXAMPLES = 5
+
 
 def _sanitize_instance_name(name: str) -> str:
     """Map every character outside ``[A-Za-z0-9_]`` in a parasitic *device
@@ -847,10 +854,11 @@ def _probe_single_abstract_pin_point(
 
 def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
     """Ranking key for choosing among several nets one pin's candidate
-    access points resolve to (issue #1181): ``(has_name, connectivity)``,
-    compared lexicographically so a named net always outranks an unnamed
-    one regardless of connectivity, and among same-name-ness, richer
-    connectivity wins.
+    access points resolve to (issue #1181): ``(has_name,
+    unnamed_device_evidence)``, compared lexicographically against every
+    other candidate's key, with ties broken by the candidate's own position
+    in :func:`_probe_abstract_pin_net`'s ``points`` list (i.e. by pin-access
+    provenance -- see that function's docstring).
 
     - **Named over unnamed.** By the time :func:`_wire_abstract_cells` runs,
       ``extract_netlist()`` and (if requested) ``--def-net-names``
@@ -861,22 +869,66 @@ def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
       never earns a name from either source. A name is therefore strong,
       already-available evidence of "this is the routed net", independent of
       whether other terminals on it have been wired into the netlist yet.
-    - **Richer connectivity as the tiebreak.** ``net.terminal_count()
-      + net.subcircuit_pin_count() + net.pin_count()`` is the same "is this
-      net actually connected to anything" signal
-      :func:`_purge_truly_floating_nets` and :func:`_promote_orphan_named_nets`
-      already use elsewhere in this module to distinguish a real net from a
-      floating one; a bare single-rectangle island scores 0 on all three,
-      while a net carrying other devices/subcircuits/top-level pins scores
-      higher.
+    - **No tiebreak at all between two *named* nets** (``(1, 0)`` for every
+      named net -- issue #1366). Both candidates are then already-real,
+      externally-routed nets, and nothing about *which of the two is bigger*
+      says which one this particular pin's geometry belongs to. Ranking them
+      against each other was the direct cause of this issue's reported
+      supply shorts: a supply rail is, by construction, the most richly
+      connected named net in a dense digital block, so a rail candidate beat
+      the pin's own correctly-resolved rail every time (a ``VSS``-role pin
+      bound to the ``VDD`` net). Leaving them tied hands the decision to
+      candidate order instead, where the pin's own label/first-declared
+      ``PORT`` -- its authoritative access point -- comes first.
+    - **Device terminals as the only tiebreak, and only among *unnamed*
+      candidates.** ``net.terminal_count()`` counts the *device* terminals
+      ``extract_netlist()`` attached to the net before this pass began, so
+      it is a fixed property of the layout rather than of how far this pass
+      has got: a bare, unrouted single-rectangle island scores 0, while an
+      unnamed net that a real recognised device sits on scores higher. That
+      is what lets an unnamed-but-routed candidate still rescue a pin whose
+      own label sits on an isolated fragment (#1181/#1183) in a design whose
+      nets carry no labels at all.
+
+      Deliberately **not** ``+ net.subcircuit_pin_count() + net.pin_count()``
+      as this function used to be (issue #1366).
+
+      ``subcircuit_pin_count()`` grows *during this very pass*:
+      :func:`_wire_abstract_cells` raises a net's count by one every time it
+      wires another abstracted instance's pin onto it, so scoring on it made
+      the ranking a function of how many pins happened to be resolved
+      **first** rather than of the drawn layout. On a fully-abstracted block
+      (no devices at all, so ``terminal_count()`` is uniformly 0) it was the
+      *entire* score, and the choice degenerated into a rich-get-richer
+      feedback loop: a net that had already collected abstracted pins beat
+      every candidate that had not, so it collected more. Both of this
+      issue's impossible bindings are what that loop produces --
+      ``_wire_abstract_cells`` resolves an instance's pins in sorted name
+      order, so an already-wired sibling pin's net had banked a ``+1`` by the
+      time a later pin of the *same instance* was scored against it (an
+      output bound to one of its own inputs), and ``VDD`` sorts before
+      ``VSS`` so the power rail was always one pin ahead of the ground rail
+      it was competing with (a ground pin bound to the power net).
+
+      ``pin_count()`` is dropped for a different reason: it was never doing
+      anything. ``_wire_abstract_cells`` runs *before*
+      ``Netlist.make_top_level_pins()`` and :func:`~klayout_tools.extract.
+      _promote_orphan_named_nets` (deliberately -- see this module's caller
+      in ``extract.py``), and both of those only ever promote a **named**
+      net, so at scoring time no net in the top circuit carries a pin at all
+      and this term is uniformly 0. Removing it is behaviour-neutral by
+      construction; it is removed rather than kept so the score cannot
+      silently acquire an order dependence again if that call ordering ever
+      changes.
 
     A single-candidate pin (the overwhelmingly common case: one LEF box, one
     label) never has anything to compare against, so this function's choice
     is moot for it -- behaviour for every existing single-rectangle-pin
     design is unchanged.
     """
-    connectivity = net.terminal_count() + net.subcircuit_pin_count() + net.pin_count()
-    return (1 if net.name else 0, connectivity)
+    if net.name:
+        return (1, 0)
+    return (0, net.terminal_count())
 
 
 def _probe_abstract_pin_net(
@@ -905,6 +957,26 @@ def _probe_abstract_pin_net(
     ``None`` only when *no* candidate point resolves to any net -- the "pin
     lands on no conductor anywhere" case the caller already reports as a
     per-instance warning.
+
+    **``points`` order is pin-access provenance, and the tiebreak leans on
+    that** (issue #1366). :func:`_resolve_abstract_cell_pins` always lists a
+    pin's *primary*, declared access point(s) first -- its own drawn text
+    label, or its LEF ``PIN``'s ``PORT`` boxes in LEF source order -- and
+    only then appends the *derived* candidates :func:`_local_pin_candidate_points`
+    discovered by walking the cell's own pre-erasure internal connectivity.
+    A primary point is where the library author said the pin is; a derived
+    point is a heuristic guess at a second fragment of the same node. So
+    whenever the scores tie, the earlier (more authoritative) candidate must
+    win, and :func:`_abstract_pin_net_score` is deliberately shaped to
+    *produce* a tie in the two cases where no evidence distinguishes the
+    candidates -- two named nets, or two unnamed nets carrying the same
+    number of device terminals -- rather than to break it on a "which net is
+    bigger" popularity contest. Before this issue's fix it did break those
+    ties, which is what let a supply rail (always the most-connected named
+    net) and an already-wired sibling pin's net (a counter this pass itself
+    increments as it goes) each steal a pin away from its own correctly
+    resolved primary candidate; see :func:`_abstract_pin_net_score` for the
+    full derivation of both reported impossible bindings.
     """
     best_net: kdb.Net | None = None
     best_score: tuple[int, int] | None = None
@@ -917,6 +989,65 @@ def _probe_abstract_pin_net(
             best_net = net
             best_score = score
     return best_net
+
+
+def _tied_abstract_pin_warning(
+    tied: list[tuple[str, str, str, list[str]]],
+) -> list[str]:
+    """A single ``warnings[]`` entry naming abstracted-cell instances that
+    resolved two or more of their *separately declared* pins onto one net --
+    or ``[]`` when there are none (issue #1366).
+
+    ``tied`` is ``[(instance name, cell name, net name, [pin names]), ...]``
+    in :func:`_wire_abstract_cells`'s own deterministic instance/pin order.
+
+    **Why warn rather than fail.** Tying two declared pins together is legal
+    -- a deliberately tied-off input is the standard case -- so this cannot
+    be an error. But on a ``--abstract-cells`` black box it is also
+    *unverifiable* by the caller: the cell's interior was erased by
+    construction, there are no devices left to cross-check against, and the
+    extraction summary otherwise reports a completely healthy run (``status:
+    extracted``, the expected pin count, a device count of 0). That is
+    exactly how issue #1366's pin-to-net binding regression stayed silent
+    all the way to a downstream ``klt lvs`` verdict that read as a design
+    fault: both impossible bindings it reports collapse to this one
+    observable shape -- a ground-role pin resolved onto the power net leaves
+    that instance's ``VDD`` and ``VSS`` pins on one net, and an output
+    resolved onto one of its own instance's inputs leaves that instance's
+    output and input pins on one net.
+
+    Deliberately *not* a separate "two supply-role pins on one net" check
+    (the first of the two self-checks issue #1366 proposes): an
+    :class:`~klayout_tools.decks.ExtractionDeck` declares no power/ground
+    net names -- supply nets get their names from the layout's own drawn
+    labels like any other net -- so there is no deck-side notion of a
+    "supply-role pin" to key that check on. This check subsumes it anyway,
+    since a supply short is a two-pins-one-net collision by definition.
+    """
+    if not tied:
+        return []
+    examples = [
+        f"{instance_name} (cell '{cell_name}'): pins "
+        f"{', '.join(pin_names)} -> net '{net_name}'"
+        for instance_name, cell_name, net_name, pin_names in tied[
+            :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
+        ]
+    ]
+    remainder = len(tied) - len(examples)
+    if remainder > 0:
+        examples.append(f"... and {remainder} more instance(s)")
+    return [
+        f"{len(tied)} --abstract-cells instance(s) resolved two or more of "
+        "their separately declared pins onto the same net: "
+        + "; ".join(examples)
+        + ". This is legal for a deliberately tied-off pin, but an "
+        "abstracted cell is a black box whose interior cannot be inspected "
+        "to confirm that, and it is also the signature of a pin-to-net "
+        "binding fault (a ground-role pin resolved onto the power net, or "
+        "an output resolved onto one of its own instance's inputs) -- "
+        "confirm these against the design's intent before trusting a "
+        "downstream `klt lvs` verdict built on this netlist"
+    ]
 
 
 def _wire_abstract_cells(
@@ -968,6 +1099,12 @@ def _wire_abstract_cells(
     ``unbiased_pmos_body_nets``) rather than a hard error for a single
     instance's placement issue.
 
+    One further ``warnings[]`` entry (issue #1366) aggregates every instance
+    that ended up with two or more of its *separately declared* pins on one
+    net -- see :func:`_tied_abstract_pin_warning` for why that is a warning
+    rather than an error, and why it is the one observable signature both of
+    that issue's reported impossible bindings collapse to.
+
     A LEF-fallback pin the ``--abstract-cell-lef`` parser could not resolve
     any ``PORT`` geometry for (issue #624 -- see
     :func:`_resolve_abstract_cell_pins`'s own ``warnings`` docs) is dropped
@@ -998,6 +1135,7 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
+    tied: list[tuple[str, str, str, list[str]]] = []
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
@@ -1030,6 +1168,13 @@ def _wire_abstract_cells(
         for index, trans in enumerate(transforms):
             instance_name = _sanitize_instance_name(f"{cell.name}_{index}")
             subcircuit = top_circuit.create_subcircuit(black_box_circuit, instance_name)
+            # Grouped by the resolved net's `expanded_name()` (unique per net
+            # within `top_circuit`, and stable for an unnamed net's `$<n>`
+            # placeholder) so the post-wiring self-check below can spot two
+            # separately declared pins of one instance landing on one net --
+            # issue #1366's single observable signature for both of its
+            # reported impossible bindings.
+            pins_by_net: dict[str, list[str]] = {}
             for pin_name, points, role in pins:
                 global_points = [trans * point for point in points]
                 net = _probe_abstract_pin_net(l2n, global_points, role, probe_layers)
@@ -1042,6 +1187,10 @@ def _wire_abstract_cells(
                         "any parent net"
                     )
                 subcircuit.connect_pin(pin_ids[pin_name], net)
+                pins_by_net.setdefault(net.expanded_name(), []).append(pin_name)
+            for net_name, pin_names in pins_by_net.items():
+                if len(pin_names) > 1:
+                    tied.append((instance_name, cell.name, net_name, pin_names))
 
         report.append(
             {
@@ -1053,5 +1202,6 @@ def _wire_abstract_cells(
             }
         )
 
+    warnings.extend(_tied_abstract_pin_warning(tied))
     report.sort(key=lambda entry: entry["cell"])
     return report, warnings
