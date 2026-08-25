@@ -48,6 +48,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   spelling exactly as before, and `klt lvs` reference-netlist parsing is
   unchanged. See `docs/cli/extract.md`'s "Geometry units follow the resolved
   PDK's own convention".
+- `klt pdk find`/`list`/`env` now confirmed to resolve IHP-Open-PDK's
+  SG13CMOS5L (`ihp-sg13cmos5l`) via the same flat, single-PDK layout logic
+  SG13G2 already used — no code change needed there (issue #1399).
+  Verifying the generic engines against a real fleet-host install did
+  surface a real gap in `pdk.drc_deck_file()`/`pdk.lvs_deck_file()`:
+  IHP-Open-PDK nests its native `drc/`/`lvs/` directories one level deeper
+  than open_pdks does (`libs.tech/klayout/tech/drc/`/`.../tech/lvs/`, not
+  `libs.tech/klayout/drc/`/`.../lvs/` directly), so neither resolver ever
+  found a deck on a real SG13G2/SG13CMOS5L install before this fix — both
+  now fall back to that nested shape when the open_pdks-shaped directory
+  does not exist, generically rather than as a per-PDK special case, so a
+  real open_pdks install (sky130/gf180mcu) never pays for the extra probe
+  and its resolution is unchanged. `lvs_deck_file()` also gained a second,
+  independent fallback for the deck's filename itself: a real
+  `ihp-sg13cmos5l` install's LVS deck is `sg13cmos5l.lvs`, dropping the
+  variant's `ihp-` vendor-prefix segment entirely — a different mismatch
+  shape from sky130/gf180mcu's existing trailing-suite-letter fallback
+  (`sky130A` → `sky130`), generalized as "also try the variant name with
+  its leading, hyphen-delimited prefix segment stripped." `klt drc --engine
+  klayout` and `klt lvs`'s `"netgen"` engine both now run cleanly against a
+  real (or SG13CMOS5L-shaped synthetic) install on a trivial cell — see
+  `docs/cli/pdk.md`'s "Scope" and "PDK layouts: what resolves and what
+  doesn't", `docs/cli/drc.md`'s "Deck resolution", and
+  `tests/test_pdk.py`/`tests/test_drc_klayout_engine.py`/`tests/test_lvs.py`'s
+  SG13CMOS5L fixtures. No curated deck exists for SG13CMOS5L yet (a
+  separate, larger follow-up) — only the two generic-engine paths are
+  proven here.
 - `klt gen-compose`'s route-vs-route collision check (#1057) is now
   spacing-aware, not just overlap-aware (issue #1386): two accepted
   `connectivity[]` legs on the same effective drawing layer that never

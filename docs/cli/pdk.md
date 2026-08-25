@@ -72,6 +72,13 @@ Fetch a pinned, checksum-verified release with
 for the explicit distinction from lambdapdk's bundled `ihp130` tree, which is
 **not** SG13G2.
 
+IHP-Open-PDK's SG13CMOS5L (issue #1399) is installed the identical flat way
+(`<root>/ihp-sg13cmos5l/libs.tech/...`, same two `$PDK_ROOT` conventions
+above) and resolves through the exact same code path — no PDK-specific
+branch was needed for `find`/`list`/`env` themselves. Verified against a
+real fleet-host install (commit `607e18d`, 2026-08-25); no dedicated fetch
+script exists for it yet the way `fetch-ihp-sg13g2.sh` does for SG13G2.
+
 **Out of scope**: the repo-local lambdapdk store fetched by
 [`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` — a
 third, distinct tree shape (`lambdapdk/<process>/{libs,base}`, no
@@ -134,6 +141,7 @@ rediscover a gap by failure.
 | ---------- | ------ | ---------------------------- | --------- | --------- |
 | sky130, gf180mcu (open_pdks / volare / ciel) | open_pdks-layout (nested) | ✅ | ✅ curated deck (`sky130`, `gf180mcu`) | ✅ `"klayout"` engine (curated deck) or `"netgen"` engine |
 | IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ✅ curated deck (`sg13g2`, issue #905) — a starter subset, see below | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
+| IHP-Open-PDK SG13CMOS5L | flat (same shape as SG13G2 above) | ✅ (issue #1399) | `klt drc --engine klayout` only, resolving the PDK's own `ihp-sg13cmos5l.drc` via `drc_deck_file` (issue #1399) — **no curated deck yet** (`--engine curated` has no `sg13cmos5l` entry) | `"netgen"` engine only, with a resolved `netgen_setup_file` and a `netgen` binary (issue #1399) — **no curated deck yet** (`"engine": "klayout"` has no `sg13cmos5l` device-recognition deck) |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
 
 **How far the SG13G2 curated deck goes.** `klt drc`/`klt lvs` only ever run
@@ -211,6 +219,31 @@ SG13G2 install's own `libs.tech/netgen/ihp-sg13g2_setup.tcl` via
 `netgen_setup_file()`, gated only by a local `netgen` binary (see
 `docs/cli/lvs.md`'s `"netgen"` engine section and
 `tests/test_lvs.py::test_netgen_engine_real_binary_against_sg13g2_shaped_install`).
+
+**SG13CMOS5L (issue #1399) has no curated deck at all yet** — it only
+proves the two generic-engine paths against the PDK's own native decks,
+the prerequisite this repo's later curated-deck work builds on: `klt drc
+--engine klayout` resolves and runs the PDK's own `ihp-sg13cmos5l.drc` via
+`drc_deck_file()`, and `klt lvs`'s `"netgen"` engine resolves and runs
+against `ihp-sg13cmos5l_setup.tcl` via `netgen_setup_file()`, exactly as
+described for SG13G2 immediately above, gated only by the respective
+binary. Verifying this uncovered a real gap `drc_deck_file`/`lvs_deck_file`
+never hit against sky130/gf180mcu: IHP-Open-PDK nests its native `drc/`/
+`lvs/` directories one level deeper than open_pdks does
+(`libs.tech/klayout/tech/drc/`/`libs.tech/klayout/tech/lvs/`, not
+`libs.tech/klayout/drc/`/`libs.tech/klayout/lvs/` directly) — both
+resolvers now fall back to that nested shape when the open_pdks-shaped
+directory does not exist, generically, not as an SG13CMOS5L-specific
+special case (see [`docs/cli/drc.md`](drc.md)'s "Deck resolution", and
+`pdk.drc_deck_file`/`pdk.lvs_deck_file`'s own docstrings). `lvs_deck_file`
+also gained a second, distinct fallback for the LVS deck's filename itself:
+a real `ihp-sg13cmos5l` install's `sg13cmos5l.lvs` drops the variant's
+`ihp-` vendor-prefix segment entirely (unlike sky130/gf180mcu's own
+trailing-suite-letter-only fallback), generalized as "also try the variant
+name with its leading, hyphen-delimited prefix segment stripped." See
+`tests/test_pdk.py`'s SG13CMOS5L flat-layout section and
+`tests/test_drc_klayout_engine.py`/`tests/test_lvs.py`'s SG13CMOS5L
+real-binary smoke tests for the fixtures this verification produced.
 
 **`klt pdk cells` is also not yet SG13G2-aware**, for a narrower reason: it
 only reports `libs_ref` entries whose name contains `_fd_sc_` (the

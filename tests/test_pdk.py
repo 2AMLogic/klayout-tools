@@ -431,6 +431,135 @@ def test_cli_env_flat_layout(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# Flat single-PDK layout -- IHP-Open-PDK's SG13CMOS5L (issue #1399)
+#
+# Mirrors the SG13G2 flat-layout section directly above: SG13CMOS5L is
+# installed the identical way (`ihp-sg13cmos5l/libs.tech/...` sitting
+# directly under the PDK's own directory, no further per-family variant
+# nesting), verified against a real fleet-host install
+# (`~/share/pdk/ihp-sg13cmos5l`, commit `607e18d`, 2026-08-25). Only
+# `netgen_setup_file`/`drc_deck_file`/`lvs_deck_file` get their own
+# SG13CMOS5L-specific coverage here (`find_pdk`/`list_pdks`/`env` are
+# already exercised generically by the SG13G2 tests above and by
+# `_make_flat_install`'s own "any flat single-PDK install" framing -- this
+# section's `find_pdk`/`list_pdks`/`env` tests exist to nail down the
+# concrete `ihp-sg13cmos5l` variant name per this issue's acceptance
+# criteria, not to re-derive the flat-layout resolution logic again).
+# --------------------------------------------------------------------------- #
+
+
+def test_flat_layout_resolves_ihp_sg13cmos5l(tmp_path):
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root, assets=("ngspice", "klayout", "netgen", "libs_ref"))
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["root"] == str(root)
+    assert report["variant"] == "ihp-sg13cmos5l"
+    assert report["version"] is None  # no SOURCES stamp -- never guessed
+    assert report["assets"]["klayout"] == str(root / "libs.tech" / "klayout")
+    assert report["assets"]["netgen"] == str(root / "libs.tech" / "netgen")
+
+
+def test_flat_layout_ihp_sg13cmos5l_via_pdk_root_env(tmp_path, monkeypatch):
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root)
+    monkeypatch.setenv("PDK_ROOT", str(root))
+
+    report = pdk.find_pdk()
+
+    assert report["variant"] == "ihp-sg13cmos5l"
+    assert report["resolved_via"] == "PDK_ROOT environment variable"
+
+
+def test_flat_layout_list_reports_ihp_sg13cmos5l(tmp_path):
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root)
+
+    report = pdk.list_pdks(root=str(root))
+
+    assert len(report["installs"]) == 1
+    install = report["installs"][0]
+    assert install["root"] == str(root)
+    assert install["variants"] == [{"name": "ihp-sg13cmos5l", "version": None}]
+
+
+def test_cli_find_ihp_sg13cmos5l_json(tmp_path, capsys):
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root)
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["variant"] == "ihp-sg13cmos5l"
+
+
+def test_cli_env_ihp_sg13cmos5l(tmp_path, capsys):
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root)
+
+    exit_code = main(["pdk", "env", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [f"export PDK_ROOT={root}", "export PDK=ihp-sg13cmos5l"]
+
+
+def test_flat_layout_netgen_setup_file_matches_ihp_sg13cmos5l_naming(tmp_path):
+    # Verified against a real fleet-host install (issue #1399): IHP-Open-PDK
+    # stages SG13CMOS5L's netgen setup script the same way it stages
+    # SG13G2's (`<variant>_setup.tcl`, see
+    # `test_flat_layout_netgen_setup_file_matches_ihp_naming` above) --
+    # `ihp-sg13cmos5l_setup.tcl`, prefix included.
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root, assets=("netgen",))
+    netgen_dir = root / "libs.tech" / "netgen"
+    (netgen_dir / "ihp-sg13cmos5l_setup.tcl").write_text("# ihp setup\n")
+
+    result = pdk.netgen_setup_file(root=str(root))
+
+    assert result == str(netgen_dir / "ihp-sg13cmos5l_setup.tcl")
+
+
+def test_drc_deck_file_resolves_nested_ihp_sg13cmos5l_tech_drc(tmp_path):
+    # Verified against a real fleet-host install (issue #1399): unlike
+    # open_pdks' sky130A/gf180mcuC (`libs.tech/klayout/drc/<variant>.lydrc`,
+    # see the `drc_deck_file` section below), IHP-Open-PDK nests its native
+    # DRC deck one directory deeper -- `libs.tech/klayout/tech/drc/
+    # ihp-sg13cmos5l.drc` (variant-named, prefix included, matching
+    # `drc_deck_file`'s existing naming precedence).
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root, assets=("klayout",))
+    drc_dir = root / "libs.tech" / "klayout" / "tech" / "drc"
+    drc_dir.mkdir(parents=True)
+    (drc_dir / "ihp-sg13cmos5l.drc").write_text("# native deck\n")
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result == str(drc_dir / "ihp-sg13cmos5l.drc")
+
+
+def test_lvs_deck_file_resolves_nested_ihp_sg13cmos5l_tech_lvs(tmp_path):
+    # Verified against a real fleet-host install (issue #1399): IHP-Open-PDK
+    # nests its native LVS deck the same extra `tech/` level DRC uses
+    # (`libs.tech/klayout/tech/lvs/`), *and* names the file after the bare
+    # process name with the `ihp-` vendor prefix dropped entirely --
+    # `sg13cmos5l.lvs`, not `ihp-sg13cmos5l.lvs` -- a distinct mismatch shape
+    # from sky130/gf180mcu's trailing-suite-letter fallback (see the
+    # `lvs_deck_file` section below).
+    root = tmp_path / "ihp-sg13cmos5l"
+    _make_flat_install(root, assets=("klayout",))
+    lvs_dir = root / "libs.tech" / "klayout" / "tech" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "sg13cmos5l.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "sg13cmos5l.lvs")
+
+
+# --------------------------------------------------------------------------- #
 # netgen_setup_file (issue #343)
 #
 # Naming convention verified against the open_pdks source tree
@@ -597,6 +726,44 @@ def test_drc_deck_file_resolves_variant_and_root_like_find_pdk(tmp_path):
     assert result == str(drc_dir / "sky130B.lydrc")
 
 
+def test_drc_deck_file_falls_back_to_nested_tech_drc_directory(tmp_path):
+    # IHP-Open-PDK's flat single-PDK layout nests `drc/` one directory
+    # deeper than open_pdks does -- `libs.tech/klayout/tech/drc/` rather
+    # than `libs.tech/klayout/drc/` (verified against a real fetched
+    # `ihp-sg13g2`/`ihp-sg13cmos5l` install, issue #1399; the
+    # `ihp-sg13cmos5l`-specific fixture lives in the flat-layout section
+    # above). This fallback fires for *any* variant name, not just IHP's --
+    # it is a directory-shape probe, not a PDK-name special case.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    nested_drc_dir = variant_dir / "libs.tech" / "klayout" / "tech" / "drc"
+    nested_drc_dir.mkdir(parents=True)
+    (nested_drc_dir / "sky130A.lydrc").write_text("# native deck\n")
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result == str(nested_drc_dir / "sky130A.lydrc")
+
+
+def test_drc_deck_file_prefers_top_level_drc_over_nested_tech_drc(tmp_path):
+    # When both shapes are present (should never happen on a real install --
+    # a PDK ships one convention or the other), the open_pdks-shaped
+    # top-level `drc/` still wins -- the nested `tech/drc/` fallback only
+    # fires when the top-level directory does not exist at all.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    top_drc_dir = variant_dir / "libs.tech" / "klayout" / "drc"
+    top_drc_dir.mkdir(parents=True)
+    (top_drc_dir / "sky130A.lydrc").write_text("# top-level deck\n")
+    nested_drc_dir = variant_dir / "libs.tech" / "klayout" / "tech" / "drc"
+    nested_drc_dir.mkdir(parents=True)
+    (nested_drc_dir / "sky130A.lydrc").write_text("# nested deck\n")
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result == str(top_drc_dir / "sky130A.lydrc")
+
+
 def test_drc_deck_file_no_install_raises(tmp_path):
     with pytest.raises(pdk.PdkNotFoundError):
         pdk.drc_deck_file(root=str(tmp_path / "does-not-exist"))
@@ -693,6 +860,86 @@ def test_lvs_deck_file_resolves_variant_and_root_like_find_pdk(tmp_path):
     result = pdk.lvs_deck_file(variant="sky130B", root=str(root))
 
     assert result == str(lvs_dir / "sky130.lvs")
+
+
+def test_lvs_deck_file_falls_back_to_nested_tech_lvs_directory(tmp_path):
+    # Mirrors `test_drc_deck_file_falls_back_to_nested_tech_drc_directory`
+    # one asset area over (issue #1399) -- the nested `tech/lvs/` fallback
+    # fires for any variant name, not just IHP's.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    nested_lvs_dir = variant_dir / "libs.tech" / "klayout" / "tech" / "lvs"
+    nested_lvs_dir.mkdir(parents=True)
+    (nested_lvs_dir / "sky130.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(nested_lvs_dir / "sky130.lvs")
+
+
+def test_lvs_deck_file_prefers_top_level_lvs_over_nested_tech_lvs(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    top_lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    top_lvs_dir.mkdir(parents=True)
+    (top_lvs_dir / "sky130.lvs").write_text("# top-level lvs deck\n")
+    nested_lvs_dir = variant_dir / "libs.tech" / "klayout" / "tech" / "lvs"
+    nested_lvs_dir.mkdir(parents=True)
+    (nested_lvs_dir / "sky130.lvs").write_text("# nested lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(top_lvs_dir / "sky130.lvs")
+
+
+def test_lvs_deck_file_falls_back_to_vendor_prefix_stripped_name(tmp_path):
+    # A real `ihp-sg13cmos5l` install ships `sg13cmos5l.lvs` -- the leading
+    # `ihp-` vendor-prefix segment dropped entirely, not just a trailing
+    # suite letter (verified against a real fetched install, issue #1399;
+    # the concrete IHP fixture lives in the flat-layout section above).
+    # This uses a synthetic `vendor-processname` variant here to prove the
+    # fallback is a generic hyphen-split, not an `ihp-sg13cmos5l` special
+    # case.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "vendor-processname", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "processname.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "processname.lvs")
+
+
+def test_lvs_deck_file_prefers_variant_named_over_vendor_prefix_stripped(tmp_path):
+    # The existing "prefer the specific name" precedence still wins over the
+    # new vendor-prefix-stripped fallback when both files exist.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "vendor-processname", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "vendor-processname.lvs").write_text("# variant-named deck\n")
+    (lvs_dir / "processname.lvs").write_text("# vendor-prefix-stripped deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "vendor-processname.lvs")
+
+
+def test_lvs_deck_file_no_hyphen_variant_unaffected_by_vendor_prefix_fallback(
+    tmp_path,
+):
+    # A variant with no hyphen at all (e.g. a bare `sky130`) never attempts
+    # the vendor-prefix-stripped candidate -- confirms the new fallback is
+    # additive, not a behavior change for existing non-hyphenated variants.
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result is None
 
 
 def test_lvs_deck_file_no_install_raises(tmp_path):

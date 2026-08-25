@@ -804,3 +804,93 @@ def test_klayout_engine_real_binary_cli_end_to_end(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "violations"
     assert payload["violation_count"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# `--engine klayout` against an SG13CMOS5L-shaped `--pdk` install (issue
+# #1399)
+#
+# The tests above all drive the engine via an explicit `--deck-file`. This
+# section instead exercises the `--pdk`/`--pdk-root` -> `pdk.drc_deck_file`
+# resolution path end-to-end against a *fabricated* install matching
+# IHP-Open-PDK's real, on-disk SG13CMOS5L layout (verified against a real
+# fleet-host install, `~/share/pdk/ihp-sg13cmos5l`, commit `607e18d`,
+# 2026-08-25): `libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc` -- one
+# directory deeper than open_pdks' `libs.tech/klayout/drc/<variant>.lydrc`
+# (`drc_deck_file`'s nested-`tech/drc/` fallback, see `tests/test_pdk.py`).
+# The deck content itself is a minimal, syntactically-valid stand-in (same
+# `_MINIMAL_WIDTH_DECK` used above) rather than the real ~500-line
+# `ihp-sg13cmos5l.drc` -- running that PDK-specific deck for real is a
+# separate, larger follow-up (a curated starter deck, tracked as part of
+# #1398's decomposition), out of scope here. This test only proves the
+# resolver + engine plumbing, not the PDK's own rule content.
+# --------------------------------------------------------------------------- #
+
+
+def _make_ihp_sg13cmos5l_shaped_install(root: Path) -> Path:
+    """Fabricate a flat, IHP-Open-PDK-shaped `ihp-sg13cmos5l` install under
+    ``root`` with a minimal, syntactically-valid native DRC deck standing in
+    for the real ``ihp-sg13cmos5l.drc`` -- same shape as a real fetched
+    install, but hermetic (no multi-hundred-MB fetch required)."""
+    drc_dir = root / "libs.tech" / "klayout" / "tech" / "drc"
+    drc_dir.mkdir(parents=True)
+    _write_deck_file(drc_dir / "ihp-sg13cmos5l.drc", _MINIMAL_WIDTH_DECK)
+    return root
+
+
+@_SKIP_NO_KLAYOUT_BINARY
+def test_klayout_engine_real_binary_against_sg13cmos5l_shaped_install(tmp_path):
+    pdk_root = tmp_path / "ihp-sg13cmos5l"
+    _make_ihp_sg13cmos5l_shaped_install(pdk_root)
+
+    deck_file = pdk.drc_deck_file(root=str(pdk_root))
+    assert deck_file == str(
+        pdk_root / "libs.tech" / "klayout" / "tech" / "drc" / "ihp-sg13cmos5l.drc"
+    )
+
+    # 0.2um wide shape -- narrower than the deck's 0.5um minimum width.
+    gds = _write_gds(tmp_path / "violation.gds", layer=(1, 0), box=(0, 0, 200, 1000))
+
+    report = run_drc_klayout_engine(gds, deck_file, timeout_s=60.0)
+
+    assert report["status"] == "violations"
+    assert report["violation_count"] == 1
+    assert report["rule_counts"] == {"W.1": 1}
+
+
+@_SKIP_NO_KLAYOUT_BINARY
+def test_cli_klayout_engine_real_binary_resolves_sg13cmos5l_via_pdk_flags(
+    tmp_path, capsys
+):
+    pdk_root = tmp_path / "ihp-sg13cmos5l"
+    _make_ihp_sg13cmos5l_shaped_install(pdk_root)
+    # 1.0um wide shape -- wider than the 0.5um minimum, so no violation.
+    gds = _write_gds(tmp_path / "clean.gds", layer=(1, 0), box=(0, 0, 1000, 1000))
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--pdk",
+            "ihp-sg13cmos5l",
+            "--pdk-root",
+            str(pdk_root),
+            "--timeout-s",
+            "60",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "clean"
+    assert payload["violation_count"] == 0
+    assert payload["deck"] == str(
+        pdk_root / "libs.tech" / "klayout" / "tech" / "drc" / "ihp-sg13cmos5l.drc"
+    )

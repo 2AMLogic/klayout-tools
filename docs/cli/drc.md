@@ -122,6 +122,14 @@ actionable error naming `--deck-file` as the way forward; a caller who has
 already produced a merged deck (e.g. by running the PDK's own `run_drc.py
 --macro_gen` ahead of time) can still reach it that way.
 
+A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
+[`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory
+deeper than open_pdks does — `libs.tech/klayout/tech/drc/<variant>.drc`,
+not `libs.tech/klayout/drc/` directly (verified against a real fetched
+install, issue #1399). `drc_deck_file` falls back to that nested `tech/
+drc/` shape only when the open_pdks-shaped directory does not exist, so a
+real open_pdks install never pays for the extra probe.
+
 **Known limitations, relative to the curated engine:**
 
 - **No `--top` support yet.** An arbitrary PDK-native DRC-DSL script has no
