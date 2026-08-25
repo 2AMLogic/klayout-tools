@@ -27,7 +27,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   is accepted too. Purely additive: unescaped plain names, unescaped
   bit-selects (`bus[3]`), and the loud rejection of range slices
   (`bus[7:0]`) and general expressions are unchanged.
-
+- `klt extract`'s `schema_version` bumps `2` -> `3` (issue #1376): the
+  top-level `pdk.root` field's shape changed from a raw (often absolute)
+  filesystem path string -- the literal `--pdk-root` argument, echoed
+  verbatim -- to the `{path, scope}` shape `env_provenance.repo_relative_path`
+  already defines (mirroring `klt pex`/`klt sim`/`klt size`'s own issue
+  #1261 bump). A PDK install is inherently external to whatever repo invokes
+  `klt extract`, so the old shape baked a host-specific absolute path --
+  possibly a username, e.g. `/home/<user>/.volare/gf180mcuD` -- into any
+  committed `--format json` evidence report, duplicating (without
+  sanitizing) the already-path-free `provenance.pdk` block
+  (`{name, source, version}`) in the same document. `root` is now
+  `{"path": null, "scope": "external"}` for the common case of a PDK
+  installed outside the invoking repo, or `{"path": "<repo-relative path>",
+  "scope": "repo"}` for one that happens to live inside it.
 - `klt lvs`'s `options.combine_devices` gained three caller-side escape
   hatches for the case where KLayout's own `Netlist.combine_devices()` trips
   its internal-consistency error *deterministically* rather than at the ~20%
