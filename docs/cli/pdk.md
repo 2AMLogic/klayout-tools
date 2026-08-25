@@ -9,6 +9,7 @@ instead of re-implementing the lookup, usually twice, per repo.
 klt pdk find      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk list      [--pdk-root <dir>] [--format text|json]
 klt pdk env       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk check     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk cells     [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
 klt pdk macros    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk corners   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
@@ -18,6 +19,12 @@ klt pdk em-limits [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 - `find` — resolve **one** install/variant and emit its paths.
 - `list` — enumerate **every** install/variant discovered across the search order.
 - `env` — the resolved paths as eval-able shell `export` lines.
+- `check` — resolve one install/variant and exit non-zero if any of its
+  asset directories contain a **dangling symlink** (issue #1406) — the
+  scriptable CI gate for an install that looks complete on disk but ships
+  part of its device library as unresolvable symlinks (e.g. a standalone
+  `ihp-sg13cmos5l` clone missing the sibling `ihp-sg13g2` checkout its own
+  xschem symbols symlink into).
 - `cells` — per standard-cell digital library, its device flavor(s) and the
   nominal supply its `.lib` timing views are characterised at.
 - `macros` — per hard-macro IP library (`libs.ref` entries named
@@ -278,7 +285,8 @@ Resolves one install/variant.
     "magic": "/usr/share/pdk/sky130A/libs.tech/magic",
     "netgen": "/usr/share/pdk/sky130A/libs.tech/netgen",
     "libs_ref": "/usr/share/pdk/sky130A/libs.ref"
-  }
+  },
+  "broken_symlinks": []
 }
 ```
 
@@ -290,12 +298,57 @@ Resolves one install/variant.
 | `version` | string \| null | Version stamp from `SOURCES`, or `null`. |
 | `resolved_via` | string | Which resolution step matched (see table above). |
 | `assets` | object | Tool area → absolute directory. |
+| `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 
 **`assets` keys are always present.** Each of `ngspice`, `xschem`, `klayout`,
 `magic`, `netgen` (under `libs.tech/`) and `libs_ref` (`libs.ref/`) maps to its
 absolute directory when that directory exists on disk, or `null` when the
 install does not ship it. Consumers should ignore keys they don't need and
 tolerate additional keys added in future (additive) versions.
+
+### Dangling symlinks (`broken_symlinks`, issue #1406)
+
+Some upstream PDKs ship parts of their device library as **symlinks that
+assume a sibling checkout**, not real files. IHP-Open-PDK's
+`ihp-sg13cmos5l` is the reported case: its own `README.md` documents the
+intended install shape as a *combined* checkout,
+`IHP-Open-PDK/{ihp-sg13g2,ihp-sg13cmos5l}` cloned side by side, and most of
+`libs.tech/xschem/sg13cmos5l_pr/*.sym` (every MOS device, the PNP, every
+resistor — only the two MoM-cap symbols are real files) is a *relative*
+symlink into a sibling `ihp-sg13g2` checkout. A standalone
+`ihp-sg13cmos5l` clone (or a resolver that only ever fetches that one PDK
+directory) does not provide that sibling, so those symlinks never resolve —
+`xschem` fails to open them entirely, not merely to the wrong target. The
+corresponding `libs.tech/ngspice/models/*.lib` files follow the same
+pattern.
+
+The failure is **silent-until-use**: `ls` shows every expected filename (the
+install "looks complete"), and nothing in `find`/`list`/`env`'s own resolved
+paths distinguishes a dangling symlink from a real file — the break only
+surfaces when a downstream tool actually tries to open one.
+
+`find_pdk()` (and therefore `klt pdk find`/`env`, which share its payload)
+now walks every resolved `assets` directory and reports every dangling
+symlink it finds as `broken_symlinks`:
+
+```json
+"broken_symlinks": [
+  {
+    "asset": "xschem",
+    "path": "/pdk/ihp-sg13cmos5l/libs.tech/xschem/sg13cmos5l_pr/sg13_hv_pmos.sym"
+  }
+]
+```
+
+Each entry names the `assets` key the dangling link was found under and its
+absolute path. Only genuinely **unresolvable** links are reported — a
+relative symlink that *does* resolve (e.g. open_pdks' own generic
+`setup.tcl` → `<variant>_setup.tcl` symlink alongside a netgen setup script,
+see `netgen_setup_file` below) is normal and intentional, not flagged.
+`find`/`env` still resolve and report the install even when
+`broken_symlinks` is non-empty (the install *is* found, and most of it may
+still work) — use `klt pdk check` (below) when you need a hard CI gate on
+this condition instead of just visibility.
 
 ### Resolving the netgen LVS setup **file** (library API, issue #343)
 
@@ -371,6 +424,46 @@ frozen exception** to the "text is unstable" rule. Specifically:
 
 Use `--format json` when you want the full asset map for scripting; use the
 default text form only for `eval`.
+
+## `klt pdk check`
+
+Resolves one install/variant (the same paths `find` emits, see
+`broken_symlinks` above) and additionally **exits non-zero when any of its
+asset directories contain a dangling symlink** — the scriptable CI gate
+`find`/`env` deliberately don't provide (they still resolve and report an
+install with dangling symlinks, since the install *is* found and most of it
+may still work).
+
+```
+$ klt pdk check --pdk-root ~/ihp-sg13cmos5l
+root: /home/user/ihp-sg13cmos5l
+variant: ihp-sg13cmos5l
+broken_symlinks: 13
+  [ngspice] /home/user/ihp-sg13cmos5l/libs.tech/ngspice/models/sg13_hv_pmos.lib
+  [xschem] /home/user/ihp-sg13cmos5l/libs.tech/xschem/sg13cmos5l_pr/sg13_hv_pmos.sym
+  ...
+
+$ echo $?
+4
+```
+
+```json
+{
+  "schema_version": 1,
+  "root": "/home/user/ihp-sg13cmos5l",
+  "variant": "ihp-sg13cmos5l",
+  "version": null,
+  "resolved_via": "--pdk-root flag",
+  "assets": { "...": "..." },
+  "broken_symlinks": [
+    { "asset": "xschem", "path": ".../sg13cmos5l_pr/sg13_hv_pmos.sym" }
+  ]
+}
+```
+
+`--format json` emits the exact same payload `find` does (`check` adds no new
+fields — it only changes the exit-code contract). A clean install prints
+`broken_symlinks: none` in text form and exits `0`.
 
 ## `klt pdk cells`
 
@@ -939,7 +1032,11 @@ em = em_limits(variant="gf180mcuD")  # same dict `klt pdk em-limits` emits
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
 payload dicts the CLI emits (the `layers_report()` pattern), and `find_pdk`
 raises `PdkNotFoundError` — carrying the actionable message — when nothing
-resolves. The `env` verb covers the shell/Tcl/rc-file side by exporting into the
+resolves. `find_pdk`'s payload always includes `broken_symlinks` (issue
+#1406, see above); there is no separate library function for `klt pdk
+check` — it is a thin CLI wrapper that inspects `find_pdk()`'s own
+`broken_symlinks` field and turns a non-empty list into a non-zero exit.
+The `env` verb covers the shell/Tcl/rc-file side by exporting into the
 process environment. `list_cell_libraries(variant=None, root=None,
 supply=None)` follows the same shape and also raises `PdkNotFoundError` when
 no PDK install resolves; `supply` is optional and adds the compatibility
@@ -960,10 +1057,11 @@ libraries ship no `techlef/` directory at all, returns an empty
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`. |
-| `1` | `find`/`env`/`cells`/`macros`/`corners`/`em-limits` resolved no PDK install. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`; `check` on a resolved install with no dangling symlinks is `0`. |
+| `1` | `find`/`env`/`check`/`cells`/`macros`/`corners`/`em-limits` resolved no PDK install. Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
+| `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
@@ -1010,4 +1108,9 @@ $ klt pdk corners --pdk gf180mcuD --format json \
     | jq -r '.corners[] | select(.complete == false) | .corner'
 fs
 sf
+
+# CI gate: fail the build if the resolved install ships any dangling
+# symlink (e.g. a standalone `ihp-sg13cmos5l` clone missing its sibling
+# `ihp-sg13g2` checkout, issue #1406):
+$ klt pdk check --pdk ihp-sg13cmos5l || echo "PDK install is broken"
 ```

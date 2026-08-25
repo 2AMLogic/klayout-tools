@@ -137,10 +137,21 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
                 "ngspice": <abs dir | None>, "xschem": ..., "klayout": ...,
                 "magic": ..., "netgen": ..., "libs_ref": ...,
             },
+            "broken_symlinks": [{"asset": <asset key>, "path": <abs path>}, ...],
         }
 
     Every ``assets`` key is always present; a value is the absolute directory
     when it exists on disk, or ``None`` when the install does not ship it.
+
+    ``broken_symlinks`` (issue #1406) reports every **dangling** symlink
+    (:func:`_find_broken_symlinks`) found under any resolved ``assets``
+    directory -- e.g. a standalone ``ihp-sg13cmos5l`` install, whose
+    ``libs.tech/xschem/sg13cmos5l_pr/*.sym`` device symbols are relative
+    symlinks into a sibling ``ihp-sg13g2`` checkout the install does not
+    contain, so `xschem` cannot open them at all. ``[]`` when every resolved
+    asset directory is clean -- the common, healthy-install case -- so a
+    caller can gate on ``bool(report["broken_symlinks"])`` without special-
+    casing the empty result. Additive field; see ``docs/json-contract.md``.
 
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
@@ -159,13 +170,15 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
         else:
             chosen = variants[0]  # variants are sorted → deterministic default
         variant_dir = chosen["_dir"]
+        assets = _asset_dirs(variant_dir)
         return {
             "schema_version": 1,
             "root": root_path,
             "variant": chosen["name"],
             "version": chosen["version"],
             "resolved_via": resolved_via,
-            "assets": _asset_dirs(variant_dir),
+            "assets": assets,
+            "broken_symlinks": _broken_symlinks_in_assets(assets),
         }
 
     raise PdkNotFoundError(_not_found_message(candidates, effective_variant))
@@ -326,6 +339,57 @@ def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
         path = os.path.join(variant_dir, *parts)
         assets[key] = path if os.path.isdir(path) else None
     return assets
+
+
+def _find_broken_symlinks(directory: str) -> list[str]:
+    """Return every **dangling** symlink under ``directory``, absolute-path
+    sorted (issue #1406).
+
+    A path is dangling when :func:`os.path.islink` is ``True`` but
+    :func:`os.path.exists` -- which follows the link -- is ``False``. This is
+    exactly the condition a standalone ``ihp-sg13cmos5l`` install hits:
+    ``libs.tech/xschem/sg13cmos5l_pr/sg13_hv_pmos.sym`` (and most of its
+    sibling device symbols) is a *relative* symlink into a sibling
+    ``ihp-sg13g2`` checkout the install does not contain, so it never
+    resolves at all.
+
+    Deliberately does **not** flag a relative symlink that *does* resolve --
+    that is the normal, intentional pattern this repo's own resolver already
+    relies on (open_pdks' variant-named ``netgen`` setup script symlinked
+    alongside a generic ``setup.tcl``, see :func:`netgen_setup_file`) -- only
+    genuinely unresolvable links are a problem.
+
+    Walks with ``followlinks=False``: :func:`os.walk` never descends into a
+    symlinked subdirectory either way, so a dangling *directory* symlink is
+    reported once, as itself (via its parent's ``dirnames``), rather than
+    raising trying to list a target that does not exist.
+    """
+    broken: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path) and not os.path.exists(path):
+                broken.append(path)
+    return sorted(broken)
+
+
+def _broken_symlinks_in_assets(assets: dict[str, str | None]) -> list[dict[str, str]]:
+    """Collect every dangling symlink (:func:`_find_broken_symlinks`) across
+    every resolved (non-``None``) entry of an ``assets`` map, tagged with
+    which asset area it was found under.
+
+    Returns ``[{"asset": <asset key>, "path": <absolute path>}, ...]``, sorted
+    by ``(asset, path)`` -- ``[]`` when every resolved asset directory is
+    clean (the common, healthy-install case).
+    """
+    found: list[dict[str, str]] = []
+    for key in sorted(assets):
+        directory = assets[key]
+        if directory is None:
+            continue
+        for path in _find_broken_symlinks(directory):
+            found.append({"asset": key, "path": path})
+    return found
 
 
 def netgen_setup_file(

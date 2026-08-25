@@ -1,11 +1,15 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Seven subcommands, all emitting through the shared envelope helpers in
+Eight subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
 - ``list`` — enumerate every install/variant discovered.
 - ``env``  — the resolved paths as eval-able shell ``export`` lines.
+- ``check`` — resolve one install/variant and exit non-zero if any of its
+  asset directories contain a dangling symlink (issue #1406) -- a scriptable
+  CI gate for the "install looks complete but part of it cannot actually be
+  opened" failure mode ``find``/``env`` also report but do not gate on.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
 - ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
 - ``corners`` — per SPICE process corner, which device families skew vs.
@@ -42,6 +46,14 @@ _ASSET_KEYS = ("ngspice", "xschem", "klayout", "magic", "netgen", "libs_ref")
 #: code does. See ``docs/cli/pdk.md``.
 EXIT_NO_COMPATIBLE_LIBRARY = 3
 
+#: `klt pdk check` exit code when the resolved install's asset directories
+#: contain one or more dangling symlinks (issue #1406) -- ran fine, resolved
+#: an install, but part of it cannot actually be opened. Distinct from every
+#: other `klt pdk` exit code (1 PdkNotFoundError, 2 argparse usage errors, 3
+#: EXIT_NO_COMPATIBLE_LIBRARY) so a CI gate can tell "no PDK" apart from "a
+#: PDK, but a broken one" apart from "a supply mismatch". See docs/cli/pdk.md.
+EXIT_BROKEN_SYMLINKS = 4
+
 
 def run_find(args: argparse.Namespace) -> int:
     try:
@@ -66,6 +78,19 @@ def run_env(args: argparse.Namespace) -> int:
         return emit_error("pdk env", str(exc), args.format)
 
     emit_success(report, args.format, _print_env_text)
+    return 0
+
+
+def run_check(args: argparse.Namespace) -> int:
+    try:
+        report = find_pdk(variant=args.pdk, root=args.pdk_root)
+    except PdkNotFoundError as exc:
+        return emit_error("pdk check", str(exc), args.format)
+
+    emit_success(report, args.format, _print_check_text)
+
+    if report["broken_symlinks"]:
+        return EXIT_BROKEN_SYMLINKS
     return 0
 
 
@@ -125,6 +150,21 @@ def _print_find_text(report: dict) -> None:
     for key in _ASSET_KEYS:
         value = assets.get(key)
         print(f"  {key}: {value if value is not None else '-'}")
+    broken = report.get("broken_symlinks", [])
+    if broken:
+        print(f"broken_symlinks: {len(broken)} (see `klt pdk check` for detail)")
+
+
+def _print_check_text(report: dict) -> None:
+    print(f"root: {report['root']}")
+    print(f"variant: {report['variant']}")
+    broken = report["broken_symlinks"]
+    if not broken:
+        print("broken_symlinks: none")
+        return
+    print(f"broken_symlinks: {len(broken)}")
+    for entry in broken:
+        print(f"  [{entry['asset']}] {entry['path']}")
 
 
 def _print_list_text(report: dict) -> None:
