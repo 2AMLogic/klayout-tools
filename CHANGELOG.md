@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt lvs` now accepts `options.combine_devices_max_attempts`
+  (issue #1412), a caller-configurable retry budget for
+  `options.combine_devices`'s bounded-retry mitigation of KLayout's own
+  `Netlist.combine_devices()` run-to-run nondeterminism (issue #1185) —
+  previously a private, hardcoded `5`. A caller working against a
+  large/complex netlist that observes retry exhaustion
+  (`device.combine_incomplete` / `status: "inconclusive"`) more often than
+  the default budget's small-fixture derivation predicts can now raise it
+  without a fork; a caller iterating on a small netlist can lower it for
+  faster feedback. Defaults to `5`, unchanged. `docs/cli/lvs.md`'s
+  `options.combine_devices` / `device.combine_incomplete` sections also now
+  document a reported (not independently re-measured) retry-exhaustion rate
+  against a large (~8,600-device, multi-class) netlist, and correct the
+  non-determinism guidance to note that every `category_counts` key can be
+  volatile under `combine_devices`, not only `device.unmatched`. Additive —
+  no `schema_version` bump.
 - **Added**: `klt pdk find`/`env`'s JSON payload now reports `broken_symlinks`
   — every dangling symlink found under any resolved `assets` directory
   (issue #1406). Some upstream PDKs (e.g. IHP-Open-PDK's `ihp-sg13cmos5l`

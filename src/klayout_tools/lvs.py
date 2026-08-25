@@ -534,6 +534,20 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``device.combine_incomplete`` warning is present in ``mismatches[]``
     either way, now carrying the failing attempt's own
     ``circuit``/``device``/``net`` identifiers.
+
+    ``options.combine_devices_max_attempts`` (issue #1412) is the
+    caller-configurable retry budget behind that degrade: how many
+    independent ``Netlist.dup()`` attempts :func:`_combine_devices_safely`
+    makes per side before falling back to ``device.combine_incomplete`` /
+    ``"inconclusive"``. Defaults to :data:`_COMBINE_DEVICES_MAX_ATTEMPTS`
+    (``5``, unchanged from before this option existed) when omitted. A caller
+    working against a large/complex netlist that observes retry exhaustion
+    more often than that default's own derivation predicts can raise this to
+    trade runtime for a lower observed exhaustion rate; a caller iterating on
+    a small netlist can lower it for faster feedback. Ignored when
+    ``options.combine_devices`` is falsy. See ``docs/cli/lvs.md``'s
+    ``options.combine_devices`` section for the documented exhaustion-rate
+    caveat this knob exists to let a caller work around.
     """
     request, request_dir = load_request_arg(request)
 
@@ -589,6 +603,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         combine_devices if isinstance(combine_devices, list) else None
     )
     combine_devices_enabled = bool(combine_devices)
+    # Issue #1412: caller-configurable retry budget for
+    # `_combine_devices_safely`'s bounded-retry mitigation (issue #1185) --
+    # previously a private `_COMBINE_DEVICES_MAX_ATTEMPTS` module constant
+    # tuned against one small fixture, with no way for a caller working
+    # against a much larger/complex netlist to raise it, or a caller
+    # iterating on a small one to lower it. Parsed unconditionally (like
+    # `flatten_layout`/`flatten_reference` above) so a malformed value is a
+    # clean request error even when `combine_devices` is off, but only
+    # consulted below when combining actually runs.
+    combine_devices_max_attempts = _parse_combine_devices_max_attempts(options)
     parameter_tolerance = _parse_parameter_tolerance(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -786,12 +810,18 @@ def run_lvs(request: str) -> dict[str, Any]:
         reference_snapshot = reference_netlist.dup()
 
         layout_warning = _combine_devices_safely(
-            layout_netlist, "layout", device_classes=combine_device_classes
+            layout_netlist,
+            "layout",
+            combine_devices_max_attempts,
+            device_classes=combine_device_classes,
         )
         if layout_warning is not None:
             combine_warnings.append(layout_warning)
         reference_warning = _combine_devices_safely(
-            reference_netlist, "reference", device_classes=combine_device_classes
+            reference_netlist,
+            "reference",
+            combine_devices_max_attempts,
+            device_classes=combine_device_classes,
         )
         if reference_warning is not None:
             combine_warnings.append(reference_warning)
@@ -2063,6 +2093,44 @@ def _parse_combine_devices(options: Mapping[str, Any]) -> bool | list[str]:
         "options.combine_devices must be a boolean or a list of device-class "
         f"name strings; got {type(value).__name__}"
     )
+
+
+def _parse_combine_devices_max_attempts(options: Mapping[str, Any]) -> int:
+    """Resolve ``options.combine_devices_max_attempts`` into a positive int,
+    defaulting to :data:`_COMBINE_DEVICES_MAX_ATTEMPTS` when omitted (issue
+    #1412).
+
+    Exposes :func:`_combine_devices_safely`'s retry budget -- previously a
+    private module constant -- as a caller-configurable knob. That constant's
+    own derivation (see its docstring) was tuned against one small fixture (a
+    single multi-finger NMOS device, ~200 gate fingers, one device class);
+    a caller re-measuring against a much larger, multi-class netlist has
+    reported the retry-exhaustion fallback (``device.combine_incomplete``)
+    firing far more often than that derivation would predict (see
+    ``docs/cli/lvs.md``'s ``options.combine_devices`` section for the
+    reported observation) -- this option lets such a caller raise the budget
+    without a fork, trading runtime for a lower observed exhaustion rate, and
+    lets a caller iterating on a small netlist lower it for faster feedback.
+
+    Malformed input raises :class:`LvsError` rather than silently falling
+    back to the default, matching this module's other request-side options
+    (``options.parameter_tolerance``, ``options.combine_devices`` itself): a
+    retry budget the caller believes is in force but is not would defeat the
+    whole point of exposing it.
+    """
+    if "combine_devices_max_attempts" not in options:
+        return _COMBINE_DEVICES_MAX_ATTEMPTS
+    value = options["combine_devices_max_attempts"]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LvsError(
+            "options.combine_devices_max_attempts must be a positive integer; "
+            f"got {value!r}"
+        )
+    if value < 1:
+        raise LvsError(
+            f"options.combine_devices_max_attempts must be at least 1; got {value!r}"
+        )
+    return value
 
 
 def _validate_combine_device_classes(
