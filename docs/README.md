@@ -119,4 +119,5 @@ docs/
   guides/                # how-to guides
     building-klayout-macos.md
     github-action.md
+    pdk-family-port-checklist.md
 ```

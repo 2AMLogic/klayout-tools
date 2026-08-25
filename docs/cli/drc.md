@@ -13,7 +13,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   auto-detects the stream format on read; the extension is not authoritative.
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
-  `gf180mcu`, `sg13g2`.
+  `gf180mcu`, `sg13g2`. Adding a new family's curated deck (registry wiring,
+  scope discipline, provenance citations) is documented in
+  [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
 - `--top` — top cell to check when the stream has more than one; omit to
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
