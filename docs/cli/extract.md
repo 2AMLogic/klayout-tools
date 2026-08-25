@@ -1400,10 +1400,15 @@ model name* differs).
 thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of
 the default `sg13_lv_nmos`/`sg13_lv_pmos` — the split the PDK's own
 `general_derivations.lvs` makes (`ngate_hv_base = ngate.and(thickgateox_drw)`
-vs. `ngate_lv_base = ngate.not(thickgateox_drw)`). `sky130` declares none
-(its curated deck has no high-voltage/thick-oxide marker layer at all). A
-deck-registered voltage-domain marker with **no** matching `mos_flavours`
-entry still only produces the diagnostic below, never a corrected binding:
+vs. `ngate_lv_base = ngate.not(thickgateox_drw)`). `sky130` declares one too
+(issue #1369), keyed on its `hvi` (75/20) marker: a transistor drawn inside
+it binds the real 5V-gate/10.5V-drain `sky130_fd_pr__nfet_g5v0d10v5`/
+`sky130_fd_pr__pfet_g5v0d10v5` models under `--pdk` instead of the default
+`sky130_fd_pr__nfet_01v8`/`sky130_fd_pr__pfet_01v8` — the split the PDK's own
+`sky130.lvs` makes (`ngate_high_voltage = ngate.and(hvi)...` vs.
+`ngate_low_voltage = ngate.not(hvi)...`). A deck-registered voltage-domain
+marker with **no** matching `mos_flavours` entry still only produces the
+diagnostic below, never a corrected binding:
 
 - A structured entry in the response's `voltage_domain_warnings[]` array
   (see "JSON schema" above): `{ "marker": "44/0", "description": str }` —
@@ -1421,14 +1426,19 @@ entry still only produces the diagnostic below, never a corrected binding:
 `mos_flavours` coverage, it only flags that the bound model name may be
 wrong — it does not correct the binding. For a marker `mos_flavours` *does*
 cover (gf180mcu's `Dualgate` as of issue #1111, sg13g2's `ThickGateOx` as of
-issue #1231), the binding gap this field exists to flag is closed, so
-`voltage_domain_warnings` no longer fires for MOS device geometry inside it
-at all — the registry entry itself is unaffected (gf180mcu's `Dualgate`
-entry stays registered for the DRC-rule residue `klt drc`'s own coverage
-still tracks — `DF.6`, `PL.5a`/`PL.5b`, not transcribed by that curated deck
-yet; sg13g2's `ThickGateOx` entry likewise stays registered for its own
-DRC-rule residue, e.g. the `Gat.a1`/`Gat.a2` channel-length-specific GatPoly
-widths).
+issue #1231, sky130's `hvi` as of issue #1369), the binding gap this field
+exists to flag is closed, so `voltage_domain_warnings` no longer fires for
+MOS device geometry inside it at all — the registry entry itself is
+unaffected (gf180mcu's `Dualgate` entry stays registered for the DRC-rule
+residue `klt drc`'s own coverage still tracks — `DF.6`, `PL.5a`/`PL.5b`, not
+transcribed by that curated deck yet; sg13g2's `ThickGateOx` entry likewise
+stays registered for its own DRC-rule residue, e.g. the `Gat.a1`/`Gat.a2`
+channel-length-specific GatPoly widths; sky130's `hvi` entry stays
+registered for the largest residue of the three — *no* rule in that curated
+deck reads `hvi`, so e.g. its `diff.width.1` rule checks `difftap.1`'s
+0.15 µm against geometry the real DRM's medium-voltage column
+(`difftap.14`, 0.29 µm) governs, see `UNMODELED_VOLTAGE_MARKERS`'s own
+description in `decks/sky130.py`).
 
 ### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462 and to junction diodes in #542)
 
@@ -1957,19 +1967,23 @@ recognised analog device classes):
 
 | Device class | sky130 | gf180mcu | sg13g2 | Geometry on the `X` card |
 |---|---|---|---|---|
-| MOS (`nfet`/`pfet`) | ✅ | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
+| MOS (`nfet`/`pfet`) | ✅ (plus `hvi`-scoped `g5v0d10v5` flavour, issue #1369) | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
 | Resistor | ✅ | ✅ (all flavours) | ❌ (bare `R` card — no curated model table yet) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | — (no capacitor recognition in that deck yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
 
-MOS flavour note (issue #1111): gf180mcu's `nfet`/`pfet` binding is no
-longer a single fixed subcircuit name. A transistor drawn (fully or
-partially — see "Voltage-domain markers and per-flavour MOS binding" above)
-inside `Dualgate` (55/0) binds `nfet_06v0`/`pfet_06v0` instead of the
-default `nfet_03v3`/`pfet_03v3`; a transistor drawn entirely outside it is
-unaffected. Selecting a flavour this way never changes `devices[].class`
-(both flavours report the deck's ordinary `"nfet"`/`"pfet"` class) or
-`device_counts` — only which real subcircuit the `X` card names.
+MOS flavour note (issue #1111, extended to sky130 by issue #1369): gf180mcu's
+and sky130's `nfet`/`pfet` bindings are no longer a single fixed subcircuit
+name. A transistor drawn (fully or partially — see "Voltage-domain markers
+and per-flavour MOS binding" above) inside `Dualgate` (55/0) binds
+`nfet_06v0`/`pfet_06v0` instead of gf180mcu's default `nfet_03v3`/
+`pfet_03v3`; a transistor drawn inside sky130's `hvi` (75/20) binds
+`sky130_fd_pr__nfet_g5v0d10v5`/`sky130_fd_pr__pfet_g5v0d10v5` instead of
+sky130's default `sky130_fd_pr__nfet_01v8`/`sky130_fd_pr__pfet_01v8`; a
+transistor drawn entirely outside either marker is unaffected. Selecting a
+flavour this way never changes `devices[].class` (every flavour reports the
+deck's ordinary `"nfet"`/`"pfet"` class) or `device_counts` — only which real
+subcircuit the `X` card names.
 
 Resistor note: the binding is **flavour-complete** on gf180mcu — every value
 `--deck-option poly_res=` accepts binds its own real subcircuit
@@ -1993,17 +2007,17 @@ the substrate internally, but no separate substrate pin is emitted on the
 resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
 future epic):
 
-- **One voltage/flavor per class, with two documented exceptions.** sky130's
+- **One voltage/flavor per class, with documented exceptions.** sky130's
   `01v8` MOS core devices, sky130/gf180mcu's specific resistor/capacitor
   device names, and gf180mcu's *default* `03v3` MOS core devices (gf180mcu
   has no `gf180mcu_fd_pr__`-prefixed naming convention the way sky130 does)
-  are each still the one flavor those classes distinguish. gf180mcu's and
-  sg13g2's MOS classes are the exceptions (issues #1111/#1231): a
-  `Dualgate`-marked gf180mcu transistor binds `nfet_06v0`/`pfet_06v0`, and a
-  `ThickGateOx`-marked sg13g2 transistor binds
-  `sg13_hv_nmos`/`sg13_hv_pmos`, instead of their decks' defaults — see the
-  "MOS flavour note" above. `sky130` declares no such marker-scoped flavour
-  today.
+  are each still the one *default* flavor those classes distinguish. All
+  three decks' MOS classes now have a marker-scoped exception (issues
+  #1111/#1231/#1369): a `Dualgate`-marked gf180mcu transistor binds
+  `nfet_06v0`/`pfet_06v0`, a `ThickGateOx`-marked sg13g2 transistor binds
+  `sg13_hv_nmos`/`sg13_hv_pmos`, and an `hvi`-marked sky130 transistor binds
+  `sky130_fd_pr__nfet_g5v0d10v5`/`sky130_fd_pr__pfet_g5v0d10v5`, instead of
+  their decks' defaults — see the "MOS flavour note" above.
 - **gf180mcu bipolar is deliberately left unbound** — its recognised `bjt`
   device stays a bare `Q` card under `--pdk`, **not** a subcircuit call. This
   is a *documented carve-out*, not an oversight: the gf180mcu deck itself has

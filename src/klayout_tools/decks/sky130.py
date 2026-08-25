@@ -256,6 +256,7 @@ from . import (
     DrcRule,
     ExtractionDeck,
     LayerRC,
+    MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
     RuleProvenance,
@@ -967,19 +968,70 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (72, 20): "met5.drawing",
     (89, 44): "capm.drawing",
     (97, 44): "capm2.drawing",
+    # High-voltage identification marker (issue #1369) -- see the
+    # `UNMODELED_VOLTAGE_MARKERS`/`EXTRACTION_DECK.mos_flavours` notes below
+    # for the layer/datatype provenance and what this deck now models with it.
+    (75, 20): "hvi.drawing",
 }
 
-# Voltage-domain marker layers this deck draws but does not model the DRC/
-# extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
-# the gf180mcu `Dualgate` sibling of this table). sky130's real PDK has an
-# `hvi` (high-voltage identification) layer with its own DRC column, but
-# this curated deck's `LAYER_NAMES` above does not name it as a recognised
-# layer at all yet (unlike gf180mcu's `Dualgate`, which is drawn/named here
-# just not scoped) -- so there is nothing to register in this table until a
-# follow-on issue adds `hvi` as a named layer first. Empty, not omitted, so
-# `get_unmodeled_voltage_markers("sky130")` returns `{}` explicitly rather
-# than relying on the registry's unregistered-deck fallback.
-UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {}
+# Voltage-domain marker layer this deck draws but does not *fully* model the
+# DRC/extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
+# the gf180mcu `Dualgate` / sg13g2 `ThickGateOx` sibling of this table).
+# sky130's real PDK's `hvi` (high-voltage identification) layer -- now named
+# above in `LAYER_NAMES` (issue #1369) -- selects its 5V-gate/10.5V-drain
+# thick-oxide voltage domain, whose DRM publishes a distinct set of MOS
+# models from the default 1.8V core ones.
+#
+# `(75, 20)` is confirmed against three independent sources in the same real
+# fetched sky130A install (volare, `c6d73a35f524070e85faff4a6a9eef49553ebc2b`,
+# the `SOURCES` line `open_pdks c6d73a35...`) this module's other provenance
+# notes cite:
+#   - `libs.tech/klayout/tech/sky130A.lyp:3127` (KLayout layer properties):
+#     `<name>hvi.drawing - 75/20</name>`
+#   - `libs.tech/klayout/lvs/sky130.lvs:941` (the official KLayout LVS deck):
+#     `hvi         = polygons(75 , 20 )`
+#   - `libs.tech/magic/sky130A.tech:3980` (magic technology file):
+#     `calma HVI 75 20`  (under the comment `# HVI (THKOX)`)
+#
+# What issue #1369 closed: `EXTRACTION_DECK` below now declares one
+# `mos_flavours` entry keyed on this same `hvi` marker (see `MOSFlavour`'s
+# own docstring in `decks/__init__.py`), so a transistor drawn (fully or
+# partially) inside `hvi` extracts bound to the real
+# `sky130_fd_pr__nfet_g5v0d10v5`/`sky130_fd_pr__pfet_g5v0d10v5` models
+# (`--pdk`-resolved SPICE output) instead of the default 1.8V-core ones --
+# `extract.py`'s own MOS `voltage_domain_warnings` no longer fires for this
+# marker (it only ever warned about the *MOS binding* gap; see
+# `pdk_models.py`'s `_MOS_MODEL_FLAVOURS` docstring for the exact subcircuit
+# provenance citation).
+#
+# What is NOT modelled, and is what this entry keeps warning about: none of
+# this deck's DRC rules above read `hvi` at all -- unlike gf180mcu's
+# `Dualgate` (whose `DF.1a`/`DF.3a` COMP width/space rules *are*
+# `Dualgate`-scoped, so that marker is only partly unmodelled), sky130's own
+# DRM publishes a second, medium-voltage threshold column selected by `hvi`
+# that this deck transcribes none of. The concrete residue behind the
+# threshold quoted below, from the same install's
+# `libs.tech/magic/sky130A.tech:4220-4224`: general diffusion width is
+# `width *ndiff,... 150 "Diffusion width < %d (diff/tap.1)"` -- the 0.15um
+# `diff.width.1` rule above -- while `hvi`-marked (`mv*`) diffusion is
+# `width *mvndiff,... 290 "MV Diffusion width < %d (diff/tap.14)"`, i.e.
+# 0.29um. Geometry drawn inside `hvi` is therefore still checked against the
+# 0.15um column here, which is why registering this marker still produces
+# `klt drc`'s `voltage_domain_warnings` diagnostic (issue #552) even though
+# the *extraction*-side binding gap is now closed.
+UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
+    (75, 20): (
+        "hvi (75/20) marks sky130's 5V-gate/10.5V-drain thick-oxide voltage "
+        "domain (see sky130.lvs's ngate_high_voltage/pgate_high_voltage). "
+        "This curated deck models it for MOS device recognition/model "
+        "binding (issue #1369: sky130_fd_pr__nfet_g5v0d10v5/pfet_g5v0d10v5 "
+        "under --pdk) only; no DRC rule here reads hvi, so every rule still "
+        "applies its general-case threshold to geometry drawn inside hvi "
+        "(e.g. diff.width.1 checks difftap.1's 0.15 um where the real DRM's "
+        "medium-voltage column, difftap.14, requires 0.29 um -- not "
+        "transcribed in this deck yet)."
+    ),
+}
 
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck
@@ -1191,11 +1243,13 @@ EXTRACTION_DECK = ExtractionDeck(
     # split (NMOS = active outside nwell, PMOS = active inside nwell). Real
     # sky130 draws several other voltage/threshold flavours off the *same*
     # split, keyed by additional implant/marker layers this curated deck
-    # does not model (`nfet_01v8_lvt`, `pfet_g5v0d10v5`, ...) -- this
-    # citation names the one flavour `nfet_class`/`pfet_class`'s generic
-    # `"nfet"`/`"pfet"` labels actually correspond to (the plain-active,
-    # no-implant-marker core device), not a claim that every sky130 MOS
-    # flavour is modelled.
+    # does not model (e.g. `nfet_01v8_lvt`/`pfet_01v8_lvt`, the low-threshold
+    # siblings) -- this citation names the one flavour `nfet_class`/
+    # `pfet_class`'s generic `"nfet"`/`"pfet"` labels actually correspond to
+    # (the plain-active, no-implant-marker core device), not a claim that
+    # every sky130 MOS flavour is modelled. The `hvi`-marked
+    # `nfet_g5v0d10v5`/`pfet_g5v0d10v5` flavour *is* now modelled, via the
+    # `mos_flavours` entry below (issue #1369).
     nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8"),
     pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8"),
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
@@ -1467,6 +1521,26 @@ EXTRACTION_DECK = ExtractionDeck(
             # Same five-length-variant merge as `res_high_po` above; cites
             # the shortest as representative (issue #868).
             provenance=_sky130_lvs_provenance("sky130_fd_pr__res_xhigh_po_0p35"),
+        ),
+    ),
+    # Per-flavour MOS marker (issue #1369, mirroring #1111's gf180mcu
+    # `Dualgate` entry and #1231's sg13g2 `ThickGateOx` entry): a transistor
+    # drawn (fully or partially) inside `hvi` (75/20) is sky130's
+    # 5V-gate/10.5V-drain thick-oxide flavour, whose real upstream
+    # device-class names are `sky130_fd_pr__nfet_g5v0d10v5`/
+    # `sky130_fd_pr__pfet_g5v0d10v5` (same `sky130.lvs` source as the default
+    # 1.8V pair above -- see `ngate_high_voltage = ngate.and(hvi)...` /
+    # `pgate_high_voltage = pgate.and(hvi)...`). `MOSFlavour.flavour="hvi"`
+    # is the key `pdk_models.py`'s `_MOS_MODEL_FLAVOURS[("sky130", "sky130")]`
+    # table binds to those two real subcircuit names under `--pdk` -- see
+    # that module's docstring for the verified-provenance citation.
+    mos_flavours=(
+        MOSFlavour(
+            marker=(75, 20),  # hvi.drawing
+            flavour="hvi",
+            description="sky130 5V-gate/10.5V-drain thick-oxide domain (hvi 75/20)",
+            nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_g5v0d10v5"),
+            pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_g5v0d10v5"),
         ),
     ),
 )

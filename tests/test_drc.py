@@ -1090,6 +1090,63 @@ def test_run_drc_gf180mcu_dualgate_still_warns_for_unsplit_rules(tmp_path):
     ]
 
 
+def _make_sky130_hvi_drc_layout(*, overlap: bool) -> kdb.Layout:
+    """One `diff` (65/20) square, wide enough to clear this deck's own
+    `diff.width.1` (`difftap.1`, 0.15um) threshold, with an `hvi` (75/20)
+    box drawn either over it (``overlap=True``) or far away
+    (``overlap=False``).
+
+    The overlapping case is exactly what issue #1369's registry entry is
+    about: the same square is 0.29um-illegal under the real DRM's
+    medium-voltage column (`difftap.14`), which this curated deck does not
+    transcribe -- so `klt drc` reports it `clean` and must say so."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        layout.set_info(li, kdb.LayerInfo(layer, datatype))
+        top.shapes(li).insert(box)
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 2000))  # diff.drawing, clears 0.15um
+    if overlap:
+        draw(75, 20, kdb.Box(-1000, -1000, 3000, 3000))  # hvi over all of it
+    else:
+        draw(75, 20, kdb.Box(100_000, 100_000, 102_000, 102_000))  # far away
+    return layout
+
+
+def test_run_drc_sky130_hvi_marker_warns_for_unscoped_rules(tmp_path):
+    """sky130 registers `hvi` (75/20) as an unmodeled voltage-domain marker
+    (issue #1369). Unlike gf180mcu's partially-modelled `Dualgate`, *no*
+    rule in this curated deck reads `hvi`, so `diff` geometry drawn inside
+    it is checked against the general-case column and
+    `coverage.voltage_domain_warnings` fires with the registered
+    description."""
+    path = tmp_path / "sky130_hvi.gds"
+    _make_sky130_hvi_drc_layout(overlap=True).write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    expected_description = get_unmodeled_voltage_markers("sky130")[(75, 20)]
+    assert report["coverage"]["voltage_domain_warnings"] == [
+        {"marker": "75/20", "description": expected_description}
+    ]
+
+
+def test_run_drc_sky130_hvi_marker_no_warning_without_overlap(tmp_path):
+    """Counterfactual for the test above: `hvi` present in the stream but
+    never interacting with geometry an unscoped rule checked produces no
+    warning -- bare presence in the stream is not the gate (issue #552's
+    per-marker interaction rule, unchanged by #1369)."""
+    path = tmp_path / "sky130_hvi_far.gds"
+    _make_sky130_hvi_drc_layout(overlap=False).write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["coverage"]["voltage_domain_warnings"] == []
+
+
 @pytest.mark.skipif(
     not GF180MCU_CORPUS_FILES, reason="no gf180mcu corpus files checked in"
 )
