@@ -1016,8 +1016,10 @@ def run_pex(
 
     extracted_netlist_path = extract_report["netlist_path"]
 
-    work_dir = artifacts_dir or os.path.join(
-        os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
+    work_dir = (
+        os.path.abspath(artifacts_dir)
+        if artifacts_dir
+        else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
     )
     os.makedirs(work_dir, exist_ok=True)
 

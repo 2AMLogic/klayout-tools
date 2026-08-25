@@ -1326,6 +1326,99 @@ def test_run_pex_a_repo_relative_request_argument_is_not_doubly_nested(tmp_path)
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_outdir_relative_with_dotdot_does_not_double_the_path(tmp_path):
+    """Issue #1378 Bug 1: a `--outdir`/`artifacts_dir` value that is
+    *relative* and climbs out of the current working directory (e.g.
+    `../reports/klt-pex-artifacts/<name>`, invoked from a directory one
+    level below the reports directory) must resolve against cwd exactly
+    once. Before the fix, `work_dir` in `run_pex` was `artifacts_dir` used
+    verbatim (never made absolute) -- the still-relative `../...` string got
+    written into the extracted-request JSON's `netlist` field, then
+    `run_sim`/`_resolve_relative` re-joined it against an *already-resolved*
+    request directory, doubling the `reports/klt-pex-artifacts/<name>`
+    segment and raising "netlist not found". Resolving `work_dir` to an
+    absolute path up front (mirroring the fallback branch, which already
+    resolves `layout_path`) fixes this without changing any of the report's
+    path-echo fields."""
+    root = tmp_path
+    layout_path = _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    request = _write_request(root / "request.json", tb)
+
+    # cwd one level below the target reports dir, matching the issue's repro.
+    testbench_dir = root / "testbench_dir"
+    testbench_dir.mkdir()
+    outdir = root / "reports" / "klt-pex-artifacts" / "res"
+
+    cwd = os.getcwd()
+    os.chdir(testbench_dir)
+    try:
+        report = run_pex(
+            str(layout_path),
+            [str(request)],
+            "sky130",
+            artifacts_dir=os.path.join("..", "reports", "klt-pex-artifacts", "res"),
+        )
+    finally:
+        os.chdir(cwd)
+
+    assert report["status"] != "error" or report.get("errored", 0) == 0
+    assert outdir.is_dir()
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_outdir_plain_relative_path_still_works(tmp_path):
+    """Regression guard: `--outdir`/`artifacts_dir` as a plain relative
+    subdirectory (no `../` segments) must keep working unchanged."""
+    root = tmp_path
+    layout_path = _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    request = _write_request(root / "request.json", tb)
+
+    outdir = root / "artifacts"
+
+    cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        report = run_pex(
+            str(layout_path),
+            [str(request)],
+            "sky130",
+            artifacts_dir="artifacts",
+        )
+    finally:
+        os.chdir(cwd)
+
+    assert report["status"] != "error" or report.get("errored", 0) == 0
+    assert outdir.is_dir()
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_outdir_absolute_path_still_works(tmp_path):
+    """Regression guard: `--outdir`/`artifacts_dir` as an absolute path must
+    keep working unchanged (this already worked before the fix)."""
+    root = tmp_path
+    layout_path = _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    request = _write_request(root / "request.json", tb)
+
+    outdir = root / "abs-artifacts"
+
+    report = run_pex(
+        str(layout_path),
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+    )
+
+    assert report["status"] != "error" or report.get("errored", 0) == 0
+    assert outdir.is_dir()
+
+
+@_SKIP_NO_NGSPICE
 def test_integration_run_pex_pin_count_mismatch_cli(
     tmp_path, resistor_layout_promoted_taps, capsys
 ):
