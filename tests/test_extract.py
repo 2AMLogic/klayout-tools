@@ -2824,6 +2824,106 @@ def test_exclude_capacitor_top_via_overlap_is_noop_with_no_top_plate_marker_draw
     assert excluded_via3.area() == pytest.approx(original_via3.area())
 
 
+def _make_sky130_mim_layout_with_far_away_routing() -> kdb.Layout:
+    """Issue #1388's minimal repro: a real, DRM-legal `capm`/met3 MiM cap
+    (co-extensive `met3.drawing`/`capm.drawing` boxes, `via3.drawing`
+    landing inside both, per `_make_sky130_mim_layout_with_drm_legal_top_via`)
+    plus a *disjoint*, far-away `met3.drawing` -> `via3.drawing` ->
+    `met4.drawing` routing stack that has nothing to do with the capacitor --
+    no `capm.drawing` drawn anywhere near it. `bottom_plate_oversize_um == 0`
+    for sky130's met3 MiM stack (unlike gf180mcu's virtual-bottom-plate
+    derivation), so `_capacitor_plate_regions`'s zero-oversize branch is the
+    one under test: before the #1388 fix, its unscoped `bottom_region` (the
+    *entire* drawn `met3.drawing`, both islands) makes
+    `_exclude_capacitor_top_via_overlap` cut the far-away `via3` too, even
+    though it is nowhere near the capacitor's own plates."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, _trans_um(x, y))
+        )
+
+    # The capacitor: met3 bottom plate, capm top-plate marker, and a via3
+    # landing legally inside both -- the false short this function must
+    # still catch.
+    draw(70, 20, _box_um(0, 0, 10, 5))  # met3.drawing (bottom plate)
+    draw(89, 44, _box_um(0, 0, 10, 5))  # capm.drawing (top plate)
+    draw(70, 44, _box_um(4, 1, 6, 4))  # via3.drawing, inside both plates
+    draw(71, 20, _box_um(3, 0, 7, 5))  # met4.drawing pad, touches only via3
+
+    # A disjoint, far-away met3<->via3<->met4 routing stack -- ordinary
+    # interconnect, no capacitor marker drawn anywhere near it -- labelled on
+    # both ends so a purely interconnect (device-free) net still survives
+    # `_purge_preserving_named_nets` and shows up in the report.
+    draw(70, 20, _box_um(100, 100, 110, 105))  # met3.drawing, far away
+    draw(70, 44, _box_um(104, 101, 106, 103))  # via3.drawing, far away
+    draw(71, 20, _box_um(103, 100, 107, 105))  # met4.drawing, far away
+    label(70, 5, "FARBOT", 102, 102)  # met3.pin
+    label(71, 5, "FARTOP", 104, 102)  # met4.pin
+
+    return layout
+
+
+def test_exclude_capacitor_top_via_overlap_leaves_far_away_routing_via_alone():
+    """Issue #1388, function-level regression: with a real capacitor drawn
+    (`bottom_plate_oversize_um == 0`, sky130's met3 MiM stack), the via3
+    shape belonging to a completely unrelated, far-away met3<->met4 routing
+    stack must stay in `vias[]` -- only the via3 shape actually under this
+    capacitor's own plates is excluded."""
+    layout = _make_sky130_mim_layout_with_far_away_routing()
+    deck = get_extraction_deck("sky130")
+    top_cell = layout.top_cell()
+    vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+    via3_index = deck.vias.index((70, 44))
+    original_via3 = vias[via3_index]
+
+    excluded = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
+    excluded_via3 = excluded[via3_index]
+
+    cap_via = kdb.Region(_box_um(4, 1, 6, 4))
+    far_via = kdb.Region(_box_um(104, 101, 106, 103))
+
+    # The capacitor's own via is cut (the false-short exclusion this
+    # function exists for still works)...
+    assert (excluded_via3 & cap_via).is_empty()
+    # ...but the far-away, unrelated routing via is untouched.
+    assert (excluded_via3 & far_via).area() == pytest.approx(far_via.area())
+    assert excluded_via3.area() == pytest.approx(original_via3.area() - cap_via.area())
+
+
+def test_sky130_capacitor_does_not_disconnect_unrelated_routing_elsewhere(tmp_path):
+    """Issue #1388 end-to-end: drawing one legal MiM capacitor
+    (`bottom_plate_oversize_um == 0`) must not disconnect an ordinary,
+    far-away met3<->via3<->met4 routing stack that has nothing to do with
+    the capacitor. Before the fix, `_exclude_capacitor_top_via_overlap`'s
+    zero-oversize branch excluded *every* via3 shape on the chip once any
+    capm marker existed anywhere, so the two labelled pads on either side of
+    the far-away via3 extracted as two distinct nets (`FARBOT`, `FARTOP`)
+    instead of one -- the exact `net.unmatched` false disconnect the issue
+    describes."""
+    path = _write_gds(
+        _make_sky130_mim_layout_with_far_away_routing(),
+        tmp_path / "mim_far_routing.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_far_routing.spice"))
+
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+
+    net_names = {n["name"] for n in report["nets"]}
+    # The far-away routing's two labelled pads merge into a single net
+    # (KLayout's own "|"-joined duplicate-pin-name convention) -- proof
+    # met3 and met4 are still connected there, not split into "FARBOT" and
+    # "FARTOP" as two separate nets.
+    assert "FARBOT|FARTOP" in net_names
+    assert "FARBOT" not in net_names
+    assert "FARTOP" not in net_names
+
+
 @pytest.mark.parametrize(
     "met4, expected_class",
     [
