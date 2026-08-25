@@ -717,6 +717,19 @@ def run_extract(
     demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
     kept internal.
 
+    Two additional cause-agnostic ``warnings`` entries (issue #1385) fire
+    independent of any flag above: one when the layout carries zero text on
+    any of ``deck``'s own label layers anywhere in the cell tree (no net can
+    be named at all -- the observed real-world trigger is a ``klt
+    place-and-route`` request whose ``io.layer_h``/``io.layer_v`` choice
+    lands on a GDS layer ``deck`` never scans for pin labels), and one after
+    every promotion/demotion pass above has run, when the top circuit ends
+    up with zero top-level pins regardless of cause. Both exist because
+    ``klt lvs``'s ``NetlistComparer`` has no net/device anchor to seed
+    correspondence with zero top-level pins, and reports a full mismatch
+    with no hint the root cause is upstream pin promotion rather than device
+    extraction.
+
     ``apply_resistor_fixed_offset`` (issue #559/#585, exposed on the CLI as
     ``klt extract --defer-resistor-fixed-offset`` by issue #588): when
     ``True`` (the default, the behavior every existing caller and every
@@ -5323,6 +5336,33 @@ def _extract_netlist(
     )
     below_top_labels = all_label_strings - top_label_strings
 
+    # Issue #1385: a layout that carries zero text on every one of `deck`'s
+    # own label layers (`well_label`/`poly_label`/`metal_labels`) anywhere in
+    # the whole cell tree cannot name a single net -- `make_top_level_pins()`
+    # below promotes only *named* nets, so this silently zeroes out the
+    # entire top-level pin interface with no error of any kind (extraction
+    # itself succeeds; DRC against the same layout is unaffected). The
+    # observed real-world trigger is a `klt place-and-route` request whose
+    # `io.layer_h`/`io.layer_v` choice lands on a GDS layer/datatype `deck`
+    # does not scan for pin-name text at all -- but this check is
+    # cause-agnostic: it fires for any layout, from any source, that reaches
+    # this point with no recognisable pin-name text.
+    if not all_label_strings:
+        scanned = ", ".join(
+            f"{layer[0]}/{layer[1]}" for layer in label_layers if layer is not None
+        )
+        warnings.append(
+            "found 0 pin-name label(s) on any of this deck's label layers "
+            f"({scanned}) anywhere in '{top_cell.name}' -- no net can be "
+            "named, so 0 top-level pins will be promoted below and `klt "
+            "lvs` will have no net/device anchor to seed a match against a "
+            "reference netlist. Compare the layers `klt layers` reports for "
+            "this GDS against the list above; for a `klt place-and-route` "
+            "layout in particular, check that request.io.layer_h/layer_v "
+            "chose a layer this --deck actually scans for pin labels "
+            "(issue #1385)"
+        )
+
     netlist.make_top_level_pins()
     _promote_orphan_named_nets(netlist)
     demoted = _reconcile_top_pins(
@@ -5385,6 +5425,32 @@ def _extract_netlist(
                 f"layout.declared_pins) matched no promoted net in the "
                 f"layout: {joined}"
             )
+
+    # Issue #1385: the final, cause-agnostic check -- after every promotion
+    # and demotion pass above (`make_top_level_pins()`, `--top-cell-pins`,
+    # `--pins`/`declared_pins`) has run, does the top circuit have *any*
+    # top-level pin left at all? A zero-pin top circuit means `klt lvs`'s
+    # `NetlistComparer` has no net/device anchor to seed correspondence
+    # against a reference netlist and will report a full mismatch even when
+    # the two sides' device populations genuinely agree -- and that failure
+    # mode gives no hint the root cause is upstream in pin promotion, not
+    # device extraction. This subsumes (but does not replace) the
+    # label-layer-specific warning above: it also catches an
+    # otherwise-labelled layout that `--top-cell-pins`/`--pins` demoted down
+    # to nothing between them.
+    final_top_circuit = netlist.circuit_by_name(top_cell.name)
+    if final_top_circuit is not None and final_top_circuit.pin_count() == 0:
+        warnings.append(
+            f"0 top-level pins are promoted on '{top_cell.name}' after "
+            "extraction -- `klt lvs` has no net/device anchor to seed "
+            "correspondence against a reference netlist and will report a "
+            "full mismatch regardless of device-count agreement. If this "
+            "design genuinely has zero top-level pins by intent, this "
+            "warning can be ignored; otherwise see the pin-name-label "
+            "warning above (if present) or check that "
+            "--top-cell-pins/--pins did not demote every promoted pin "
+            "(issue #1385)"
+        )
 
     # `Netlist.purge()` (used by `_purge_preserving_named_nets` below) judges
     # a net "floating" -- and, transitively, a whole circuit/subcircuit chain
