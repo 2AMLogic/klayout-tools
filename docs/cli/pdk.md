@@ -136,6 +136,14 @@ rediscover a gap by failure.
 | IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ✅ curated deck (`sg13g2`, issue #905) — a starter subset, see below | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
 
+IHP's second open PDK, **CMOS5L**, is not in this table yet — it has no
+curated deck (or CI-reproducible fetch script) in this repo as of this
+writing, only findings gathered while scoping a port. See
+[`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
+for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
+DRC/LVS source-shape) and the general steps for adding any new PDK family
+to this module's resolution and this repo's curated-deck registry.
+
 **How far the SG13G2 curated deck goes.** `klt drc`/`klt lvs` only ever run
 *this repo's own* curated Python rule decks via KLayout's native `Region`
 check primitives — a deliberate engine choice (see `docs/cli/drc.md`) that

@@ -219,7 +219,10 @@ When a device name is not one of the curated devices, supply it explicitly:
 
 - `reference.deck` — `"sky130"` / `"gf180mcu"`, selects that deck's device
   map (validates names against it, and already covers MOS, resistor,
-  capacitor, and bipolar for both registered decks — see below).
+  capacitor, and bipolar for both registered decks — see below). Adding a
+  new PDK family's device map (`_MOS_MODEL_TABLE`, `_KNOWN_PDK_FAMILIES`,
+  `_PDK_VARIANT_FAMILY_ALIASES` in `klayout_tools.pdk_models`) is covered
+  in [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
 - `reference.device_map` — an explicit `{ "<subckt-name>": <override> }`
   override, merged on top of the deck's map, for a device subcircuit name
   the curated table does not cover. `<override>` is either a bare
