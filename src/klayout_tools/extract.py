@@ -3505,7 +3505,15 @@ def _exclude_capacitor_top_via_overlap(
     bottom plate keeps the rest of its footprint in the generic connectivity
     graph, and any *other* via shape drawn on the same physical via layer
     elsewhere in the layout -- ordinary routing unrelated to this capacitor
-    -- is left untouched.
+    -- is left untouched. That last guarantee requires narrowing
+    ``bottom_region`` to ``interacting(top_region)`` before intersecting it
+    with the via footprint (issue #1388): for a deck with
+    ``bottom_plate_oversize_um == 0`` (e.g. sky130's MiM stacks),
+    :func:`_capacitor_plate_regions` hands back the bottom conductor's
+    *entire* drawn region on that metal, not just the part under this
+    capacitor's own top plate, so without the narrowing a single drawn
+    capacitor would exclude every via on the shared via layer chip-wide --
+    including ordinary routing vias nowhere near a capacitor.
 
     Returns a new ``vias`` list (the input list/regions are not mutated); a
     deck with no capacitor declaring ``top_plate_via``, or whose declared
@@ -3533,31 +3541,33 @@ def _exclude_capacitor_top_via_overlap(
         top_region, bottom_region = _capacitor_plate_regions(
             layout, top_cell, capacitor
         )
-        # Same "no PDK cap marker drawn anywhere on this layout" guard the
-        # main capacitor-recognition loop below applies before registering a
-        # device (issue #775 regression finding): for a deck whose
-        # `bottom_plate` is *not* clipped to the top plate's own footprint
-        # (`bottom_plate_oversize_um == 0`, e.g. sky130's MiM stacks --
-        # `_capacitor_plate_regions`'s zero-oversize branch returns the
-        # bottom conductor's *entire* drawn region, unscoped by whether any
-        # top-plate mark exists at all), `bottom_region` stays non-empty even
-        # when this capacitor's `top_plate` marker is never drawn on the
-        # layout -- the overwhelmingly common case for any digital/macro
-        # design that draws ordinary routing on the declared `bottom_plate`
-        # metal but no MiM cap. Without this check, `top_via_region` (every
-        # shape on the declared `top_plate_via` layer, e.g. sky130's real
-        # `via3`/`via4` routing vias used throughout ordinary signal
-        # routing) intersected with that unscoped, chip-wide `bottom_region`
-        # excludes essentially every legitimate via on that layer from the
-        # deck's generic `vias[]` connectivity -- a false disconnect across
-        # the whole design, not the narrow false-short exclusion this
-        # function exists to apply. gf180mcu's stack never hit this because
-        # its nonzero `bottom_plate_oversize_um` branch already derives
-        # `bottom_region` from `interacting(top_region)`, which is itself
-        # empty whenever `top_region` is.
-        if top_region.is_empty() or bottom_region.is_empty():
+        # For a deck whose `bottom_plate` is *not* clipped to the top
+        # plate's own footprint (`bottom_plate_oversize_um == 0`, e.g.
+        # sky130's MiM stacks), `_capacitor_plate_regions`'s zero-oversize
+        # branch returns the bottom conductor's *entire* drawn region --
+        # every shape on that metal layer anywhere in the layout, not just
+        # this capacitor's own plate. Narrowing to `interacting(top_region)`
+        # here (issue #1388) keeps only the bottom-plate shape(s) that
+        # actually sit under *this* capacitor's top-plate marker, the same
+        # scoping the nonzero-oversize branch above already applies when it
+        # derives `bottom_region` itself. This both restores the issue #775
+        # guard (an empty `top_region` -- no cap marker drawn anywhere --
+        # makes `scoped_bottom_region` empty too, so a digital/macro layout
+        # that only routes on the declared `bottom_plate` metal is
+        # untouched) *and* fixes the case #775 didn't cover: a layout that
+        # draws both a real capacitor and ordinary routing between the
+        # bottom-plate metal and the metal above elsewhere on the chip.
+        # Without this narrowing, `top_via_region` (every shape on the
+        # declared `top_plate_via` layer, e.g. sky130's real `via3`/`via4`
+        # routing vias used throughout ordinary signal routing) intersected
+        # against the unscoped, chip-wide `bottom_region` excludes every
+        # legitimate via on that layer from the deck's generic `vias[]`
+        # connectivity -- a false disconnect across the whole design, not
+        # the narrow false-short exclusion this function exists to apply.
+        scoped_bottom_region = bottom_region.interacting(top_region)
+        if top_region.is_empty() or scoped_bottom_region.is_empty():
             continue
-        overlap = top_via_region & bottom_region
+        overlap = top_via_region & scoped_bottom_region
         if overlap.is_empty():
             continue
         exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap
