@@ -1631,6 +1631,76 @@ def test_declared_pins_applied_after_top_cell_pins_only(tmp_path):
     assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
 
 
+# --------------------------------------------------------------------------- #
+# Zero-promoted-pins diagnostics (issue #1385)
+# --------------------------------------------------------------------------- #
+
+
+def test_zero_label_layer_text_warns(tmp_path):
+    """A layout with no text at all on any of the deck's label layers (the
+    real-world trigger: a `klt place-and-route` request whose
+    `io.layer_h`/`io.layer_v` choice lands on a GDS layer this deck never
+    scans for pin labels) gets a clear, cause-agnostic warning instead of
+    silently promoting zero top-level pins -- issue #1385, root cause 1."""
+    layout = _make_inverter_layout()
+    top = layout.top_cell()
+    # Strip every label this deck's sky130 label layers use in this fixture
+    # (li1.pin 67/5, nwell.pin 64/5, poly.pin 66/5) -- geometry (and
+    # therefore device recognition) is left untouched, only the naming text
+    # is removed.
+    for layer_spec in [(67, 5), (64, 5), (66, 5)]:
+        top.shapes(layout.layer(*layer_spec)).clear()
+    path = _write_gds(layout, tmp_path / "no_labels.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "no_labels.spice"))
+
+    warning = next(
+        (w for w in report["warnings"] if "found 0 pin-name label" in w), None
+    )
+    assert warning is not None
+    assert "io.layer_h/layer_v" in warning
+    # Device extraction itself is unaffected -- both transistors are still
+    # recognised even though nothing is named.
+    assert report["device_count"] == 2
+
+
+def test_zero_promoted_pins_warns_even_when_labels_present(tmp_path):
+    """The final, cause-agnostic zero-pins check fires even when the layout
+    *does* carry pin-name labels, if `--pins`/`declared_pins` demotes every
+    one of them -- distinct from (and not redundant with) the zero-label-text
+    warning above, since it also catches over-restriction downstream of a
+    perfectly normal, fully-labelled layout (issue #1385, root cause 3's
+    actionable diagnostic)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "declared.spice"),
+        declared_pins=frozenset(),  # demotes every promoted pin, incl. vsubs
+    )
+
+    assert not any("found 0 pin-name label" in w for w in report["warnings"])
+    warning = next(
+        (w for w in report["warnings"] if "0 top-level pins are promoted" in w),
+        None,
+    )
+    assert warning is not None
+    assert not any(n["pin"] for n in report["nets"])
+
+
+def test_pin_count_nonzero_does_not_warn(tmp_path):
+    """The ordinary, fully-labelled fixture (real pins promoted) never
+    triggers either new zero-pins warning -- a plain regression guard so a
+    normal `klt extract` run's `warnings[]` stays unchanged."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert not any("found 0 pin-name label" in w for w in report["warnings"])
+    assert not any("0 top-level pins are promoted" in w for w in report["warnings"])
+    assert any(n["pin"] for n in report["nets"])
+
+
 def test_cli_pins_flag_demotes_undeclared_label(tmp_path, capsys):
     """The `--pins` flag wires through the CLI: a top-cell-drawn label ("A")
     absent from the declared set is not promoted to a top-level pin, while

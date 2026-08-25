@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt extract` (and `klt lvs`, which shares the same extraction path) now
+  emits two additive, cause-agnostic `warnings[]` entries when top-level pin
+  promotion silently produces nothing to anchor `klt lvs`'s net/device
+  correspondence against (issue #1385): one when the layout carries zero
+  text on any of the target `--deck`'s own label layers anywhere in the cell
+  tree (the observed real-world trigger is a `klt place-and-route` request
+  whose `io.layer_h`/`io.layer_v` choice lands on a GDS layer the deck never
+  scans for pin-name text), and one after every promotion/demotion pass
+  (`make_top_level_pins()`, `--top-cell-pins`, `--pins`/`declared_pins`) has
+  run, whenever the top circuit ends up with zero top-level pins for any
+  reason. Purely additive (new `warnings[]` strings only) — no change to
+  `nets[]`, `pin_count`, or any other field, and a layout that already
+  promotes at least one top-level pin is unaffected.
 - `klt lvs`'s `reference.form: "gate-level-verilog"` conversion now reads a
   Verilog **escaped identifier** the way Verilog defines it — one atomic
   token from the backslash to the next whitespace (issue #1371). A

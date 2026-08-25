@@ -1776,6 +1776,57 @@ cell, has an empty below-top set: `--top-cell-pins` is then a no-op and no
 warning fires. `klt lvs` exposes the same control as the `layout.top_cell_pins`
 request field (see [`docs/cli/lvs.md`](lvs.md)).
 
+### DEF→GDS-merged (`klt place-and-route`) layouts (#1385)
+
+`--top-cell-pins`'s "only labels drawn directly in the top cell" heuristic is
+sized for a **hand-drawn hierarchical** layout, where a sub-cell's own
+internal pin labels genuinely live inside that instance's own cell view. A
+layout produced by `klt place-and-route`'s own LEF/DEF → GDS merge is
+structurally different: DEF's `NETS` section records every net's physical
+pin connections as `(component, local-pin-name)` pairs, and every one of
+those connection points ends up geometrically **in the top cell** once the
+design is flattened by routing — indistinguishable, by cell-nesting depth
+alone, from a genuine DEF `PINS`-section top-level port. `--top-cell-pins`
+is a structural no-op against this case (the below-top set is always empty
+for a fully-flattened layout — see above), and `make_top_level_pins()`
+promotes every one of those DEF-`NETS` connection-point labels right
+alongside the real top-level ports, including collided, comma-joined names
+where two or more distinct labels land on the same electrical net (surfaced
+separately as `merged_net_labels[]`, see
+["Merged net labels"](#merged-net-labels-issue-470) above). There is
+currently no flatten-aware promotion heuristic that fixes this — carrying DEF
+`PINS`-vs-`NETS` provenance through as GDS metadata during the merge is the
+leading candidate design, but is not yet implemented; track this gap under
+issue #1385's own follow-up.
+
+What **is** implemented today, so this failure mode is at least never
+silent:
+
+- If the layout carries **zero** text on any of the target `--deck`'s own
+  label layers anywhere in the cell tree, `warnings[]` says so explicitly and
+  points at `klt layers` and, for a `klt place-and-route` layout
+  specifically, at `request.io.layer_h`/`io.layer_v` — the observed
+  real-world trigger is an I/O-pin-layer choice that lands on a GDS layer the
+  target deck never scans for pin-name text at all (issue #1385's root
+  cause). This is a whole-layout check, independent of any flag.
+- After every promotion/demotion pass above has run (`make_top_level_pins()`,
+  `--top-cell-pins`, `--pins`/`declared_pins`), if the top circuit ends up
+  with **zero** top-level pins for *any* reason, `warnings[]` says so — `klt
+  lvs`'s `NetlistComparer` has no net/device anchor to seed correspondence
+  with zero top-level pins, and otherwise reports a full mismatch with no
+  hint the root cause is upstream pin promotion rather than device
+  extraction disagreement.
+- `merged_net_labels[]` (issue #470, see below) already reports every net —
+  promoted to a pin or not — whose name is a multi-label collision, which is
+  usually the first visible symptom of the DEF-`NETS`-vs-`PINS` ambiguity
+  above.
+
+Neither of these makes a DEF-merged layout's promoted pin set *correct* —
+only diagnosable. `--pins`/`declared_pins` (below) is the practical
+workaround today when the DEF's own `PINS` list is available separately: pass
+it explicitly to demote every DEF-`NETS`-origin label back to an internal
+node, since `--top-cell-pins` structurally cannot help here.
+
 ## Declared pin set (`--pins`, #514)
 
 `--top-cell-pins` filters labels by **which cell** they were drawn in — the
