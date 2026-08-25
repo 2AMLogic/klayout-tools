@@ -297,12 +297,21 @@ flavour's subcircuit compares correctly against the extracted layout's
 **Unit suffixes matter.** `NetlistSpiceReader` interprets a bare numeric
 literal for a MOS `W`/`L` parameter as plain SI (metres) per the SPICE
 standard, but an explicit `U` (or `UM`) suffix as micrometres — the
-convention `klt extract`'s own writer always uses (`W=0.65U`). A reference
+convention `klt extract`'s `M`-card writer uses (`W=0.65U`). A reference
 netlist authored without unit suffixes will parse with a `1e6`-scaled
 device parameter that only ever mismatches or matches *relative to itself*
 consistently, but produces a nonsensical absolute value in a
 `device.property` mismatch's reported numbers. Always write reference
 netlists with explicit unit suffixes on `W`/`L`.
+
+This is a **reader-side** rule and is deliberately unaffected by issue
+#1396, which changed only what `klt extract --pdk sky130*` writes onto a
+**simulation-form** `X` card (bare micrometres, matching that vendor deck's
+own `.option scale=1.0u`). `klt lvs`'s layout netlist is the unbound
+`M`-card form, which still carries explicit suffixes. If you do hand a
+`--pdk sky130*`-bound netlist to `klt lvs` as a `subckt-call` reference,
+add the suffixes back first — the normalizer cannot tell a bare-micrometre
+literal from SI metres without side information.
 
 ## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
 

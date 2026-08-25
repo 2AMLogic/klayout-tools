@@ -2059,9 +2059,9 @@ library at all.
 subcircuit call against the resolved PDK's real device library instead:
 
 ```
-X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U AS=0.234P AD=0.234P PS=1.6U PD=1.6U
-X$7 RA RB sky130_fd_pr__res_generic_po l=6U w=1U
-X$8 net1 net2 sky130_fd_pr__cap_mim_m3_1 l=10U w=5U
+X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15 W=0.65 AS=0.234 AD=0.234 PS=1.6 PD=1.6
+X$7 RA RB sky130_fd_pr__res_generic_po l=6 w=1
+X$8 net1 net2 sky130_fd_pr__cap_mim_m3_1 l=10 w=5
 X$9 vsubs BASE EMIT sky130_fd_pr__pnp_05v5_W0p68L0p68
 ```
 
@@ -2071,6 +2071,26 @@ provenance of every bound subcircuit name and parameter spelling, each read
 off a real fetched PDK install rather than assumed) and a
 `kdb.NetlistSpiceWriterDelegate` subclass that overrides KLayout's default
 primitive-card writer only for classes present in the resolved tables.
+
+**Geometry units follow the resolved PDK's own convention** (issue #1396).
+The unbound `M` card above keeps KLayout's explicit unit suffixes
+(`L=0.15U`, `AS=0.234P`); the bound `X` card writes whichever form the target
+vendor deck expects:
+
+| PDK family | Bound `X`-card geometry | Why |
+|---|---|---|
+| sky130 | bare micrometres — `L=0.15 W=0.65 AS=0.234` | The vendor deck (`libs.tech/combined/corners/all.spice`) sets `.option scale=1.0u` and documents the convention itself: *"1 micron width is W=1, not W=1u."* |
+| gf180mcu | explicit unit suffixes — `L=0.28U W=10U AS=0.5P` | No `.option scale` anywhere in `libs.tech/ngspice/`; its subcircuits declare raw-metre defaults (`.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7`), so an absolute literal is correct. |
+| sg13g2 | explicit unit suffixes | Unverified against a real IHP install; left on the default rather than changed on a guess. |
+
+This matters because `.option scale` is applied **on top of** the parsed
+literal — ngspice multiplies a MOS card's `l`/`w`/`ps`/`pd` by `scale` and its
+`as`/`ad` by `scale²`. Writing sky130's cards with unit suffixes therefore
+made every geometry 10⁶× too small, and the resulting device matched no model
+bin at all: ngspice rejected it with the generic `could not find a valid
+modelname`. The same mistake in the other direction (bare numbers for
+gf180mcu) would be wrong by the same factor, which is why the convention is
+resolved per PDK family rather than picked globally.
 
 **Coverage** (issue #339 extended #209's MOS-only binding to the other
 recognised analog device classes):
@@ -2159,11 +2179,12 @@ future epic):
   naming what was tried — **never** a silent fallback to the bare primitive
   form. (This up-front deck/PDK-mismatch guard keys off the MOS table, which
   every deck has; it is distinct from the per-class carve-out above.)
-- Geometry values on every `X` card use an explicit unit suffix (e.g.
-  `L=0.15U`, `l=6U`, `r_length=6U` for a length in micrometres, `AS=0.234P`
-  for an area in square micrometres — the same convention `klt extract`'s
-  `M`-card form already uses, unambiguous regardless of any `.option scale` a
-  caller's testbench may or may not set) and rely on the resolved
+- Geometry values on every `X` card follow the resolved PDK family's own
+  convention (see "Geometry units follow the resolved PDK's own convention"
+  above): bare micrometres for sky130 (`L=0.15`, `l=6`, `AS=0.234`), an
+  explicit unit suffix for gf180mcu and `sg13g2` (`L=0.28U`, `r_length=6U`
+  for a length in micrometres, `AS=0.5P` for an area in square
+  micrometres). Both forms rely on the resolved
   subcircuit's own defaults for everything else (`nf`/`mult`/`par`/`m`, all
   confirmed `1`-equivalent in the fetched real installs each table was
   verified against — the extractor has no opinion on multi-finger/multiplied

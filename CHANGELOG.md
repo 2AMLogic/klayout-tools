@@ -27,6 +27,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   no-`pdk` shape (a plain relative or `$PDK_ROOT/…` literal `lib`) keeps its
   existing eager request-dir resolution, which the copy in `--outdir` still
   needs. No JSON shape change.
+- **Fixed**: `klt extract --pdk sky130*` now writes the geometry on every
+  PDK-bound `X` card as **bare micrometre numbers** (`L=0.15 W=0.65 AS=0.234
+  AD=0.234 PS=1.6 PD=1.6`) instead of explicit SPICE unit suffixes (`L=0.15U
+  ... AS=0.234P ...`) (issue #1396). sky130's own vendor deck
+  (`libs.tech/combined/corners/all.spice`) sets `.option scale=1.0u` and
+  documents the convention outright — *"1 micron width is W=1, not W=1u"* —
+  and ngspice applies `scale` **on top of** the parsed literal (`×scale` for
+  `l`/`w`/`ps`/`pd`, `×scale²` for `as`/`ad`). The suffixed form therefore
+  reached the model 10⁶× too small, matched no model bin, and was rejected
+  with the generic `could not find a valid modelname`; the same 1e6 error
+  silently mis-sized sky130's bound resistor and MiM-capacitor cards, which
+  are geometry-parameterized under the same ambient scale, so the convention
+  is now resolved once per PDK family and applied to every bound device kind.
+  **gf180mcu is deliberately unchanged** — its model library sets no `.option
+  scale` and its subcircuits declare raw-metre defaults, so the absolute,
+  suffix-carrying literal is correct there; `sg13g2` also stays on the
+  unit-suffix default (no real IHP install was available to verify against).
+  The **unbound** `M`-card form (no `--pdk`) keeps KLayout's own unit-suffixed
+  spelling exactly as before, and `klt lvs` reference-netlist parsing is
+  unchanged. See `docs/cli/extract.md`'s "Geometry units follow the resolved
+  PDK's own convention".
 - `klt gen-compose`'s route-vs-route collision check (#1057) is now
   spacing-aware, not just overlap-aware (issue #1386): two accepted
   `connectivity[]` legs on the same effective drawing layer that never
