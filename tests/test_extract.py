@@ -53,6 +53,7 @@ from klayout_tools.extract import (
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
 from klayout_tools.pdk_models import (
+    GEOMETRY_STYLE_BARE_UM,
     _format_um,
     _format_um2,
     _select_bipolar_variant,
@@ -3780,11 +3781,22 @@ def test_sky130_extract_binds_nfet_01v8_outside_hvi(tmp_path):
     assert not any("sky130_fd_pr__nfet_g5v0d10v5" in line for line in device_lines)
 
 
-def test_pdk_resolved_x_card_carries_l_w_with_unit_suffix(tmp_path):
-    """The emitted `X` card's `L`/`W` use the same explicit micrometre unit
-    suffix `klt extract`'s own `M`-card writer already uses (see
-    `docs/cli/lvs.md`'s "Unit suffixes matter" note) -- unambiguous
-    regardless of what `.option scale` (if any) a caller's testbench sets."""
+def test_pdk_resolved_x_card_carries_l_w_as_bare_microns_sky130(tmp_path):
+    """Issue #1396: the sky130-bound `X` card writes `L`/`W` as **bare
+    micrometre numbers**, not the unit-suffixed `L=0.15U` form this test
+    originally asserted.
+
+    The original contract assumed an explicit SI unit suffix is parsed
+    identically regardless of a deck's `.option scale`. That premise is false
+    for sky130, whose own vendor deck
+    (`libs.tech/combined/corners/all.spice`) sets `.option scale=1.0u` and
+    documents the convention outright -- *"1 micron width is W=1, not W=1u"*.
+    ngspice applies `scale` on top of the parsed literal, so `W=2U` reached
+    the model as `2e-12` m, missed every model bin, and the device was
+    rejected with `could not find a valid modelname`. The assertion is
+    therefore deliberately inverted for this family; the unit-suffixed form is
+    still asserted for gf180mcu below, which sets no `.option scale` at all.
+    """
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     root = _make_pdk_install(tmp_path, "sky130A")
 
@@ -3799,8 +3811,190 @@ def test_pdk_resolved_x_card_carries_l_w_with_unit_suffix(tmp_path):
     text = Path(report["netlist_path"]).read_text()
     nfet = next(d for d in report["devices"] if d["class"] == "nfet")
     l_um, w_um = nfet["params"]["l_um"], nfet["params"]["w_um"]
+    assert f"L={l_um:g} " in text
+    assert f"W={w_um:g} " in text
+    # No suffix survives anywhere on a bound sky130 card -- a single leftover
+    # `U`/`P` is a 1e6 geometry error against this deck, not a cosmetic one.
+    bound_lines = [line for line in text.splitlines() if line.startswith("X")]
+    assert bound_lines
+    for line in bound_lines:
+        assert not re.search(r"=[0-9.eE+-]+[UP]\b", line), line
+
+
+def test_pdk_resolved_x_card_keeps_unit_suffix_gf180mcu(tmp_path):
+    """Issue #1396 regression guard: gf180mcu's bound `X` cards keep the
+    explicit unit-suffixed form.
+
+    gf180mcu's model library sets no `.option scale`, and its subcircuits
+    declare raw-metre defaults (`.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7`),
+    so the absolute suffix-carrying literal is the correct convention there.
+    Writing sky130's bare-micrometre form for this family would be wrong by
+    the same factor of 1e6, in the opposite direction."""
+    layout_path = CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds"
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+
+    report = run_extract(
+        str(layout_path),
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "clkinv_1.spice"),
+    )
+
+    text = Path(report["netlist_path"]).read_text()
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    l_um, w_um = nfet["params"]["l_um"], nfet["params"]["w_um"]
     assert f"L={l_um:g}U" in text
     assert f"W={w_um:g}U" in text
+    assert re.search(r"AS=[0-9.]+P AD=[0-9.]+P", text)
+
+
+def test_geometry_style_is_per_pdk_family(tmp_path):
+    """Issue #1396: the geometry-literal convention is resolved per PDK
+    family and stamped onto every `DeviceBinding` for that family (MOS,
+    resistor, capacitor and bipolar alike), because it is a property of the
+    target deck rather than of the device kind -- an unknown family keeps the
+    module's original unit-suffixed default."""
+    from klayout_tools.pdk_models import (
+        GEOMETRY_STYLE_UNIT_SUFFIX,
+        geometry_style_for_family,
+        resolve_device_bindings,
+    )
+
+    assert geometry_style_for_family("sky130") == GEOMETRY_STYLE_BARE_UM
+    assert geometry_style_for_family("gf180mcu") == GEOMETRY_STYLE_UNIT_SUFFIX
+    # No IHP install was available to verify sg13g2's convention against, so
+    # it stays on the pre-#1396 default rather than being changed on a guess.
+    assert geometry_style_for_family("sg13g2") == GEOMETRY_STYLE_UNIT_SUFFIX
+    assert geometry_style_for_family("nosuchpdk") == GEOMETRY_STYLE_UNIT_SUFFIX
+
+    sky_deck = get_extraction_deck("sky130")
+    sky_bindings = resolve_device_bindings("sky130", "sky130A", sky_deck)
+    assert sky_bindings
+    assert {b.kind for b in sky_bindings.values()} >= {"mos", "resistor", "capacitor"}
+    assert all(
+        b.geometry_style == GEOMETRY_STYLE_BARE_UM for b in sky_bindings.values()
+    )
+
+    gf_deck = get_extraction_deck("gf180mcu")
+    gf_bindings = resolve_device_bindings("gf180mcu", "gf180mcuA", gf_deck)
+    assert gf_bindings
+    assert all(
+        b.geometry_style == GEOMETRY_STYLE_UNIT_SUFFIX for b in gf_bindings.values()
+    )
+
+
+# --- real-PDK + ngspice proof for the bound MOS card (issue #1396) ---------- #
+#
+# Every assertion above pins the *written text*. This one closes the loop the
+# issue actually reports: the card `klt extract --pdk sky130A` writes is fed
+# to ngspice against sky130's own vendor model deck. It skips cleanly where no
+# real install / no ngspice is present, following the `list_pdks()`-search
+# convention `tests/test_lvs.py`'s real-PDK tier established.
+
+
+def _find_real_sky130_lib_spice() -> str | None:
+    """The path of a real installed sky130 `libs.tech/combined/sky130.lib.spice`
+    (the corner-selectable entry point the vendor deck ships), or ``None``."""
+    try:
+        result = pdk.list_pdks()
+    except Exception:
+        return None
+    for install in result["installs"]:
+        for variant in install["variants"]:
+            if not variant["name"].startswith("sky130"):
+                continue
+            candidate = (
+                Path(install["root"])
+                / variant["name"]
+                / "libs.tech"
+                / "combined"
+                / "sky130.lib.spice"
+            )
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+_REAL_SKY130_LIB_SPICE = _find_real_sky130_lib_spice()
+
+
+@pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_LIB_SPICE is None,
+    reason="no real sky130 combined/sky130.lib.spice resolves via list_pdks()",
+)
+def test_real_sky130_bound_mos_card_simulates_against_the_vendor_deck(tmp_path):
+    """Issue #1396's acceptance criterion, end to end: the MOS `X` card
+    `klt extract --pdk sky130A` writes solves an operating point against
+    sky130's real vendor model deck.
+
+    The counter-assertion is what makes this non-vacuous -- the *same* card
+    with the pre-#1396 unit suffixes restored (`L=0.4U`, `AS=0.8P`, ...) is
+    rejected by the same deck with `could not find a valid modelname`,
+    because the deck's own `.option scale=1.0u` scales the already-absolute
+    literal a second time.
+    """
+    import subprocess
+
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "inv.spice"),
+    )
+
+    text = Path(report["netlist_path"]).read_text()
+    card = next(line for line in text.splitlines() if "sky130_fd_pr__nfet_01v8" in line)
+    # Everything from the subcircuit name onward: `<subckt> L=.. W=.. AS=..`.
+    tail = card[card.index("sky130_fd_pr__nfet_01v8") :].strip()
+
+    def restore_unit_suffixes(instance_tail: str) -> str:
+        """The pre-#1396 spelling of the same card: `U` on every length, `P`
+        on every area."""
+        out = []
+        for token in instance_tail.split():
+            key, sep, value = token.partition("=")
+            if not sep:
+                out.append(token)
+                continue
+            out.append(f"{key}={value}{'P' if key in ('AS', 'AD') else 'U'}")
+        return " ".join(out)
+
+    def simulate(instance_tail: str, name: str) -> str:
+        deck = tmp_path / f"{name}.spice"
+        deck.write_text(
+            f".lib {_REAL_SKY130_LIB_SPICE} tt\n"
+            "Vd d 0 dc 1.8\n"
+            "Vg g 0 dc 1.8\n"
+            f"X1 d g 0 0 {instance_tail}\n"
+            ".control\n"
+            "op\n"
+            "print i(Vd)\n"
+            ".endc\n"
+            ".end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(deck)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return completed.stdout + completed.stderr
+
+    written = simulate(tail, "as_written")
+    assert "could not find a valid modelname" not in written, written
+    drain_current = re.search(r"i\(vd\)\s*=\s*(\S+)", written)
+    assert drain_current is not None, written
+    # A biased-on 1.8V NFET draws a real, non-negligible current -- a solved
+    # operating point, not a degenerate one.
+    assert abs(float(drain_current.group(1))) > 1e-9, written
+
+    legacy = simulate(restore_unit_suffixes(tail), "legacy_suffixes")
+    assert "could not find a valid modelname" in legacy, legacy
 
 
 def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
@@ -3809,7 +4003,13 @@ def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
     under the same (KLayout-native) parameter spelling the unbound `M`-card
     form already uses, with the same measured values -- diffing the bound
     and unbound netlists for the same cell shows the bound form loses no
-    parameter."""
+    parameter.
+
+    Since issue #1396 the two forms no longer share a *literal* spelling for
+    sky130 (the unbound `M` card keeps KLayout's `0.8P`/`3.6U` suffixes, the
+    bound `X` card writes the bare-micrometre form the vendor deck's `.option
+    scale=1.0u` expects), so the comparison is on the decoded micrometre
+    values rather than the raw text."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     root = _make_pdk_install(tmp_path, "sky130A")
 
@@ -3825,8 +4025,18 @@ def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
     unbound_text = Path(unbound["netlist_path"]).read_text()
     bound_text = Path(bound["netlist_path"]).read_text()
 
-    def junction_params(text: str) -> list[tuple[str, str, str, str]]:
-        return re.findall(r"AS=(\S+) AD=(\S+) PS=(\S+)\s*\n?\+?\s*PD=(\S+)", text)
+    def junction_params(text: str) -> list[tuple[float, float, float, float]]:
+        # `AS`/`AD` are square micrometres (`P` == 1e-12 == 1 um^2) and
+        # `PS`/`PD` micrometres (`U` == 1e-6 == 1 um), so stripping the
+        # suffix leaves the same micrometre-domain number the bare form
+        # already carries -- decoding both to floats is what makes the two
+        # card shapes comparable after #1396.
+        return [
+            tuple(float(value.rstrip("UPup")) for value in match)
+            for match in re.findall(
+                r"AS=(\S+) AD=(\S+) PS=(\S+)\s*\n?\+?\s*PD=(\S+)", text
+            )
+        ]
 
     unbound_junctions = junction_params(unbound_text)
     bound_junctions = junction_params(bound_text)
@@ -3843,10 +4053,11 @@ def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
     assert nfet["params"]["ps_um"] > 0.0
     assert nfet["params"]["pd_um"] > 0.0
 
-    assert f"AS={_format_um2(nfet['params']['as_um2'])}" in bound_text
-    assert f"AD={_format_um2(nfet['params']['ad_um2'])}" in bound_text
-    assert f"PS={_format_um(nfet['params']['ps_um'])}" in bound_text
-    assert f"PD={_format_um(nfet['params']['pd_um'])}" in bound_text
+    bare = GEOMETRY_STYLE_BARE_UM
+    assert f"AS={_format_um2(nfet['params']['as_um2'], bare)} " in bound_text
+    assert f"AD={_format_um2(nfet['params']['ad_um2'], bare)} " in bound_text
+    assert f"PS={_format_um(nfet['params']['ps_um'], bare)} " in bound_text
+    assert f"PD={_format_um(nfet['params']['pd_um'], bare)}" in bound_text
 
 
 def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
@@ -3929,7 +4140,10 @@ def _device_cards(netlist_path: str) -> list[str]:
 def test_pdk_resolved_binds_resistor_sky130(tmp_path):
     """--pdk binds a recognised sky130 poly resistor to its real geometry-
     parameterized subcircuit (`sky130_fd_pr__res_generic_po`, two terminals,
-    `l`/`w` in micrometres) -- not the bare, value-only `R`-card form (#339)."""
+    `l`/`w` in micrometres) -- not the bare, value-only `R`-card form (#339).
+
+    `l`/`w` are written suffix-free because sky130's own deck sets `.option
+    scale=1.0u` (issue #1396); the gf180mcu sibling below keeps the suffix."""
     path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "res.gds")
     out = str(tmp_path / "res.spice")
     run_extract(
@@ -3946,7 +4160,7 @@ def test_pdk_resolved_binds_resistor_sky130(tmp_path):
     assert " sky130_fd_pr__res_generic_po " in card
     # Two terminals (the contacted heads), no bulk tie for the generic device.
     assert card.split()[1:3] == ["RA", "RB"]
-    assert "l=6U" in card and "w=1U" in card
+    assert "l=6 " in card and card.endswith("w=1")
 
 
 def test_pdk_resolved_binds_resistor_gf180mcu(tmp_path):
@@ -3982,7 +4196,8 @@ def test_pdk_resolved_binds_capacitor_sky130(tmp_path, met4, expected_subckt):
     """--pdk binds each sky130 MiM stack to its real simulation subcircuit
     (`sky130_fd_pr__cap_mim_m3_1`/`_m3_2`), with plate `l`/`w` recovered from
     the extracted plate area+perimeter via the equivalent-rectangle solver:
-    the 10x5um plate (A=50, P=30) resolves to `l=10U w=5U` (#339)."""
+    the 10x5um plate (A=50, P=30) resolves to `l=10 w=5` -- bare micrometres,
+    per sky130's own `.option scale=1.0u` convention (#339, #1396)."""
     path = _write_gds(_make_sky130_mim_layout(met4=met4), tmp_path / "mim.gds")
     out = str(tmp_path / "mim.spice")
     run_extract(
@@ -3995,7 +4210,7 @@ def test_pdk_resolved_binds_capacitor_sky130(tmp_path, met4, expected_subckt):
     (card,) = _device_cards(out)
     assert card.startswith("X")
     assert f" {expected_subckt} " in card
-    assert "l=10U" in card and "w=5U" in card
+    assert "l=10 " in card and card.endswith("w=5")
     # No bare `C`-card value-only primitive leaks in.
     assert not card.startswith("C")
 

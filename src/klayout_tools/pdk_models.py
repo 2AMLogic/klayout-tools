@@ -97,18 +97,10 @@ installs** (not guessed from this issue's own suggested names):
   naming and the ``d g s b <model>`` terminal order). gf180mcu's real
   in-the-wild geometry values are written in raw SI (metres, e.g.
   ``w=1.5e-6``), never bare micrometre literals -- unlike the sky130 SRAM
-  netlist's bare-micrometre convention above (which only round-trips
-  correctly under an external ``.option scale=1e-6``, e.g.
-  ``scripts/gallery_signals.py``'s own sim wrapper sets exactly that for its
-  sky130 corner deck). :func:`create_model_binding_delegate` sidesteps this
-  cross-PDK inconsistency entirely by always writing an explicit
-  micrometre-unit-suffixed literal (``L=0.5U W=8U``, the same convention
-  `klt extract`'s own default ``M``-card writer already uses -- see
-  ``docs/cli/lvs.md``'s "Unit suffixes matter" note) rather than a bare
-  number: an explicit SI unit suffix is parsed identically by ngspice
-  regardless of any ``.option scale`` a downstream caller's testbench may or
-  may not set, so it is correct under both PDKs' real-world conventions
-  without needing to special-case either one.
+  netlist's bare-micrometre convention above. Each family's geometry-literal
+  convention is therefore written out per family; see
+  ``_GEOMETRY_STYLE_BY_FAMILY`` below for the (verified, ngspice-reproduced)
+  reason a unit-suffixed literal is *not* portable across the two.
 
 Both real installs instantiate their MOS subcircuit with only ``l``/``w``
 supplied -- no ``nf``/``mult``/``par`` override at the call site -- relying
@@ -136,12 +128,16 @@ uppercase) parameter spelling the unbound ``M``-card form already uses --
 SPICE subcircuit parameter names are matched case-insensitively by both
 PDKs' real ngspice decks, so this does not need to track each PDK's own
 lowercase spelling the way ``length_param``/``width_param`` do for
-resistor/capacitor. Areas are formatted with an explicit ``P`` (pico) unit
-suffix rather than ``U`` (micro) -- a source/drain area in square
-micrometres is numerically identical to the same value in square metres
-times ``1e-12`` (e.g. ``0.8`` um² ``== 0.8e-12`` m² ``== 0.8P``), matching
-KLayout's own default ``M``-card writer's formatting of ``AS``/``AD``
-exactly (see ``docs/cli/extract.md``'s "SPICE model binding" section for a
+resistor/capacitor. Under the ``"unit_suffix"`` geometry style (gf180mcu, and
+the unverified-family default -- see ``_GEOMETRY_STYLE_BY_FAMILY``) areas are
+formatted with an explicit ``P`` (pico) unit suffix rather than ``U``
+(micro) -- a source/drain area in square micrometres is numerically identical
+to the same value in square metres times ``1e-12`` (e.g. ``0.8`` um²
+``== 0.8e-12`` m² ``== 0.8P``), matching KLayout's own default ``M``-card
+writer's formatting of ``AS``/``AD`` exactly. Under the ``"bare_um"`` style
+(sky130) the *same* square-micrometre number is written with no suffix at
+all, because that deck's ambient ``.option scale=1.0u`` already supplies the
+unit (see ``docs/cli/extract.md``'s "SPICE model binding" section for a
 worked ``M``-card/``X``-card example).
 
 **Resistor / capacitor / bipolar subcircuit names + parameter conventions,
@@ -211,13 +207,12 @@ comment):
   PNP the collector *is* the substrate, and the extraction deck already ties
   the collector to ``substrate_net``, so no separate substrate pin is emitted.
 
-Geometry values on every new ``X`` card use the same explicit
-micrometre-unit-suffixed literal (``...U``) the MOS path uses (see the
-``L=0.5U W=8U`` note above): ``8U`` is ``8e-6`` in absolute SI regardless of a
-downstream ``.option scale``, so it is correct against both the sky130
-subcircuits (whose bare ``w``/``l`` are micrometre-convention) and the
-gf180mcu subcircuits (whose ``r_length``/``c_length`` etc. are raw-metre
-convention) without special-casing either.
+Geometry values on every new ``X`` card use the same per-family style the MOS
+path uses -- bare micrometres for sky130 (whose ``w``/``l`` are
+micrometre-convention under its own ``.option scale=1.0u``), an explicit
+micrometre-unit-suffixed literal for gf180mcu (whose ``r_length``/
+``c_length`` etc. are raw-metre convention with no ambient scale). See
+:data:`_GEOMETRY_STYLE_BY_FAMILY` for the reproduction behind each.
 """
 
 from __future__ import annotations
@@ -376,6 +371,73 @@ _KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2")
 #: own comment states, rather than introducing a family spelled differently
 #: from every table key around it.
 _PDK_VARIANT_FAMILY_ALIASES: dict[str, str] = {"ihp-sg13g2": "sg13g2"}
+
+#: Geometry-literal style: write an explicit SPICE unit suffix (``L=0.5U``,
+#: ``AS=0.84P``), i.e. an absolute SI value that does not depend on the
+#: caller's ``.option scale``.
+GEOMETRY_STYLE_UNIT_SUFFIX = "unit_suffix"
+
+#: Geometry-literal style: write a bare, suffix-free number already expressed
+#: in micrometres (``L=0.5``) or square micrometres (``AS=0.84``), which the
+#: deck's own ambient ``.option scale=1.0u`` converts to SI.
+GEOMETRY_STYLE_BARE_UM = "bare_um"
+
+#: PDK family -> the geometry-literal style :func:`create_model_binding_delegate`
+#: writes ``L``/``W``/``AS``/``AD``/``PS``/``PD`` in for that family's bound
+#: ``X`` cards (issue #1396). Families absent here keep
+#: :data:`GEOMETRY_STYLE_UNIT_SUFFIX`, the module's original behaviour.
+#:
+#: This table exists because the module's original premise -- "an explicit SI
+#: unit suffix is parsed identically regardless of any ``.option scale``, so
+#: it is correct under every PDK without special-casing" -- is **false** for a
+#: vendor deck that sets ``.option scale`` itself. ngspice's ``scale`` option
+#: multiplies a MOS card's ``l``/``w``/``ps``/``pd`` by ``scale`` and its
+#: ``as``/``ad`` by ``scale^2`` *after* parsing the literal, so under a
+#: ``scale=1.0u`` deck a unit-suffixed ``W=2U`` becomes ``2e-12`` m, not
+#: ``2e-6`` m.
+#:
+#: - ``sky130`` -> :data:`GEOMETRY_STYLE_BARE_UM`. Verified against a real
+#:   fetched sky130A install (open_pdks): ``libs.tech/combined/corners/all.spice``
+#:   line 29 is ``.option scale=1.0u``, and the vendor's own comment there
+#:   states the convention outright -- *"The scale option forces all netlists
+#:   to provide distance units in microns (e.g., 1 micron width is W=1, not
+#:   W=1u)."* Every sky130 primitive subcircuit forwards its call-site
+#:   geometry straight onto an internal scaled card (e.g.
+#:   ``.subckt sky130_fd_pr__nfet_01v8 d g s b`` -> ``msky130_fd_pr__nfet_01v8
+#:   ... l={l} w={w} ...``), so a unit-suffixed literal is off by ``1e6``
+#:   there: reproduced with ngspice 46, where ``L=0.5U W=2U AS=0.84P AD=0.84P
+#:   PS=4.84U PD=4.84U`` misses every model bin (``could not find a valid
+#:   modelname``, with the model's internally defaulted ``nrd``/``nrs``
+#:   reported as ``7e+04``) while the identical geometry as ``L=0.5 W=2
+#:   AS=0.84 AD=0.84 PS=4.84 PD=4.84`` solves to a sane operating point. The
+#:   same 1e6 error hits this family's resistor and capacitor bindings, whose
+#:   subcircuits are geometry-parameterized under the same ambient scale
+#:   (``sky130_fd_pr__res_xhigh_po l=5U w=2U`` fails the deck's own parse-tree
+#:   check; ``sky130_fd_pr__cap_mim_m3_1 w=10U l=10U`` silently models a
+#:   ~4600x-too-small capacitor), which is why the style is keyed by family
+#:   rather than by device kind.
+#: - ``gf180mcu`` -> :data:`GEOMETRY_STYLE_UNIT_SUFFIX` (unchanged). Its model
+#:   library sets no ``.option scale`` at all (verified: no ``.option`` line in
+#:   ``libs.tech/ngspice/sm141064.ngspice``) and its subcircuits declare
+#:   raw-metre defaults (``.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7 ...``), so
+#:   the absolute, suffix-carrying literal is the correct form for this family
+#:   and switching it to bare micrometres would break it by the same 1e6.
+#: - ``sg13g2`` -> absent, so unchanged at the unit-suffix default. No IHP
+#:   install was available to reproduce against here, and changing an
+#:   unverified family's convention on a guess is exactly the mistake this
+#:   table documents.
+_GEOMETRY_STYLE_BY_FAMILY: dict[str, str] = {
+    "sky130": GEOMETRY_STYLE_BARE_UM,
+    "gf180mcu": GEOMETRY_STYLE_UNIT_SUFFIX,
+}
+
+
+def geometry_style_for_family(family: str) -> str:
+    """The geometry-literal style bound ``X`` cards use for PDK ``family``
+    (issue #1396) -- :data:`GEOMETRY_STYLE_UNIT_SUFFIX` for any family with no
+    curated entry in :data:`_GEOMETRY_STYLE_BY_FAMILY`, i.e. this module's
+    original behaviour."""
+    return _GEOMETRY_STYLE_BY_FAMILY.get(family, GEOMETRY_STYLE_UNIT_SUFFIX)
 
 
 class ModelBindingError(Exception):
@@ -621,27 +683,51 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     return result
 
 
-def _format_um(value: float) -> str:
-    """Format a micrometre value the same way KLayout's own default
-    ``M``-card writer formats ``L``/``W`` (e.g. ``8.0`` -> ``"8U"``, ``0.5``
-    -> ``"0.5U"``) -- an explicit unit suffix, no unnecessary trailing zeros.
-    """
+def _round_um_text(value: float) -> str:
+    """``value`` rounded to :data:`_PARAM_PRECISION_UM` decimal places and
+    rendered without unnecessary trailing zeros (``8.0`` -> ``"8"``, ``0.5``
+    -> ``"0.5"``, ``0.0`` -> ``"0"``) -- the shared numeric half of
+    :func:`_format_um`/:func:`_format_um2`, before either applies (or omits) a
+    unit suffix."""
     rounded = round(value, _PARAM_PRECISION_UM)
     text = f"{rounded:.{_PARAM_PRECISION_UM}f}".rstrip("0").rstrip(".")
-    return f"{text or '0'}U"
+    return text or "0"
 
 
-def _format_um2(value: float) -> str:
-    """Format a square-micrometre value the same way KLayout's own default
-    ``M``-card writer formats ``AS``/``AD`` (e.g. ``0.8`` -> ``"0.8P"``) --
-    ``1 um^2 == 1e-12 m^2``, the same order of magnitude the SPICE ``P``
-    (pico, ``1e-12``) unit suffix denotes, so a value already expressed in
-    square micrometres needs no numeric conversion at all, only swapping
-    ``_format_um``'s ``"U"`` (micro) suffix for ``"P"`` (issue #695).
+def _format_um(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
+    """Format a micrometre value for a device card's length-dimensioned
+    parameter (``L``/``W``/``PS``/``PD``).
+
+    Under the default :data:`GEOMETRY_STYLE_UNIT_SUFFIX` this matches KLayout's
+    own default ``M``-card writer exactly (``8.0`` -> ``"8U"``, ``0.5`` ->
+    ``"0.5U"``) -- an explicit unit suffix, no unnecessary trailing zeros.
+    Under :data:`GEOMETRY_STYLE_BARE_UM` the same number is written with no
+    suffix (``"8"``, ``"0.5"``), because the target deck's own ambient
+    ``.option scale=1.0u`` supplies the micrometre unit and would otherwise
+    scale a suffixed literal a second time (issue #1396 -- see
+    :data:`_GEOMETRY_STYLE_BY_FAMILY`).
     """
-    rounded = round(value, _PARAM_PRECISION_UM)
-    text = f"{rounded:.{_PARAM_PRECISION_UM}f}".rstrip("0").rstrip(".")
-    return f"{text or '0'}P"
+    text = _round_um_text(value)
+    return text if style == GEOMETRY_STYLE_BARE_UM else f"{text}U"
+
+
+def _format_um2(value: float, style: str = GEOMETRY_STYLE_UNIT_SUFFIX) -> str:
+    """Format a square-micrometre value for a device card's area-dimensioned
+    parameter (``AS``/``AD``, and ``A`` on a normalized ``C`` card).
+
+    Under the default :data:`GEOMETRY_STYLE_UNIT_SUFFIX` this matches KLayout's
+    own default ``M``-card writer (``0.8`` -> ``"0.8P"``) -- ``1 um^2 ==
+    1e-12 m^2``, the same order of magnitude the SPICE ``P`` (pico, ``1e-12``)
+    unit suffix denotes, so a value already expressed in square micrometres
+    needs no numeric conversion at all, only swapping :func:`_format_um`'s
+    ``"U"`` (micro) suffix for ``"P"`` (issue #695). Under
+    :data:`GEOMETRY_STYLE_BARE_UM` the same number is written with no suffix
+    (``"0.8"``): ngspice scales a MOS card's ``as``/``ad`` by ``scale^2``, so a
+    bare square-micrometre number is exactly what a ``scale=1.0u`` deck wants
+    (issue #1396).
+    """
+    text = _round_um_text(value)
+    return text if style == GEOMETRY_STYLE_BARE_UM else f"{text}P"
 
 
 def equivalent_rectangle_um(
@@ -728,6 +814,17 @@ class DeviceBinding:
     distinct class was deliberately avoided). Empty for every device class
     with no declared flavour -- every class before this field existed, and
     every non-``"mos"`` kind today.
+
+    ``geometry_style`` (issue #1396) is the resolved PDK family's
+    geometry-literal convention -- :data:`GEOMETRY_STYLE_UNIT_SUFFIX` (write
+    ``L=0.5U``/``AS=0.84P``) or :data:`GEOMETRY_STYLE_BARE_UM` (write
+    ``L=0.5``/``AS=0.84``, letting the vendor deck's own ``.option
+    scale=1.0u`` supply the unit). It is a property of the *target deck*, not
+    of the device kind, so :func:`resolve_device_bindings` stamps the same
+    value onto every binding it builds for one family; see
+    :data:`_GEOMETRY_STYLE_BY_FAMILY` for the per-family evidence. Defaults to
+    the unit-suffix form, which is what every caller got before this field
+    existed.
     """
 
     kind: str
@@ -738,6 +835,7 @@ class DeviceBinding:
     variants: tuple[tuple[float, str], ...] = field(default_factory=tuple)
     dropped_params: tuple[str, ...] = field(default_factory=tuple)
     flavour_subckts: dict[str, str] = field(default_factory=dict)
+    geometry_style: str = GEOMETRY_STYLE_UNIT_SUFFIX
 
 
 #: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> subckt name}.
@@ -841,6 +939,10 @@ def resolve_device_bindings(
     function.
     """
     family = _pdk_variant_family(pdk_variant)
+    # The target family's geometry-literal convention (issue #1396). Stamped
+    # onto every binding below -- it is a property of the deck the cards are
+    # written against, not of the device kind.
+    geometry_style = geometry_style_for_family(family)
     mos = resolve_mos_model_table(deck_name, pdk_variant)
     mos_flavours = _MOS_MODEL_FLAVOURS.get((deck_name, family), {})
     nfet_flavour_subckts = {
@@ -859,12 +961,14 @@ def resolve_device_bindings(
             mos["nfet"],
             ("D", "G", "S", "B"),
             flavour_subckts=nfet_flavour_subckts,
+            geometry_style=geometry_style,
         ),
         deck.pfet_class: DeviceBinding(
             "mos",
             mos["pfet"],
             ("D", "G", "S", "B"),
             flavour_subckts=pfet_flavour_subckts,
+            geometry_style=geometry_style,
         ),
     }
 
@@ -876,7 +980,12 @@ def resolve_device_bindings(
             continue
         terminals = ("A", "B", "W") if resistor.bulk_to_substrate else ("A", "B")
         bindings[resistor.name] = DeviceBinding(
-            "resistor", subckt, terminals, res_len, res_wid
+            "resistor",
+            subckt,
+            terminals,
+            res_len,
+            res_wid,
+            geometry_style=geometry_style,
         )
 
     cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family), {})
@@ -886,7 +995,12 @@ def resolve_device_bindings(
         if subckt is None:
             continue
         bindings[capacitor.name] = DeviceBinding(
-            "capacitor", subckt, ("A", "B"), cap_len, cap_wid
+            "capacitor",
+            subckt,
+            ("A", "B"),
+            cap_len,
+            cap_wid,
+            geometry_style=geometry_style,
         )
 
     bjt_table = _BIPOLAR_MODEL_TABLE.get((deck_name, family), {})
@@ -902,6 +1016,7 @@ def resolve_device_bindings(
             ("C", "B", "E"),
             variants=variants,
             dropped_params=_BIPOLAR_DROPPED_PARAMS,
+            geometry_style=geometry_style,
         )
 
     return bindings
@@ -948,6 +1063,12 @@ def create_model_binding_delegate(
             if binding is None:
                 super().write_device(device)
                 return
+
+            # The target PDK family's geometry-literal convention (#1396):
+            # bare micrometres for a deck that sets its own `.option scale`
+            # (sky130), explicit unit suffixes otherwise (gf180mcu, and any
+            # family with no curated entry).
+            style = binding.geometry_style
 
             terminal_ids = {
                 terminal.name: terminal.id()
@@ -1006,23 +1127,24 @@ def create_model_binding_delegate(
                 # parameters (verified against a real fetched install -- see
                 # the module docstring's "Card shape" section), so nothing is
                 # dropped here the way `DeviceBinding.dropped_params`
-                # documents for bipolar. `AS`/`AD` use `_format_um2`'s `P`
-                # suffix (matching the unbound `M`-card form's own area
-                # formatting); `PS`/`PD` are lengths, so `_format_um`'s `U`
-                # suffix applies exactly as it does for `L`/`W`.
+                # documents for bipolar. `AS`/`AD` are areas and `PS`/`PD`
+                # lengths, each written in the binding's own
+                # `geometry_style` exactly as `L`/`W` are below (#1396).
                 as_um2 = self._device_param(device, "AS") or 0.0
                 ad_um2 = self._device_param(device, "AD") or 0.0
                 ps_um = self._device_param(device, "PS") or 0.0
                 pd_um = self._device_param(device, "PD") or 0.0
                 extra_params = (
-                    f" AS={_format_um2(as_um2)} AD={_format_um2(ad_um2)}"
-                    f" PS={_format_um(ps_um)} PD={_format_um(pd_um)}"
+                    f" AS={_format_um2(as_um2, style)}"
+                    f" AD={_format_um2(ad_um2, style)}"
+                    f" PS={_format_um(ps_um, style)}"
+                    f" PD={_format_um(pd_um, style)}"
                 )
 
             self.emit_line(
                 f"X{name} {pins} {subckt} "
-                f"{binding.length_param}={_format_um(length_um)} "
-                f"{binding.width_param}={_format_um(width_um)}{extra_params}"
+                f"{binding.length_param}={_format_um(length_um, style)} "
+                f"{binding.width_param}={_format_um(width_um, style)}{extra_params}"
             )
 
     return _ModelBindingSpiceWriterDelegate(bindings)
