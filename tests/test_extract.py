@@ -505,7 +505,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["file"] == path
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
@@ -3082,11 +3082,17 @@ def test_optional_pdk_resolution_is_reported(tmp_path):
         path, "sky130", pdk_variant="sky130A", pdk_root=str(tmp_path / "pdk_install")
     )
 
+    # Issue #1376: `pdk.root` is a sanitized `{path, scope}` pair (mirroring
+    # `env_provenance.repo_relative_path`), never the raw `--pdk-root`
+    # argument -- a PDK install under a pytest `tmp_path` lives outside this
+    # repo, so it resolves to `scope: "external"`, `path: null`. The literal
+    # absolute path string must not appear anywhere in the report.
     assert report["pdk"] == {
         "variant": "sky130A",
-        "root": str(tmp_path / "pdk_install"),
+        "root": {"path": None, "scope": "external"},
         "version": None,
     }
+    assert str(tmp_path / "pdk_install") not in json.dumps(report)
 
     # The shared provenance block mirrors the resolved PDK (name/source/
     # version), independent of extract's own richer `pdk` echo above.
@@ -5373,7 +5379,7 @@ def test_sky130_corpus_extraction_produces_well_formed_report(layout_path, tmp_p
         str(layout_path), "sky130", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -5392,7 +5398,7 @@ def test_gf180mcu_corpus_extraction_produces_well_formed_report(layout_path, tmp
         str(layout_path), "gf180mcu", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])

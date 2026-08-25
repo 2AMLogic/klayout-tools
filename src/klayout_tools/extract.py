@@ -140,6 +140,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from . import env_provenance
 from ._annotation import is_reserved_annotation_layer
 from ._layout import load_layout, resolve_top_cell
 from ._layout import region as _region
@@ -216,7 +217,20 @@ if TYPE_CHECKING:
 #: star). `parasitics.r_count` also changed meaning: it now counts every
 #: emitted resistor (one or more per net), not one per net, so
 #: `r_count == c_count` no longer holds in general.
-SCHEMA_VERSION = 2
+#:
+#: 3 (issue #1376): the top-level `pdk.root` field's shape changed from a raw
+#: (often absolute) filesystem path string -- the literal `--pdk-root`
+#: argument, echoed verbatim -- to the `{path, scope}` shape
+#: `env_provenance.repo_relative_path` already defines (mirroring `klt
+#: pex`/`klt sim`/`klt size`'s own issue #1261 bump). A PDK install is
+#: inherently external to whatever repo invokes `klt extract`, so the old
+#: shape baked a host-specific absolute path -- possibly a username, e.g.
+#: `/home/<user>/.volare/gf180mcuD` -- into any committed `--format json`
+#: evidence report; `provenance.pdk` (`{name, source, version}`, no path)
+#: already carries the reproducible identity of the same PDK without it. See
+#: docs/cli/env-provenance.md's "external input pinned by identity, not
+#: location" rationale.
+SCHEMA_VERSION = 3
 
 #: Decimal places `devices[].params` (`w_um`/`l_um`) are rounded to -- clears
 #: floating-point noise from KLayout's internal dbu -> um conversion (e.g.
@@ -1026,7 +1040,16 @@ def run_extract(
                 },
                 ...
             ],
-            "pdk": {"variant": str, "root": str, "version": str | None} | None,
+            "pdk": {
+                "variant": str,
+                # {path, scope} (issue #1376), never a raw path -- see
+                # `env_provenance.repo_relative_path`. `scope` is one of
+                # "repo" / "external" / "absent"; `path` is `null` unless
+                # `scope == "repo"`. A PDK install is virtually always
+                # "external" in practice.
+                "root": {"path": str | None, "scope": str},
+                "version": str | None,
+            } | None,
             "parasitics": {...} | None,
             "spef_path": <str | None>,  # populated only when `spef_output` was given
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -2156,7 +2179,14 @@ def run_extract(
     if pdk_info is not None:
         result["pdk"] = {
             "variant": pdk_info["variant"],
-            "root": pdk_info["root"],
+            # {path, scope} (issue #1376), not the raw `--pdk-root` argument
+            # -- a PDK install is external to the invoking repo by
+            # definition, so the old raw-path shape baked a host-specific
+            # absolute path (possibly a username) into any committed
+            # `--format json` evidence report. `provenance.pdk` below
+            # already carries this PDK's reproducible identity
+            # (name/source/version) without a path.
+            "root": env_provenance.repo_relative_path(pdk_info["root"]),
             "version": pdk_info["version"],
         }
     else:
