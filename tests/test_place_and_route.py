@@ -60,6 +60,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -4420,11 +4421,14 @@ def test_merge_def_to_gds_success(tmp_path):
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
     """Issue #1367: the merged GDS's BGNLIB/BGNSTR records must not carry
     KLayout's default wall-clock timestamp, so re-running an identical merge
-    twice produces byte-identical output. Before the fix, this assertion
-    could fail reliably -- or, if both runs happened to land within the same
-    wall-clock second, merely be flaky rather than a deterministic failure;
-    the fix removes the wall-clock dependency entirely, so this is reliable
-    either way."""
+    twice produces byte-identical output. Before the fix, a bare `.write()`
+    call with no `SaveLayoutOptions` stamps those records with the merge's
+    own wall-clock time; without the `time.sleep()` below (crossing a whole
+    GDS2 timestamp second between the two runs) that pre-fix failure could
+    be flaky -- passing by accident if both runs land within the same
+    wall-clock second -- rather than reliably reproducing the bug. The fix
+    removes the wall-clock dependency entirely, so this stays reliable
+    (and fast: the sleep is the only appreciable cost) either way."""
     root = tmp_path / "install"
     cell_name = "testcell"
     tech_lef = tmp_path / "tech.tlef"
@@ -4442,7 +4446,13 @@ def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
     out_path_1 = tmp_path / "out1.gds"
     out_path_2 = tmp_path / "out2.gds"
 
-    for out_path in (out_path_1, out_path_2):
+    for i, out_path in enumerate((out_path_1, out_path_2)):
+        if i:
+            # Force the two runs to land in different wall-clock seconds so
+            # a pre-fix regression (a bare `.write()` stamping GDS2's
+            # whole-second-resolution BGNLIB/BGNSTR timestamp fields)
+            # reliably fails this assertion instead of merely being flaky.
+            time.sleep(1.1)
         place_and_route._merge_def_to_gds(
             def_path=str(def_path),
             tech_lef=str(tech_lef),
