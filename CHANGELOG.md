@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt gen-compose` now routes **more than one** same-block self-net that
+  needs `routing.cross_block_layer_role`'s fallback (issue #1393). Before
+  this, `#1168`'s fallback only fired from the self-net pad-crossing /
+  drawn-metal checks and had no visibility into a route-vs-route collision
+  (#1057/#1386) with a *different* self-net on the same block that also
+  needed the cross layer, so whichever net `connectivity[]` declared first
+  claimed the lane and the other was reported unroutable
+  (`"crosses already-routed net '<first net>'"`) — reordering the entries
+  just moved the failure to the other net. `route_two_pin()` now retries
+  such a leg on a bounded set of alternate lanes looped clear of the block's
+  own bbox (the same *pattern* the #1167 detour search already applies to a
+  third, unrelated block), re-running every routability check plus the
+  route-vs-route check against each drawn lane and keeping the first that
+  passes. Purely additive and narrowly armed: the retry is reachable only
+  from a same-block self-net's own fixed-shape attempt that resolved onto
+  `routing.cross_block_layer_role`, so every other leg reaches the
+  route-vs-route check exactly as before, a leg whose every lane still
+  conflicts is still reported `routed: false`, and nothing is waived to make
+  a lane fit. Note an accepted lane is not pinned to the cross layer — it
+  commonly resolves back onto the primary `routing.layer_role` once it no
+  longer crosses the pads that forced the fallback. See
+  `docs/cli/gen-compose.md`'s "More than one same-block self-net per block"
+  section, which replaces that document's previous "at most one same-block
+  self-net crossing per block" known-limitation callout.
 - `klt pex`'s extracted-side leg no longer mis-resolves a PDK-relative
   `models.lib` path (issue #1395). When the request's `models` block uses the
   documented PDK-resolution shape (`{"pdk": "<variant>", "lib": "<relative

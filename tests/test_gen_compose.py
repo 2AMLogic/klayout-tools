@@ -5360,6 +5360,251 @@ def test_compose_cross_block_layer_role_leaves_non_crossing_nets_on_primary_laye
 
 
 # --------------------------------------------------------------------------- #
+# More than one same-block self-net crossing per block (#1393). #1168's
+# cross-layer fallback only ever fires from route_two_pin()'s checks 3/4 (a
+# leg crossing another of its *own block's pads*), so it had no visibility
+# into a route-vs-route collision (#1057/#1386) with a *different* self-net
+# on the same block that also needed the cross layer: the first net declared
+# claimed the lane and the second was rejected outright, whichever order they
+# were declared in. route_two_pin() now retries such a leg on a bounded set
+# of lanes looped clear of the block's own bbox, the same *pattern* #1167
+# already applies to a third, unrelated block sitting in the channel.
+# --------------------------------------------------------------------------- #
+
+
+def _diff_pair_split_gate_request(pdk_root, dp, output, cell_name, net_order):
+    """The #1393 reproduction request: a `diff_pair` with `splits: 2` has two
+    gate self-nets (`Q1_1_G`+`Q1_2_G`, `Q2_1_G`+`Q2_2_G`) whose ports sit at
+    the *same* pair of x columns, swapped between the two rows -- so the two
+    nets' default `manhattan_backbone()` shapes are the two diagonals of one
+    rectangle and genuinely cross. ``net_order`` names the `connectivity[]`
+    declaration order, so the same fixture runs both ways round."""
+    nets = {
+        "GA": {
+            "net": "GA",
+            "pins": [
+                {"block": "dp", "port": "Q1_1_G"},
+                {"block": "dp", "port": "Q1_2_G"},
+            ],
+        },
+        "GB": {
+            "net": "GB",
+            "pins": [
+                {"block": "dp", "port": "Q2_1_G"},
+                {"block": "dp", "port": "Q2_2_G"},
+            ],
+        },
+    }
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [{"id": "dp", "generator_report": dp}],
+        "placement": {"strategy": "row", "order": ["dp"], "spacing_um": 1.0},
+        "connectivity": [nets[name] for name in net_order],
+        "routing": {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+        },
+        "options": {"cell_name": cell_name, "output": str(output)},
+    }
+
+
+@pytest.mark.parametrize("net_order", [("GA", "GB"), ("GB", "GA")])
+def test_compose_routes_two_same_block_self_nets_needing_the_cross_layer(
+    tmp_path, pdk_root, net_order
+):
+    # #1393's own acceptance criterion: both same-block self-nets route,
+    # regardless of `connectivity[]` declaration order. Before this, whichever
+    # net was declared second was rejected with "crosses already-routed net
+    # '<the other one>'" -- reordering just moved the failure to the other net.
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp",
+        splits=2,
+        add_guard_ring=False,
+        gate_contact=True,
+    )
+    # The reproduction's own precondition: the two nets' gate ports are the
+    # two diagonals of one rectangle (same x columns, swapped between rows),
+    # which is why the fixed one-jog shape collides for both orders.
+    gates = {p["name"]: (p["x_um"], p["y_um"]) for p in dp["ports"]}
+    assert gates["Q1_1_G"][0] == gates["Q2_2_G"][0]
+    assert gates["Q2_1_G"][0] == gates["Q1_2_G"][0]
+    assert gates["Q1_1_G"][1] == gates["Q2_1_G"][1]
+    assert gates["Q1_2_G"][1] == gates["Q2_2_G"][1]
+
+    cell_name = "dp_split_gates_" + "".join(net_order).lower()
+    output = tmp_path / f"{cell_name}.gds"
+    report = compose(
+        _diff_pair_split_gate_request(pdk_root, dp, output, cell_name, net_order)
+    )
+
+    assert report["unrouted_nets"] == []
+    assert [net["net"] for net in report["nets"]] == list(net_order)
+    for net in report["nets"]:
+        assert net["routed"] is True, net["legs"]
+        assert net["route_length_um"] > 0
+        assert all(leg["reason"] is None for leg in net["legs"])
+
+    # The composed layout is real, checked metal: DRC-clean, and the two gate
+    # nets extract as two *distinct* nodes (never merged onto one), each
+    # bussing exactly the two split legs of its own device.
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    result = extract.run_extract(str(output), "sky130", top=cell_name)
+    assert result["merged_net_labels"] == []
+    gate_nets = [d["nets"]["g"] for d in result["devices"] if d["class"] == "nfet"]
+    assert sorted(gate_nets) == ["GA", "GA", "GB", "GB"]
+
+
+def test_compose_two_same_block_self_nets_detour_loops_clear_of_the_block(
+    tmp_path, pdk_root
+):
+    # The *shape* the retry draws, not just that it routes: the second net's
+    # accepted lane loops around the outside of the block's own bbox (#1393),
+    # which is what lets the two crossing diagonals coexist at all. Asserted
+    # against the drawn GDS rather than the report, since the detour only
+    # matters if it is what actually got written.
+    import klayout.db as kdb
+
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp",
+        splits=2,
+        add_guard_ring=False,
+        gate_contact=True,
+    )
+    output = tmp_path / "dp_split_gates_shape.gds"
+    report = compose(
+        _diff_pair_split_gate_request(
+            pdk_root, dp, output, "dp_split_gates_shape", ("GA", "GB")
+        )
+    )
+    assert report["unrouted_nets"] == []
+
+    bbox = dp["bbox_um"]
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("dp_split_gates_shape")
+    paths = [
+        [(p.x * layout.dbu, p.y * layout.dbu) for p in shape.path.each_point()]
+        for layer_info in ((67, 20), (68, 20))
+        for shape in top.shapes(layout.layer(*layer_info)).each()
+        if shape.is_path()
+    ]
+    # Exactly two routed conductors, one per net -- and exactly one of them
+    # leaves the block's own bbox entirely (the retry's corner loop). The
+    # other keeps the plain one-jog shape it had before this issue.
+    assert len(paths) == 2
+    looped = [
+        path
+        for path in paths
+        if any(x > bbox["x1"] or x < bbox["x0"] or y > bbox["y1"] for x, y in path)
+    ]
+    assert len(looped) == 1, paths
+
+
+def test_self_net_cross_layer_lane_waypoints_are_bounded_and_outside_the_bbox():
+    # The lane generator itself (#1393): a fixed, bounded set of single
+    # waypoints, every one strictly outside the block's bbox on both axes,
+    # ordered shortest-detour-first so the composed GDS stays reproducible
+    # (#320) -- the same contract _detour_lane_waypoints_um() follows.
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 4.0}
+    lanes = gen_compose._self_net_cross_layer_lane_waypoints_um(
+        (1.0, 1.0), (9.0, 3.0), bbox, width_um=0.2
+    )
+    assert 0 < len(lanes) <= gen_compose._MAX_SAME_BLOCK_CROSS_LAYER_LANES
+    for lane in lanes:
+        assert len(lane) == 1
+        (x, y) = lane[0]
+        assert x < bbox["x0"] or x > bbox["x1"]
+        assert y < bbox["y0"] or y > bbox["y1"]
+    # Deterministic and shortest-first.
+    assert lanes == gen_compose._self_net_cross_layer_lane_waypoints_um(
+        (1.0, 1.0), (9.0, 3.0), bbox, width_um=0.2
+    )
+    detour_lengths = [
+        abs(x - 1.0) + abs(y - 1.0) + abs(x - 9.0) + abs(y - 3.0)
+        for (x, y) in (lane[0] for lane in lanes)
+    ]
+    assert detour_lengths == sorted(detour_lengths)
+
+
+def test_compose_two_same_block_self_nets_still_rejected_when_no_lane_clears(
+    tmp_path, pdk_root, monkeypatch
+):
+    # Regression guard for #1057/#1386: the retry proposes lanes, it never
+    # waives the collision check. With the lane generator yielding nothing to
+    # try, the identical request must fall straight back to the pre-#1393
+    # rejection -- `routed: false` naming the already-routed net, not a
+    # silently-accepted short.
+    monkeypatch.setattr(
+        gen_compose, "_self_net_cross_layer_lane_waypoints_um", lambda *a, **k: []
+    )
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp",
+        splits=2,
+        add_guard_ring=False,
+        gate_contact=True,
+    )
+    output = tmp_path / "dp_split_gates_no_lane.gds"
+    report = compose(
+        _diff_pair_split_gate_request(
+            pdk_root, dp, output, "dp_split_gates_no_lane", ("GA", "GB")
+        )
+    )
+
+    assert report["unrouted_nets"] == ["GB"]
+    blocker = next(
+        leg for leg in report["nets"][1]["legs"] if leg["reason"] is not None
+    )
+    assert "crosses already-routed net 'GA'" in blocker["reason"]
+
+    result = extract.run_extract(str(output), "sky130", top="dp_split_gates_no_lane")
+    assert result["merged_net_labels"] == []
+
+
+def test_compose_two_same_block_self_nets_unchanged_without_a_cross_layer(
+    tmp_path, pdk_root
+):
+    # The retry is reachable only from a leg that resolved on
+    # `routing.cross_block_layer_role` (#1168). Drop that key and the same
+    # request behaves exactly as it did before #1168 ever existed: neither
+    # gate net routes -- each one's own fixed-shape backbone would short
+    # across another of the block's pads on the primary layer (checks 3/4) --
+    # and nothing is drawn that could merge the two declared nets.
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp",
+        splits=2,
+        add_guard_ring=False,
+        gate_contact=True,
+    )
+    output = tmp_path / "dp_split_gates_no_cross.gds"
+    request = _diff_pair_split_gate_request(
+        pdk_root, dp, output, "dp_split_gates_no_cross", ("GA", "GB")
+    )
+    del request["routing"]["cross_block_layer_role"]
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["GA", "GB"]
+    assert all(net["routed"] is False for net in report["nets"])
+
+    result = extract.run_extract(str(output), "sky130", top="dp_split_gates_no_cross")
+    assert result["merged_net_labels"] == []
+
+
+# --------------------------------------------------------------------------- #
 # Gate-port routing (#492): before this, a `connectivity[]` net naming a
 # bare-poly gate port was drawn as a metal stub *over* the gate with no
 # contact joining the two -- `routed: true`, no note, and an open net only a

@@ -97,7 +97,12 @@ Scope (phase 2, this module's current state):
   ``routing.layer_role`` -- resolved and via-hop-validated by
   :func:`_resolve_cross_block_route_layer`, and applied per leg by
   :func:`route_two_pin`'s same-drawing-layer-short retry. Every other net in
-  the same request keeps drawing on ``routing.layer_role`` unchanged.
+  the same request keeps drawing on ``routing.layer_role`` unchanged. Since
+  issue #1393 a *second* same-block self-net that also needs that fallback
+  is no longer rejected for colliding with the first: the leg is retried on
+  a bounded set of lanes looped clear of the block's own bbox
+  (:func:`_self_net_cross_layer_lane_waypoints_um`), the same pattern the
+  #1167 detour search applies to an unrelated block in the channel.
 * **Blocks this command did not generate** (issue #1189): a ``blocks[]``
   entry names its geometry source in exactly one of two ways. ``generator_report``
   is a ``klt`` verb's own JSON response (``klt gen``, ``klt draw``, or -- since
@@ -1883,7 +1888,13 @@ _DETOUR_CLEARANCE_WIDTHS = 2.0
 #: the "1-2 alternate jog points" bound the issue asks for, and is what keeps
 #: this a *bounded* search rather than a general maze router: there is no
 #: recursion (a lane is never itself detoured around) and no per-obstacle
-#: growth (see :func:`_detour_lane_waypoints_um`).
+#: growth (see :func:`_detour_lane_waypoints_um`). Shared by both callers of
+#: :func:`_detour_lane_waypoints_um` in :func:`route_two_pin` -- the original
+#: third-party-block obstacle retry (#1167) and the same-block cross-layer
+#: conflict retry (#1393) -- so a block with more same-block self-nets
+#: needing ``cross_block_layer_role``'s fallback than this bound can give
+#: each a distinct lane still has the same "reported unroutable, not a
+#: silent short" failure mode as any other exhausted bounded search.
 _MAX_DETOUR_LANES = 2
 
 
@@ -2071,6 +2082,89 @@ def _detour_lane_waypoints_um(
         ]
         lanes.sort(key=lambda wp: abs(wp[1][0] - sa[0]) + abs(wp[2][0] - sb[0]))
     return lanes[:_MAX_DETOUR_LANES]
+
+
+#: How many alternate corner loops :func:`_self_net_cross_layer_lane_waypoints_um`
+#: (issue #1393) tries before giving up -- the block's four corners (top/
+#: bottom x left/right), still a fixed, bounded set with no recursion and no
+#: per-obstacle growth, same as :func:`_detour_lane_waypoints_um`'s own bound
+#: just above. Deliberately a *different* constant from ``_MAX_DETOUR_LANES``
+#: rather than reusing it: that search's "two ways around" (over/under, or
+#: left/right) is inherent to a *channel* between two obstacles, whereas this
+#: retry loops fully *around* one block's own bbox, where there are
+#: genuinely four independent corners to try, not two.
+_MAX_SAME_BLOCK_CROSS_LAYER_LANES = 4
+
+
+def _self_net_cross_layer_lane_waypoints_um(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    bbox_um: dict[str, float],
+    width_um: float,
+) -> list[list[tuple[float, float]]]:
+    """Alternate waypoint loops for the same-block cross-layer conflict retry
+    (issue #1393, see :func:`route_two_pin`'s own docstring for when this is
+    used).
+
+    Unlike :func:`_detour_lane_waypoints_um` -- which places its lane using
+    each port's own natural entry/exit column (fine for an inter-block
+    obstacle, since a third block's bbox has no relationship to either
+    port's own coordinates) -- a *same-block* self-net's two ports sit
+    *inside* the very bbox this retry must clear, and a different same-block
+    self-net's own ports can sit at those exact same coordinates: the
+    ``diff_pair``/``splits: 2`` reproduction this issue fixes has its two
+    self-nets' ports at the identical pair of columns, swapped between the
+    two nets (a common-centroid cross-quad checkerboard). Routing straight
+    up (or down) either port's own column into an over/under lane -- the
+    shape :func:`_detour_lane_waypoints_um` would produce -- runs straight
+    through the *other* self-net's own approach stub at that same column
+    even when the horizontal jog itself clears it (this was verified as the
+    actual failure mode during this issue's implementation: shifting only
+    the jog's height, the first fix attempted, still collided for exactly
+    this reason).
+
+    So this instead routes fully **around the outside of the block's own
+    bbox**: each candidate is a single corner point strictly outside
+    ``bbox_um`` on both axes (one of the four corners, each pushed out by
+    :func:`_detour_lane_waypoints_um`'s own ``_DETOUR_CLEARANCE_WIDTHS *
+    width_um`` clearance) -- :func:`manhattan_backbone`'s own waypoint
+    handling (``waypoints_um``, issue #634) already inserts the two elbows
+    needed to reach it and return from it (leave ``a``'s stub, sideways to
+    the corner's column *at the port's own row*, then along that column
+    clear of the block, then sideways to ``b``'s column *at the corner's
+    row*, then down/up into ``b``'s stub) -- so no bespoke elbow-insertion
+    logic is needed here, only the four corner points themselves. Because
+    the loop leaves each block edge at the *other* port's own row/column
+    rather than at either port's shared native one, the two nets' own
+    approach stubs no longer share a coordinate to collide on.
+
+    Returns up to :data:`_MAX_SAME_BLOCK_CROSS_LAYER_LANES` single-waypoint
+    candidates, ordered shortest total detour first (ties broken over
+    before under, right before left -- the same stable convention
+    :func:`_detour_lane_waypoints_um` uses, keeping the composed GDS
+    byte-reproducible, #320). The caller re-runs every routability check
+    against each drawn path and keeps the first that passes -- exactly the
+    same "propose candidates, let the checks decide" contract
+    :func:`_detour_lane_waypoints_um` follows.
+    """
+    clearance_um = _DETOUR_CLEARANCE_WIDTHS * width_um
+    over_y = bbox_um["y1"] + clearance_um
+    under_y = bbox_um["y0"] - clearance_um
+    right_x = bbox_um["x1"] + clearance_um
+    left_x = bbox_um["x0"] - clearance_um
+    corners = [
+        (side_x, lane_y) for lane_y in (over_y, under_y) for side_x in (right_x, left_x)
+    ]
+    lanes = [[corner] for corner in corners]
+    lanes.sort(
+        key=lambda wp: (
+            abs(wp[0][0] - a[0])
+            + abs(wp[0][1] - a[1])
+            + abs(wp[0][0] - b[0])
+            + abs(wp[0][1] - b[1])
+        )
+    )
+    return lanes[:_MAX_SAME_BLOCK_CROSS_LAYER_LANES]
 
 
 #: Port-name prefixes a ``klt gen`` generator uses for a guard/collector ring's
@@ -2571,6 +2665,7 @@ def route_two_pin(
     waypoints_um: list[tuple[float, float]] | None = None,
     cross_block_route_layer: tuple[int, int] | None = None,
     cross_block_geometry: dict[str, dict[str, Any] | None] | None = None,
+    leg_conflict: Any = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -2752,6 +2847,70 @@ def route_two_pin(
     reported ``reason`` is check 5's original wording plus a note that the
     detour was tried, so a caller can tell "there was no way around" from
     "no attempt was made".
+
+    **Same-block cross-layer conflict retry (issue #1393).** ``leg_conflict``
+    is an optional callable with the same signature as
+    :func:`route_bundle`'s own ``leg_conflict`` parameter (``(points_um,
+    via_drops, stub_widen, route_layer) -> str | None``) -- ``compose()``
+    threads its route-vs-route collision check (#1057/#1386) through
+    unchanged. It has no effect unless **all** of the following hold, so
+    every other leg is entirely unaffected -- a same-block self-net that
+    resolved on the *primary* ``route_layer``, an inter-block net, and a
+    caller-supplied ``waypoints_um`` path all behave exactly as before this
+    issue:
+
+    - this leg is a same-block self-net (``pin_a``/``pin_b`` share a block);
+    - this call is the *fixed*-shape attempt, not itself a caller- or
+      detour-supplied path (``waypoints_um`` is ``None`` -- bounds the
+      search to one level of recursion, mirroring #1167);
+    - the leg actually resolved on ``cross_block_route_layer`` -- i.e. the
+      checks 3/4 same-layer-short retry above fired, so this leg exists
+      *because of* ``routing.cross_block_layer_role`` in the first place.
+
+    When all three hold and ``leg_conflict`` rejects the fixed-shape path --
+    the case #1168's own fallback has no visibility into: a *different*
+    same-block self-net that also needed the cross layer and already claimed
+    the identical lane (:func:`route_bundle`'s route-vs-route check, #1057,
+    correctly flags the resulting literal overlap or spacing violation) --
+    this function generalises the same *pattern* of bounded detour search
+    used just above -- but not the same lane shape, which does not work for
+    this case (see :func:`_self_net_cross_layer_lane_waypoints_um`'s own
+    docstring: a straight up/down lane at either port's native column can run
+    straight through a *different* same-block self-net's own approach stub,
+    since a same-block self-net's ports can share coordinates with another
+    same-block self-net's ports -- verified as the actual failure mode this
+    issue's own reproduction hits). Instead,
+    :func:`_self_net_cross_layer_lane_waypoints_um` proposes up to
+    ``_MAX_SAME_BLOCK_CROSS_LAYER_LANES`` single-corner waypoints that route
+    fully *around the outside* of the block both pins sit on (there is no
+    third-party obstacle bbox here, unlike the #1167 case -- the collision is
+    with another net's *drawn metal*, not a placed block), and each is routed
+    by a recursive call to this same function with the corner as its sole
+    ``waypoints_um`` entry (without threading ``leg_conflict`` further --
+    the one-level recursion bound is enforced the same way #1167's own
+    retry is, by the ``waypoints_um is None`` gate above); ``leg_conflict``
+    is then re-checked against *that* lane's actual drawn points before it is
+    accepted, so a lane that clears the block but still collides with the
+    other net is rejected and the next lane is tried. Unlike #1167's own
+    scope guard (just above, which deliberately excludes a pin's own block
+    from that retry), this is a distinct case with its own gating -- not a
+    relaxation of that guard: #1167 retries around a *third*, unrelated
+    block's bbox; this retries around an *already-accepted leg of a
+    different self-net on the same block*. When no lane clears the conflict
+    either, the reported ``reason`` is ``leg_conflict``'s own wording plus a
+    note that the detour was tried.
+
+    A retried lane is **not** pinned to ``cross_block_route_layer``: the
+    recursive call re-runs the *whole* layer resolution above against the
+    lane's own drawn path, so a lane that loops clear of the block no longer
+    crosses the pads that forced the fallback in the first place and
+    naturally resolves back onto the primary ``route_layer``. That is the
+    intended outcome, not an escape -- it is the same checks reaching a
+    different verdict for a genuinely different path, and it leaves the
+    cross layer free for the *first* self-net that still needs it. What the
+    gating above guarantees is only that this retry is *reachable* solely
+    from a leg that needed the cross layer; it makes no promise about which
+    layer the accepted lane ends up on.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list,
@@ -3423,6 +3582,68 @@ def route_two_pin(
         if widen is not None:
             stub_widen.append(widen)
 
+    # Same-block cross-layer conflict retry (#1393, see docstring): only
+    # armed when leg_conflict was supplied AND this leg is a same-block
+    # self-net's fixed-shape attempt that resolved on cross_block_route_layer
+    # -- every other leg (an inter-block net, a same-block self-net that
+    # never needed the cross-layer fallback, or a caller-/detour-supplied
+    # waypoints_um path) skips this block entirely and returns below exactly
+    # as before this issue, so route_bundle's own leg_conflict check (#1057/
+    # #1386) remains the sole, unchanged decision-maker for every one of
+    # those cases.
+    retry_eligible = (
+        leg_conflict is not None
+        and same_block_self_net
+        and waypoints_um is None
+        and cross_block_route_layer is not None
+        and effective_route_layer == cross_block_route_layer
+    )
+    conflict_reason = (
+        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        if retry_eligible
+        else None
+    )
+    if conflict_reason is not None:
+        lanes = _self_net_cross_layer_lane_waypoints_um(
+            a, b, placed_bboxes_um[own_a], width_um
+        )
+        for lane in lanes:
+            retry = route_two_pin(
+                pin_a,
+                pin_b,
+                blocks,
+                offsets_um,
+                placed_bboxes_um,
+                width_um,
+                route_layer,
+                extraction_deck,
+                block_geometry,
+                waypoints_um=lane,
+                cross_block_route_layer=cross_block_route_layer,
+                cross_block_geometry=cross_block_geometry,
+            )
+            if not retry["routed"]:
+                continue
+            lane_conflict = leg_conflict(
+                retry["points_um"],
+                retry.get("via_drops", []),
+                retry.get("stub_widen", []),
+                retry.get("route_layer"),
+            )
+            if lane_conflict is None:
+                return retry
+        return {
+            "routed": False,
+            "route_length_um": None,
+            "points_um": None,
+            "reason": (
+                conflict_reason + " -- a bounded same-block cross-layer detour "
+                f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
+                "looped clear of the block's own bbox) was tried first, and "
+                "each one still conflicted"
+            ),
+        }
+
     return {
         "routed": True,
         "route_length_um": _polyline_length_um(points),
@@ -3553,7 +3774,15 @@ def route_bundle(
     accept) -- ``compose()`` passes its route-vs-route collision check
     (#1057) here, so a leg colliding with an *already-routed other net* is
     rejected as a candidate and an alternative leg is tried, rather than
-    failing the whole net.
+    failing the whole net. The identical callable is also threaded straight
+    into every candidate leg's own :func:`route_two_pin` call (issue #1393):
+    that function's own "same-block cross-layer conflict retry" (see its
+    docstring) uses it to detect -- and retry around, with an alternate
+    ``cross_block_layer_role`` lane -- the narrow case this bundle-level
+    check alone cannot recover from: a same-block self-net whose *only*
+    candidate leg collides with a *different* same-block self-net's
+    already-accepted route on the shared cross layer, where there is no
+    other candidate pair left to fall back to.
 
     ``cross_block_route_layer``/``cross_block_geometry_for`` (issue #1168)
     mirror ``route_layer``/``block_geometry_for`` for an optional second,
@@ -3667,6 +3896,7 @@ def route_bundle(
             waypoints_um=waypoints_um,
             cross_block_route_layer=cross_block_route_layer,
             cross_block_geometry=cross_geometry,
+            leg_conflict=leg_conflict,
         )
         reason = None if result["routed"] else result["reason"]
         if result["routed"] and leg_conflict is not None:
