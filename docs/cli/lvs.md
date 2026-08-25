@@ -418,7 +418,16 @@ actually needs are supported — `module`/`endmodule`, `input`/`output`/
 to one boundary pin per bit), named (`.PORT(NET)`) instance connections
 only (a plain net, a single-index bit-select `bus[3]`, a `1'b0`/`1'b1`
 constant, or `.PORT()` for an explicit no-connect), and a simple `assign
-<net> = <net>;` alias. A hierarchical module (uncommon for `verilog_path`,
+<net> = <net>;` alias. A Verilog **escaped identifier** (`\name`) is
+accepted wherever a name is, and is read exactly as Verilog defines it —
+one atomic token running from the backslash to the next whitespace, so
+every character in between belongs to the literal name. A backend-emitted
+name that embeds a flattened `generate`/`genvar` hierarchy path, e.g.
+`\my_array[0].u_inst/_01_`, is therefore the net named
+`my_array[0].u_inst/_01_`, never re-read as a bit-select of a bus
+`my_array` (issue #1371). A genuine bit-select of an escaped net is
+written the way Verilog requires, with the terminating whitespace explicit:
+`\bus [3]`. A hierarchical module (uncommon for `verilog_path`,
 which is always a single flat module post-place-and-route, but not assumed
 away) converts correctly too — an instantiated cell type that matches
 another parsed `module` in the same file is treated as a genuine
