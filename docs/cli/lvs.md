@@ -1336,7 +1336,8 @@ that deck's source and compares against `provenance.deck.content_hash`.
       "actual": "<hex>",
       "match": true
     }
-  ]
+  ],
+  "advisories": []
 }
 ```
 
@@ -1345,6 +1346,37 @@ the original run used an extraction deck.) `status` is `"match"` only when
 every `checks[]` entry's `match` is `true` — a report with no recorded hash
 to compare against always renders that check `match: false`, never a false
 pass.
+
+**`advisories` (issue #1373):** a list, always present (possibly empty), of
+non-fatal notices that the *engine itself* differs between the committed
+report and the one currently running `--check` — the input hashes above can
+all still be `[OK]` while a fresh compare against the same inputs would now
+use a different `klt`/KLayout build. Each entry names one differing
+`provenance.klt_version`/`provenance.klayout_version`:
+
+```json
+"advisories": [
+  {
+    "field": "provenance.klt_version",
+    "report": "0.3.0+g634e074ff484",
+    "current": "0.3.1+gabc1234"
+  }
+]
+```
+
+This is purely informational — it **never** affects `status` or the exit
+code, and is never folded into `checks[]`'s `[OK]`/`[DRIFTED]` list, so a
+scripted gate that greps that list for a failure marker does not start
+matching on it. `provenance.pdk.version` is deliberately excluded from this
+check: unlike the tool build, a PDK release routinely differs by design
+across machines/CI runners, so including it here would make the advisory
+noisy rather than informative (`pdk` is always `null` for LVS reports in
+practice regardless). A version missing from either side — an older report
+predating these fields, or an unresolvable current version — is treated as
+"unknown", not "drift", and is silently omitted rather than reported. Text
+output (`--format text`, the default) renders each entry as `[DRIFT]
+provenance.klt_version: 0.3.0+g634e074ff484 (report) vs 0.3.1+gabc1234
+(current)`, printed after the `checks[]` lines.
 
 **Known limitation**: `layout`/`reference` are echoed exactly as given in
 the original request document, which may have been relative to that request

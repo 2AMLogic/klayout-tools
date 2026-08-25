@@ -7064,6 +7064,92 @@ def test_check_lvs_report_malformed_json_raises(tmp_path):
         check_lvs_report(str(report_path))
 
 
+def test_check_lvs_report_matching_versions_no_advisory(tmp_path):
+    """A freshly-committed report's `provenance.klt_version`/
+    `klayout_version` match the engine currently running `--check` (the
+    ordinary case) -- `advisories` is present but empty (issue #1373)."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["advisories"] == []
+    assert result["status"] == "match"
+
+
+def test_check_lvs_report_klt_version_drift_advisory(tmp_path):
+    """A committed report whose `provenance.klt_version` differs from the
+    engine currently running `--check` surfaces a non-fatal advisory naming
+    both versions -- `status`/`checks[]` (hash-integrity) are unaffected."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    report["provenance"]["klt_version"] = "0.0.1-forged"
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    result = check_lvs_report(str(report_path))
+
+    # Non-fatal: the hash-integrity verdict is unaffected by version drift.
+    assert result["status"] == "match"
+    assert all(check["match"] for check in result["checks"])
+
+    advisories = {entry["field"]: entry for entry in result["advisories"]}
+    assert advisories.keys() == {"provenance.klt_version"}
+    assert advisories["provenance.klt_version"]["report"] == "0.0.1-forged"
+    assert advisories["provenance.klt_version"]["current"] == lvs._klt_version()
+
+
+def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
+    """Same as above, for `provenance.klayout_version`."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    report["provenance"]["klayout_version"] = "0.0.1-forged"
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    advisories = {entry["field"]: entry for entry in result["advisories"]}
+    assert advisories.keys() == {"provenance.klayout_version"}
+    assert advisories["provenance.klayout_version"]["report"] == "0.0.1-forged"
+    assert advisories["provenance.klayout_version"]["current"] == lvs._klayout_version()
+
+
+def test_check_lvs_report_missing_version_fields_no_crash(tmp_path):
+    """A report predating `provenance.klt_version`/`klayout_version` (older
+    report format) is "unknown", not "drift" -- no advisory, and `--check`
+    does not raise."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    del report["provenance"]["klt_version"]
+    del report["provenance"]["klayout_version"]
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["advisories"] == []
+    assert result["status"] == "match"
+
+
 def test_rerun_lvs_report_clean_pass(tmp_path):
     layout_path, reference_path = _matching_netlist_request(tmp_path)
     request = {
@@ -7379,6 +7465,27 @@ def test_cli_lvs_check_clean_exits_zero(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["mode"] == "check"
     assert data["status"] == "match"
+
+
+def test_cli_lvs_check_version_drift_advisory_text_exits_zero(tmp_path, capsys):
+    """A version-drift advisory is non-fatal end to end through the CLI
+    (issue #1373): exit code and `status` stay `0`/`"match"` (hashes
+    unmutated), but the text output names the `[DRIFT]` advisory."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    report["provenance"]["klt_version"] = "0.0.1-forged"
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+    capsys.readouterr()
+
+    assert main(["lvs", "--check", str(report_path)]) == 0
+    out = capsys.readouterr().out
+    assert "status: match" in out
+    assert "[DRIFT] provenance.klt_version: 0.0.1-forged (report) vs" in out
 
 
 def test_cli_lvs_check_drifted_exits_three(tmp_path, capsys):

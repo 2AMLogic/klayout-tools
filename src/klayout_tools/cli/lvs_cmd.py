@@ -136,6 +136,15 @@ def _print_check_text(result: dict) -> None:
         if not check["match"]:
             print(f"      expected: {check['expected']}")
             print(f"      actual:   {check['actual']}")
+    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
+    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
+    # affect `status`/exit code, so a scripted gate parsing that list alone
+    # never sees it.
+    for advisory in result.get("advisories", ()):
+        print(
+            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
+            f"vs {advisory['current']} (current)"
+        )
 
 
 def _print_rerun_text(result: dict) -> None:
