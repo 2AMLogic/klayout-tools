@@ -1304,21 +1304,66 @@ triage the flagged set once (e.g. "these N are known routing tracks, assert
 the count doesn't grow") instead of re-deriving it by re-implementing this
 heuristic against the stream.
 
-**Remaining known limitation: ordinary poly routing (issue #324).** The
-heuristic still has no signal distinguishing a resistor-shaped **routing
-track** from an actual unmodelled resistor body: on a layout whose signal
-routing is deliberately drawn on `poly` (e.g. a one-metal-level analog cell),
-every track contacted at both ends and touching no gate trips the same
-signature as a real missing device, and the false-positive count can
-dominate the true-positive count. There is no server-side fix for this today
-— tightening the signature (e.g. an aspect-ratio floor, or a "no more than 2
-contact clusters" ceiling to separate a two-terminal body from a track that
-fans out to every device on its net) is deliberately deferred pending
-validation against more than one deck/layout. The interim workaround is
+**Remaining known limitation: ordinary poly routing (issue #324, escape hatch
+added in #1425).** The heuristic still has no *geometric* signal
+distinguishing a resistor-shaped **routing track** — most commonly a
+**deliberate poly underpass**: a poly strip contacted to metal at each end,
+used to route one net beneath another on a deck with too few metal levels to
+stay planar — from an actual unmodelled resistor body: on a layout whose
+signal routing is deliberately drawn on `poly` (e.g. a one-metal-level analog
+cell), every track contacted at both ends and touching no gate trips the same
+signature as a real missing device, and the false-positive count can dominate
+the true-positive count. A caller who can mark the intentional shapes in the
+GDS itself should use the `poly_interconnect` deck field below rather than
+filter the JSON client-side — it is precise (per-shape) and travels with the
+layout. Tightening the *heuristic itself* (e.g. an aspect-ratio floor, or a
+"no more than 2 contact clusters" ceiling to separate a two-terminal body from
+a track that fans out to every device on its net) remains deliberately
+deferred pending validation against more than one deck/layout, and would
+silently change reports for every caller, marked or not — the interim
+workaround for a shape that is *not* (or cannot yet be) annotated is still
 client-side: use `unmodelled_poly[]`'s bounding boxes to filter out shapes
 already known to be routing (by inspection, by contact-cluster count, or by
 aspect ratio) and assert only on what remains, or track the *change* in the
 filtered count across revisions rather than gating on its absolute value.
+
+### Declaring intentional poly interconnect: the `poly_interconnect` marker layer (issue #1425)
+
+A deliberate **poly underpass** — a poly strip contacted to metal at each end,
+carrying one net beneath another where the deck has too few metal levels to
+stay planar — matches the unmodelled-device signature above exactly (no MOS
+gate, contact at 2+ separate points, no resistor marker), even though it is
+correct, intentional geometry and the extracted netlist is already right.
+Before this field there was no way to tell `klt extract` that a given `poly`
+shape is intentional interconnect rather than a missing device: the report
+carried a `warnings[]` entry and an `unmodelled_poly[]` record for correct
+geometry, and a genuine unmodelled resistor body elsewhere in the same cell
+was harder to spot in the same list.
+
+A deck may declare an optional `poly_interconnect` marker layer (a `(layer,
+datatype)` pair, like `dummy` above — any layer the deck's PDK does not
+otherwise use for connectivity; it never participates in ordinary net
+extraction, only in this exclusion check). A `poly` connected component that
+overlaps `poly_interconnect` **anywhere** is excluded from the
+unmodelled-device diagnostic entirely: it is never counted, never appears in
+`unmodelled_poly[]`, and never contributes to `warnings[]`. This is a
+per-shape, whole-component exclusion — the same "any overlap counts" idiom
+this deck already uses for a recognised MOS gate or resistor body — not a
+narrowing of the geometric signature itself, so it never affects a shape the
+caller has not annotated. The strip's own extraction is unaffected either
+way: it was already correct ordinary poly interconnect before this field
+existed; declaring the marker only silences the diagnostic for it.
+
+`poly_interconnect` is opt-in and additive, `None` by default: no shipped
+deck (sky130, gf180mcu, sg13g2, sg13cmos5l) declares it as of this field's
+introduction, so every deck extracts exactly as it did before the field
+existed unless a caller configures it (e.g. via a project-local deck
+override). **A shape that goes unannotated still lands in
+`unmodelled_poly[]`** — including a genuine poly underpass in a layout whose
+deck has not declared this marker, or whose caller has not drawn it — so a
+non-empty `unmodelled_poly[]` is not on its own proof of a defect; a caller
+reading the report should check whether each flagged shape is a deliberate,
+unannotated underpass before assuming it is a missing device.
 
 ### Merged net labels (issue #470)
 
@@ -3850,7 +3895,7 @@ exit codes).
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
 | `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
 | `abstracted_cells` | array\<object\>            | One entry per distinct cell type matched by `--abstract-cells` (issue #620 — see "Cell-level (black-box + pins) abstraction" above), each `{ "cell": string, "instance_count": int, "pin_count": int, "resolution_source": "in_cell_labels" \| "lef_abstract", "lef_path": string \| null }` (`lef_path` names the specific `--abstract-cell-lef` file for `"lef_abstract"`, `null` for `"in_cell_labels"`). Always present, empty unless `--abstract-cells` matched at least one instantiated cell. |
-| `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
+| `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. A deliberate poly underpass lands here too unless the deck declares `poly_interconnect` and the shape is marked with it — see "Declaring intentional poly interconnect" below (issue #1425). |
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |

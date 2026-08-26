@@ -3657,6 +3657,7 @@ def _detect_unmodelled_poly_bodies(
     resistor_markers: kdb.Region | None = None,
     resistor_bodies: kdb.Region | None = None,
     dbu: float = 1.0,
+    interconnect_markers: kdb.Region | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Flag ``poly`` connected components that no MOS gate extractor claims
     and that touch ``contact`` at two or more geometrically separate
@@ -3726,6 +3727,18 @@ def _detect_unmodelled_poly_bodies(
     ``1.0`` (i.e. no conversion) for callers that only need the warning
     strings.
 
+    ``interconnect_markers`` (issue #1425) is the union of every shape drawn
+    on the deck's optional ``ExtractionDeck.poly_interconnect`` marker layer
+    -- a caller-drawn annotation saying "this poly is intentional
+    interconnect" (most commonly a poly underpass: a strip contacted to
+    metal at each end, routing one net beneath another). A component
+    overlapping it at all is skipped unconditionally, the same way a
+    component touching ``gate_regions``/``resistor_bodies`` is skipped above
+    -- it never reaches the contact-cluster count or the resistor-marker
+    split, and so is never counted, flagged, or warned about. ``None`` (the
+    default) skips no component on this basis, matching this function's
+    behaviour before #1425.
+
     Returns ``(warnings, unmodelled_poly)``. ``warnings`` has up to two
     strings (empty when nothing is flagged) -- at most one for unmarked
     shapes and one for marked-but-unrecognised ones -- each naming how many
@@ -3743,6 +3756,9 @@ def _detect_unmodelled_poly_bodies(
     gate_regions = nfet_gate + pfet_gate
     bodies = resistor_bodies if resistor_bodies is not None else kdb.Region()
     markers = resistor_markers if resistor_markers is not None else kdb.Region()
+    interconnect = (
+        interconnect_markers if interconnect_markers is not None else kdb.Region()
+    )
     unmarked = 0
     marked_unrecognised = 0
     unmodelled_poly: list[dict[str, Any]] = []
@@ -3751,6 +3767,8 @@ def _detect_unmodelled_poly_bodies(
         if not candidate.interacting(gate_regions).is_empty():
             continue
         if not candidate.interacting(bodies).is_empty():
+            continue
+        if not candidate.interacting(interconnect).is_empty():
             continue
         contact_clusters = (candidate & contact).merged().count()
         if contact_clusters < _UNMODELLED_POLY_MIN_CONTACT_CLUSTERS:
@@ -4551,6 +4569,15 @@ def _extract_netlist(
         if spec.body == deck.poly:
             poly_resistor_markers += _region(layout, top_cell, spec.marker)
     poly_resistor_bodies = poly_resistor_candidate_bodies
+    # `poly_interconnect_markers` (issue #1425) is the caller-drawn "this
+    # poly is intentional interconnect" annotation from the deck's optional
+    # `ExtractionDeck.poly_interconnect` layer (most commonly a poly
+    # underpass) -- a component overlapping it is excluded from the
+    # heuristic entirely, the same way a component touching a recognised
+    # gate or resistor body is above. `_region` returns an empty `Region`
+    # when the deck declares no such layer (or the stream has no shapes on
+    # it), matching this function's behaviour before #1425.
+    poly_interconnect_markers = _region(layout, top_cell, deck.poly_interconnect)
     # Combine the default nfet/pfet gates with every declared flavour's own
     # (issue #1111): a flavoured transistor's gate is a real, recognised MOS
     # gate just like the default split's, and must not be misflagged as
@@ -4570,6 +4597,7 @@ def _extract_netlist(
         poly_resistor_markers,
         poly_resistor_bodies,
         layout.dbu,
+        poly_interconnect_markers,
     )
 
     # Dummy-device suppression, MOS gates (issue #295; extended to resistor

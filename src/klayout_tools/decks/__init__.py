@@ -836,6 +836,27 @@ class ExtractionDeck:
     ``devices[].class`` label. Empty for a deck with no such flavour (every
     deck as of this field's introduction, until gf180mcu's own module sets
     it) extracts exactly as it did before the field existed.
+
+    ``poly_interconnect`` (issue #1425) is an optional marker layer declaring
+    that a ``poly``-layer shape it covers is *intentional* interconnect (most
+    commonly a poly underpass -- a poly strip contacted to metal at each end,
+    used to route one net beneath another on a deck with too few metal levels
+    to stay planar) rather than an unrecognised device body. Without it, such
+    a shape matches ``extract.py``'s ``_detect_unmodelled_poly_bodies``
+    resistor-body signature (issue #288: not part of a recognised MOS gate,
+    touches ``contact`` at 2+ separate points, carries no resistor marker)
+    and is reported in ``unmodelled_poly[]``/``warnings[]`` as though its
+    terminals were an unintended short -- a false positive for correct,
+    deliberate geometry that also crowds out genuine unmodelled-device
+    findings in the same report. A caller who draws this marker over such a
+    strip (any ``(layer, datatype)`` the deck's PDK does not otherwise use --
+    it never participates in ordinary connectivity, only in this exclusion
+    check) keeps the shape out of ``unmodelled_poly[]`` entirely; it still
+    extracts as ordinary poly interconnect exactly as it does today, this
+    only silences the diagnostic. ``None`` (the default -- every deck as of
+    this field's introduction) disables the exclusion: a poly shape matching
+    the signature is flagged exactly as it was before this field existed, no
+    behaviour change for a deck/layout that declares or draws no marker.
     """
 
     active: tuple[int, int]
@@ -849,6 +870,7 @@ class ExtractionDeck:
     well_label: tuple[int, int] | None = None
     poly_label: tuple[int, int] | None = None
     dummy: tuple[int, int] | None = None
+    poly_interconnect: tuple[int, int] | None = None
     metal_labels: tuple[tuple[int, int] | None, ...] = ()
     vias: tuple[tuple[int, int], ...] = ()
     nfet_class: str = "nfet"
