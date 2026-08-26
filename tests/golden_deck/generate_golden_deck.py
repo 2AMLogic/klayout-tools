@@ -96,9 +96,11 @@ ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
     # separation rules ship as hand-written violate/clean pairs directly in
     # `tests/test_drc.py` instead -- see that deck's own module docstring.
     "sg13g2": ("width", "space"),
-    # sg13cmos5l (issue #1400): a MOS-only starter, width/space rules only
-    # (Activ/GatPoly/Metal1) -- see that deck's own module docstring.
-    "sg13cmos5l": ("width", "space"),
+    # sg13cmos5l (issue #1400, width/space on Activ/GatPoly/Metal1; issue
+    # #1417 extends coverage to the Metal2-TopMetal1 stack's width/space
+    # rules plus every via level's width/space/enclosing rules) -- see that
+    # deck's own module docstring.
+    "sg13cmos5l": ("width", "space", "enclosing"),
 }
 
 #: Fixed bar dimensions (database units), independent of any individual

@@ -1,14 +1,14 @@
 """Tests for the sg13cmos5l (IHP-Open-PDK) MOS-only starter deck (issue
-#1400, decomposed from #1398).
+#1400, decomposed from #1398; metal stack extended by #1417).
 
-`src/klayout_tools/decks/sg13cmos5l.py`'s DRC width/space rules are already
-exercised end-to-end (coverage, provenance-populated, curated-engine
+`src/klayout_tools/decks/sg13cmos5l.py`'s DRC width/space/enclosing rules are
+already exercised end-to-end (coverage, provenance-populated, curated-engine
 agreement) by `tests/test_golden_deck.py`'s `DECK_NAMES`-parametrized tests
--- `sg13cmos5l` was added to that tuple by this issue, so those three tiers
-already cover every rule in `sg13cmos5l.DECK` with no new test code needed
-here.
+-- `sg13cmos5l` was added to that tuple by #1400, so those three tiers
+already cover every rule in `sg13cmos5l.DECK` (27 rules as of #1417, up from
+6) with no new test code needed here.
 
-This module covers the two things `test_golden_deck.py` does *not*, mirroring
+This module covers the things `test_golden_deck.py` does *not*, mirroring
 `tests/test_sg13g2_deck.py`'s own structure exactly (the deck this one is
 independently verified against, not inherited from by analogy -- see
 `sg13cmos5l.py`'s own module docstring):
@@ -25,6 +25,12 @@ independently verified against, not inherited from by analogy -- see
   `R = squares * sheet_rho_ohm_sq` and -- the regression this issue is
   actually about -- keep their two contacted heads on *distinct* nets
   instead of shorting them together through the unmodelled `GatPoly` body.
+- **The Metal1-TopMetal1 connectivity stack** (issue #1417): a net routed
+  straight up through every via level extracts as one connected net (not
+  several disconnected ones, the pre-#1417 "outside deck's connectivity
+  graph" failure mode), and geometry on the layers cmos5l forbids outright
+  just above this stack (`Metal5`/`Via4`/`TopVia2`/`TopMetal2`) stays
+  correctly unrecognised.
 
 - **HV (`ThickGateOx`-flavoured) MOS device recognition** (issue #1416): a
   transistor drawn inside `ThickGateOx` (44/0) extracts bound to the real
@@ -32,10 +38,10 @@ independently verified against, not inherited from by analogy -- see
   `tests/test_sg13g2_deck.py`'s own HV golden-pair tests.
 
 See `src/klayout_tools/decks/sg13cmos5l.py`'s module docstring for this
-deck's full provenance notes, scope (`width`/`space` DRC checks only, across
-`Activ`/`GatPoly`/`Metal1`; LV *and* HV MOSFET LVS device class pairs, plus
-the three poly resistors), and what was deliberately left un-transcribed and
-why (metal resistors, diodes, capacitors, the Metal2-TopMetal1 stack,
+deck's full provenance notes, scope (`width`/`space`/`enclosing` DRC checks
+across `Activ`/`GatPoly`/`Metal1`-`TopMetal1`/`Via1`-`Via3`/`TopVia1`; LV *and*
+HV MOSFET LVS device class pairs, plus the three poly resistors), and what was
+deliberately left un-transcribed and why (metal resistors, diodes, capacitors,
 parasitics).
 """
 
@@ -85,11 +91,45 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     `decks/__init__.py`'s registries) and is exactly the curated
     Activ->lowest-metal width/space-only starter subset the module
     docstring describes -- 6 rules across 3 layers (`Activ`, `GatPoly`,
-    `Metal1`), no other check kind."""
+    `Metal1`), no other check kind.
+
+    (Name kept from #1400 for git-blame continuity even though #1417 below
+    grew the deck well past six rules -- the `Activ`/`GatPoly`/`Metal1`
+    width/space-only *subset* this test asserts is still exactly six rules;
+    see `test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension` for
+    the full, current rule count.)"""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 6
-    assert {rule.check for rule in deck} == {"width", "space"}
-    assert {rule.layer for rule in deck} == {(1, 0), (5, 0), (8, 0)}
+    mos_only_rules = [
+        r
+        for r in deck
+        if r.layer in {(1, 0), (5, 0), (8, 0)} and r.check in {"width", "space"}
+    ]
+    assert len(mos_only_rules) == 6
+    assert {rule.check for rule in mos_only_rules} == {"width", "space"}
+
+
+def test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension():
+    """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
+    Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
+    Via1/Via2/Via3/TopVia1 vias -- 27 rules total across 11 layers, and now
+    an `"enclosing"` check kind (the via/metal enclosure rules) alongside
+    `"width"`/`"space"`."""
+    deck = get_deck("sg13cmos5l")
+    assert len(deck) == 27
+    assert {rule.check for rule in deck} == {"width", "space", "enclosing"}
+    assert {rule.layer for rule in deck} == {
+        (1, 0),  # Activ.drawing
+        (5, 0),  # GatPoly.drawing
+        (8, 0),  # Metal1.drawing
+        (10, 0),  # Metal2.drawing
+        (19, 0),  # Via1.drawing
+        (29, 0),  # Via2.drawing
+        (30, 0),  # Metal3.drawing
+        (49, 0),  # Via3.drawing
+        (50, 0),  # Metal4.drawing
+        (125, 0),  # TopVia1.drawing
+        (126, 0),  # TopMetal1.drawing
+    }
 
 
 def test_run_drc_sg13cmos5l_metal1_width_violation(tmp_path: Path):
@@ -118,6 +158,228 @@ def test_run_drc_sg13cmos5l_metal1_clean(tmp_path: Path):
 
     report = run_drc(path, "sg13cmos5l")
     assert report["status"] == "clean"
+
+
+def test_run_drc_sg13cmos5l_via1_enclosure_violation(tmp_path: Path):
+    """A `Via1.drawing` square barely (0.005um) enclosed by `Metal1.drawing`
+    -- below the 0.01um `V1.c` floor -- trips `metal1.enclosing.via1.1`
+    under `klt drc --deck sg13cmos5l` end to end, exercising one of the new
+    via-level rules #1417 adds (not just the pre-existing Metal1 width/space
+    pair `test_run_drc_sg13cmos5l_metal1_width_violation`/`..._metal1_clean`
+    above already covered)."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(19, 0)).insert(_box_um(0, 0, 2, 2))  # Via1
+    top.shapes(layout.layer(8, 0)).insert(_box_um(-0.005, -0.005, 2.005, 2.005))
+    path = _write_gds(layout, tmp_path / "via1_enclosure_violate.gds")
+
+    report = run_drc(path, "sg13cmos5l")
+    assert report["status"] == "violations"
+    assert report["rule_counts"].get("metal1.enclosing.via1.1", 0) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# EXTRACTION_DECK's Metal1-TopMetal1 stack (issue #1417)
+# --------------------------------------------------------------------------- #
+
+
+def test_sg13cmos5l_deck_declares_full_metal_stack():
+    """`EXTRACTION_DECK` now declares the full Metal1-TopMetal1 stack with a
+    Via1/Via2/Via3/TopVia1 chain between them (index-aligned, `len(metals) -
+    1` vias) and a `.pin` (datatype 2) label layer per metal level -- the
+    deck-data half of #1417, mirroring `test_extract.py`'s
+    `test_sky130_deck_declares_full_metal_stack`/
+    `test_gf180mcu_deck_declares_full_metal_stack`. No `Metal5`/`Via4`/
+    `TopVia2`/`TopMetal2`: cmos5l's own stack tops at `TopMetal1` (all four
+    are on cmos5l's own LVS/DRC forbidden-layer lists -- see
+    `sg13cmos5l.py`'s module docstring)."""
+    assert EXTRACTION_DECK.metals == (
+        (8, 0),  # Metal1.drawing
+        (10, 0),  # Metal2.drawing
+        (30, 0),  # Metal3.drawing
+        (50, 0),  # Metal4.drawing
+        (126, 0),  # TopMetal1.drawing
+    )
+    assert EXTRACTION_DECK.vias == (
+        (19, 0),  # Via1.drawing
+        (29, 0),  # Via2.drawing
+        (49, 0),  # Via3.drawing
+        (125, 0),  # TopVia1.drawing
+    )
+    assert EXTRACTION_DECK.metal_labels == (
+        (8, 2),  # Metal1.pin
+        (10, 2),  # Metal2.pin
+        (30, 2),  # Metal3.pin
+        (50, 2),  # Metal4.pin
+        (126, 2),  # TopMetal1.pin
+    )
+    assert len(EXTRACTION_DECK.vias) == len(EXTRACTION_DECK.metals) - 1
+
+
+def _make_nfet_layout_routed_through_full_metal_stack() -> kdb.Layout:
+    """The same NMOS `_make_nfet_layout` draws, except the drain terminal is
+    routed straight up through *every* level of `EXTRACTION_DECK.metals`/
+    `.vias` (Metal1 -> Via1 -> Metal2 -> Via2 -> Metal3 -> Via3 -> Metal4 ->
+    TopVia1 -> TopMetal1) instead of being labelled directly at Metal1 --
+    mirrors `tests/test_sg13g2_deck.py`'s own
+    `_make_nmos_layout_routed_through_full_metal_stack` (issue #1243), the
+    template this issue's own curated body names. The drain net's own `"D"`
+    label is drawn only at the very top (`TopMetal1.pin`, 126/2); if any
+    level of the stack were disconnected, `run_extract` would instead report
+    an unlabelled/synthesized net for the drain terminal, not `"D"`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
+    draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um
+
+    draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
+    draw(8, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    label(8, 2, "S", 0.2, 0.5)  # Metal1.pin
+
+    draw(6, 0, _box_um(0.9, 1.0, 1.1, 1.2))  # gate Cont
+    draw(8, 0, _box_um(0.85, 0.95, 1.15, 1.25))  # gate Metal1 pad
+    label(8, 2, "G", 1.0, 1.1)
+
+    # Drain: Cont lands on Metal1, then every metal/via level of the stack
+    # stacks straight up, each level's box wide/tall enough to satisfy that
+    # level's own DRC width floor and the via enclosure margin below/above
+    # it (see `sg13cmos5l.py`'s `DECK`) -- not load-bearing for this
+    # connectivity-only test, but keeping the fixture DRC-clean too avoids a
+    # golden layout that would fail `klt drc` on the very stack it
+    # demonstrates.
+    draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
+    conductor_layers = [
+        (8, 0),  # Metal1.drawing
+        (10, 0),  # Metal2.drawing
+        (30, 0),  # Metal3.drawing
+        (50, 0),  # Metal4.drawing
+        (126, 0),  # TopMetal1.drawing
+    ]
+    via_layers = [
+        (19, 0),  # Via1.drawing
+        (29, 0),  # Via2.drawing
+        (49, 0),  # Via3.drawing
+        (125, 0),  # TopVia1.drawing
+    ]
+    for layer, datatype in conductor_layers:
+        draw(layer, datatype, _box_um(1.5, 0.0, 4.5, 3.0))
+    for layer, datatype in via_layers:
+        draw(layer, datatype, _box_um(2.0, 0.5, 3.0, 1.5))
+    label(126, 2, "D", 3.0, 1.5)  # TopMetal1.pin -- the top of the stack
+
+    return layout
+
+
+def test_golden_pair_sg13cmos5l_nfet_drain_routes_through_full_metal_stack(
+    tmp_path: Path,
+):
+    """The device-recognition geometry is unchanged from
+    `test_golden_pair_sg13cmos5l_nfet_l_w_matches_drawn_geometry` above (same
+    `l_um`/`w_um`), but the drain terminal is only labelled at `TopMetal1`,
+    the top of the stack issue #1417 extends `EXTRACTION_DECK.metals`/
+    `.vias` to reach. Before #1417 (`metals`/`vias` capped at `Metal1`, no
+    vias), a drain routed this far out would resolve to an *isolated*,
+    unlabelled/synthesized net -- `deck.metals`/`.vias` had no entries above
+    `Metal1` to carry the connection, so the "D" label at `TopMetal1` would
+    never reach the transistor's own drain terminal at all -- exactly the
+    "outside deck's connectivity graph" failure mode this issue exists to
+    close."""
+    path = _write_gds(
+        _make_nfet_layout_routed_through_full_metal_stack(),
+        tmp_path / "nfet_full_stack.gds",
+    )
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "nfet_full_stack.spice")
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["params"]["l_um"] == pytest.approx(0.4)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["nets"]["s"] == "S"
+    assert device["nets"]["d"] == "D"
+    assert device["nets"]["g"] == "G"
+    assert report["ignored_layers"] == []
+    assert not any("connectivity graph" in warning for warning in report["warnings"])
+
+
+def test_sg13cmos5l_forbidden_layers_above_topmetal1_stay_unrecognised(
+    tmp_path: Path,
+):
+    """Geometry on `Metal5` (67/0), `Via4` (66/0), `TopVia2` (133/0), and
+    `TopMetal2` (134/0) -- all four on cmos5l's own LVS/DRC forbidden-layer
+    lists, and all four sitting just above this deck's curated
+    `TopMetal1`-topped stack -- stays outside `EXTRACTION_DECK`'s
+    connectivity graph after #1417, exactly like before: the metal-stack
+    extension must not accidentally recognise a level cmos5l itself
+    forbids. A drain labelled only on `Metal5` reports as a separate,
+    unlabelled net rather than merging into the `Metal1`-rooted source/gate
+    nets -- the same "outside deck's connectivity graph" diagnostic a
+    genuinely undeclared layer produces."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
+    draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um
+
+    draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
+    draw(8, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    label(8, 2, "S", 0.2, 0.5)
+
+    draw(6, 0, _box_um(0.9, 1.0, 1.1, 1.2))  # gate Cont
+    draw(8, 0, _box_um(0.85, 0.95, 1.15, 1.25))  # gate Metal1 pad
+    label(8, 2, "G", 1.0, 1.1)
+
+    # Drain: Cont lands on Metal1, but the "route" beyond that is drawn on
+    # the four forbidden layers above TopMetal1 instead of this deck's real
+    # stack -- none of which EXTRACTION_DECK reads.
+    draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
+    draw(8, 0, _box_um(1.6, 0.2, 2.0, 0.8))  # Metal1 (drain pad)
+    forbidden_layers = [
+        (67, 0),  # Metal5.drawing
+        (66, 0),  # Via4.drawing
+        (133, 0),  # TopVia2.drawing
+        (134, 0),  # TopMetal2.drawing
+    ]
+    for layer, datatype in forbidden_layers:
+        draw(layer, datatype, _box_um(1.5, 0.0, 4.5, 3.0))
+    label(134, 0, "D", 3.0, 1.5)  # drawn on TopMetal2, not a read label layer
+
+    path = _write_gds(layout, tmp_path / "forbidden_layers.gds")
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "forbidden_layers.spice")
+    )
+
+    ignored = {(e["layer"], e["datatype"]) for e in report["ignored_layers"]}
+    for layer, datatype in forbidden_layers:
+        assert (layer, datatype) in ignored, report["ignored_layers"]
+    # The drain net never reaches a "D" label: the forbidden-layer geometry
+    # (including the "D" text itself, drawn on the un-read TopMetal2) is
+    # invisible to extraction, so this NMOS's drain resolves to a
+    # synthesized/unlabelled net, not "D".
+    (device,) = report["devices"]
+    assert device["nets"]["d"] != "D"
 
 
 # --------------------------------------------------------------------------- #
