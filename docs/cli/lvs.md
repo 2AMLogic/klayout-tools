@@ -344,9 +344,17 @@ design, and what was measured live for `gcd` in issue #1336):
 klt place-and-route par_request.json --format json >par.json
 
 # 2. layout side: every standard cell a pin-only black box, with the
-#    design's own DEF net names recovered so top-level pin names line up
+#    design's own DEF net names recovered so top-level pin names line up.
+#    `[!f]*` excludes `sky130_fd_sc_hd__fill_*` -- physical-only filler
+#    cells issue #1442's row-rail fix now inserts unconditionally (even
+#    without `request.power`) to close standard-cell row gaps. Filler
+#    cells carry no logical function, so `write_verilog` (the reference
+#    side) correctly never emits them -- abstracting them on the layout
+#    side with no reference-side counterpart is a real `topology`
+#    mismatch (`circuit could not be matched to a counterpart`), not a
+#    connectivity defect.
 klt extract "$(jq -r .gds_path par.json)" --deck sky130 \
-  --abstract-cells 'sky130_fd_sc_hd__*' --def-net-names \
+  --abstract-cells 'sky130_fd_sc_hd__[!f]*' --def-net-names \
   -o gcd.gate.spice --format json >extract.json
 
 # 3. compare against the same run's own verilog_path
@@ -406,9 +414,10 @@ A layout side that *does* carry power pins (which `klt extract
 draw in-cell `VPWR`/`VGND`/well-tie labels) still compares **cleanly**:
 KLayout's comparer matches the black-box cell circuits on their common,
 name-matched signal pins and tolerates the layout's extra pins and extra
-power nets — measured on the real routed `gcd` sequence above (506
-abstracted `sky130_fd_sc_hd` instances): `status: "match"`,
-`mismatch_count: 0`, with no `pin.unmatched` entry. You
+power nets — measured on the real routed `gcd` sequence above (460
+abstracted, non-filler `sky130_fd_sc_hd` instances, re-measured against
+the fixture #1443 regenerated with #1442's row-rail fix applied): `status:
+"match"`, `mismatch_count: 0`, with no `pin.unmatched` entry. You
 do **not** need to narrow the layout-side pin resolution to signal pins to
 get a verdict.
 
@@ -525,11 +534,13 @@ Applying "Negative controls" above to that same committed fixture
 corpus round-trip / self-consistency methodology `#456` established for a
 real OpenROAD-produced layout:
 
-- **Clean self-compare.** Extracting the macro's own netlist (**4355
-  devices**, 2961 nets, 1571 pins across the flattened layout) and comparing
-  the layout against it reports
+- **Clean self-compare.** Extracting the macro's own netlist (**4857
+  devices**, 2048 nets, 541 pins across the flattened layout — re-measured
+  against the fixture #1443 regenerated with #1442's row-rail fix applied;
+  see `tests/test_power.py`'s docstring on the same fixture for why the
+  exact counts shifted) and comparing the layout against it reports
   `status: "match"`, with every device accounted for on both sides
-  (`counts.devices` layout = reference = matched = 4355 — no silently-
+  (`counts.devices` layout = reference = matched = 4857 — no silently-
   dropped devices at this scale). The only mismatches are the same deck-
   structural **warnings** the hand-drawn corpus round-trip already carries:
   one `device.body_unverified` (the synthetic-substrate net every NMOS body
@@ -543,7 +554,7 @@ real OpenROAD-produced layout:
   `device.property` entry (`severity: "error"`, `class: "nfet"`,
   `description`: "matched device parameter 'w_um' differs") naming that exact
   instance — correctly attributed to the one changed device, not smeared
-  across the ~4000 unchanged standard-cell devices.
+  across the ~4800 unchanged standard-cell devices.
 
 This is a **self-consistency** check (the layout's own extracted netlist as
 its own reference), not an independent-reference LVS: a true golden-reference

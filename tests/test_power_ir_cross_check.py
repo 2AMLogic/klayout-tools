@@ -404,12 +404,21 @@ def test_gcd_routed_design_matches_ngspice(tmp_path):
                 )
             )
 
-    assert len(blocks) >= 100, "expected most of the fixture's islands to solve"
+    # Re-pinned for #1443: this fixture was regenerated with #1442's
+    # row-rail fix applied, which merges what used to be many small,
+    # gap-fragmented per-row islands into one continuous island per row per
+    # net -- 34 total islands / 68 total nodes today (was ~193 islands /
+    # ~386 nodes pre-#1443; see
+    # `tests/test_power.py::test_gcd_fixture_extracts_a_real_power_grid`'s
+    # docstring for the full explanation). The thresholds below keep the
+    # same "most of the fixture solves, comparison is not vacuous" intent
+    # against the new, smaller-but-still-real island/node counts.
+    assert len(blocks) >= 30, "expected most of the fixture's islands to solve"
 
     values = _run_ngspice(_spice_deck(blocks), tmp_path)
     max_v, max_i, compared = _compare(blocks, results, values)
 
-    assert compared >= 200
+    assert compared >= 60
     assert max_v < VOLTAGE_ABSTOL_V
     assert max_i < CURRENT_ABSTOL_A
     # And the cross-check is about a real, non-zero droop, not about a grid

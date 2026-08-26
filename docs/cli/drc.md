@@ -674,6 +674,23 @@ Splitting one layer's geometry into several touching shapes is an ordinary
 GDS authoring/tiling choice, not a drawn defect, so this class of report
 was never a real violation to fix in the layout.
 
+**Update (issues #1420/#1430/#1442/#1443):** the `"status": "clean"` state
+above did not last. Issue #1420 added this deck's first `nwell`-layer
+rules, and this same fixture's flattened, merged `nwell` geometry genuinely
+violated them — 184 violations (142 `nwell.space.1` + 42
+`nwell.width.1`), tracked as issue #1430. The root cause was a real gap in
+`klt place-and-route`'s sky130 row/cell placement: no filler-cell insertion
+across abutting standard-cell rows, so adjacent rows' `nwell` geometry fell
+short of the required spacing/width. Issue #1442 fixed the underlying
+defect (an unconditional row-rail obstruction before routing, un-gating
+`filler_placement` even without `request.power`), and issue #1443
+regenerated this fixture with that fix applied — `klt drc --deck sky130`
+reports `"status": "clean"`, `violation_count: 0` again today, this time
+because the row gaps are actually filled, not because of the earlier
+`_run_check` merging fix. See `tests/test_drc.py`'s
+`test_openroad_gcd_fixture_produces_well_formed_report` for the current
+regression pin.
+
 ### gf180mcu standard-cell row abutment (#1028)
 
 Issue #1028 reported that checking a row of abutted

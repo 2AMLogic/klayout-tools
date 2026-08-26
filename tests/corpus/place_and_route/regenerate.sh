@@ -9,9 +9,12 @@
 #   - a real, volare-fetched `sky130A` PDK install (`~/.volare/sky130A` or
 #     any install `klt pdk find --pdk sky130A` resolves)
 #   - `openroad` on $PATH, OR docker with the `openroad/orfs:latest` image
-#     (this script uses the Docker path, matching PR #431's own worked
-#     example -- swap the `docker run ...` block below for a bare
-#     `openroad ...` invocation if you have a native `openroad` binary)
+#     (issue #1443: the place-and-route step auto-detects a native
+#     `openroad` binary on $PATH and invokes `klt place-and-route` directly
+#     against it, matching the native-`yosys` path `klt synthesize` already
+#     uses above; it falls back to the `openroad/orfs:latest` Docker image,
+#     matching PR #431's own worked example, only when no native `openroad`
+#     is found)
 #
 # Usage: run from the repo root:
 #   ./tests/corpus/place_and_route/regenerate.sh
@@ -66,7 +69,14 @@ declare -A DESIGN_OUT_GDS_GZ=(
 )
 
 for DESIGN in gcd mult8; do
-  SCRATCH="$(mktemp -d)"
+  # Scratch dir under $HOME, not the system default (often /tmp): a native
+  # `openroad` on $PATH may itself be a thin Docker-forwarding wrapper that
+  # only bind-mounts $HOME into the container (observed in this environment
+  # -- see the header comment above), so a /tmp scratch dir is invisible to
+  # the containerized `openroad` process even though `klt place-and-route`
+  # itself (running on the host) can read/write it fine. Keeping scratch
+  # under $HOME works for a genuinely native binary too.
+  SCRATCH="$(mktemp -d -p "$HOME" klt-regen-pnr-XXXXXX)"
   trap 'rm -rf "$SCRATCH"' EXIT
 
   echo "=== $DESIGN ==="
@@ -115,22 +125,28 @@ JSON
   ( cd "$SCRATCH" && PATH="/usr/bin:$PATH" PDK=sky130A uv --project "$REPO_ROOT" run klt synthesize \
       "$SCRATCH/synth_request.json" --format json )
 
-  echo "==> klt place-and-route $DESIGN (real OpenROAD, via openroad/orfs:latest Docker image)"
-  docker run --rm --platform linux/amd64 \
-    -v "$REPO_ROOT:/workdir/repo:ro" \
-    -v "$SCRATCH:/workdir/scratch" \
-    -v "$HOME/.volare:/workdir/volare:ro" \
-    -e PDK=sky130A \
-    -e PDK_ROOT=/workdir/volare \
-    -e PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    openroad/orfs:latest \
-    bash -c '
-      pip3 install -q /workdir/repo &&
-      python3 -c "
+  if command -v openroad >/dev/null 2>&1; then
+    echo "==> klt place-and-route $DESIGN (native openroad on \$PATH: $(command -v openroad))"
+    ( cd "$SCRATCH" && PATH="/usr/bin:$PATH" PDK=sky130A uv --project "$REPO_ROOT" run klt place-and-route \
+        "$SCRATCH/par_request.json" --format json )
+  else
+    echo "==> klt place-and-route $DESIGN (real OpenROAD, via openroad/orfs:latest Docker image)"
+    docker run --rm --platform linux/amd64 \
+      -v "$REPO_ROOT:/workdir/repo:ro" \
+      -v "$SCRATCH:/workdir/scratch" \
+      -v "$HOME/.volare:/workdir/volare:ro" \
+      -e PDK=sky130A \
+      -e PDK_ROOT=/workdir/volare \
+      -e PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      openroad/orfs:latest \
+      bash -c '
+        pip3 install -q /workdir/repo &&
+        python3 -c "
 from klayout_tools.cli import main
 import sys
 sys.exit(main([\"place-and-route\", \"/workdir/scratch/par_request.json\", \"--format\", \"json\"]))
 "'
+  fi
 
   GDS="$SCRATCH/.klt/place-and-route/$DESIGN.gds"
   if [[ ! -f "$GDS" ]]; then

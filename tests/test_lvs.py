@@ -5151,10 +5151,20 @@ def test_pnr_gcd_fixture_self_compare_matches_cleanly(tmp_path):
     # of silently purging it). #619's `metals`/`vias` extension merges all
     # 78 into their real internal nets on both sides identically, so the
     # collision -- and the asymmetry it caused -- no longer arises.
+    #
+    # Re-pinned for #1443: this fixture was regenerated with #1442's
+    # row-rail fix applied (filler cells now close every standard-cell row
+    # gap, which also resolves #1430's nwell DRC violations as a side
+    # effect). The design's connectivity is unchanged, but the routed
+    # layout's own net/pin counts shifted -- the new row-rail obstruction
+    # and the filler cells it un-gates change downstream
+    # placement/CTS/repair, which changes how many synthesis-numbered
+    # internal nets survive into the routed layout (see the analogous
+    # `tests/test_extract.py::test_def_net_names_recovers_...` docstring).
     nets = report["counts"]["nets"]
-    assert nets["layout"] == nets["reference"] == nets["matched"] == 2133
+    assert nets["layout"] == nets["reference"] == nets["matched"] == 2048
     pins = report["counts"]["pins"]
-    assert pins["layout"] == pins["reference"] == pins["matched"] == 743
+    assert pins["layout"] == pins["reference"] == pins["matched"] == 541
 
     # A clean self-compare carries only warnings -- the same deck-structural
     # signal the hand-drawn corpus round-trip tier above documents, never an
