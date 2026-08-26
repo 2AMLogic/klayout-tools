@@ -1422,7 +1422,12 @@ _WRITE_DEF_RE = re.compile(r"^write_def (\S+)$")
 #: Issue #996 -- OpenROAD's own `write_verilog` (the `dbSta` command, not
 #: Yosys's identically-named one `klt synthesize` drives), mirroring
 #: `tests/test_synthesize.py`'s `_WRITE_VERILOG_RE` for that other engine.
-_WRITE_VERILOG_RE = re.compile(r"^write_verilog (\S+)$")
+#: Deliberately matches only the first (path) argument, not `$` at end of
+#: line: since issue #1091 (and, once `request.power` is omitted, issue
+#: #1442's own row-rail fallback), this line may carry a trailing
+#: `-remove_cells {...}` clause naming the physical-only instances this
+#: stage inserted -- the path is always the first token either way.
+_WRITE_VERILOG_RE = re.compile(r"^write_verilog (\S+)")
 _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 
@@ -1784,8 +1789,18 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
 
     # Issue #1091: `request.power` omitted (the default here) preserves
-    # today's exact prior behavior -- no PDN/global-connect/tapcell/filler
-    # Tcl ever emitted, and the additive `power` field says so plainly.
+    # today's exact prior behavior for the *full, caller-configured* PDN --
+    # no tapcell/full-PDN `add_global_connection`/`pdngen -- straps` Tcl
+    # ever emitted, and the additive `power` field's own
+    # `pdn`/`global_connect`/`power_net`/`ground_net`/`tapcell_master`/
+    # `endcap_master`/`straps`/`connects` all still say so plainly.
+    # `power.row_rail` is the one deliberate exception (issue #1442): a
+    # real `sky130_fd_sc_hd` row-rail obstruction is now always emitted at
+    # the "route" stage, `request.power` or not -- and, once that
+    # obstruction exists, this stage's own `filler_placement`/
+    # `global_connect` pair (issue #1091's existing call, previously gated
+    # on `request.power` alone) also runs, closing every row gap safely --
+    # see `_ROW_RAIL_STRAP`'s own docstring for the live-verified evidence.
     assert report["power"] == {
         "pdn": False,
         "global_connect": False,
@@ -1796,6 +1811,18 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "filler_masters": [],
         "straps": [],
         "connects": [],
+        "row_rail": {
+            "emitted": True,
+            "layer": "met1",
+            "power_net": "VPWR",
+            "ground_net": "VGND",
+            "filler_masters": [
+                "sky130_fd_sc_hd__fill_1",
+                "sky130_fd_sc_hd__fill_2",
+                "sky130_fd_sc_hd__fill_4",
+                "sky130_fd_sc_hd__fill_8",
+            ],
+        },
     }
     floorplan_script = os.path.join(
         os.path.dirname(request_path),
@@ -1818,7 +1845,36 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_route.tcl"
     )
     route_lines = _script_lines(route_script)
-    assert not any(line.startswith("filler_placement") for line in route_lines)
+    # Issue #1442: the row-rail fallback is present, right before
+    # `global_route` -- a real pre-existing obstruction on the same layer
+    # (`met1`) `set_routing_layers -signal met1-met5` opens up to signal
+    # routing -- and `filler_placement` *does* now run on this
+    # `request.power`-less run too, safe only because that obstruction
+    # already exists (see `_row_rail_lines`'s own docstring for the
+    # live-verified "naive unconditional filler_placement without a row
+    # rail shorts VPWR/VGND to signal nets" negative control). `pdngen`
+    # carries `-dont_add_pins` -- without it, `pdngen` promotes VPWR/VGND
+    # into this design's own top-level Verilog port list even though
+    # `define_pdn_grid` above never requested `-pins` (a second, independent
+    # port-promotion mechanism, live-verified against a real openroad build
+    # to break `tests/test_equiv.py`'s golden/gate port-list comparison --
+    # see `_row_rail_lines`'s own docstring).
+    assert "pdngen -dont_add_pins" in route_lines
+    assert route_lines.index("pdngen -dont_add_pins") < route_lines.index(
+        "global_route"
+    )
+    assert (
+        "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
+        "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}" in route_lines
+    )
+    assert route_lines.index("global_route") < route_lines.index(
+        "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
+        "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
+    )
+    assert any(
+        line.startswith("add_pdn_stripe") and "-followpins" in line and "met1" in line
+        for line in route_lines
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1992,6 +2048,17 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
                 "split_cuts": None,
             },
         ],
+        # Issue #1442: a `request.power`-bearing run's own `straps[]`
+        # already carries a `met1` `-followpins` entry (`_BASE_STRAPS`
+        # below) -- the row-rail fallback below is `request.power`'s own
+        # complement, never active alongside it.
+        "row_rail": {
+            "emitted": False,
+            "layer": None,
+            "power_net": None,
+            "ground_net": None,
+            "filler_masters": [],
+        },
     }
 
     floorplan_script = os.path.join(
@@ -3456,7 +3523,15 @@ def test_route_stage_script_writes_the_as_built_verilog_netlist(tmp_path, monkey
     `repair_antennas` diodes this command itself inserted.
 
     Mirrors `tests/test_synthesize.py`'s own `_WRITE_VERILOG_RE` check for
-    the Yosys-side `write_verilog` line in the generated `.ys` script."""
+    the Yosys-side `write_verilog` line in the generated `.ys` script.
+
+    `request.power` is omitted here (the default `_setup_success_env`
+    request), but `sky130_fd_sc_hd` is still covered by issue #1442's
+    row-rail fallback, which drives this same stage's `filler_placement`
+    call -- so the `write_verilog` line below does carry a trailing
+    `-remove_cells` clause for those filler masters, unlike a cell library
+    (or, before #1442, any `request.power`-less run) with no row-rail
+    fallback at all."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
     _stub_merge_def_to_gds(monkeypatch)
@@ -3468,13 +3543,17 @@ def test_route_stage_script_writes_the_as_built_verilog_netlist(tmp_path, monkey
 
     output_dir = os.path.join(os.path.dirname(request_path), ".klt", "place-and-route")
     expected = os.path.join(output_dir, "gcd.v")
-    assert f"write_verilog {expected}" in route_lines
+    assert any(line.startswith(f"write_verilog {expected}") for line in route_lines)
     assert _script_write_verilog_path(route_script) == expected
 
     # Additive, not a replacement: `write_def` still runs, and the netlist
     # is written from the same design state immediately after it.
     def_index = route_lines.index(f"write_def {os.path.join(output_dir, 'gcd.def')}")
-    verilog_index = route_lines.index(f"write_verilog {expected}")
+    verilog_index = next(
+        i
+        for i, line in enumerate(route_lines)
+        if line.startswith(f"write_verilog {expected}")
+    )
     assert verilog_index == def_index + 1
 
     # Both artifacts must be written *after* every cell-inserting/resizing
@@ -3490,7 +3569,15 @@ def test_route_stage_script_writes_the_as_built_verilog_netlist(tmp_path, monkey
     # Flags deliberately not passed -- see `_stage_script_lines`'s own
     # `"route"` branch for why each is omitted.
     assert not any("-include_pwr_gnd" in line for line in route_lines)
-    assert not any("-remove_cells" in line for line in route_lines)
+    # Issue #1442: `-remove_cells` *does* now appear here -- the row-rail
+    # fallback's own `filler_placement` call inserted physical-only filler
+    # instances above, so this flag strips exactly those from the as-built
+    # netlist (see `_stage_script_lines`'s own `physical_only_masters`
+    # construction).
+    assert (
+        "-remove_cells {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
+        "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
+    ) in route_lines[verilog_index]
     assert not any("write_verilog -sort" in line for line in route_lines)
 
 

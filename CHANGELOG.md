@@ -14,6 +14,42 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt place-and-route`'s `"route"` stage now always draws a real,
+  `request.power`-independent `sky130_fd_sc_hd` row-rail obstruction
+  (`add_pdn_stripe ... -followpins` on the library's own `VPWR`/`VGND` pins)
+  immediately before `global_route` runs, even when `request.power` is
+  entirely omitted (issue #1442). Without it, a `request.power`-less run had
+  no continuous per-row power-rail shape on `met1` for the router to avoid —
+  the same layer `_ROUTING_LAYER_RANGE` opens up to ordinary signal
+  routing — so a signal net could legally route straight across an
+  unfilled standard-cell row gap; a filler cell dropped into that same gap
+  later (this stage's own `filler_placement` call, previously gated on
+  `request.power` alone) could then physically short its own VPWR/VGND
+  strap onto that pre-existing signal route, invisible to `klt drc`
+  (spacing/width checks never fire on touching/overlapping same-layer
+  shapes) but a real electrical short in `klt extract`'s
+  `merged_net_labels[]`. `filler_placement`/`global_connect` now also runs
+  whenever this row-rail fallback is active, safely, because the
+  obstruction it draws precedes routing — live-verified against a real
+  `openroad` toolchain to produce zero power/signal `merged_net_labels[]`
+  merges. The fallback's own `pdngen` call carries `-dont_add_pins`
+  (discovered live while validating this fix): without it, `pdngen`
+  promotes `VPWR`/`VGND` into the design's own top-level **Verilog** port
+  list even with no `-pins` on `define_pdn_grid`, breaking
+  `tests/test_equiv.py`'s golden (`klt synthesize`) vs. gate (`klt
+  place-and-route`) port-list comparison for every default,
+  `request.power`-omitted `sky130_fd_sc_hd` route — `-dont_add_pins`
+  suppresses exactly that promotion while leaving the physical
+  `SPECIALNETS` row-rail shapes untouched. New additive response field
+  `power.row_rail`
+  (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`); no
+  `schema_version` bump. `tests/corpus/place_and_route/regenerate.sh` gains
+  a matching `merged_net_labels[]` connectivity check (alongside its
+  existing `klt drc` check) so this class of defect cannot silently ship
+  again; the committed `gcd.gds.gz`/`mult8.gds.gz` corpus fixtures
+  themselves are intentionally not regenerated in this change (see
+  `docs/cli/place-and-route.md`'s "Row-rail fallback" section for why) —
+  tracked as a follow-up.
 - **Added**: `klt gen well_island` — a named-net well/tap island isolated
   from a caller-specified set of other wells (issue #1421). It draws
   `guard_ring`'s geometry with the two properties a *well island* needs and
