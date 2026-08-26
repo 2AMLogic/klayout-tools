@@ -425,11 +425,12 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 17
+design rule manual (which spans hundreds of rules). It currently covers 47
 rules — width, spacing, and enclosure checks across the `poly`, `diff`,
-`li1`, `met1`, `licon1`, `mcon`, `met2`, and `via` (met1&lt;-&gt;met2 via1)
-layers — transcribed directly from the official community sky130 KLayout
-DRC deck
+`li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
+`met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
+`nwell` (issue #1420) layers — transcribed directly from the official
+community sky130 KLayout DRC deck
 ([`fossi-foundation/open-pdks`](https://github.com/fossi-foundation/open-pdks),
 `sky130/klayout/sky130.lydrc` and `sky130.lyt`; GPLv3). The `met2`/`via`
 rules (issue #513) were cross-checked against a real sky130A PDK install's
@@ -440,7 +441,23 @@ confirming it carries the same content. Each rule in
 `src/klayout_tools/decks/sky130.py` cites the exact source rule id (e.g.
 `"poly.1a"`) and comment it was transcribed from.
 
-Two of the seventeen rules approximate an official rule defined on a
+`nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
+gap on the well layer: before these two rules, `DECK` had *zero* rules
+referencing `nwell` (64/20), even though `EXTRACTION_DECK` has always used
+that exact layer for PMOS device recognition and body-net derivation — a
+layout with illegally-close, effectively-merged well islands passed `klt
+drc` cleanly on the very layer its own extraction correctness depends on.
+`nwell.space.1` additionally approximates its source rule's `isolated`
+check (space between distinct polygons only) as this engine's `"space"`
+check (which also catches same-polygon notches) — strictly *stricter* than
+the source rule, not looser; see its own docstring in `sky130.py`. Two more
+official well rules — `nwell`'s enclosure of opposite-type diffusion/tap
+(`difftap.8`/`difftap.10`, both scoped to a `psdm`/`nsdm` implant-layer
+boolean expression no `klt gen` generator draws today) — are deliberately
+**not** transcribed; see the "nwell (well-layer) rule coverage" note in
+`sky130.py`'s own module docstring for the full reasoning.
+
+Two of these rules approximate an official rule defined on a
 *compound* layer expression (a boolean union of two mask layers, e.g.
 `diff.or(tap)`) as a check against a single drawn layer, because the native
 `Region` check primitives check one layer, or one layer against one other

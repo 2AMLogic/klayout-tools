@@ -178,6 +178,7 @@
   ],
   "coverage": {
     "deck_layers": [
+      "64/20",
       "65/20",
       "66/20",
       "66/44",
@@ -234,6 +235,8 @@
       "met5.enclosing.via4.1",
       "met5.space.1",
       "met5.width.1",
+      "nwell.space.1",
+      "nwell.width.1",
       "via.space.1",
       "via.width.1",
       "via2.space.1",
@@ -256,6 +259,7 @@
       "m3",
       "m4",
       "m5",
+      "nwell",
       "poly",
       "via",
       "via2",

@@ -953,6 +953,112 @@
       ]
     }
   },
+  "nwell.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            64,
+            20
+          ]
+        },
+        {
+          "box": [
+            3370,
+            0,
+            5370,
+            4000
+          ],
+          "layer": [
+            64,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real volare-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule lives inside the script's `if FEOL ... end` block, so `run_drc_klayout_engine` never evaluates it at all, regardless of the input layout. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      64,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            64,
+            20
+          ]
+        },
+        {
+          "box": [
+            3170,
+            0,
+            5170,
+            4000
+          ],
+          "layer": [
+            64,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "nwell.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            940,
+            4000
+          ],
+          "layer": [
+            64,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real volare-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule lives inside the script's `if FEOL ... end` block, so `run_drc_klayout_engine` never evaluates it at all, regardless of the input layout. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      64,
+      20
+    ],
+    "threshold_dbu": 840,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            740,
+            4000
+          ],
+          "layer": [
+            64,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "poly.width.1": {
     "check": "width",
     "clean": {
