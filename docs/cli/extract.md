@@ -3725,12 +3725,16 @@ never a bare `$2`) wherever it writes an anonymous, unlabelled net's
 `Net.expanded_name()` placeholder as an actual SPICE node reference — a
 node token that merely *starts with* `$` is inline-comment syntax to ngspice
 (and the wider SPICE3/HSPICE-descended dialect family), so a bare `$2` would
-silently truncate the rest of its card. `nets[].name`, `devices[].nets[...]`,
-and `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net` all carry this
+silently truncate the rest of its card. This escaping applies to **net-name
+fields only**: `nets[].name`, `devices[].nets[...]`, and
+`parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net` all carry this
 same escaped `\$N` spelling for an anonymous net (issue #1162) — matching
 the written netlist byte-for-byte, exactly like the `\|`-joined spelling
-"Merged net labels" above already carries for a label-merged net. **Before
-this fix, these JSON fields reported the *bare*, unescaped `$N` form** — a
+"Merged net labels" above already carries for a label-merged net. **Not
+`devices[].name`** — a synthesized device instance name is never the first
+token on its SPICE instance line (always preceded by a class letter like `M$1774`),
+so the inline-comment hazard does not apply there; device names remain bare
+`$<n>` without backslash escaping. **Before this fix, these JSON fields reported the *bare*, unescaped `$N` form** — a
 caller that copied one of these fields verbatim into a hand-authored SPICE
 card (a testbench, a `.save`/probe directive, a manual instantiation)
 reproduced the exact silent-truncation hazard `NetlistSpiceWriter` itself
@@ -3916,7 +3920,7 @@ consume.
 
 | Field    | Type                        | Description                                                                                    |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
-| `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
+| `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line). **This field is deliberately NOT backslash-escaped** (contrast `nets[].name` below): a KLayout-synthesized `$<n>` anonymous-device name is never the first token on an instance line — always preceded by a class-letter prefix (`M$1774`, `R$22`, etc.) — so the leading-`$` ngspice inline-comment hazard that `spice_safe_net_name()` guards against in net-name fields does not apply to device names. See "Anonymous nets are backslash-escaped" for the full rationale. |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
 | `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
 | `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
