@@ -26,27 +26,35 @@ independently verified against, not inherited from by analogy -- see
   actually about -- keep their two contacted heads on *distinct* nets
   instead of shorting them together through the unmodelled `GatPoly` body.
 
+- **HV (`ThickGateOx`-flavoured) MOS device recognition** (issue #1416): a
+  transistor drawn inside `ThickGateOx` (44/0) extracts bound to the real
+  `sg13_hv_nmos`/`sg13_hv_pmos` model under `klt extract --pdk`, mirroring
+  `tests/test_sg13g2_deck.py`'s own HV golden-pair tests.
+
 See `src/klayout_tools/decks/sg13cmos5l.py`'s module docstring for this
 deck's full provenance notes, scope (`width`/`space` DRC checks only, across
-`Activ`/`GatPoly`/`Metal1`; one LV MOSFET LVS device class pair, plus the
-three poly resistors), and what was deliberately left un-transcribed and why
-(HV MOS flavour, metal resistors, diodes, capacitors, the Metal2-TopMetal1
-stack, parasitics).
+`Activ`/`GatPoly`/`Metal1`; LV *and* HV MOSFET LVS device class pairs, plus
+the three poly resistors), and what was deliberately left un-transcribed and
+why (metal resistors, diodes, capacitors, the Metal2-TopMetal1 stack,
+parasitics).
 """
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
 from klayout_tools.decks import RuleProvenance, get_deck
+from klayout_tools.decks import sg13cmos5l as sg13cmos5l_deck_module
 from klayout_tools.decks.sg13cmos5l import EXTRACTION_DECK
 from klayout_tools.drc import run_drc
 from klayout_tools.extract import run_extract
 
 _DBU_UM = 0.001
+_IHP_OPEN_PDK_COMMIT = "d2cc0355f26235c777dfcc6867b390fa1e78083f"
 
 
 def _box_um(x0: float, y0: float, x1: float, y1: float) -> kdb.Box:
@@ -150,7 +158,7 @@ def test_sg13cmos5l_mos_provenance_cites_mos_extraction_lvs():
 # --------------------------------------------------------------------------- #
 
 
-def _make_nfet_layout() -> kdb.Layout:
+def _make_nfet_layout(*, thick_gate_ox: bool = False) -> kdb.Layout:
     """One drawn NMOS on sg13cmos5l's curated MOS-recognition layers: a
     2x1um `Activ.drawing` strip crossed by a 0.4um-wide `GatPoly.drawing`
     gate bar (active outside `NWell.drawing`, so it recognises as NMOS) --
@@ -158,7 +166,14 @@ def _make_nfet_layout() -> kdb.Layout:
     (`sg13_lv_nmos`). cmos5l's `Cont.drawing` (`6/0`) lands directly on
     `Metal1.drawing` (`8/0`), the same single-first-metal-level shape
     `sg13g2.py`'s own deck has. `W` is the active strip's own 1um
-    cross-extent; `L` is the poly bar's 0.4um width."""
+    cross-extent; `L` is the poly bar's 0.4um width.
+
+    With `thick_gate_ox=True` the same geometry is additionally covered by
+    `ThickGateOx` (44/0), making it cmos5l's thick-oxide ("-HV") flavour
+    (`sg13_hv_nmos`, `general_derivations.lvs`'s `ngate_hv_base =
+    ngate.and(thickgateox_drw)`) -- the *only* difference between the two
+    layouts, so any extracted difference is attributable to the marker
+    alone."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -173,6 +188,8 @@ def _make_nfet_layout() -> kdb.Layout:
 
     draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
     draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um
+    if thick_gate_ox:
+        draw(44, 0, _box_um(-0.3, -0.3, 2.3, 1.3))  # ThickGateOx -> "-HV"
 
     draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
     draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
@@ -206,14 +223,18 @@ def test_golden_pair_sg13cmos5l_nfet_l_w_matches_drawn_geometry(tmp_path: Path):
     assert EXTRACTION_DECK.nfet_provenance.rule_id == "sg13_lv_nmos"
 
 
-def _make_pfet_layout() -> kdb.Layout:
+def _make_pfet_layout(*, thick_gate_ox: bool = False) -> kdb.Layout:
     """The `_make_nfet_layout` geometry with the same active/poly/contact
     stack, wrapped in `NWell.drawing` (active *inside* `NWell` recognises as
     PMOS, the deck's own NMOS/PMOS split) -- the exact device
     `EXTRACTION_DECK.pfet_provenance` cites (`sg13_lv_pmos`). A direct
     `NWell.pin` (`well_label`) text names the body/well net without needing
     a separate tap-contact stack, mirroring `sg13g2.py`'s own `well_label`
-    convention."""
+    convention.
+
+    With `thick_gate_ox=True`, same `ThickGateOx` (44/0) addition as
+    `_make_nfet_layout` -- the PMOS sibling of its thick-oxide flavour
+    (`sg13_hv_pmos`)."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -231,6 +252,8 @@ def _make_pfet_layout() -> kdb.Layout:
 
     draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
     draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um
+    if thick_gate_ox:
+        draw(44, 0, _box_um(-0.3, -0.3, 2.3, 1.3))  # ThickGateOx -> "-HV"
 
     draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
     draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
@@ -262,6 +285,144 @@ def test_golden_pair_sg13cmos5l_pfet_l_w_matches_drawn_geometry(tmp_path: Path):
     assert device["params"]["w_um"] == pytest.approx(1.0)
     assert device["nets"]["b"] == "VPB"
     assert EXTRACTION_DECK.pfet_provenance.rule_id == "sg13_lv_pmos"
+
+
+# --------------------------------------------------------------------------- #
+# Thick-oxide ("-HV") MOS flavour (issue #1416)
+# --------------------------------------------------------------------------- #
+
+
+def _make_pdk_install(tmp_path: Path) -> str:
+    """A minimal IHP-Open-PDK-shaped install tree `klt pdk find` resolves as
+    variant `ihp-sg13cmos5l` -- mirrors `test_sg13g2_deck.py`'s own
+    `_make_pdk_install` (the resolver only probes for the variant
+    directory's `libs.tech` marker; the model binding itself is a curated
+    table, not a file read)."""
+    root = tmp_path / "pdk_install"
+    (root / "ihp-sg13cmos5l" / "libs.tech").mkdir(parents=True)
+    return str(root)
+
+
+def _device_cards(report: dict) -> list[str]:
+    text = Path(report["netlist_path"]).read_text()
+    return [line for line in text.splitlines() if line and line[0] in ("M", "X")]
+
+
+def test_sg13cmos5l_thick_gate_ox_declares_a_mos_flavour():
+    """`ThickGateOx` (44/0) is no longer a diagnostic-only voltage-domain
+    marker: `EXTRACTION_DECK` declares one `mos_flavours` entry keyed on it
+    (issue #1416), whose `nfet_provenance`/`pfet_provenance` cite
+    `mos_extraction.lvs`'s own `sg13_hv_nmos`/`sg13_hv_pmos`
+    `extract_devices(mos4(...))` calls."""
+    (flavour,) = EXTRACTION_DECK.mos_flavours
+    assert flavour.marker == (44, 0)
+    assert flavour.flavour == "hv"
+    assert flavour.nfet_provenance.rule_id == "sg13_hv_nmos"
+    assert flavour.pfet_provenance.rule_id == "sg13_hv_pmos"
+    assert flavour.nfet_provenance.source_path == (
+        "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
+    )
+    assert flavour.pfet_provenance.commit == _IHP_OPEN_PDK_COMMIT
+
+
+def test_golden_pair_sg13cmos5l_thick_oxide_nmos_binds_sg13_hv_nmos(tmp_path: Path):
+    """The acceptance criterion of issue #1416: a golden layout whose NMOS
+    is drawn inside `ThickGateOx` (44/0) extracts bound to the real
+    `sg13_hv_nmos` model, not the thin-oxide `sg13_lv_nmos` -- and the
+    `ThickGateOx` voltage-domain warning that used to fire for exactly this
+    geometry no longer does."""
+    path = _write_gds(_make_nfet_layout(thick_gate_ox=True), tmp_path / "hv_nfet.gds")
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "hv_nfet.spice"),
+    )
+
+    # The structural class label is deliberately unchanged (see
+    # `MOSFlavour`'s own docstring) -- only the bound model name
+    # distinguishes the flavours.
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["params"]["l_um"] == pytest.approx(0.4)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert report["voltage_domain_warnings"] == []
+
+    cards = _device_cards(report)
+    assert cards and all(line.startswith("X") for line in cards)
+    assert any(" sg13_hv_nmos " in line for line in cards)
+    assert not any(" sg13_lv_nmos " in line for line in cards)
+
+
+def test_golden_pair_sg13cmos5l_thick_oxide_pfet_binds_sg13_hv_pmos(tmp_path: Path):
+    """The PMOS sibling of the NMOS golden pair above (`sg13_hv_pmos`)."""
+    path = _write_gds(_make_pfet_layout(thick_gate_ox=True), tmp_path / "hv_pfet.gds")
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "hv_pfet.spice"),
+    )
+
+    assert report["device_counts"] == {"pfet": 1}
+    assert report["voltage_domain_warnings"] == []
+    cards = _device_cards(report)
+    assert any(" sg13_hv_pmos " in line for line in cards)
+    assert not any(" sg13_lv_pmos " in line for line in cards)
+
+
+def test_sg13cmos5l_thin_oxide_mos_still_binds_sg13_lv_nmos(tmp_path: Path):
+    """Regression control: the *same* NMOS geometry with no `ThickGateOx`
+    drawn over it still binds the deck's default thin-oxide model, so the
+    flavour split above is attributable to the marker and nothing else."""
+    path = _write_gds(_make_nfet_layout(), tmp_path / "lv_nfet.gds")
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "lv_nfet.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
+    cards = _device_cards(report)
+    assert any(" sg13_lv_nmos " in line for line in cards)
+    assert not any(" sg13_hv_nmos " in line for line in cards)
+
+
+def test_sg13cmos5l_thick_oxide_mos_was_misclassified_before_mos_flavours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Negative control for the fix: with `mos_flavours` stripped back to
+    its pre-#1416 empty state (and nothing else changed), the *same*
+    thick-oxide golden layout binds `sg13_lv_nmos` -- the silent
+    mis-classification issue #1416 reports -- and `ThickGateOx` fires the
+    residual-gap `voltage_domain_warnings` diagnostic it fired before the
+    fix."""
+    monkeypatch.setattr(
+        sg13cmos5l_deck_module,
+        "EXTRACTION_DECK",
+        dataclasses.replace(EXTRACTION_DECK, mos_flavours=()),
+    )
+
+    path = _write_gds(
+        _make_nfet_layout(thick_gate_ox=True), tmp_path / "hv_nfet_pre_fix.gds"
+    )
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "hv_nfet_pre_fix.spice"),
+    )
+
+    cards = _device_cards(report)
+    assert any(" sg13_lv_nmos " in line for line in cards)
+    assert not any(" sg13_hv_nmos " in line for line in cards)
+    assert [w["marker"] for w in report["voltage_domain_warnings"]] == ["44/0"]
 
 
 # --------------------------------------------------------------------------- #

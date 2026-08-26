@@ -364,6 +364,28 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
             "pfet": "sg13_hv_pmos",
         },
     },
+    # sg13cmos5l's thick-oxide ("-HV") pair (issue #1416, the sg13cmos5l
+    # sibling of sg13g2's own #1231 entry above). cmos5l's own
+    # `libs.tech/ngspice/models/sg13g2_moshv_mod.lib` is a literal symlink
+    # into a sibling `ihp-sg13g2` checkout (see `decks/sg13cmos5l.py`'s
+    # module docstring for the full symlink-chain provenance) --
+    # independently fetched at the exact commit
+    # `ihp-sg13cmos5l/.github/ihp-sg13g2.ref` pins
+    # (`d2cc0355f26235c777dfcc6867b390fa1e78083f`) and confirmed to declare
+    # `.subckt sg13_hv_nmos d g s b` / `.subckt sg13_hv_pmos d g s b`,
+    # byte-identical names/terminal order/parameter set to sg13g2's own HV
+    # pair above -- not assumed identical by analogy (per
+    # `docs/guides/pdk-family-port-checklist.md` step 2). cmos5l's own
+    # `mos_extraction.lvs` (also a resolved symlink to the same sibling)
+    # extracts the matching layout devices under exactly these names, which
+    # is what `decks/sg13cmos5l.py`'s `mos_flavours[0].nfet_provenance`/
+    # `.pfet_provenance` cite.
+    ("sg13cmos5l", "sg13cmos5l"): {
+        "hv": {
+            "nfet": "sg13_hv_nmos",
+            "pfet": "sg13_hv_pmos",
+        },
+    },
     ("sky130", "sky130"): {
         "hvi": {
             "nfet": "sky130_fd_pr__nfet_g5v0d10v5",

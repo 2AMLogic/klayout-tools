@@ -90,16 +90,17 @@ on-disk source:
   (also present, also symlinked to the same sibling) additionally declares
   RF-flavoured devices -- out of scope for this MOS-only baseline, mirroring
   sg13g2.py's own un-transcribed RF-FET note.
-- **Only the LV flavour is transcribed by this starter**, mirroring
-  ``sg13g2.py``'s own #905 starter scope exactly (#905 shipped LV-only;
-  ``sg13g2.py``'s HV pair was a dedicated follow-on, issue #1231, using the
-  ``MOSFlavour``/``mos_flavours`` mechanism). ``ThickGateOx`` (44/0) is a
-  real, cited cmos5l layer this deck neither checks (the DRC rules
-  transcribed below apply the general-case thresholds regardless of
-  ``ThickGateOx``'s presence, same as sg13g2.py's own note) nor models for
-  MOS device-recognition/model binding -- see ``UNMODELED_VOLTAGE_MARKERS``
-  below. Adding the HV flavour (the ``sg13cmos5l`` sibling of sg13g2.py's
-  own issue #1231) is left for a follow-on issue (#1416).
+- **Both the LV and HV flavours are transcribed**, mirroring ``sg13g2.py``'s
+  own two-stage history (#905 shipped LV-only; ``sg13g2.py``'s HV pair was a
+  dedicated follow-on, issue #1231, using the ``MOSFlavour``/
+  ``mos_flavours`` mechanism) -- this deck's own HV follow-on is issue
+  #1416. ``ThickGateOx`` (44/0) is a real, cited cmos5l layer this deck
+  still does not check in its DRC rules (the rules transcribed below apply
+  the general-case thresholds regardless of ``ThickGateOx``'s presence,
+  same as sg13g2.py's own note), but it *is* now modelled for MOS
+  device-recognition/model binding via ``EXTRACTION_DECK.mos_flavours`` --
+  see ``UNMODELED_VOLTAGE_MARKERS`` below for what, if anything, remains
+  unmodelled about that marker.
 - cmos5l's **resistor** device-recognition rules (issue #1415) live in
   ``lvs/rule_decks/{res_derivations,res_extraction,res_connections}.lvs``
   -- three more of the symlinked-into-the-sibling files above, ``%include``d
@@ -148,6 +149,7 @@ from __future__ import annotations
 from . import (
     DrcRule,
     ExtractionDeck,
+    MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
     RuleProvenance,
@@ -351,15 +353,15 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
         "voltage domain (see general_derivations.lvs's ngate_hv_base/"
         "pgate_hv_base -- confirmed present in cmos5l's own (symlinked-but-"
         "resolved) LVS source, mos_extraction.lvs's sg13_hv_nmos/"
-        "sg13_hv_pmos extract_devices calls). This MOS-only starter models "
-        "neither side of that split yet: EXTRACTION_DECK recognises only "
-        "the LV (thin-gate-oxide) NMOS/PMOS pair (mirroring sg13g2.py's own "
-        "#905 starter scope; the HV pair is left for a follow-on issue, the "
-        "sg13cmos5l sibling of sg13g2.py's issue #1231), and this curated "
-        "deck's DRC rules apply the general-case thresholds to geometry "
-        "regardless of ThickGateOx's presence (the channel-length-specific "
-        "Gat.a1/Gat.a2 GatPoly-width rules that do read it are not "
-        "transcribed here, mirroring sg13g2.py's own note)."
+        "sg13_hv_pmos extract_devices calls). Issue #1416 added the HV "
+        "MOSFlavour entry to EXTRACTION_DECK.mos_flavours, so a transistor "
+        "drawn inside this marker now recognises and binds correctly "
+        "(mirroring sg13g2.py's own #1231 follow-on) -- what remains "
+        "unmodelled is this curated deck's DRC rules, which still apply "
+        "the general-case thresholds to geometry regardless of "
+        "ThickGateOx's presence (the channel-length-specific Gat.a1/Gat.a2 "
+        "GatPoly-width rules that do read it are not transcribed here, "
+        "mirroring sg13g2.py's own note)."
     ),
 }
 
@@ -385,14 +387,46 @@ EXTRACTION_DECK = ExtractionDeck(
     # approximation of `general_derivations.lvs`'s fuller
     # `ngate_lv_base.not(nmos_exc)` exclusion chain (RF-FET/latchup-guard/
     # moscap markers) that `sg13g2.py`'s own `nfet_provenance` note
-    # documents. The HV pair (`sg13_hv_nmos`/`sg13_hv_pmos`) is real and
-    # independently confirmed present (see `UNMODELED_VOLTAGE_MARKERS`
-    # above) but not transcribed by this MOS-only starter.
+    # documents. These stay the *default* pair, cited for every transistor
+    # drawn outside ThickGateOx; the thick-oxide ("-HV") pair is the
+    # `mos_flavours` entry below (issue #1416).
     nfet_provenance=_cmos5l_shared_g2_provenance(
         f"{_LVS_RULE_DECKS}/mos_extraction.lvs", "sg13_lv_nmos"
     ),
     pfet_provenance=_cmos5l_shared_g2_provenance(
         f"{_LVS_RULE_DECKS}/mos_extraction.lvs", "sg13_lv_pmos"
+    ),
+    # Thick-oxide ("-HV") MOS flavour (issue #1416, the sg13cmos5l sibling
+    # of sg13g2.py's own issue #1231, using the mechanism issue #1111 added
+    # for gf180mcu's `Dualgate`): a transistor whose Activ island overlaps
+    # ThickGateOx (44/0) is cmos5l's thick-gate-oxide device, whose real
+    # upstream device-class names are `sg13_hv_nmos`/`sg13_hv_pmos` --
+    #   extract_devices(mos4('sg13_hv_nmos'), { ..., 'G' => ngate_hv, ... })
+    #   extract_devices(mos4('sg13_hv_pmos'), { ..., 'G' => pgate_hv, ... })
+    # in the same (symlinked-but-resolved) `mos_extraction.lvs`, keyed off
+    # `general_derivations.lvs`'s `ngate_hv_base =
+    # ngate.and(thickgateox_drw)` / `pgate_hv_base` (and, symmetrically,
+    # `ngate_lv_base = ngate.not(thickgateox_drw)` -- so the default pair
+    # above is genuinely the *complement* of this flavour, which is exactly
+    # the split `MOSFlavour` implements). Both names are independently
+    # confirmed byte-identical to sg13g2.py's own HV pair (see the module
+    # docstring's MOS-device-recognition source bullet) rather than assumed
+    # identical by analogy -- `pdk_models.py`'s
+    # `_MOS_MODEL_FLAVOURS[("sg13cmos5l", "sg13cmos5l")]` table binds
+    # `MOSFlavour.flavour="hv"` to those two real subcircuit names under
+    # `--pdk`.
+    mos_flavours=(
+        MOSFlavour(
+            marker=(44, 0),  # ThickGateOx.drawing
+            flavour="hv",
+            description="cmos5l thick-gate-oxide domain (ThickGateOx 44/0)",
+            nfet_provenance=_cmos5l_shared_g2_provenance(
+                f"{_LVS_RULE_DECKS}/mos_extraction.lvs", "sg13_hv_nmos"
+            ),
+            pfet_provenance=_cmos5l_shared_g2_provenance(
+                f"{_LVS_RULE_DECKS}/mos_extraction.lvs", "sg13_hv_pmos"
+            ),
+        ),
     ),
     # No distinct drawn tap layer -- cmos5l's `ntap`/`ptap` are derived as
     # `Activ` intersected with `nwell`/`pwell` in `general_derivations.lvs`
