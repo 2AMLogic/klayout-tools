@@ -466,12 +466,37 @@ echoes exactly what was applied (``power.straps[].spacing_um``,
 caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
 :func:`_pdn_connects_applied`).
 
-``request.power`` omitted (the default) is byte-for-byte today's exact prior
-behavior: no ``tapcell``/``add_global_connection``/``global_connect``/
-``pdngen``/``filler_placement`` line is emitted anywhere, and the response's
-additive ``power`` field reports that nothing ran -- see
-``docs/cli/place-and-route.md``'s "Power delivery" section for the full
-request/response contract.
+``request.power`` omitted (the default) still emits **no**
+``tapcell``/full-PDN ``add_global_connection``/``pdngen -- straps`` line
+anywhere -- the caller-configured PDN this section otherwise describes
+never runs -- and the response's additive ``power`` field's own
+``pdn``/``global_connect``/``tapcell_master``/``endcap_master``/
+``straps``/``connects`` all still report that nothing ran, exactly as
+before. It is **not**, however, byte-identical Tcl to before issue #1442:
+the ``"route"`` stage now always emits a small, separate,
+``request.power``-independent row-rail fallback
+(:func:`_row_rail_lines`/:data:`_ROW_RAIL_STRAP`) on every
+``cell_library`` where the real defect exists -- a single
+``add_global_connection``/``global_connect`` pair binding the library's
+own literal ``VPWR``/``VGND`` pins, plus a ``pdngen`` drawing just that
+library's row-rail ``-followpins`` stripe (no straps, no tapcells, no
+caller-net aliasing) -- *and*, once that rail exists, this stage's own
+``filler_placement``/``global_connect`` pair now also runs (previously
+gated on ``request.power`` alone), closing every row gap the same way a
+full PDN's own filler pass would. See :data:`_ROW_RAIL_STRAP`'s own
+docstring for the full root-cause citation: without the row-rail
+obstruction, a ``request.power``-less run left every unfilled standard-
+cell row gap as genuine free routing space on the same layer the row's
+own power rail lives on, letting a signal net route straight across it --
+a real, DRC-invisible short once a filler cell's PG strap later landed in
+that same gap; live-verified (issue #1442's own PR description) that the
+row-rail obstruction closes that gap with zero
+``merged_net_labels[]`` power/signal shorts, whether or not
+``filler_placement`` also runs. The response's own additive
+``power.row_rail`` field (``emitted``/``layer``/``power_net``/
+``ground_net``/``filler_masters``) reports exactly what this fallback
+did -- see ``docs/cli/place-and-route.md``'s "Power delivery" section for
+the full request/response contract.
 """
 
 from __future__ import annotations
@@ -607,6 +632,62 @@ _CTS_BUFFER_CELLS: dict[str, str] = {
 _ROUTING_LAYER_RANGE: dict[str, str] = {
     "sky130_fd_sc_hd": "met1-met5",
     "gf180mcu_fd_sc_mcu9t5v0": "Metal2-Metal5",
+}
+
+#: Per-cell-library fallback "row rail" ``-followpins`` PDN stripe, emitted
+#: unconditionally at the start of the ``"route"`` stage whenever
+#: ``request.power`` was *not* given (issue #1442) -- **not** gated behind
+#: ``request.power`` the way :data:`_TAPCELL_CELLS`/:data:`_POWER_PIN_PATTERNS`
+#: (the *full*, caller-configured PDN) are.
+#:
+#: Root cause this closes: :data:`_ROUTING_LAYER_RANGE`'s own
+#: ``sky130_fd_sc_hd`` entry starts signal routing at ``met1`` -- the same
+#: layer that library's own standard-cell ``VPWR``/``VGND`` row rail lives
+#: on. A real ORFS run is safe doing this only because ``pdngen`` *always*
+#: runs before ``global_route``/``detailed_route`` there, drawing each row's
+#: rail as one continuous ``-followpins`` shape spanning the row's full
+#: width -- a real, pre-existing routing obstruction, independent of which
+#: cells happen to occupy each gap in that row. `klt place-and-route`
+#: uniquely allows reaching the ``"route"`` stage with no PDN at all
+#: (``request.power`` omitted): without *some* row-rail shape already
+#: drawn, every unfilled row gap is genuine free space on ``met1`` as far as
+#: the router is concerned, and it may legally route a signal net straight
+#: across it -- a real, DRC-invisible short once a filler cell's own PG
+#: strap later lands in that same gap (see this module's own "Power
+#: delivery" docstring section and issue #1442 for the full analysis).
+#:
+#: This table intentionally covers only ``sky130_fd_sc_hd``:
+#: ``gf180mcu_fd_sc_mcu9t5v0`` is not affected -- its own
+#: :data:`_ROUTING_LAYER_RANGE` entry starts one layer *above* where that
+#: library's row rail lives (``Metal2``, not ``Metal1`` -- see that table's
+#: own docstring), so its signal router never shares a layer with the row
+#: rail in the first place, and this repo has no independently-verified
+#: gf180mcu row-rail geometry to add here regardless (this table follows the
+#: same "not derivable from the install, verified not guessed" posture as
+#: every other per-library table in this module).
+#:
+#: Values sourced 2026-08-26 from the real ``openroad/orfs:latest``
+#: container's own vendored ORFS checkout (``The-OpenROAD-Project/
+#: OpenROAD-flow-scripts`` @ ``master``), ``platforms/sky130hd/pdn.tcl``'s
+#: own ``standard cell grid`` section: ``add_pdn_stripe -grid {grid} -layer
+#: {met1} -width {0.48} -pitch {5.44} -offset {0} -followpins`` -- the exact
+#: same stripe a full ``request.power`` PDN run would draw for a met1
+#: strap, just without the vertical straps/tapcells/global-connect-to-a-
+#: caller-net that the rest of that config also carries. The power/ground
+#: pin name (``VPWR``/``VGND``) is the LEF's own literal standard-cell pin
+#: name -- also confirmed against that same ``pdn.tcl``'s own
+#: ``add_global_connection ... -pin_pattern {VPWR}``/``{VGND}`` lines
+#: (unaliased to a caller-chosen net, unlike :data:`_POWER_PIN_PATTERNS`,
+#: since there is no caller-given ``request.power.power_net``/
+#: ``.ground_net`` to alias to here) -- deliberately reusing ``VPWR``/
+#: ``VGND`` as both the pin pattern *and* the net name this fallback
+#: creates, so a caller inspecting the routed DEF's ``SPECIALNETS`` sees the
+#: library's own familiar pin names, not an invented placeholder.
+#:
+#: Tuple shape: ``(layer, width_um, pitch_um, offset_um, power_pin,
+#: ground_pin)``.
+_ROW_RAIL_STRAP: dict[str, tuple[str, float, float, float, str, str]] = {
+    "sky130_fd_sc_hd": ("met1", 0.48, 5.44, 0.0, "VPWR", "VGND"),
 }
 
 #: Per-cell-library antenna-diode cell (and its signal pin) for the
@@ -1084,6 +1165,25 @@ def run_place_and_route(
             f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
             f"-- cannot honor request.power at target_stage '{target_stage}'"
         )
+    # Row-rail fallback (issue #1442): once `stage_index` reaches `"route"`
+    # on a `cell_library` with a verified `_ROW_RAIL_STRAP` entry (`power`
+    # omitted), the fallback also drives `filler_placement` -- see
+    # `_stage_script_lines`'s own `"route"` branch. A defensive check, not a
+    # reachable one today: every `_ROW_RAIL_STRAP` entry currently has a
+    # matching `_FILLER_CELLS` entry, but this guards a future
+    # `_ROW_RAIL_STRAP` addition that doesn't, with a clear error instead of
+    # a `KeyError`.
+    if (
+        power is None
+        and stage_index >= STAGE_ORDER.index("route")
+        and cell_library in _ROW_RAIL_STRAP
+        and cell_library not in _FILLER_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no filler-cell masters known for standard-cell library "
+            f"'{cell_library}' -- cannot honor the row-rail fallback "
+            f"(issue #1442) at target_stage '{target_stage}'"
+        )
 
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
     try:
@@ -1289,6 +1389,42 @@ def run_place_and_route(
     # it from the request document itself. `connects` always lists one entry
     # per consecutive strap pair (built via :func:`_pdn_connects_applied`),
     # whether or not the caller supplied `power.connects[]` tuning for it.
+    #
+    # `row_rail` (issue #1442): reports the separate, `request.power`-
+    # independent fallback :func:`_row_rail_lines` may have emitted at the
+    # start of the `"route"` stage -- see that function's own and
+    # :data:`_ROW_RAIL_STRAP`'s own docstrings for why this exists and why
+    # it is never active when `power is not None` (a `request.power`-bearing
+    # run's real PDN already covers this, if its own `straps[]` include the
+    # row-rail layer). `emitted` is `True` only once a run both omitted
+    # `request.power` *and* actually reached the `"route"` stage on a
+    # `cell_library` with a verified :data:`_ROW_RAIL_STRAP` entry.
+    # `filler_masters` mirrors `power.filler_masters`'s own shape: the
+    # row-rail fallback also drives this same `"route"`-stage-only
+    # `filler_placement` call (see `_stage_script_lines`), safe only because
+    # the row-rail obstruction above already precedes `global_route`.
+    row_rail_emitted = (
+        power is None and target_stage == "route" and cell_library in _ROW_RAIL_STRAP
+    )
+    if row_rail_emitted:
+        rail_layer, _w, _p, _o, rail_power_net, rail_ground_net = _ROW_RAIL_STRAP[
+            cell_library
+        ]
+        row_rail_info: dict[str, Any] = {
+            "emitted": True,
+            "layer": rail_layer,
+            "power_net": rail_power_net,
+            "ground_net": rail_ground_net,
+            "filler_masters": list(_FILLER_CELLS[cell_library]),
+        }
+    else:
+        row_rail_info = {
+            "emitted": False,
+            "layer": None,
+            "power_net": None,
+            "ground_net": None,
+            "filler_masters": [],
+        }
     if power is None:
         power_info: dict[str, Any] = {
             "pdn": False,
@@ -1300,6 +1436,7 @@ def run_place_and_route(
             "filler_masters": [],
             "straps": [],
             "connects": [],
+            "row_rail": row_rail_info,
         }
     else:
         tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
@@ -1318,6 +1455,7 @@ def run_place_and_route(
                 for strap in power["straps"]
             ],
             "connects": _pdn_connects_applied(power),
+            "row_rail": row_rail_info,
         }
 
     last_stage = stages[-1]
@@ -2530,6 +2668,86 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     return lines
 
 
+def _row_rail_lines(cell_library: str) -> list[str]:
+    """Tcl for the ``request.power``-independent row-rail fallback (issue
+    #1442) -- see :data:`_ROW_RAIL_STRAP`'s own docstring for the full root-
+    cause analysis and source citation. Called once, at the very start of
+    the ``"route"`` stage (before ``set_routing_layers``/``global_route``),
+    but **only** when ``request.power`` was not given -- see
+    :func:`_stage_script_lines`'s own ``"route"`` branch for the call site.
+
+    Deliberately a small subset of :func:`_power_delivery_lines`: a single
+    ``add_global_connection``/``global_connect`` pair (binding the library's
+    own literal ``VPWR``/``VGND`` pins to like-named nets -- no caller-given
+    ``power_net``/``ground_net`` exists here to alias to), a
+    ``set_voltage_domain``, and one ``define_pdn_grid``/``add_pdn_stripe
+    -followpins``/``pdngen`` -- no ``tapcell``, no vertical straps, no
+    ``-macro`` grid. This is intentionally *not* a full PDN: it exists only
+    to give the router a real row-rail obstruction, not to make a
+    ``request.power``-less run electrically complete (a caller that wants
+    real power delivery should still set ``request.power``). Once this rail
+    exists, :func:`_stage_script_lines`'s own ``"route"`` branch also runs
+    that same stage's ``filler_placement``/``global_connect`` pair (issue
+    #1091's existing call, previously gated on ``request.power`` alone) --
+    safe *because* the row rail this function draws already obstructs the
+    router before `filler_placement`'s own instances ever land, live-
+    verified (issue #1442's own PR description) to close every row gap
+    with zero `merged_net_labels[]` power/signal shorts, unlike the naive
+    "just run `filler_placement` unconditionally, with no row-rail
+    obstruction" fix this issue exists to document as unsafe.
+
+    ``define_pdn_grid`` deliberately omits ``-pins`` (unlike
+    :func:`_power_delivery_lines`'s own call, which names its topmost strap
+    layer): ``-pins`` marks that layer's grid boundary as a real block-level
+    P/G interface, which ``pdngen`` then promotes into the routed DEF's own
+    top-level ``PINS`` section -- confirmed live (issue #1442: an
+    `openroad/orfs:latest` run with ``-pins {met1}`` grew the DEF's
+    promoted-pin count from 52 to 54, adding `VPWR`/`VGND` as if they were
+    real design ports; the identical run with ``-pins`` simply omitted still
+    draws the same real ``SPECIALNETS`` row-rail shapes -- confirmed via the
+    same DEF's own ``SPECIALNETS`` section -- with the DEF pin count
+    unchanged at 52). This fallback exists only to obstruct the router, not
+    to advertise a new top-level interface a caller never asked for.
+
+    ``pdngen`` itself also takes a ``-dont_add_pins`` flag, passed here for
+    the same reason and live-verified to matter independently of
+    ``define_pdn_grid``'s own ``-pins`` above: even with ``-pins`` already
+    omitted, a plain ``pdngen`` call still promotes ``VPWR``/``VGND`` into
+    the design's own top-level Verilog port list -- confirmed live (issue
+    #1442) by isolating the two calls against the same post-CTS checkpoint:
+    `add_global_connection`/`global_connect` alone leaves `write_verilog`'s
+    module port list untouched (`module gcd (clk, ..., result);`); adding
+    `set_voltage_domain`/`define_pdn_grid`/`add_pdn_stripe`/`pdngen` (still
+    with no `-pins`) grows it to `module gcd (clk, ..., result, VPWR,
+    VGND);` -- a real regression this issue's own equivalence-check test
+    suite (`tests/test_equiv.py`) caught (`yosys equivalence check failed:
+    ERROR: Can't match gate port 'VGND_gate' to a gold port` -- the "gold"
+    side is `klt synthesize`'s netlist, which never declares VPWR/VGND
+    ports). `-dont_add_pins` suppresses exactly that Verilog-port
+    promotion while leaving the physical `SPECIALNETS` row-rail shapes
+    (confirmed identical DEF `SPECIALNETS` section either way) and the
+    router obstruction they provide completely unaffected -- this fallback
+    only ever needed the physical shapes, never a new logical port.
+    """
+    layer, width_um, pitch_um, offset_um, power_pin, ground_pin = _ROW_RAIL_STRAP[
+        cell_library
+    ]
+    return [
+        f"add_global_connection -net {{{power_pin}}} -inst_pattern {{.*}} "
+        f"-pin_pattern {{{power_pin}}} -power",
+        f"add_global_connection -net {{{ground_pin}}} -inst_pattern {{.*}} "
+        f"-pin_pattern {{{ground_pin}}} -ground",
+        "global_connect",
+        f"set_voltage_domain -name {{CORE}} -power {{{power_pin}}} "
+        f"-ground {{{ground_pin}}}",
+        "define_pdn_grid -name {row_rail} -voltage_domains {CORE}",
+        f"add_pdn_stripe -grid {{row_rail}} -layer {{{layer}}} "
+        f"-width {{{width_um}}} -pitch {{{pitch_um}}} -offset {{{offset_um}}} "
+        "-followpins",
+        "pdngen -dont_add_pins",
+    ]
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -2675,6 +2893,21 @@ def _stage_script_lines(
                 "global_route "
                 f"-critical_nets_percentage {route_critical_nets_percentage}"
             )
+        # Row-rail fallback (issue #1442): only when `request.power` was
+        # *not* given -- a `request.power`-bearing run already got a real
+        # PDN (including, when the caller's own `straps[]` name a met1
+        # layer, a real row rail) at the end of the `"floorplan"` stage,
+        # before placement/CTS/routing ever ran, so there is no obstruction
+        # gap left to close here. Emitted before `set_routing_layers`/
+        # `global_route` -- the router must see this as a pre-existing
+        # obstruction, not something drawn after the fact. See
+        # `_row_rail_lines`/`_ROW_RAIL_STRAP`'s own docstrings for why this
+        # is unconditional on `request.power` (unlike every other PDN-
+        # related call in this module) and why it is deliberately scoped to
+        # `cell_library`s with a verified :data:`_ROW_RAIL_STRAP` entry only.
+        row_rail_active = power is None and cell_library in _ROW_RAIL_STRAP
+        if row_rail_active:
+            lines += _row_rail_lines(cell_library)
         lines += [
             f"set_routing_layers -signal {routing_range}",
             global_route_call,
@@ -2719,7 +2952,26 @@ def _stage_script_lines(
         # connected". Fillers carry no signal nets, so this insertion point
         # (before the parasitics re-estimate below) does not affect any
         # signal-net RC.
-        if power is not None:
+        #
+        # Issue #1442: `row_rail_active` runs this same `filler_placement`/
+        # `global_connect` pair too, using the row-rail fallback's own
+        # `add_global_connection` rules (`_row_rail_lines`) instead of
+        # `request.power`'s -- safe *because* the row-rail obstruction above
+        # now precedes `global_route`, unlike the naive "just run
+        # `filler_placement` unconditionally" fix this issue's own
+        # investigation found shorts signal nets to `VPWR`/`VGND` (no prior
+        # obstruction meant the router could freely cross a row gap on
+        # `met1`, then a filler cell's own PG strap would land on top of
+        # that signal route). Live-verified against the real
+        # `openroad/orfs:latest` toolchain (issue #1442's own PR
+        # description carries the transcript): row-rail-only leaves
+        # `tests/corpus/place_and_route/gcd.gds.gz`'s own
+        # `nwell.width.1`/`nwell.space.1` violations open (the row gaps
+        # this fallback deliberately does not fill), while row-rail +
+        # `filler_placement` closes them (0 `klt drc` violations) with
+        # zero `klt extract` `merged_net_labels[]` power/signal shorts
+        # either way.
+        if power is not None or row_rail_active:
             filler_masters = " ".join(_FILLER_CELLS[cell_library])
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
@@ -2768,14 +3020,15 @@ def _stage_script_lines(
         #   synthesize`'s netlist (which likewise carries no VPWR/VGND
         #   connections -- power comes from the LEF/DEF grid, not the
         #   netlist). That diff is the issue's own motivating workflow.
-        # - `-remove_cells <cells>`: `null` (omitted) unless `request.power`
-        #   is set -- this flow never inserts tap/endcap/filler cells
-        #   otherwise, so the flag would be a no-op that only risks dropping
-        #   a real cell. When `request.power` *is* set, this stage's own
-        #   `tapcell`/`filler_placement` calls above insert real physical-
-        #   only instances that would otherwise widen the divergence from
-        #   `klt synthesize`'s own netlist (which never contains them) --
-        #   ORFS's own `flow/scripts/final_outputs.tcl` strips the
+        # - `-remove_cells <cells>`: `null` (omitted) unless this stage
+        #   actually inserted a physical-only instance -- either
+        #   `request.power`'s own `tapcell`/`filler_placement` calls above,
+        #   or (issue #1442) the row-rail fallback's own `filler_placement`
+        #   call, active whenever `request.power` was omitted on a
+        #   `cell_library` the fallback covers. Either way, this flag exists
+        #   because those instances would otherwise widen the divergence
+        #   from `klt synthesize`'s own netlist (which never contains
+        #   them) -- ORFS's own `flow/scripts/final_outputs.tcl` strips the
         #   equivalent set via `-remove_cells [find_physical_only_masters]`,
         #   but that proc is defined only inside ORFS's own utility scripts,
         #   never sourced by this module (see this module's own docstring:
@@ -2785,7 +3038,7 @@ def _stage_script_lines(
         #   name explicitly -- a literal, deterministic list rather than a
         #   dependency on an external proc. Antenna diodes
         #   (`repair_antennas`) are genuine logical instances (not
-        #   physical-only) and are always kept, `request.power` or not.
+        #   physical-only) and are always kept, either way.
         # - `-sort`: OpenROAD warns it is ignored (`utl::warn STA 2065`).
         #
         # Written only at `"route"`, not at `"cts"` (issue #996's own open
@@ -2799,12 +3052,21 @@ def _stage_script_lines(
         # `def_path`/`gds_path` exactly: populated at `"route"`, `null`
         # before it.
         write_verilog_call = f"write_verilog {verilog_path}"
+        # `-remove_cells` (see above): also strips the row-rail fallback's
+        # own `filler_placement` instances (issue #1442) -- that path never
+        # inserts a tapcell/endcap (the fallback deliberately carries no
+        # `tapcell` call), so its own physical-only set is just the filler
+        # masters, unlike `request.power`'s tapcell+endcap+filler set below.
+        physical_only_masters: list[str] = []
         if power is not None:
             tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
-            physical_only_masters = [tap_master]
+            physical_only_masters.append(tap_master)
             if endcap_master is not None:
                 physical_only_masters.append(endcap_master)
             physical_only_masters += list(_FILLER_CELLS[cell_library])
+        elif row_rail_active:
+            physical_only_masters += list(_FILLER_CELLS[cell_library])
+        if physical_only_masters:
             removed = " ".join(physical_only_masters)
             write_verilog_call += f" -remove_cells {{{removed}}}"
         lines += [f"write_def {def_path}", write_verilog_call]

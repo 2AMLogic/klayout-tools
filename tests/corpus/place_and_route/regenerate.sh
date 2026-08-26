@@ -138,6 +138,54 @@ sys.exit(main([\"place-and-route\", \"/workdir/scratch/par_request.json\", \"--f
     exit 1
   fi
 
+  echo "==> klt drc --deck sky130 $DESIGN (informational -- review, don't gate on this)"
+  uv --project "$REPO_ROOT" run klt drc "$GDS" --deck sky130 --format json \
+    > "$SCRATCH/${DESIGN}_drc.json"
+  python3 -c "
+import json
+report = json.load(open('$SCRATCH/${DESIGN}_drc.json'))
+print(f\"    status={report['status']!r} violation_count={report['violation_count']} rule_counts={report['rule_counts']}\")
+"
+
+  # Connectivity check (issue #1442): `klt drc` cannot see a real electrical
+  # short between a power rail and a signal net -- spacing/width checks
+  # never fire on touching or overlapping same-layer shapes, which is
+  # exactly the geometry a row-rail-obstruction defect produces (see that
+  # issue's own "Root cause"/"Evidence" sections). `klt extract`'s own
+  # `merged_net_labels[]` *does* see it: any entry whose label set combines
+  # one of `power_nets` below with a non-power label is a real short, not a
+  # benign label collision -- scan for that class on every regeneration so
+  # this defect can never silently ship again, the same way #1442's own
+  # investigation first surfaced it (comparing a regenerated fixture's own
+  # `merged_net_labels[]` against the committed one).
+  echo "==> klt extract --deck sky130 $DESIGN -- connectivity (power/signal short) check"
+  uv --project "$REPO_ROOT" run klt extract "$GDS" --deck sky130 --format json \
+    > "$SCRATCH/${DESIGN}_extract.json"
+  python3 -c "
+import json
+import sys
+
+power_nets = {'VPWR', 'VGND', 'VDD', 'VSS', 'VPB', 'VNB'}
+report = json.load(open('$SCRATCH/${DESIGN}_extract.json'))
+shorts = [
+    entry
+    for entry in report.get('merged_net_labels', [])
+    if (set(entry['labels']) & power_nets) and (set(entry['labels']) - power_nets)
+]
+if shorts:
+    print(
+        f'error: {len(shorts)} merged_net_labels[] entr'
+        + ('y' if len(shorts) == 1 else 'ies')
+        + ' combine a power-rail label with a non-power label -- a real'
+        ' electrical short, not a benign label collision:',
+        file=sys.stderr,
+    )
+    for entry in shorts:
+        print(f\"    {entry['net']}\", file=sys.stderr)
+    sys.exit(1)
+print(f\"    clean: 0 power/signal shorts across {len(report.get('merged_net_labels', []))} merged_net_labels[] entries\")
+"
+
   mkdir -p "$(dirname "${DESIGN_OUT_GDS_GZ[$DESIGN]}")"
   gzip -9 -c "$GDS" > "${DESIGN_OUT_GDS_GZ[$DESIGN]}"
   echo "wrote ${DESIGN_OUT_GDS_GZ[$DESIGN]}"
