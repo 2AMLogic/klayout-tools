@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: the `sg13cmos5l` curated deck now models SG13CMOS5L's **whole
+  BEOL stack** — `Metal1`/`Via1`/`Metal2`/`Via2`/`Metal3`/`Via3`/`Metal4`/
+  `TopVia1`/`TopMetal1` — instead of a single `Metal1` level with no via at
+  all (issue #1417). This is a correctness fix, not just added coverage:
+  with `EXTRACTION_DECK.metals` capped at `Metal1` and `.vias` empty, every
+  shape on a higher level sat *outside* the deck's connectivity graph, so a
+  net routed off `Metal1` extracted as several disconnected nets instead of
+  one and silently mismatched a downstream `klt lvs` reference netlist —
+  which in practice meant any block verified against this deck had to be
+  floorplanned planar and single-metal. `klt drc --deck sg13cmos5l` gains
+  the matching 21 width/space/enclosure rules (6 rules before, 27 now),
+  each with a golden violate/clean fixture pair in
+  `tests/golden_deck/sg13cmos5l/manifest.json`. Contrary to the rest of this
+  deck (whose rule *text* is symlinked into a pinned sibling `ihp-sg13g2`
+  checkout), cmos5l's `5_17_metaln.drc`/`5_19_via1.drc`/`5_20_vian.drc`/
+  `5_21_topvia1.drc` are its **own**, non-symlinked files scoped to its
+  real, shorter stack (`TopVia1` lands on `Metal4`, not sg13g2's `Metal5`),
+  so those rules cite `IHP-GmbH/ihp-sg13cmos5l` provenance directly. No
+  `Metal5`/`Via4`/`TopVia2`/`TopMetal2`: all four are on cmos5l's own LVS
+  and DRC forbidden-layer lists, so the stack tops at `TopMetal1` and those
+  four stay unrecognised. Metal resistors (`res_metal1`..`res_topmetal1`)
+  are now reachable in principle but remain untranscribed — a dedicated
+  follow-on, not a side effect of this connectivity fix.
 - **Fixed**: the `sg13cmos5l` curated deck now recognises SG13CMOS5L's three
   **drawn poly resistors** — `rsil` (7.0 Ω/sq), `rppd` (260.0 Ω/sq) and
   `rhigh` (1360.0 Ω/sq) — instead of leaving them undeclared (issue #1415).
