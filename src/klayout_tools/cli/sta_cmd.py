@@ -60,3 +60,6 @@ def _print_text(report: dict) -> None:
         )
         if annotation["annotation_warning"]:
             print(f"  warning: {annotation['annotation_warning']}")
+        missing_sample = annotation.get("design_nets_missing_sample")
+        if missing_sample:
+            print(f"  missing nets (sample): {', '.join(missing_sample)}")
