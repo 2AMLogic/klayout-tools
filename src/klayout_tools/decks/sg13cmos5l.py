@@ -692,12 +692,13 @@ DECK: list[DrcRule] = [
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_21_topvia1.drc", "TV1.d"),
     ),
     # --- 5.22 TopMetal1 (beol/5_22_topmetal1.drc) -- a genuine symlink into
-    # the sibling ihp-sg13g2 checkout (unlike the five rule families above),
-    # so this pair alone keeps the shared-g2 provenance helper. Note the
-    # much coarser threshold (1.64 um, vs. Metal2-Metal4's 0.20 um) --
-    # verified against both the file's own inline prose comment and
-    # cmos5l's own sg13cmos5l_tech_default.json's TM1_a/TM1_b entries, not a
-    # transcription error. ---------------------------------------------
+    # the sibling ihp-sg13g2 checkout (unlike the four cmos5l-own rule
+    # families above: 5_17_metaln/5_19_via1/5_20_vian/5_21_topvia1), so
+    # alone among the BEOL rule families this issue adds it keeps the
+    # shared-g2 provenance helper. Note the much coarser threshold (1.64 um,
+    # vs. Metal2-Metal4's 0.20 um) -- verified against both the file's own
+    # inline prose comment and cmos5l's own sg13cmos5l_tech_default.json's
+    # TM1_a/TM1_b entries, not a transcription error. -------------------
     DrcRule(
         id="topmetal1.width.1",
         description="minimum TopMetal1 width",
