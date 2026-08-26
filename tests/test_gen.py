@@ -529,8 +529,9 @@ _SKY130_DUMMY_LAYER = (83, 20)
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
     issue scopes, alongside phase 1's `resistor_strip`, phase 4's
-    `bjt_array`, the chip-boundary `bond_pad` (issue #568), and `esd_device`
-    (issue #569) (acceptance criterion #1)."""
+    `bjt_array`, the chip-boundary `bond_pad` (issue #568), `esd_device`
+    (issue #569), and the named-net `well_island` (issue #1421) (acceptance
+    criterion #1)."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -543,6 +544,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "bond_pad",
         "esd_device",
         "cap_array",
+        "well_island",
     }
 
 
@@ -2701,6 +2703,487 @@ def test_guard_ring_invalid_params_rejected(tmp_path, pdk_root, params):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+# --- well_island (issue #1421) ------------------------------------------------ #
+
+#: sky130's `nwell.pin` well-label layer. `well_island` must **never** draw a
+#: text here: a well label names the `nwell` polygon directly, which would
+#: make `klt extract`'s `devices[].nets["b"]` report the intended body net
+#: even with the tap tie broken -- the "well-label tautology" #1421 exists to
+#: avoid. See `_SKY130_METAL_LABEL_LAYER` for the layer it *does* use.
+_SKY130_WELL_LABEL_LAYER = (64, 5)
+
+#: sky130's `li1.pin` -- the label layer `well_island` names its tie's net on
+#: (== `klayout_tools.decks.sky130.EXTRACTION_DECK.metal_labels[0]`).
+_SKY130_METAL_LABEL_LAYER = (67, 5)
+
+#: sky130's `licon1.drawing` -- the contact layer the island's tie runs
+#: through; deleting it is how the round-trip test below proves the reported
+#: body net comes from the *physical* tie rather than from a label.
+_SKY130_CONTACT_LAYER = (66, 44)
+
+
+def _drawn_layers(gds_path):
+    """Every (layer, datatype) pair present in a written GDS."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    return {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+
+
+def _texts_on_layer(gds_path, layer, datatype):
+    """Every text string drawn on one layer of a written GDS."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    index = layout.layer(layer, datatype)
+    strings = []
+    for cell in layout.each_cell():
+        for shape in cell.shapes(index).each():
+            if shape.is_text():
+                strings.append(shape.text.string)
+    return strings
+
+
+def _assemble(target_path, placements):
+    """Merge several generated GDS cells into one layout at given offsets.
+
+    ``placements`` is a list of ``(gds_path, dx_um, dy_um)``. This is the
+    caller-side composition step the #1421 round trip needs (two islands plus
+    the devices sitting inside each of them) -- `klt gen` produces one cell
+    per call by design, so a *composition* has to be assembled by whoever is
+    placing the blocks.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for index, (path, dx_um, dy_um) in enumerate(placements):
+        source = kdb.Layout()
+        source.read(str(path))
+        cell = layout.create_cell(f"blk{index}")
+        cell.copy_tree(source.top_cell())
+        top.insert(
+            kdb.CellInstArray(
+                cell.cell_index(),
+                kdb.Trans(
+                    kdb.Vector(
+                        round(dx_um / layout.dbu),
+                        round(dy_um / layout.dbu),
+                    )
+                ),
+            )
+        )
+    layout.write(str(target_path))
+    return target_path
+
+
+def _well_island(tmp_path, root, variant, name, **params):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "well_island",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": params,
+            "options": {"cell_name": name, "output": str(output)},
+        }
+    )
+    return output, report
+
+
+def _pfet_unit(tmp_path, root, variant, name):
+    """One PMOS unit device -- the thing whose `nets["b"]` proves an island's
+    tie actually biased the well it sits in."""
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": {
+                "flavor": "pfet",
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+                "w_um": 0.6,
+                "l_um": 0.28,
+            },
+            "options": {"cell_name": name, "output": str(output)},
+        }
+    )
+    return output, report
+
+
+def _centred_offset_um(island_report, device_report):
+    """Offset placing a device block at the centre of an island's own bbox."""
+    island = island_report["bbox_um"]
+    device = device_report["bbox_um"]
+    return (
+        (island["x0"] + island["x1"]) / 2.0 - (device["x1"] - device["x0"]) / 2.0,
+        (island["y0"] + island["y1"]) / 2.0 - (device["y1"] - device["y0"]) / 2.0,
+    )
+
+
+def test_well_island_reports_named_net_on_every_tap_port(tmp_path, pdk_root):
+    """Acceptance criterion #1: the tie is bound to a caller-supplied net
+    name, reported back in `ports[]` (and in `drc_hints.well_net`) so a
+    composition can route to it by name. Every other generator still reports
+    `"net": null` -- nothing feeds theirs."""
+    _, report = _well_island(
+        tmp_path, pdk_root, "sky130A", "island", net="VBODY_SWITCH"
+    )
+
+    tap_ports = [p for p in report["ports"] if p["name"].startswith("TAP_")]
+    assert {p["name"] for p in tap_ports} == {"TAP_N", "TAP_S", "TAP_E", "TAP_W"}
+    assert {p["net"] for p in tap_ports} == {"VBODY_SWITCH"}
+    assert report["drc_hints"]["well_net"] == "VBODY_SWITCH"
+
+
+def test_well_island_net_label_is_drawn_on_metal_not_on_the_well_label_layer(
+    tmp_path, pdk_root
+):
+    """Acceptance criterion #3 (the well-label tautology): the net name is
+    drawn as a text on the *ring metal's* label layer, so it can only reach
+    the well through the physical tie. Nothing is ever drawn on the deck's
+    `well_label` layer, which would name the `nwell` polygon directly."""
+    output, _ = _well_island(tmp_path, pdk_root, "sky130A", "island", net="VBODY_A")
+
+    assert _texts_on_layer(output, *_SKY130_METAL_LABEL_LAYER) == ["VBODY_A"]
+    assert _SKY130_WELL_LABEL_LAYER not in _drawn_layers(output)
+
+
+def test_well_island_without_a_net_draws_no_label_and_says_so(tmp_path, pdk_root):
+    """An island with no `params.net` is still a legal (guard-ring-shaped)
+    island -- it just carries no name, which `drc_hints.notes` states rather
+    than leaving the caller to discover it from an anonymous extracted net."""
+    output, report = _well_island(tmp_path, pdk_root, "sky130A", "unnamed")
+
+    assert _SKY130_METAL_LABEL_LAYER not in _drawn_layers(output)
+    assert report["drc_hints"]["well_net"] is None
+    assert all(p["net"] is None for p in report["ports"])
+    assert any("params.net is empty" in note for note in report["drc_hints"]["notes"])
+
+
+def test_well_island_reports_its_well_and_keepout_rectangles(tmp_path, pdk_root):
+    """The reporting half of the issue's "suggested direction": the caller
+    gets the island's own well rectangle *and* the region no other well may
+    enter, so a placer never has to re-derive either from raw geometry."""
+    _, report = _well_island(tmp_path, pdk_root, "sky130A", "island", net="VB")
+
+    hints = report["drc_hints"]
+    assert hints["well_separation_um"] == pytest.approx(1.27)  # sky130 nwell.2
+    well = hints["well_box_um"]
+    keepout = hints["well_keepout_box_um"]
+    for axis in ("x0", "y0"):
+        assert keepout[axis] == pytest.approx(well[axis] - 1.27)
+    for axis in ("x1", "y1"):
+        assert keepout[axis] == pytest.approx(well[axis] + 1.27)
+
+
+def test_well_island_separation_below_the_pdk_rule_is_rejected(tmp_path, pdk_root):
+    """Edge case (a) of the issue's test plan: a requested separation smaller
+    than the PDK's own different-potential well spacing must fail loudly --
+    honouring it is exactly how two islands silently merge."""
+    with pytest.raises(GenError, match="below the minimum well-to-well spacing"):
+        _well_island(
+            tmp_path, pdk_root, "sky130A", "too_tight", net="VB", separation_um=0.5
+        )
+
+
+def test_well_island_too_close_to_another_well_is_rejected(tmp_path, pdk_root):
+    """The headline fail-loud case: an island that cannot clear a declared
+    neighbouring well -- even at the minimum well enclosure -- raises
+    `GenError` rather than emitting a well that merges with it."""
+    _, baseline = _well_island(tmp_path, pdk_root, "sky130A", "baseline", net="VB")
+    well = baseline["drc_hints"]["well_box_um"]
+    # A neighbour exactly 1 dbu closer than sky130's 1.27um rule allows.
+    neighbour = [
+        well["x0"] - 1.269 - (well["x1"] - well["x0"]),
+        well["y0"],
+        well["x0"] - 1.269,
+        well["y1"],
+    ]
+    with pytest.raises(GenError, match="required between wells at different"):
+        _well_island(
+            tmp_path,
+            pdk_root,
+            "sky130A",
+            "merged",
+            net="VB",
+            isolate_from=[neighbour],
+        )
+
+
+def test_well_island_exactly_at_the_pdk_rule_is_accepted(tmp_path, pdk_root):
+    """The complement of the rejection above: the same neighbour one dbu
+    further away is accepted, so the check is the rule's own threshold rather
+    than a conservative margin around it."""
+    _, baseline = _well_island(tmp_path, pdk_root, "sky130A", "baseline", net="VB")
+    well = baseline["drc_hints"]["well_box_um"]
+    neighbour = [
+        well["x0"] - 1.27 - (well["x1"] - well["x0"]),
+        well["y0"],
+        well["x0"] - 1.27,
+        well["y1"],
+    ]
+    _, report = _well_island(
+        tmp_path, pdk_root, "sky130A", "cleared", net="VB", isolate_from=[neighbour]
+    )
+    assert any(
+        "well-to-well separation enforced" in note
+        for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_well_island_trims_its_well_margin_to_clear_a_neighbour(tmp_path, pdk_root):
+    """The "sizes itself to satisfy the rule" half of acceptance criterion
+    #2: a generous `well_margin_um` that would violate the separation is
+    trimmed (never below the tap ring's own well enclosure) instead of being
+    rejected -- and the trim is reported, not silent."""
+    _, baseline = _well_island(tmp_path, pdk_root, "sky130A", "baseline", net="VB")
+    well = baseline["drc_hints"]["well_box_um"]
+    # Room for a 0.33um enclosure and no more: at the requested 1.0um the
+    # island's well would sit 1.0um from the neighbour, short of 1.27um.
+    neighbour = [-8.0, well["y0"], well["x0"] - 1.27 - 0.18, well["y1"]]
+
+    _, report = _well_island(
+        tmp_path,
+        pdk_root,
+        "sky130A",
+        "trimmed",
+        net="VB",
+        well_margin_um=1.0,
+        isolate_from=[neighbour],
+    )
+
+    trimmed = report["drc_hints"]["well_box_um"]
+    assert trimmed["x0"] == pytest.approx(-0.33)
+    assert any("was trimmed to" in note for note in report["drc_hints"]["notes"])
+    assert any("well enclosure trimmed" in w for w in report["warnings"])
+    # ...and the drawn well matches the reported one exactly.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(tmp_path / "trimmed.gds"))
+    nwell = layout.top_cell().bbox_per_layer(layout.layer(64, 20))
+    assert nwell.left * layout.dbu == pytest.approx(trimmed["x0"])
+
+
+def test_well_island_same_net_neighbour_is_equipotential_not_isolated(
+    tmp_path, pdk_root
+):
+    """Edge case (b) of the issue's test plan: two islands requesting the
+    *same* net name tie together rather than isolate, so the
+    different-potential rule does not apply between them -- an overlapping
+    same-net neighbour is accepted, and the response says why."""
+    _, report = _well_island(
+        tmp_path,
+        pdk_root,
+        "sky130A",
+        "equipotential",
+        net="VDDA",
+        isolate_from=[[-1.0, -1.0, 1.0, 1.0, "VDDA"]],
+    )
+    assert any("equipotential" in note for note in report["drc_hints"]["notes"])
+
+    # ...while the *same* geometry at a different net is rejected.
+    with pytest.raises(GenError, match="required between wells at different"):
+        _well_island(
+            tmp_path,
+            pdk_root,
+            "sky130A",
+            "different",
+            net="VDDA",
+            isolate_from=[[-1.0, -1.0, 1.0, 1.0, "VSSA"]],
+        )
+
+
+def test_well_island_on_a_family_with_no_well_layer_warns(
+    tmp_path, pdk_root, monkeypatch
+):
+    """Edge case (c): a family whose layer table has no well role gets the
+    same "no well shape was drawn" treatment `guard_ring`'s `add_well` already
+    gives -- a note plus a top-level warning, not a hard failure."""
+    from klayout_tools.gen import _PDK_ROLE_LAYERS
+
+    roles = dict(_PDK_ROLE_LAYERS["sky130"])
+    roles["well"] = None
+    monkeypatch.setitem(_PDK_ROLE_LAYERS, "sky130", roles)
+
+    output, report = _well_island(tmp_path, pdk_root, "sky130A", "no_well", net="VB")
+    assert (64, 20) not in _drawn_layers(output)
+    assert report["drc_hints"]["well_box_um"] is None
+    assert any("no well layer" in note for note in report["drc_hints"]["notes"])
+    assert any("isolates nothing" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("params", "match"),
+    [
+        ({"net": "VB A"}, "whitespace"),
+        ({"net": "$1"}, "anonymous"),
+        ({"well_margin_um": 0.1}, "well_margin_um must be >="),
+        ({"separation_um": -1.0}, "separation_um must be >= 0"),
+        ({"isolate_from": [[0.0, 0.0, 1.0]]}, "isolate_from\\[0\\] must be"),
+        ({"isolate_from": [[0.0, 0.0, 0.0, 1.0]]}, "zero-area"),
+        ({"isolate_from": [[0.0, 0.0, 1.0, 1.0, 7]]}, "net name string"),
+        ({"isolate_from": "nope"}, "must be an array"),
+    ],
+)
+def test_well_island_invalid_params_rejected(tmp_path, pdk_root, params, match):
+    with pytest.raises(GenError, match=match):
+        _well_island(tmp_path, pdk_root, "sky130A", "bad", **params)
+
+
+@pytest.mark.parametrize(
+    ("deck", "variant", "separation_um"),
+    [("sky130", "sky130A", 1.27), ("gf180mcu", "gf180mcuD", 1.4)],
+)
+def test_well_island_default_params_are_drc_clean(
+    tmp_path, both_pdk_root, deck, variant, separation_um
+):
+    """Same bar every other PDK-aware generator holds: the documented default
+    `params` pass `klt drc --deck <pdk>` clean on both supported families --
+    and each family's *own* different-potential well rule is the separation
+    that gets enforced (sky130's `nwell.2`, gf180mcu's `NW.2b`), not one
+    family's number applied to both."""
+    output, report = _well_island(
+        tmp_path, both_pdk_root, variant, f"island_{deck}", net="VB"
+    )
+    assert run_drc(str(output), deck)["status"] == "clean"
+    assert report["drc_hints"]["well_separation_um"] == pytest.approx(separation_um)
+
+
+@pytest.mark.parametrize(
+    ("deck", "variant"), [("sky130", "sky130A"), ("gf180mcu", "gf180mcuD")]
+)
+def test_well_island_round_trip_two_named_body_nets(
+    tmp_path, both_pdk_root, deck, variant
+):
+    """Acceptance criterion #4, the issue's own round trip: two named-net
+    well islands placed at a caller-specified separation, each holding a PMOS
+    device, must come back `klt drc`-clean with two *distinct, correctly
+    named* body nets in `devices[].nets["b"]`.
+
+    `unbiased_pmos_body_nets` being empty is deliberately **not** the
+    assertion here -- the issue's own analysis points out that a single well
+    over everything, tied to one supply, satisfies that too. The per-device
+    body names are what distinguishes two body domains from one.
+    """
+    island_a, report_a = _well_island(
+        tmp_path, both_pdk_root, variant, "island_a", net="VBODY_A"
+    )
+    device, device_report = _pfet_unit(tmp_path, both_pdk_root, variant, "pfet_unit")
+
+    well = report_a["drc_hints"]["well_box_um"]
+    keepout = report_a["drc_hints"]["well_keepout_box_um"]
+    # Place island B exactly on island A's reported keepout edge -- the
+    # tightest legal placement, derived from the response rather than from
+    # the caller's own geometry bookkeeping.
+    offset_um = keepout["x1"] - well["x0"]
+    island_b, _ = _well_island(
+        tmp_path,
+        both_pdk_root,
+        variant,
+        "island_b",
+        net="VBODY_B",
+        # Island A's well, expressed in island B's own coordinate frame.
+        isolate_from=[
+            [
+                well["x0"] - offset_um,
+                well["y0"],
+                well["x1"] - offset_um,
+                well["y1"],
+                "VBODY_A",
+            ]
+        ],
+    )
+
+    dx_um, dy_um = _centred_offset_um(report_a, device_report)
+    assembled = _assemble(
+        tmp_path / "assembled.gds",
+        [
+            (island_a, 0.0, 0.0),
+            (island_b, offset_um, 0.0),
+            (device, dx_um, dy_um),
+            (device, dx_um + offset_um, dy_um),
+        ],
+    )
+
+    drc_report = run_drc(str(assembled), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    extract_report = run_extract(str(assembled), deck)
+    pfets = [d for d in extract_report["devices"] if d["class"].endswith("fet")]
+    assert len(pfets) == 2
+    body_nets = sorted(d["nets"]["b"] for d in pfets)
+    assert body_nets == ["VBODY_A", "VBODY_B"]
+
+
+def test_well_island_body_net_name_needs_the_real_tie_not_just_the_label(
+    tmp_path, pdk_root
+):
+    """The non-tautology proof behind acceptance criterion #3: break the
+    island's tie (delete the contact layer, leaving the label untouched) and
+    the extracted body net stops reporting the requested name -- it falls back
+    to an anonymous KLayout net, and `unbiased_pmos_body_nets` flags it. A
+    `well_label` text would have kept reporting the name regardless.
+    """
+    import klayout.db as kdb
+
+    island, report = _well_island(
+        tmp_path, pdk_root, "sky130A", "island", net="VBODY_A"
+    )
+    device, device_report = _pfet_unit(tmp_path, pdk_root, "sky130A", "pfet_unit")
+    dx_um, dy_um = _centred_offset_um(report, device_report)
+    assembled = _assemble(
+        tmp_path / "tied.gds", [(island, 0.0, 0.0), (device, dx_um, dy_um)]
+    )
+
+    tied = run_extract(str(assembled), "sky130")
+    assert [d["nets"]["b"] for d in tied["devices"]] == ["VBODY_A"]
+    assert tied["unbiased_pmos_body_nets"] == []
+
+    layout = kdb.Layout()
+    layout.read(str(assembled))
+    layout.clear_layer(layout.layer(*_SKY130_CONTACT_LAYER))
+    broken_path = tmp_path / "broken.gds"
+    layout.write(str(broken_path))
+    # The net label itself is still drawn -- only the tie is gone.
+    assert _texts_on_layer(broken_path, *_SKY130_METAL_LABEL_LAYER) == ["VBODY_A"]
+
+    broken = run_extract(str(broken_path), "sky130")
+    assert [d["nets"]["b"] for d in broken["devices"]] != ["VBODY_A"]
+    assert len(broken["unbiased_pmos_body_nets"]) == 1
+
+
+def test_well_island_list_declares_its_isolation_params(tmp_path):
+    """`klt gen --list` is the generator schema's own contract surface -- the
+    new params must show up there (including the JSON-array `isolate_from`),
+    and the hidden layer/label params must not."""
+    report = list_generators()
+    generator = next(g for g in report["generators"] if g["name"] == "well_island")
+    params = {p["name"]: p for p in generator["params"]}
+
+    assert {"net", "separation_um", "isolate_from", "well_margin_um"} <= set(params)
+    assert params["isolate_from"]["type"] == "list"
+    assert params["isolate_from"]["default"] == []
+    assert params["separation_um"]["default"] == 0.0
+    assert not set(params) & {
+        "metal_label_layer",
+        "metal_label_present",
+        "well_tap_implant_layer",
+        "well_tap_implant_present",
+        "well_margin_resolved_um",
+        "well_layer",
+        "well_present",
+    }
 
 
 # --- diff_pair ---------------------------------------------------------------- #

@@ -210,7 +210,7 @@ unsupported `placement.strategy`).
 | `mos_array` | `"array"`, `"common_centroid"` (its own `params.topology` enum) |
 | `bjt_array` | `"array"`, `"common_centroid"` (same enum) |
 | `diff_pair` | `"common_centroid"` — it always draws a common-centroid cross-quad, so that is the one value consistent with what it lays out |
-| `resistor_strip`, `res_array`, `cap_array`, `guard_ring`, `bond_pad`, `esd_device` | *(none — these generators document no topology concept, so any declared value is unsupported)* |
+| `resistor_strip`, `res_array`, `cap_array`, `guard_ring`, `well_island`, `bond_pad`, `esd_device` | *(none — these generators document no topology concept, so any declared value is unsupported)* |
 
 Consequently:
 
