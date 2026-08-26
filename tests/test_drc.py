@@ -1249,24 +1249,28 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     #
     # It moved to 184 (142 `nwell.space.1` + 42 `nwell.width.1`) when #1420
     # added this deck's first `nwell`-layer rules: unlike the #995 case
-    # above, these are *not* an engine artifact -- `_run_check` already
+    # above, these were *not* an engine artifact -- `_run_check` already
     # merges each checked region before measuring (#995's own fix), and the
-    # measured gaps/widths here (as little as 0.08 um of `nwell`-to-`nwell`
-    # space against the real 1.27 um minimum) are genuine properties of this
-    # fixture's flattened, merged `nwell` geometry. This macro was produced
-    # by `klt place-and-route`'s sky130 row/cell placement, which does not
-    # currently guarantee `nwell` continuity/adequate spacing across
-    # abutting standard-cell rows (no alternate-row flip to share power
-    # rails and merge adjacent rows' wells, no well-tap/filler-cell
-    # insertion) -- a real gap in that verb, not in this rule or this test,
-    # tracked separately as #1430. Pinning the new count here (rather than
-    # excluding `nwell.*` from this fixture, or leaving the old `clean` pin
-    # to silently regress) keeps this regression guard honest about what
-    # `klt drc --deck sky130` actually reports against real, committed,
-    # machine-generated layout today.
-    assert report["violation_count"] == 184
-    assert report["rule_counts"] == {"nwell.space.1": 142, "nwell.width.1": 42}
-    assert report["status"] == "violations"
+    # measured gaps/widths (as little as 0.08 um of `nwell`-to-`nwell` space
+    # against the real 1.27 um minimum) were genuine properties of that
+    # fixture's flattened, merged `nwell` geometry. The row/cell placement
+    # that produced them did not guarantee `nwell` continuity/adequate
+    # spacing across abutting standard-cell rows (no alternate-row flip to
+    # share power rails and merge adjacent rows' wells, no well-tap/
+    # filler-cell insertion) -- a real gap tracked as #1430.
+    #
+    # #1430 is now resolved: #1442 fixed `klt place-and-route` to always draw
+    # a row-rail obstruction before routing (even without `request.power`),
+    # which un-gates `filler_placement` -- and it is filling every row gap
+    # (not just the row-rail obstruction itself) that closes the abutting-row
+    # `nwell` gaps/widths above. #1443 regenerated this fixture with that fix
+    # applied (`tests/corpus/place_and_route/regenerate.sh`, native OpenROAD,
+    # 2026-08-26) and confirmed it is now DRC-clean -- 0 `nwell.*` (or any
+    # other) violations, down from 184. See `tests/corpus/README.md`'s
+    # "Machine-generated macro-scale fixture" section for full provenance.
+    assert report["violation_count"] == 0
+    assert report["rule_counts"] == {}
+    assert report["status"] == "clean"
 
 
 def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:

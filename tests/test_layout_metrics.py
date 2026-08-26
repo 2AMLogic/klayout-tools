@@ -451,22 +451,26 @@ def test_openroad_gcd_fixture_report(tmp_path):
     assert report["layout_file"] == "layout.gds.gz"
     assert report["status"] == "ok"
     assert report["layer_count"] == 31
-    assert report["cell_count"] == 69
-    assert report["instance_count"] == 3645
+    assert report["cell_count"] == 61
+    assert report["instance_count"] == 4303
     # This pin was 4 `diff.enclosing.licon.1` violations until #995 (a false
     # positive, see below), then 0 (clean) until #1420 added this deck's
-    # first `nwell`-layer rules. It moved to 184 (142 `nwell.space.1` + 42
-    # `nwell.width.1`) because those are genuine properties of this fixture's
-    # flattened, merged `nwell` geometry -- not an engine artifact -- per the
-    # full explanation in
+    # first `nwell`-layer rules, then 184 (142 `nwell.space.1` + 42
+    # `nwell.width.1`) because those were genuine properties of that
+    # fixture's flattened, merged `nwell` geometry -- not an engine artifact
+    # -- per the full explanation in
     # `tests/test_drc.py::test_openroad_gcd_fixture_produces_well_formed_report`
-    # and `docs/cli/drc.md`; the underlying `klt place-and-route` gap is
-    # tracked separately as #1430. The earlier #995 pin (4
+    # and `docs/cli/drc.md`. The earlier #995 pin (4
     # `diff.enclosing.licon.1` violations) was the same false positive on
     # `sky130_fd_sc_hd__and3_1`'s own touching-but-unmerged `diff` shapes, not
     # real row-gap geometry.
+    #
+    # Now 0 (clean): #1443 regenerated this fixture with #1442's row-rail
+    # fix applied (filler cells now close every standard-cell row gap),
+    # which also resolves #1430 as a side effect -- see this same file's
+    # `tests/test_drc.py` explanation for the full reasoning.
     assert report["drc"] == {
         "deck": "sky130",
-        "status": "violations",
-        "violation_count": 184,
+        "status": "clean",
+        "violation_count": 0,
     }

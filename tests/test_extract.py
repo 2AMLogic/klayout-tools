@@ -14048,11 +14048,21 @@ def test_def_net_names_recovers_the_routed_corpus_designs_own_net_names(
 ):
     """Acceptance measurement for issue #951, on the real routed artifact:
     `tests/corpus/place_and_route/gcd.gds.gz` is a `klt place-and-route`
-    `"route"`-stage output, and it *already* carries all 458 of that
+    `"route"`-stage output, and it *already* carries all 492 of that
     design's DEF net names on its routed metal (GDS `PROPATTR`/`PROPVALUE`
     round-trips KLayout's `net_property_name`) -- which is why closing this
     gap needed no fixture regeneration. Default extraction cannot see them;
     `--def-net-names` recovers every one.
+
+    Counts below were re-measured against the fixture #1443 regenerated with
+    #1442's row-rail fix applied. The pre-route Yosys synthesis netlist
+    itself is unaffected by that fix (it runs before `klt place-and-route`
+    at all); what changed is the *routed* netlist DEF net names recover --
+    the new row-rail obstruction (drawn before `global_route`) and the
+    filler cells it un-gates change downstream placement/routing, which
+    changes how many buffers/clones `clock_tree_synthesis` and
+    `repair_design`/`repair_timing` insert, and therefore how many
+    synthesis-numbered `_NNN_` internal nets survive into the routed DEF.
     """
     tmp_path = tmp_path_factory.mktemp("gcd_def_net_names")
     layout_path = str(CORPUS_DIR / "place_and_route" / "gcd.gds.gz")
@@ -14077,8 +14087,8 @@ def test_def_net_names_recovers_the_routed_corpus_designs_own_net_names(
         assert design_net in def_names
     assert not {"_019_", "_000_"} & default_names
 
-    # All 334 `_NNN_` synthesis nets plus all 80 bus bits reach the netlist.
-    assert len([name for name in def_names if re.fullmatch(r"_\d+_", name)]) == 334
+    # All 303 `_NNN_` synthesis nets plus all 80 bus bits reach the netlist.
+    assert len([name for name in def_names if re.fullmatch(r"_\d+_", name)]) == 303
     assert len([name for name in def_names if "[" in name]) == 80
 
     # Nothing was left behind: no DEF name failed to resolve to an extracted
@@ -14095,8 +14105,11 @@ def test_declared_pins_restricts_spef_ports_on_the_routed_corpus(tmp_path_factor
     artifact. `--def-net-names` (test above) gives *every* routed net a real
     name, and `Netlist.make_top_level_pins()` promotes every named net to a
     top-level circuit pin -- so the SPEF written from that extraction
-    declared **463** `*PORTS` entries for `gcd`, i.e. ordinary internal nets
-    like `_019_` announced to `read_spef` as design boundary ports.
+    declared **497** `*PORTS` entries for `gcd` (re-measured against the
+    fixture #1443 regenerated with #1442's row-rail fix -- see the
+    `test_def_net_names_recovers_...` docstring above for why the exact
+    routed-net counts shifted), i.e. ordinary internal nets like `_019_`
+    announced to `read_spef` as design boundary ports.
 
     Passing the design's real port list as `declared_pins` (what
     `place_and_route._def_pin_net_names` recovers from the routed DEF's own
@@ -14135,10 +14148,10 @@ def test_declared_pins_restricts_spef_ports_on_the_routed_corpus(tmp_path_factor
     }
     assert declared == design_ports
 
-    # Unchanged by the restriction: the same 1392 `*D_NET` blocks the
+    # Unchanged by the restriction: the same 1376 `*D_NET` blocks the
     # unrestricted extraction writes (measured on this same fixture), so the
     # demotion moves nets out of `*PORTS` without dropping any parasitics.
-    assert len(re.findall(r"^\*D_NET ", spef_text, re.M)) == 1392
+    assert len(re.findall(r"^\*D_NET ", spef_text, re.M)) == 1376
 
 
 # --------------------------------------------------------------------------- #

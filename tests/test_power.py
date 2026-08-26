@@ -626,11 +626,39 @@ def test_gcd_fixture_extracts_a_real_power_grid(tmp_path):
     `klt par` (issue #700) deliberately runs no PDN (power-grid) generation
     (see `place_and_route.py`'s "Deliberately out of scope for this v1"
     note), so this design's power/ground geometry is whatever the standard
-    cell rows themselves contribute -- many disconnected, un-strapped
-    per-row islands rather than one connected mesh. The island counts below
-    are a regression pin against this specific, static, committed fixture
-    (mirroring `test_drc.py`'s own `violation_count == 4` pin) -- not a
-    claim about what a real PDN-equipped design should look like.
+    cell rows themselves contribute -- disconnected, un-strapped per-row
+    islands rather than one connected mesh (no cross-row straps, no PDN
+    grid). The island counts below are a regression pin against this
+    specific, static, committed fixture (mirroring `test_drc.py`'s own
+    `violation_count` pin) -- not a claim about what a real PDN-equipped
+    design should look like.
+
+    Re-pinned for #1443: this fixture was regenerated with #1442's row-rail
+    fix applied (an unconditional row-rail obstruction before routing,
+    un-gating `filler_placement`). Before that fix, missing filler cells
+    left literal gaps in each row's own met1 power rail, so a single row
+    often split into *several* separate VPWR/VGND islands (88 VPWR + 105
+    VGND across this design's 17 rows, pre-#1443). `filler_placement` now
+    closes every one of those gaps, so each row's rail is one continuous
+    island per net -- exactly 17 VPWR + 17 VGND islands, matching this
+    design's row count 1:1. This is a real, structural improvement in the
+    fixture (it is also what makes `klt drc --deck sky130` go from 184
+    `nwell.*` violations to 0, per #1430), not an artifact to work around --
+    so this test is re-pinned to the new topology rather than split off
+    into a separate frozen "no PDN" fixture. The multi-island/fragmented
+    topology code paths this test used to exercise at this scale (multiple
+    islands per net, per-island pad/current bookkeeping, unsolved-island
+    warnings) remain independently covered by hand-drawn, small-scale
+    fixtures elsewhere in this file --
+    `test_run_power_reports_three_islands_across_two_nets`,
+    `test_run_power_isolated_island_is_one_rail_edge`,
+    `test_run_power_via_bridged_island_has_metal_and_via_edges`,
+    `test_run_power_island_ids_are_scoped_per_net`,
+    `test_islands_without_a_pad_are_reported_unsolved_with_one_summary_warning`,
+    `test_current_stranded_on_a_padless_island_is_named_and_totalled` --
+    so this real-fixture test's own purpose (validate extraction against
+    real, machine-generated geometry, not specifically preserve
+    fragmentation) is unaffected by re-pinning to the fixed topology.
     """
     spec = tmp_path / "gcd.power.json"
     spec.write_text(
@@ -667,11 +695,11 @@ def test_gcd_fixture_extracts_a_real_power_grid(tmp_path):
 
     assert report["warnings"] == []
     by_net = {entry["net"]: entry for entry in report["networks"]}
-    assert by_net["VPWR"]["island_count"] == 88
-    assert by_net["VGND"]["island_count"] == 105
-    assert report["island_count"] == 193
-    assert report["node_count"] == 386
-    assert report["edge_count"] == 193
+    assert by_net["VPWR"]["island_count"] == 17
+    assert by_net["VGND"]["island_count"] == 17
+    assert report["island_count"] == 34
+    assert report["node_count"] == 68
+    assert report["edge_count"] == 34
 
     # Every rail is a real, positive resistor -- not a silent zero.
     for entry in report["networks"]:
@@ -1394,8 +1422,10 @@ def test_gcd_fixture_solves_for_a_real_ir_drop_map(tmp_path):
     assert ir_drop["unsolved_current_a"] == 0.0
     assert report["warnings"] == []
 
-    # 88 VPWR islands each drawing 0.2 mA.
-    assert ir_drop["total_current_a"] == pytest.approx(88 * 2e-4)
+    # 17 VPWR islands (re-pinned for #1443, see
+    # `test_gcd_fixture_extracts_a_real_power_grid`'s docstring) each
+    # drawing 0.2 mA.
+    assert ir_drop["total_current_a"] == pytest.approx(17 * 2e-4)
     for net_entry in ir_drop["nets"]:
         assert net_entry["unsolved_island_count"] == 0
         # Conservation, per island: the pads source exactly what the model
@@ -1915,9 +1945,13 @@ _MODEXP_BASE_SPEC = {
 )
 def test_modexp_canary_extracts_a_real_power_grid(tmp_path):
     """`klt power` extraction-only against the real `sky130-modexp` canary:
-    like `gcd` (88/105 `VPWR`/`VGND` islands), this larger, PDN-free design
-    resolves to many more small disconnected islands than one mesh -- a
-    regression pin against this specific, static, vendored fixture."""
+    a larger, PDN-free design that resolves to many small disconnected
+    islands rather than one mesh -- a regression pin against this specific,
+    static, vendored fixture. (Unlike `tests/corpus/place_and_route/gcd.gds.gz`
+    above, this `modexp` GDS is a vendored canary, not regenerated by
+    `tests/corpus/place_and_route/regenerate.sh` -- #1443's row-rail-fix
+    regeneration and #1442's fix itself do not touch this fixture, so its
+    island counts below are untouched.)"""
     probe = tmp_path / "modexp.probe.json"
     probe.write_text(json.dumps(_MODEXP_BASE_SPEC))
     report = run_power(str(MODEXP_CANARY_GDS), str(probe))

@@ -89,7 +89,7 @@ and cannot be solved for droop without saying so plainly (it is reported
 `solved: false` with `unsolved_reason: "no_pad"`, never guessed at).
 This is not a defect in the extraction; it is what a PDN-free routed design
 actually looks like. See "Worked example" below, where the real
-`gcd` corpus fixture resolves to 88 separate `VPWR` islands and 105
+`gcd` corpus fixture resolves to 17 separate `VPWR` islands and 17
 separate `VGND` islands.
 
 ## Spec file
@@ -676,27 +676,31 @@ layer numbers (verified against a real sky130A install — see
 `klt synthesize` + `klt place-and-route` (real Yosys + real OpenROAD) — the
 same corpus fixture `klt drc`/`klt extract`/`klt lvs` already validate
 against (see `tests/corpus/README.md`'s "Machine-generated macro-scale
-fixture" section). This run resolves to **88 separate `VPWR` islands and
-105 separate `VGND` islands** (386 nodes, 193 edges total, zero warnings) —
+fixture" section). This run resolves to **17 separate `VPWR` islands and
+17 separate `VGND` islands** (68 nodes, 34 edges total, zero warnings) —
 a regression pin against this specific, static, committed fixture (see
 `tests/test_power.py`'s `test_gcd_fixture_extracts_a_real_power_grid`), and
 a real, measured instance of "why a named net is usually several islands"
-above: this design has no PDN, so almost every standard-cell row's power
-rail is its own disconnected island.
+above: this design has no PDN, so every standard-cell row's power rail is
+its own disconnected island (one island per row per net; before issue
+#1442's row-rail fix, missing filler cells left literal gaps *within* a
+row's own rail too, fragmenting it into 88 `VPWR` / 105 `VGND` islands —
+see `tests/test_power.py`'s docstring for the full before/after story).
 
 Adding `pads` (one per island, at each rail's left-hand end) and a
 `current_model` (0.2 mA hung on each `VPWR` rail's far end) to that same
 spec — with both metal roles at `0.125` ohm/sq, a sky130-order sheet
-resistance — turns the run into a full IR-drop solve. Every one of the 193
-islands gets an operating point, all 386 nodes solve, no current is
+resistance — turns the run into a full IR-drop solve. Every one of the 34
+islands gets an operating point, all 68 nodes solve, no current is
 stranded (`unsolved_current_a: 0.0`), each island's `pad_current_a`
-balances its own load exactly, and the run is warning-free. The 88 loads
-total 17.6 mA; the worst droop is **4.84 mV** on `VGND#88`, exactly twice
-the worst `VPWR` droop of 2.42 mV — because abutting standard-cell rows
-share a ground rail, so 20 of the 105 `VGND` islands collect *two* rows'
-return current (0.4 mA) while every `VPWR` island carries one row's 0.2 mA.
-That is the rails' own `I * 0.125 ohm/sq * L/W` arithmetic, read back out
-of a real routed layout. The same network is
+balances its own load exactly, and the run is warning-free. The 17 loads
+total 3.4 mA; the worst droop is **9.58 mV** on the worst-case `VGND`
+island, almost exactly twice the worst `VPWR` droop of 4.79 mV — because
+abutting standard-cell rows share a ground rail, so 4 of the 17 `VGND`
+islands collect *two* rows' return current (0.4 mA) while every `VPWR`
+island carries one row's 0.2 mA. That is the rails' own
+`I * 0.125 ohm/sq * L/W` arithmetic, read back out of a real routed
+layout. The same network is
 then handed to ngspice, which reproduces every node voltage to `1e-9` V and
 every branch current to `1e-12` A (`tests/test_power.py`'s
 `test_gcd_fixture_solves_for_a_real_ir_drop_map` and
@@ -706,7 +710,7 @@ every branch current to `1e-12` A (`tests/test_power.py`'s
 Adding `current_limit_a_per_um: 0.0028` (sky130's own `met1`/`met2` EM
 limit — `DCCURRENTDENSITY AVERAGE 2.8` in a real
 `sky130_fd_sc_hd__nom.tlef`, meaning 2.8 mA/um) to both metal roles turns
-the same run into a full EM check. Every one of the 193 solved edges
+the same run into a full EM check. Every one of the 34 solved edges
 carries a well under 1 mA branch current on rails at least `0.14` um wide
 (sky130's own `met1`/`met2` minimum routing width), so every checked edge
 passes comfortably (`em_verdict.status: "pass"`, `fail_count: 0`) —
@@ -729,7 +733,7 @@ through `klt synthesize` + `klt place-and-route` (real OpenROAD) to a
 routed GDS, vendored into this repo as
 `tests/corpus/place_and_route/modexp_canary.gds.gz` (see
 `tests/corpus/README.md`'s own section on it for full provenance) — an
-order of magnitude larger than `gcd` (718 cells vs. 69).
+order of magnitude larger than `gcd` (718 cells vs. 61).
 
 ```bash
 klt power tests/corpus/place_and_route/modexp_canary.gds.gz modexp.power.json --format json
@@ -751,7 +755,7 @@ this canary instead uses `sky130-modexp`'s own measured `estimated power
 record) — `total_current_a = 0.876 mW / 1.8 V ≈ 0.487 mA`, spread evenly
 across all 216 `VPWR` islands' own far ends (`≈2.25 µA` each). Every
 island solves (`unsolved_current_a: 0.0`), and the worst-case droop is
-**0.0443 mV** — much smaller than `gcd`'s 4.84 mV, because this canary's
+**0.0443 mV** — much smaller than `gcd`'s 9.58 mV, because this canary's
 per-island current is ~90x smaller than `gcd`'s hand-picked figure (a real
 design's *average* current spread across many more, mostly lightly-loaded
 rails, versus `gcd`'s single made-up per-rail load). Adding the same real
