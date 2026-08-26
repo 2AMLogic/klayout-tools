@@ -81,6 +81,21 @@ _SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 #: ``spef`` file declares, for the net-name-correlation sanity check below --
 #: never to parse capacitance/resistance values.
 _SPEF_D_NET_RE = re.compile(r"^\*D_NET\s+(\S+)", re.MULTILINE)
+#: Reverses ``extract_spef.py``'s ``_spef_name()`` escaping (backslash
+#: before every character outside ``[A-Za-z0-9_]``) -- see
+#: :func:`_unescape_spef_name`.
+_SPEF_ESCAPED_CHAR_RE = re.compile(r"\\(.)")
+
+#: Delimits the (capped) sample of design-side net names that failed to
+#: correlate against the SPEF's own declared name set -- see
+#: :func:`_spef_net_check_lines` and :func:`_parse_spef_missing_nets`.
+_SPEF_MISSING_NETS_BEGIN = "===KLT_STA_SPEF_MISSING_NETS_BEGIN==="
+_SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
+#: Upper bound on how many uncorrelated design-side net names
+#: :func:`_spef_net_check_lines` collects into ``klt_design_missing`` -- a
+#: diagnostic sample, not an exhaustive list, so a design with thousands of
+#: misnamed nets doesn't balloon the OpenSTA stdout this module parses.
+_SPEF_MISSING_NETS_SAMPLE_LIMIT = 20
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
 
@@ -255,6 +270,7 @@ def run_sta(
             design_nets_total > 0 and design_nets_annotated == design_nets_total
         )
         annotation_warning = None
+        design_nets_missing_sample: list[str] = []
         if not annotation_complete:
             annotation_warning = (
                 f"only {design_nets_annotated} of {design_nets_total} nets in "
@@ -262,11 +278,13 @@ def run_sta(
                 "worst_slack_ns/etc. fields above are NOT a real-parasitics "
                 "measurement to the extent annotation is missing."
             )
+            design_nets_missing_sample = _parse_spef_missing_nets(completed.stdout)
         response["spef_annotation"] = {
             "nets_annotated": nets_annotated,
             "nets_total": nets_total,
             "design_nets_annotated": design_nets_annotated,
             "design_nets_total": design_nets_total,
+            "design_nets_missing_sample": design_nets_missing_sample,
             "annotation_complete": annotation_complete,
             "annotation_warning": annotation_warning,
         }
@@ -450,7 +468,18 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     ``klt extract --parasitics``-produced one does, so this reuses the same
     two-directional (SPEF-side / design-side) measurement, run **before**
     ``read_spef`` so an uncaught Tcl error partway through that call cannot
-    also silently skip this check."""
+    also silently skip this check.
+
+    ``net_names`` must already be *unescaped* (real design spelling, e.g.
+    ``a[10]``/``u_sub/net``, not SPEF's ``a\\[10\\]``/``u_sub\\/net``) --
+    :func:`_spef_net_names` guarantees this. ``get_full_name`` (design side)
+    never returns SPEF's backslash-escaped spelling, so a still-escaped
+    ``klt_spef_have`` key would silently fail to match any design net whose
+    name contains a SPEF-reserved character (issue #1422).
+
+    Also collects a capped sample (:data:`_SPEF_MISSING_NETS_SAMPLE_LIMIT`)
+    of design-side net names that fail to correlate, so a caller can see
+    *which* nets are missing rather than only the aggregate counts."""
     return [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -462,16 +491,25 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
         "}",
         "set klt_design_total 0",
         "set klt_design_annotated 0",
+        "set klt_design_missing {}",
+        f"set klt_design_missing_limit {_SPEF_MISSING_NETS_SAMPLE_LIMIT}",
         "foreach klt_design_net [get_nets -quiet *] {",
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",
+        "    } elseif {[llength $klt_design_missing] < $klt_design_missing_limit} {",
+        "        lappend klt_design_missing [get_full_name $klt_design_net]",
         "    }",
         "}",
         f'puts "{_SPEF_NET_CHECK_BEGIN}"',
         'puts "$klt_spef_annotated [llength $klt_spef_nets]"',
         'puts "$klt_design_annotated $klt_design_total"',
         f'puts "{_SPEF_NET_CHECK_END}"',
+        f'puts "{_SPEF_MISSING_NETS_BEGIN}"',
+        "foreach klt_missing_net $klt_design_missing {",
+        "    puts $klt_missing_net",
+        "}",
+        f'puts "{_SPEF_MISSING_NETS_END}"',
     ]
 
 
@@ -533,20 +571,40 @@ def _sta_script_lines(
 # --------------------------------------------------------------------------- #
 
 
+def _unescape_spef_name(name: str) -> str:
+    """The exact inverse of ``extract_spef.py``'s ``_spef_name()``: strips
+    the backslash SPEF's own (IEEE 1481-1999) identifier grammar requires
+    before every *special* character (anything outside ``[A-Za-z0-9_]``),
+    e.g. ``a\\[10\\]`` -> ``a[10]``, ``u_sub\\/net`` -> ``u_sub/net``.
+
+    A SPEF-declared ``*D_NET`` name is written *escaped*
+    (:func:`extract_spef._spef_name`'s own docstring: "Reading tools strip
+    the backslashes back off, so the name an STA session matches against its
+    own netlist is the unescaped one"). :func:`_spef_net_names` must apply
+    this before a recovered name is used as an OpenSTA ``get_nets``/Tcl
+    array-key value, or every name containing a SPEF-reserved character
+    (bus-index brackets, hierarchical-path slashes, ...) silently fails to
+    correlate against the design's real, unescaped net names (issue #1422:
+    measured ~51% vs. a true ~99.5% structural agreement on a real routed
+    design, split exactly along "name contains `[`/`]`/`/`")."""
+    return _SPEF_ESCAPED_CHAR_RE.sub(r"\1", name)
+
+
 def _spef_net_names(spef_path: str) -> list[str]:
     """Recover the net *name set* a caller-supplied ``spef`` file declares,
     by scanning its own ``*D_NET <name> <total_cap>`` lines (the SPEF net-
     declaration line every writer -- including this repo's own
-    ``extract.py::_write_spef`` -- emits one of per net). Used only to feed
-    :func:`_spef_net_check_lines`'s correlation check; never to parse
-    capacitance/resistance values. Raises :class:`PostRouteStaError` if the
-    file cannot be read."""
+    ``extract.py::_write_spef`` -- emits one of per net), then un-escaping
+    each recovered name (:func:`_unescape_spef_name`) back to its real,
+    design-side spelling. Used only to feed :func:`_spef_net_check_lines`'s
+    correlation check; never to parse capacitance/resistance values. Raises
+    :class:`PostRouteStaError` if the file cannot be read."""
     try:
         with open(spef_path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
     except OSError as exc:
         raise PostRouteStaError(f"could not read spef '{spef_path}': {exc}") from exc
-    return sorted(set(_SPEF_D_NET_RE.findall(text)))
+    return sorted({_unescape_spef_name(name) for name in _SPEF_D_NET_RE.findall(text)})
 
 
 # --------------------------------------------------------------------------- #
@@ -646,6 +704,26 @@ def _count_spef_nets_annotated(stdout: str) -> tuple[int, int, int, int] | None:
         int(match.group(3)),
         int(match.group(4)),
     )
+
+
+def _parse_spef_missing_nets(stdout: str) -> list[str]:
+    """A capped sample of design-side net names that failed to correlate
+    against the SPEF's own declared name set, parsed from
+    :func:`_spef_net_check_lines`'s own
+    ``===KLT_STA_SPEF_MISSING_NETS_BEGIN===``/``===END===``-delimited stdout
+    block (one net name per line, already the design's real spelling --
+    ``get_full_name``'s own output). Returns ``[]`` when the markers aren't
+    found (defensive; should not happen for a successful run) or the block
+    is empty (nothing missing)."""
+    try:
+        start_idx = stdout.index(_SPEF_MISSING_NETS_BEGIN) + len(
+            _SPEF_MISSING_NETS_BEGIN
+        )
+        stop_idx = stdout.index(_SPEF_MISSING_NETS_END, start_idx)
+    except ValueError:
+        return []
+    block = stdout[start_idx:stop_idx]
+    return [line.strip() for line in block.splitlines() if line.strip()]
 
 
 def _openroad_version() -> str | None:

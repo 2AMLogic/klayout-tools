@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt sta`'s `spef_annotation` net-name correlation
+  (`design_nets_annotated`/`design_nets_total`) no longer silently drops
+  every design net whose name contains a SPEF-escaped bus-index bracket
+  (`\[`/`\]`) or hierarchical-path separator (`\/`) (issue #1422). The
+  correlation check compared a still-*escaped* name recovered from the
+  SPEF's own `*D_NET` lines against the design's real, unescaped net names
+  (`get_full_name`'s own spelling), so any name containing a SPEF-reserved
+  character never matched — measured as low as ~51% correlation on a real
+  routed design where the true structural agreement was ~99.5%.
+  `_spef_net_names()` now un-escapes each recovered name
+  (`_unescape_spef_name()`, the exact inverse of `extract_spef.py`'s
+  `_spef_name()`) before it is used as a Tcl `get_nets`/array-key value.
+  Also adds `spef_annotation.design_nets_missing_sample` — a capped sample
+  (at most 20) of the design's own net names that still fail to correlate,
+  for self-diagnosing a future correlation gap without a separate DEF/SPEF
+  cross-check. Additive — no `schema_version` bump.
 - **Added**: `klt lvs` now accepts `options.combine_devices_max_attempts`
   (issue #1412), a caller-configurable retry budget for
   `options.combine_devices`'s bounded-retry mitigation of KLayout's own

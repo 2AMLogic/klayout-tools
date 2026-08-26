@@ -163,6 +163,7 @@ Tcl failure can't also silently skip the check:
   "nets_total": 1356,
   "design_nets_annotated": 537,
   "design_nets_total": 537,
+  "design_nets_missing_sample": [],
   "annotation_complete": true,
   "annotation_warning": null
 }
@@ -176,11 +177,27 @@ Tcl failure can't also silently skip the check:
 - `design_nets_annotated`/`design_nets_total` — design-side: how many of
   the nets OpenSTA times are actually named by the SPEF. **Check this pair
   before trusting the timing numbers above.**
+- `design_nets_missing_sample` — a capped sample (at most 20) of the
+  design's own net names (`get_full_name`'s spelling — never SPEF's
+  backslash-escaped one) that did **not** correlate against the SPEF's
+  declared name set. Always `[]` when `annotation_complete` is `true`; a
+  diagnostic aid for spotting *why* annotation is incomplete (e.g. a
+  systematic naming-convention mismatch) without a separate DEF/SPEF
+  cross-check. Not exhaustive on a design with more than 20 uncorrelated
+  nets — a non-empty list here is a symptom to investigate, not a full
+  accounting.
 - `annotation_complete` — `true` only when the design-side pair is equal
   and non-zero.
 - `annotation_warning` — `null` when complete, otherwise a sentence naming
   the shortfall and stating that `worst_slack_ns`/etc. are not a
   real-parasitics measurement to the extent annotation is missing.
+
+**Net names containing SPEF-reserved characters correlate correctly.**
+Bus-indexed (`data[7:0]`) and hierarchical (`u_submodule/net`) net names are
+backslash-escaped in the SPEF text itself (SPEF's own IEEE 1481-1999
+identifier grammar) but un-escaped back to their real, design-side spelling
+before this correlation check runs — a caller-supplied SPEF with ordinary
+bus/hierarchy naming is not penalized for it.
 
 ## Worked example
 

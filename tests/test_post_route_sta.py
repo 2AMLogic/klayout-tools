@@ -341,6 +341,26 @@ def test_sta_script_lines_with_spef_reads_after_liberty_and_clock():
     )
     assert check_begin_idx < read_spef_idx
     assert "{net_a} {net_b[3]}" in "\n".join(lines)
+    # The missing-nets diagnostic block also runs before `read_spef`, right
+    # after the aggregate-count block (see `_spef_net_check_lines`).
+    missing_begin_idx = next(
+        i for i, ln in enumerate(lines) if post_route_sta._SPEF_MISSING_NETS_BEGIN in ln
+    )
+    assert check_begin_idx < missing_begin_idx < read_spef_idx
+
+
+def test_spef_net_check_lines_uses_unescaped_names_verbatim():
+    """The Tcl array that backs the design-side correlation check
+    (`klt_spef_have`) must be keyed by the *unescaped* net name --
+    `get_full_name` (design side) never returns SPEF's backslash-escaped
+    spelling, so a still-escaped key would never match (issue #1422)."""
+    lines = post_route_sta._spef_net_check_lines(["a[10]", "u_sub/net"])
+    script = "\n".join(lines)
+
+    assert "{a[10]} {u_sub/net}" in script
+    # No literal backslash anywhere in the generated Tcl -- confirms this
+    # helper never re-introduces SPEF's own escaping.
+    assert "\\" not in script
 
 
 def test_spef_net_names_parses_d_net_lines(tmp_path):
@@ -360,6 +380,82 @@ def test_spef_net_names_parses_d_net_lines(tmp_path):
     names = post_route_sta._spef_net_names(str(spef_path))
 
     assert names == ["net_a", "net_b[3]"]
+
+
+def test_unescape_spef_name_reverses_extract_spef_escaping():
+    """`_unescape_spef_name` must be the exact inverse of
+    `extract_spef.py`'s `_spef_name()` -- imported directly (not
+    hand-copied) so the two can never silently drift apart."""
+    from klayout_tools.extract_spef import _spef_name
+
+    for raw in ("a[10]", "u_sub/net", "data[7:0]", "net$1", "plain_name"):
+        assert post_route_sta._unescape_spef_name(_spef_name(raw)) == raw
+
+
+def test_unescape_spef_name_examples():
+    assert post_route_sta._unescape_spef_name(r"a\[10\]") == "a[10]"
+    assert post_route_sta._unescape_spef_name(r"u_sub\/net") == "u_sub/net"
+    assert post_route_sta._unescape_spef_name("plain_name") == "plain_name"
+
+
+def test_spef_net_names_unescapes_bracket_and_slash_escaped_names(tmp_path):
+    """Issue #1422: a real SPEF writer (`extract_spef.py::_spef_name`)
+    backslash-escapes every SPEF-reserved character it writes into a
+    `*D_NET` name -- `_spef_net_names` must undo that, not return the raw,
+    still-escaped text, or every bus-indexed/hierarchical net name silently
+    fails to correlate against the design's real (unescaped) net names."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text(
+        '*SPEF "IEEE 1481-1999"\n'
+        "*D_NET a\\[10\\] 0.012345\n"
+        "*CONN\n"
+        "*END\n"
+        "*D_NET u_sub\\/net 0.5\n"
+        "*CONN\n"
+        "*END\n"
+        "*D_NET plain_net 0.1\n"
+        "*CONN\n"
+        "*END\n",
+        encoding="utf-8",
+    )
+
+    names = post_route_sta._spef_net_names(str(spef_path))
+
+    assert names == ["a[10]", "plain_net", "u_sub/net"]
+    # None of the escaping backslashes should survive.
+    assert not any("\\" in name for name in names)
+
+
+def test_parse_spef_missing_nets_extracts_block():
+    stdout = "\n".join(
+        [
+            post_route_sta._SPEF_NET_CHECK_BEGIN,
+            "1 3",
+            "1 3",
+            post_route_sta._SPEF_NET_CHECK_END,
+            post_route_sta._SPEF_MISSING_NETS_BEGIN,
+            "a[10]",
+            "u_sub/net",
+            post_route_sta._SPEF_MISSING_NETS_END,
+        ]
+    )
+
+    assert post_route_sta._parse_spef_missing_nets(stdout) == ["a[10]", "u_sub/net"]
+
+
+def test_parse_spef_missing_nets_empty_block():
+    stdout = "\n".join(
+        [
+            post_route_sta._SPEF_MISSING_NETS_BEGIN,
+            post_route_sta._SPEF_MISSING_NETS_END,
+        ]
+    )
+
+    assert post_route_sta._parse_spef_missing_nets(stdout) == []
+
+
+def test_parse_spef_missing_nets_no_markers_returns_empty():
+    assert post_route_sta._parse_spef_missing_nets("no markers here") == []
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +480,7 @@ def _stub_openroad_success(
     setup_violations: int = 1,
     hold_violations: int = 0,
     spef_check: tuple[int, int, int, int] | None = None,
+    spef_missing_nets: list[str] | None = None,
 ) -> None:
     metrics = metrics if metrics is not None else _STA_METRICS
 
@@ -410,6 +507,9 @@ def _stub_openroad_success(
                 f"{a} {b}",
                 f"{c} {d}",
                 post_route_sta._SPEF_NET_CHECK_END,
+                post_route_sta._SPEF_MISSING_NETS_BEGIN,
+                *(spef_missing_nets or []),
+                post_route_sta._SPEF_MISSING_NETS_END,
                 *stdout_lines,
             ]
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
@@ -461,19 +561,62 @@ def test_run_sta_with_spef_reports_annotation(tmp_path, monkeypatch):
     assert annotation["design_nets_total"] == 1
     assert annotation["annotation_complete"] is True
     assert annotation["annotation_warning"] is None
+    # No missing-net sample when correlation is already complete.
+    assert annotation["design_nets_missing_sample"] == []
 
 
 def test_run_sta_with_spef_incomplete_annotation_warns(tmp_path, monkeypatch):
     spef_path = tmp_path / "top.spef"
     spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
     request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
-    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 3, 10))
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(1, 1, 3, 10),
+        spef_missing_nets=["a[10]", "u_sub/net"],
+    )
 
     report = run_sta(request_path)
 
     annotation = report["spef_annotation"]
     assert annotation["annotation_complete"] is False
     assert "only 3 of 10 nets" in annotation["annotation_warning"]
+    assert annotation["design_nets_missing_sample"] == ["a[10]", "u_sub/net"]
+
+
+def test_run_sta_with_escaped_spef_net_names_no_longer_depressed(tmp_path, monkeypatch):
+    """Regression for issue #1422: a caller-supplied SPEF whose `*D_NET`
+    names carry real SPEF escaping (bus-index brackets, hierarchical
+    slashes) must feed the *unescaped* name set into the correlation check's
+    Tcl -- the stub simulates a fully-correlated OpenSTA run, and this test
+    asserts the request pipeline gets there (i.e. `_spef_net_names` produced
+    the real, unescaped names `_sta_script_lines` embedded, not the raw
+    escaped SPEF text)."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text(
+        '*SPEF "IEEE 1481-1999"\n'
+        "*D_NET a\\[10\\] 0.01\n*CONN\n*END\n"
+        "*D_NET u_sub\\/net 0.02\n*CONN\n*END\n",
+        encoding="utf-8",
+    )
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    # A real OpenSTA session, given the now-unescaped names, correlates all
+    # of them -- this is what the stub simulates.
+    _stub_openroad_success(monkeypatch, spef_check=(2, 2, 2, 2))
+
+    report = run_sta(request_path)
+
+    annotation = report["spef_annotation"]
+    assert annotation["annotation_complete"] is True
+    assert annotation["design_nets_annotated"] == 2
+    assert annotation["design_nets_total"] == 2
+
+    # The generated Tcl script itself embeds the *unescaped* names -- this
+    # is the actual mechanism the fix changes.
+    script_path = tmp_path / ".klt" / "sta" / "sta_top.tcl"
+    script_text = script_path.read_text(encoding="utf-8")
+    assert "{a[10]} {u_sub/net}" in script_text
+    assert "\\[" not in script_text
+    assert "\\/" not in script_text
 
 
 def test_run_sta_engine_failure_raises(tmp_path, monkeypatch):
@@ -534,6 +677,25 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     assert "worst_slack_ns: -0.15" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
+
+
+def test_cli_text_format_prints_missing_nets_sample(tmp_path, monkeypatch, capsys):
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(1, 1, 3, 10),
+        spef_missing_nets=["a[10]", "u_sub/net"],
+    )
+
+    exit_code = main(["sta", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "spef_annotation:" in out
+    assert "warning:" in out
+    assert "missing nets (sample): a[10], u_sub/net" in out
 
 
 def test_cli_error_exits_one_with_json_error(tmp_path, monkeypatch, capsys):
