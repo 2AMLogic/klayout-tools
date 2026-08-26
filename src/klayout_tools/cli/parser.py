@@ -69,6 +69,22 @@ def _add_format_arg(
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
 
 
+def _deck_names_str() -> str:
+    """Comma-joined, sorted list of every built-in deck name this build ships.
+
+    Sourced from :func:`klayout_tools.decks.deck_names` -- the same registry
+    ``deck_source_path`` validates a ``--deck`` value against -- so this
+    build's ``--deck`` help text can never go stale relative to the registry
+    the way it did for ``sg13cmos5l`` (issue #1418): a family's deck module
+    landing in the registry (``decks/__init__.py``'s ``_registry()`` /
+    ``_extraction_registry()``) is now sufficient for every ``--deck`` help
+    string below to list it, with no separate doc-string edit required.
+    """
+    from ..decks import deck_names
+
+    return ", ".join(deck_names())
+
+
 class _BuildVersionAction(argparse.Action):
     """``--version``, printing the *build* identity (issue #1202).
 
@@ -449,7 +465,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--deck",
         default=None,
         help=(
-            "DRC deck to run (currently: sky130, gf180mcu, sg13g2). Required for "
+            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
             "--engine curated (the default); ignored for --engine klayout. "
             "Not validated by argparse -- an unknown deck name exits 1 with "
             "a clean error, per docs/cli/drc.md's exit-code contract, "
@@ -819,7 +835,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "DRC deck to run for the drc.violation_count field (currently: "
-            "sky130, gf180mcu, sg13g2). Omit to skip DRC entirely."
+            f"{_deck_names_str()}). Omit to skip DRC entirely."
         ),
     )
     layout_metrics_parser.add_argument(
@@ -827,7 +843,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "PDK family this block targets, recorded verbatim as the pdk "
-            "field (currently: sky130, gf180mcu, sg13g2). Omit to leave the "
+            f"field (currently: {_deck_names_str()}). Omit to leave the "
             "field out -- nothing in a block directory identifies its PDK, "
             "so it is never inferred. Unlike --deck, an unknown name exits 1 "
             "rather than being silently dropped."
@@ -963,7 +979,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--deck",
         default=None,
         help=(
-            "extraction deck to run (currently: sky130, gf180mcu, sg13g2). "
+            f"extraction deck to run (currently: {_deck_names_str()}). "
             "Required unless --check is given (an omitted --deck with "
             "positional 'file' is an application error, exit 1, not an "
             "argparse usage error -- see docs/cli/extract.md's exit-code "
@@ -2130,7 +2146,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--deck",
         required=True,
         help=(
-            "extraction deck to run (currently: sky130, gf180mcu, sg13g2), "
+            f"extraction deck to run (currently: {_deck_names_str()}), "
             "passed through to `klt extract --parasitics`"
         ),
     )
@@ -3107,7 +3123,7 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     hash_parser.add_argument(
         "--deck",
         required=True,
-        help="built-in deck name to identify (e.g. sky130, gf180mcu, sg13g2)",
+        help=f"built-in deck name to identify (e.g. {_deck_names_str()})",
     )
     _add_format_arg(hash_parser)
     hash_parser.set_defaults(func=deck_cmd.run_hash)

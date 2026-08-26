@@ -4,7 +4,7 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu|sg13g2 [--top <cell>] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -13,7 +13,7 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   auto-detects the stream format on read; the extension is not authoritative.
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
-  `gf180mcu`, `sg13g2`. Adding a new family's curated deck (registry wiring,
+  `gf180mcu`, `sg13g2`, `sg13cmos5l`. Adding a new family's curated deck (registry wiring,
   scope discipline, provenance citations) is documented in
   [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
 - `--top` — top cell to check when the stream has more than one; omit to
@@ -607,8 +607,15 @@ process variant this deck doesn't model — see `gf180mcu.py`'s docstring), or
 pairs (issue #1110): `DF.6`, `PL.5a`/`PL.5b` and the rest of the DRM's
 `_MV` column are not transcribed at all yet — left for follow-on issues.
 
-Coverage is expected to grow incrementally in follow-on issues, for both
-decks.
+The `sg13g2` and `sg13cmos5l` decks (IHP-Open-PDK families) are likewise
+curated starter subsets, but documented alongside the rest of that PDK
+family's resolution details rather than here — see
+[`pdk.md`](pdk.md)'s "How far the SG13G2 curated deck goes" and "How far
+the SG13CMOS5L curated deck goes" sections for their own per-surface
+coverage tables and gaps.
+
+Coverage is expected to grow incrementally in follow-on issues, for every
+deck.
 
 ## Macro-scale, machine-generated (standard-cell) layout
 

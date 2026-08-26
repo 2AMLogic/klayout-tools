@@ -148,16 +148,14 @@ rediscover a gap by failure.
 | ---------- | ------ | ---------------------------- | --------- | --------- |
 | sky130, gf180mcu (open_pdks / volare / ciel) | open_pdks-layout (nested) | ✅ | ✅ curated deck (`sky130`, `gf180mcu`) | ✅ `"klayout"` engine (curated deck) or `"netgen"` engine |
 | IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ✅ curated deck (`sg13g2`, issue #905) — a starter subset, see below | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
-| IHP-Open-PDK SG13CMOS5L | flat (same shape as SG13G2 above) | ✅ (issue #1399) | `klt drc --engine klayout` only, resolving the PDK's own `ihp-sg13cmos5l.drc` via `drc_deck_file` (issue #1399) — **no curated deck yet** (`--engine curated` has no `sg13cmos5l` entry) | `"netgen"` engine only, with a resolved `netgen_setup_file` and a `netgen` binary (issue #1399) — **no curated deck yet** (`"engine": "klayout"` has no `sg13cmos5l` device-recognition deck) |
+| IHP-Open-PDK SG13CMOS5L | flat (same shape as SG13G2 above) | ✅ (issue #1399) | ✅ curated deck (`sg13cmos5l`, issue #1408) — a starter subset, see below — or `klt drc --engine klayout` against the PDK's own native `ihp-sg13cmos5l.drc` via `drc_deck_file` (issue #1399) | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` and a `netgen` binary (issue #1399) |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
 
-IHP's second open PDK, **CMOS5L**, is not in this table yet — it has no
-curated deck (or CI-reproducible fetch script) in this repo as of this
-writing, only findings gathered while scoping a port. See
-[`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
+See [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
 for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
-DRC/LVS source-shape) and the general steps for adding any new PDK family
-to this module's resolution and this repo's curated-deck registry.
+DRC/LVS source-shape) this port surfaced, and the general steps for adding
+any new PDK family to this module's resolution and this repo's curated-deck
+registry.
 
 **How far the SG13G2 curated deck goes.** `klt drc`/`klt lvs` only ever run
 *this repo's own* curated Python rule decks via KLayout's native `Region`
@@ -235,9 +233,8 @@ SG13G2 install's own `libs.tech/netgen/ihp-sg13g2_setup.tcl` via
 `docs/cli/lvs.md`'s `"netgen"` engine section and
 `tests/test_lvs.py::test_netgen_engine_real_binary_against_sg13g2_shaped_install`).
 
-**SG13CMOS5L (issue #1399) has no curated deck at all yet** — it only
-proves the two generic-engine paths against the PDK's own native decks,
-the prerequisite this repo's later curated-deck work builds on: `klt drc
+**SG13CMOS5L's generic-engine paths (issue #1399)** were proved first,
+ahead of any curated deck, against the PDK's own native decks: `klt drc
 --engine klayout` resolves and runs the PDK's own `ihp-sg13cmos5l.drc` via
 `drc_deck_file()`, and `klt lvs`'s `"netgen"` engine resolves and runs
 against `ihp-sg13cmos5l_setup.tcl` via `netgen_setup_file()`, exactly as
@@ -259,6 +256,30 @@ name with its leading, hyphen-delimited prefix segment stripped." See
 `tests/test_pdk.py`'s SG13CMOS5L flat-layout section and
 `tests/test_drc_klayout_engine.py`/`tests/test_lvs.py`'s SG13CMOS5L
 real-binary smoke tests for the fixtures this verification produced.
+
+**How far the SG13CMOS5L curated deck goes.** Issue #1408 (`Part of #1398`,
+sub-issue #1400) then compiled the first curated `klayout_tools.decks.sg13cmos5l`
+module, mirroring SG13G2's own #905 starting point: cmos5l's DRC/LVS rule
+scripts are themselves literal symlinks into a sibling `ihp-sg13g2`
+checkout for everything this deck currently transcribes (see
+`src/klayout_tools/decks/sg13cmos5l.py`'s own docstring for the full
+symlink-chain finding and the pinned commits involved), so `klt drc`/`klt
+lvs` now also run `sg13cmos5l` through this repo's own curated `Region`/
+`DeviceExtractor` primitives, the same as SG13G2. Like SG13G2's own history,
+it is a **starter subset**, grown incrementally since #1408 by two
+follow-ons (#1415 poly resistors, #1416 the HV MOS flavour):
+
+| Surface | Covered today | Not covered |
+|---|---|---|
+| DRC geometric rules | one connected Activ→Metal1 stack (`Activ`, `GatPoly`, `Metal1` width/space — 6 rules; no `Cont` yet) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants), and everything above `Metal1` (issue #1417) |
+| LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1416) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`) |
+| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq), `rppd` (260 Ω/sq) and `rhigh` (1360 Ω/sq), issue #1415 | well/substrate tap layers (issue #1414 — a PMOS body can never reach a supply net without one); metal resistors, diodes, bipolar devices; capacitors are not a gap at all — cmos5l has no MIM/MoM capacitor family (a "forbidden layer" for this process), confirmed against both its own forbidden-layer rule and every layer this deck declares (see the module's "No MIM capacitors" docstring section) |
+| Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
+
+An unrecognised device class extracts as ordinary interconnect, exactly as
+described for SG13G2 above — see
+`src/klayout_tools/decks/sg13cmos5l.py`'s own docstring for the source
+citations behind each covered rule/device and each declined/deferred gap.
 
 **`klt pdk cells` is also not yet SG13G2-aware**, for a narrower reason: it
 only reports `libs_ref` entries whose name contains `_fd_sc_` (the
