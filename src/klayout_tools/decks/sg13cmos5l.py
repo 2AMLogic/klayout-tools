@@ -1,6 +1,6 @@
 """sg13cmos5l DRC/LVS deck: a curated starter subset (Part of #1398,
-decomposed sub-issue #1400; poly resistors added by #1415; metal stack
-extended by #1417).
+decomposed sub-issue #1400; poly resistors added by #1415; well/substrate
+taps added by #1414; metal stack extended by #1417).
 
 Mirrors ``sg13g2.py``'s own history: sg13g2's first curated deck
 (``decks/sg13g2.py``, issue #905) was a small, fully-verified MOS-only
@@ -54,11 +54,17 @@ recognition; it has since grown three follow-on increments the way
   should switch to ``.text`` to match ``sg13g2.py`` is a separate question
   -- it would have to move ``Metal1`` too -- and is deliberately not
   settled here.
-- **Still out of scope**, left for follow-on issues: well/substrate tap
-  layers (#1414), the ``res_metal1``..``res_topmetal1`` metal-resistor
-  family (now reachable in principle now that #1417 lands the metal stack
-  those bodies sit on, but not transcribed by this issue -- see the
-  resistor note below), plus diodes, MoM capacitors (cmos5l has no MIM;
+- **Added by #1414**: ``tap_nplus``/``tap_pplus`` well/substrate tap
+  derivation -- see ``EXTRACTION_DECK.tap_nplus``/``.tap_pplus`` below.
+  Without it every PMOS body terminal extracted onto an isolated,
+  unbiased well net (``unbiased_pmos_body_nets[]``/
+  ``device.body_unverified`` on every ``sg13cmos5l`` layout, regardless of
+  drawn tap geometry).
+- **Still out of scope**, left for follow-on issues: the
+  ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
+  in principle now that #1417 lands the metal stack those bodies sit on,
+  but not transcribed by this issue -- see the resistor note below), plus
+  diodes, MoM capacitors (cmos5l has no MIM;
   see "No MIM capacitors" below), and parasitics.
 
 Source, read directly from a real ``ihp-sg13cmos5l`` install (standalone
@@ -849,13 +855,37 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
         ),
     ),
-    # No distinct drawn tap layer -- cmos5l's `ntap`/`ptap` are derived as
-    # `Activ` intersected with `nwell`/`pwell` in `general_derivations.lvs`
-    # (`ntap = nactiv.and(nwell_drw)...`, `ptap_all = pactiv.and(pwell)...`),
-    # not a dedicated tap mask -- the same "no distinct tap layer" shape
-    # `sg13g2.py`'s own deck has. The NMOS body terminal falls back to
-    # `ExtractionDeck.substrate_net`'s synthesized global.
+    # No distinct drawn tap layer (`tap` stays `None`) -- cmos5l's `ntap`/
+    # `ptap` are derived as `Activ` intersected with `nwell`/`pwell` in
+    # `general_derivations.lvs` (`ntap = nactiv.and(nwell_drw)...`,
+    # `ptap_all = pactiv.and(pwell)...`), not a dedicated tap mask -- the
+    # same "no distinct tap layer, shared with transistor active" shape
+    # `sg13g2.py`'s own deck has (and, independently confirmed here: cmos5l's
+    # `general_derivations.lvs`/`layers_definitions.lvs`/`mos_extraction.lvs`
+    # are themselves symlinks into the pinned sibling `ihp-sg13g2` checkout,
+    # see the module docstring, so this is the *same* derivation, not merely
+    # an analogous one). Issue #1414 (the cmos5l sibling of sg13g2.py's own
+    # #1273 fix, mirroring gf180mcu's #1084): rather than leaving those
+    # well/substrate ties structurally unrecognisable, this deck declares
+    # `tap_nplus`/`tap_pplus` -- the `nSD` (7/0) / `pSD` (14/0) implant
+    # layers `mos_extraction.lvs` itself keys NMOS/PMOS source-drain off of
+    # (`nsd_fet`/`psd_fet`, cited by `nfet_provenance`/`pfet_provenance`
+    # above) -- so `extract.py` can *derive* an equivalent tap region: an
+    # `nSD`-covered Activ shape *inside* NWell is a well tie (ties the PMOS
+    # body to the well's real net -- opposite doping from the PMOS's own
+    # S/D, which is `pSD`-covered Activ inside the same NWell, so the two
+    # can never collide), and a `pSD`-covered Activ shape *outside* every
+    # NWell is a substrate tie (ties the NMOS body to the substrate's real
+    # net -- opposite doping from the NMOS's own S/D, which is `nSD`-covered
+    # Activ outside NWell). A layout drawing no tie still extracts exactly
+    # as it did before this issue (both `tap_nplus`/`tap_pplus` are
+    # additive-only derivation inputs): the NMOS body terminal falls back to
+    # `ExtractionDeck.substrate_net`'s synthesized global, and the PMOS body
+    # terminal is a floating, anonymous net -- unless `well_label` (below)
+    # already names it.
     tap=None,
+    tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
+    tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
     well_label=(31, 2),  # NWell.pin
     contact=(6, 0),  # Cont.drawing -- lands directly on Metal1, no li1-like
     # local-interconnect level (same single-first-metal-level shape as

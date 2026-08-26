@@ -413,6 +413,22 @@ def test_sg13cmos5l_mos_provenance_cites_mos_extraction_lvs():
     )
 
 
+def test_sg13cmos5l_derives_well_substrate_taps_from_implant_layers():
+    """`EXTRACTION_DECK` declares no distinct drawn tap mask (`tap` stays
+    `None`), but -- issue #1414, the cmos5l sibling of sg13g2.py's own
+    `tap_nplus`/`tap_pplus` fix (#1273, itself mirroring gf180mcu's #1084)
+    -- declares `tap_nplus`/`tap_pplus` so `extract.py` can derive an
+    equivalent well-/substrate-tie region from the same `nSD`/`pSD` implant
+    layers already used for MOS source/drain recognition. Unlike sg13g2,
+    cmos5l's `well_label` is not `None` (`NWell.pin`, `31/2`) -- that field
+    is unrelated to and unaffected by this fix (see its own docstring
+    note)."""
+    assert EXTRACTION_DECK.tap is None
+    assert EXTRACTION_DECK.tap_nplus == (7, 0)  # nSD.drawing
+    assert EXTRACTION_DECK.tap_pplus == (14, 0)  # pSD.drawing
+    assert EXTRACTION_DECK.well_label == (31, 2)  # NWell.pin
+
+
 # --------------------------------------------------------------------------- #
 # Golden layout -> netlist pairs (issue #1400 AC: "Golden layout->netlist
 # pair tests ... for the new NMOS/PMOS device recognition, asserting
