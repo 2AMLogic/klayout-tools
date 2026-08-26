@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: the `sg13cmos5l` curated deck now recognises SG13CMOS5L's three
+  **drawn poly resistors** — `rsil` (7.0 Ω/sq), `rppd` (260.0 Ω/sq) and
+  `rhigh` (1360.0 Ω/sq) — instead of leaving them undeclared (issue #1415).
+  This is a correctness fix, not just added coverage: a drawn `rppd` body is
+  a `GatPoly` strip contacted at both ends, so with no `ResistorDevice`
+  entry the body was absorbed into ordinary interconnect and the resistor's
+  **two terminals were shorted together**, collapsing two schematic nets
+  into one and cascading into `net.unmatched`/`device.unmatched` for every
+  other device in the block. Recognition is transcribed from cmos5l's own
+  (symlink-resolved) `lvs/rule_decks/res_derivations.lvs`/
+  `res_extraction.lvs` — `polyres_mk = polyres_drw.and(extblock_drw)
+  .interacting(gatpoly).not(polyres_exclude)`, then each flavour's own
+  `pSD`/`nSD`/`SalBlock`/`RES` terms — with every layer number read from
+  cmos5l's own `sg13cmos5l.lyp` and every sheet rho from cmos5l's own,
+  non-symlinked `sg13cmos5l_tech.json` (its `techName`, `SG13G2_CMOS5L`,
+  selects the `G2`-suffixed keys; there is no cmos5l-specific `*G2C_rspec`),
+  corroborated by `cornerRES.lib`'s typical (`res_typ`) corner. Metal
+  resistors (`res_metal1`..`res_topmetal2`) remain unrecognised, deferred
+  behind this deck's Metal2-TopMetal1 stack extension (issue #1417); two of
+  them sit on layers cmos5l forbids outright. See
+  `src/klayout_tools/decks/sg13cmos5l.py`'s resistor note for the
+  transcription, the documented approximations, and the deferral rationale.
 - **Fixed**: `klt sta`'s `spef_annotation` net-name correlation
   (`design_nets_annotated`/`design_nets_total`) no longer silently drops
   every design net whose name contains a SPEF-escaped bus-index bracket
