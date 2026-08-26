@@ -1718,6 +1718,70 @@ function record_assign(word,   eqpos, vname, vval, vlen, c1, c2) {
     }
     varmap[vname] = vval
 }
+# strip_subst_close_parens() -- drop the closing paren(s) of an ENCLOSING
+# `$(...)` command substitution that whitespace tokenization left glued onto a
+# write-target token (#6940).
+#
+# extract_write_targets() is a whitespace/quote-aware TOKENIZER, not a shell
+# parser: it has no notion of command-substitution nesting, so in the extremely
+# common capture-stderr idiom
+#
+#     ERR_FILE=/tmp/champion_ci_err_6212.txt
+#     out=$(gh pr checks "$PR" --json bucket 2>"$ERR_FILE")
+#
+# the `2>` redirect target arrives at resolve_var_q() as the literal token
+#     "$ERR_FILE")
+# -- the `)` that actually terminates the SURROUNDING `$(`...`)` is still
+# attached, because nothing separated it from the target by whitespace.
+# the double-quote-pair test in resolve_var_q() (and the leading-`$` test
+# inside resolve_var()) then both miss, so a target whose value the resolver had
+# ALREADY recorded from a literal same-command assignment moments earlier fell
+# through unresolved and denied with `worktree-write-confinement-unresolved-
+# var`. The identical command WITHOUT the `$(...)` wrapper resolved fine, so
+# this was a tokenization gap, not an intentional "a substitution is a fresh
+# unresolvable scope" rule (#6940; same defect class as the #6444 quote gap
+# directly below).
+#
+# NARROWNESS -- only an UNBALANCED trailing `)` is stripped: the token`s own
+# parens are counted, and at most (closes - opens) trailing `)` characters are
+# removed. A paren that belongs to the TOKEN ITSELF is therefore never touched,
+# which is what keeps the fail-closed contract intact for the cases that matter:
+#   - `$(mktemp -d)` / `"$(mktemp)"` as the target is BALANCED -> untouched ->
+#     still not a bare variable reference -> still unresolvable -> still denies.
+#   - `$(mktemp))` (a dynamic target inside an enclosing substitution) loses
+#     exactly ONE paren, leaving `$(mktemp)` -- still unresolvable, still denies.
+#   - a process substitution argument (`>(cmd)`) is balanced -> untouched.
+# Parens inside a quoted span are counted like any other, so quoted paren DATA
+# can only ever SUPPRESS a strip (leaving the pre-#6940 unresolved/deny
+# behavior), never manufacture one.
+#
+# Stripping cannot widen an allow on its own either: the returned token is
+# still handed to resolve_var() (unchanged fail-closed semantics -- an
+# unresolvable name comes back untouched) and the resolved path is still run
+# through the SAME containment check, so this can never grant more than writing
+# that literal path outright would already grant (the #6172 argument). Removing
+# a trailing `)` only ever SHORTENS a path within the same parent directory, so
+# a target that was inside the main checkout stays inside it.
+function strip_subst_close_parens(tok,   i, n, c, opens, closes, excess) {
+    n = length(tok)
+    if (n == 0) return tok
+    if (substr(tok, n, 1) != ")") return tok
+    opens = 0
+    closes = 0
+    for (i = 1; i <= n; i++) {
+        c = substr(tok, i, 1)
+        if (c == "(") { opens++ } else if (c == ")") { closes++ }
+    }
+    excess = closes - opens
+    if (excess <= 0) return tok
+    while (excess > 0) {
+        n = length(tok)
+        if (n == 0 || substr(tok, n, 1) != ")") break
+        tok = substr(tok, 1, n - 1)
+        excess--
+    }
+    return tok
+}
 # resolve_var_q() -- quote-aware wrapper around resolve_var(), used by the
 # five write-target print sites inside extract_write_targets() (#6444).
 # qsplit() deliberately preserves quote characters verbatim in each token
@@ -1738,6 +1802,10 @@ function record_assign(word,   eqpos, vname, vval, vlen, c1, c2) {
 # falls through to resolve_var() exactly as it did before this wrapper
 # existed.
 function resolve_var_q(tok,   n, c1, c2) {
+    # #6940: peel an enclosing `$(...)`s trailing paren FIRST, so the quote
+    # test below (and resolve_var()s leading-$ test after it) sees the real
+    # target token rather than one with a stray `)` glued on.
+    tok = strip_subst_close_parens(tok)
     n = length(tok)
     if (n >= 2) {
         c1 = substr(tok, 1, 1)
@@ -4730,6 +4798,119 @@ rm_scope_mktemp_same_command_safe() {
 }
 
 # =============================================================================
+# write-confinement SAME-COMMAND mktemp RESOLUTION (#6949)
+#
+# Sibling of rm_scope_mktemp_same_command_safe() (above) for the
+# `worktree-write-confinement-unresolved-var` deny (below, in the Bash-tool
+# write-confinement block): the same scratch-dir idiom that fixed #6520 for
+# `rm` targets —
+#   tmp=$(mktemp -d) && mkdir -p "$tmp/sub" && cat > "$tmp/sub/out.txt"
+#   TMPGUARD=$(mktemp) && ... > "$TMPGUARD"
+# — was equally unresolvable here: resolve_var()/resolve_var_q() only ever
+# substitute the LITERAL text following `=`, so a command-substitution RHS
+# like `$(mktemp -d)` still starts with `$` and stays unresolved (same root
+# cause documented on rm_scope_mktemp_same_command_safe() above). Because a
+# write target routinely carries a SUFFIX after the captured scratch dir
+# (`"$tmp/sub/out.txt"`, not just a bare `"$tmp"`), this sibling — unlike the
+# rm-scope original, which only ever proves a BARE `$NAME` reference safe —
+# additionally accepts a `/`-prefixed suffix after the variable reference.
+#
+# _wt_write_mktemp_leading_var() returns success (0), with the variable name
+# in `_WT_WRITE_VARNAME` and the (possibly empty) `/`-prefixed suffix in
+# `_WT_WRITE_SUFFIX`, ONLY when the write target, after stripping at most one
+# layer of surrounding quotes, is a bare `$NAME`/`${NAME}` reference OR that
+# same reference immediately followed by `/<rest>` — nothing else in the
+# token. wt_write_mktemp_same_command_safe() then applies:
+#
+#   1. The SAME exact-string same-command mktemp scan rm-scope uses (only a
+#      SAME command NAME=$(mktemp -d) / NAME=$(mktemp) — optionally
+#      double-quoted — assignment counts; a custom template/prefix
+#      (`mktemp -d /other/dir/XXXXXX`, `mktemp --tmpdir=/other/dir`, …) never
+#      matches this exact-string test and falls through to today's
+#      fail-closed deny) and the SAME ambiguity rule (two or more assignments
+#      to NAME anywhere in the command poison the resolution and fail closed).
+#   2. A NEW safety condition the rm-scope original does not need, precisely
+#      because it never allows a suffix at all: any `..` path-traversal
+#      component in the suffix (`/../`, or a suffix that IS or ends in `/..`)
+#      fails closed. mktemp's own OUTPUT PATH is never known to this static
+#      scanner — only that it is freshly created and /tmp-or-$TMPDIR-rooted —
+#      so a `..` in the suffix could walk back out of that unknown directory
+#      to an unknown number of levels, potentially back into a protected
+#      worktree/checkout. Excluding any `..` component keeps the same
+#      "provably safe or fail closed" guarantee the exact-string mktemp match
+#      itself relies on.
+#
+# On success the caller treats the write as landing inside a freshly created
+# scratch directory outside every worktree and skips the
+# `worktree-write-confinement-unresolved-var` deny for this target — mirrors
+# the rm-scope caller's own "no need to re-run any further scope check"
+# treatment, since a fresh mktemp path can never coincide with the main
+# checkout or any managed worktree.
+# =============================================================================
+_WT_WRITE_VARNAME=""
+_WT_WRITE_SUFFIX=""
+_wt_write_mktemp_leading_var() {
+    local tok="$1" t c1 c2
+    t="$tok"
+    if [[ ${#t} -ge 2 ]]; then
+        c1="${t:0:1}"
+        c2="${t: -1}"
+        if [[ ("$c1" == '"' && "$c2" == '"') || ("$c1" == "'" && "$c2" == "'") ]]; then
+            t="${t:1:${#t}-2}"
+        fi
+    fi
+    if [[ "$t" =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*)\}(/.*)?$ ]]; then
+        _WT_WRITE_VARNAME="${BASH_REMATCH[1]}"
+        _WT_WRITE_SUFFIX="${BASH_REMATCH[2]}"
+        return 0
+    fi
+    if [[ "$t" =~ ^\$([A-Za-z_][A-Za-z0-9_]*)(/.*)?$ ]]; then
+        _WT_WRITE_VARNAME="${BASH_REMATCH[1]}"
+        _WT_WRITE_SUFFIX="${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+wt_write_mktemp_same_command_safe() {
+    local target="$1" cmdtext="$2" varname suffix verdict
+    _wt_write_mktemp_leading_var "$target" || return 1
+    varname="$_WT_WRITE_VARNAME"
+    suffix="$_WT_WRITE_SUFFIX"
+    [[ -n "$varname" ]] || return 1
+    if [[ -n "$suffix" ]]; then
+        case "$suffix" in
+            */../*|*/..) return 1 ;;
+        esac
+    fi
+    verdict=$(printf '%s' "$cmdtext" | awk -v varname="$varname" "$_QSPLIT_AWK"'
+    {
+        $0 = qsplit($0)
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/[ \t]+$/, "", seg)
+            prefix = varname "="
+            plen = length(prefix)
+            if (length(seg) > plen && substr(seg, 1, plen) == prefix) {
+                rhs = substr(seg, plen + 1)
+                total++
+                if (rhs == "$(mktemp -d)" || rhs == "$(mktemp)" || \
+                    rhs == "\"$(mktemp -d)\"" || rhs == "\"$(mktemp)\"") {
+                    safe++
+                }
+            }
+        }
+    }
+    END {
+        if (total == 1 && safe == 1) print "SAFE"
+        else print "UNSAFE"
+    }')
+    [[ "$verdict" == "SAFE" ]]
+}
+
+# =============================================================================
 # rm-scope SAME-COMMAND LITERAL-PATH RESOLUTION (#6676)
 #
 # rm_scope_mktemp_same_command_safe() (above) proves ONLY the exact-string
@@ -6137,6 +6318,39 @@ if worktree_isolation_guard_enabled && \
                 # directory — the main checkout's own included).
                 if [[ "$_wmarked" == $'\001'* || "$_wmarked" == /$'\001'* ]]; then
                     if _wt_isolation_in_play; then
+                        # Same-command mktemp scratch-write resolution (#6949):
+                        # a target whose leading `$NAME`/`${NAME}` (optionally
+                        # followed by a `/`-suffix, and with no `..` traversal
+                        # in that suffix) matches a SAME-command exact-string
+                        # `NAME=$(mktemp -d)`/`NAME=$(mktemp)` assignment is a
+                        # provably fresh /tmp-or-$TMPDIR-rooted scratch path —
+                        # see wt_write_mktemp_same_command_safe()'s own doc
+                        # comment (above rm_scope_literal_same_command_resolve())
+                        # for the exact, deliberately narrow conditions
+                        # (mirrors rm_scope_mktemp_same_command_safe(), #6520).
+                        # Skip the unresolved-var deny entirely on success —
+                        # a fresh mktemp path can never coincide with the main
+                        # checkout or any managed worktree.
+                        #
+                        # HEREDOC-BODY-MASKED SCAN (#6549, same rationale as
+                        # COMMAND_RM_MKTEMP_SCAN): scans a dedicated
+                        # COMMAND_WT_MKTEMP_SCAN copy (lazily built once, cached
+                        # across loop iterations) that masks EVERY heredoc body
+                        # unconditionally, so a decoy `NAME=$(mktemp -d)` line
+                        # planted inside an inert heredoc body cannot manufacture
+                        # a false SAFE verdict for a live assignment elsewhere in
+                        # the same command.
+                        if [[ -z "${COMMAND_WT_MKTEMP_SCAN+x}" ]]; then
+                            COMMAND_WT_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"
+                            if [[ "$COMMAND_WT_MKTEMP_SCAN" == *"<<"* ]]; then
+                                COMMAND_WT_MKTEMP_SCAN=$(printf '%s' "$COMMAND_WT_MKTEMP_SCAN" | awk "$_MASKHEREDOC_AWK"'
+                                { buf = buf (NR > 1 ? "\n" : "") $0 }
+                                END { printf "%s", mask_heredoc_bodies(buf) }')
+                            fi
+                        fi
+                        if wt_write_mktemp_same_command_safe "$_wtarget" "$COMMAND_WT_MKTEMP_SCAN"; then
+                            continue
+                        fi
                         deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree (.loom/worktrees/issue-<N>) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
                     fi
                     continue
