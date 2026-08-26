@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -21,17 +21,24 @@ two disagree, this document (and the code) win.
   auto-detects the stream format on read (same as `klt drc`); the extension
   is not authoritative.
 - `--deck` — required. The connectivity + device-extraction deck to run.
-  Currently: `sky130`, `gf180mcu`, `sg13g2`. `sg13g2`'s device coverage is
-  MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the thick-oxide
-  `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0), three drawn poly
-  resistors (`rsil`, `rppd`, and — as of issue #1235, its upstream
+  Currently: `sky130`, `gf180mcu`, `sg13g2`, `sg13cmos5l`. `sg13g2`'s device
+  coverage is MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the
+  thick-oxide `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0), three drawn
+  poly resistors (`rsil`, `rppd`, and — as of issue #1235, its upstream
   sheet-rho ambiguity resolved against a third citable source — `rhigh`),
   and two drawn metal resistors (`res_metal1`, `res_metal2`, also issue
   #1235); it has **no** curated capacitor, bipolar (HBT) or diode entries
   yet, and deliberately omits the remaining metal resistors
   (`res_metal3`..`res_topmetal2`, above this deck's curated Metal2 stack)
   — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for each gap
-  and why.
+  and why. `sg13cmos5l`'s device coverage is MOS (both the thin-oxide
+  `sg13_lv_*` flavour and, as of issue #1416, the thick-oxide `sg13_hv_*`
+  flavour scoped to the same `ThickGateOx` 44/0) plus the same three drawn
+  poly resistors (`rsil`, `rppd`, `rhigh`, added by issue #1415); it has
+  **no** curated capacitor, bipolar or diode entries yet, and — pending its
+  own Metal2 stack (issue #1417) — no drawn metal resistors at all — see
+  `src/klayout_tools/decks/sg13cmos5l.py`'s own docstring for each gap and
+  why.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
   "next to the input" convention `klt render`/`klt sim` already use). The
