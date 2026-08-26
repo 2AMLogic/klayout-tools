@@ -6035,6 +6035,122 @@ def test_unmodelled_poly_field_distinguishes_marked_from_unmarked(tmp_path):
     assert lefts == sorted(lefts)
 
 
+# --------------------------------------------------------------------------- #
+# `poly_interconnect` marker (issue #1425): a caller-drawn escape hatch that
+# reclassifies a deliberate poly underpass -- a poly strip contacted to metal
+# at each end, used to route one net beneath another -- from `unmodelled_poly`
+# to intended interconnect, since it matches the #288 resistor-body signature
+# exactly even though it is correct, intentional geometry.
+# --------------------------------------------------------------------------- #
+
+#: An unused (layer, datatype) the tests draw the intentional-interconnect
+#: annotation on -- outside every sky130/gf180mcu connectivity layer, so it is
+#: invisible to extraction except through the `poly_interconnect` field these
+#: tests configure (mirrors `_DUMMY_MARKER`'s convention below).
+_POLY_INTERCONNECT_MARKER = (101, 0)
+
+
+def _poly_interconnect_deck(
+    name: str = "sky130", deck_options: dict[str, str] | None = None
+) -> ExtractionDeck:
+    """The registered ``name`` extraction deck (sky130 by default), with the
+    optional ``poly_interconnect`` marker layer set to
+    :data:`_POLY_INTERCONNECT_MARKER` (issue #1425). Everything else is
+    identical, so a layout with no shapes on that layer extracts exactly as it
+    does under the shipped deck.
+
+    Written to accept the same ``(name, deck_options)`` positional signature
+    as ``get_extraction_deck`` (mirrors ``_dummy_deck`` above) so it can stand
+    in for it under ``monkeypatch.setattr``."""
+    return dataclasses.replace(
+        get_extraction_deck(name, deck_options),
+        poly_interconnect=_POLY_INTERCONNECT_MARKER,
+    )
+
+
+def test_poly_interconnect_field_defaults_none_on_shipped_decks():
+    """`poly_interconnect` is opt-in (issue #1425, backward-compatible per the
+    field's own docstring): no shipped deck declares it yet, so every deck
+    extracts exactly as it did before the field existed unless a caller
+    configures it."""
+    assert get_extraction_deck("sky130").poly_interconnect is None
+    assert get_extraction_deck("gf180mcu").poly_interconnect is None
+
+
+def test_poly_underpass_marker_excludes_it_from_unmodelled_poly(tmp_path, monkeypatch):
+    """The exact scenario from the issue: a poly strip contacted to metal at
+    each end (no resistor marker, no MOS gate) is a deliberate underpass, not
+    an unmodelled device. Annotating it with the deck's `poly_interconnect`
+    marker removes it from `unmodelled_poly[]` and drops the "absorbed into
+    ordinary interconnect as an unintended short" warning entirely -- the
+    strip still extracts as ordinary poly interconnect exactly as it did
+    before (the marker only silences the diagnostic)."""
+    layout = _make_poly_resistor_layout("sky130", marked=False)
+    layout.top_cell().shapes(layout.layer(*_POLY_INTERCONNECT_MARKER)).insert(_RES_BAR)
+    path = _write_gds(layout, tmp_path / "underpass.gds")
+
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck", _poly_interconnect_deck
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "underpass.spice"))
+
+    assert report["unmodelled_poly"] == []
+    assert not any(_UNMODELLED_WARNING_SNIPPET in w for w in report["warnings"])
+    # The two labelled heads still merge onto one physical net (the whole
+    # point of an underpass) -- the #539 net-merge note still fires, only the
+    # unmodelled-device diagnostic is silenced.
+    assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
+
+
+def test_unmarked_poly_resistor_body_still_flagged_when_deck_has_marker(
+    tmp_path, monkeypatch
+):
+    """A deck declaring `poly_interconnect` must not blanket-suppress the
+    diagnostic -- a poly shape matching the #288 signature that does *not*
+    overlap the marker (a genuinely unmodelled resistor body, drawn elsewhere
+    in the same cell) still lands in `unmodelled_poly[]` exactly as it does on
+    the shipped deck, confirming the exclusion is per-shape, not global."""
+    layout = _make_poly_resistor_layout("sky130", marked=False)
+    # No shape drawn on `_POLY_INTERCONNECT_MARKER` -- this bar carries no
+    # intentional-interconnect annotation, unlike the underpass test above.
+    path = _write_gds(layout, tmp_path / "unmarked_bar.gds")
+
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck", _poly_interconnect_deck
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "unmarked_bar.spice"))
+
+    unmodelled_poly = report["unmodelled_poly"]
+    assert len(unmodelled_poly) == 1
+    assert unmodelled_poly[0]["reason"] == "unmarked"
+    assert any(_UNMODELLED_WARNING_SNIPPET in w for w in report["warnings"])
+
+
+def test_poly_interconnect_configured_but_no_marker_geometry_is_identical(
+    tmp_path, monkeypatch
+):
+    """A deck that declares `poly_interconnect`, run on a layout that draws no
+    shapes on that layer, produces byte-identical extraction output to the
+    shipped deck -- the field only ever *excludes* marked geometry (mirrors
+    `test_dummy_configured_but_no_dummy_geometry_is_identical`)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck", _poly_interconnect_deck
+    )
+    with_field = run_extract(path, "sky130", output=str(tmp_path / "field.spice"))
+
+    assert with_field["device_count"] == baseline["device_count"]
+    assert with_field["device_counts"] == baseline["device_counts"]
+    assert with_field["devices"] == baseline["devices"]
+    assert with_field["nets"] == baseline["nets"]
+    assert with_field["unmodelled_poly"] == baseline["unmodelled_poly"]
+    assert with_field["warnings"] == baseline["warnings"]
+    assert with_field["netlist_sha256"] == baseline["netlist_sha256"]
+
+
 def _make_poly_gate_strap_layout(top_name: str = "TOP") -> kdb.Layout:
     """One NMOS whose gate poly extends well past the active strip into a
     bare strap, contacted at **two** separate points along the strap (a
