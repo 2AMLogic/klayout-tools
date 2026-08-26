@@ -226,6 +226,7 @@ _GENERATOR_TOPOLOGY_SUPPORT: dict[str, frozenset[str]] = {
     "bjt_array": frozenset({"array", "common_centroid"}),
     "bond_pad": frozenset(),
     "esd_device": frozenset(),
+    "well_island": frozenset(),
 }
 
 #: ``rows[].align`` values (spike section 2 field table).

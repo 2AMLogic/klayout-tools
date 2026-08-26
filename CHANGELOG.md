@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen well_island` — a named-net well/tap island isolated
+  from a caller-specified set of other wells (issue #1421). It draws
+  `guard_ring`'s geometry with the two properties a *well island* needs and
+  a guard ring cannot express: the tie is bound to a caller-supplied
+  `params.net` (reported as every `TAP_*` port's `net` and as
+  `drc_hints.well_net`, and drawn as a label on the ring's own **metal**),
+  and `params.isolate_from` + `params.separation_um` state which other well
+  regions it must stay clear of. It either trims its own well enclosure to
+  clear them or raises a `GenError` naming the offending rectangle — never a
+  silently merged well. Separation defaults to the *resolved family's own*
+  different-potential well rule (sky130 `nwell.2`, 1.27µm euclidian;
+  gf180mcu `NW.2b`, 1.4µm), neither of which the curated DRC decks check
+  today (sky130 transcribes no well rule at all — issue #1420 — and
+  gf180mcu deliberately transcribes only `NW.2a`'s equipotential 0.6µm), so
+  the generator is the source of truth for the geometry it draws. The net
+  name is deliberately **not** drawn on the deck's well-label layer: a text
+  there names the `nwell` polygon directly and would make
+  `klt extract`'s `devices[].nets["b"]` report the intended body net even
+  with the tie broken. Naming the ring metal instead means the name only
+  reaches the well through the physical tie, so a per-device body net is
+  real evidence the bias works. New reporting fields
+  `drc_hints.well_net`/`well_box_um`/`well_separation_um`/
+  `well_keepout_box_um` (additive; no `schema_version` bump), and
+  `ports[].net` is now non-`null` for this generator. `klt gen --list`
+  gains a fifth `params[].type`, `list` (a JSON array), for
+  `isolate_from`.
 - **Fixed**: the `sg13cmos5l` curated deck now models SG13CMOS5L's **whole
   BEOL stack** — `Metal1`/`Via1`/`Metal2`/`Via2`/`Metal3`/`Via3`/`Metal4`/
   `TopVia1`/`TopMetal1` — instead of a single `Metal1` level with no via at

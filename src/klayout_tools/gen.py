@@ -51,6 +51,7 @@ revisit this once a real family-aware need surfaces.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -91,6 +92,11 @@ _HIDDEN_PARAMS = {
     "tap_layer",
     "well_layer",
     "well_present",
+    "metal_label_layer",
+    "metal_label_present",
+    "well_tap_implant_layer",
+    "well_tap_implant_present",
+    "well_margin_resolved_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -155,6 +161,43 @@ MIN_SAME_LAYER_SPACING_UM = 0.4
 #: curated deck has no well-layer rule, so this only ever matters on
 #: gf180mcu (see :data:`_PDK_ROLE_LAYERS`'s ``"well"`` entries).
 WELL_ENCLOSURE_MARGIN_UM = 0.15
+
+#: Minimum spacing (um) between two well regions held at **different**
+#: potentials -- the rule ``well_island`` (issue #1421) enforces between its
+#: own drawn well and every other well region the caller names in
+#: ``params.isolate_from``. Measured *euclidian* (corner-to-corner, not
+#: per-axis), matching the metric the source rule itself is written with.
+#:
+#: This is deliberately **not** the ``space``-rule value either curated DRC
+#: deck checks today, because neither deck checks the different-potential
+#: case at all:
+#:
+#: - ``sky130``: 1.27um, the SkyWater sign-off rule ``nwell.2`` ("Minimum
+#:   spacing between N-well and N-well of different potential"), the rule the
+#:   PDK's own KLayout deck codes as ``nwell.isolated(1.27, euclidian)``.
+#:   This repo's curated sky130 DRC deck (``klayout_tools.decks.sky130``)
+#:   transcribes **no** well-layer rule whatsoever -- see issue #1420 -- so
+#:   ``klt drc --deck sky130`` cannot catch two same-flavour well islands
+#:   that merged. That gap is precisely why the *generator* enforces the
+#:   separation itself rather than deferring to the checker: it is the source
+#:   of truth for the geometry it draws.
+#: - ``gf180mcu``: 1.4um, DRM 7.4 Nwell rule ``NW.2b`` ("Min. Nwell Space
+#:   (Outside DNWELL) [Different potential]", 3.3V column). This value is not
+#:   invented here -- it is the *same* number ``klayout_tools.decks.gf180mcu``'s
+#:   own ``nwell.space.1`` docstring already cites as the half of the
+#:   ``NW.2a``/``NW.2b`` split it deliberately does not transcribe ("our
+#:   engine has no connectivity/netlist information, so this uses the less
+#:   strict ``NW.2a`` value"). ``klt gen`` *does* know the intended potential
+#:   (the caller names it), so it can apply the strict half.
+#:
+#: A family absent from this table has no known different-potential well rule
+#: to enforce; ``well_island`` reports that via ``drc_hints.notes`` rather
+#: than silently applying another family's number (see
+#: :func:`_well_island_isolation`).
+_PDK_WELL_ISOLATION_UM: dict[str, float] = {
+    "sky130": 1.27,  # nwell.2 (different potential), euclidian
+    "gf180mcu": 1.4,  # NW.2b (different potential), 3.3V
+}
 
 #: A contact-to-contact edge gap (um) below this is *legal* under sky130's
 #: curated deck (which checks no ``licon1`` spacing rule at all) but close
@@ -409,6 +452,29 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # section already documents.
         "metal3": (69, 20),  # met2.drawing -- EXTRACTION_DECK.metals[2]
         "via2": (68, 44),  # via.drawing -- EXTRACTION_DECK.vias[1] (met1<->met2)
+        # Label/pin purpose of the *base* routing metal role above (`metal`,
+        # li1) -- the same pair `klayout_tools.decks.sky130`'s
+        # `EXTRACTION_DECK.metal_labels[0]` declares, never a second private
+        # one. Drawn by `well_island` (issue #1421) as a `kdb.Text` sitting on
+        # the island's own tap-ring metal, so the ring's *conductor* carries
+        # the caller's requested net name into `klt extract`.
+        #
+        # Deliberately **not** `well_label` (64/5, `EXTRACTION_DECK.well_label`):
+        # a text there names the `nwell` polygon *directly*, so the extracted
+        # body net would read back as the intended name even when the
+        # tap/contact/metal tie that is supposed to bias the well is broken or
+        # absent -- the "well-label tautology" issue #1421 exists to avoid.
+        # Naming the metal instead means the name only reaches the well
+        # through the physical tie (li1 -> licon1 -> tap -> nwell), so
+        # `klt extract`'s `devices[].nets["b"]` is real evidence the tie
+        # works. No `klt gen` generator draws on `well_label` at all.
+        "metal_label": (67, 5),  # li1.pin -- EXTRACTION_DECK.metal_labels[0]
+        # No `well_tap_implant` entry: sky130 has a real, dedicated tap layer
+        # (`tap.drawing`, the `"tap"` role above), and this deck's own
+        # `tap`-inside-`nwell` split (see `decks/sky130.py`) already
+        # recognises a shape drawn there as a well tie with no additional
+        # implant mask. gf180mcu, which has no dedicated tap layer, does need
+        # one -- see its own entry below.
         "dummy": (83, 20),  # curated marker, matches
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.dummy` -- see that
         # deck's own comment for why sky130 has no native dummy-device GDS
@@ -490,6 +556,26 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `EXTRACTION_DECK.metals`/`.vias` in `klayout_tools.decks.gf180mcu`).
         "metal3": (42, 0),  # Metal3 -- EXTRACTION_DECK.metals[2]
         "via2": (38, 0),  # Via2 -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
+        # Label/pin purpose of the base `metal` role (Metal1) -- the same pair
+        # `klayout_tools.decks.gf180mcu`'s `EXTRACTION_DECK.metal_labels[0]`
+        # declares. Same rationale (and the same deliberate avoidance of a
+        # well-label text) as sky130's entry above.
+        "metal_label": (34, 10),  # Metal1 pin -- EXTRACTION_DECK.metal_labels[0]
+        # Well-tie implant (issue #1421). Unlike sky130, gf180mcu has no
+        # dedicated tap layer -- a well tie is drawn on the *same* `Comp`
+        # layer as transistor active (see this table's own `"tap"` entry),
+        # so the only thing distinguishing an n+ well tie from a PMOS's own
+        # p+ source/drain inside the well is the implant covering it. This is
+        # the *same* `Nplus` (32/0) layer `klayout_tools.decks.gf180mcu`'s
+        # `EXTRACTION_DECK.tap_nplus` already declares for exactly that
+        # derivation ("an n+ (`Nplus`)-covered Comp shape *inside* `Nwell` is
+        # a well tie", issue #1084) -- never a second, private citation.
+        # `well_island` draws it as a ring exactly coincident with its own tap
+        # ring (never a blanket over the enclosed area, which would re-dope
+        # the enclosed devices' own source/drain diffusion and make it extract
+        # as a well tie instead). No curated *DRC* rule in this deck checks
+        # 32/0, so drawing it never affects `klt drc --deck gf180mcu` status.
+        "well_tap_implant": (32, 0),  # Nplus -- EXTRACTION_DECK.tap_nplus
         # Bond-pad roles (issue #568, same rationale as sky130's pair above).
         # `pad` matches `decks/gf180mcu.py`'s `pad.enclosing.metal5.1` (PAD.4)
         # `other_layer`; `top_metal` matches that same rule's `layer` --
@@ -1888,6 +1974,131 @@ def _ring_layout(
     }
 
 
+#: Order ``well_island`` prefers when picking which ring side carries its net
+#: label text (see :func:`_well_island_label_point`). Any side still covered
+#: by ring metal works electrically -- the order only makes the choice
+#: deterministic, so the drawn GDS and the reported label position never
+#: disagree between two runs (or between ``produce_impl`` and ``describe``).
+_WELL_ISLAND_LABEL_SIDE_ORDER = ("S", "N", "W", "E")
+
+
+def _well_island_label_point(ring: dict[str, Any]) -> tuple[float, float] | None:
+    """Where ``well_island`` places its net-label text: the midpoint of the
+    first side of ``ring`` (in :data:`_WELL_ISLAND_LABEL_SIDE_ORDER`) that is
+    still covered by ring metal.
+
+    A point on a side's own centre line always falls *inside* the drawn metal
+    band, which is what makes the text attach to that conductor during
+    extraction. ``None`` only when the ring has no covered side left at all
+    -- structurally impossible today (``ring_gap_side`` opens at most one
+    side), but handled rather than assumed.
+    """
+    for side in _WELL_ISLAND_LABEL_SIDE_ORDER:
+        xy = ring["ports"].get(side)
+        if xy is not None:
+            return xy
+    return None
+
+
+def _well_box_um(
+    ring: dict[str, Any], margin_um: float
+) -> tuple[float, float, float, float]:
+    """The well rectangle enclosing ``ring``'s outer box by ``margin_um`` on
+    every side -- the same shape ``guard_ring``'s ``add_well`` already draws,
+    factored out so ``well_island``'s isolation math and its ``produce_impl``
+    can never derive it differently."""
+    return (
+        -margin_um,
+        -margin_um,
+        ring["outer_w_um"] + margin_um,
+        ring["outer_h_um"] + margin_um,
+    )
+
+
+def _box_separation_um(
+    a_um: tuple[float, float, float, float],
+    b_um: tuple[float, float, float, float],
+) -> float:
+    """Euclidian separation (um) between two axis-aligned rectangles: ``0.0``
+    when they touch or overlap, otherwise the corner-to-corner distance
+    between their nearest points.
+
+    Euclidian rather than per-axis on purpose -- it is the metric the well
+    isolation rules this module enforces are themselves written with (sky130's
+    ``nwell.isolated(1.27, euclidian)``; see :data:`_PDK_WELL_ISOLATION_UM`),
+    and it is the *stricter* of the two at a diagonal offset, so a
+    geometry this function accepts is never one the rule's own metric would
+    reject.
+    """
+    ax0, ay0, ax1, ay1 = a_um
+    bx0, by0, bx1, by1 = b_um
+    dx = max(0.0, bx0 - ax1, ax0 - bx1)
+    dy = max(0.0, by0 - ay1, ay0 - by1)
+    return math.hypot(dx, dy)
+
+
+def _parse_well_regions(
+    generator: str, param_name: str, raw: Any
+) -> list[dict[str, Any]]:
+    """Parse a ``params.isolate_from``-shaped value into normalised well
+    regions (issue #1421).
+
+    Each entry is ``[x0, y0, x1, y1]`` or ``[x0, y0, x1, y1, "<net>"]`` -- a
+    rectangle in the generated cell's **own** coordinate frame (the same frame
+    the response's ``bbox_um``/``ports[]`` use), optionally tagged with the
+    net that region is held at. The optional net is what makes the
+    "equipotential wells may merge" case expressible: a neighbour tagged with
+    the *same* net as the island's own tie is not a different-potential
+    neighbour, so the isolation rule does not apply to it (see
+    :func:`_well_island_isolation`).
+
+    Corner order is normalised (``min``/``max``), so a caller who hands over a
+    bbox with either corner first gets the same answer. A degenerate
+    (zero-area) rectangle is rejected -- it is far more likely a caller bug
+    than an intentional request, and it would silently satisfy every
+    separation check by having no extent to violate one with.
+    """
+    if not isinstance(raw, list):
+        raise GenError(
+            f"generator '{generator}': params.{param_name} must be a JSON array"
+        )
+    regions: list[dict[str, Any]] = []
+    for index, entry in enumerate(raw):
+        where = f"params.{param_name}[{index}]"
+        if not isinstance(entry, (list, tuple)) or len(entry) not in (4, 5):
+            raise GenError(
+                f"generator '{generator}': {where} must be "
+                "[x0_um, y0_um, x1_um, y1_um] or "
+                "[x0_um, y0_um, x1_um, y1_um, net]"
+            )
+        coords: list[float] = []
+        for value in entry[:4]:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise GenError(
+                    f"generator '{generator}': {where}'s first four elements "
+                    "must be numbers (a rectangle in um)"
+                )
+            coords.append(float(value))
+        x0, y0, x1, y1 = coords
+        box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        if box[0] == box[2] or box[1] == box[3]:
+            raise GenError(
+                f"generator '{generator}': {where} is a zero-area rectangle "
+                f"({coords}) -- a well region with no extent cannot be "
+                "separated from anything"
+            )
+        net: str | None = None
+        if len(entry) == 5:
+            if not isinstance(entry[4], str):
+                raise GenError(
+                    f"generator '{generator}': {where}'s optional fifth "
+                    "element must be a net name string"
+                )
+            net = entry[4] or None
+        regions.append({"box_um": box, "net": net})
+    return regions
+
+
 def _diff_pair_layout(
     w_um: float,
     l_um: float,
@@ -2552,6 +2763,17 @@ def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
         if not isinstance(value, bool):
             raise GenError(f"generator '{generator}': params.{name} must be a boolean")
         return value
+    if ptype == Decl.TypeList:
+        # A JSON array passes through as a plain Python list -- KLayout's
+        # PCell variant machinery round-trips nested lists unchanged (see
+        # `_WellIslandPCell.isolate_from`). Element *shape* is the individual
+        # generator's business, validated in its own `validate()` (e.g.
+        # :func:`_parse_well_regions`), the same division of labour every
+        # other param type here follows: this function only enforces the
+        # declared JSON type.
+        if not isinstance(value, list):
+            raise GenError(f"generator '{generator}': params.{name} must be an array")
+        return list(value)
     raise GenError(
         f"generator '{generator}': params.{name} has an unsupported PCell "
         "parameter type"
@@ -3363,14 +3585,276 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.add_well and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
-                margin = WELL_ENCLOSURE_MARGIN_UM
-                well_box = (
-                    -margin,
-                    -margin,
-                    info["outer_w_um"] + margin,
-                    info["outer_h_um"] + margin,
-                )
+                well_box = _well_box_um(info, WELL_ENCLOSURE_MARGIN_UM)
                 _insert_boxes(self.cell, li_well, dbu, [well_box])
+
+    class _WellIslandPCell(kdb.PCellDeclarationHelper):
+        """Named-net, isolated well/tap island (issue #1421).
+
+        ``guard_ring``'s geometry -- the same tap ring + local-metal ring +
+        evenly-spaced contacts, enclosed by a well tie -- with the two
+        properties that idiom needs and a plain guard ring cannot express:
+
+        1. **The tie carries a caller-named net.** ``params.net`` is drawn as
+           a ``kdb.Text`` on the resolved family's *metal* label layer
+           (``metal_label`` role) sitting on the ring's own metal band, so
+           the name reaches the enclosed well only through the physical tie
+           (metal -> contact -> tap -> well). Nothing is ever drawn on the
+           deck's ``well_label`` layer, which would name the well polygon
+           directly and make ``klt extract``'s ``devices[].nets["b"]`` report
+           the intended body net even with the tie broken (the "well-label
+           tautology" the issue calls out).
+        2. **The island is isolated from a caller-named set of other wells.**
+           ``params.isolate_from`` lists the other well regions, in this
+           cell's own frame; ``params.separation_um`` optionally raises the
+           required clearance above the resolved family's own
+           different-potential well rule (:data:`_PDK_WELL_ISOLATION_UM`).
+           The check itself lives in :func:`_well_island_isolation`, which
+           runs *before* any geometry is produced -- an island that cannot
+           clear its neighbours raises :class:`GenError` rather than
+           emitting a well that silently merges with one of them.
+
+        ``well_margin_resolved_um`` is the harness-computed well enclosure
+        this cell actually draws: ``params.well_margin_um`` when it clears
+        every neighbour, otherwise the largest value below it that does (down
+        to :data:`WELL_ENCLOSURE_MARGIN_UM`, never below). See
+        :func:`_well_island_isolation`.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.param(
+                "inner_width_um",
+                self.TypeDouble,
+                "Width of the enclosed inner area (um)",
+                default=3.0,
+            )
+            self.param(
+                "inner_height_um",
+                self.TypeDouble,
+                "Height of the enclosed inner area (um)",
+                default=3.0,
+            )
+            self.param(
+                "ring_width_um",
+                self.TypeDouble,
+                "Tap ring thickness (um)",
+                default=0.42,
+            )
+            self.param(
+                "contacts_per_side",
+                self.TypeInt,
+                "Tap contacts evenly spaced along each ring side -- applied "
+                "uniformly to all four sides unless overridden per-axis by "
+                "contacts_per_side_ns/contacts_per_side_ew",
+                default=4,
+            )
+            self.param(
+                "contacts_per_side_ns",
+                self.TypeInt,
+                "Tap contacts on the N/S (top/bottom) sides, spaced along "
+                "inner_width_um -- 0 (default) inherits contacts_per_side",
+                default=0,
+            )
+            self.param(
+                "contacts_per_side_ew",
+                self.TypeInt,
+                "Tap contacts on the E/W (left/right) sides, spaced along "
+                "inner_height_um -- 0 (default) inherits contacts_per_side",
+                default=0,
+            )
+            self.param(
+                "ring_gap_side",
+                self.TypeString,
+                "Cut one routing opening through the tap ring on this side: "
+                "'' (default, closed ring), 'N', 'S', 'E' or 'W'",
+                default="",
+            )
+            self.param(
+                "ring_gap_um",
+                self.TypeDouble,
+                "Length of the ring opening along its side (um), when "
+                "ring_gap_side is set",
+                default=0.0,
+            )
+            self.param(
+                "ring_gap_offset_um",
+                self.TypeDouble,
+                "Shift of the ring opening from its side's midpoint (um): "
+                "+x on 'N'/'S', +y on 'E'/'W'",
+                default=0.0,
+            )
+            self.param(
+                "net",
+                self.TypeString,
+                "Net name the island's tie carries -- drawn as a text on the "
+                "ring's own metal (never on the well label layer) and "
+                "reported as ports[].net. '' (default) draws no label",
+                default="",
+            )
+            self.param(
+                "well_margin_um",
+                self.TypeDouble,
+                "Well enclosure of the tap ring (um) -- trimmed towards "
+                f"{WELL_ENCLOSURE_MARGIN_UM} when a larger value would "
+                "violate the requested separation from isolate_from",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
+                "separation_um",
+                self.TypeDouble,
+                "Required clearance (um, euclidian) from every isolate_from "
+                "well at a different potential -- 0 (default) uses the "
+                "resolved PDK family's own different-potential well rule; a "
+                "value below that rule is rejected",
+                default=0.0,
+            )
+            self.param(
+                "isolate_from",
+                self.TypeList,
+                "Other well regions this island must stay clear of, as "
+                "[x0_um, y0_um, x1_um, y1_um] or "
+                "[x0_um, y0_um, x1_um, y1_um, net] entries in this cell's "
+                "own coordinate frame -- an entry naming this island's own "
+                "net is equipotential and is not isolated from",
+                default=[],
+            )
+            self.param(
+                "tap_layer",
+                self.TypeLayer,
+                "Substrate/well tap drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "contact_layer",
+                self.TypeLayer,
+                "Contact drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "metal_layer",
+                self.TypeLayer,
+                "Local routing metal drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "metal_label_layer",
+                self.TypeLayer,
+                "Label layer the net name is drawn on (only used when "
+                "metal_label_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "metal_label_present",
+                self.TypeBoolean,
+                "Whether metal_label_layer is a real label layer for the resolved PDK",
+                default=False,
+            )
+            self.param(
+                "well_layer",
+                self.TypeLayer,
+                "Well drawing layer (only used when well_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_present",
+                self.TypeBoolean,
+                "Whether well_layer is a real layer for the resolved PDK",
+                default=False,
+            )
+            self.param(
+                "well_tap_implant_layer",
+                self.TypeLayer,
+                "Well-tie implant layer drawn over the tap ring (only used "
+                "when well_tap_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_tap_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "the tap ring as a well tie",
+                default=False,
+            )
+            self.param(
+                "well_margin_resolved_um",
+                self.TypeDouble,
+                "Harness-resolved well enclosure actually drawn (see "
+                "_well_island_isolation)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+
+        def display_text_impl(self) -> str:
+            return f"well_island({self.net or 'unnamed'})"
+
+        def produce_impl(self) -> None:
+            dbu = self.layout.dbu
+            li_tap = self.layout.layer(self.tap_layer)
+            li_contact = self.layout.layer(self.contact_layer)
+            li_metal = self.layout.layer(self.metal_layer)
+            contacts_ns = self.contacts_per_side_ns or self.contacts_per_side
+            contacts_ew = self.contacts_per_side_ew or self.contacts_per_side
+            info = _ring_layout(
+                self.inner_width_um,
+                self.inner_height_um,
+                self.ring_width_um,
+                (contacts_ns, contacts_ew),
+                self.ring_gap_side,
+                self.ring_gap_um,
+                self.ring_gap_offset_um,
+            )
+            gap_box = info["gap"]["box_um"] if info["gap"] is not None else None
+            _insert_ring(
+                self.cell,
+                li_tap,
+                dbu,
+                info["outer_box_um"],
+                info["inner_box_um"],
+                gap_box,
+            )
+            _insert_ring(
+                self.cell,
+                li_metal,
+                dbu,
+                info["outer_box_um"],
+                info["inner_box_um"],
+                gap_box,
+            )
+            _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
+            if self.well_tap_implant_present:
+                # Exactly coincident with the tap ring -- never a blanket over
+                # the enclosed area, which would re-dope whatever a caller
+                # later places inside the island (see the `well_tap_implant`
+                # role's own comment in `_PDK_ROLE_LAYERS`).
+                _insert_ring(
+                    self.cell,
+                    self.layout.layer(self.well_tap_implant_layer),
+                    dbu,
+                    info["outer_box_um"],
+                    info["inner_box_um"],
+                    gap_box,
+                )
+            if self.well_present:
+                _insert_boxes(
+                    self.cell,
+                    self.layout.layer(self.well_layer),
+                    dbu,
+                    [_well_box_um(info, self.well_margin_resolved_um)],
+                )
+            if self.net and self.metal_label_present:
+                anchor = _well_island_label_point(info)
+                if anchor is not None:
+                    self.cell.shapes(self.layout.layer(self.metal_label_layer)).insert(
+                        kdb.Text(
+                            self.net,
+                            kdb.Trans(
+                                kdb.Vector(
+                                    int(round(anchor[0] / dbu)),
+                                    int(round(anchor[1] / dbu)),
+                                )
+                            ),
+                        )
+                    )
 
     class _DiffPairPCell(kdb.PCellDeclarationHelper):
         """Differential pair / current mirror cell (spike section 4's
@@ -4221,6 +4705,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         "bjt_array": _BjtArrayPCell,
         "bond_pad": _BondPadPCell,
         "esd_device": _EsdDevicePCell,
+        "well_island": _WellIslandPCell,
     }
 
 
@@ -4826,6 +5311,7 @@ def _ring_ports(
     tap_layer: dict[str, Any],
     tap_width_um: float,
     gap_layer: dict[str, Any],
+    tap_net: str | None = None,
 ) -> list[dict[str, Any]]:
     """Reported ``ports[]`` entries for a drawn ring.
 
@@ -4838,6 +5324,13 @@ def _ring_ports(
     side, ``direction_deg`` = the side's outward normal) on the layer a route
     would cross it on, and `klt gen-compose` rejects any attempt to wire or
     label it.
+
+    ``tap_net`` (issue #1421) names the net every tap port carries, reported
+    as each entry's ``net``. ``None`` (the default, and every caller that
+    predates ``well_island``) keeps the historical ``"net": null`` -- a ring
+    whose tie net the generator has no way to know. It is never applied to a
+    ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
+    no net by construction.
     """
     ox, oy = offset_um
     ports: list[dict[str, Any]] = []
@@ -4848,7 +5341,7 @@ def _ring_ports(
         ports.append(
             {
                 "name": f"{tap_prefix}{side}",
-                "net": None,
+                "net": tap_net,
                 "layer": tap_layer,
                 "x_um": xy[0] + ox,
                 "y_um": xy[1] + oy,
@@ -4892,6 +5385,37 @@ def _ring_gap_notes(ring: dict[str, Any] | None, ring_gap_side: str) -> list[str
     ]
 
 
+def _ring_contact_gap_notes(
+    inner_w_um: float, inner_h_um: float, contacts_ns: int, contacts_ew: int
+) -> list[str]:
+    """``drc_hints.notes`` entries for a resolved per-axis contact count that
+    fits but leaves less than :data:`CONTACT_GAP_SAFE_UM` between adjacent
+    contacts (issue #685).
+
+    ``_guard_ring_validate`` only rejects a count whose contacts would
+    literally overlap (see its own ``pitch <= CONTACT_SIZE_UM`` check) -- it
+    can't reject on ``CONTACT_GAP_SAFE_UM`` alone since that margin's real
+    violation only applies to gf180mcu (sky130's curated deck checks no
+    contact-spacing rule at all), and a ``validate()`` doesn't know the
+    resolved PDK family. A ``describe()`` does, so a tight-but-still-accepted
+    gap is flagged here instead, per-axis, so a caller targeting gf180mcu
+    knows to double-check with ``klt drc``.
+    """
+    notes: list[str] = []
+    for label, straight, contacts in (
+        ("inner_width_um", inner_w_um, contacts_ns),
+        ("inner_height_um", inner_h_um, contacts_ew),
+    ):
+        pitch = straight / (contacts + 1)
+        if pitch - CONTACT_SIZE_UM < CONTACT_GAP_SAFE_UM:
+            notes.append(
+                f"the resolved contact count ({contacts}) leaves less than "
+                f"{CONTACT_GAP_SAFE_UM}um between adjacent contacts along {label} -- "
+                "may violate the target PDK's minimum contact spacing rule"
+            )
+    return notes
+
+
 def _guard_ring_axis_contacts(params: dict[str, Any]) -> tuple[int, int]:
     """Resolve ``params``'s per-axis contact counts: ``contacts_per_side_ns``/
     ``contacts_per_side_ew`` when set (non-zero), else ``contacts_per_side``
@@ -4903,25 +5427,34 @@ def _guard_ring_axis_contacts(params: dict[str, Any]) -> tuple[int, int]:
     return contacts_ns, contacts_ew
 
 
-def _guard_ring_validate(params: dict[str, Any]) -> None:
+def _ring_params_validate(generator: str, params: dict[str, Any]) -> None:
+    """Bounds shared by every generator whose ``params`` describe a tap ring
+    directly (``guard_ring`` and ``well_island``) -- the inner-area/ring-width
+    floors, the per-axis contact counts and the ring opening.
+
+    ``generator`` only names the generator in the raised message, so a
+    ``well_island`` request is never rejected in ``guard_ring``'s name.
+    """
     if params["inner_width_um"] <= 0:
-        raise GenError("generator 'guard_ring': params.inner_width_um must be > 0")
+        raise GenError(f"generator '{generator}': params.inner_width_um must be > 0")
     if params["inner_height_um"] <= 0:
-        raise GenError("generator 'guard_ring': params.inner_height_um must be > 0")
+        raise GenError(f"generator '{generator}': params.inner_height_um must be > 0")
     if params["ring_width_um"] < UNIT_MIN_W_UM:
         raise GenError(
-            f"generator 'guard_ring': params.ring_width_um must be >= {UNIT_MIN_W_UM}"
+            f"generator '{generator}': params.ring_width_um must be >= {UNIT_MIN_W_UM}"
         )
     if params["contacts_per_side"] < 1:
-        raise GenError("generator 'guard_ring': params.contacts_per_side must be >= 1")
+        raise GenError(
+            f"generator '{generator}': params.contacts_per_side must be >= 1"
+        )
     if params["contacts_per_side_ns"] < 0:
         raise GenError(
-            "generator 'guard_ring': params.contacts_per_side_ns must be >= 0 "
+            f"generator '{generator}': params.contacts_per_side_ns must be >= 0 "
             "(0 inherits params.contacts_per_side)"
         )
     if params["contacts_per_side_ew"] < 0:
         raise GenError(
-            "generator 'guard_ring': params.contacts_per_side_ew must be >= 0 "
+            f"generator '{generator}': params.contacts_per_side_ew must be >= 0 "
             "(0 inherits params.contacts_per_side)"
         )
 
@@ -4944,19 +5477,23 @@ def _guard_ring_validate(params: dict[str, Any]) -> None:
         pitch = straight / (contacts + 1)
         if pitch <= CONTACT_SIZE_UM:
             raise GenError(
-                f"generator 'guard_ring': {param_name} (effectively {contacts}, "
+                f"generator '{generator}': {param_name} (effectively {contacts}, "
                 "from params.contacts_per_side unless overridden) does not fit "
                 f"along {label}={straight}um without overlapping contacts"
             )
 
     _validate_ring_gap(
-        "guard_ring",
+        generator,
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
         params["inner_width_um"],
         params["inner_height_um"],
     )
+
+
+def _guard_ring_validate(params: dict[str, Any]) -> None:
+    _ring_params_validate("guard_ring", params)
 
 
 def _guard_ring_describe(
@@ -4987,25 +5524,14 @@ def _guard_ring_describe(
     )
 
     notes = _ring_gap_notes(info, params["ring_gap_side"])
-    # `_guard_ring_validate` only rejects a per-axis contact count that would
-    # literally overlap (see its own `pitch <= CONTACT_SIZE_UM` check) -- it
-    # can't reject on `CONTACT_GAP_SAFE_UM` alone since that margin's real
-    # violation only applies to gf180mcu (sky130's curated deck checks no
-    # contact-spacing rule at all), and `_guard_ring_validate` doesn't know
-    # the resolved PDK family. `_guard_ring_describe` does, so it flags a
-    # tight-but-still-accepted gap here instead, per-axis, so a caller
-    # targeting gf180mcu knows to double-check with `klt drc` (issue #685).
-    for label, straight, contacts in (
-        ("inner_width_um", params["inner_width_um"], contacts_ns),
-        ("inner_height_um", params["inner_height_um"], contacts_ew),
-    ):
-        pitch = straight / (contacts + 1)
-        if pitch - CONTACT_SIZE_UM < CONTACT_GAP_SAFE_UM:
-            notes.append(
-                f"the resolved contact count ({contacts}) leaves less than "
-                f"{CONTACT_GAP_SAFE_UM}um between adjacent contacts along {label} -- "
-                "may violate the target PDK's minimum contact spacing rule"
-            )
+    notes.extend(
+        _ring_contact_gap_notes(
+            params["inner_width_um"],
+            params["inner_height_um"],
+            contacts_ns,
+            contacts_ew,
+        )
+    )
     if params["add_well"] and not well_supported:
         notes.append(
             f"params.add_well is true but the resolved PDK family ('{family}') has "
@@ -5036,6 +5562,436 @@ def _guard_ring_describe(
             if snapped
             else []
         ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# well_island (issue #1421) -- a named-net well/tap island, isolated from a
+# caller-specified set of other well regions.
+# --------------------------------------------------------------------------- #
+
+#: Slack (um) allowed when comparing a measured separation (or a requested
+#: one) against a rule threshold. Purely float-noise tolerance -- three orders
+#: of magnitude below one dbu (:data:`_GRID_DBU_UM`), so it can never absorb a
+#: real, drawable violation.
+_SEPARATION_EPS_UM = 1e-9
+
+#: How KLayout spells an *anonymous* (unlabelled) net -- ``Net.expanded_name()``
+#: returns ``"$<n>"`` for a net no drawn label names, which
+#: ``klayout_tools.extract`` reports (backslash-escaped, ``"\\$<n>"``) and
+#: ``_detect_unbiased_pmos_body_nets`` keys its unbiased-body detection off.
+#: ``well_island`` refuses to *draw* a label starting with it: a body net
+#: deliberately named ``"$1"`` would be indistinguishable, downstream, from an
+#: unbiased body that nobody tied at all.
+_ANONYMOUS_NET_LABEL_PREFIX = "$"
+
+
+def _well_island_ring(params: dict[str, Any]) -> dict[str, Any]:
+    """``well_island``'s tap-ring layout, from its ``params`` -- the same
+    ``_ring_layout`` call its ``produce_impl`` makes, so the isolation math,
+    the reported ports and the drawn geometry all derive from one source."""
+    contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+    return _ring_layout(
+        params["inner_width_um"],
+        params["inner_height_um"],
+        params["ring_width_um"],
+        (contacts_ns, contacts_ew),
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+    )
+
+
+def _largest_clearing_margin_um(
+    ring: dict[str, Any],
+    regions: list[dict[str, Any]],
+    separation_um: float,
+    min_margin_um: float,
+    max_margin_um: float,
+) -> float | None:
+    """The largest well enclosure in ``[min_margin_um, max_margin_um]`` whose
+    well rectangle still clears every region in ``regions`` by
+    ``separation_um``, or ``None`` when even ``min_margin_um`` does not.
+
+    The well rectangle grows with the margin and separation shrinks with it
+    monotonically, so a bisection on the dbu grid finds the exact largest
+    admissible value -- this is the "sizes itself to satisfy the rule"
+    half of ``well_island``'s isolation contract, bounded below by
+    :data:`WELL_ENCLOSURE_MARGIN_UM` (the enclosure the tap ring under it
+    still needs) so it can never trade a well-spacing violation for a
+    well-enclosure one.
+    """
+
+    def _clears(margin_um: float) -> bool:
+        box = _well_box_um(ring, margin_um)
+        return all(
+            _box_separation_um(box, region["box_um"])
+            >= separation_um - _SEPARATION_EPS_UM
+            for region in regions
+        )
+
+    if _clears(max_margin_um):
+        return max_margin_um
+    if not _clears(min_margin_um):
+        return None
+    lo = round(min_margin_um / _GRID_DBU_UM)
+    hi = round(max_margin_um / _GRID_DBU_UM)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if _clears(mid * _GRID_DBU_UM):
+            lo = mid
+        else:
+            hi = mid
+    return lo * _GRID_DBU_UM
+
+
+def _well_island_isolation(params: dict[str, Any], family: str) -> dict[str, Any]:
+    """Resolve ``well_island``'s well geometry against its isolation request.
+
+    Runs *before* any geometry is produced (see
+    :func:`_well_island_layer_params`) and again when the response is built
+    (see :func:`_well_island_describe`) -- one pure function, so the drawn
+    well and the reported well/keepout rectangles can never disagree.
+
+    The contract, in order:
+
+    1. ``params.separation_um`` below the resolved family's own
+       different-potential well rule (:data:`_PDK_WELL_ISOLATION_UM`) is a
+       hard rejection -- honouring it would draw exactly the silently-too-close
+       pair of wells this generator exists to prevent. ``0`` (the default)
+       means "use the rule".
+    2. Every ``params.isolate_from`` region **not** naming this island's own
+       ``params.net`` is a different-potential neighbour and must clear the
+       resolved separation. A region naming the same net is equipotential:
+       the different-potential rule does not apply to it and the two wells are
+       expected to tie together (reported via ``notes``, never enforced).
+    3. If the requested ``params.well_margin_um`` does not clear every
+       different-potential neighbour, the margin is trimmed towards
+       :data:`WELL_ENCLOSURE_MARGIN_UM` until it does (reported via ``notes``
+       and ``warnings``).
+    4. If even the minimum margin cannot clear them, :class:`GenError` --
+       never a silently merged well.
+
+    Returns the resolved margin, the well/keepout rectangles (``None`` on a
+    family with no well layer at all), and the notes/warnings the response
+    should carry.
+    """
+    notes: list[str] = []
+    warnings: list[str] = []
+    well_supported = _PDK_ROLE_LAYERS[family].get("well") is not None
+    rule_um = _PDK_WELL_ISOLATION_UM.get(family)
+    regions = _parse_well_regions("well_island", "isolate_from", params["isolate_from"])
+    own_net = params["net"] or None
+    requested_um = params["separation_um"]
+
+    if (
+        requested_um > 0
+        and rule_um is not None
+        and requested_um < rule_um - _SEPARATION_EPS_UM
+    ):
+        raise GenError(
+            f"generator 'well_island': params.separation_um ({requested_um}) is "
+            f"below the minimum well-to-well spacing PDK family '{family}' "
+            f"requires between wells at different potentials ({rule_um}um, "
+            "euclidian -- see klayout_tools.gen._PDK_WELL_ISOLATION_UM for the "
+            "rule citation). Raise params.separation_um to at least that value, "
+            "or set it to 0 to use the rule's own minimum"
+        )
+
+    separation_um = requested_um if requested_um > 0 else rule_um
+    if separation_um is None:
+        notes.append(
+            f"the resolved PDK family ('{family}') has no known well-to-well "
+            "spacing rule for wells at different potentials, and "
+            "params.separation_um is 0 -- no separation was enforced; set "
+            "params.separation_um explicitly to check one"
+        )
+
+    different: list[dict[str, Any]] = []
+    equipotential: list[dict[str, Any]] = []
+    for region in regions:
+        if own_net is not None and region["net"] == own_net:
+            equipotential.append(region)
+        else:
+            different.append(region)
+
+    if equipotential:
+        notes.append(
+            f"{len(equipotential)} params.isolate_from region(s) name this "
+            f"island's own net ('{own_net}') -- they are equipotential with it, "
+            "so no separation was required against them and the two wells are "
+            "expected to tie together rather than isolate"
+        )
+
+    min_margin_um = WELL_ENCLOSURE_MARGIN_UM
+    requested_margin_um = params["well_margin_um"]
+    margin_um = requested_margin_um
+
+    if not well_supported:
+        if regions or params["net"]:
+            notes.append(
+                f"the resolved PDK family ('{family}') has no well layer in "
+                "klayout_tools.gen._PDK_ROLE_LAYERS -- no well shape was drawn, "
+                "so this island encloses no well to isolate or to name"
+            )
+            warnings.append(
+                f"no well layer for PDK family '{family}' -- the island's tap "
+                "ring was drawn but it isolates nothing"
+            )
+        return {
+            "well_supported": False,
+            "margin_um": margin_um,
+            "requested_margin_um": requested_margin_um,
+            "separation_um": separation_um,
+            "well_box_um": None,
+            "keepout_box_um": None,
+            "notes": notes,
+            "warnings": warnings,
+        }
+
+    ring = _well_island_ring(params)
+    if different and separation_um is not None:
+        resolved = _largest_clearing_margin_um(
+            ring, different, separation_um, min_margin_um, requested_margin_um
+        )
+        if resolved is None:
+            floor_box = _well_box_um(ring, min_margin_um)
+            worst = min(
+                different,
+                key=lambda region: _box_separation_um(floor_box, region["box_um"]),
+            )
+            gap_um = _box_separation_um(floor_box, worst["box_um"])
+            raise GenError(
+                "generator 'well_island': the island's own well "
+                f"{_format_box_um(floor_box)} (already at the minimum "
+                f"enclosure of {min_margin_um}um) clears the "
+                f"params.isolate_from region {_format_box_um(worst['box_um'])} "
+                f"by only {gap_um:.4g}um, but {separation_um}um is required "
+                "between wells at different potentials -- move the island, "
+                "shrink params.inner_width_um/params.inner_height_um, or tie "
+                "the two regions to the same net (a fifth isolate_from element) "
+                "if they are meant to be equipotential"
+            )
+        margin_um = resolved
+        if margin_um < requested_margin_um - _SEPARATION_EPS_UM:
+            notes.append(
+                f"params.well_margin_um ({requested_margin_um}) was trimmed to "
+                f"{margin_um:.4g}um so the island's well still clears every "
+                f"different-potential params.isolate_from region by "
+                f"{separation_um}um"
+            )
+            warnings.append(
+                f"well enclosure trimmed from {requested_margin_um}um to "
+                f"{margin_um:.4g}um to satisfy the requested well separation"
+            )
+
+    well_box_um = _well_box_um(ring, margin_um)
+    keepout_box_um = (
+        None
+        if separation_um is None
+        else (
+            well_box_um[0] - separation_um,
+            well_box_um[1] - separation_um,
+            well_box_um[2] + separation_um,
+            well_box_um[3] + separation_um,
+        )
+    )
+    if different and separation_um is not None:
+        notes.append(
+            f"well-to-well separation enforced against {len(different)} "
+            f"different-potential params.isolate_from region(s): "
+            f"{separation_um}um (euclidian)"
+            + (
+                ""
+                if rule_um is None or separation_um > rule_um + _SEPARATION_EPS_UM
+                else f" -- PDK family '{family}'s own different-potential well rule"
+            )
+        )
+    return {
+        "well_supported": True,
+        "margin_um": margin_um,
+        "requested_margin_um": requested_margin_um,
+        "separation_um": separation_um,
+        "well_box_um": well_box_um,
+        "keepout_box_um": keepout_box_um,
+        "notes": notes,
+        "warnings": warnings,
+    }
+
+
+def _format_box_um(box_um: tuple[float, float, float, float]) -> str:
+    """A compact ``(x0, y0)..(x1, y1)`` rendering of a rectangle, for error
+    messages that have to name which rectangle is at fault."""
+    x0, y0, x1, y1 = box_um
+    return f"({x0:.4g}, {y0:.4g})..({x1:.4g}, {y1:.4g})um"
+
+
+def _box_um_field(
+    box_um: tuple[float, float, float, float] | None,
+) -> dict[str, float] | None:
+    """A rectangle as the response's own ``{x0, y0, x1, y1}`` object shape --
+    the same one ``bbox_um`` already uses -- or ``None``."""
+    if box_um is None:
+        return None
+    return {"x0": box_um[0], "y0": box_um[1], "x1": box_um[2], "y1": box_um[3]}
+
+
+def _well_island_validate(params: dict[str, Any]) -> None:
+    """PDK-agnostic validation for ``well_island``.
+
+    Everything that needs the resolved PDK family -- the well-spacing rule
+    itself, and the geometry check against ``params.isolate_from`` -- lives in
+    :func:`_well_island_isolation`, reached through
+    :func:`_well_island_layer_params` before any geometry is produced (the
+    same split ``res_array``'s ``flavor`` validation already uses, since
+    ``_GeneratorSpec.validate`` is handed no ``pdk_info``).
+    """
+    # The ring geometry is `guard_ring`'s, so its bounds are too -- reuse the
+    # shared validator rather than restating (and risking drift from) the
+    # same checks.
+    _ring_params_validate("well_island", params)
+
+    net = params["net"]
+    if net:
+        if net.strip() != net or any(character.isspace() for character in net):
+            raise GenError(
+                "generator 'well_island': params.net must not contain "
+                "whitespace -- it is drawn as a net label and read back by "
+                "`klt extract`"
+            )
+        if net.startswith(_ANONYMOUS_NET_LABEL_PREFIX):
+            raise GenError(
+                "generator 'well_island': params.net must not start with "
+                f"'{_ANONYMOUS_NET_LABEL_PREFIX}' -- that prefix is how "
+                "KLayout spells an *anonymous* (unlabelled) net, so a body net "
+                "named this way could not be told apart from an unbiased one"
+            )
+    if params["well_margin_um"] < WELL_ENCLOSURE_MARGIN_UM:
+        raise GenError(
+            "generator 'well_island': params.well_margin_um must be >= "
+            f"{WELL_ENCLOSURE_MARGIN_UM} (the well enclosure of the tap ring "
+            "under it)"
+        )
+    if params["separation_um"] < 0:
+        raise GenError("generator 'well_island': params.separation_um must be >= 0")
+    _parse_well_regions("well_island", "isolate_from", params["isolate_from"])
+
+
+def _well_island_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    family = _pdk_family(pdk_info["variant"])
+    contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+    info = _well_island_ring(params)
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
+    net = params["net"] or None
+
+    ports = _ring_ports(
+        info,
+        (0.0, 0.0),
+        "TAP_",
+        metal_layer,
+        params["ring_width_um"],
+        metal_layer,
+        net,
+    )
+
+    isolation = _well_island_isolation(params, family)
+    notes = _ring_gap_notes(info, params["ring_gap_side"])
+    notes.extend(
+        _ring_contact_gap_notes(
+            params["inner_width_um"],
+            params["inner_height_um"],
+            contacts_ns,
+            contacts_ew,
+        )
+    )
+    notes.extend(isolation["notes"])
+
+    label_present = _PDK_ROLE_LAYERS[family].get("metal_label") is not None
+    if net is None:
+        notes.append(
+            "params.net is empty -- no net label was drawn, so the island's "
+            "body net extracts as an anonymous KLayout-synthesized net unless "
+            "the caller routes and labels the tap ring themselves"
+        )
+    elif not label_present:
+        notes.append(
+            f"params.net is '{net}' but the resolved PDK family ('{family}') "
+            "has no metal label layer in klayout_tools.gen._PDK_ROLE_LAYERS -- "
+            "no net label was drawn"
+        )
+
+    snapped = _grid_snapped(
+        dbu,
+        params["inner_width_um"],
+        params["inner_height_um"],
+        params["ring_width_um"],
+        params["well_margin_um"],
+    )
+    warnings = list(isolation["warnings"])
+    if snapped:
+        warnings.append("one or more dimensions were rounded to the technology grid")
+
+    return {
+        "device_count": len(info["contact_boxes_um"]),
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
+            "matched_group_id": None,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+            # Issue #1421's own reporting contract: the caller (or
+            # `klt gen-compose`, or their own placer) gets the island's
+            # resulting well rectangle and the region no *other* well may
+            # enter, so a composition never has to re-derive either from raw
+            # geometry.
+            "well_net": net,
+            "well_box_um": _box_um_field(isolation["well_box_um"]),
+            "well_separation_um": isolation["separation_um"],
+            "well_keepout_box_um": _box_um_field(isolation["keepout_box_um"]),
+        },
+        "warnings": warnings,
+    }
+
+
+def _well_island_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``well_island`` -- ``guard_ring``'s ring roles
+    plus the net-label layer and (on a family with no dedicated tap layer) the
+    well-tie implant.
+
+    Also the one pre-draw hook that knows the resolved PDK family, so it is
+    where :func:`_well_island_isolation` runs: an unsatisfiable isolation
+    request raises :class:`GenError` from here, before any geometry exists or
+    any file is written. The resolved well enclosure it computes is threaded
+    to the PCell as the hidden ``well_margin_resolved_um`` param, so the drawn
+    well is exactly the rectangle the response reports.
+    """
+    import klayout.db as kdb
+
+    family = _pdk_family(pdk_info["variant"])
+    well = _role_layer_info(family, "well")
+    metal_label = _role_layer_info(family, "metal_label")
+    implant = _role_layer_info(family, "well_tap_implant")
+    isolation = _well_island_isolation(params, family)
+    return {
+        "tap_layer": _role_layer_info(family, "tap"),
+        "contact_layer": _role_layer_info(family, "contact"),
+        "metal_layer": _role_layer_info(family, "metal"),
+        "metal_label_layer": (
+            metal_label if metal_label is not None else kdb.LayerInfo(0, 0)
+        ),
+        "metal_label_present": metal_label is not None,
+        "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
+        "well_present": well is not None,
+        "well_tap_implant_layer": (
+            implant if implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "well_tap_implant_present": implant is not None,
+        "well_margin_resolved_um": isolation["margin_um"],
     }
 
 
@@ -5625,6 +6581,7 @@ _PARAM_TYPE_NAMES = {
     1: "double",
     2: "string",
     3: "bool",
+    6: "list",  # PCellParameterDeclaration.TypeList -- a JSON array
 }
 
 _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
@@ -5696,6 +6653,23 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_guard_ring_validate,
         describe=_guard_ring_describe,
         layer_params=_ring_layer_params,
+    ),
+    "well_island": _GeneratorSpec(
+        name="well_island",
+        summary=(
+            "Named-net, isolated well/tap island: guard_ring's tap ring + "
+            "well tie, with the tie bound to a caller-supplied net (drawn as "
+            "a label on the ring's own metal, never on the well label layer) "
+            "and a separation constraint against a caller-supplied set of "
+            "other well regions -- sized to clear them or rejected outright, "
+            "never silently merged. The primitive for giving two groups of "
+            "same-flavour devices two different body potentials (issue "
+            "#1421)."
+        ),
+        dbu=0.001,
+        validate=_well_island_validate,
+        describe=_well_island_describe,
+        layer_params=_well_island_layer_params,
     ),
     "diff_pair": _GeneratorSpec(
         name="diff_pair",

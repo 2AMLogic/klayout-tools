@@ -8,8 +8,11 @@ proven end-to-end with one reference generator (`resistor_strip`). Phase 2
 adds the four analog primitive generators the accepted spike scopes:
 `mos_array`, `res_array`, `guard_ring`, and `diff_pair`. Phase 4 (Epic #152)
 adds `bjt_array`, a matched vertical-bipolar (PNP/BJT) array. Issue #568
-(this document's current state) adds `bond_pad`, the first generator
-covering the chip *boundary* rather than a core analog device. See
+adds `bond_pad`, the first generator covering the chip *boundary* rather
+than a core analog device. Issue #1421 (this document's current state) adds
+`well_island`, a family-3 sibling of `guard_ring` that binds its tie to a
+caller-named net and isolates its well from a caller-named set of other
+wells. See
 [`docs/design/layout-generator-spike.md`](../design/layout-generator-spike.md)
 section 2 for the contract this command implements, and section 4 for the
 four phase-2 families' scope; see
@@ -73,8 +76,8 @@ successor.
 
 ### PDK-family support (phase 2 generators)
 
-`mos_array`, `res_array`, `cap_array`, `guard_ring`, `diff_pair`,
-`esd_device`, `bond_pad`, and `bjt_array` (every generator except
+`mos_array`, `res_array`, `cap_array`, `guard_ring`, `well_island`,
+`diff_pair`, `esd_device`, `bond_pad`, and `bjt_array` (every generator except
 `resistor_strip`, the deliberately PDK-agnostic phase-1 reference generator)
 draw on their resolved PDK's own curated-DRC-deck layers (the same
 layer/datatype pairs `klt drc --deck sky130`/`--deck gf180mcu` check — see
@@ -113,7 +116,12 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
   `mos_array`/`diff_pair`), `tap` (substrate/well tap rings), `res_mark`/
   `bjt_mark` (device-class markers `klt extract`'s curated deck keys off of
   — omitting them means the drawn device extracts as a generic short/wire
-  rather than its intended class), and the routing-plane roles (`metal2`/
+  rather than its intended class), `metal_label` (the pin/label purpose of
+  the `metal` role — `well_island` names its tie's net there) and
+  `well_tap_implant` (only on a family whose well tie is drawn on the same
+  layer as transistor active, so the implant is the only thing marking it as
+  a tie — gf180mcu's `Nplus`; sky130 has a dedicated `tap` layer and needs
+  none), and the routing-plane roles (`metal2`/
   `via1`, `metal3`/`via2`) `gen_compose`'s router resolves. Each role's
   purpose and the exact curated-deck citation it must match is documented
   inline as a comment on that role's entry in the existing `sky130`/
@@ -478,9 +486,156 @@ opening through the ring's band so a route can pass through it instead:
   block whose ring is switched off — that no opening was cut.
 
 The same three params, with the same semantics, are accepted by `diff_pair`
-(on its `add_guard_ring` ring) and `bjt_array` (on its `add_collector_ring`
-ring). Openings are opt-in: omitting them draws exactly the closed ring
-these generators always drew.
+(on its `add_guard_ring` ring), `bjt_array` (on its `add_collector_ring`
+ring) and `well_island` (below). Openings are opt-in: omitting them draws
+exactly the closed ring these generators always drew.
+
+### `well_island` (family 3 sibling: named-net, isolated well/tap island)
+
+`guard_ring`'s geometry — the same tap ring, contacts, local-metal ring and
+enclosing well tie — with the two properties a *well island* needs and a
+plain guard ring cannot express (issue #1421):
+
+1. **The tie carries a caller-named net** (`net`). It is reported as every
+   `TAP_*` port's `net` and as `drc_hints.well_net`, so a composition can
+   route to it by name, and it is drawn into the layout as a text on the
+   **ring metal's** label layer (`metal_label` role — sky130's `li1.pin`
+   `(67, 5)`, gf180mcu's `Metal1` pin purpose `(34, 10)`).
+2. **The island is isolated from a caller-named set of other wells**
+   (`isolate_from` + `separation_um`). The generator either sizes itself to
+   clear them or rejects the request outright — it never emits a well that
+   silently merges with one of them.
+
+On a PDK family whose well tie is drawn on the same layer as transistor
+active (gf180mcu, whose `Comp` does double duty), the island also draws the
+well-tie implant that makes it *recognisable* as a tie — `Nplus` `(32, 0)`,
+the same layer `klayout_tools.decks.gf180mcu`'s `EXTRACTION_DECK.tap_nplus`
+declares — as a ring exactly coincident with the tap ring, never as a
+blanket over the enclosed area (which would re-dope whatever the caller
+places inside it). Without it, gf180mcu extracts the island's enclosed PMOS
+bodies as anonymous nets. sky130 needs no implant: its `tap.drawing` layer
+is already a tie by virtue of sitting inside `nwell`.
+
+**Why this is not just `guard_ring` with a label.** On any PDK whose
+extraction deck derives a well-flavour device's body from `active & well`
+and names the well from the tap inside it, the only way to give two groups
+of same-flavour devices two different body potentials is two physically
+separate well islands with two separately-routed taps. `klt extract`'s
+`unbiased_pmos_body_nets` being empty is *necessary but not sufficient*
+evidence that you got it: a single well over everything, tied to one supply,
+satisfies it too. The per-device `devices[].nets["b"]` names are what
+distinguish two body domains from one — see the well-label note below.
+
+| `params` field          | Type   | Default | Description |
+| ------------------------ | ------ | ------- | ----------- |
+| `inner_width_um`         | double | `3.0`   | Width of the enclosed inner area (µm). Must be `> 0`. |
+| `inner_height_um`        | double | `3.0`   | Height of the enclosed inner area (µm). Must be `> 0`. |
+| `ring_width_um`          | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
+| `contacts_per_side`      | int    | `4`     | Tap contacts evenly spaced along each ring side, applied uniformly unless overridden per-axis below. Must be `>= 1`. |
+| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S sides, spaced along `inner_width_um`. `0` inherits `contacts_per_side`. Must be `>= 0`. |
+| `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W sides, spaced along `inner_height_um`. `0` inherits `contacts_per_side`. Must be `>= 0`. |
+| `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring: `""`, `"N"`, `"S"`, `"E"` or `"W"` — identical semantics to `guard_ring`'s (see "Ring routing openings" above). The opening is cut through the tap/metal/implant rings, never through the well. |
+| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Must be `>= 0.4` when `ring_gap_side` is set; `0` otherwise. |
+| `ring_gap_offset_um`     | double | `0.0`   | Slide the opening off its side's midpoint (µm). |
+| `net`                    | string | `""`    | Net name the island's tie carries. Reported as every `TAP_*` port's `net` and drawn as a label on the ring metal. `""` (the default) draws no label and notes that the body net will extract anonymously. Must contain no whitespace and must not start with `$` (KLayout's own anonymous-net spelling). |
+| `well_margin_um`         | double | `0.15`  | Well enclosure of the tap ring (µm). Must be `>= 0.15` (the enclosure the ring under it needs). Trimmed towards `0.15` when a larger value would violate the requested separation — see below. |
+| `separation_um`          | double | `0.0`   | Required clearance (µm, **euclidian**) from every `isolate_from` well at a different potential. `0` (the default) uses the resolved PDK family's own different-potential well rule; a non-zero value *below* that rule is rejected. |
+| `isolate_from`           | list   | `[]`    | Other well regions this island must stay clear of. Each entry is `[x0_um, y0_um, x1_um, y1_um]` or `[x0_um, y0_um, x1_um, y1_um, net]`, in **this cell's own coordinate frame** (the same frame `bbox_um`/`ports[]` use). An entry naming this island's own `net` is *equipotential*: no separation is required against it. |
+
+Four ports — `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` — sit at the midpoint of each
+ring side (less any the ring opening removed), each carrying `net`.
+`device_count` is the number of tap contacts drawn.
+**`drc_hints.matched_group_id` is always `null`.**
+
+#### Well separation: which rule, and what happens when it cannot be met
+
+| Family | Rule | Value |
+| ------ | ---- | ----- |
+| `sky130` | `nwell.2` — "Minimum spacing between N-well and N-well of different potential", the rule the PDK's own KLayout deck codes as `nwell.isolated(1.27, euclidian)` | `1.27µm` |
+| `gf180mcu` | DRM 7.4 Nwell `NW.2b` — "Min. Nwell Space (Outside DNWELL) [Different potential]", 3.3V column | `1.4µm` |
+
+Neither value is the one `klt drc` checks, and that is deliberate:
+
+- This repo's **curated sky130 DRC deck transcribes no well-layer rule at
+  all** (issue #1420), so `klt drc --deck sky130` cannot catch two islands
+  that merged.
+- The curated **gf180mcu** deck's `nwell.space.1` deliberately transcribes
+  only the *equipotential* half of the `NW.2a`/`NW.2b` split (`0.6µm`),
+  because a geometry-only checker cannot tell the two contexts apart. `klt
+  gen` *can* — the caller names the potential — so it applies the strict
+  half.
+
+The generator is therefore the source of truth for the geometry it draws,
+independent of whether the checker can confirm it. Behaviour, in order:
+
+- **`separation_um` below the family's rule → `GenError`.** Honouring it
+  would draw exactly the too-close pair of wells this generator exists to
+  prevent.
+- **A same-net `isolate_from` entry is equipotential.** No separation is
+  required against it (the two wells are expected to tie together, not
+  isolate); `drc_hints.notes` records that the different-potential rule was
+  not applied to it.
+- **A `well_margin_um` that does not clear every different-potential
+  neighbour is trimmed** — down to, never below, the `0.15µm` the tap ring's
+  own well enclosure needs — and both `drc_hints.notes` and `warnings`
+  record the trim.
+- **If even the minimum enclosure cannot clear a neighbour → `GenError`**,
+  naming the offending rectangle, the gap actually achieved and the
+  separation required. Never a silently merged well.
+- A family with no well layer at all gets the same "no well shape was drawn"
+  treatment `guard_ring`'s `add_well` already gives (a `drc_hints.notes`
+  entry plus a top-level `warning`), not a hard failure.
+
+The response reports the resulting geometry so a placer never has to
+re-derive it:
+
+| `drc_hints` field | Type | Description |
+| ----------------- | ---- | ----------- |
+| `well_net` | string \| null | The island's tie net (echo of `params.net`), or `null`. |
+| `well_box_um` | object \| null | `{x0, y0, x1, y1}` — the well rectangle actually drawn, at the *resolved* (possibly trimmed) enclosure. `null` on a family with no well layer. |
+| `well_separation_um` | number \| null | The clearance actually enforced. |
+| `well_keepout_box_um` | object \| null | `well_box_um` grown by `well_separation_um` on every side — the region no *other* well may enter. Placing the next island's well exactly on this edge is the tightest legal placement. |
+
+#### The well-label tautology (and why this generator avoids it)
+
+It is tempting to name a well island by drawing a text on the deck's
+**well-label** layer (sky130's `nwell.pin` `(64, 5)`). Don't: a text there
+names the `nwell` polygon *directly*, so `klt extract` reports the intended
+body net **even when the tap tie meant to bias the well is broken or
+missing** — the verification becomes a tautology.
+
+`well_island` never draws on the well-label layer. It names the ring's
+**metal** instead, so the name can only reach the well through the physical
+tie (`li1` → `licon1` → `tap` → `nwell`). Consequently
+`devices[].nets["b"]` from [`klt extract`](extract.md) is real evidence that
+the tie works: break the tie and the body net falls back to an anonymous
+KLayout net and shows up in `unbiased_pmos_body_nets`. This is exercised
+directly by the round-trip test in `tests/test_gen.py`
+(`test_well_island_body_net_name_needs_the_real_tie_not_just_the_label`).
+
+#### Worked example: two body domains
+
+```bash
+# Island A, tied to VBODY_A.
+klt gen well_island --pdk sky130A --params '{"net": "VBODY_A"}' \
+    --cell-name island_a -o island_a.gds --format json
+# -> drc_hints.well_box_um     = {"x0": -0.15, ..., "x1": 3.99, "y1": 3.99}
+#    drc_hints.well_keepout_box_um = {"x0": -1.42, ..., "x1": 5.26, "y1": 5.26}
+
+# Island B, tied to VBODY_B, placed 5.41µm to the right of A (A's keepout
+# edge). A's well, expressed in B's own frame, is handed over as the region
+# B must stay clear of -- tagged with A's net, so the rule applied is the
+# different-potential one.
+klt gen well_island --pdk sky130A --cell-name island_b -o island_b.gds \
+    --params '{"net": "VBODY_B",
+               "isolate_from": [[-5.56, -0.15, -1.42, 3.99, "VBODY_A"]]}'
+```
+
+Place a `pfet`-flavoured `mos_array` inside each island (its own well merges
+into the island's), and `klt extract` reports two distinct body nets:
+`devices[].nets["b"]` is `VBODY_A` for the devices in A and `VBODY_B` for
+those in B. Nudge island B one database unit closer and the second `klt gen`
+call exits `1` instead of drawing a merged well.
 
 ### `diff_pair` (family 4: differential pair / current mirror cell)
 
@@ -839,7 +994,7 @@ family/variant split the resolver doesn't have. The response's
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, `C<i>_TOP`/`_BOT` for `cap_array`, etc). |
-| `net` | string \| null | Caller-supplied net label; always `null` — no request field feeds it yet. |
+| `net` | string \| null | The net this port carries. `null` for every generator except `well_island` (issue #1421), whose `TAP_*` ports carry its `params.net` — the one request field that feeds a port's net today. A `GAP_*` marker is never given one (it marks the *absence* of ring conductor). |
 | `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
@@ -850,11 +1005,15 @@ family/variant split the resolver doesn't have. The response's
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (or its own safe-margin constant, for a generator with no single caller-supplied spacing param — see each generator's section above). |
-| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`, `cap_array`); always `null` for `resistor_strip`, `guard_ring`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
+| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`, `cap_array`); always `null` for `resistor_strip`, `guard_ring`, `well_island`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 | `voltage_flavor` | string \| null | `mos_array`/`diff_pair` only (issue #1054): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
 | `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair` only (issue #1054): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
+| `well_net` | string \| null | `well_island` only (issue #1421): the net its tie carries (echo of `params.net`), or `null` when unnamed. |
+| `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
+| `well_separation_um` | number \| null | `well_island` only: the well-to-well clearance actually enforced against `params.isolate_from` — the resolved family's own different-potential rule unless `params.separation_um` raised it. |
+| `well_keepout_box_um` | object \| null | `well_island` only: `well_box_um` grown by `well_separation_um` on every side — the region no *other* well may enter. |
 
 ### Semantics and guarantees
 
@@ -889,8 +1048,11 @@ Enumerates every registered generator and its `params` schema — the same data
 }
 ```
 
-`params[].type` is one of `int`, `double`, `string`, `bool` (the KLayout PCell
-parameter types this phase's harness supports). Implementation-only
+`params[].type` is one of `int`, `double`, `string`, `bool`, or `list` (the
+KLayout PCell parameter types this harness supports). A `list` param takes a
+JSON array — `well_island`'s `isolate_from` is the only one today; its
+element *shape* is that generator's own business, documented in its section
+above and validated by it. Implementation-only
 parameters a generator's PCell declares (e.g. `resistor_strip`'s drawing
 layer) are never listed — `params` documents exactly the fields a request's
 `params` object may set.
