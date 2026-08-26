@@ -2926,11 +2926,12 @@ def run_extract_klayout_engine(
                 params[param_def.name] = raw
             devices.append(
                 {
-                    # device.expanded_name() yields a bare $<n> name for anonymous devices (no backslash escaping).
-                    # This is correct: unlike net names (which are backslash-escaped by spice_safe_net_name()
-                    # to avoid ngspice's leading-$ inline-comment hazard), a device instance name is always
-                    # preceded by a class-letter prefix (M$1, R$22, etc.) on its SPICE instance line, so the
-                    # leading-$ hazard does not apply. See issue #1439 and docs/cli/extract.md.
+                    # expanded_name() yields a bare $<n> for anonymous devices:
+                    # deliberately NOT backslash-escaped, unlike net names. A
+                    # device name always follows a class-letter prefix (M$1, R$22)
+                    # on its SPICE instance line, so ngspice's leading-$ comment
+                    # hazard that spice_safe_net_name() guards against cannot
+                    # arise here. See issue #1439 and docs/cli/extract.md.
                     "name": device.expanded_name(),
                     "class": class_name,
                     "params": params,
@@ -7684,11 +7685,12 @@ def _describe_devices(
 
         devices.append(
             {
-                # device.expanded_name() yields a bare $<n> name for anonymous devices (no backslash escaping).
-                # This is correct: unlike net names (which are backslash-escaped by spice_safe_net_name()
-                # to avoid ngspice's leading-$ inline-comment hazard), a device instance name is always
-                # preceded by a class-letter prefix (M$1, R$22, etc.) on its SPICE instance line, so the
-                # leading-$ hazard does not apply. See issue #1439 and docs/cli/extract.md.
+                # expanded_name() yields a bare $<n> for anonymous devices:
+                # deliberately NOT backslash-escaped, unlike net names. A
+                # device name always follows a class-letter prefix (M$1, R$22)
+                # on its SPICE instance line, so ngspice's leading-$ comment
+                # hazard that spice_safe_net_name() guards against cannot
+                # arise here. See issue #1439 and docs/cli/extract.md.
                 "name": device.expanded_name(),
                 "class": class_name,
                 "nets": nets,
