@@ -1207,8 +1207,8 @@ PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 )
 def test_openroad_gcd_fixture_produces_well_formed_report():
     """`klt drc --deck sky130` against the real, OpenROAD-produced GCD
-    macro-scale fixture required no verb-side fix (#436): it runs cleanly
-    (no crash) against thousands of instances, one level of real hierarchy,
+    macro-scale fixture required no verb-side fix (#436): it runs without
+    crashing against thousands of instances, one level of real hierarchy,
     and routing-layer usage the hand-drawn analog corpus never exercises."""
     report = run_drc(str(PLACE_AND_ROUTE_GDS), "sky130")
 
@@ -1246,9 +1246,27 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     # wide, inside a single cell instance -- not, as
     # docs/cli/drc.md previously recorded, real geometry at a standard-cell
     # row boundary that filler-cell insertion would absorb.
-    assert report["violation_count"] == 0
-    assert report["rule_counts"] == {}
-    assert report["status"] == "clean"
+    #
+    # It moved to 184 (142 `nwell.space.1` + 42 `nwell.width.1`) when #1420
+    # added this deck's first `nwell`-layer rules: unlike the #995 case
+    # above, these are *not* an engine artifact -- `_run_check` already
+    # merges each checked region before measuring (#995's own fix), and the
+    # measured gaps/widths here (as little as 0.08 um of `nwell`-to-`nwell`
+    # space against the real 1.27 um minimum) are genuine properties of this
+    # fixture's flattened, merged `nwell` geometry. This macro was produced
+    # by `klt place-and-route`'s sky130 row/cell placement, which does not
+    # currently guarantee `nwell` continuity/adequate spacing across
+    # abutting standard-cell rows (no alternate-row flip to share power
+    # rails and merge adjacent rows' wells, no well-tap/filler-cell
+    # insertion) -- a real gap in that verb, not in this rule or this test,
+    # tracked separately as #1430. Pinning the new count here (rather than
+    # excluding `nwell.*` from this fixture, or leaving the old `clean` pin
+    # to silently regress) keeps this regression guard honest about what
+    # `klt drc --deck sky130` actually reports against real, committed,
+    # machine-generated layout today.
+    assert report["violation_count"] == 184
+    assert report["rule_counts"] == {"nwell.space.1": 142, "nwell.width.1": 42}
+    assert report["status"] == "violations"
 
 
 def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
@@ -4258,6 +4276,102 @@ def test_run_drc_sky130_capm2_separation_via4_violation(tmp_path):
     assert violation["rule"] == "capm2.separation.via4.1"
     assert violation["check"] == "separation"
     assert violation["layer"] == "capm2.drawing"
+
+
+# --- nwell.width.1 / nwell.space.1 (issue #1420) ------------------------
+
+
+def test_run_drc_sky130_nwell_width_violation(tmp_path):
+    """An nwell bar narrower than the 840 dbu (0.84 um) `nwell.width.1`
+    threshold trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(64, 20)
+    layout.set_info(nwell, kdb.LayerInfo(64, 20, "nwell.drawing"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 500, 6000))  # 500 dbu < 840
+    path = tmp_path / "nwell_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"nwell.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "nwell.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "nwell.drawing"
+
+
+def test_run_drc_sky130_nwell_width_clean(tmp_path):
+    """An nwell bar at exactly the 840 dbu threshold passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(64, 20)
+    layout.set_info(nwell, kdb.LayerInfo(64, 20, "nwell.drawing"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 840, 6000))  # 840 dbu == threshold
+    path = tmp_path / "nwell_width_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_nwell_space_violation(tmp_path):
+    """The issue's own reproducer (#1420): two 2.0x2.0 um nwell rectangles
+    spaced 0.50 um apart -- well under the real 1.27 um `nwell.space.1`
+    minimum -- trip exactly one violation, instead of the `status: "clean"`
+    the deck reported before this rule existed."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(64, 20)
+    layout.set_info(nwell, kdb.LayerInfo(64, 20, "nwell.drawing"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
+    top.shapes(nwell).insert(kdb.Box(2500, 0, 4500, 2000))  # 500 dbu gap < 1270
+    path = tmp_path / "nwell_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"nwell.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "nwell.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "nwell.drawing"
+
+
+def test_run_drc_sky130_nwell_space_clean(tmp_path):
+    """Two nwell rectangles spaced exactly at the 1270 dbu (1.27 um)
+    threshold -- a legal, properly-spaced multi-well layout -- pass
+    cleanly (no false positive from the new rule)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(64, 20)
+    layout.set_info(nwell, kdb.LayerInfo(64, 20, "nwell.drawing"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
+    top.shapes(nwell).insert(kdb.Box(3270, 0, 5270, 2000))  # 1270 dbu == threshold
+    path = tmp_path / "nwell_space_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "layout_path", SKY130_CORPUS_FILES, ids=[p.name for p in SKY130_CORPUS_FILES]
+)
+def test_sky130_corpus_no_false_nwell_violations(layout_path: Path):
+    """Regression guard (#1420): `nwell.width.1`/`nwell.space.1` must not
+    fire against real, committed sky130 standard-cell fixtures, each of
+    which draws exactly one well-formed `nwell` body-tie region."""
+    report = run_drc(str(layout_path), "sky130")
+
+    assert report["rule_counts"].get("nwell.width.1", 0) == 0
+    assert report["rule_counts"].get("nwell.space.1", 0) == 0
 
 
 def test_run_drc_sky130_upper_stack_layers_now_covered(tmp_path):

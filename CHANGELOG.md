@@ -63,6 +63,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   four stay unrecognised. Metal resistors (`res_metal1`..`res_topmetal1`)
   are now reachable in principle but remain untranscribed — a dedicated
   follow-on, not a side effect of this connectivity fix.
+- **Fixed**: the `sky130` curated DRC deck now checks the `nwell` (64/20)
+  well layer — `nwell.width.1` (min width, 0.84 um) and `nwell.space.1`
+  (min inter-well spacing/isolation, 1.27 um), transcribed from
+  `sky130.lydrc`'s `nwell.1a`/`nwell.2a` (issue #1420). Before this, `DECK`
+  had zero rules referencing `nwell`, even though `EXTRACTION_DECK` has
+  always used that exact layer for PMOS device recognition and body-net
+  derivation — a layout with illegally-close, effectively-merged well
+  islands (e.g. two n-wells spaced well under the real 1.27 um minimum)
+  reported a vacuous `status: "clean"` on the very layer its own
+  extraction correctness depends on. Two more official well rules — the
+  `nwell` enclosure of opposite-type diffusion/tap, scoped to a
+  `psdm`/`nsdm` implant-layer boolean expression no `klt gen` generator
+  draws today — are deliberately left uncovered; see the "nwell (well-layer)
+  rule coverage" note in `src/klayout_tools/decks/sky130.py`'s module
+  docstring for the full reasoning.
 - **Fixed**: the `sg13cmos5l` curated deck now recognises SG13CMOS5L's three
   **drawn poly resistors** — `rsil` (7.0 Ω/sq), `rppd` (260.0 Ω/sq) and
   `rhigh` (1360.0 Ω/sq) — instead of leaving them undeclared (issue #1415).

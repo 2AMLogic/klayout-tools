@@ -246,6 +246,43 @@ compound-layer notes above document (``met3.enclosing.capm.1``/
 rule instead -- ``m3.enclosing(capm, ...)``/``m4.enclosing(cap2m, ...)`` --
 exactly as ``capm.3``'s own source-deck comment already prefers that
 formulation over its commented-out compound predecessor).
+
+nwell (well-layer) rule coverage (issue #1420): before this, ``DECK`` had
+*zero* rules referencing ``nwell`` (64/20), even though ``EXTRACTION_DECK``
+below has always used that exact layer to derive PMOS device recognition and
+body/well-tap nets (its own ``nwell=(64, 20)`` field) -- a layout with
+illegally-close, effectively-merged well islands (e.g. two n-wells spaced
+well under the real minimum) passed ``klt drc`` cleanly on the very layer
+its own extraction correctness silently depends on. ``nwell.width.1`` and
+``nwell.space.1`` below close the two highest-value rules of that gap,
+transcribed from ``sky130.lydrc``'s ``nwell.1a``/``nwell.2a`` (see each
+rule's own docstring for its one approximation, ``nwell.2a``'s ``isolated``
+vs. ``space`` distinction).
+
+Two more ``sky130.lydrc`` well rules are deliberately **not** transcribed
+here: ``nwell.enclosing(diff.and(psdm), 0.18)`` and
+``nwell.enclosing(tap.and(nsdm), 0.18)`` (an nwell's minimum enclosure of,
+respectively, the p-select-implant diffusion inside it -- PMOS source/drain
+-- and the n-select-implant tap inside it -- the well's own body/substrate
+tie). Both are scoped to a *compound* layer expression this engine's
+single-layer/two-layer ``Region`` check primitives cannot evaluate (the same
+class of gap ``difftap.1``/``poly.1a``'s compound-layer notes above already
+document), and unlike those other compound-layer approximations elsewhere in
+this deck, there is no honest plain-layer stand-in available: ``psdm``/
+``nsdm`` (the implant marker layers the compound expressions key off) are
+not drawn by any ``klt gen`` generator today (per issue #1420's own scoping
+note), so a rule scoped by well-*containment* instead of implant -- "nwell
+encloses whatever diff/tap already overlaps it" -- would silently pass on
+every generator-produced layout regardless of correctness, while risking new
+false positives against the real ``sky130_fd_sc_hd`` standard-cell corpus
+this repo already exercises (whose diff/tap-to-nwell margins are the
+implant-scoped rule's business, not this unscoped stand-in's). Rather than
+ship an untested widening with no generator coverage to exercise it, this
+gap is left explicitly open: ``EXTRACTION_DECK`` still has no ``psdm``/
+``nsdm`` fields, ``coverage.deck_scope`` will not include an enclosure-rule
+entry for the ``nwell.*`` family, and a future issue that also teaches
+``klt gen`` to draw implant layers is the natural place to revisit both
+rules together with real geometry to test them against.
 """
 
 from __future__ import annotations
@@ -942,12 +979,55 @@ DECK: list[DrcRule] = [
         # (transcribes exactly, same note as capm.separation.via3.1 above.)
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
     ),
+    # nwell (well-layer) rule coverage (issue #1420, closing the gap the
+    # module docstring's own "nwell (well-layer) rule coverage" note
+    # documents in full): these are the first two DRC rules on `nwell`
+    # (64/20) in this deck, even though `EXTRACTION_DECK.nwell` below has
+    # relied on that same layer for PMOS device recognition and body-net
+    # derivation all along -- see that note for why exactly these two (not
+    # the enclosure rules) were chosen, and why the choice was made this way.
+    DrcRule(
+        id="nwell.width.1",
+        description="minimum nwell width",
+        layer=(64, 20),  # nwell.drawing
+        check="width",
+        threshold_dbu=840,  # 0.84 um
+        # sky130.lydrc rule "nwell.1a": nwell.width(0.84, euclidian)
+        # -> "nwell.1a : min. nwell width : 0.84um"
+        scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.1a"),
+    ),
+    DrcRule(
+        id="nwell.space.1",
+        description="minimum nwell spacing / isolation between distinct wells",
+        layer=(64, 20),  # nwell.drawing
+        check="space",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130.lydrc rule "nwell.2a": nwell.isolated(1.27, euclidian)
+        # -> "nwell.2a : min. nwell space to nwell : 1.27um"
+        # Approximation: the source rule uses `isolated`, which (unlike
+        # `space`) only measures the gap between *different* polygons,
+        # skipping any concave notch within a single polygon. This engine's
+        # `DrcRule` vocabulary only exposes `"space"` (`Region.space_check`,
+        # which also flags same-polygon notches -- see `drc.py`'s
+        # `isolated_check`/`space_check` distinction, used internally for
+        # gf180mcu's `mim.space.1`) as a check kind, not `"isolated"`. This
+        # makes the transcribed rule strictly *stricter* than `nwell.2a`: it
+        # additionally flags a sufficiently narrow concave notch carved into
+        # one nwell polygon, which the real rule would not. No corpus
+        # regression from this was found (see the test suite's sky130
+        # corpus regression check for this rule), and the threshold value
+        # itself is unmodified.
+        scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.2a"),
+    ),
 ]
 
 # (layer, datatype) -> "name.purpose" string, from sky130.lyt's layer-map,
 # used only to render violations[].layer as e.g. "poly.drawing" instead of
 # the bare "66/20" fallback.
 LAYER_NAMES: dict[tuple[int, int], str] = {
+    (64, 20): "nwell.drawing",
     (65, 20): "diff.drawing",
     (65, 44): "tap.drawing",
     (66, 20): "poly.drawing",
