@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt pdk cells`: `_DEVICE_MODEL_RE` gains a leading `\b`
+  token-boundary anchor, so a flavor-shaped substring embedded inside an
+  unrelated identifier can no longer accidentally match. Each library's
+  `device_flavors` also gains an additive `device_flavors_status`
+  (`"ok"`/`"unknown"`) field: a library whose `spice/` view has SPICE
+  instance lines (`X<n> ...`) but none matched the device-flavor parser now
+  reports `"unknown"` (a loud signal that this library's device-naming
+  convention isn't recognised) instead of a silent `[]` indistinguishable
+  from "this library genuinely has no devices" — addresses issue #537
+  acceptance criterion 4, which #556's fix for the same issue didn't cover.
+  The `klt pdk cells` text table renders `unknown` (not `-`) in the
+  `devices` column for this case. No `schema_version` bump — both changes
+  are additive (`supplies_v`, `device_flavors_status`); no existing field
+  was renamed, removed, or had its documented type changed.
 - **Fixed**: `klt place-and-route`'s `"route"` stage now always draws a real,
   `request.power`-independent `sky130_fd_sc_hd` row-rail obstruction
   (`add_pdn_stripe ... -followpins` on the library's own `VPWR`/`VGND` pins)

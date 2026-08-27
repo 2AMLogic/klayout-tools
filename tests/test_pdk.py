@@ -8,6 +8,7 @@ is installed on the machine running the suite.
 """
 
 import json
+import re
 
 import pytest
 
@@ -1684,7 +1685,51 @@ def test_cells_missing_spice_view_yields_empty_device_flavors(tmp_path):
 
     library = report["libraries"][0]
     assert library["device_flavors"] == []
+    assert library["device_flavors_status"] == "ok"
     assert library["nominal_supply_v"] == 1.8  # lib/ view still present
+
+
+def test_cells_unknown_device_naming_reported_loudly(tmp_path):
+    """A `spice/` view with SPICE instance lines that don't match any known
+    device-naming shape must report `device_flavors_status: "unknown"` -- a
+    loud signal distinguishable from "this library genuinely has no
+    devices" (issue #537 acceptance criterion 4). `device_flavors` is still
+    `[]` in this case -- only the status field distinguishes it.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        devices=("some_unrecognised_model",),
+        bare_device_names=True,
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["device_flavors"] == []
+    assert library["device_flavors_status"] == "unknown"
+
+
+def test_cells_no_instance_lines_is_ok_not_unknown(tmp_path):
+    """A `spice/` view that exists but has zero SPICE instance lines is
+    genuinely "no devices" -- `"ok"`, not `"unknown"` -- distinct from the
+    "instance lines present but unrecognised" case above.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    lib_dir = _make_cell_library(variant_dir, "sky130_fd_sc_hd", with_spice=False)
+    (lib_dir / "spice").mkdir(parents=True)
+    (lib_dir / "spice" / "sky130_fd_sc_hd.spice").write_text(
+        "* no instance lines here\n", encoding="utf-8"
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["device_flavors"] == []
+    assert library["device_flavors_status"] == "ok"
 
 
 def test_cells_missing_lib_view_yields_null_supply(tmp_path):
@@ -1772,6 +1817,32 @@ def test_cli_cells_text_table(tmp_path, capsys):
     assert "sky130_fd_sc_hd" in out
     assert "nfet_01v8/pfet_01v8_hvt" in out
     assert "1.8V @ tt_025C_1v80" in out
+
+
+def test_cli_cells_text_table_reports_unknown_devices_not_dash(tmp_path, capsys):
+    """The text table's `devices` column must render `unknown` (not `-`)
+    when `device_flavors_status == "unknown"`, so a parse failure is not
+    visually indistinguishable from a library that genuinely ships no
+    devices (issue #537 acceptance criterion 4).
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        devices=("some_unrecognised_model",),
+        bare_device_names=True,
+    )
+
+    exit_code = main(["pdk", "cells", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if "sky130_fd_sc_hd" in line]
+    assert len(lines) == 1
+    # devices is the second column -- must render "unknown", not "-".
+    columns = re.split(r"\s{2,}", lines[0].strip())
+    assert columns[1] == "unknown"
 
 
 def test_cli_cells_supply_exit_zero_when_compatible(tmp_path, capsys):

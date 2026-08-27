@@ -521,6 +521,7 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
     {
       "name": "sky130_fd_sc_hd",
       "device_flavors": ["nfet_01v8", "pfet_01v8_hvt"],
+      "device_flavors_status": "ok",
       "nominal_supply_v": 1.8,
       "nominal_corner": "tt_025C_1v80",
       "supplies_v": [1.8],
@@ -532,6 +533,7 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
         "nfet_01v8", "nfet_05v0_nvt", "nfet_g5v0d10v5",
         "pfet_01v8_hvt", "pfet_g5v0d10v5"
       ],
+      "device_flavors_status": "ok",
       "nominal_supply_v": 2.64,
       "nominal_corner": "tt_025C_2v64_lv1v80",
       "supplies_v": [2.64, 2.97, 3.3],
@@ -548,7 +550,8 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
 | `root` | string | Absolute install root. |
 | `libraries` | array | One entry per standard-cell digital library found (see "Which libraries are reported" below). |
 | `libraries[].name` | string | The `libs.ref` entry's directory name. |
-| `libraries[].device_flavors` | array of string | Sorted, deduplicated nfet/pfet device model *suffixes* its cells instantiate, read from `spice/<lib>.spice`'s instance lines. An optional `<family>_fd_pr__` prefix is stripped when present (sky130's `sky130_fd_pr__nfet_01v8` shape) — the prefix repeats the PDK family and adds no information; gf180mcu's instance lines name the bare flavor with no prefix at all (`nfet_06v0`) and are matched directly. `[]` when the library ships no `spice/` view, or no instance line matches. |
+| `libraries[].device_flavors` | array of string | Sorted, deduplicated nfet/pfet device model *suffixes* its cells instantiate, read from `spice/<lib>.spice`'s instance lines. An optional `<family>_fd_pr__` prefix is stripped when present (sky130's `sky130_fd_pr__nfet_01v8` shape) — the prefix repeats the PDK family and adds no information; gf180mcu's instance lines name the bare flavor with no prefix at all (`nfet_06v0`) and are matched directly. `[]` when the library ships no `spice/` view, no instance line at all, or (see `device_flavors_status`) every instance line failed to parse. |
+| `libraries[].device_flavors_status` | `"ok"` \| `"unknown"` | `"unknown"` when the `spice/` view has SPICE instance lines (`X<n> ...`) but none matched the device-flavor parser — a loud signal that this library's device-naming convention is not recognised, so an empty `device_flavors` cannot be silently mistaken for "this library has no devices". `"ok"` otherwise (parsed successfully, or the library genuinely ships no instance lines). |
 | `libraries[].nominal_supply_v` | float \| null | The **lowest** of `supplies_v` (below) — the library's nominal, baseline/minimum-operating-point `.lib` timing view (its `nom_voltage` Liberty attribute). Preserved for backward compatibility; it is *not* necessarily the library's only characterised supply — see `supplies_v`. `null` when the library ships no `lib/` directory or no parseable `.lib` file. |
 | `libraries[].nominal_corner` | string \| null | The nominal view's Liberty operating-condition name (its `default_operating_conditions`, e.g. `tt_025C_1v80`), always bare — never `<name>__<corner>` — even for a library (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`) whose `.lib` file's own `default_operating_conditions` attribute already carries a leading `<name>__` prefix; that prefix is stripped. `null` alongside `nominal_supply_v`. |
 | `libraries[].supplies_v` | array of float | **Every** distinct supply (volts) the library's nominal-corner `.lib` views are characterised at, sorted ascending — e.g. `[1.8]` for a single-supply library, or `[1.8, 3.3, 5.0]` for a library separately, fully characterised at multiple voltages (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`). `[]` alongside a `null` `nominal_supply_v`. See "Nominal supply selection" below. |
