@@ -227,7 +227,11 @@ def _print_cells_text(report: dict) -> None:
 
     rows = []
     for library in libraries:
-        devices = "/".join(library["device_flavors"]) or "-"
+        devices = "/".join(library["device_flavors"])
+        if not devices:
+            devices = (
+                "unknown" if library.get("device_flavors_status") == "unknown" else "-"
+            )
         row = (library["name"], devices, _format_supplies(library))
         if supply_given:
             row = row + ("yes" if library["compatible"] else "no",)

@@ -1027,7 +1027,14 @@ _SUPPLY_MATCH_ABS_TOL = 0.01
 #: device model with the bare flavor and no `_fd_pr__` prefix at all
 #: (`nfet_06v0`), so a prefix-required pattern silently matched nothing on
 #: that PDK (issue #537).
-_DEVICE_MODEL_RE = re.compile(r"(?:[a-z0-9]+_fd_pr__)?((?:n|p)fet_[a-z0-9_]+)")
+_DEVICE_MODEL_RE = re.compile(r"\b(?:[a-z0-9]+_fd_pr__)?((?:n|p)fet_[a-z0-9_]+)")
+
+#: Distinguishes "no SPICE instance lines at all" (ok -- library genuinely
+#: has no devices) from "instance lines present but none matched
+#: `_DEVICE_MODEL_RE`" (unknown -- a loud signal that device-flavor parsing
+#: failed for this family rather than the library shipping no devices; see
+#: issue #537 acceptance criterion 4). SPICE instance lines start with `X`.
+_SPICE_INSTANCE_LINE_RE = re.compile(r"^X\S+", re.MULTILINE)
 _NOM_PROCESS_RE = re.compile(r"nom_process\s*:\s*([0-9.eE+-]+)")
 _NOM_TEMPERATURE_RE = re.compile(r"nom_temperature\s*:\s*(-?[0-9.eE+-]+)")
 _NOM_VOLTAGE_RE = re.compile(r"nom_voltage\s*:\s*([0-9.eE+-]+)")
@@ -1074,6 +1081,13 @@ def list_cell_libraries(
       read from `spice/<lib>.spice`'s ``X<n> ... <model> w=... l=...``
       instance lines. ``[]`` when the library ships no `spice/` view, or its
       view has no matching device instance line.
+    - ``device_flavors_status`` -- ``"ok"`` or ``"unknown"``, a loud signal
+      distinguishing "genuinely no devices" from "device-flavor parsing
+      failed". ``"unknown"`` when the library's `spice/` view has SPICE
+      instance lines but none matched the device-flavor pattern (so
+      ``device_flavors`` is ``[]`` but that doesn't mean the library ships no
+      devices); ``"ok"`` otherwise, including when the library ships no
+      `spice/` view at all or that view has no instance lines.
     - ``nominal_supply_v`` / ``nominal_corner`` -- the supply (and Liberty
       operating-condition name) its `.lib` timing views are characterised at,
       read from the nominal (typical-process, room-temperature) `.lib`
@@ -1115,6 +1129,7 @@ def list_cell_libraries(
                 {
                     "name": str,
                     "device_flavors": [str, ...],
+                    "device_flavors_status": "ok" | "unknown",
                     "nominal_supply_v": float | None,
                     "nominal_corner": str | None,
                     "supplies_v": [float, ...],
@@ -1165,10 +1180,12 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
         if not os.path.isdir(lib_dir) or _STD_CELL_LIB_MARKER not in name:
             continue
         nominal = _nominal_supply(lib_dir)
+        flavors, flavors_status = _device_flavors(name, lib_dir)
         libraries.append(
             {
                 "name": name,
-                "device_flavors": _device_flavors(name, lib_dir),
+                "device_flavors": flavors,
+                "device_flavors_status": flavors_status,
                 "nominal_supply_v": nominal["voltage"],
                 "nominal_corner": nominal["corner"],
                 "supplies_v": nominal["supplies_v"],
@@ -1178,13 +1195,25 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
     return libraries
 
 
-def _device_flavors(name: str, lib_dir: str) -> list[str]:
-    """Sorted, deduplicated nfet/pfet device flavors from `spice/<name>.spice`."""
+def _device_flavors(name: str, lib_dir: str) -> tuple[list[str], str]:
+    """Sorted, deduplicated nfet/pfet device flavors from `spice/<name>.spice`,
+    plus a ``"ok"``/``"unknown"`` status.
+
+    ``"unknown"`` is a loud signal that the library's `spice/` view has SPICE
+    instance lines but none matched `_DEVICE_MODEL_RE` -- distinct from
+    genuinely shipping no devices, which is also an empty list but reports
+    ``"ok"`` (see issue #537 acceptance criterion 4).
+    """
     spice_path = os.path.join(lib_dir, "spice", f"{name}.spice")
     text = _read_text(spice_path)
     if text is None:
-        return []
-    return sorted({match.group(1) for match in _DEVICE_MODEL_RE.finditer(text)})
+        return [], "ok"
+    flavors = sorted({match.group(1) for match in _DEVICE_MODEL_RE.finditer(text)})
+    if flavors:
+        return flavors, "ok"
+    if _SPICE_INSTANCE_LINE_RE.search(text):
+        return [], "unknown"
+    return [], "ok"
 
 
 def _nominal_supply(lib_dir: str) -> dict[str, Any]:
