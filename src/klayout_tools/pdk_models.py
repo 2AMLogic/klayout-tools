@@ -34,15 +34,24 @@ of issue #1231 -- ``sg13g2``; MOS only, as of issue #1400 -- ``sg13cmos5l``):
   inside sky130's ``hvi``) -- see :data:`MOS_FLAVOUR_PROPERTY` and
   :data:`_MOS_MODEL_FLAVOURS` below, and ``klayout_tools.extract``'s module
   docstring.
-- **Resistor** (sky130/gf180mcu) -- every ``ResistorDevice`` class each deck
-  declares (:func:`resolve_device_bindings` reads the deck's own list).
-  sg13g2's two drawn poly resistors (``rsil``/``rppd``, issue #1231) have no
-  curated entry yet and keep their bare ``R``-card form -- the same
-  documented bare-primitive carve-out gf180mcu's bipolar gets below.
+- **Resistor** (sky130/gf180mcu, plus -- issue #1457 -- sg13g2's three drawn
+  poly flavours) -- every ``ResistorDevice`` class each deck declares
+  (:func:`resolve_device_bindings` reads the deck's own list) that has a real
+  subcircuit to bind to. sg13g2's ``rsil``/``rppd``/``rhigh`` (issues
+  #1231/#1235) bind to the real 3-terminal ``rsil``/``rppd``/``rhigh``
+  subcircuits. sg13g2's two drawn *metal* resistors (``res_metal1``/
+  ``res_metal2``, issue #1235) are a **deliberate, verified carve-out**, not
+  a "not implemented yet" gap: a real fetched IHP-Open-PDK v0.3.0 install
+  defines no ``.subckt``/``.model`` for either name at all (IHP's own
+  reference CDL netlists instantiate them as a bare
+  semiconductor-resistor-with-model-reference card that a consumer's own
+  simulation deck must supply the ``.model`` for) -- the same documented
+  bare-primitive carve-out gf180mcu's bipolar gets below.
 - **Capacitor** (sky130/gf180mcu) -- every ``CapacitorDevice`` class each deck
   declares, with plate ``L``/``W`` derived from the extracted plate area and
   perimeter via :func:`equivalent_rectangle_um`. sg13g2's deck recognises no
-  capacitor device yet, so there is nothing to bind.
+  capacitor device yet, so there is nothing to bind (tracked as a follow-up
+  once a `CapacitorDevice` entry lands for `cap_cmim`/`rfcmim`).
 - **Bipolar** -- **sky130 only** (``sky130_fd_pr__pnp_05v5``). gf180mcu's
   bipolar is deliberately left **unbound** (its recognised ``bjt`` device
   keeps KLayout's bare ``Q``-card form), because the gf180mcu deck itself has
@@ -174,6 +183,22 @@ comment):
   per-family parameter-name difference (``l``/``w`` vs ``r_length``/
   ``r_width``) is why the binding carries the subcircuit's own length/width
   parameter names per family rather than assuming one convention.
+- **sg13g2 resistors** -- ``rsil`` / ``rppd`` / ``rhigh`` (issue #1457), each
+  a three-terminal ``1 2 bn`` subcircuit (``bn`` the bulk/substrate tie,
+  matching the deck's own ``bulk_to_substrate=True`` on all three classes),
+  geometry-parameterized by ``l``/``w`` in raw metres (same convention as
+  gf180mcu's resistors, but sky130-style parameter *names*). Confirmed in a
+  real fetched IHP-Open-PDK v0.3.0 install's
+  ``libs.tech/ngspice/models/resistors_mod.lib`` (``.subckt rsil 1 2 bn`` +
+  ``.param w=0.5e-6 l=0.5e-6 ...``, and the ``rppd``/``rhigh`` siblings on the
+  identical terminal/parameter convention with their own default
+  ``w``/``l``). sg13g2's two drawn *metal* resistors (``res_metal1``/
+  ``res_metal2``) have **no** curated entry: the same fetched install defines
+  no ``.subckt``/``.model`` for either name anywhere under ``libs.tech/
+  ngspice/`` or ``libs.tech/xyce/`` -- there is no real subcircuit to bind to,
+  a verified carve-out rather than an unimplemented one (see the module
+  docstring's "Scope" section above and ``docs/cli/extract.md``'s "Scope
+  limits").
 - **sky130 capacitors** -- the deck's LVS device names
   (``sky130_fd_pr__model__cap_mim`` on ``capm``/met3,
   ``sky130_fd_pr__model__cap_mim_m4`` on ``capm2``/met4) map to the
@@ -468,10 +493,14 @@ GEOMETRY_STYLE_BARE_UM = "bare_um"
 #:   raw-metre defaults (``.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7 ...``), so
 #:   the absolute, suffix-carrying literal is the correct form for this family
 #:   and switching it to bare micrometres would break it by the same 1e6.
-#: - ``sg13g2`` -> absent, so unchanged at the unit-suffix default. No IHP
-#:   install was available to reproduce against here, and changing an
-#:   unverified family's convention on a guess is exactly the mistake this
-#:   table documents.
+#: - ``sg13g2`` -> absent, so unchanged at the unit-suffix default. Confirmed
+#:   correct (not merely left unverified) as of issue #1457: no ``.option
+#:   scale`` line anywhere under a real fetched IHP-Open-PDK v0.3.0 install's
+#:   ``libs.tech/ngspice/``, and every subcircuit this module binds --
+#:   ``sg13_lv_nmos``/``sg13_lv_pmos`` (``.subckt sg13_lv_nmos d g s b w=0.35u
+#:   l=0.34u ...``) and ``rsil``/``rppd``/``rhigh`` (``.subckt rsil 1 2 bn``,
+#:   ``.param w=0.5e-6 l=0.5e-6 ...``) -- declares raw-metre defaults, the same
+#:   convention gf180mcu uses.
 _GEOMETRY_STYLE_BY_FAMILY: dict[str, str] = {
     "sky130": GEOMETRY_STYLE_BARE_UM,
     "gf180mcu": GEOMETRY_STYLE_UNIT_SUFFIX,
@@ -903,6 +932,41 @@ _RESISTOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "ppolyf_u_2k": "ppolyf_u_2k",
         "ppolyf_u_3k": "ppolyf_u_3k",
     },
+    # sg13g2's three drawn poly resistors (issue #1457; classes recognised by
+    # issues #1231/#1235). Confirmed against a real fetched IHP-Open-PDK
+    # v0.3.0 install (`scripts/fetch-ihp-sg13g2.sh`):
+    # `libs.tech/ngspice/models/resistors_mod.lib` declares `.subckt rsil 1 2
+    # bn` / `.subckt rhigh 1 2 bn` / `.subckt rppd 1 2 bn` -- each a
+    # 3-terminal (two heads plus `bn`, the bulk/substrate tie) subcircuit
+    # taking `w`/`l` in raw metres (e.g. `.param w=0.5e-6 l=0.5e-6`), matching
+    # `decks/sg13g2.py`'s own `bulk_to_substrate=True` on all three classes
+    # (so `resolve_device_bindings` already emits the matching `("A", "B",
+    # "W")` terminal triple with no code change needed there) and the
+    # no-`.option scale` raw-metre convention `sg13_lv_nmos`/`sg13_lv_pmos`
+    # already established for this family's MOS binding (issue #1231) --
+    # see `_RESISTOR_PARAM_STYLE`/`_GEOMETRY_STYLE_BY_FAMILY` below.
+    #
+    # `res_metal1`/`res_metal2` (also recognised by issue #1235) are
+    # deliberately **not** in this table: the same fetched install's
+    # `libs.tech/ngspice/` and `libs.tech/xyce/` model trees define no
+    # `.subckt`/`.model` for either name at all (grepped directly, zero
+    # hits) -- IHP's own reference CDL netlists (under
+    # `libs.tech/klayout/tech/lvs/testing/testcases/unit/res_devices/
+    # netlist/res_metal1.cdl`) instantiate them as a bare
+    # semiconductor-resistor-with-model-reference card (`Rm2 net3 net4
+    # res_metal1 l=1.5u w=5u`) that a consumer's own simulation deck
+    # supplies the `.model res_metal1 R ...` for -- there is no real
+    # subcircuit name this table could bind to. This mirrors gf180mcu's
+    # `bjt` carve-out: a *documented* bare-primitive carve-out (see
+    # `docs/cli/extract.md` -> "Coverage" / "Scope limits"), not an
+    # oversight -- and this deck's own bare `R` card already names the
+    # correct PDK device-class token (`res_metal1`/`res_metal2`) for that
+    # consumer-supplied `.model` to attach to.
+    ("sg13g2", "sg13g2"): {
+        "rsil": "rsil",
+        "rppd": "rppd",
+        "rhigh": "rhigh",
+    },
 }
 
 #: (deck_name, pdk_variant_family) -> {deck CapacitorDevice.name -> subckt name}.
@@ -945,10 +1009,13 @@ _BIPOLAR_DROPPED_PARAMS: tuple[str, ...] = ("PE", "AB", "PB", "AC", "PC", "NE")
 
 #: Per-PDK-family subcircuit length/width parameter spellings (see the module
 #: docstring): sky130 uses ``l``/``w``; gf180mcu's resistor/capacitor cells use
-#: distinct ``r_``/``c_`` prefixes.
+#: distinct ``r_``/``c_`` prefixes; sg13g2's `rsil`/`rppd`/`rhigh` subcircuits
+#: also use plain ``l``/``w`` (confirmed in the same fetched
+#: `resistors_mod.lib` cited by `_RESISTOR_MODEL_TABLE` above).
 _RESISTOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
     "sky130": ("l", "w"),
     "gf180mcu": ("r_length", "r_width"),
+    "sg13g2": ("l", "w"),
 }
 _CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
     "sky130": ("l", "w"),
