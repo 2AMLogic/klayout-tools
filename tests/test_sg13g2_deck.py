@@ -802,6 +802,84 @@ def test_sg13g2_unmarked_metal1_bar_is_not_a_resistor(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# --pdk resistor model binding (issue #1457): rsil/rppd/rhigh bind to their
+# real 3-terminal subcircuits; res_metal1/res_metal2 stay a documented
+# bare-`R`-card carve-out (verified against a real fetched IHP-Open-PDK
+# install -- see `pdk_models.py`'s module docstring). Mirrors
+# `test_extract.py`'s `test_pdk_resolved_writes_x_card_model_binding_sky130`/
+# `..._gf180mcu`, reusing this file's own poly/metal-resistor fixtures above.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("name", "extra_layers"),
+    [
+        ("rsil", ((111, 0), (24, 0))),
+        ("rppd", ((111, 0), (14, 0), (28, 0))),
+        ("rhigh", ((111, 0), (14, 0), (7, 0), (28, 0))),
+    ],
+)
+def test_pdk_resolved_binds_poly_resistor_sg13g2(
+    tmp_path: Path, name: str, extra_layers: tuple[tuple[int, int], ...]
+):
+    """--pdk binds each of sg13g2's drawn poly resistors (`rsil`/`rppd`/
+    `rhigh`) to its real 3-terminal subcircuit of the same name, whose
+    geometry parameters are spelled `l`/`w` (issue #1457) -- not the bare,
+    value-only `R`-card form (which cannot even represent the bulk-tie third
+    terminal in valid SPICE)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(extra_layers), tmp_path / f"{name}.gds"
+    )
+    out = str(tmp_path / f"{name}.spice")
+    report = run_extract(
+        path,
+        "sg13g2",
+        pdk_variant="ihp-sg13g2",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=out,
+    )
+
+    assert report["device_counts"] == {name: 1}
+    cards = _device_cards(report)
+    assert cards, "expected a device card"
+    assert all(card.startswith("X") for card in cards)
+    (card,) = cards
+    assert f" {name} " in card
+    substrate = EXTRACTION_DECK.substrate_net
+    # Three terminals: the two contacted heads plus the substrate-tied bulk.
+    assert card.split()[1:4] == ["RA", "RB", substrate]
+    # sg13g2 has no ambient `.option scale` (unlike sky130), so the geometry
+    # literal keeps the explicit micrometre-unit suffix, same as gf180mcu.
+    assert "l=6U" in card and card.endswith("w=1U")
+
+
+def test_pdk_resolved_leaves_res_metal1_as_bare_r_card(tmp_path: Path):
+    """Regression/carve-out guard: `res_metal1` has no curated resistor-model
+    table entry (issue #1457's verified finding -- the real fetched install
+    defines no `.subckt`/`.model` for it at all, unlike `rsil`/`rppd`/
+    `rhigh`), so it stays the bare `R`-card form under `--pdk`, exactly like
+    without `--pdk` -- never a guessed subcircuit call."""
+    path = _write_gds(_make_metal_resistor_layout(8, 8, 8), tmp_path / "res_metal1.gds")
+    out = str(tmp_path / "res_metal1.spice")
+    report = run_extract(
+        path,
+        "sg13g2",
+        pdk_variant="ihp-sg13g2",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=out,
+    )
+
+    assert report["device_counts"] == {"res_metal1": 1}
+    text = Path(out).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X", "R")
+    ]
+    (card,) = device_lines
+    assert card.startswith("R")
+    assert card.endswith("res_metal1")
+
+
+# --------------------------------------------------------------------------- #
 # Antenna diodes (issue #1234)
 # --------------------------------------------------------------------------- #
 

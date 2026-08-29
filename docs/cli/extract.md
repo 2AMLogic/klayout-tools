@@ -2135,7 +2135,7 @@ vendor deck expects:
 |---|---|---|
 | sky130 | bare micrometres — `L=0.15 W=0.65 AS=0.234` | The vendor deck (`libs.tech/combined/corners/all.spice`) sets `.option scale=1.0u` and documents the convention itself: *"1 micron width is W=1, not W=1u."* |
 | gf180mcu | explicit unit suffixes — `L=0.28U W=10U AS=0.5P` | No `.option scale` anywhere in `libs.tech/ngspice/`; its subcircuits declare raw-metre defaults (`.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7`), so an absolute literal is correct. |
-| sg13g2 | explicit unit suffixes | Unverified against a real IHP install; left on the default rather than changed on a guess. |
+| sg13g2 | explicit unit suffixes — `l=6U w=1U` | Confirmed (issue #1457) against a real fetched IHP-Open-PDK v0.3.0 install: no `.option scale` anywhere in `libs.tech/ngspice/`; its `sg13_lv_nmos`/`rsil`/`rppd`/`rhigh` subcircuits all declare raw-metre defaults, same convention as gf180mcu. |
 
 This matters because `.option scale` is applied **on top of** the parsed
 literal — ngspice multiplies a MOS card's `l`/`w`/`ps`/`pd` by `scale` and its
@@ -2152,7 +2152,7 @@ recognised analog device classes):
 | Device class | sky130 | gf180mcu | sg13g2 | Geometry on the `X` card |
 |---|---|---|---|---|
 | MOS (`nfet`/`pfet`) | ✅ (plus `hvi`-scoped `g5v0d10v5` flavour, issue #1369) | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
-| Resistor | ✅ | ✅ (all flavours) | ❌ (bare `R` card — no curated model table yet) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
+| Resistor | ✅ | ✅ (all flavours) | ✅ `rsil`/`rppd`/`rhigh` (issue #1457); ❌ `res_metal1`/`res_metal2` (verified carve-out — no real subcircuit exists) | `l`/`w` (sky130 or sg13g2) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | — (no capacitor recognition in that deck yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
 
@@ -2178,6 +2178,16 @@ convention), so combining `--pdk` with a non-default flavour emits
 flavour changes *which* subcircuit is called; it never changes
 `devices[].class` handling or the extracted resistance, which the deck
 computes from that flavour's own sheet rho either way.
+
+sg13g2 resistor note (issue #1457): `rsil`/`rppd`/`rhigh` bind to their real,
+identically-named 3-terminal subcircuits (`X … rsil l=… w=…`, the bulk-tie
+third terminal wired to `vsubs`) — a real fetched IHP-Open-PDK v0.3.0 install
+confirms all three in `libs.tech/ngspice/models/resistors_mod.lib`.
+`res_metal1`/`res_metal2` are a **verified carve-out**, not a "not implemented
+yet" gap: the same install defines no `.subckt`/`.model` for either name
+anywhere, so there is no real subcircuit for this table to bind to — they
+keep the bare `R`-card form under `--pdk`, unchanged from today, matching the
+"Scope limits" carve-out discipline below.
 
 Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
 (`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer
@@ -2216,14 +2226,18 @@ future epic):
   bind; only the `bjt` stays a bare card). Any other recognised device class
   with no curated binding entry is likewise written as its bare primitive card
   rather than a guessed subcircuit call.
-- **MOS-only binding for `sg13g2`** (issue #1231): its drawn poly resistors
-  (`rsil`, `rppd`, and — issue #1235 — `rhigh`) and drawn metal resistors
-  (`res_metal1`, `res_metal2`, also issue #1235) have no curated
-  resistor-model table entry yet, so they stay bare `R` cards under `--pdk`
-  — the same documented bare-primitive carve-out gf180mcu's `bjt` gets
-  above, not an error. Their model token is already the PDK's own
-  device-class name (`rsil`/`rppd`/`rhigh`/`res_metal1`/`res_metal2`), so a
-  consumer can supply the matching `.subckt`/`.model` itself.
+- **`sg13g2`'s drawn metal resistors are a verified carve-out** (`res_metal1`/
+  `res_metal2`, issue #1235's classes; the carve-out itself confirmed by
+  issue #1457): a real fetched IHP-Open-PDK v0.3.0 install defines no
+  `.subckt`/`.model` for either name anywhere under `libs.tech/ngspice/` or
+  `libs.tech/xyce/`, so there is no real subcircuit for this binding to call
+  — they stay bare `R` cards under `--pdk`, the same documented
+  bare-primitive carve-out gf180mcu's `bjt` gets above, not an error. Their
+  model token is already the PDK's own device-class name (`res_metal1`/
+  `res_metal2`), so a consumer can supply the matching `.model` itself. Its
+  drawn *poly* resistors (`rsil`/`rppd`/`rhigh`, issues #1231/#1235) **do**
+  bind, as of issue #1457 — see the "Coverage" table and "sg13g2 resistor
+  note" above.
 - **Three curated decks** (`sky130`, `gf180mcu`, `sg13g2` — the last as of
   issue #1231, resolved from the `ihp-sg13g2` variant name IHP-Open-PDK
   installs use); a resolved PDK whose
