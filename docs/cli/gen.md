@@ -96,45 +96,54 @@ generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 
 | Generator | `sky130` | `gf180mcu` | `sg13g2` |
 | --------- | :------: | :--------: | :------: |
-| `mos_array` | yes | yes | no — see below |
+| `mos_array` | yes | yes | yes |
 | `res_array` | yes | yes | yes |
 | `cap_array` | yes | no | no |
 | `guard_ring` | yes | yes | yes |
 | `well_island` | yes | yes | no |
-| `diff_pair` | yes | yes | no — see below |
+| `diff_pair` | yes | yes | yes |
 | `esd_device` | yes | yes | no |
 | `bond_pad` | yes | yes | no |
 | `bjt_array` | yes | yes | no |
 
-**sg13g2 (IHP-Open-PDK, issue #1448).** Only `res_array` and `guard_ring` are
-wired up against this family's curated deck
-(`klayout_tools.decks.sg13g2`) today, for two independent reasons:
+**sg13g2 (IHP-Open-PDK, issues #1448/#1450).** `res_array`/`guard_ring`
+(#1448) and `mos_array`/`diff_pair` (#1450) are wired up against this
+family's curated deck (`klayout_tools.decks.sg13g2`) today;
+`bjt_array`/`cap_array`/`esd_device`/`bond_pad`/`well_island` are not:
 
 - `bjt_array`/`cap_array` have no recognised device class in this deck's
   `EXTRACTION_DECK` at all (it declares `nfet`/`pfet`/three drawn poly
   resistors/two junction diodes only — see that module's own "Device-class
   coverage" note — no bipolars, no MiM capacitors).
 - `mos_array` (and, since it composes `mos_array`'s own unit-device drawing,
-  `diff_pair`) fails a **real** DRC check on this family:
+  `diff_pair`) initially failed a **real** DRC check on this family:
   `gatpoly.separation.activ.1` (`Gat.d`, "minimum GatPoly space to unrelated
   Activ", 0.07µm). The unit device's gate-poly landing pad (issue #461 — a
   `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` square, wider than the gate
   stripe it sits on) overhangs the channel gate on both sides so a contact
-  can land outside the channel; that overhang's own underside edge faces
-  unrelated `Activ` at zero lateral distance. Neither `sky130` nor `gf180mcu`
-  transcribes an equivalent poly-to-unrelated-active spacing rule in this
-  repo's curated deck, so this overhang has never before tripped a DRC
-  check. Widening the landing pad to close the gap would change every
-  currently-supported family's drawn geometry and reported port fields
-  (`mos_array`'s `U<i>_G` port width is defined off this pad) — out of this
-  table-driven fix's scope, so `mos_array`/`diff_pair` are rejected outright
-  on `sg13g2` rather than silently shipping DRC-dirty output.
+  can land outside the channel; with the pad sitting flush on the diffusion,
+  that overhang's own underside edge faced unrelated `Activ` at zero lateral
+  distance. Neither `sky130` nor `gf180mcu` transcribes an equivalent
+  poly-to-unrelated-active spacing rule in this repo's curated deck, so the
+  overhang had never tripped a DRC check before. **Issue #1450 fixed the
+  geometry**: on a family that declares a gate-pad clearance
+  (`gen.py`'s `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` — `sg13g2`: 0.1µm, the
+  only entry today), the landing pad is lifted that far clear of the
+  diffusion edge and the gap is bridged by a poly stem of exactly the gate
+  length, so no poly edge faces `Activ` at zero distance. On `sky130` and
+  `gf180mcu` the clearance is `0`, so their drawn geometry and their
+  `U<i>_G` port position/width are byte-for-byte unchanged. On `sg13g2` the
+  reported `U<i>_G` port sits 0.1µm higher than the equivalent sky130 device
+  (its *width* is still the landing pad's, unchanged).
 
 `esd_device`/`bond_pad`/`well_island` were simply not attempted for
 `sg13g2` by issue #1448 (no citable curated passivation-opening layer for
 `bond_pad`; no verification effort spent on the other two) — a documented
 gap, not a discovered defect, and open to a future contribution the same way
-the rest of this section describes. The resolved PDK-family *name* also
+the rest of this section describes. `esd_device` draws the same unit device
+`mos_array` does and so would likely inherit #1450's fix for free, but it
+also composes a ring/marker stack that was not verified on this family, so
+it stays deferred rather than shipped untested. The resolved PDK-family *name* also
 differs from every other family here: IHP-Open-PDK's own install-directory
 name (the `pdk.variant` string `klt pdk find` reports for a real fetched
 install) is `"ihp-sg13g2"`, not a `"sg13g2"`-prefixed string the way
@@ -206,6 +215,17 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
   returns `None` for a missing key, and generators report the resulting
   "role not drawn on this family" state through `drc_hints.notes` rather
   than failing.
+- **Family-specific *geometry*, not just layer numbers**: most generator
+  geometry is deliberately family-agnostic (every shared margin constant in
+  `gen.py` is sized to exceed *every* curated deck's equivalent rule), but a
+  family whose deck checks a rule the others simply do not transcribe can
+  need its own dimension. `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` is the
+  precedent (issue #1450): a small per-family table, defaulting to `0` — the
+  pre-existing geometry byte-for-byte — for every family not listed, threaded
+  to the PCell as a resolved hidden param exactly like
+  `well_island`'s `well_margin_resolved_um`. Prefer that shape over changing
+  a shared constant, which would move already-shipped families' drawn
+  geometry and reported port coordinates for no DRC benefit on them.
 - **A family entry does not have to support every generator on day one**:
   `_GENERATOR_FAMILY_DEFERRED` (plus a generator's own explicit missing-role
   check, e.g. `_cap_family_layers`'s/`_bond_pad_layer_params`'s) lets a
@@ -249,6 +269,14 @@ contact at the reported gate port straddled the diff edge
 width rather than `l_um`) — a JSON-contract-visible move of the gate port
 coordinate. The opt-in `finger_topology: "series"` shape described below pads
 every finger this way, not just the first (issue #781).
+
+On a PDK family whose curated deck checks poly-to-*unrelated*-active spacing,
+that pad is additionally stood off the diffusion edge by that family's
+gate-pad clearance and the gap bridged by a poly stem of exactly `l_um` (see
+"PDK-family support" above — `sg13g2`: 0.1 µm; `sky130`/`gf180mcu`: none, so
+their geometry and `U<i>_G` are unchanged). The clearance is resolved from the
+PDK, never a request param: a caller does not (and cannot) ask for it, but on
+`sg13g2` the reported `U<i>_G` `y_um` includes it.
 
 `gate_contact` (issue #492) finishes that stack rather than leaving it to the
 caller: it draws a contact **and** a local-metal pad on the landing pad, and

@@ -98,6 +98,7 @@ _HIDDEN_PARAMS = {
     "well_tap_implant_layer",
     "well_tap_implant_present",
     "well_margin_resolved_um",
+    "gate_pad_clearance_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -199,6 +200,50 @@ _PDK_WELL_ISOLATION_UM: dict[str, float] = {
     "sky130": 1.27,  # nwell.2 (different potential), euclidian
     "gf180mcu": 1.4,  # NW.2b (different potential), 3.3V
 }
+
+#: Per-PDK-family clearance (um) the unit device's gate-poly landing pad
+#: (issue #461) is held clear of the diffusion's own gate-side edge, drawn as
+#: a poly stem of exactly the gate length across the gap (issue #1450). See
+#: :func:`_mos_unit_layout` for the geometry.
+#:
+#: The landing pad is a :data:`CONTACT_SIZE_UM` + 2 * :data:`ENCLOSURE_MARGIN_UM`
+#: square -- wider than the gate stripe it sits on for every realistic gate
+#: length -- so it overhangs the gate on both sides. With no clearance the pad
+#: abuts the diffusion at ``y == w_um``, which puts the overhang's own
+#: underside edge (an edge with no active area beneath it, unlike the channel
+#: portion of the gate) facing unrelated ``active`` at *zero* lateral
+#: distance. sky130's and gf180mcu's curated decks transcribe no
+#: poly-to-unrelated-active spacing rule at all, so that has always been --
+#: and remains -- legal there; sg13g2's does, and flags it.
+#:
+#: A family absent from this table gets ``0.0`` (see
+#: :func:`_gate_pad_clearance_um`), i.e. the pre-#1450 geometry byte-for-byte:
+#: this is deliberately *not* applied universally, because lifting the pad
+#: also lifts the reported ``U<i>_G`` port (its ``y``, and with
+#: ``gate_contact`` the drawn contact/local-metal stack too), which would move
+#: every existing sky130/gf180mcu caller's gate port for no DRC benefit on
+#: those families (issues #461/#492/#781 pin that contract).
+#:
+#: - ``sg13g2``: 0.1um, comfortably above ``klayout_tools.decks.sg13g2``'s
+#:   ``gatpoly.separation.activ.1`` (`5_8_gatpoly.drc` rule ``Gat.d``,
+#:   "Min. GatPoly space to Activ", 0.07um -- the binding rule) and equal to
+#:   the enclosure budget :data:`ENCLOSURE_MARGIN_UM` every other margin in
+#:   this module is already sized against, so the drawn value keeps the same
+#:   ~40% headroom over the threshold that the rest of the generator's
+#:   constants keep over theirs. Landing the pad this way is also closer to
+#:   how a real device is drawn: the gate poly extends past the channel
+#:   (an endcap) rather than stopping dead on the diffusion edge.
+_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM: dict[str, float] = {
+    "sg13g2": 0.1,  # Gat.d (GatPoly space to Activ) is 0.07um
+}
+
+
+def _gate_pad_clearance_um(family: str) -> float:
+    """Return ``family``'s gate-poly-landing-pad clearance (see
+    :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`), or ``0.0`` for a family that
+    declares none -- the pre-#1450 geometry, byte-for-byte."""
+    return _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM.get(family, 0.0)
+
 
 #: A contact-to-contact edge gap (um) below this is *legal* under sky130's
 #: curated deck (which checks no ``licon1`` spacing rule at all) but close
@@ -623,30 +668,34 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     # cross-checked against a real fetched IHP-Open-PDK v0.3.0 install (the
     # same commit that deck's own module docstring pins).
     #
-    # Only `res_array` and `guard_ring` are actually wired up to *run* on
-    # this family -- every other generator is explicitly rejected
-    # (`_GENERATOR_FAMILY_DEFERRED`, `_device_layer_params`'s own hard-coded
-    # `sg13g2` check, and `_bond_pad_layer_params`'s missing-role guard)
-    # rather than silently producing untested output, for two distinct
-    # reasons:
+    # `res_array`/`guard_ring` (#1448) and `mos_array`/`diff_pair` (#1450)
+    # are wired up to *run* on this family; `bjt_array`/`cap_array`/
+    # `esd_device`/`bond_pad`/`well_island` are still explicitly rejected
+    # (`_GENERATOR_FAMILY_DEFERRED`, `_cap_family_layers`'s plate check, and
+    # `_bond_pad_layer_params`'s missing-role guard) rather than silently
+    # producing untested output:
     #
-    # - `mos_array`/`diff_pair`/`esd_device`/`bjt_array` all draw
-    #   `mos_array`'s own unit-device geometry, whose gate-poly landing pad
-    #   (issue #461) *actually fails* this family's real
-    #   `gatpoly.separation.activ.1` (`Gat.d`) DRC rule -- verified with a
-    #   real generated shape (see `_device_layer_params`'s own docstring for
-    #   the full geometric explanation). Every other currently-supported
-    #   family simply checks no equivalent poly-to-unrelated-active spacing
-    #   rule, so this was never caught before.
-    # - `bjt_array`/`cap_array` also have no recognised device class in this
+    # - `mos_array`/`diff_pair` were rejected by #1448 too, for a reason
+    #   unlike every other deferral here: their shared unit device's
+    #   gate-poly landing pad (issue #461) *actually failed* this family's
+    #   real `gatpoly.separation.activ.1` (`Gat.d`) DRC rule -- verified with
+    #   a real generated shape. #1450 fixed the geometry rather than the
+    #   table: `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` stands that pad off the
+    #   diffusion edge for this family only (see `_mos_unit_layout` for the
+    #   full geometric explanation), leaving sky130/gf180mcu byte-for-byte
+    #   unchanged. `esd_device` draws the same unit device and would very
+    #   likely follow for free, but it also composes a ring/marker stack this
+    #   issue did not verify on this family, so it stays deferred rather than
+    #   shipped untested.
+    # - `bjt_array`/`cap_array` have no recognised device class in this
     #   deck's `EXTRACTION_DECK` at all (`.bipolars`/`.capacitors` are both
-    #   empty), and `bond_pad`/`well_island` were not attempted by this issue
+    #   empty), and `bond_pad`/`well_island` were not attempted by #1448
     #   (no citable curated passivation-opening layer for the former; no
     #   verification effort spent on the latter's well-tie-implant story for
     #   the latter).
     #
-    # `res_array`/`guard_ring` were verified DRC-clean against
-    # `klt drc --deck sg13g2` on their documented default `params`, and
+    # Every generator wired up here was verified DRC-clean against
+    # `klt drc --deck sg13g2` on its documented default `params`, and
     # `res_array`'s default output round-trips through `klt extract --deck
     # sg13g2` to the `"rsil"` device class (see `_PDK_RES_FLAVOR_LAYERS`
     # below) -- the same bar `docs/cli/gen.md`'s "Adding a third PDK family"
@@ -950,40 +999,31 @@ def _device_layer_params(
     exactly, matching every other opt-in role here (e.g. ``esd_device``'s
     ``salicide_block``).
 
-    Rejects the ``sg13g2`` family outright (issue #1448), even though
-    :func:`_pdk_family` itself resolves it and every role below is populated
-    for it in :data:`_PDK_ROLE_LAYERS` -- unlike every other deferral in this
-    module, this one is a *verified DRC failure*, not an unattempted gap: the
-    unit device's own gate-poly landing pad (issue #461 -- a
-    ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` square, wider than the gate
-    stripe it sits on, that overhangs the channel gate on both sides so a
-    contact can land outside the channel) creates a step where the overhang's
-    own underside edge faces unrelated ``active`` at zero lateral distance.
-    Every other family's curated DRC deck simply checks no rule shaped like
-    sg13g2's ``gatpoly.separation.activ.1`` (``Gat.d``, 0.07um poly-to-
-    unrelated-active spacing) at all, so this overhang has never before
-    tripped a DRC check -- confirmed with a real fetched-shape reproduction
-    (``kdb.Region.separation_check`` still reports the overhang's step edges
-    even after ``.merged()``, since a native KLayout separation check is
-    edge-based, not whole-polygon: the channel portion's real area overlap
-    with ``active`` correctly exempts it, but the overhang's own edges are a
-    distinct, non-overlapping facing pair). Widening the landing pad's own
-    geometry to close this gap would change every currently-supported
-    family's drawn geometry and reported port fields (``mos_array``'s own
-    ``U<i>_G`` port width is defined off this pad, per issue #461/#492/#781)
-    -- out of this table-driven issue's scope; ``diff_pair`` composes this
-    same unit-device drawing (via :func:`_diff_pair_layer_params`) and so
-    inherits the identical rejection with no separate check needed."""
+    Finally resolves ``gate_pad_clearance_um`` (issue #1450) -- the
+    family-specific gap the unit device's gate-poly landing pad (issue #461)
+    is held clear of the diffusion's own gate-side edge (see
+    :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` and :func:`_mos_unit_layout`).
+    This is a *geometry* param rather than a layer one, mirroring
+    ``well_island``'s own harness-resolved ``well_margin_resolved_um``: the
+    landing pad is a ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` square, wider
+    than the gate stripe it sits on, so it overhangs the channel gate on both
+    sides -- and with no clearance the overhang's own underside edge (which,
+    unlike the channel portion, has no active area beneath it to exempt it)
+    faces unrelated ``active`` at *zero* lateral distance. sg13g2's curated
+    deck is the only one that transcribes a rule shaped like that
+    (``gatpoly.separation.activ.1``, ``Gat.d``, 0.07um poly-to-unrelated-
+    active spacing), which is why ``mos_array``/``diff_pair`` were rejected
+    outright on that family before #1450 -- a *verified DRC failure*, not an
+    unattempted gap (``kdb.Region.separation_check`` still reports the
+    overhang's step edges even after ``.merged()``, since a native KLayout
+    separation check is edge-based, not whole-polygon). ``0.0`` for
+    sky130/gf180mcu keeps their drawn geometry and reported ``U<i>_G`` port
+    (issues #461/#492/#781) byte-for-byte unchanged; ``diff_pair`` composes
+    this same unit-device drawing (via :func:`_diff_pair_layer_params`) and so
+    inherits the resolved clearance with no separate lookup needed."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
-    if family == "sg13g2":
-        raise GenError(
-            "generator 'mos_array': PDK family 'sg13g2' is not yet supported "
-            "by this generator -- the unit device's gate-poly landing pad "
-            "trips this family's gatpoly.separation.activ.1 DRC rule (see "
-            "docs/cli/gen.md's 'PDK-family support' section)"
-        )
     well = _role_layer_info(family, "well")
     dummy = _role_layer_info(family, "dummy")
     voltage_flavor = params.get("voltage_flavor", "")
@@ -1005,6 +1045,7 @@ def _device_layer_params(
             else kdb.LayerInfo(0, 0)
         ),
         "voltage_flavor_mark_present": voltage_flavor_mark is not None,
+        "gate_pad_clearance_um": _gate_pad_clearance_um(family),
     }
 
 
@@ -1358,6 +1399,7 @@ def _mos_unit_layout(
     fingers: int,
     gate_contact: bool = False,
     finger_topology: str = "series",
+    gate_pad_clearance_um: float = 0.0,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -1418,6 +1460,26 @@ def _mos_unit_layout(
     connected region, and the reported gate port moves to the raised
     contact's centre. Left at ``False`` (the default) the drawn geometry and
     the reported gate port are byte-for-byte the pre-#492 bare-poly gate.
+
+    ``gate_pad_clearance_um`` (issue #1450, resolved per PDK family by
+    :func:`_gate_pad_clearance_um`) stands that landing pad off the
+    diffusion's top edge instead of abutting it, bridging the gap with a poly
+    stem of exactly ``l_um`` -- the gate stripe's own width, so the poly stays
+    one connected region *and* the stem contributes no new edge at
+    ``y == w_um`` for a poly-to-active separation check to measure. That
+    matters because the pad is wider than the gate stripe for any realistic
+    ``l_um``: with no clearance, the two overhangs' undersides sit flush on
+    the diffusion's own top edge, facing unrelated ``active`` at zero
+    distance. sky130/gf180mcu pass ``0.0`` (neither curated deck checks
+    poly-to-unrelated-active spacing at all, and lifting the pad would move
+    their long-pinned ``U<i>_G`` port), so their drawn geometry is
+    byte-for-byte unchanged; sg13g2 passes a real clearance. The stem is only
+    ever ``l_um`` wide, never the pad's width, so a caller's existing gate
+    length still fully determines poly width here -- no new minimum-width or
+    poly-space rule binds. Only the ``"series"`` shape needs this: the
+    ``"parallel"`` strapped shape (:func:`_mos_unit_strapped_layout`) already
+    runs every gate stripe a full :data:`MIN_SAME_LAYER_SPACING_UM` plus a
+    contact region past the diffusion before widening into its comb.
     """
     if finger_topology == "parallel" and fingers > 1:
         return _mos_unit_strapped_layout(w_um, l_um, fingers, gate_contact)
@@ -1466,14 +1528,28 @@ def _mos_unit_layout(
         # contact_region_um square, and centred on the #461 pad it would
         # share the y == w_um edge with the S/D local-metal pads either side
         # -- merging into one polygon and shorting the gate to source/drain.
+        #
+        # `gate_pad_clearance_um` (issue #1450) additionally lifts the whole
+        # pad (and, with `gate_contact`, its stem/contact/metal stack) that
+        # far off y == w_um on families whose curated deck checks
+        # poly-to-unrelated-active spacing -- see the function docstring. The
+        # gap is bridged by a poly box of the gate stripe's *own* width
+        # (px0..px1), never the pad's: a full-width bridge would just move the
+        # overhang's underside edge up by the clearance instead of removing it
+        # from the diffusion's edge, and a stripe-width one adds no edge at
+        # y == w_um at all (it is flush with the gate stripe below it).
         pad_half = contact_region_um / 2.0
+        clearance_um = max(gate_pad_clearance_um, 0.0)
         stem_um = MIN_SAME_LAYER_SPACING_UM if gate_contact else 0.0
-        gate_ext_um = stem_um + contact_region_um
-        g_cy = w_um + stem_um + contact_region_um / 2.0
+        pad_y0 = w_um + clearance_um
+        gate_ext_um = clearance_um + stem_um + contact_region_um
+        g_cy = pad_y0 + stem_um + contact_region_um / 2.0
         for px0, px1 in poly_positions:
             g_cx = (px0 + px1) / 2.0
+            if clearance_um:
+                boxes["poly"].append((px0, w_um, px1, pad_y0))
             boxes["poly"].append(
-                (g_cx - pad_half, w_um, g_cx + pad_half, w_um + gate_ext_um)
+                (g_cx - pad_half, pad_y0, g_cx + pad_half, w_um + gate_ext_um)
             )
             if gate_contact:
                 boxes["contact"].append(
@@ -1704,6 +1780,7 @@ def _mos_array_layout(
     topology: str,
     gate_contact: bool = False,
     finger_topology: str = "parallel",
+    gate_pad_clearance_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1711,13 +1788,24 @@ def _mos_array_layout(
     ``finger_topology`` is forwarded to :func:`_mos_unit_layout` and decides
     whether a ``fingers > 1`` unit is one parallel folded device (the
     default) or an unstrapped series chain (issue #777).
+    ``gate_pad_clearance_um`` (issue #1450) is likewise forwarded; it grows
+    each unit's ``bbox_height_um``, so the row pitch and the enclosing well
+    follow it without any further arithmetic here (exactly as ``gate_contact``
+    already does).
 
     Also computes ``well_box_um`` -- a single well shape (per
     :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
     used only when the caller requests ``flavor="pfet"``."""
-    unit = _mos_unit_layout(w_um, l_um, fingers, gate_contact, finger_topology)
+    unit = _mos_unit_layout(
+        w_um,
+        l_um,
+        fingers,
+        gate_contact,
+        finger_topology,
+        gate_pad_clearance_um,
+    )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
 
@@ -2302,6 +2390,7 @@ def _diff_pair_layout(
     ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
     row_spacing_um: float = MIN_SAME_LAYER_SPACING_UM,
     gate_contact: bool = False,
+    gate_pad_clearance_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -2321,9 +2410,16 @@ def _diff_pair_layout(
     ``gate_contact`` (issue #492) is forwarded to :func:`_mos_unit_layout`;
     it grows each unit's ``bbox_height_um``, so both the row pitch and the
     automatically-sized guard ring follow it without any further arithmetic
-    here.
+    here. ``gate_pad_clearance_um`` (issue #1450) is forwarded the same way,
+    with the same knock-on effect.
     """
-    unit = _mos_unit_layout(w_um, l_um, 1, gate_contact)
+    unit = _mos_unit_layout(
+        w_um,
+        l_um,
+        1,
+        gate_contact,
+        gate_pad_clearance_um=gate_pad_clearance_um,
+    )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
 
@@ -3247,6 +3343,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "for params.voltage_flavor on this PDK family",
                 default=False,
             )
+            self.param(
+                "gate_pad_clearance_um",
+                self.TypeDouble,
+                "Harness-resolved clearance the gate-poly landing pad keeps "
+                "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -3267,6 +3370,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.topology,
                 self.gate_contact,
                 self.finger_topology,
+                self.gate_pad_clearance_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -4214,6 +4318,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "for params.voltage_flavor on this PDK family",
                 default=False,
             )
+            self.param(
+                "gate_pad_clearance_um",
+                self.TypeDouble,
+                "Harness-resolved clearance the gate-poly landing pad keeps "
+                "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"diff_pair(w={self.w_um},l={self.l_um},splits={self.splits})"
@@ -4235,6 +4346,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_padding_um,
                 self.row_spacing_um,
                 self.gate_contact,
+                self.gate_pad_clearance_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -5070,6 +5182,10 @@ def _mos_array_describe(
         params["topology"],
         params["gate_contact"],
         params["finger_topology"],
+        # Must match the value `_device_layer_params` threads to the PCell --
+        # the reported gate-port position is defined off the landing pad this
+        # clearance moves (issue #1450).
+        _gate_pad_clearance_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -6207,6 +6323,12 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
     if params["row_spacing_um"] < 0:
         raise GenError("generator 'diff_pair': params.row_spacing_um must be >= 0")
 
+    # `gate_pad_clearance_um` is deliberately left at its default here: this
+    # validator runs before the PDK family is resolved (the same PDK-agnostic
+    # position `_guard_ring_validate` already documents), and a family that
+    # does declare a clearance only makes the ring *taller* -- so validating
+    # the caller's requested ring gap against the no-clearance inner height is
+    # the conservative direction, never one that admits an unfittable gap.
     inner_w_um, inner_h_um = _auto_ring_inner_size_um(
         _diff_pair_layout(
             params["w_um"],
@@ -6243,6 +6365,8 @@ def _diff_pair_describe(
         params["ring_padding_um"],
         params["row_spacing_um"],
         params["gate_contact"],
+        # See the equivalent note in `_mos_array_describe` (issue #1450).
+        _gate_pad_clearance_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]

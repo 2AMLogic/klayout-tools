@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen mos_array` and `klt gen diff_pair` now support the
+  `sg13g2` (IHP-Open-PDK) PDK family (issue #1450), lifting the deliberate
+  rejection #1448 shipped. Root cause: the shared unit device's gate-poly
+  landing pad (issue #461) is a `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`
+  square that overhangs the narrower gate stripe on both sides, and with the
+  pad sitting flush on the diffusion those overhangs' undersides faced
+  unrelated `Activ` at zero distance — tripping `sg13g2`'s real
+  `gatpoly.separation.activ.1` (`Gat.d`, 0.07 µm), the only rule of that
+  shape any curated deck in this repo transcribes. The fix is a new
+  per-family `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` table in
+  `klayout_tools.gen`: on a family that declares a clearance (`sg13g2`:
+  0.1 µm — the only entry today) the landing pad is stood that far off the
+  diffusion edge and the gap is bridged by a poly stem of exactly the gate
+  length, so no poly edge faces `Activ` at zero distance. **`sky130` and
+  `gf180mcu` declare no clearance and are byte-for-byte unchanged** — same
+  drawn geometry, same `U<i>_G`/`*_G` port position and `width_um` (the
+  contract issues #461/#492/#781 pinned). On `sg13g2` only, the reported gate
+  port's `y_um` includes the clearance; its `width_um` is unchanged. Verified
+  DRC-clean with `klt drc --deck sg13g2` across both finger topologies,
+  `gate_contact`, `fingers > 1`, `dummy` columns, and `flavor="pfet"`.
+  `esd_device`/`bjt_array`/`cap_array`/`bond_pad`/`well_island` remain
+  explicitly rejected on `sg13g2`. No `schema_version` bump — no field
+  changed shape.
 - **Added**: `klt gen res_array`/`klt gen guard_ring` now support the
   `sg13g2` (IHP-Open-PDK) PDK family, alongside `sky130`/`gf180mcu` (issue
   #1448 — the concrete follow-through to #1266's "Adding a third PDK family"
@@ -22,12 +45,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `guard_ring`'s tap ring is drawn on sg13g2's `Activ` layer (no distinct tap
   mask on this family, mirroring gf180mcu's own `Comp` reuse). Both pass `klt
   drc --deck sg13g2` clean on their documented default `params`. `mos_array`/
-  `diff_pair` are **not** supported on `sg13g2`: the shared unit-device
-  gate-poly landing pad trips this family's real `gatpoly.separation.activ.1`
-  DRC rule (`Gat.d`), a genuine geometry gap neither `sky130` nor `gf180mcu`
-  happens to check for — requesting either generator against `sg13g2` now
-  fails with a specific error citing that rule rather than silently emitting
-  DRC-dirty output. `bjt_array`/`cap_array` (no bipolar/MiM-capacitor device
+  `diff_pair` were **not** supported on `sg13g2` by this issue: the shared
+  unit-device gate-poly landing pad tripped this family's real
+  `gatpoly.separation.activ.1` DRC rule (`Gat.d`), a genuine geometry gap
+  neither `sky130` nor `gf180mcu` happens to check for, so requesting either
+  generator against `sg13g2` failed with a specific error citing that rule
+  rather than silently emitting DRC-dirty output. (Superseded before release
+  by issue #1450 above, which fixes the geometry and lifts that rejection.)
+  `bjt_array`/`cap_array` (no bipolar/MiM-capacitor device
   recognition in this deck's curated `EXTRACTION_DECK`) and `esd_device`/
   `bond_pad`/`well_island` (not attempted by this issue) are also explicitly
   rejected for `sg13g2` rather than left to crash or silently succeed with

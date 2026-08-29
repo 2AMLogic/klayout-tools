@@ -3727,12 +3727,12 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 # --------------------------------------------------------------------------- #
 # sg13g2 (IHP-Open-PDK) support (issue #1448) -- the third family
 # `klayout_tools.gen._PDK_ROLE_LAYERS` supports, following #1266's own
-# "Adding a third PDK family" contribution guide. Only `res_array`/
-# `guard_ring` are actually wired up to *run* on this family -- see that
-# table's own "sg13g2" entry for the full rationale on why `mos_array`/
-# `diff_pair` (a verified DRC failure, not merely an unattempted gap) and
-# `bjt_array`/`cap_array`/`esd_device`/`bond_pad`/`well_island` are all
-# explicitly deferred instead.
+# "Adding a third PDK family" contribution guide. `res_array`/`guard_ring`
+# (#1448) and `mos_array`/`diff_pair` (#1450, via the family-resolved
+# gate-pad clearance `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` supplies) are wired
+# up to *run* on this family -- see that table's own "sg13g2" entry for the
+# rationale on why `bjt_array`/`cap_array`/`esd_device`/`bond_pad`/
+# `well_island` are still explicitly deferred.
 #
 # The resolved `--pdk`/`$PDK` *variant* string for a real IHP-Open-PDK
 # install is `"ihp-sg13g2"` (the install directory's own name -- see
@@ -3742,7 +3742,7 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 # --------------------------------------------------------------------------- #
 
 _SG13G2_VARIANT = "ihp-sg13g2"
-_SG13G2_GENERATORS = ("res_array", "guard_ring")
+_SG13G2_GENERATORS = ("res_array", "guard_ring", "mos_array", "diff_pair")
 
 
 @pytest.fixture()
@@ -3835,23 +3835,108 @@ def test_sg13g2_guard_ring_extracts_no_recognised_device(tmp_path, sg13g2_pdk_ro
     assert report["device_counts"] == {}
 
 
-@pytest.mark.parametrize("generator_name", ("mos_array", "diff_pair"))
-def test_sg13g2_mos_device_generators_rejected_with_drc_reason(
-    generator_name, tmp_path, sg13g2_pdk_root
+@pytest.mark.parametrize(
+    ("generator_name", "params"),
+    [
+        # The `"series"` unit shape is the one whose gate-poly landing pad
+        # (issue #461) overhangs the channel gate, so it is the shape #1450's
+        # clearance actually moves -- exercised here across every option that
+        # changes the drawn poly/active relationship (gate contact stack,
+        # multi-finger chains, dummy columns, an enclosing well).
+        ("mos_array", {"rows": 1, "cols": 1, "dummy": 0}),
+        ("mos_array", {"finger_topology": "series", "fingers": 3}),
+        ("mos_array", {"finger_topology": "series", "gate_contact": True}),
+        ("mos_array", {"finger_topology": "series", "fingers": 2, "dummy": 2}),
+        ("mos_array", {"finger_topology": "series", "flavor": "pfet"}),
+        ("mos_array", {"l_um": 0.13}),
+        # The `"parallel"` (default) strapped shape routes every gate into a
+        # comb well clear of the diffusion, so it never had the overhang --
+        # pinned here so a future clearance change cannot regress it either.
+        ("mos_array", {"finger_topology": "parallel", "fingers": 3}),
+        ("diff_pair", {"splits": 1, "add_guard_ring": False}),
+        ("diff_pair", {"splits": 2, "add_guard_ring": True}),
+        ("diff_pair", {"splits": 2, "gate_contact": True}),
+    ],
+)
+def test_sg13g2_mos_device_generators_are_drc_clean(
+    generator_name, params, tmp_path, sg13g2_pdk_root
 ):
-    """`mos_array`/`diff_pair` both draw `mos_array`'s own unit-device
-    geometry, whose gate-poly landing pad (issue #461) trips sg13g2's real
-    `gatpoly.separation.activ.1` DRC rule -- a verified failure, not an
-    unattempted gap, so both are explicitly rejected rather than silently
-    shipping DRC-dirty output."""
-    with pytest.raises(GenError, match="gatpoly.separation.activ.1"):
-        generate(
-            {
-                "generator": generator_name,
-                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
-                "options": {"output": str(tmp_path / "out.gds")},
-            }
-        )
+    """#1450: `mos_array`/`diff_pair` both draw `mos_array`'s own unit-device
+    geometry, whose gate-poly landing pad (issue #461) used to overhang the
+    channel gate straight onto the diffusion's own top edge -- tripping
+    sg13g2's real `gatpoly.separation.activ.1` (`Gat.d`, 0.07um) rule, the
+    only currently-curated deck that checks poly-to-unrelated-active spacing
+    at all. The family-resolved gate-pad clearance
+    (`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`) lifts that pad clear of the
+    diffusion, so both generators are now DRC-clean on this family across
+    every option that touches the poly/active relationship."""
+    output = tmp_path / f"{generator_name}_sg13g2_variant.gds"
+    generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "sg13g2")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13g2_gate_pad_clearance_lifts_pad_off_diffusion(tmp_path, sg13g2_pdk_root):
+    """The clearance is drawn as an actual poly stem, not merely asserted via
+    `klt drc`: the gate poly must stand exactly
+    `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM["sg13g2"]` further past the diffusion's
+    top edge than on a family with no clearance, and the reported `U0_G` port
+    must move with it (never reporting a position the drawn contact no longer
+    sits at)."""
+    from klayout_tools.gen import (
+        _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM,
+        CONTACT_SIZE_UM,
+        ENCLOSURE_MARGIN_UM,
+    )
+
+    clearance_um = _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM["sg13g2"]
+    assert clearance_um > 0
+
+    output = tmp_path / "mos_array_sg13g2_pad.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+                "finger_topology": "series",
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    pad_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    poly_bbox = _layer_bbox(output, 5, 0)  # GatPoly.drawing
+    activ_bbox = _layer_bbox(output, 1, 0)  # Activ.drawing
+    assert poly_bbox["top"] == pytest.approx(activ_bbox["top"] + clearance_um + pad_um)
+
+    gate = next(p for p in report["ports"] if p["name"] == "U0_G")
+    assert gate["y_um"] == pytest.approx(activ_bbox["top"] + clearance_um + pad_um / 2)
+    assert gate["width_um"] == pytest.approx(pad_um)
+
+
+@pytest.mark.parametrize("family", ("sky130", "gf180mcu"))
+def test_families_without_gate_pad_clearance_are_unchanged(family):
+    """#1450 must not move a single dbu on the two families that shipped
+    before it: neither declares a gate-pad clearance, so
+    `_gate_pad_clearance_um` resolves to exactly `0.0` and the unit-device
+    layout is byte-for-byte identical to the no-clearance call."""
+    assert gen._gate_pad_clearance_um(family) == 0.0
+    assert gen._mos_unit_layout(
+        0.42, 0.28, 2, finger_topology="series"
+    ) == gen._mos_unit_layout(
+        0.42, 0.28, 2, finger_topology="series", gate_pad_clearance_um=0.0
+    )
 
 
 @pytest.mark.parametrize("generator_name", ("bjt_array", "esd_device", "well_island"))
