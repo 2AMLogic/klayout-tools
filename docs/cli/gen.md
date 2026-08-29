@@ -80,18 +80,77 @@ successor.
 `diff_pair`, `esd_device`, `bond_pad`, and `bjt_array` (every generator except
 `resistor_strip`, the deliberately PDK-agnostic phase-1 reference generator)
 draw on their resolved PDK's own curated-DRC-deck layers (the same
-layer/datatype pairs `klt drc --deck sky130`/`--deck gf180mcu` check — see
-[`klt drc`](drc.md)), so they only support the `sky130`/`gf180mcu` PDK
-families (matched by the resolved `pdk.variant`'s prefix, e.g. `sky130A` or
-`gf180mcuC`). Any other resolved PDK family is an application error (exit
+layer/datatype pairs `klt drc --deck sky130`/`--deck gf180mcu`/`--deck
+sg13g2` check — see [`klt drc`](drc.md)), so each one only supports the PDK
+families whose curated deck it has been verified against — see the
+per-generator table below. Any other resolved PDK family (or a family a
+given generator has not been wired up for) is an application error (exit
 code `1`) — including a family `klt pdk find`/`list`/`env` themselves
 resolve successfully, since PDK *resolution* and generator layer-role
 *support* are independent: the resolver is generic across families, but each
 generator's layer lookup is a hardcoded per-family table (see "Adding a
 third PDK family" below). Every generator's **documented default `params`**
-are chosen to pass `klt drc --deck sky130` and `klt drc --deck gf180mcu`
-clean; a non-default `params` set is not guaranteed to (see each generator's
-"advisory, not authoritative" `drc_hints.notes` behaviour below).
+are chosen to pass `klt drc --deck <family>` clean on every family listed for
+it below; a non-default `params` set is not guaranteed to (see each
+generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
+
+| Generator | `sky130` | `gf180mcu` | `sg13g2` |
+| --------- | :------: | :--------: | :------: |
+| `mos_array` | yes | yes | no — see below |
+| `res_array` | yes | yes | yes |
+| `cap_array` | yes | no | no |
+| `guard_ring` | yes | yes | yes |
+| `well_island` | yes | yes | no |
+| `diff_pair` | yes | yes | no — see below |
+| `esd_device` | yes | yes | no |
+| `bond_pad` | yes | yes | no |
+| `bjt_array` | yes | yes | no |
+
+**sg13g2 (IHP-Open-PDK, issue #1448).** Only `res_array` and `guard_ring` are
+wired up against this family's curated deck
+(`klayout_tools.decks.sg13g2`) today, for two independent reasons:
+
+- `bjt_array`/`cap_array` have no recognised device class in this deck's
+  `EXTRACTION_DECK` at all (it declares `nfet`/`pfet`/three drawn poly
+  resistors/two junction diodes only — see that module's own "Device-class
+  coverage" note — no bipolars, no MiM capacitors).
+- `mos_array` (and, since it composes `mos_array`'s own unit-device drawing,
+  `diff_pair`) fails a **real** DRC check on this family:
+  `gatpoly.separation.activ.1` (`Gat.d`, "minimum GatPoly space to unrelated
+  Activ", 0.07µm). The unit device's gate-poly landing pad (issue #461 — a
+  `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` square, wider than the gate
+  stripe it sits on) overhangs the channel gate on both sides so a contact
+  can land outside the channel; that overhang's own underside edge faces
+  unrelated `Activ` at zero lateral distance. Neither `sky130` nor `gf180mcu`
+  transcribes an equivalent poly-to-unrelated-active spacing rule in this
+  repo's curated deck, so this overhang has never before tripped a DRC
+  check. Widening the landing pad to close the gap would change every
+  currently-supported family's drawn geometry and reported port fields
+  (`mos_array`'s `U<i>_G` port width is defined off this pad) — out of this
+  table-driven fix's scope, so `mos_array`/`diff_pair` are rejected outright
+  on `sg13g2` rather than silently shipping DRC-dirty output.
+
+`esd_device`/`bond_pad`/`well_island` were simply not attempted for
+`sg13g2` by issue #1448 (no citable curated passivation-opening layer for
+`bond_pad`; no verification effort spent on the other two) — a documented
+gap, not a discovered defect, and open to a future contribution the same way
+the rest of this section describes. The resolved PDK-family *name* also
+differs from every other family here: IHP-Open-PDK's own install-directory
+name (the `pdk.variant` string `klt pdk find` reports for a real fetched
+install) is `"ihp-sg13g2"`, not a `"sg13g2"`-prefixed string the way
+`"sky130A"`/`"gf180mcuC"` are literal prefixes of their own family names —
+see "Family key and resolution" below.
+
+`res_array`'s recognised poly-resistor flavour on `sg13g2` is `"generic"`
+only (`rsil`, 7Ω/□) — this family's other two recognised classes (`rppd`,
+`rhigh`) each need a *third* required mask beyond `res_array`'s two-slot
+`res_implant`/`res_block` flavour shape, so requesting `"high"`/`"xhigh"`
+there fails clearly (mirroring `gf180mcu`'s own single-flavour-only
+precedent). `guard_ring`'s tap ring is drawn on `sg13g2`'s `Activ` layer (it
+declares no distinct tap mask, the same "shared with transistor active"
+situation `gf180mcu`'s own `Comp` reuse documents) — DRC-clean, but not
+itself recognised as a distinct tap/tie device by `klt extract --deck
+sg13g2` (no currently-supported family's `guard_ring` output is).
 
 #### Adding a third PDK family
 
@@ -103,46 +162,69 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
 `_PDK_VOLTAGE_FLAVOR_LAYERS` tables). Concretely:
 
 - **Family key and resolution**: `_pdk_family()` maps a resolved
-  `pdk.variant` string (e.g. `"sky130A"`) to a family key by prefix match
-  against `_PDK_ROLE_LAYERS`'s top-level keys — so the new key must be a
-  literal prefix of every variant string the target PDK's resolver produces
-  (mirroring `"sky130"`/`"gf180mcu"`).
+  `pdk.variant` string to a family key in `_PDK_ROLE_LAYERS` by delegating to
+  `klayout_tools.pdk_models._pdk_variant_family()` (the same helper `sim.py`
+  already imports directly for its own MOS-model-binding lookup) — a plain
+  literal-prefix match against most variant strings (e.g. `"sky130A"` ->
+  `"sky130"`, `"gf180mcuC"` -> `"gf180mcu"`), *or* an explicit
+  `_PDK_VARIANT_FAMILY_ALIASES` entry for a variant whose resolved name is
+  not a prefix of its own family key at all (`"ihp-sg13g2"` -> `"sg13g2"`,
+  the exact shape a standalone, non-open_pdks-style PDK clone like
+  IHP-Open-PDK's SG13G2 or its sibling SG13CMOS5L produces — see `klt pdk
+  find`'s own flat-layout resolution in [`klt pdk`](pdk.md)). A brand-new
+  family needs a new `_KNOWN_PDK_FAMILIES`
+  entry in `pdk_models.py` (plus an alias there only if its resolved variant
+  name isn't a literal prefix of the family key), not a change to `gen.py`
+  itself.
 - **Mandatory roles**: `active`, `poly`, `contact`, and `metal` are drawn by
   essentially every generator (the base MOS/resistor unit-device geometry)
   and must resolve to a real `(layer, datatype)` pair — a generator cannot
   produce a device at all without them.
 - **Conditionally-required roles**: `well` (needed only when a generator
   draws a well-tap device, e.g. `guard_ring` or a `pfet`-flavoured
-  `mos_array`/`diff_pair`), `tap` (substrate/well tap rings), `res_mark`/
-  `bjt_mark` (device-class markers `klt extract`'s curated deck keys off of
-  — omitting them means the drawn device extracts as a generic short/wire
-  rather than its intended class), `metal_label` (the pin/label purpose of
-  the `metal` role — `well_island` names its tie's net there) and
-  `well_tap_implant` (only on a family whose well tie is drawn on the same
-  layer as transistor active, so the implant is the only thing marking it as
-  a tie — gf180mcu's `Nplus`; sky130 has a dedicated `tap` layer and needs
-  none), and the routing-plane roles (`metal2`/
-  `via1`, `metal3`/`via2`) `gen_compose`'s router resolves. Each role's
-  purpose and the exact curated-deck citation it must match is documented
-  inline as a comment on that role's entry in the existing `sky130`/
-  `gf180mcu` blocks of `_PDK_ROLE_LAYERS` — follow those comments' citation
-  style (point at the specific `klayout_tools.decks.<family>` rule or
-  `EXTRACTION_DECK` entry the number comes from, never an unverified guess).
+  `mos_array`/`diff_pair`), `tap` (substrate/well tap rings — always a real
+  layer for every family a `guard_ring`-composing generator supports, even
+  when it is the same physical layer as `active`, e.g. `gf180mcu`'s `Comp`
+  or `sg13g2`'s `Activ`), `res_mark`/`bjt_mark` (device-class markers `klt
+  extract`'s curated deck keys off of — omitting them means the drawn device
+  extracts as a generic short/wire rather than its intended class),
+  `metal_label` (the pin/label purpose of the `metal` role — `well_island`
+  names its tie's net there) and `well_tap_implant` (only on a family whose
+  well tie is drawn on the same layer as transistor active, so the implant
+  is the only thing marking it as a tie — gf180mcu's `Nplus`; sky130 has a
+  dedicated `tap` layer and needs none), and the routing-plane roles
+  (`metal2`/`via1`, `metal3`/`via2`) `gen_compose`'s router resolves. Each
+  role's purpose and the exact curated-deck citation it must match is
+  documented inline as a comment on that role's entry in the existing
+  `sky130`/`gf180mcu`/`sg13g2` blocks of `_PDK_ROLE_LAYERS` — follow those
+  comments' citation style (point at the specific `klayout_tools.decks.<family>`
+  rule or `EXTRACTION_DECK` entry the number comes from, never an unverified
+  guess).
 - **Optional roles**: any role a family's curated deck has no equivalent
   layer for (e.g. sky130's `_PDK_ROLE_LAYERS` entry has no `esd_mark`/
   `salicide_block`) may simply be omitted — `_role_layer_info()` already
   returns `None` for a missing key, and generators report the resulting
   "role not drawn on this family" state through `drc_hints.notes` rather
   than failing.
-- **The bar for landing it**: a contributed family's entry must be backed by
-  a **curated DRC/extraction deck** for that family (see [`klt drc`](drc.md)
-  / [`klt extract`](extract.md)) so `klt drc --deck <family>` can actually
-  check the drawn layers, and every affected generator's documented default
-  `params` must pass `klt drc --deck <family>` clean on it — the same bar
-  the existing `sky130`/`gf180mcu` support meets, stated above.
+- **A family entry does not have to support every generator on day one**:
+  `_GENERATOR_FAMILY_DEFERRED` (plus a generator's own explicit missing-role
+  check, e.g. `_cap_family_layers`'s/`_bond_pad_layer_params`'s) lets a
+  specific generator reject a family that otherwise resolves fine —
+  `sg13g2`'s own entry above is the precedent: a family can land with a
+  strict subset of generators actually wired up, each one verified rather
+  than assumed.
+- **The bar for landing a generator against a family**: that generator's
+  documented default `params` must pass `klt drc --deck <family>` clean, and
+  — where the deck recognises a device class the generator's output should
+  round-trip to — `klt extract --deck <family>` must recognise it as that
+  class (`res_array`'s `sg13g2` support round-trips to `"rsil"`, mirroring
+  `res_generic_po`/`ppolyf_u` on the other two families). A family/generator
+  pair that does not clear this bar is deferred (see above), never shipped
+  with an asterisk.
 
 This is a scope statement for what a contribution needs to satisfy, not a
-commitment that a third family is currently planned or in progress.
+commitment that a fourth family or full `sg13g2` generator coverage is
+currently planned or in progress.
 
 ### `mos_array` (family 1: matched transistor array)
 
@@ -318,16 +400,18 @@ Every unit (dummies included) has its resistive *body segment* — the middle
 span between the two contacted end pads — covered by the target PDK's own
 resistor-ID marker layer (sky130's `poly.res` `(66, 13)`; gf180mcu's
 `RES_MK` `(110, 5)`, plus the `Pplus`/`SAB` layers its own `ppolyf_u`
-device additionally requires), so `klt gen res_array`'s output is directly
-recognised as a resistor device by `klt extract --deck <pdk>` rather than
-being absorbed into ordinary poly interconnect as a short (issue #369).
-Neither curated *DRC* deck checks any of these layers, so drawing them never
-affects `klt drc` status. On sky130 only (issue #491), each *dummy* unit's
-body segment is additionally covered by the curated `dummy` marker layer, so
-`klt extract`'s dummy-device suppression (see "Dummy devices: the `dummy`
-marker layer" in `docs/cli/extract.md`) drops it from the extracted netlist
-instead of reporting it as a spurious unmatched device under `klt lvs` —
-gf180mcu draws no equivalent marker.
+device additionally requires; sg13g2's `PolyRes.drawing` `(128, 0)`, plus
+the `EXTBlock`/`Res` layers its own `rsil` device additionally requires — see
+below), so `klt gen res_array`'s output is directly recognised as a resistor
+device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
+poly interconnect as a short (issue #369). Neither curated *DRC* deck checks
+any of these layers, so drawing them never affects `klt drc` status. On
+sky130 only (issue #491), each *dummy* unit's body segment is additionally
+covered by the curated `dummy` marker layer, so `klt extract`'s dummy-device
+suppression (see "Dummy devices: the `dummy` marker layer" in
+`docs/cli/extract.md`) drops it from the extracted netlist instead of
+reporting it as a spurious unmatched device under `klt lvs` — gf180mcu/sg13g2
+draw no equivalent marker.
 
 `flavor` selects which recognised poly-resistor *device class* the array
 draws, by covering each body segment with the implant/precision-resistor
@@ -342,10 +426,15 @@ ladder uses to spend far fewer squares per ohm. The layer/purpose numbers
 come straight from the same `klayout_tools.decks.sky130` extraction deck that
 recognises them, so a `flavor="high"`/`"xhigh"` array round-trips through
 `klt extract` to the matching device class rather than always reading
-`res_generic_po`. gf180mcu exposes only its single `"generic"` flavour;
-requesting a sky130-only flavour there raises a clear error. As with the
-marker, no curated *DRC* deck checks these masks, so they never affect
-`klt drc` status.
+`res_generic_po`. gf180mcu and sg13g2 each expose only their single
+`"generic"` flavour (gf180mcu's `ppolyf_u`; sg13g2's `rsil`, 7Ω/□ — its
+`EXTBlock`/`Res` `requires` pair, `(111, 0)`/`(24, 0)`, from
+`klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors[0]`; sg13g2's other two
+recognised classes, `rppd`/`rhigh`, each need a *third* required mask this
+generator's two-slot flavour shape cannot express yet); requesting a
+sky130-only flavour on either raises a clear error. As with the marker, no
+curated *DRC* deck checks these masks, so they never affect `klt drc`
+status.
 
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
@@ -355,7 +444,7 @@ marker, no curated *DRC* deck checks these masks, so they never affect
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
-| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu) or, on sky130 only, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`) for the higher-sheet-rho flavours. Must be a flavour the resolved PDK family exposes. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2) or, on sky130 only, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`) for the higher-sheet-rho flavours. Must be a flavour the resolved PDK family exposes. |
 
 ### `cap_array` (MiM capacitor array, issue #1117)
 
@@ -399,12 +488,17 @@ there is no same-layer spacing violation between "segments") with
 local-metal ring on top, optionally enclosed by a well tie (`add_well`) on
 PDK families whose curated deck checks a well layer (gf180mcu's `Nwell`
 `(21, 0)`; sky130's `nwell.drawing` `(64, 20)`, matching
-`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`). Both supported PDK
-families draw the well tie by default — sky130's curated *DRC* deck happens
-to check no rule against that layer (so drawing it there never affects DRC
-status), which is different from "the layer doesn't exist"; a family with
-neither a well layer nor a well rule would still get the documented no-op,
-reported via `drc_hints.notes`. Four ports —
+`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; sg13g2's `NWell.drawing`
+`(31, 0)`, matching `klayout_tools.decks.sg13g2.EXTRACTION_DECK.nwell`).
+Every currently supported family draws the well tie by default — sky130's
+and sg13g2's curated *DRC* decks both happen to check no rule against that
+layer (so drawing it there never affects DRC status), which is different
+from "the layer doesn't exist"; a family with neither a well layer nor a
+well rule would still get the documented no-op, reported via
+`drc_hints.notes`. The tap ring itself is drawn on the target PDK's own
+`active` layer (gf180mcu's `Comp`, sg13g2's `Activ.drawing`) on the two
+families with no separate, dedicated tap mask; sky130 has one (`tap.drawing`)
+and uses it instead. Four ports —
 `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` — sit at the midpoint of each ring side.
 `device_count` is the number of tap contacts actually drawn
 (`2 * (contacts_ns + contacts_ew)`, less any the ring opening below clipped

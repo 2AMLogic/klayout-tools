@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen res_array`/`klt gen guard_ring` now support the
+  `sg13g2` (IHP-Open-PDK) PDK family, alongside `sky130`/`gf180mcu` (issue
+  #1448 — the concrete follow-through to #1266's "Adding a third PDK family"
+  contribution guide). `res_array`'s `"generic"` flavour round-trips through
+  `klt extract --deck sg13g2` to the `rsil` poly-resistor device class;
+  `guard_ring`'s tap ring is drawn on sg13g2's `Activ` layer (no distinct tap
+  mask on this family, mirroring gf180mcu's own `Comp` reuse). Both pass `klt
+  drc --deck sg13g2` clean on their documented default `params`. `mos_array`/
+  `diff_pair` are **not** supported on `sg13g2`: the shared unit-device
+  gate-poly landing pad trips this family's real `gatpoly.separation.activ.1`
+  DRC rule (`Gat.d`), a genuine geometry gap neither `sky130` nor `gf180mcu`
+  happens to check for — requesting either generator against `sg13g2` now
+  fails with a specific error citing that rule rather than silently emitting
+  DRC-dirty output. `bjt_array`/`cap_array` (no bipolar/MiM-capacitor device
+  recognition in this deck's curated `EXTRACTION_DECK`) and `esd_device`/
+  `bond_pad`/`well_island` (not attempted by this issue) are also explicitly
+  rejected for `sg13g2` rather than left to crash or silently succeed with
+  untested geometry. `_pdk_family()` now delegates variant -> family
+  classification to `klayout_tools.pdk_models._pdk_variant_family()` (the
+  same helper `sim.py` already imports directly) instead of its own
+  narrower literal-prefix scan, so IHP-Open-PDK's real resolved variant name
+  (`"ihp-sg13g2"`, which is not itself prefixed by `"sg13g2"`) resolves
+  correctly. No `schema_version` bump — no field changed shape.
 - **Fixed**: `klt pdk cells`: `_DEVICE_MODEL_RE` gains a leading `\b`
   token-boundary anchor, so a flavor-shaped substring embedded inside an
   unrelated identifier can no longer accidentally match. Each library's
