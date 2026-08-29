@@ -150,12 +150,12 @@ install) is `"ihp-sg13g2"`, not a `"sg13g2"`-prefixed string the way
 `"sky130A"`/`"gf180mcuC"` are literal prefixes of their own family names —
 see "Family key and resolution" below.
 
-`res_array`'s recognised poly-resistor flavour on `sg13g2` is `"generic"`
-only (`rsil`, 7Ω/□) — this family's other two recognised classes (`rppd`,
-`rhigh`) each need a *third* required mask beyond `res_array`'s two-slot
-`res_implant`/`res_block` flavour shape, so requesting `"high"`/`"xhigh"`
-there fails clearly (mirroring `gf180mcu`'s own single-flavour-only
-precedent). `guard_ring`'s tap ring is drawn on `sg13g2`'s `Activ` layer (it
+`res_array` exposes all three of this family's recognised poly-resistor
+classes (issue #1451): `"generic"` (`rsil`, 7Ω/□), `"rppd"` (260Ω/□) and
+`"rhigh"` (1360Ω/□) — see the `res_array` `flavor` description below for the
+mask set each one draws. sky130's differently-named `"high"`/`"xhigh"` are
+still rejected there, with an error naming this family's own flavours.
+`guard_ring`'s tap ring is drawn on `sg13g2`'s `Activ` layer (it
 declares no distinct tap mask, the same "shared with transistor active"
 situation `gf180mcu`'s own `Comp` reuse documents) — DRC-clean, but not
 itself recognised as a distinct tap/tie device by `klt extract --deck
@@ -454,15 +454,24 @@ ladder uses to spend far fewer squares per ohm. The layer/purpose numbers
 come straight from the same `klayout_tools.decks.sky130` extraction deck that
 recognises them, so a `flavor="high"`/`"xhigh"` array round-trips through
 `klt extract` to the matching device class rather than always reading
-`res_generic_po`. gf180mcu and sg13g2 each expose only their single
-`"generic"` flavour (gf180mcu's `ppolyf_u`; sg13g2's `rsil`, 7Ω/□ — its
-`EXTBlock`/`Res` `requires` pair, `(111, 0)`/`(24, 0)`, from
-`klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors[0]`; sg13g2's other two
-recognised classes, `rppd`/`rhigh`, each need a *third* required mask this
-generator's two-slot flavour shape cannot express yet); requesting a
-sky130-only flavour on either raises a clear error. As with the marker, no
-curated *DRC* deck checks these masks, so they never affect `klt drc`
-status.
+`res_generic_po`. gf180mcu exposes only its single `"generic"` flavour
+(`ppolyf_u`). sg13g2 exposes all three of its recognised poly-resistor
+classes (issue #1451), each drawing that class's own `requires` set from
+`klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`:
+
+| `flavor` | sg13g2 device class | Sheet ρ | Masks drawn over each body |
+| -------- | ------------------- | ------- | -------------------------- |
+| `"generic"` (default) | `rsil` | 7 Ω/□ | `EXTBlock` `(111, 0)` + `Res` `(24, 0)` |
+| `"rppd"` | `rppd` | 260 Ω/□ | `EXTBlock` + `pSD` `(14, 0)` + `SalBlock` `(28, 0)` |
+| `"rhigh"` | `rhigh` | 1360 Ω/□ | `EXTBlock` + `pSD` + `nSD` `(7, 0)` + `SalBlock` |
+
+Those classes' own `excludes` sets keep them mutually unambiguous — `rsil`
+excludes `pSD`/`SalBlock`/`nSD` and `rppd` excludes `nSD`, so drawing exactly
+one flavour's `requires` set can only ever extract as that flavour. Flavour
+names are per-family: requesting a sky130-only name (`"high"`/`"xhigh"`) on
+gf180mcu or sg13g2 — or an sg13g2-only name on sky130 — raises a clear error
+listing the flavours that family does expose. As with the marker, no curated
+*DRC* deck checks these masks, so they never affect `klt drc` status.
 
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
@@ -472,7 +481,7 @@ status.
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
-| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2) or, on sky130 only, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`) for the higher-sheet-rho flavours. Must be a flavour the resolved PDK family exposes. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on sg13g2, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. |
 
 ### `cap_array` (MiM capacitor array, issue #1117)
 

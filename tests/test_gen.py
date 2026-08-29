@@ -3744,6 +3744,18 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 _SG13G2_VARIANT = "ihp-sg13g2"
 _SG13G2_GENERATORS = ("res_array", "guard_ring", "mos_array", "diff_pair")
 
+#: sg13g2's poly-resistor marker plus the `requires` masks its three
+#: recognised poly-resistor classes are keyed off in
+#: `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors` -- the same layer
+#: numbers `gen._PDK_RES_FLAVOR_LAYERS`'s own `"sg13g2"` entry draws
+#: (issue #1451).
+_SG13G2_RES_MARK_LAYER = (128, 0)  # PolyRes -- every flavour's marker
+_SG13G2_EXTBLOCK_LAYER = (111, 0)  # EXTBlock -- every flavour's head term
+_SG13G2_RES_LAYER = (24, 0)  # Res -- rsil ("generic") only
+_SG13G2_PSD_LAYER = (14, 0)  # pSD -- rppd/rhigh
+_SG13G2_NSD_LAYER = (7, 0)  # nSD -- rhigh only (rppd excludes it)
+_SG13G2_SALBLOCK_LAYER = (28, 0)  # SalBlock -- rppd/rhigh
+
 
 @pytest.fixture()
 def sg13g2_pdk_root(tmp_path):
@@ -3801,10 +3813,125 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     assert report["device_counts"].get("rsil", 0) > 0
 
 
+def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):
+    """Widening this family's flavour set (issue #1451) must not move the
+    `"generic"` (`rsil`) default: an explicit `flavor="generic"` request stays
+    geometry-identical to one that never mentions `flavor`."""
+    output_default = tmp_path / "res_array_sg13g2_default.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_explicit = tmp_path / "res_array_sg13g2_generic.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": "generic"},
+            "options": {"output": str(output_explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_explicit)
+
+
+@pytest.mark.parametrize(
+    ("flavor", "expected_layers", "absent_layers"),
+    [
+        (
+            "rppd",
+            (_SG13G2_EXTBLOCK_LAYER, _SG13G2_PSD_LAYER, _SG13G2_SALBLOCK_LAYER),
+            (_SG13G2_NSD_LAYER, _SG13G2_RES_LAYER),
+        ),
+        (
+            "rhigh",
+            (
+                _SG13G2_EXTBLOCK_LAYER,
+                _SG13G2_PSD_LAYER,
+                _SG13G2_NSD_LAYER,
+                _SG13G2_SALBLOCK_LAYER,
+            ),
+            (_SG13G2_RES_LAYER,),
+        ),
+    ],
+)
+def test_sg13g2_res_array_higher_sheet_rho_flavor_draws_its_requires_masks(
+    tmp_path, sg13g2_pdk_root, flavor, expected_layers, absent_layers
+):
+    """`rppd` (3 masks) and `rhigh` (4 masks) each draw exactly the
+    `requires` set their `EXTRACTION_DECK.resistors` entry is keyed off --
+    the three/four-slot flavour shape issue #1451 widened `res_array` to,
+    beyond the two-slot `EXTBlock`/`Res` pair `"generic"` (`rsil`) uses."""
+    output = tmp_path / f"res_array_sg13g2_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _SG13G2_RES_MARK_LAYER in present
+    for layer in expected_layers:
+        assert layer in present, f"{flavor} must draw {layer}"
+    for layer in absent_layers:
+        assert layer not in present, f"{flavor} must not draw {layer}"
+
+
+@pytest.mark.parametrize("flavor", ("rppd", "rhigh"))
+def test_sg13g2_res_array_higher_sheet_rho_flavor_extracts_as_matching_class(
+    tmp_path, sg13g2_pdk_root, flavor
+):
+    """The end-to-end acceptance bar from issue #1451, mirroring sky130's own
+    `test_res_array_higher_sheet_rho_flavor_extracts_as_matching_class`: a
+    higher-sheet-rho sg13g2 flavour must classify through (unmodified) `klt
+    extract --deck sg13g2` as its own device class -- never the base `rsil`
+    -- so a schematic reference to `rppd`/`rhigh` can reach an LVS-clean
+    layout through `klt gen`."""
+    output = tmp_path / f"res_array_sg13g2_{flavor}_extract.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"num": 3, "dummy": 1, "flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13g2")
+
+    assert report["device_counts"].get(flavor, 0) > 0
+    assert report["device_counts"].get("rsil", 0) == 0
+
+
+@pytest.mark.parametrize("flavor", ("rppd", "rhigh"))
+def test_sg13g2_res_array_higher_sheet_rho_flavor_is_drc_clean(
+    tmp_path, sg13g2_pdk_root, flavor
+):
+    """The widened flavours hold the same `klt drc --deck sg13g2` clean bar
+    `_SG13G2_GENERATORS`' own default-params matrix enforces."""
+    output = tmp_path / f"res_array_sg13g2_{flavor}_drc.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "sg13g2")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 def test_sg13g2_res_array_rejects_sky130_only_flavor(tmp_path, sg13g2_pdk_root):
-    """sg13g2 exposes only the `"generic"` (`rsil`) poly-resistor flavour --
-    requesting sky130's `"high"`/`"xhigh"` fails clearly, mirroring
-    gf180mcu's own single-flavour precedent."""
+    """sg13g2 exposes `"generic"`/`"rppd"`/`"rhigh"` (its own curated deck's
+    three recognised poly-resistor classes) -- sky130's differently-named
+    `"high"`/`"xhigh"` are still rejected, and the error names this family's
+    own flavours."""
     with pytest.raises(GenError, match="not a recognised poly-resistor flavour"):
         generate(
             {
@@ -3814,6 +3941,24 @@ def test_sg13g2_res_array_rejects_sky130_only_flavor(tmp_path, sg13g2_pdk_root):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+def test_sg13g2_res_array_unrecognised_flavor_error_lists_all_three(
+    tmp_path, sg13g2_pdk_root
+):
+    """The unsupported-flavour error must list every flavour this family now
+    exposes, so a caller can discover `rppd`/`rhigh` from the failure alone."""
+    with pytest.raises(GenError) as excinfo:
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "params": {"flavor": "bogus"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+    message = str(excinfo.value)
+    assert "supported flavours: generic, rhigh, rppd" in message
 
 
 def test_sg13g2_guard_ring_extracts_no_recognised_device(tmp_path, sg13g2_pdk_root):
