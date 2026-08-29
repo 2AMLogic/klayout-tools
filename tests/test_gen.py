@@ -3725,6 +3725,180 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 
 
 # --------------------------------------------------------------------------- #
+# sg13g2 (IHP-Open-PDK) support (issue #1448) -- the third family
+# `klayout_tools.gen._PDK_ROLE_LAYERS` supports, following #1266's own
+# "Adding a third PDK family" contribution guide. Only `res_array`/
+# `guard_ring` are actually wired up to *run* on this family -- see that
+# table's own "sg13g2" entry for the full rationale on why `mos_array`/
+# `diff_pair` (a verified DRC failure, not merely an unattempted gap) and
+# `bjt_array`/`cap_array`/`esd_device`/`bond_pad`/`well_island` are all
+# explicitly deferred instead.
+#
+# The resolved `--pdk`/`$PDK` *variant* string for a real IHP-Open-PDK
+# install is `"ihp-sg13g2"` (the install directory's own name -- see
+# `test_pdk.py`'s flat-layout tests), not a `"sg13g2"`-prefixed string the
+# way `"sky130A"`/`"gf180mcuC"` are literal prefixes of their own family
+# keys -- `_make_install` below mirrors that real-world naming exactly.
+# --------------------------------------------------------------------------- #
+
+_SG13G2_VARIANT = "ihp-sg13g2"
+_SG13G2_GENERATORS = ("res_array", "guard_ring")
+
+
+@pytest.fixture()
+def sg13g2_pdk_root(tmp_path):
+    root = tmp_path / "pdk_install"
+    _make_install(root, _SG13G2_VARIANT)
+    return root
+
+
+def test_pdk_family_resolves_ihp_sg13g2_variant_alias():
+    """`_pdk_family` must resolve the real-world `"ihp-sg13g2"` variant
+    string to the `"sg13g2"` family key -- a plain prefix scan alone (this
+    module's pre-#1448 mechanism) would never match it, since `"ihp-sg13g2"`
+    does not start with `"sg13g2"`."""
+    assert gen._pdk_family(_SG13G2_VARIANT) == "sg13g2"
+
+
+@pytest.mark.parametrize("generator_name", _SG13G2_GENERATORS)
+def test_sg13g2_generator_default_params_are_drc_clean(
+    generator_name, tmp_path, sg13g2_pdk_root
+):
+    """`res_array`/`guard_ring`'s documented default `params` must pass `klt
+    drc --deck sg13g2` clean, the same bar `_PHASE2_GENERATOR_X_DECK`'s own
+    sky130/gf180mcu matrix enforces."""
+    output = tmp_path / f"{generator_name}_sg13g2.gds"
+    report = generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["pdk"]["variant"] == _SG13G2_VARIANT
+
+    drc_report = run_drc(str(output), "sg13g2")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk_root):
+    """`res_array`'s default output round-trips through `klt extract --deck
+    sg13g2` to the `"rsil"` device class (`res_mark`/`res_implant`/
+    `res_block` = PolyRes/EXTBlock/Res, matching
+    `EXTRACTION_DECK.resistors[0]`'s `marker`/`requires`) -- issue #369's
+    precedent, mirrored for the third family."""
+    output = tmp_path / "res_array_sg13g2.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13g2")
+
+    assert report["device_counts"].get("rsil", 0) > 0
+
+
+def test_sg13g2_res_array_rejects_sky130_only_flavor(tmp_path, sg13g2_pdk_root):
+    """sg13g2 exposes only the `"generic"` (`rsil`) poly-resistor flavour --
+    requesting sky130's `"high"`/`"xhigh"` fails clearly, mirroring
+    gf180mcu's own single-flavour precedent."""
+    with pytest.raises(GenError, match="not a recognised poly-resistor flavour"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "params": {"flavor": "high"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_sg13g2_guard_ring_extracts_no_recognised_device(tmp_path, sg13g2_pdk_root):
+    """`guard_ring`'s tap ring draws on `active` (sg13g2 declares no distinct
+    tap mask, see `_PDK_ROLE_LAYERS`'s own `"tap"` entry) but is not itself a
+    recognised device class on *any* currently supported family --
+    `klt extract --deck sg13g2` reports no devices at all."""
+    output = tmp_path / "guard_ring_sg13g2.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13g2")
+
+    assert report["device_counts"] == {}
+
+
+@pytest.mark.parametrize("generator_name", ("mos_array", "diff_pair"))
+def test_sg13g2_mos_device_generators_rejected_with_drc_reason(
+    generator_name, tmp_path, sg13g2_pdk_root
+):
+    """`mos_array`/`diff_pair` both draw `mos_array`'s own unit-device
+    geometry, whose gate-poly landing pad (issue #461) trips sg13g2's real
+    `gatpoly.separation.activ.1` DRC rule -- a verified failure, not an
+    unattempted gap, so both are explicitly rejected rather than silently
+    shipping DRC-dirty output."""
+    with pytest.raises(GenError, match="gatpoly.separation.activ.1"):
+        generate(
+            {
+                "generator": generator_name,
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+@pytest.mark.parametrize("generator_name", ("bjt_array", "esd_device", "well_island"))
+def test_sg13g2_deferred_generators_rejected(generator_name, tmp_path, sg13g2_pdk_root):
+    """`bjt_array` (no bipolar device recognition in this deck's curated
+    extraction deck -- `EXTRACTION_DECK.bipolars` is empty), `esd_device`,
+    and `well_island` (neither attempted by this issue) are all explicitly
+    deferred rather than silently accepted with untested geometry."""
+    with pytest.raises(GenError, match="not yet supported by this generator"):
+        generate(
+            {
+                "generator": generator_name,
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_sg13g2_cap_array_rejected(tmp_path, sg13g2_pdk_root):
+    """sg13g2's curated extraction deck declares no MiM-capacitor recognition
+    at all (`EXTRACTION_DECK.capacitors` is empty) -- `cap_array` stays
+    sky130-only, mirroring gf180mcu's own pre-existing exclusion."""
+    with pytest.raises(GenError, match="no MiM capacitor plate layers"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_sg13g2_bond_pad_rejected(tmp_path, sg13g2_pdk_root):
+    """sg13g2's curated deck cites no passivation-opening/pad-boundary layer
+    -- `bond_pad` raises a clear error instead of crashing on a `None` layer
+    param."""
+    with pytest.raises(GenError, match="no bond-pad"):
+        generate(
+            {
+                "generator": "bond_pad",
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Phase 4: bjt_array -- matched vertical-bipolar (PNP/BJT) array (Epic #152
 # phase 4, #176). Drawn from base layers per docs/design/gen-bjt-array-spike.md.
 # --------------------------------------------------------------------------- #

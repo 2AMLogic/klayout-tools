@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from .pdk import PdkNotFoundError, find_pdk
+from .pdk_models import _pdk_variant_family
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -615,7 +616,116 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `_bjt_unit_layout` already documents) is not a new citation.
         "salicide_block": (49, 0),  # SAB
     },
+    # sg13g2 (IHP-Open-PDK), issue #1448 -- the third family this table
+    # supports, following #1266's own "Adding a third PDK family" guide
+    # below. Every number here is transcribed from
+    # `klayout_tools.decks.sg13g2` (never a second, private layer map),
+    # cross-checked against a real fetched IHP-Open-PDK v0.3.0 install (the
+    # same commit that deck's own module docstring pins).
+    #
+    # Only `res_array` and `guard_ring` are actually wired up to *run* on
+    # this family -- every other generator is explicitly rejected
+    # (`_GENERATOR_FAMILY_DEFERRED`, `_device_layer_params`'s own hard-coded
+    # `sg13g2` check, and `_bond_pad_layer_params`'s missing-role guard)
+    # rather than silently producing untested output, for two distinct
+    # reasons:
+    #
+    # - `mos_array`/`diff_pair`/`esd_device`/`bjt_array` all draw
+    #   `mos_array`'s own unit-device geometry, whose gate-poly landing pad
+    #   (issue #461) *actually fails* this family's real
+    #   `gatpoly.separation.activ.1` (`Gat.d`) DRC rule -- verified with a
+    #   real generated shape (see `_device_layer_params`'s own docstring for
+    #   the full geometric explanation). Every other currently-supported
+    #   family simply checks no equivalent poly-to-unrelated-active spacing
+    #   rule, so this was never caught before.
+    # - `bjt_array`/`cap_array` also have no recognised device class in this
+    #   deck's `EXTRACTION_DECK` at all (`.bipolars`/`.capacitors` are both
+    #   empty), and `bond_pad`/`well_island` were not attempted by this issue
+    #   (no citable curated passivation-opening layer for the former; no
+    #   verification effort spent on the latter's well-tie-implant story for
+    #   the latter).
+    #
+    # `res_array`/`guard_ring` were verified DRC-clean against
+    # `klt drc --deck sg13g2` on their documented default `params`, and
+    # `res_array`'s default output round-trips through `klt extract --deck
+    # sg13g2` to the `"rsil"` device class (see `_PDK_RES_FLAVOR_LAYERS`
+    # below) -- the same bar `docs/cli/gen.md`'s "Adding a third PDK family"
+    # section states.
+    "sg13g2": {
+        "active": (1, 0),  # Activ.drawing -- EXTRACTION_DECK.active
+        "poly": (5, 0),  # GatPoly.drawing -- EXTRACTION_DECK.poly
+        "contact": (6, 0),  # Cont.drawing -- EXTRACTION_DECK.contact
+        "metal": (8, 0),  # Metal1.drawing -- EXTRACTION_DECK.metals[0]
+        "well": (31, 0),  # NWell.drawing -- EXTRACTION_DECK.nwell; this
+        # deck's own curated `DECK` list transcribes no rule against
+        # NWell.drawing at all (verified: no `nwell.*` entry in
+        # `klayout_tools.decks.sg13g2.DECK`), the identical "the layer is
+        # real, just uncheckable" situation sky130's own `"well"` entry
+        # above documents -- so `guard_ring`'s `add_well` never affects `klt
+        # drc --deck sg13g2` status.
+        "tap": (1, 0),  # Activ.drawing -- sg13g2 declares no distinct tap
+        # mask (`klayout_tools.decks.sg13g2.EXTRACTION_DECK.tap` is `None`;
+        # that module's own docstring: "sg13g2 draws no distinct tap mask
+        # ... derives well ties (`ntap`/`ptap` in `general_derivations.lvs`)
+        # from the *same* Activ layer as transistor source/drain"), the
+        # identical "no distinct tap layer, shared with transistor active"
+        # situation `gf180mcu`'s own `"tap": (22, 0)` (Comp) entry above
+        # documents (there, reusing gf180mcu's own `"active"` layer number
+        # for exactly the same reason). `guard_ring` draws its tap ring here
+        # -- DRC-clean against this deck's `activ.width.1`/`activ.space.1`/
+        # `activ.enclosing.cont.1` rules with the same generous margin every
+        # other family gets (`UNIT_MIN_W_UM`/`MIN_SAME_LAYER_SPACING_UM`/
+        # `ENCLOSURE_MARGIN_UM` above all exceed every sg13g2 FEOL/BEOL
+        # threshold this deck transcribes, the smallest of which -- `V1.c`'s
+        # 0.01um Metal1-encloses-Via1 -- is not even drawn by `guard_ring`).
+        # Not recognised by `klt extract` as a distinct well/substrate *tie*
+        # the way `well_island`'s own `well_tap_implant` role makes
+        # gf180mcu's tap ring recognisable
+        # (issue #1084) -- `guard_ring`/`diff_pair` draw no such implant on
+        # any currently-supported family, gf180mcu included, so this is not
+        # a new gap sg13g2 introduces.
+        "res_mark": (128, 0),  # PolyRes.drawing --
+        # `EXTRACTION_DECK.resistors[0]` (`"rsil"`, sg13g2's lowest-sheet-rho
+        # recognised poly resistor, 7 ohm/sq)'s `marker` field (issue #369's
+        # precedent: without it, a drawn poly body extracts as plain
+        # interconnect instead of a resistor device).
+    },
 }
+
+#: Generators whose current geometry is not wired up for a family that
+#: :func:`_pdk_family` otherwise resolves successfully -- distinct from an
+#: unresolvable family (:func:`_pdk_family`'s own error, e.g. a variant
+#: matching no family at all) and from a per-role gap a generator already
+#: checks explicitly (:func:`_cap_family_layers`'s ``cap_top_plate``/
+#: ``cap_bottom_plate`` check; :func:`_bond_pad_layer_params`'s own
+#: ``pad``/``top_metal`` check below). sg13g2 (issue #1448) resolves every
+#: role :func:`_bjt_layer_params`/:func:`_esd_device_layer_params`/
+#: :func:`_well_island_layer_params` treat as mandatory (``active``/
+#: ``contact``/``metal``/``tap``, all populated above for `guard_ring`'s own
+#: sake) -- so, unlike ``cap_array``/``bond_pad``, none of those three would
+#: raise or crash on their own. They are deferred here as a deliberate scope
+#: decision instead: this deck's `EXTRACTION_DECK` declares no bipolar
+#: device recognition at all (`bjt_array`), and `esd_device`/`well_island`
+#: were simply not attempted by this issue (see `docs/cli/gen.md`'s
+#: "PDK-family support" section) -- not a discovered defect in either.
+_GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
+    "bjt_array": ("sg13g2",),
+    "esd_device": ("sg13g2",),
+    "well_island": ("sg13g2",),
+}
+
+
+def _reject_deferred_family(generator_name: str, family: str) -> None:
+    """Raise :class:`GenError` when ``generator_name`` explicitly defers
+    ``family`` (see :data:`_GENERATOR_FAMILY_DEFERRED`) -- a no-op for every
+    other generator/family pair."""
+    if family in _GENERATOR_FAMILY_DEFERRED.get(generator_name, ()):
+        raise GenError(
+            f"generator '{generator_name}': PDK family '{family}' is not "
+            "yet supported by this generator -- see docs/cli/gen.md's "
+            "'PDK-family support' section"
+        )
+
 
 #: Per-PDK-family poly-resistor *flavour* -> implant/salicide-block layer pair,
 #: selected by ``res_array``'s ``flavor`` request param (issue #463). Unlike
@@ -652,6 +762,22 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, dict[str, tuple[int, int] | None]]] 
         # block) over the RES_MK marker (issue #369).
         "generic": {"res_implant": (31, 0), "res_block": (49, 0)},
     },
+    "sg13g2": {
+        # rsil (7 ohm/sq): sg13g2's lowest-sheet-rho recognised poly
+        # resistor -- `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors[0]`
+        # (`"rsil"`)'s `requires` is `((111, 0), (24, 0))` (EXTBlock, Res),
+        # beyond the `res_mark` (PolyRes) marker every flavour shares. Only
+        # this single flavour is exposed here -- this deck's other two
+        # recognised poly-resistor classes (`"rppd"`, 260 ohm/sq; `"rhigh"`,
+        # 1360 ohm/sq) each need a *third* `requires` layer beyond
+        # `res_implant`/`res_block`'s two-slot shape (`rppd`: EXTBlock + pSD
+        # + SalBlock; `rhigh`: EXTBlock + pSD + nSD + SalBlock) this
+        # generator's flavour mechanism cannot express without widening it --
+        # mirroring gf180mcu's own single-flavour-only precedent above
+        # exactly (a family exposing fewer flavours than sky130 is not a
+        # deck-authoring gap).
+        "generic": {"res_implant": (111, 0), "res_block": (24, 0)},
+    },
 }
 
 #: The default ``res_array`` flavour: the first flavour listed for each family
@@ -681,16 +807,34 @@ def _res_flavor_layers(family: str, flavor: str) -> dict[str, tuple[int, int] | 
 
 
 def _pdk_family(variant: str) -> str:
-    """Map a resolved PDK ``variant`` (e.g. ``"sky130A"``) to the layer-role
-    family (``"sky130"``/``"gf180mcu"``) key in :data:`_PDK_ROLE_LAYERS`.
+    """Map a resolved PDK ``variant`` (e.g. ``"sky130A"``, ``"gf180mcuC"``,
+    ``"ihp-sg13g2"``) to the layer-role family key
+    (``"sky130"``/``"gf180mcu"``/``"sg13g2"``) in :data:`_PDK_ROLE_LAYERS`.
 
-    Raises :class:`GenError` for any other family -- the four phase-2
+    Delegates the variant -> family classification to
+    :func:`klayout_tools.pdk_models._pdk_variant_family` -- the *same* helper
+    ``sim.py`` already imports directly for its own MOS-model-binding lookup
+    (issue #1448) -- rather than this module's own, narrower prefix-only scan
+    it replaces. This is a deliberate reuse, not a layering violation (see
+    that helper's own module for the equivalent note ``netlist_digest.py``
+    makes): ``pdk_models.py`` has no imports of its own beyond the stdlib, so
+    there is no import cycle. The reuse matters concretely for
+    ``"ihp-sg13g2"`` -- IHP-Open-PDK's own install-directory name, and the
+    exact ``variant`` string ``klt pdk find`` reports for a real fetched
+    install (see ``tests/test_pdk.py``'s flat-layout tests) -- which is
+    *not* a literal prefix of this module's ``"sg13g2"`` family key the way
+    ``"sky130A"``/``"gf180mcuC"`` are literal prefixes of ``"sky130"``/
+    ``"gf180mcu"``; a bare prefix scan here would never match it.
+    :data:`klayout_tools.pdk_models._PDK_VARIANT_FAMILY_ALIASES` is what
+    resolves that exact mismatch.
+
+    Raises :class:`GenError` for any other family -- the PDK-aware
     generators draw PDK-specific layers (unlike ``resistor_strip``, which is
     PDK-agnostic and never calls this).
     """
-    for family in _PDK_ROLE_LAYERS:
-        if variant.startswith(family):
-            return family
+    family = _pdk_variant_family(variant)
+    if family in _PDK_ROLE_LAYERS:
+        return family
     raise GenError(
         f"PDK variant '{variant}' is not supported by this generator -- "
         f"supported families: {', '.join(sorted(_PDK_ROLE_LAYERS))}"
@@ -804,10 +948,42 @@ def _device_layer_params(
     "no marker requested" and always resolves to absent -- a request that
     never mentions ``voltage_flavor`` reproduces the pre-#1054 geometry
     exactly, matching every other opt-in role here (e.g. ``esd_device``'s
-    ``salicide_block``)."""
+    ``salicide_block``).
+
+    Rejects the ``sg13g2`` family outright (issue #1448), even though
+    :func:`_pdk_family` itself resolves it and every role below is populated
+    for it in :data:`_PDK_ROLE_LAYERS` -- unlike every other deferral in this
+    module, this one is a *verified DRC failure*, not an unattempted gap: the
+    unit device's own gate-poly landing pad (issue #461 -- a
+    ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` square, wider than the gate
+    stripe it sits on, that overhangs the channel gate on both sides so a
+    contact can land outside the channel) creates a step where the overhang's
+    own underside edge faces unrelated ``active`` at zero lateral distance.
+    Every other family's curated DRC deck simply checks no rule shaped like
+    sg13g2's ``gatpoly.separation.activ.1`` (``Gat.d``, 0.07um poly-to-
+    unrelated-active spacing) at all, so this overhang has never before
+    tripped a DRC check -- confirmed with a real fetched-shape reproduction
+    (``kdb.Region.separation_check`` still reports the overhang's step edges
+    even after ``.merged()``, since a native KLayout separation check is
+    edge-based, not whole-polygon: the channel portion's real area overlap
+    with ``active`` correctly exempts it, but the overhang's own edges are a
+    distinct, non-overlapping facing pair). Widening the landing pad's own
+    geometry to close this gap would change every currently-supported
+    family's drawn geometry and reported port fields (``mos_array``'s own
+    ``U<i>_G`` port width is defined off this pad, per issue #461/#492/#781)
+    -- out of this table-driven issue's scope; ``diff_pair`` composes this
+    same unit-device drawing (via :func:`_diff_pair_layer_params`) and so
+    inherits the identical rejection with no separate check needed."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    if family == "sg13g2":
+        raise GenError(
+            "generator 'mos_array': PDK family 'sg13g2' is not yet supported "
+            "by this generator -- the unit device's gate-poly landing pad "
+            "trips this family's gatpoly.separation.activ.1 DRC rule (see "
+            "docs/cli/gen.md's 'PDK-family support' section)"
+        )
     well = _role_layer_info(family, "well")
     dummy = _role_layer_info(family, "dummy")
     voltage_flavor = params.get("voltage_flavor", "")
@@ -1006,6 +1182,7 @@ def _bjt_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _reject_deferred_family("bjt_array", family)
     well = _role_layer_info(family, "well")
     mark = _role_layer_info(family, "bjt_mark")
     dummy = _role_layer_info(family, "dummy")
@@ -1030,12 +1207,26 @@ def _bond_pad_layer_params(
     opening (``pad`` role) and the family's own topmost routing metal
     (``top_metal`` role) that must overlap it by ``params.enclosure_um`` on
     every side. Both roles are real, always-resolved layers for every
-    currently supported family -- unlike ``well``/``bjt_mark``/``dummy``
-    above, neither is ever ``None``, so this needs no ``*_present`` flag."""
+    family this generator supports -- unlike ``well``/``bjt_mark``/``dummy``
+    above, neither is ever ``None`` *there*, so this needs no ``*_present``
+    flag; a family with no curated passivation-opening/top-metal layer at all
+    (e.g. ``sg13g2``, issue #1448 -- this deck's own ``LAYER_NAMES`` cites no
+    pad-opening mask) raises :class:`GenError` here instead, mirroring
+    :func:`_cap_family_layers`'s own explicit missing-role check rather than
+    passing ``None`` through to a PCell layer param that requires a real
+    ``kdb.LayerInfo``."""
     family = _pdk_family(pdk_info["variant"])
+    pad = _role_layer_info(family, "pad")
+    top_metal = _role_layer_info(family, "top_metal")
+    if pad is None or top_metal is None:
+        raise GenError(
+            f"generator 'bond_pad': PDK family '{family}' has no bond-pad "
+            "passivation-opening/top-metal layers configured -- supported "
+            "families: gf180mcu, sky130"
+        )
     return {
-        "pad_layer": _role_layer_info(family, "pad"),
-        "top_metal_layer": _role_layer_info(family, "top_metal"),
+        "pad_layer": pad,
+        "top_metal_layer": top_metal,
     }
 
 
@@ -1070,6 +1261,7 @@ def _esd_device_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _reject_deferred_family("esd_device", family)
     esd_mark = _role_layer_info(family, "esd_mark")
     salicide_block = _role_layer_info(family, "salicide_block")
     return {
@@ -5973,6 +6165,7 @@ def _well_island_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _reject_deferred_family("well_island", family)
     well = _role_layer_info(family, "well")
     metal_label = _role_layer_info(family, "metal_label")
     implant = _role_layer_info(family, "well_tap_implant")
