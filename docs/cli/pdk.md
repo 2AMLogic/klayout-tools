@@ -177,7 +177,7 @@ not a full transcription:
 |---|---|---|
 | DRC geometric rules | one connected Activ→TopMetal2 stack (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2, Metal3, Via3, Metal4, Via4, Metal5, TopVia1, TopMetal1, TopVia2, TopMetal2 width/space/enclosure) | the rest of the DRM (density, antenna, forbidden-pattern, wide-metal refinements, `ThickGateOx`-scoped FEOL variants) |
 | LVS MOS devices | thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`, plus (issue #1231) the thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` flavour scoped to `ThickGateOx` (44/0) | RF MOS (`rfmos_*`), the `sg13_hv_svaricap` varactor |
-| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq), `rppd` (260 Ω/sq, issue #1231) and `rhigh` (1360 Ω/sq, issue #1235 — its upstream sheet-rho ambiguity resolved against a third citable source, `cornerRES.lib`'s `res_typ` corner); drawn metal resistors `res_metal1` (0.110 Ω/sq) and `res_metal2` (0.088 Ω/sq), issue #1235; antenna diodes `dantenna` (n+/p-substrate) and `dpantenna` (p+/NWell), issue #1234 | metal resistors `res_metal3`..`res_topmetal2`², MIM capacitors (`cap_cmim`/`rfcmim`)², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, `schottky_nbl1`³, inductors, ESD devices |
+| LVS other devices | drawn poly resistors `rsil` (7 Ω/sq), `rppd` (260 Ω/sq, issue #1231) and `rhigh` (1360 Ω/sq, issue #1235 — its upstream sheet-rho ambiguity resolved against a third citable source, `cornerRES.lib`'s `res_typ` corner); drawn metal resistors `res_metal1` (0.110 Ω/sq) and `res_metal2` (0.088 Ω/sq), issue #1235; antenna diodes `dantenna` (n+/p-substrate) and `dpantenna` (p+/NWell), issue #1234; MIM capacitors `cap_cmim` and `rfcmim` (1.5 fF/µm² area + 0.04 fF/µm perimeter, issue #1454) | metal resistors `res_metal3`..`res_topmetal2`², SiGe HBTs (`npn13G2`/`npn13G2l`/`npn13G2v`/`pnpMPA`)¹, `schottky_nbl1`³, `rfcmim`'s substrate terminal and RF parasitic network⁴, inductors, ESD devices |
 | Parasitics (`--parasitics`) | nothing curated — every conductor role reports as an uncalibrated gap | all RC coefficients |
 
 ¹ SiGe HBTs are a different kind of gap from the rest of this row: issue
@@ -189,26 +189,29 @@ engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
 investigated, declined" docstring section for the full finding.
 
-² MIM capacitors and the remaining metal resistors (`res_metal3` and up)
-are a different kind of gap from the rest of this row: their own recognition
-(populating `EXTRACTION_DECK.capacitors`/`.resistors` for them) is **still
-not curated** — issue #1233 (MIM caps) and issue #1235 (the remaining metal
-resistors) both investigated and deferred it, since both land on levels
-(MIM caps on Metal5 with a TopMetal1 via; `res_metal3`..`res_topmetal2` as
-high as TopMetal2 — `res_metal1`/`res_metal2` sit on Metal1/Metal2, already
-inside the stack, which is why issue #1235 could recognise those two without
-waiting on the extension) that were, at the time, above this deck's curated
+² The remaining metal resistors (`res_metal3` and up) are a different kind
+of gap from the rest of this row: their own recognition (populating
+`EXTRACTION_DECK.resistors` for them) is **still not curated** — issue
+#1233 (MIM caps) and issue #1235 (the remaining metal resistors) both
+investigated and deferred it, since both land on levels (MIM caps on Metal5
+with a TopMetal1 via; `res_metal3`..`res_topmetal2` as high as TopMetal2 —
+`res_metal1`/`res_metal2` sit on Metal1/Metal2, already inside the stack,
+which is why issue #1235 could recognise those two without waiting on the
+extension) that were, at the time, above this deck's curated
 Metal1/Via1/Metal2 stack — recognising either without a connectivity stack
 reaching that far would produce a device whose plates/body connect to
 nothing else in the extracted graph. Issue #1243 has since extended
 `metals`/`vias` up through TopMetal2 (the shared prerequisite both issues
 named), the same order sky130's own `met3`/`met4` MiM caps took (#619
 extended the stack, #775 then wired the via) rather than gf180mcu's single
-pass (whose stack already reached `Metal4` when its MiM cap was curated) —
-so recognising `cap_cmim`/`rfcmim` and `res_metal3`..`res_topmetal2` is now
-each its own standalone follow-on against the already-extended stack, not a
-blocked one. See `src/klayout_tools/decks/sg13g2.py`'s "MIM capacitors —
-investigated, deferred" docstring section for the full finding.
+pass (whose stack already reached `Metal4` when its MiM cap was curated).
+Issue #1454 has since taken the MIM-capacitor half of that follow-on
+(`cap_cmim`/`rfcmim` now recognised, both plates wired into the extended
+stack, `top_plate_via`/`top_plate_via_metal` set on the first pass);
+`res_metal3`..`res_topmetal2` remain a standalone follow-on against the
+already-extended stack, not a blocked one. See
+`src/klayout_tools/decks/sg13g2.py`'s "MIM capacitors" docstring section
+for the full history.
 
 ³ `schottky_nbl1` is likewise an *investigated, declined* gap (issue #1234):
 it extracts upstream through the same stock `DeviceExtractorBJT3Transistor`
@@ -218,6 +221,17 @@ terminal a dynamic per-instance `.covering(...)` derivation — neither
 expressible by `BipolarDevice`'s plain layer-intersection fields. See
 `src/klayout_tools/decks/sg13g2.py`'s "Schottky diode (schottky_nbl1) —
 investigated, declined" docstring section for the full finding.
+
+⁴ `rfcmim` is recognised (issue #1454) as its **2-terminal**
+plate-to-plate core only. Upstream it is a 3-terminal device — a `mim_sub`
+substrate terminal tied to the surrounding `ptap` ring, a `wfeed` parameter
+read off the drawn feed width, and a full RF lumped network
+(`lplate`/`lfeed`/`lskin`/`cox`/`csub`/`rsub`/`rmim`/`rskin` in
+`capacitors_mod.lib`'s `.subckt cap_rfcmim`) wrapped around the same
+`cmim_core` capacitor. `CapacitorDevice` models two plates and one
+capacitance, so the substrate terminal and the parasitic network are a
+documented approximation, not silently dropped: the plate-to-plate value
+itself is identical in both flavours.
 
 An unrecognised device class extracts as ordinary interconnect, so a design
 using one will see it as a short (LVS `device.unmatched`), never as a wrong

@@ -49,9 +49,10 @@ of issue #1231 -- ``sg13g2``; MOS only, as of issue #1400 -- ``sg13cmos5l``):
   bare-primitive carve-out gf180mcu's bipolar gets below.
 - **Capacitor** (sky130/gf180mcu) -- every ``CapacitorDevice`` class each deck
   declares, with plate ``L``/``W`` derived from the extracted plate area and
-  perimeter via :func:`equivalent_rectangle_um`. sg13g2's deck recognises no
-  capacitor device yet, so there is nothing to bind (tracked as a follow-up
-  once a `CapacitorDevice` entry lands for `cap_cmim`/`rfcmim`).
+  perimeter via :func:`equivalent_rectangle_um`. sg13g2's two MIM capacitors
+  (``cap_cmim``/``rfcmim``, issue #1454) have no curated entry yet and keep
+  their bare ``C``-card form -- the same documented bare-primitive carve-out
+  that deck's own poly resistors get above.
 - **Bipolar** -- **sky130 only** (``sky130_fd_pr__pnp_05v5``). gf180mcu's
   bipolar is deliberately left **unbound** (its recognised ``bjt`` device
   keeps KLayout's bare ``Q``-card form), because the gf180mcu deck itself has

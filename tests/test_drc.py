@@ -5387,13 +5387,16 @@ def test_sg13g2_extraction_deck_declares_mos_recognition():
     )
     assert deck.vias == ((19, 0), (29, 0), (49, 0), (66, 0), (125, 0), (133, 0))
     assert deck.tap is None
-    # `"resistor"` trails the MOS roles as of issue #1231's two curated poly
-    # resistors, followed by the two curated antenna diodes added by issue
-    # #1234; the thick-oxide MOS flavour added by #1231 deliberately shares
-    # the `nfet`/`pfet` labels (see `MOSFlavour`).
+    # The two MIM capacitors added by issue #1454 trail the MOS roles;
+    # `"resistor"` follows them as of issue #1231's curated poly resistors,
+    # then the two curated antenna diodes added by issue #1234. The
+    # thick-oxide MOS flavour added by #1231 deliberately shares the
+    # `nfet`/`pfet` labels (see `MOSFlavour`).
     assert deck.device_classes == (
         "nfet",
         "pfet",
+        "cap_cmim",
+        "rfcmim",
         "resistor",
         "dantenna",
         "dpantenna",

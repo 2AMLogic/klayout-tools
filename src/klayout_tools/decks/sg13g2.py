@@ -113,7 +113,9 @@ poly resistors; issue #1235 resolved the third poly-resistor flavour
 (``rhigh``, previously left unrecognised pending an external sheet-rho
 source -- see below) and added the two metal resistors that fit inside this
 deck's already-curated Metal1/Metal2 stack; issue #1234 added the two
-antenna diodes. Recognised today:
+antenna diodes; issue #1454 added the two MIM capacitors, once #1243's
+``metals``/``vias`` extension removed the blocker #1233 deferred them on.
+Recognised today:
 
 - **MOS** -- thin-oxide ``sg13_lv_nmos``/``sg13_lv_pmos`` (the default
   ``active``/``nwell`` split) and thick-oxide ``sg13_hv_nmos``/
@@ -126,6 +128,11 @@ antenna diodes. Recognised today:
 - **Junction diodes** (issue #1234) -- the two antenna diodes, ``dantenna``
   (n+ diffusion/p-substrate) and ``dpantenna`` (p+ diffusion/NWell) -- see
   ``EXTRACTION_DECK``'s own diode note below for the full derivation.
+- **MIM capacitors** (issue #1454) -- ``cap_cmim`` and ``rfcmim``, a
+  ``MIM`` (36/0) top plate over a ``Metal5`` (67/0) bottom plate with the
+  ``Vmim`` (129/0) via up to ``TopMetal1`` (126/0) -- see "MIM capacitors"
+  below for the deferral history and ``EXTRACTION_DECK``'s own
+  ``capacitors`` note for the derivation.
 
 Still unrecognised, each tracked as its own follow-on issue rather than left
 a silent gap (a device class this deck cannot recognise extracts as ordinary
@@ -141,10 +148,12 @@ device, never a wrong device with a plausible value):
   are now a standalone follow-on rather than a blocked one.
 - ``schottky_nbl1`` -- see "Schottky diode (``schottky_nbl1``) --
   investigated, declined" below -- plus the ``isolbox`` isolation device,
-  the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF
-  MOS/RF MIM variants, none of which is tracked yet.
+  the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF MOS
+  variants, none of which is tracked yet. (``rfcmim``, the RF MIM variant,
+  *is* recognised as of issue #1454 -- as its 2-terminal plate-to-plate
+  core, not its full 3-terminal RF network; see "MIM capacitors" below.)
 
-### MIM capacitors -- investigated/deferred (#1233), prerequisite landed (#1243)
+### MIM capacitors -- deferred (#1233), unblocked (#1243), recognised (#1454)
 
 Unlike the plain "not curated yet" gaps above, issue #1233 *investigated*
 populating ``EXTRACTION_DECK.capacitors`` for ``cap_cmim``/``rfcmim``
@@ -186,13 +195,30 @@ identical Metal2 ceiling).
 
 **Prerequisite landed (issue #1243):** ``EXTRACTION_DECK.metals``/``.vias``
 now reach ``TopMetal2`` (see "Scope guard" above and ``EXTRACTION_DECK``'s
-own ``metals``/``vias`` comment below) -- ``cap_cmim``/``rfcmim`` recognition
-itself is **still not declared** here; #1243 only extends the connectivity
-stack those plates would land on. Recognising ``cap_cmim``/``rfcmim`` is now
-a standalone follow-on (issue #1233, reopened against the extended stack)
-that can set ``top_plate_via``/``top_plate_via_metal`` correctly on the
-first pass, mirroring #775 rather than repeating sky130's two-step
-history.
+own ``metals``/``vias`` comment below) -- #1243 only extends the
+connectivity stack those plates land on, it does not declare the devices.
+
+**Recognition landed (issue #1454):** ``EXTRACTION_DECK.capacitors`` now
+declares both flavours, each setting ``top_plate_via``/
+``top_plate_via_metal`` (``Vmim`` 129/0 -> ``TopMetal1`` 126/0) on the
+*first* pass -- mirroring #775's end state rather than repeating sky130's
+two-step #619-then-#775 history, exactly as the deferral above intended.
+Both plates therefore land on tracked ``metals[]`` levels (Metal5 as the
+``bottom_plate`` directly, TopMetal1 through the via), so the recognised
+device is wired into the rest of the extracted graph instead of floating on
+the two isolated nodes #1233 declined to ship. The two flavours share
+byte-identical plate geometry and are separated solely by ``PWell.block``
+(46/21), the head term of upstream's own ``mimcap_exclude``
+(``cap_cmim`` subtracts it; ``rfcmim``'s ``rfmim_area =
+pwell_block.interacting(mim_drw)`` requires it). Area/perimeter
+coefficients come from the PDK's own ``cmim_core`` model card
+(``capacitors_mod.lib``'s ``CJ=cap_carea``/``CJSW=40E-18`` with
+``cornerCAP.lib``'s typical-corner ``cap_carea = 1.5E-15``), cross-checked
+against upstream's own worked ``C=74.620f`` example for a 7x7um plate. See
+``EXTRACTION_DECK``'s own ``capacitors`` comment below for the full
+derivation and this entry's documented approximations (notably: ``rfcmim``
+is a 3-terminal RF device upstream, modelled here as its 2-terminal
+plate-to-plate core only).
 
 ### Schottky diode (``schottky_nbl1``) -- investigated, declined (issue #1234)
 
@@ -356,6 +382,7 @@ diffed sky130's compiled deck against ``sky130.lvs``.
 from __future__ import annotations
 
 from . import (
+    CapacitorDevice,
     DiodeDevice,
     DrcRule,
     ExtractionDeck,
@@ -1343,6 +1370,153 @@ EXTRACTION_DECK = ExtractionDeck(
             pfet_provenance=_sg13g2_lvs_provenance(
                 "mos_extraction.lvs", "sg13_hv_pmos"
             ),
+        ),
+    ),
+    # Drawn MIM capacitors (issue #1454, the follow-on #1233 deferred and
+    # #1243/PR #1247's `metals`/`vias` extension unblocked -- see the module
+    # docstring's "MIM capacitors" section for the full deferral history).
+    # Transcribed from `cap_derivations.lvs`/`cap_extraction.lvs`/
+    # `cap_connections.lvs`:
+    #
+    #   rfmimcap_exc  = ind_drw.join(ind_pin)
+    #   mimcap_exclude= pwell_block.join(rfmimcap_exc)
+    #   mim_top       = mim_drw.overlapping(topmetal1_con)
+    #   mim_btm       = mim_drw.and(metal5_con)
+    #   mim_via       = vmim_drw.join(topvia1_drw).and(mim_drw)
+    #
+    #   cmim_top      = mim_top.not(mimcap_exclude)
+    #   cmim_btm      = mim_btm.covering(cmim_top)
+    #   extract_devices(MIMCAPExtractor.new('cap_cmim'),
+    #     { 'core' => cmim_top, 'top_mim' => cmim_top,
+    #       'btm_mim' => cmim_btm, ... })
+    #
+    #   rfmim_area    = pwell_block.interacting(mim_drw)
+    #   rfmim_top     = mim_top.and(rfmim_area).not(rfmimcap_exc)
+    #   rfmim_btm     = mim_btm.and(rfmim_area).covering(rfmim_top)
+    #   extract_devices(MIMCAPExtractor.new('rfcmim'),
+    #     { 'core' => rfmim_top, ..., 'sub_mk' => rfmim_sub })
+    #
+    #   connect(cmim_btm, metal5_con); connect(cmim_top, mim_via)
+    #   connect(mim_via, topmetal1_con)                (ditto rfcmim)
+    #
+    # Mapping onto this engine's `CapacitorDevice` model (`top_plate` and
+    # `bottom_plate` as two independent drawn layers, each narrowed by its
+    # own `requires`/`excludes`, the device value computed from their
+    # geometric *overlap*): `top_plate` is MIM (36/0), `bottom_plate` is
+    # Metal5 (67/0). Upstream's own `mim_btm = mim_drw.and(metal5_con)`
+    # intersection is exactly the overlap this engine already measures, so
+    # it is not re-expressed as a `bottom_plate_requires` term.
+    # `top_plate_via`/`top_plate_via_metal` are set on the *first* pass here
+    # (Vmim 129/0 -> TopMetal1 126/0), mirroring gf180mcu's Via4/Metal5 MiM
+    # stack rather than repeating sky130's two-step #619/#775 history --
+    # the whole point of waiting for #1243: both plates now land on tracked
+    # `metals[]` levels (Metal5 directly, TopMetal1 through Vmim), so the
+    # recognised device is wired into the rest of the extracted graph
+    # instead of floating on two isolated nodes.
+    #
+    # The two flavours share byte-identical plate geometry and are told
+    # apart solely by `PWell.block` (46/21), the head term of upstream's own
+    # `mimcap_exclude`: `cap_cmim` subtracts it, `rfcmim` requires it
+    # (`rfmim_area = pwell_block.interacting(mim_drw)`; the PDK's own
+    # `rfcmim_code.py` PyCell draws that ring at `Box(-3, -3, lu+3, wu+3)`,
+    # covering both plates, so intersecting with it reproduces upstream's
+    # `.and(rfmim_area)` narrowing on any real instance). That makes the two
+    # entries mutually exclusive by construction -- the same
+    # disambiguation-by-drawn-mask discipline `rppd`/`rhigh` above use.
+    #
+    # Capacitance coefficients come from the PDK's own SPICE model cards,
+    # not from the LVS deck (which carries none -- `MIMCAPExtractor` reports
+    # `A`/`P` and leaves the value to the model): `capacitors_mod.lib`'s
+    #   .model cmim_core C (TC1=3.6E-6 TC2=2E-9 TNOM=27
+    #                       CJ=cap_carea CJSW=40E-18)
+    # with `cap_carea = 1.5E-15` from `cornerCAP.lib`'s typical corner
+    # (`.LIB cap_typ`; the `cap_wc`/`cap_bc` corners scale it by 0.9/1.1 --
+    # the same "nominal/typical corner" convention `PARASITICS` below and
+    # the `rsil`/`rppd`/`rhigh` sheet rhos above already follow). Both
+    # flavours instantiate the *same* `cmim_core` device (`C1 1 MINUS
+    # cmim_core l=l/sf w=w/sf` in `cap_cmim`; `Cmim 4 5 cmim_core ...` in
+    # `cap_rfcmim`), so they share both coefficients. Cross-checked against
+    # the PDK's own worked example in `custom_reader.lvs` (`C1 PLUS MINUS
+    # cap_cmim w=6.99u l=6.99u m=1 C=74.620f`): a 7x7um plate gives
+    # `49 um^2 * 1.5e-15 + 28 um * 40e-18 = 74.62 fF` exactly.
+    #
+    # Documented approximations, in this deck's usual "known-unmodelled
+    # beats silently wrong" style:
+    #
+    # - `mim_top`'s `.overlapping(topmetal1_con)` narrowing is *not*
+    #   transcribed as a `top_plate_requires` entry: this engine's
+    #   `requires` is a boolean AND (it would clip the plate to the
+    #   TopMetal1 footprint), while upstream's `overlapping` is a
+    #   whole-polygon selection. The PDK's own `cmim_code.py` PyCell draws
+    #   TopMetal1 strictly *inside* the MIM plate, so an AND would understate
+    #   every real instance's area. The `top_plate_via` wiring above already
+    #   ties the plate to TopMetal1 for connectivity purposes.
+    # - `rfcmim` is upstream a **3-terminal** device (`mim_sub`, tied to the
+    #   `ptap` ring through `rfmim_sub = rfmim_area.sized(1.um)`) wrapped in
+    #   a full RF lumped network (`cap_rfcmim`'s `lplate`/`lfeed`/`lskin`/
+    #   `cox`/`csub`/`rsub`/`rmim`/`rskin` parameters, plus a `wfeed`
+    #   parameter derived from the drawn feed width). `CapacitorDevice` is a
+    #   2-terminal model, so the substrate terminal, `wfeed`, and the RF
+    #   parasitic network are not modelled -- the plate-to-plate capacitance
+    #   itself (the `cmim_core` term) is, and is the same in both flavours.
+    # - Upstream additionally removes `topvia1_drw` shapes that land on a
+    #   MIM plate from ordinary TopVia1 connectivity (`topvia1_n_cap =
+    #   topvia1_drw.not(mim_via)`). This engine's own equivalent (#364) is
+    #   keyed on `top_plate_via` being one of the deck's `vias`; the PDK's
+    #   own `cmim`/`rfcmim` PyCells draw `Vmim` (129/0, not a `vias` entry),
+    #   so `top_plate_via` names that layer and a hand-drawn TopVia1-over-MIM
+    #   stack would still be read as an ordinary Metal5<->TopMetal1 via.
+    # - `metal5_con = metal5.not(metal5_res)` is transcribed as a
+    #   `bottom_plate_excludes` term so a `Metal5.res`-marked segment (the
+    #   `res_metal5` metal resistor this deck does not curate) is never also
+    #   read as a capacitor plate. Upstream's `metal5 = metal5_drw
+    #   .join(metal5_filler).not(metal5_slit)` filler/slit terms are not
+    #   modelled by this deck at all and are not transcribed.
+    capacitors=(
+        CapacitorDevice(
+            name="cap_cmim",  # upstream LVS device-class name
+            top_plate=(36, 0),  # MIM.drawing
+            top_plate_excludes=(
+                (46, 21),  # PWell.block -\ `mimcap_exclude` (the term that
+                (27, 0),  # Ind.drawing  |  separates this flavour from
+                (27, 2),  # Ind.pin     -/  `rfcmim` below)
+            ),
+            bottom_plate=(67, 0),  # Metal5.drawing
+            bottom_plate_excludes=(
+                (67, 29),  # Metal5.res -- `metal5_con = metal5.not(metal5_res)`
+            ),
+            # `cmim_core`'s `CJ=cap_carea` at the typical corner
+            # (`cornerCAP.lib`'s `cap_typ`: `cap_carea = 1.5E-15`).
+            area_cap_f_um2=1.5e-15,
+            perim_cap_f_um=4.0e-17,  # `cmim_core`'s `CJSW=40E-18`
+            top_plate_via=(129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
+            top_plate_via_metal=(126, 0),  # TopMetal1.drawing
+            provenance=_sg13g2_lvs_provenance("cap_extraction.lvs", "cap_cmim"),
+        ),
+        CapacitorDevice(
+            name="rfcmim",  # upstream LVS device-class name
+            top_plate=(36, 0),  # MIM.drawing
+            top_plate_requires=(
+                (46, 21),  # PWell.block -- `rfmim_area`, see note above
+            ),
+            top_plate_excludes=(
+                (27, 0),  # Ind.drawing -\ `rfmimcap_exc`
+                (27, 2),  # Ind.pin     -/
+            ),
+            bottom_plate=(67, 0),  # Metal5.drawing
+            bottom_plate_requires=(
+                (46, 21),  # PWell.block -- `rfmim_btm`'s own `.and(rfmim_area)`
+            ),
+            bottom_plate_excludes=(
+                (67, 29),  # Metal5.res -- `metal5_con`, same as `cap_cmim`
+            ),
+            # Same `cmim_core` model card as `cap_cmim` above (`Cmim 4 5
+            # cmim_core l=l/sf w=w/sf` inside `.subckt cap_rfcmim`).
+            area_cap_f_um2=1.5e-15,
+            perim_cap_f_um=4.0e-17,
+            top_plate_via=(129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
+            top_plate_via_metal=(126, 0),  # TopMetal1.drawing
+            provenance=_sg13g2_lvs_provenance("cap_extraction.lvs", "rfcmim"),
         ),
     ),
     # Drawn precision poly resistors (issue #1231), transcribed from

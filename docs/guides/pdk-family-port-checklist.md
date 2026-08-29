@@ -269,10 +269,12 @@ both PDKs are still under active development.
 ### Capacitors — **[verified: layer status]** / **[release-notes: MoM maturity]**
 
 - SG13G2 has MIM capacitors (`cap_cmim`/`rfcmim`, GDS `MIM` layer 36/0 +
-  `Vmim` via layer 129/0) — **not yet curated in this repo's own sg13g2
-  deck either** (issue #1233 investigated and deferred it; see
-  `sg13g2.py`'s "MIM capacitors — investigated, deferred" docstring
-  section).
+  `Vmim` via layer 129/0) — curated in this repo's own sg13g2 deck as of
+  issue #1454, after issue #1233 investigated and deferred them behind
+  #1243's `metals`/`vias` stack extension; see `sg13g2.py`'s "MIM
+  capacitors" docstring section for the full history and the documented
+  approximations (`rfcmim`'s substrate terminal and RF parasitic network
+  are not modelled).
 - CMOS5L has **no MIM capacitors at all** — **[verified]**: `MIM` (36/0)
   and `Vmim` (129/0) are both in CMOS5L's own LVS forbidden-layer list
   (`cmos5l_forbidden_check.lvs`, "MIM capacitor layers" group) and its DRC
