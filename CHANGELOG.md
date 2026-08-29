@@ -37,6 +37,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `esd_device`/`bjt_array`/`cap_array`/`bond_pad`/`well_island` remain
   explicitly rejected on `sg13g2`. No `schema_version` bump — no field
   changed shape.
+- **Added**: `klt gen res_array` now exposes all three of `sg13g2`'s
+  recognised poly-resistor device classes, not just the base one (issue
+  #1451): `params.flavor` accepts `"rppd"` (260 Ω/□ — `EXTBlock` + `pSD` +
+  `SalBlock`) and `"rhigh"` (1360 Ω/□ — `EXTBlock` + `pSD` + `nSD` +
+  `SalBlock`) alongside the existing `"generic"` (`rsil`, 7 Ω/□). Both draw
+  their class's own `requires` set from
+  `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`, pass `klt drc
+  --deck sg13g2` clean, and round-trip through `klt extract --deck sg13g2` to
+  the matching device class. Internally, `gen.py`'s `_PDK_RES_FLAVOR_LAYERS`
+  widens from a fixed two-slot `res_implant`/`res_block` pair per flavour to
+  an ordered, arbitrary-length tuple of `requires` masks (the shape that
+  structurally blocked `rppd`/`rhigh` before); `_ResArrayPCell` declares one
+  static mask slot per mask the widest flavour in that table needs, so a
+  future family's five-mask class needs a table entry only. `sky130`'s
+  `"generic"`/`"high"`/`"xhigh"` and `gf180mcu`'s `"generic"` are
+  geometry-identical to before, and a flavour name a family does not expose is
+  still
+  rejected with an error listing that family's own flavours. No
+  `schema_version` bump — no field changed shape, and no request field
+  changed meaning.
 - **Added**: `klt gen res_array`/`klt gen guard_ring` now support the
   `sg13g2` (IHP-Open-PDK) PDK family, alongside `sky130`/`gf180mcu` (issue
   #1448 — the concrete follow-through to #1266's "Adding a third PDK family"

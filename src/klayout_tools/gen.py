@@ -83,7 +83,9 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: layer params (see :func:`_device_layer_params` and friends) plus
 #: ``well_present``, the harness-computed flag that tells a generator
 #: whether its ``well_layer`` param is a real, DRC-checked layer for the
-#: resolved PDK family.
+#: resolved PDK family. ``res_array``'s own per-flavour ``res_flavor_<i>_*``
+#: mask slots are appended below :data:`_PDK_RES_FLAVOR_LAYERS`, since how
+#: many of them exist is derived from that table.
 _HIDDEN_PARAMS = {
     "layer",
     "active_layer",
@@ -103,10 +105,6 @@ _HIDDEN_PARAMS = {
     "bjt_mark_present",
     "res_mark_layer",
     "res_mark_present",
-    "res_implant_layer",
-    "res_implant_present",
-    "res_block_layer",
-    "res_block_present",
     "dummy_layer",
     "dummy_present",
     "pad_layer",
@@ -652,7 +650,7 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `klt drc --deck gf180mcu` status.
         "esd_mark": (55, 0),  # Dualgate
         # Salicide-block role, shared with `_PDK_RES_FLAVOR_LAYERS`'s own
-        # `"generic"` `res_block` entry -- the *same* SAB (49/0) layer, not a
+        # gf180mcu `"generic"` mask set -- the *same* SAB (49/0) layer, not a
         # second private one: SAB is documented above as a general
         # "salicide block" mask, not a resistor-specific one, so reusing it
         # for `esd_device`'s own `salicide_block` option (a ballast-style
@@ -776,57 +774,121 @@ def _reject_deferred_family(generator_name: str, family: str) -> None:
         )
 
 
-#: Per-PDK-family poly-resistor *flavour* -> implant/salicide-block layer pair,
-#: selected by ``res_array``'s ``flavor`` request param (issue #463). Unlike
-#: the always-single roles in :data:`_PDK_ROLE_LAYERS`, a poly resistor's
-#: recognised device *class* is chosen by which implant/precision-resistor
-#: mask covers its body, and a single PDK family exposes several such classes.
+#: Per-PDK-family poly-resistor *flavour* -> the ordered set of extra mask
+#: layers that flavour's recognised device class requires over each unit's
+#: body segment, selected by ``res_array``'s ``flavor`` request param (issue
+#: #463). Unlike the always-single roles in :data:`_PDK_ROLE_LAYERS`, a poly
+#: resistor's recognised device *class* is chosen by which implant/precision-
+#: resistor masks cover its body, and a single PDK family exposes several such
+#: classes -- with a *different number* of masks per class (issue #1451): from
+#: none at all (sky130's ``res_generic_po``) up to four (sg13g2's ``rhigh``).
+#: Each entry is therefore a plain ordered tuple of ``(layer, datatype)``
+#: pairs, drawn in full over every unit body; an empty tuple means the flavour
+#: needs no mask beyond the shared ``res_mark`` marker. (Before #1451 this was
+#: a fixed two-slot ``res_implant``/``res_block`` dict, which structurally
+#: could not express sg13g2's three- and four-mask classes.)
+#:
 #: The layer/purpose numbers below are the *same* ``requires`` layers the
 #: curated *extraction* decks key each flavour off -- never a second, private
 #: map: sky130's ``res_high_po``/``res_xhigh_po`` from
 #: ``klayout_tools.decks.sky130.EXTRACTION_DECK.resistors`` (issue #222/#299),
-#: and gf180mcu's single ``ppolyf_u`` (issue #369). ``None`` means the flavour
-#: needs no layer of that kind (sky130's base ``res_generic_po`` requires
-#: neither, so a generator simply omits both there). The first-listed flavour
+#: gf180mcu's single ``ppolyf_u`` (issue #369), and sg13g2's
+#: ``rsil``/``rppd``/``rhigh`` (issues #1448/#1451). The first-listed flavour
 #: per family is that family's default (``_DEFAULT_RES_FLAVOR``), chosen so a
 #: request that never mentions ``flavor`` reproduces the pre-#463 geometry
-#: exactly (sky130 -> ``res_generic_po``, gf180mcu -> ``ppolyf_u``).
-_PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, dict[str, tuple[int, int] | None]]] = {
+#: exactly (sky130 -> ``res_generic_po``, gf180mcu -> ``ppolyf_u``, sg13g2 ->
+#: ``rsil``).
+_PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
     "sky130": {
         # sky130_fd_pr__res_generic_po (48.2 ohm/sq): the poly.res marker
         # alone, no implant/block -- the base, lowest-sheet-rho flavour.
-        "generic": {"res_implant": None, "res_block": None},
+        "generic": (),
         # sky130_fd_pr__res_high_po_* (319.8 ohm/sq): psdm P+ implant + rpm
         # precision-resistor mask (EXTRACTION_DECK.resistors["res_high_po"].
         # requires).
-        "high": {"res_implant": (94, 20), "res_block": (86, 20)},
+        "high": (
+            (94, 20),  # psdm -- P+ implant
+            (86, 20),  # rpm  -- 300 ohm precision-resistor mask
+        ),
         # sky130_fd_pr__res_xhigh_po_* (2 kohm/sq): psdm P+ implant + urpm
         # (EXTRACTION_DECK.resistors["res_xhigh_po"].requires). rpm/urpm are
         # mutually exclusive, so drawing urpm (not rpm) selects xhigh.
-        "xhigh": {"res_implant": (94, 20), "res_block": (79, 20)},
+        "xhigh": (
+            (94, 20),  # psdm -- P+ implant
+            (79, 20),  # urpm -- 2 kohm precision-resistor mask
+        ),
     },
     "gf180mcu": {
         # ppolyf_u: gf180mcu exposes a single recognised drawn-poly-resistor
         # flavour, which requires both Pplus (implant) and SAB (salicide
         # block) over the RES_MK marker (issue #369).
-        "generic": {"res_implant": (31, 0), "res_block": (49, 0)},
+        "generic": (
+            (31, 0),  # Pplus -- P+ implant
+            (49, 0),  # SAB   -- salicide block
+        ),
     },
     "sg13g2": {
-        # rsil (7 ohm/sq): sg13g2's lowest-sheet-rho recognised poly
-        # resistor -- `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors[0]`
-        # (`"rsil"`)'s `requires` is `((111, 0), (24, 0))` (EXTBlock, Res),
-        # beyond the `res_mark` (PolyRes) marker every flavour shares. Only
-        # this single flavour is exposed here -- this deck's other two
-        # recognised poly-resistor classes (`"rppd"`, 260 ohm/sq; `"rhigh"`,
-        # 1360 ohm/sq) each need a *third* `requires` layer beyond
-        # `res_implant`/`res_block`'s two-slot shape (`rppd`: EXTBlock + pSD
-        # + SalBlock; `rhigh`: EXTBlock + pSD + nSD + SalBlock) this
-        # generator's flavour mechanism cannot express without widening it --
-        # mirroring gf180mcu's own single-flavour-only precedent above
-        # exactly (a family exposing fewer flavours than sky130 is not a
-        # deck-authoring gap).
-        "generic": {"res_implant": (111, 0), "res_block": (24, 0)},
+        # All three entries below come straight from
+        # `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`' own
+        # `requires` sets, beyond the `res_mark` (PolyRes) marker every
+        # flavour shares. Each class's `excludes` set is what keeps them
+        # mutually unambiguous without this generator having to model
+        # exclusions: rsil excludes pSD/SalBlock/nSD, and rppd excludes
+        # nSD/nSD_block, so drawing exactly one flavour's `requires` set can
+        # only ever match that flavour.
+        #
+        # rsil (7 ohm/sq): the lowest-sheet-rho class, and this family's
+        # default -- `EXTRACTION_DECK.resistors["rsil"].requires`.
+        "generic": (
+            (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
+            (24, 0),  # Res       -- the silicided-resistor marker itself
+        ),
+        # rppd (260 ohm/sq): p+ doped, unsalicided poly --
+        # `EXTRACTION_DECK.resistors["rppd"].requires` (issue #1451). Three
+        # masks; rsil's own `excludes` (pSD, SalBlock) rule it out here.
+        "rppd": (
+            (111, 0),  # EXTBlock
+            (14, 0),  # pSD      -- p+ doped poly
+            (28, 0),  # SalBlock -- unsalicided (vs. rsil's 7 ohm/sq)
+        ),
+        # rhigh (1360 ohm/sq): the highest-sheet-rho class --
+        # `EXTRACTION_DECK.resistors["rhigh"].requires` (issue #1451). Four
+        # masks: unlike rppd it requires nSD present *alongside* pSD (the
+        # doping combination its higher sheet rho comes from), which is also
+        # exactly what rppd's own `excludes` subtracts.
+        "rhigh": (
+            (111, 0),  # EXTBlock
+            (14, 0),  # pSD      -\ both implants present together
+            (7, 0),  # nSD       -/
+            (28, 0),  # SalBlock -- unsalicided, same as rppd
+        ),
     },
+}
+
+#: The widest flavour in :data:`_PDK_RES_FLAVOR_LAYERS` -- how many
+#: ``requires``-mask slots ``_ResArrayPCell`` declares (a KLayout PCell's
+#: parameter list is static, so the slot count has to be fixed at class-
+#: declaration time). Derived from the table rather than hard-coded, so
+#: adding a flavour with more masks than any current one needs no PCell
+#: change: today ``4`` (sg13g2's ``rhigh``).
+_MAX_RES_FLAVOR_LAYERS = max(
+    (
+        len(layers)
+        for family in _PDK_RES_FLAVOR_LAYERS.values()
+        for layers in family.values()
+    ),
+    default=0,
+)
+
+#: ``res_array``'s flavour mask slots are generated from
+#: :data:`_MAX_RES_FLAVOR_LAYERS` (which depends on the table above), so they
+#: join :data:`_HIDDEN_PARAMS` here rather than being listed literally at its
+#: own definition -- they are harness-computed layer params like every other
+#: name in that set, never part of the request schema.
+_HIDDEN_PARAMS |= {
+    f"res_flavor_{i}_{suffix}"
+    for i in range(_MAX_RES_FLAVOR_LAYERS)
+    for suffix in ("layer", "present")
 }
 
 #: The default ``res_array`` flavour: the first flavour listed for each family
@@ -836,8 +898,8 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, dict[str, tuple[int, int] | None]]] 
 _DEFAULT_RES_FLAVOR = "generic"
 
 
-def _res_flavor_layers(family: str, flavor: str) -> dict[str, tuple[int, int] | None]:
-    """Return the ``res_implant``/``res_block`` layer pair for ``flavor`` in
+def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
+    """Return the ordered ``requires``-mask layer pairs for ``flavor`` in
     ``family`` (see :data:`_PDK_RES_FLAVOR_LAYERS`).
 
     Raises :class:`GenError` for a flavour the family does not expose, listing
@@ -1061,13 +1123,20 @@ def _resistor_layer_params(
     interconnect and the two terminals come out shorted together (issue
     #369). The marker alone selects the *base* device class; the
     higher-sheet-rho flavours a family recognises are selected by additionally
-    drawing an implant and/or precision-resistor mask over the same segment
-    (see :data:`_PDK_RES_FLAVOR_LAYERS`). The ``flavor`` request param picks
-    which flavour -- sky130's `res_generic_po` (default) needs neither mask,
-    while `res_high_po`/`res_xhigh_po` each need the psdm implant plus their
-    own rpm/urpm mask; gf180mcu's single `ppolyf_u` flavour needs both Pplus
-    and SAB. A ``None`` in the resolved pair follows the
-    `well_present`/`bjt_mark_present` precedent (the generator omits it).
+    drawing that class's own implant/precision-resistor masks over the same
+    segment (see :data:`_PDK_RES_FLAVOR_LAYERS`). The ``flavor`` request param
+    picks which flavour -- sky130's `res_generic_po` (default) needs no extra
+    mask at all, while `res_high_po`/`res_xhigh_po` each need the psdm implant
+    plus their own rpm/urpm mask; gf180mcu's single `ppolyf_u` needs both
+    Pplus and SAB; sg13g2's `rsil`/`rppd`/`rhigh` need two/three/four masks
+    respectively (issue #1451).
+
+    The resolved masks are handed to the PCell positionally, as
+    :data:`_MAX_RES_FLAVOR_LAYERS` ``res_flavor_<i>_layer``/
+    ``res_flavor_<i>_present`` slot pairs -- one static slot per mask the
+    *widest* flavour in the table needs, with the tail slots of a narrower
+    flavour left absent. Absence follows the `well_present`/`bjt_mark_present`
+    precedent (the generator omits that layer entirely).
 
     Also resolves ``dummy_layer``/``dummy_present`` (issue #491), the same
     optional PDK dummy-device marker :func:`_device_layer_params` resolves --
@@ -1078,24 +1147,23 @@ def _resistor_layer_params(
     flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
     flavor_layers = _res_flavor_layers(family, flavor)
     mark = _role_layer_info(family, "res_mark")
-    implant_pair = flavor_layers["res_implant"]
-    block_pair = flavor_layers["res_block"]
-    implant = kdb.LayerInfo(*implant_pair) if implant_pair is not None else None
-    block = kdb.LayerInfo(*block_pair) if block_pair is not None else None
     dummy = _role_layer_info(family, "dummy")
-    return {
+    resolved: dict[str, Any] = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
         "metal_layer": _role_layer_info(family, "metal"),
         "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "res_mark_present": mark is not None,
-        "res_implant_layer": implant if implant is not None else kdb.LayerInfo(0, 0),
-        "res_implant_present": implant is not None,
-        "res_block_layer": block if block is not None else kdb.LayerInfo(0, 0),
-        "res_block_present": block is not None,
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
     }
+    for i in range(_MAX_RES_FLAVOR_LAYERS):
+        pair = flavor_layers[i] if i < len(flavor_layers) else None
+        resolved[f"res_flavor_{i}_layer"] = (
+            kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
+        )
+        resolved[f"res_flavor_{i}_present"] = pair is not None
+    return resolved
 
 
 def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
@@ -3468,9 +3536,11 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Poly-resistor flavour selecting the recognised device class "
                 "by which implant/precision-resistor masks cover each body: "
                 "'generic' (default, the base sheet-rho flavour -- "
-                "res_generic_po on sky130, ppolyf_u on gf180mcu), or, on "
-                "sky130, 'high' (res_high_po) / 'xhigh' (res_xhigh_po) for the "
-                "higher-sheet-rho flavours (issue #463)",
+                "res_generic_po on sky130, ppolyf_u on gf180mcu, rsil on "
+                "sg13g2), or, on sky130, 'high' (res_high_po) / 'xhigh' "
+                "(res_xhigh_po), or, on sg13g2, 'rppd' (260 ohm/sq) / "
+                "'rhigh' (1360 ohm/sq) for the higher-sheet-rho flavours "
+                "(issues #463/#1451)",
                 default=_DEFAULT_RES_FLAVOR,
             )
             self.param(
@@ -3505,36 +3575,31 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "resolved PDK",
                 default=False,
             )
-            self.param(
-                "res_implant_layer",
-                self.TypeLayer,
-                "Resistor implant drawing layer (e.g. gf180mcu's Pplus) "
-                "required over the body segment for device recognition "
-                "(only used when res_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "res_implant_present",
-                self.TypeBoolean,
-                "Whether res_implant_layer is a real, DRC-checked layer for "
-                "the resolved PDK",
-                default=False,
-            )
-            self.param(
-                "res_block_layer",
-                self.TypeLayer,
-                "Resistor salicide-block drawing layer (e.g. gf180mcu's SAB) "
-                "required over the body segment for device recognition "
-                "(only used when res_block_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "res_block_present",
-                self.TypeBoolean,
-                "Whether res_block_layer is a real, DRC-checked layer for "
-                "the resolved PDK",
-                default=False,
-            )
+            # One static slot per mask the *widest* flavour in
+            # `_PDK_RES_FLAVOR_LAYERS` requires (issue #1451). A KLayout
+            # PCell's parameter list is fixed at declaration time, so the
+            # count comes from `_MAX_RES_FLAVOR_LAYERS` rather than the
+            # per-request flavour; a narrower flavour simply leaves its tail
+            # slots absent. Before #1451 these were two fixed
+            # `res_implant`/`res_block` slots, which could not express
+            # sg13g2's three-mask `rppd` / four-mask `rhigh` classes.
+            for i in range(_MAX_RES_FLAVOR_LAYERS):
+                self.param(
+                    f"res_flavor_{i}_layer",
+                    self.TypeLayer,
+                    f"Flavour requires-mask #{i} (implant / precision-resistor "
+                    "/ salicide-block layer, e.g. gf180mcu's Pplus or SAB) "
+                    "drawn over the body segment for device recognition "
+                    f"(only used when res_flavor_{i}_present)",
+                    default=kdb.LayerInfo(0, 0),
+                )
+                self.param(
+                    f"res_flavor_{i}_present",
+                    self.TypeBoolean,
+                    f"Whether res_flavor_{i}_layer is a real, DRC-checked "
+                    "layer the resolved PDK's requested flavour requires",
+                    default=False,
+                )
             self.param(
                 "dummy_layer",
                 self.TypeLayer,
@@ -3582,18 +3647,25 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
 
-            # Draw the PDK resistor-ID marker (and, on gf180mcu, the implant/
-            # salicide-block requires-layers) over every unit's body segment
-            # -- dummies included, since they are structurally real unit
-            # resistors too (mirrors `mos_array`'s dummy gates, which are
-            # drawn identically to real ones) -- see :func:`_res_unit_layout`
-            # for why the marker box excludes the contacted end pads.
+            # Draw the PDK resistor-ID marker, plus every requires-mask the
+            # requested flavour needs (none on sky130's `res_generic_po`, two
+            # on gf180mcu's `ppolyf_u` and sg13g2's `rsil`, three on sg13g2's
+            # `rppd`, four on its `rhigh` -- issue #1451), over every unit's
+            # body segment -- dummies included, since they are structurally
+            # real unit resistors too (mirrors `mos_array`'s dummy gates,
+            # which are drawn identically to real ones) -- see
+            # :func:`_res_unit_layout` for why the marker box excludes the
+            # contacted end pads.
             marker_boxes = unit_boxes["marker"]
-            for present, layer_param in (
+            for present, layer_param in [
                 (self.res_mark_present, self.res_mark_layer),
-                (self.res_implant_present, self.res_implant_layer),
-                (self.res_block_present, self.res_block_layer),
-            ):
+            ] + [
+                (
+                    getattr(self, f"res_flavor_{i}_present"),
+                    getattr(self, f"res_flavor_{i}_layer"),
+                )
+                for i in range(_MAX_RES_FLAVOR_LAYERS)
+            ]:
                 if not present:
                     continue
                 li_mark = self.layout.layer(layer_param)
