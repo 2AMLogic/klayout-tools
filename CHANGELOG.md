@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt extract --deck sg13g2` now recognises the PDK's two MIM
+  capacitors, `cap_cmim` and `rfcmim` (issue #1454) — closing out the
+  deferral issue #1233 opened. `EXTRACTION_DECK.capacitors` declares a `MIM`
+  (36/0) top plate over a `Metal5` (67/0) bottom plate, with
+  `top_plate_via`/`top_plate_via_metal` set on the first pass (`Vmim` 129/0
+  → `TopMetal1` 126/0). Both plates therefore land on tracked `metals[]`
+  levels, so the recognised device is wired into the rest of the extracted
+  graph rather than floating on two isolated nodes — the precise condition
+  #1233 deferred on and issue #1243 (PR #1247) removed by extending the
+  deck's `metals`/`vias` stack to TopMetal2. The two flavours share
+  byte-identical plate geometry and are separated solely by `PWell.block`
+  (46/21), the head term of upstream's own `mimcap_exclude`. Area/perimeter
+  coefficients (1.5 fF/µm² / 0.04 fF/µm) are transcribed from the PDK's own
+  `cmim_core` model card (`capacitors_mod.lib`'s `CJ=cap_carea`/`CJSW=40E-18`
+  with `cornerCAP.lib`'s typical-corner `cap_carea = 1.5E-15`) and
+  cross-checked against upstream's own worked `C=74.620f` example for a
+  7×7 µm plate. `device_classes` for this deck gains `"cap_cmim"`/`"rfcmim"`
+  (additive; they trail the MOS roles, ahead of `"resistor"`). Documented
+  approximations: `rfcmim` is modelled as its 2-terminal plate-to-plate core
+  only (its substrate terminal, `wfeed`, and RF parasitic network are not
+  expressible in `CapacitorDevice`), and neither entry is bound to a SPICE
+  subcircuit under `--pdk` yet, so both keep KLayout's bare `C`-card form.
+  No `schema_version` bump — no field changed shape.
 - **Added**: `klt gen mos_array` and `klt gen diff_pair` now support the
   `sg13g2` (IHP-Open-PDK) PDK family (issue #1450), lifting the deliberate
   rejection #1448 shipped. Root cause: the shared unit device's gate-poly

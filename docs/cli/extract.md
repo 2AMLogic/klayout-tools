@@ -26,12 +26,16 @@ two disagree, this document (and the code) win.
   thick-oxide `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0), three drawn
   poly resistors (`rsil`, `rppd`, and — as of issue #1235, its upstream
   sheet-rho ambiguity resolved against a third citable source — `rhigh`),
-  and two drawn metal resistors (`res_metal1`, `res_metal2`, also issue
-  #1235); it has **no** curated capacitor, bipolar (HBT) or diode entries
-  yet, and deliberately omits the remaining metal resistors
-  (`res_metal3`..`res_topmetal2`, above this deck's curated Metal2 stack)
-  — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for each gap
-  and why. `sg13cmos5l`'s device coverage is MOS (both the thin-oxide
+  two drawn metal resistors (`res_metal1`, `res_metal2`, also issue #1235),
+  two antenna diodes (`dantenna`, `dpantenna`, issue #1234) and — as of
+  issue #1454 — two MIM capacitors (`cap_cmim`, `rfcmim`: a `MIM` 36/0 top
+  plate over a `Metal5` 67/0 bottom plate, with the `Vmim` 129/0 via up to
+  `TopMetal1` 126/0); it has **no** curated bipolar (HBT) entries yet, and
+  deliberately omits the remaining metal resistors
+  (`res_metal3`..`res_topmetal2`, whose own recognition is a standalone
+  follow-on now that issue #1243 has extended this deck's stack to
+  TopMetal2) — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for
+  each gap and why. `sg13cmos5l`'s device coverage is MOS (both the thin-oxide
   `sg13_lv_*` flavour and, as of issue #1416, the thick-oxide `sg13_hv_*`
   flavour scoped to the same `ThickGateOx` 44/0) plus the same three drawn
   poly resistors (`rsil`, `rppd`, `rhigh`, added by issue #1415); it has
@@ -2153,7 +2157,7 @@ recognised analog device classes):
 |---|---|---|---|---|
 | MOS (`nfet`/`pfet`) | ✅ (plus `hvi`-scoped `g5v0d10v5` flavour, issue #1369) | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
 | Resistor | ✅ | ✅ (all flavours) | ✅ `rsil`/`rppd`/`rhigh` (issue #1457); ❌ `res_metal1`/`res_metal2` (verified carve-out — no real subcircuit exists) | `l`/`w` (sky130 or sg13g2) or `r_length`/`r_width` (gf180mcu), read off the device |
-| Capacitor (MiM) | ✅ | ✅ | — (no capacitor recognition in that deck yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
+| Capacitor (MiM) | ✅ | ✅ | ❌ (bare `C` card — `cap_cmim`/`rfcmim` are recognised as of issue #1454, but no curated model table yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
 
 MOS flavour note (issue #1111, extended to sky130 by issue #1369): gf180mcu's

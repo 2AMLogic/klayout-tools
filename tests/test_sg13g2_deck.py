@@ -98,32 +98,31 @@ def test_sg13g2_mos_provenance_cites_mos_extraction_lvs():
     )
 
 
-def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_entries():
+def test_sg13g2_extraction_deck_curated_device_families():
     """Issue #1231 curates MOS (thin- *and* thick-oxide) plus the two
     unambiguous poly-resistor flavours; issue #1235 adds the third poly
     resistor (`rhigh`, its sheet-rho ambiguity resolved -- see `sg13g2.py`'s
     resistor note) and the two metal resistors that fit inside this deck's
     curated Metal1/Metal2 stack (`res_metal1`/`res_metal2`); issue #1234
-    additionally curates the two antenna diodes. `capacitors` remains empty
-    because no follow-on issue has curated it yet, exactly like
-    sky130/gf180mcu's own pre-#225 state (see `sg13g2.py`'s "Scope guard"
-    docstring section).
+    additionally curates the two antenna diodes.
 
-    `capacitors` staying empty is a deliberate deferral, not a plain gap:
-    issue #1233 investigated populating it for `cap_cmim`/`rfcmim` and found
-    both plates land on Metal5/TopMetal1, above this deck's curated
-    Metal1/Via1/Metal2 stack -- declaring the entry today would recognise an
-    isolated-node capacitor (`CapacitorDevice`'s own documented "Known
-    limitation"), so recognition is deferred until the stack itself is
-    extended (issue #1243, shared with #1235's metal resistors). See
-    `sg13g2.py`'s "MIM capacitors -- investigated, deferred" docstring
-    section for the full finding.
+    `capacitors` is populated as of issue #1454, which closed out the
+    deferral #1233 opened: #1233 investigated `cap_cmim`/`rfcmim` and found
+    both plates land on Metal5/TopMetal1, above this deck's then-current
+    Metal1/Via1/Metal2 stack -- declaring the entry then would have
+    recognised an isolated-node capacitor (`CapacitorDevice`'s own
+    documented "Known limitation"), so recognition was deferred behind the
+    stack extension itself (issue #1243, shared with #1235's metal
+    resistors). #1243 landed via PR #1247 (`metals`/`vias` now reach
+    TopMetal2), so both entries below set
+    `top_plate_via`/`top_plate_via_metal` on the first pass. See
+    `sg13g2.py`'s "MIM capacitors" docstring section for the full history.
 
-    `bipolars` staying empty is the same kind of deferral for a different
-    reason: issue #1232 *investigated* populating it and found the stock
-    `BipolarDevice` model cannot faithfully express SG13G2's own
-    `CustomBJTExtractor`-based derivation (see `sg13g2.py`'s "SiGe HBTs --
-    investigated, declined" docstring section for the full finding) -- see
+    `bipolars` staying empty is a deferral of a different kind: issue #1232
+    *investigated* populating it and found the stock `BipolarDevice` model
+    cannot faithfully express SG13G2's own `CustomBJTExtractor`-based
+    derivation (see `sg13g2.py`'s "SiGe HBTs -- investigated, declined"
+    docstring section for the full finding) -- see
     `test_sg13g2_bipolars_declined_after_investigation` below for a test
     that documents *why*, not just *that*. Issue #1234's own investigation of
     `schottky_nbl1` reached the same "declined" conclusion for a different
@@ -134,7 +133,7 @@ def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_entries():
     Named explicitly here so a future extension of this deck must update
     this assertion, rather than silently leaving the coverage-discipline
     test below out of sync."""
-    assert EXTRACTION_DECK.capacitors == ()
+    assert {c.name for c in EXTRACTION_DECK.capacitors} == {"cap_cmim", "rfcmim"}
     assert EXTRACTION_DECK.bipolars == ()
     assert {d.name for d in EXTRACTION_DECK.diodes} == {"dantenna", "dpantenna"}
     assert {r.name for r in EXTRACTION_DECK.resistors} == {
@@ -147,10 +146,45 @@ def test_sg13g2_extraction_deck_has_no_capacitor_bipolar_entries():
     assert EXTRACTION_DECK.device_classes == (
         "nfet",
         "pfet",
+        "cap_cmim",
+        "rfcmim",
         "resistor",
         "dantenna",
         "dpantenna",
     )
+
+
+def test_sg13g2_mim_capacitors_wire_both_plates_into_the_tracked_metal_stack():
+    """Issue #1233's own deferral condition, pinned as a regression test:
+    the reason `cap_cmim`/`rfcmim` waited for #1243 is that a MiM cap whose
+    plates sit above the deck's tracked `metals[]` stack extracts as a
+    correctly-valued device between two nets nothing else in the graph
+    touches (`CapacitorDevice`'s "Known limitation"). Both plates must now
+    resolve into that stack -- Metal5 as the `bottom_plate` directly,
+    TopMetal1 through `top_plate_via_metal` -- or the entries have
+    regressed to the isolated-node state #1233 declined to ship."""
+    for capacitor in EXTRACTION_DECK.capacitors:
+        assert capacitor.bottom_plate == (67, 0)  # Metal5.drawing
+        assert capacitor.bottom_plate in EXTRACTION_DECK.metals
+        assert capacitor.top_plate_via == (129, 0)  # Vmim.drawing
+        assert capacitor.top_plate_via_metal == (126, 0)  # TopMetal1.drawing
+        assert capacitor.top_plate_via_metal in EXTRACTION_DECK.metals
+
+
+def test_sg13g2_capacitor_provenance_cites_cap_extraction_lvs():
+    """Both curated MIM-capacitor entries carry a `provenance` citing the
+    real `cap_extraction.lvs` `MIMCAPExtractor.new(...)` call that defines
+    them upstream (issue #1454, mirroring the resistor/diode entries'
+    own citations)."""
+    for capacitor in EXTRACTION_DECK.capacitors:
+        assert capacitor.provenance == RuleProvenance(
+            source_repo="IHP-GmbH/IHP-Open-PDK",
+            source_path=(
+                "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/cap_extraction.lvs"
+            ),
+            rule_id=capacitor.name,
+            commit=_IHP_OPEN_PDK_COMMIT,
+        )
 
 
 def test_sg13g2_bipolars_declined_after_investigation():
@@ -880,6 +914,159 @@ def test_pdk_resolved_leaves_res_metal1_as_bare_r_card(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# MIM capacitors (issue #1454, unblocked by #1243's metals/vias extension)
+# --------------------------------------------------------------------------- #
+
+# `cmim_core`'s own model card (`libs.tech/ngspice/models/capacitors_mod.lib`,
+# `CJ=cap_carea`/`CJSW=40E-18`) at the typical corner
+# (`cornerCAP.lib`'s `.LIB cap_typ`, `cap_carea = 1.5E-15`).
+_MIM_AREA_CAP_F_UM2 = 1.5e-15
+_MIM_PERIM_CAP_F_UM = 4.0e-17
+
+
+def _make_sg13g2_mim_layout(*, pwell_block: bool) -> kdb.Layout:
+    """A 10x5um `MIM` (36/0) top plate over a `Metal5` (67/0) bottom plate,
+    with the `Vmim` (129/0) via stack up to `TopMetal1` (126/0) the PDK's own
+    `cmim`/`rfcmim` PyCells draw -- mirroring
+    `test_lvs_device_provenance.py`'s own sky130 `capm`-over-`met3` golden
+    pair.
+
+    `pwell_block` draws the `PWell.block` (46/21) ring `rfcmim`'s own
+    `rfmim_area = pwell_block.interacting(mim_drw)` derivation requires (and
+    `cap_cmim`'s `mimcap_exclude` subtracts) -- the one drawn layer that
+    tells the two flavours apart."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    if pwell_block:
+        # `rfmim_area` -- covers both plates, exactly as `rfcmim_code.py`'s
+        # own `Box(-3, -3, lu+3, wu+3)` PWell.block rectangle does.
+        draw(46, 21, _box_um(-2, -2, 12, 7))
+    draw(67, 0, _box_um(-1, -1, 11, 6))  # Metal5 bottom plate (overhangs MIM)
+    draw(36, 0, _box_um(0, 0, 10, 5))  # MIM top plate, 10x5um
+    draw(129, 0, _box_um(2, 2, 3, 3))  # Vmim (MIM -> TopMetal1)
+    draw(126, 0, _box_um(1.5, 1.5, 3.5, 3.5))  # TopMetal1 landing pad
+    label(67, 25, "BOT", 10.5, 5.5)
+    label(126, 25, "TOP", 2.5, 2.5)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("name", "pwell_block"),
+    [
+        # `cmim_top = mim_top.not(mimcap_exclude)` -- `mimcap_exclude`'s head
+        # term is `pwell_block`, so the plain MiM cap is the *absence* of it.
+        ("cap_cmim", False),
+        # `rfmim_top = mim_top.and(rfmim_area)`, `rfmim_area =
+        # pwell_block.interacting(mim_drw)` -- the RF flavour requires it.
+        ("rfcmim", True),
+    ],
+)
+def test_golden_pair_sg13g2_mim_capacitor_c_f_matches_provenance_coefficients(
+    tmp_path: Path, name: str, pwell_block: bool
+):
+    """A drawn 10x5um `MIM` top plate over a `Metal5` bottom plate extracts
+    as `cap_cmim`/`rfcmim` with `C = area * area_cap_f_um2 + perimeter *
+    perim_cap_f_um`, computed from the deck's own provenance-cited
+    coefficients -- the sg13g2 sibling of
+    `test_golden_pair_sky130_capacitor_c_f_matches_provenance_coefficients`
+    (issue #1454)."""
+    capacitor = next(c for c in EXTRACTION_DECK.capacitors if c.name == name)
+    assert capacitor.provenance.rule_id == name
+    assert capacitor.area_cap_f_um2 == _MIM_AREA_CAP_F_UM2
+    assert capacitor.perim_cap_f_um == _MIM_PERIM_CAP_F_UM
+
+    path = _write_gds(
+        _make_sg13g2_mim_layout(pwell_block=pwell_block), tmp_path / f"{name}.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    area_um2 = 50.0
+    perimeter_um = 30.0
+    assert device["params"]["area_um2"] == pytest.approx(area_um2)
+    assert device["params"]["perimeter_um"] == pytest.approx(perimeter_um)
+    assert device["params"]["c_f"] == pytest.approx(
+        area_um2 * capacitor.area_cap_f_um2 + perimeter_um * capacitor.perim_cap_f_um
+    )
+    # #1243's whole point: both plates land on tracked `metals[]` levels, so
+    # the recognised device is wired into the rest of the extracted graph
+    # (Metal5 bottom plate directly; MIM top plate through `Vmim` ->
+    # TopMetal1) rather than floating on two isolated nodes.
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"TOP", "BOT"}
+
+
+def test_sg13g2_mim_capacitor_c_f_reproduces_pdk_reference_instance(tmp_path: Path):
+    """The PDK's own worked reference instance, reproduced end-to-end: a 7x7um
+    `cap_cmim` is documented as `C=74.620f` in `custom_reader.lvs`'s own
+    example netlist card (`C1 PLUS MINUS cap_cmim w=6.99u l=6.99u m=1
+    C=74.620f`). `49 um^2 * 1.5e-15 + 28 um * 40e-18 = 74.62 fF` -- an
+    independent cross-check that this deck's transcribed coefficients are the
+    ones the PDK's own MiM extractor uses, not merely self-consistent."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(67, 0, _box_um(-1, -1, 8, 8))  # Metal5 bottom plate
+    draw(36, 0, _box_um(0, 0, 7, 7))  # MIM top plate, 7x7um
+    draw(129, 0, _box_um(2, 2, 3, 3))  # Vmim
+    draw(126, 0, _box_um(1.5, 1.5, 3.5, 3.5))  # TopMetal1
+
+    path = _write_gds(layout, tmp_path / "cmim_7x7.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "cmim_7x7.spice"))
+
+    assert report["device_counts"] == {"cap_cmim": 1}
+    (device,) = report["devices"]
+    assert device["params"]["c_f"] == pytest.approx(74.62e-15)
+
+
+def test_sg13g2_mim_capacitor_flavours_are_mutually_exclusive(tmp_path: Path):
+    """`cap_cmim` and `rfcmim` share byte-identical plate geometry and are
+    told apart solely by `PWell.block`: the same drawn MiM stack must extract
+    as exactly one of them, never both (upstream's own
+    `cmim_top = mim_top.not(pwell_block...)` vs.
+    `rfmim_top = mim_top.and(rfmim_area)` split)."""
+    for pwell_block, expected in ((False, "cap_cmim"), (True, "rfcmim")):
+        path = _write_gds(
+            _make_sg13g2_mim_layout(pwell_block=pwell_block),
+            tmp_path / f"mim_{expected}.gds",
+        )
+        report = run_extract(
+            path, "sg13g2", output=str(tmp_path / f"mim_{expected}.spice")
+        )
+        assert report["device_counts"] == {expected: 1}
+
+
+def test_sg13g2_metal5_without_mim_marker_is_not_a_capacitor(tmp_path: Path):
+    """Plain Metal5-under-TopMetal1 routing with no drawn `MIM` (36/0) plate
+    stays ordinary interconnect -- the capacitor entries recognise the
+    purpose-drawn MiM dielectric mark, not any two stacked metals."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(67, 0)).insert(_box_um(-1, -1, 11, 6))
+    top.shapes(layout.layer(126, 0)).insert(_box_um(0, 0, 10, 5))
+
+    path = _write_gds(layout, tmp_path / "no_mim.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "no_mim.spice"))
+
+    assert report["device_counts"] == {}
+
+
+# --------------------------------------------------------------------------- #
 # Antenna diodes (issue #1234)
 # --------------------------------------------------------------------------- #
 
@@ -992,9 +1179,10 @@ def _provenanced_device_rule_ids() -> set[str]:
     """Mirrors `test_lvs_device_provenance.py`'s own
     `_provenanced_device_rule_ids`, scoped to sg13g2's `EXTRACTION_DECK`
     (MOS -- thin- and thick-oxide -- plus the three curated poly resistors,
-    the two curated metal resistors and the two curated antenna diodes; see
-    `test_sg13g2_extraction_deck_has_no_capacitor_bipolar_entries` above for
-    what is still unrecognised)."""
+    the two curated metal resistors, the two curated antenna diodes and the
+    two curated MIM capacitors; see
+    `test_sg13g2_extraction_deck_curated_device_families` above for what is
+    still unrecognised)."""
     ids: set[str] = set()
     if EXTRACTION_DECK.nfet_provenance is not None:
         ids.add(EXTRACTION_DECK.nfet_provenance.rule_id)
@@ -1032,6 +1220,8 @@ _GOLDEN_PAIR_TESTED_RULE_IDS = frozenset(
         "res_metal2",
         "dantenna",
         "dpantenna",
+        "cap_cmim",
+        "rfcmim",
     }
 )
 
