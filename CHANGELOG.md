@@ -65,6 +65,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   expressible in `CapacitorDevice`), and neither entry is bound to a SPICE
   subcircuit under `--pdk` yet, so both keep KLayout's bare `C`-card form.
   No `schema_version` bump — no field changed shape.
+- **Added**: `klt extract --deck sg13g2` and `--deck sg13cmos5l` now
+  recognise the PDK's two MoM
+  (Metal-oxide-Metal) capacitors, `cap_cmomi` (interdigitated) and
+  `cap_cmomf` (metal fringe/finger) — issue #1466, found while investigating
+  #1463. This device family cannot be expressed by the existing
+  `CapacitorDevice` shape (one marker layer covering the whole device
+  footprint, not two independently-drawn plate layers; exactly two per-metal
+  port shapes told apart by *position*, not by declared layer; no computed
+  capacitance value at all), so this adds a new `MomCapacitorDevice`
+  dataclass (`ExtractionDeck.mom_capacitors`) plus a dedicated
+  `kdb.GenericDeviceExtractor` subclass (`extract.py`'s
+  `_build_mom_capacitor_extractor`, a Python transcription of upstream's own
+  `CapMomExtractor`). Recognised devices report only `w_um`/`l_um` (the
+  marker's own bounding-box height/width) in `devices[].params` — no
+  `c_f`/`area_um2`/`perimeter_um` at all, since the real device's
+  capacitance is supplied by its SPICE/Verilog-A model
+  (`density[N]*active_area + Cfeed`), not computed by LVS extraction; see
+  `docs/json-contract.md`'s "Pre-1.0 caveat" for why this needs no
+  `schema_version` bump. `device_classes` gains `"cap_cmomi"`/`"cap_cmomf"`
+  on both decks (additive; on `sg13g2` they trail the two MIM capacitor
+  roles, on `sg13cmos5l` they follow `"nfet"`/`"pfet"` — either way ahead of
+  `"resistor"`). Both decks declare the family because both upstream rule
+  decks do: `sg13cmos5l`'s own non-symlinked `sg13cmos5l.lvs` `%include`s the
+  same derivation files directly, so these are genuinely cmos5l devices and
+  not an sg13g2-only artifact it symlinks in unused. The one per-deck
+  difference is reach — cmos5l's stack tops out at `TopMetal1` with no
+  `Metal5`, so its port layers stop at `Metal4.pin` and an instance can only
+  ever populate `m1p`..`m4p`. For `sg13cmos5l` this is also the deck's only
+  capacitor family at all (its forbidden-layer rule blocks the MiM stack
+  outright, the observation that opened #1463). No
+  `schema_version` bump — no existing field changed shape.
 - **Added**: `klt gen mos_array` and `klt gen diff_pair` now support the
   `sg13g2` (IHP-Open-PDK) PDK family (issue #1450), lifting the deliberate
   rejection #1448 shipped. Root cause: the shared unit device's gate-poly

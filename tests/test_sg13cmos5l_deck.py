@@ -37,14 +37,20 @@ independently verified against, not inherited from by analogy -- see
   `sg13_hv_nmos`/`sg13_hv_pmos` model under `klt extract --pdk`, mirroring
   `tests/test_sg13g2_deck.py`'s own HV golden-pair tests.
 
+- **MoM capacitor device recognition** (issue #1466, the corrected
+  follow-on to #1463): `cap_cmomi`/`cap_cmomf` extract with `w_um`/`l_um`
+  read off their own recognition marker and **no** computed `c_f`, through
+  the `MomCapacitorDevice` shape that issue added -- including the stacked
+  (`same`-feed) two-metal port case a `CapacitorDevice` entry could not
+  express at all.
+
 See `src/klayout_tools/decks/sg13cmos5l.py`'s module docstring for this
 deck's full provenance notes, scope (`width`/`space`/`enclosing` DRC checks
 across `Activ`/`GatPoly`/`Metal1`-`TopMetal1`/`Via1`-`Via3`/`TopVia1`; LV *and*
-HV MOSFET LVS device class pairs, plus the three poly resistors), and what was
-deliberately left un-transcribed and why (metal resistors, diodes,
-parasitics, and -- per issue #1463's investigation, deferred rather than
-absent, see the "MoM capacitors" section of that docstring and issue #1466
--- capacitors).
+HV MOSFET LVS device class pairs, the three poly resistors, and the two MoM
+capacitors), and what was deliberately left un-transcribed and why (metal
+resistors, diodes, parasitics, and the MiM capacitor stack cmos5l's own
+forbidden-layer rule blocks outright).
 """
 
 from __future__ import annotations
@@ -726,16 +732,27 @@ def test_sg13cmos5l_recognises_the_three_poly_resistor_flavours():
         "rhigh",
     }
     # The generic `"resistor"` device class is now live on this deck (it was
-    # absent while `resistors` was empty); no diode/capacitor/bipolar class
-    # joins it, so this starter's remaining device-recognition gaps stay
-    # visible in the same assertion. `capacitors` stays empty even though
-    # cmos5l does have a MoM capacitor family (`cap_cmomi`/`cap_cmomf`,
-    # confirmed by #1463) -- its marker-scoped, topologically-matched shape
-    # does not fit `CapacitorDevice`, so recognising it needs new
-    # extraction machinery, filed as #1466. See `sg13cmos5l.py`'s "MoM
-    # capacitors" docstring section for the full investigation.
-    assert EXTRACTION_DECK.device_classes == ("nfet", "pfet", "resistor")
+    # absent while `resistors` was empty), preceded by the two MoM capacitor
+    # classes issue #1466 added (`mom_capacitors` entries take the same
+    # "device-class role" position `capacitors` entries would -- see
+    # `ExtractionDeck.device_classes`). No diode/bipolar class joins them, so
+    # this starter's remaining device-recognition gaps stay visible in the
+    # same assertion. `capacitors` itself stays empty: cmos5l's only
+    # capacitor family is the MoM one (#1463), and its marker-scoped,
+    # topologically-matched shape does not fit `CapacitorDevice` -- see
+    # `sg13cmos5l.py`'s "MoM capacitors" docstring section.
+    assert EXTRACTION_DECK.device_classes == (
+        "nfet",
+        "pfet",
+        "cap_cmomi",
+        "cap_cmomf",
+        "resistor",
+    )
     assert EXTRACTION_DECK.capacitors == ()
+    assert {c.name for c in EXTRACTION_DECK.mom_capacitors} == {
+        "cap_cmomi",
+        "cap_cmomf",
+    }
     assert EXTRACTION_DECK.bipolars == ()
     assert EXTRACTION_DECK.diodes == ()
 
@@ -936,3 +953,160 @@ def test_sg13cmos5l_unmarked_poly_bar_is_not_a_resistor(tmp_path: Path):
     assert [entry["reason"] for entry in report["unmodelled_poly"]] == [
         "marked_unrecognised"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# MoM capacitors (issue #1466, the corrected follow-on to #1463)
+# --------------------------------------------------------------------------- #
+
+
+def test_sg13cmos5l_mom_capacitor_provenance_cites_cap_extraction_lvs():
+    """Both curated MoM-capacitor entries cite the real
+    `extract_devices(CapMomExtractor.new(...))` calls they were transcribed
+    from, at the sibling-`ihp-sg13g2` commit `.github/ihp-sg13g2.ref` pins
+    (`cap_extraction.lvs` is one of the rule decks cmos5l symlinks into that
+    checkout -- see `sg13cmos5l.py`'s module docstring). That the devices are
+    genuinely *cmos5l's* rather than symlinked-in-but-unused is established
+    separately, by cmos5l's own non-symlinked `sg13cmos5l.lvs` `%include`ing
+    both `cap_cmom{i,f}_derivations.lvs` -- see the same docstring's "MoM
+    capacitors" section."""
+    by_name = {c.name: c for c in EXTRACTION_DECK.mom_capacitors}
+    assert set(by_name) == {"cap_cmomi", "cap_cmomf"}
+    for name in ("cap_cmomi", "cap_cmomf"):
+        assert by_name[name].provenance == RuleProvenance(
+            source_repo="IHP-GmbH/IHP-Open-PDK",
+            source_path=(
+                "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/cap_extraction.lvs"
+            ),
+            rule_id=name,
+            commit=_IHP_OPEN_PDK_COMMIT,
+        )
+
+
+def test_sg13cmos5l_mom_capacitor_metal_pins_stop_at_metal4():
+    """`metal_pins` has one entry per `metals` level and reaches only
+    `Metal4.pin` (50/2): cmos5l's stack is M1-M2-M3-M4-TopMetal1, so
+    upstream's own shared `cap_extraction.lvs` `m5p` port
+    (`Metal5.pin` 67/2) has no `metals` level to attach to here -- `Metal5`
+    67/0 is on this deck's forbidden-layer list -- and `TopMetal1` is a level
+    that call never wires a pin layer for in either family. `sg13g2.py`'s own
+    entries, on the same symlinked rule text, do reach `Metal5.pin`."""
+    assert [layer for layer, _dt in EXTRACTION_DECK.metals] == [8, 10, 30, 50, 126]
+    for capacitor in EXTRACTION_DECK.mom_capacitors:
+        assert len(capacitor.metal_pins) == len(EXTRACTION_DECK.metals)
+        assert capacitor.metal_pins == (
+            (8, 2),  # Metal1.pin
+            (10, 2),  # Metal2.pin
+            (30, 2),  # Metal3.pin
+            (50, 2),  # Metal4.pin
+            None,  # TopMetal1
+        )
+        assert (67, 2) not in capacitor.metal_pins  # Metal5.pin, unreachable here
+
+
+def test_sg13cmos5l_mom_capacitor_flavours_are_told_apart_solely_by_marker_layer():
+    """`cap_cmomi`/`cap_cmomf` share byte-identical recognition geometry and
+    are told apart *only* by which marker layer is drawn -- upstream's own
+    `custom_mom_extractor.lvs` comment ("The marker is the only thing that
+    tells the two devices apart, so they must never share one")."""
+    by_name = {c.name: c for c in EXTRACTION_DECK.mom_capacitors}
+    assert by_name["cap_cmomi"].marker == (99, 39)  # Recog.mom
+    assert by_name["cap_cmomf"].marker == (99, 40)  # Recog.momf
+    assert by_name["cap_cmomi"].metal_pins == by_name["cap_cmomf"].metal_pins
+
+
+def _make_sg13cmos5l_mom_layout(*, marker: tuple[int, int]) -> kdb.Layout:
+    """A 8x3um MoM-capacitor marker with two `Metal1.pin` (8/2) port shapes
+    side by side (the `double`/`none` PCell option -- both ports on the same
+    metal level), each contacted out to its own labelled `Metal1` routing
+    stub. Mirrors upstream's own `cap_cmom{i,f}_derivations.lvs` port
+    derivation (`metal1_pin.and(marker)`); `marker` is the only layer that
+    tells the two device flavours apart."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(*layer)).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(marker, _box_um(0, 0, 8, 3))  # device marker, 8um x 3um
+    draw((8, 2), _box_um(0, 0, 1, 1))  # Metal1.pin, PLUS
+    draw((8, 2), _box_um(7, 2, 8, 3))  # Metal1.pin, MINUS
+    draw((8, 0), _box_um(-2, 0, 0, 1))  # Metal1 routing stub off PLUS
+    draw((8, 0), _box_um(8, 2, 10, 3))  # Metal1 routing stub off MINUS
+    # NB: this deck's `metal_labels` are the `.pin` layers themselves
+    # (8/2 etc.), not sg13g2's separate `.text` layers -- a text object is
+    # not a polygon, so the same layer carries both a MoM port shape and a
+    # net label without either reading the other.
+    label((8, 2), "PLUS_NET", -1, 0.5)
+    label((8, 2), "MINUS_NET", 9, 2.5)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_golden_pair_sg13cmos5l_mom_capacitor_w_l_matches_marker_geometry(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """A drawn 8x3um MoM-cap marker with two side-by-side `Metal1.pin` ports
+    extracts as `cap_cmomi`/`cap_cmomf` with `w_um`/`l_um` read straight off
+    the marker's own bounding box (`l` -> X extent, `w` -> Y extent, the real
+    extractor's own axis mapping), both port nets on distinct terminals, and
+    **no** `c_f`/`area_um2`/`perimeter_um` key at all -- this device's
+    capacitance is supplied by its SPICE/Verilog-A model, not measured by
+    `klt extract`. See `docs/json-contract.md`'s "MoM capacitor devices"
+    note for that JSON-shape decision."""
+    path = _write_gds(_make_sg13cmos5l_mom_layout(marker=marker), tmp_path / "mom.gds")
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"] == {"w_um": pytest.approx(3.0), "l_um": pytest.approx(8.0)}
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"PLUS_NET", "MINUS_NET"}
+
+
+def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
+    tmp_path: Path,
+):
+    """The `same`-feed PCell configuration stacks the two ports on *adjacent*
+    metal levels at identical (x, y) rather than side by side -- the case a
+    two-different-layer `CapacitorDevice` split cannot express at all. Both
+    ports must still resolve to their own metal's distinct net. Drawn on
+    `Metal3`/`Metal4` here (this deck's top two thin-metal levels, since
+    `Metal5` is forbidden), where `sg13g2.py`'s own sibling test uses
+    `Metal4`/`Metal5`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(*layer)).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw((99, 40), _box_um(0, 0, 5, 5))  # Recog.momf marker
+    draw((30, 2), _box_um(1, 1, 2, 2))  # Metal3.pin
+    draw((50, 2), _box_um(1, 1, 2, 2))  # Metal4.pin, same (x, y) -- stacked
+    draw((30, 0), _box_um(-3, 1, 1, 2))  # Metal3 routing stub
+    draw((50, 0), _box_um(2, 1, 5, 2))  # Metal4 routing stub
+    label((30, 2), "M3_NET", -2, 1.5)  # this deck labels on the .pin layers
+    label((50, 2), "M4_NET", 4, 1.5)
+
+    path = _write_gds(layout, tmp_path / "cap_cmomf_stacked.gds")
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "cap_cmomf_stacked.spice")
+    )
+
+    assert report["device_counts"] == {"cap_cmomf": 1}
+    (device,) = report["devices"]
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"M3_NET", "M4_NET"}
+    assert device["params"] == {"w_um": pytest.approx(5.0), "l_um": pytest.approx(5.0)}

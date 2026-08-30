@@ -757,6 +757,18 @@ def _declared_non_mos_classes(
     unknown/unregistered deck yields ``((), ())`` rather than raising, so the
     fallback can only ever *add* bindings -- it never turns a deck that
     resolved before into one that fails.
+
+    **Deliberately does not read ``ExtractionDeck.mom_capacitors``** (issue
+    #1466): a ``MomCapacitorDevice`` (e.g. sg13g2's ``cap_cmomi``/
+    ``cap_cmomf``) reports only ``w_um``/``l_um`` -- it has no computed
+    value analogous to a resistor's ``r_ohm`` or a MiM capacitor's ``c_f``
+    for a bound ``X`` card to carry, and this repo has no curated real
+    subcircuit to bind either device to yet -- so an assumed-identity
+    binding here would be a guess with no verified target, the same guard
+    rail the module docstring's "three deliberate limits" section applies
+    to the bipolar carve-out. Documented as a known gap in
+    ``docs/cli/extract.md``'s "SPICE model binding" coverage table rather
+    than silently unaddressed.
     """
     from .decks import UnknownExtractionDeckError, get_extraction_deck
 

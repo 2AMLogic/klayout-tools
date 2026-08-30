@@ -3648,6 +3648,203 @@ def _exclude_capacitor_top_via_overlap(
     ]
 
 
+def _build_mom_capacitor_extractor(
+    name: str, metal_count: int
+) -> kdb.GenericDeviceExtractor:
+    """Build a fresh ``kdb.GenericDeviceExtractor`` subclass instance that
+    recognises one :class:`MomCapacitorDevice` entry (issue #1466) --
+    IHP's ``cap_cmomi``/``cap_cmomf`` MoM (Metal-oxide-Metal) capacitors, and
+    structurally any future device with the same "single marker, per-metal
+    multi-port, position-split terminals, no computed value" shape.
+
+    A **Python transcription of upstream's own ``CapMomExtractor``**
+    (``custom_mom_extractor.lvs``, an ``RBA::GenericDeviceExtractor``
+    subclass) -- kept as close to that source's structure and variable
+    names as the Ruby/Python API difference allows, so the two can be
+    diffed side by side. See :class:`~klayout_tools.decks.MomCapacitorDevice`
+    for the device-recognition semantics this implements, and this
+    function's own inline comments for the specific upstream lines each
+    step mirrors.
+
+    ``kdb.GenericDeviceExtractor`` is the Python-subclassable base KLayout's
+    own built-in extractors (``DeviceExtractorCapacitor`` etc.) are written
+    against internally -- the same "reimplement the C++ extension base
+    class from script" mechanism this codebase already uses for
+    ``kdb.NetlistSpiceWriterDelegate`` (``pdk_models.py``'s
+    ``_ModelBindingSpiceWriterDelegate``) and ``kdb.GenericNetlistCompareLogger``
+    (``lvs.py``'s ``_Logger``); this is the first such subclass for *device
+    extraction* rather than netlist writing/comparison, because no built-in
+    ``DeviceExtractor*`` class models this device's recognition shape (see
+    ``MomCapacitorDevice``'s docstring for why).
+
+    ``name`` becomes the extracted ``devices[].class`` value (and the
+    device extractor/class name KLayout error/log messages cite).
+    ``metal_count`` is the number of per-metal port layers to define --
+    always ``len(deck.metals)`` for the owning :class:`MomCapacitorDevice`
+    entry's deck, so a fresh instance's layer set lines up index-for-index
+    with the caller's own ``metal_pins``/``metals`` regions (an empty
+    ``kdb.Region`` at every index the entry's ``metal_pins`` left ``None``).
+
+    A fresh instance is required per device *name* (not just per deck):
+    ``kdb.GenericDeviceExtractor.setup()`` sets this extractor's own
+    ``name``/registers its own device class once, so reusing one instance
+    across ``cap_cmomi`` and ``cap_cmomf`` would register a second device
+    class under the first one's name instead of two independent ones --
+    mirroring why upstream's own ``cap_extraction.lvs`` constructs a fresh
+    ``CapMomExtractor.new(...)`` per device too, despite both sharing the
+    same Ruby class.
+    """
+    import klayout.db as kdb
+
+    class _MomCapacitorExtractor(kdb.GenericDeviceExtractor):
+        def __init__(self, extractor_name: str, num_metals: int) -> None:
+            super().__init__()
+            self._extractor_name = extractor_name
+            self._num_metals = num_metals
+            # Terminal/parameter ids are read back off their own definition
+            # objects in `setup()`, once the device class is registered --
+            # mirrors upstream's own `@reg_dev.terminal_id('mim_top')`
+            # lookups rather than hard-coding the ids `add_terminal()`
+            # happens to hand out in declaration order.
+            self._terminal_a = 0
+            self._terminal_b = 1
+
+        def setup(self) -> None:
+            # Mirrors upstream's private `define_layers`: `core` (the
+            # marker), one per-metal port layer per declared metal level,
+            # then `dev_mk` (the same marker again, kept as its own layer
+            # for 1:1 parity with upstream's `core`/`dev_mk` split -- see
+            # `custom_mom_extractor.lvs`'s own `define_layers`).
+            self.name = self._extractor_name
+            self.define_layer("core", f"{self._extractor_name} recognition marker")
+            for metal_number in range(1, self._num_metals + 1):
+                self.define_layer(f"m{metal_number}p", f"Metal{metal_number} pin ports")
+            self.define_layer("dev_mk", "Device marker")
+
+            # `DeviceCustomMIM`'s shape (`custom_mim_extractor.lvs`): two
+            # terminals, declared EQUIVALENT (order is arbitrary -- see
+            # `MomCapacitorDevice`'s docstring), plus `W`/`L` geometry
+            # parameters and deliberately no capacitance parameter at all
+            # (the real device's `C` is supplied by the SPICE/Verilog-A
+            # model, not computed here -- see `docs/json-contract.md`'s "MoM
+            # capacitor devices" note for the resulting `devices[].params`
+            # shape). `W`/`L` (uppercase) match KLayout's own MOS
+            # convention so `extract.py`'s `_describe_devices` reports them
+            # as `w_um`/`l_um` with no code change needed there.
+            device_class = kdb.DeviceClass()
+            terminal_a = kdb.DeviceTerminalDefinition("A", "Terminal A")
+            device_class.add_terminal(terminal_a)
+            self._terminal_a = terminal_a.id()
+            terminal_b = kdb.DeviceTerminalDefinition("B", "Terminal B")
+            device_class.add_terminal(terminal_b)
+            self._terminal_b = terminal_b.id()
+            device_class.equivalent_terminal_id(self._terminal_a, self._terminal_b)
+            # `add_parameter()`/`add_terminal()` return the owning
+            # `DeviceClass` (for chaining), not the definition object -- the
+            # id is written back onto the *argument* object passed in
+            # (per `DeviceClass.add_parameter`'s own docstring), so it must
+            # be read off that same object afterward rather than off the
+            # call's own return value. Captured explicitly here rather than
+            # assumed inline at the `set_parameter()` call sites below, so a
+            # future reordering of these two lines cannot silently swap
+            # `w_um`/`l_um`.
+            param_w = kdb.DeviceParameterDefinition("W", "Width")
+            device_class.add_parameter(param_w)
+            self._param_w = param_w.id()
+            param_l = kdb.DeviceParameterDefinition("L", "Length")
+            device_class.add_parameter(param_l)
+            self._param_l = param_l.id()
+            self.register_device_class(device_class)
+
+        def get_connectivity(
+            self, layout: kdb.Layout, layers: list[int]
+        ) -> kdb.Connectivity:
+            # Mirrors upstream's own `get_connectivity`: the marker
+            # self-merges, and every per-metal port layer is scoped to
+            # shapes touching the (duplicate) device-marker layer -- purely
+            # an *internal* clustering connectivity for this extractor's own
+            # marker-to-ports grouping, entirely separate from (and never
+            # wired into) the outer `LayoutToNetlist` connectivity graph the
+            # caller builds with its own `l2n.connect()` calls.
+            core = layers[0]
+            metal_port_layers = layers[1 : 1 + self._num_metals]
+            dev_mk = layers[-1]
+            conn = kdb.Connectivity()
+            conn.connect(core, core)
+            conn.connect(core, dev_mk)
+            for metal_port_layer in metal_port_layers:
+                conn.connect(metal_port_layer, dev_mk)
+            return conn
+
+        def extract_devices(self, layer_geometry: list[kdb.Region]) -> None:
+            # Mirrors upstream's own `extract_devices` body closely -- see
+            # its inline comments (transcribed into this function's own
+            # docstring) for the full rationale of each step.
+            core = layer_geometry[0]
+            metal_ports = {
+                metal_index + 1: layer_geometry[1 + metal_index]
+                for metal_index in range(self._num_metals)
+            }
+            dev_mk = layer_geometry[-1]
+
+            for component in dev_mk.merged().each():
+                ports: list[tuple[Any, int]] = []
+                for metal_index, port_region in metal_ports.items():
+                    for polygon in port_region.each():
+                        ports.append((polygon, metal_index))
+
+                if len(ports) != 2:
+                    # A well-formed device places exactly two `MkPin`s under
+                    # its marker (upstream's own guard) -- skip anything
+                    # else rather than guessing which two of N ports belong
+                    # together. The usual real-world cause is two device
+                    # markers close enough to touch and merge into one
+                    # cluster, which drops BOTH devices, not just the
+                    # malformed one.
+                    self.error(
+                        f"{self._extractor_name}: expected exactly 2 port "
+                        f"regions under its recognition marker, found "
+                        f"{len(ports)}. The device is not extracted. Check "
+                        "for markers of adjacent devices touching or "
+                        "overlapping.",
+                        component,
+                    )
+                    continue
+
+                device = self.create_device()
+
+                # `l` -> marker bounding-box WIDTH (X extent), `w` -> HEIGHT
+                # (Y extent) -- upstream's own axis mapping, transcribed
+                # verbatim (`custom_mom_extractor.lvs`'s "Parameter/axis
+                # mapping" comment).
+                bbox = core.merged().bbox()
+                device.set_parameter(self._param_l, bbox.width() * self.dbu())
+                device.set_parameter(self._param_w, bbox.height() * self.dbu())
+
+                # Deterministic pick of two ports (by x, then y, then metal
+                # index) -- which of the two ends up on terminal A is
+                # arbitrary, which is why the two terminals are declared
+                # equivalent above; what matters is that each terminal is
+                # defined on the layer that carries its own metal net, so
+                # two ports stacked on adjacent metals (the `same`-feed
+                # PCell configuration) stay on separate nets rather than
+                # collapsing onto one.
+                ports.sort(
+                    key=lambda entry: (
+                        entry[0].bbox().center().x,
+                        entry[0].bbox().center().y,
+                        entry[1],
+                    )
+                )
+                a_polygon, a_metal_index = ports[0]
+                b_polygon, b_metal_index = ports[-1]
+
+                self.define_terminal(device, self._terminal_a, a_metal_index, a_polygon)
+                self.define_terminal(device, self._terminal_b, b_metal_index, b_polygon)
+
+    return _MomCapacitorExtractor(name, metal_count)
+
+
 #: Minimum number of geometrically separate `contact` clusters a candidate
 #: poly component must touch to be flagged by `_detect_unmodelled_poly_bodies`
 #: -- the "resistor-body signature": a two-terminal conductor segment
@@ -5102,6 +5299,94 @@ def _extract_netlist(
         l2n.extract_devices(
             kdb.DeviceExtractorCapacitor(capacitor.name, capacitor.area_cap_f_um2),
             {"P1": bottom_region, "P2": top_region},
+        )
+
+    # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466):
+    # each of the deck's optional `mom_capacitors` entries (see
+    # `MomCapacitorDevice` in `decks/__init__.py`) is recognised by a single
+    # marker layer covering the whole device footprint, containing exactly
+    # two per-metal port shapes told apart by *position* rather than by
+    # declared layer -- structurally distinct from the MiM `capacitors`
+    # block above (two independently-drawn plate layers, capacitance
+    # computed from their geometric overlap). `_build_mom_capacitor_extractor`
+    # builds a fresh `kdb.GenericDeviceExtractor` subclass instance per entry
+    # (a Python transcription of upstream's own `CapMomExtractor`) that
+    # reports only `W`/`L` (the marker's own bounding-box dimensions) as
+    # matched parameters -- no capacitance value, since the real device's
+    # `C` is supplied by the SPICE/Verilog-A model, not computed by LVS.
+    for mom_capacitor in deck.mom_capacitors:
+        # Deck-authoring validation (mirrors the capacitor block's own
+        # `top_plate_via`/`top_plate_via_metal` pairing check above):
+        # checked unconditionally so a mistake in a deck module is caught
+        # even on a MoM-cap-free layout, since `metal_pins` must line up
+        # index-for-index with `deck.metals` for the per-metal connectivity
+        # wiring below to attach each port to the *right* metal level.
+        if len(mom_capacitor.metal_pins) != len(deck.metals):
+            raise ExtractError(
+                f"mom_capacitor '{mom_capacitor.name}': metal_pins has "
+                f"{len(mom_capacitor.metal_pins)} entries, but this deck "
+                f"declares {len(deck.metals)} metals -- metal_pins must have "
+                "exactly one entry (or None) per deck.metals level"
+            )
+
+        marker_region = _region(layout, top_cell, mom_capacitor.marker)
+
+        # Dummy-device suppression (issue #295, extended to capacitors above
+        # and to MoM capacitors here): count and cut whole recognised marker
+        # components covered by the deck's `dummy` marker, the same
+        # "component fully covered is dropped, partially covered is a clean
+        # geometric cut" rule every other device family in this loop
+        # applies.
+        if not dummy.is_empty():
+            for component in marker_region.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            marker_region = marker_region - dummy
+
+        if marker_region.is_empty():
+            # No PDK MoM-cap marker drawn anywhere on this layout -- the
+            # common case. Registering/extracting an empty device would be
+            # a no-op anyway, but skipping it entirely keeps a MoM-cap-free
+            # layout's extraction bit-for-bit what it was before this
+            # feature existed, the same guard the MiM capacitor block above
+            # applies.
+            continue
+
+        # Per-metal port regions, index-aligned with `deck.metals`/`metals`
+        # (an empty `Region` at every index `metal_pins` left `None` -- the
+        # extractor below simply never finds a port there).
+        port_regions = [
+            _region(layout, top_cell, pin) if pin is not None else kdb.Region()
+            for pin in mom_capacitor.metal_pins
+        ]
+
+        l2n.register(marker_region, f"{mom_capacitor.name}_marker")
+        layer_geometry = {"core": marker_region, "dev_mk": marker_region}
+        # NOTE: this loop's own index variable is deliberately named
+        # `metal_level` rather than `metal_index` -- the latter is already
+        # bound, earlier in this same function, to the list of registered
+        # `metals[]` layer indices `_detect_dead_metal`'s call below reads
+        # back. A plain `for` loop's target leaks into the enclosing
+        # function scope in Python (unlike a comprehension's own scope), so
+        # reusing that name here would silently clobber it with a bare
+        # `int` on the last iteration.
+        for metal_level, port_region in enumerate(port_regions):
+            layer_name = f"m{metal_level + 1}p"
+            l2n.register(port_region, f"{mom_capacitor.name}_{layer_name}")
+            layer_geometry[layer_name] = port_region
+            # Per-metal port connectivity (mirrors upstream's own
+            # `cap_cmomi_connections.lvs`/`cap_cmomf_connections.lvs`): tie
+            # each port *only* to its own metal's routed conductor, never to
+            # every metal at once -- a merged "all ports to all metals"
+            # connect would bridge two ports the real device keeps
+            # electrically independent (the `same`-feed stacked-pin PCell
+            # configuration in particular).
+            if not port_region.is_empty():
+                l2n.connect(port_region, metals[metal_level])
+
+        l2n.extract_devices(
+            _build_mom_capacitor_extractor(mom_capacitor.name, len(deck.metals)),
+            layer_geometry,
         )
 
     # Drawn resistors: `R` is the recognised resistive segment, `C` the

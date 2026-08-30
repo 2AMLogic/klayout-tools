@@ -86,6 +86,24 @@ hierarchy" (issue #452) — is a breaking change and does earn a
 JSON type (`integer`) never changed. See `docs/cli/precheck.md` for that
 concrete precedent.
 
+**A new `devices[].class` bringing its own, disjoint `params`/`nets` key set
+is likewise additive, not a breaking change** — `klt extract`'s
+`devices[].params`/`.nets` shape is already documented as varying *by device
+class* (MOS: `w_um`/`l_um`/...; MiM capacitor: `c_f`/`area_um2`/
+`perimeter_um`; drawn resistor: `w_um`/`l_um`/`r_ohm`; see
+`docs/cli/extract.md`'s `devices[]` schema table), so a new class simply
+adding its own key combination to that per-class map earns no
+`schema_version` bump. The concrete precedent: issue #1466's MoM capacitor
+devices (`cap_cmomi`/`cap_cmomf`) report only `w_um`/`l_um` — deliberately
+**no** `c_f`/`area_um2`/`perimeter_um` at all, since the real device's
+capacitance comes from its SPICE/Verilog-A model, not from LVS geometry —
+the same "some device classes simply have fewer of the common
+param/net keys than others" precedent bipolar devices (empty `params`) and
+MOS devices (no `r_ohm`/`c_f`) already established, extended to a
+capacitor-shaped device with no computed value at all. See
+`docs/cli/extract.md`'s "MoM capacitor devices" section for the full
+derivation.
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule

@@ -27,11 +27,16 @@ two disagree, this document (and the code) win.
   poly resistors (`rsil`, `rppd`, and — as of issue #1235, its upstream
   sheet-rho ambiguity resolved against a third citable source — `rhigh`),
   two drawn metal resistors (`res_metal1`, `res_metal2`, also issue #1235),
-  two antenna diodes (`dantenna`, `dpantenna`, issue #1234) and — as of
-  issue #1454 — two MIM capacitors (`cap_cmim`, `rfcmim`: a `MIM` 36/0 top
-  plate over a `Metal5` 67/0 bottom plate, with the `Vmim` 129/0 via up to
-  `TopMetal1` 126/0); it has **no** curated bipolar (HBT) entries yet, and
-  deliberately omits the remaining metal resistors
+  two antenna diodes (`dantenna`, `dpantenna`, issue #1234), two MIM
+  capacitors (issue #1454 — `cap_cmim`, `rfcmim`: a `MIM` 36/0 top plate over
+  a `Metal5` 67/0 bottom plate, with the `Vmim` 129/0 via up to `TopMetal1`
+  126/0) and — as of issue #1466 — two MoM (Metal-oxide-Metal) capacitors
+  (`cap_cmomi`, `cap_cmomf`: a single marker layer, `Recog.mom` 99/39 /
+  `Recog.momf` 99/40, covering the whole device footprint, with exactly two
+  per-metal port shapes on `Metal1.pin`..`Metal5.pin` told apart by
+  *position* rather than declared layer — see "MoM capacitor devices" below
+  for the resulting `devices[].params` shape); it has **no** curated bipolar
+  (HBT) entries yet, and deliberately omits the remaining metal resistors
   (`res_metal3`..`res_topmetal2`, whose own recognition is a standalone
   follow-on now that issue #1243 has extended this deck's stack to
   TopMetal2) — see `src/klayout_tools/decks/sg13g2.py`'s own docstring for
@@ -42,16 +47,17 @@ two disagree, this document (and the code) win.
   **no** curated bipolar or diode entries yet, and — although issue #1417
   has since extended this deck's metal stack to the full `Metal1`-
   `TopMetal1` stack those bodies sit on — the `res_metal1`..`res_topmetal1`
-  metal-resistor family is not transcribed by this deck yet. It also has no
-  curated capacitor entry, but not because none exists: issue #1463
-  confirmed cmos5l has a MoM capacitor family (`cap_cmomi`/`cap_cmomf`),
-  found by fetching the live upstream commits this deck's own docstring
-  already pins rather than this repo's older vendored PDK snapshot — but
-  that device's marker-scoped, multi-metal-port, topologically-matched (no
-  computed capacitance value) shape does not fit this repo's `CapacitorDevice`
-  mechanism, so recognising it needs new device-recognition machinery, filed
-  as issue #1466 — see `src/klayout_tools/decks/sg13cmos5l.py`'s own
-  docstring for the full investigation and each other gap and why.
+  metal-resistor family is not transcribed by this deck yet. As of issue
+  #1466 it also declares the same two MoM capacitors sg13g2 gained above
+  (`cap_cmomi`, `cap_cmomf`) — genuinely cmos5l's own devices, confirmed by
+  issue #1463 against the live upstream commits this deck's docstring pins
+  rather than this repo's older vendored PDK snapshot, with one difference:
+  cmos5l tops out at `TopMetal1` (no `Metal5`), so its port layers stop at
+  `Metal4.pin` and an instance can only ever populate `m1p`..`m4p`. It has
+  **no** MiM capacitor entry — cmos5l's own forbidden-layer rule blocks that
+  stack outright, so MoM is the only capacitor family this deck has. See
+  `src/klayout_tools/decks/sg13cmos5l.py`'s own docstring for the full
+  investigation and each other gap and why.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
   "next to the input" convention `klt render`/`klt sim` already use). The
@@ -841,13 +847,85 @@ capacitors nor any voltage-flavor/size variant beyond the two curated
 `capm`/`capm2` stacks above are modelled — out of scope for this curated
 starter subset, not a silent omission.
 
+### MoM capacitor devices (issue #1466)
+
+`sg13g2` and `sg13cmos5l` each declare two drawn MoM (Metal-oxide-Metal)
+capacitor device-recognition entries (`ExtractionDeck.mom_capacitors`, a
+tuple of `MomCapacitorDevice` — see its docstring in
+`src/klayout_tools/decks/__init__.py`) — a structural sibling of
+`ExtractionDeck.capacitors` for a device family the MiM mechanism above
+cannot represent: `cap_cmomi` (interdigitated) and `cap_cmomf` (metal
+fringe/finger) are recognised from a **single marker layer** covering the
+whole device footprint (`Recog.mom` 99/39, `Recog.momf` 99/40), containing
+exactly two per-metal port shapes (on `Metal1.pin`..`Metal5.pin` for
+`sg13g2`, `Metal1.pin`..`Metal4.pin` for `sg13cmos5l`, whose stack tops out
+at `TopMetal1` with no `Metal5`) told apart
+by *position* — sorted by `(x-center, y-center, metal index)`, first/last
+mapped to the device's two terminals — rather than by which layer they sit
+on. The two ports can land on the *same* metal level (side by side) or on
+*adjacent* metal levels (stacked), so there is no "top plate over bottom
+plate" pair of independently-drawn layers the way a MiM cap's `top_plate`/
+`bottom_plate` split assumes.
+
+`klt extract` runs this recognition through a dedicated
+`kdb.GenericDeviceExtractor` subclass (`extract.py`'s
+`_build_mom_capacitor_extractor`, a Python transcription of upstream's own
+`CapMomExtractor`, an `RBA::GenericDeviceExtractor`) rather than a built-in
+`DeviceExtractorCapacitor` call, since no built-in KLayout device extractor
+models this recognition shape.
+
+**JSON-contract decision: no computed value, `w_um`/`l_um` only.** Unlike a
+MiM cap (`c_f`/`area_um2`/`perimeter_um`, computed from the plates'
+geometric overlap), this device's real compact model computes its own
+capacitance from `density[N]*active_area + Cfeed` — a value supplied by the
+SPICE/Verilog-A model, not by LVS extraction (upstream's own extractor
+source comment: "the LVS extractor does NOT compute C; LVS matches devices
+on topology"). Fabricating an area/perimeter coefficient here would report
+a capacitance value with no real source. Instead, `devices[].params` for a
+`cap_cmomi`/`cap_cmomf` device carries only `w_um`/`l_um` — the marker's own
+bounding-box height/width (`l` → X extent, `w` → Y extent, upstream's own
+axis mapping) — the same "dimension-matched, not value-computed" shape a
+MOS transistor's `devices[].params` already uses, reusing the existing
+`W`/`L` parameter-name branches in `_describe_devices` with **no code
+change** needed there: a device class that never registers a `C`/`A`/`P`
+KLayout device parameter simply never populates those keys, exactly as a
+MOS or bipolar device already does not. No new JSON schema field or
+`schema_version` bump was needed for this — see "JSON response" below and
+`docs/json-contract.md`'s own capacitor-devices note.
+
+`devices[].nets` uses generic `"a"`/`"b"` terminal keys (mirroring
+`CapacitorDevice`'s own `DeviceClassCapacitor` `"a"`/`"b"` naming), declared
+**equivalent** for `klt lvs` matching purposes (order is arbitrary — which
+port ends up on `"a"` vs. `"b"` depends only on the geometric sort above,
+never on which metal level or PCell polarity it came from); what matters
+electrically is that each terminal resolves to *its own* metal's real net,
+which each per-metal port region's connectivity wiring into the deck's
+`metals[]` stack (mirroring upstream's own `cap_cmomi_connections.lvs`/
+`cap_cmomf_connections.lvs`, one `connect(<metal>_ports, <metal>_con)` line
+per level) already guarantees.
+
+A marker with anything other than exactly two port polygons under it (e.g.
+two adjacent devices whose markers touch and merge into one cluster) is
+**dropped, not guessed at** — reported as a `warnings[]` entry naming the
+device, mirroring upstream's own extractor guard.
+
+Both decks declare the family, because both upstream rule decks do: `sg13g2`
+is its native home, and `sg13cmos5l`'s own (non-symlinked) top-level
+`sg13cmos5l.lvs` `%include`s the same `cap_cmomi`/`cap_cmomf` derivation
+files directly — it is not an sg13g2-only artifact cmos5l merely symlinks in
+unused. The only per-deck difference is reach: cmos5l's `metal_pins` stops
+at `Metal4.pin` (its `Metal5` is on the deck's own forbidden-layer list),
+so a cmos5l instance can only populate `m1p`..`m4p`. For `sg13cmos5l` this
+is the deck's *only* capacitor family — its forbidden-layer rule blocks the
+MiM stack outright, so `ExtractionDeck.capacitors` stays empty there.
+
 ### Device-recognition-only layers (issue #619)
 
 `ignored_layers` (see "JSON schema" below) only distinguishes "shape-bearing
 layer this deck reads" from "shape-bearing layer this deck never reads at
 all" — it cannot tell "read as a `metals`/`vias` connectivity level" from
-"read only for a `bipolars`/`capacitors`/`resistors`/`diodes`
-device-recognition role." That ambiguity let a real routing-connectivity gap
+"read only for a `bipolars`/`capacitors`/`mom_capacitors`/`resistors`/
+`diodes` device-recognition role." That ambiguity let a real routing-connectivity gap
 hide behind a clean-looking `ignored_layers` report: sky130's `met3.drawing`/
 `met4.drawing` were already read as `capacitors[].bottom_plate` (see above)
 well before they became `metals` connectivity levels, so a layout with two
@@ -2165,6 +2243,7 @@ recognised analog device classes):
 | MOS (`nfet`/`pfet`) | ✅ (plus `hvi`-scoped `g5v0d10v5` flavour, issue #1369) | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
 | Resistor | ✅ | ✅ (all flavours) | ✅ `rsil`/`rppd`/`rhigh` (issue #1457); ❌ `res_metal1`/`res_metal2` (verified carve-out — no real subcircuit exists) | `l`/`w` (sky130 or sg13g2) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | ❌ (bare `C` card — `cap_cmim`/`rfcmim` are recognised as of issue #1454, but no curated model table yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
+| Capacitor (MoM) | — (no MoM recognition in that deck) | — (no MoM recognition in that deck) | ❌ (bare, unmodelled-value card — `cap_cmomi`/`cap_cmomf` are recognised as of issue #1466, on `sg13g2` **and** `sg13cmos5l`, with no `C` at all to bind; a curated `--pdk` model table is out of scope until this device gets a real compact model to bind against) | n/a |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
 
 MOS flavour note (issue #1111, extended to sky130 by issue #1369): gf180mcu's
@@ -3917,7 +3996,7 @@ exit codes).
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |
 | `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors and bipolars (both issue #462), and junction diodes (issue #542) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
 | `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. Does **not** catch a layer that is read for device recognition only, never as a `metals`/`vias` connectivity level — see `device_recognition_only_layers` below (issue #619). Every entry here already carries a material (`shapes > 0`) count — empty-layer entries are dropped before they reach this field — so a non-empty `ignored_layers` also appends a single aggregate prose entry to `warnings[]` (issue #666), naming the affected layer(s) and their total shape count, so a caller checking only `warnings[]` still sees it. |
-| `device_recognition_only_layers` | array\<object\> | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck` **does** read (so they never appear in `ignored_layers` above) but only for a bipolar/capacitor/resistor/diode device-recognition role, never as a `metals`/`vias` connectivity level and never one of the deck's own MOS-core layers either (issue #619 — see "Device-recognition-only layers" below), each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Two nets joined only through such a layer will not merge, and — unlike a layer the deck never reads at all — this gap is invisible to `ignored_layers`, which can only tell "read" from "not read," not "read for connectivity" from "read for device recognition only." This is diagnostic context, not a warning: unlike `ignored_layers`, a non-empty list does **not** append to `warnings[]` (a deck's own marker/mask geometry is expected to be device-recognition-only by PDK design, not a coverage gap). Empty when every device-recognition layer is also a `metals`/`vias` level or one of the deck's own MOS-core layers, or the deck declares no `bipolars`/`capacitors`/`resistors`/`diodes` entries at all. |
+| `device_recognition_only_layers` | array\<object\> | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck` **does** read (so they never appear in `ignored_layers` above) but only for a bipolar/capacitor/resistor/diode device-recognition role, never as a `metals`/`vias` connectivity level and never one of the deck's own MOS-core layers either (issue #619 — see "Device-recognition-only layers" below), each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Two nets joined only through such a layer will not merge, and — unlike a layer the deck never reads at all — this gap is invisible to `ignored_layers`, which can only tell "read" from "not read," not "read for connectivity" from "read for device recognition only." This is diagnostic context, not a warning: unlike `ignored_layers`, a non-empty list does **not** append to `warnings[]` (a deck's own marker/mask geometry is expected to be device-recognition-only by PDK design, not a coverage gap). Empty when every device-recognition layer is also a `metals`/`vias` level or one of the deck's own MOS-core layers, or the deck declares no `bipolars`/`capacitors`/`mom_capacitors`/`resistors`/`diodes` entries at all. |
 | `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above; and a deck that declares one or more junction diodes appends each one's class name last, e.g. gf180mcu's `"diode_nd2ps_06v0"`/`"diode_pd2nw_06v0"` — see "Junction diodes" above), independent of what this layout happens to contain. sky130 currently reports `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]` and gf180mcu `["nfet", "pfet", <bipolar>, <capacitor>, "resistor", <diode…>]`. Note the `"resistor"` role token is not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
@@ -3947,8 +4026,8 @@ consume.
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line). **This field is deliberately NOT backslash-escaped** (contrast `nets[].name` below): a KLayout-synthesized `$<n>` anonymous-device name is never the first token on an instance line — always preceded by a class-letter prefix (`M$1774`, `R$22`, etc.) — so the leading-`$` ngspice inline-comment hazard that `spice_safe_net_name()` guards against in net-name fields does not apply to device names. See "Anonymous nets are backslash-escaped" for the full rationale. |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"a"`, `"b"`, declared **equivalent** (order is arbitrary — see "MoM capacitor devices" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"w_um"` / `"l_um"` only — the marker's own bounding-box height/width — and deliberately **no** `"c_f"`/`"area_um2"`/`"perimeter_um"` key at all, since the real device's capacitance is supplied by the SPICE/Verilog-A model from `density[N]*active_area + Cfeed`, not computed by LVS extraction; see "MoM capacitor devices" above for the full JSON-contract decision. Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 

@@ -798,6 +798,17 @@ class ExtractionDeck:
     recognition; non-empty decks may declare more than one entry (e.g.
     sky130's two independent MiM stacks, one per metal level it is drawn on).
 
+    ``mom_capacitors`` is an optional tuple of :class:`MomCapacitorDevice`
+    entries (empty by default) declaring this deck's drawn MoM (Metal-oxide-
+    Metal) capacitor device-recognition layers (issue #1466) -- a structural
+    sibling of ``capacitors`` for a device family (single marker + per-metal
+    multi-port, topologically matched, no computed capacitance value)
+    :class:`CapacitorDevice` cannot represent; see that class's own
+    docstring for the full rationale. Empty for a deck with no curated MoM
+    capacitor recognition; non-empty decks may declare more than one entry
+    (e.g. sg13g2's ``cap_cmomi``/``cap_cmomf`` pair, told apart only by
+    their own distinct marker layers).
+
     ``resistors`` declares the deck's *drawn* precision-resistor device
     classes (see :class:`ResistorDevice`), each recognised by KLayout's
     ``DeviceExtractorResistor``/``...WithBulk``. Optional and empty by
@@ -879,6 +890,7 @@ class ExtractionDeck:
     substrate_isolation: tuple[int, int] | None = None
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
+    mom_capacitors: tuple[MomCapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
@@ -906,7 +918,12 @@ class ExtractionDeck:
         deck declares. Last, a deck that declares one or more ``diodes``
         entries (#542) appends each entry's ``name`` (in declaration order,
         deduplicated) after that -- one token per declared junction-diode
-        flavour, matching how ``bipolars``/``capacitors`` name theirs.
+        flavour, matching how ``bipolars``/``capacitors`` name theirs. A deck
+        that declares one or more ``mom_capacitors`` entries (#1466) appends
+        each entry's ``name`` right after ``capacitors``' own -- the two
+        capacitor families are structurally distinct (see
+        :class:`MomCapacitorDevice`'s docstring) but share the same "device-
+        class role" position in this list.
         """
         classes = ["nfet", "pfet"]
         for bipolar in self.bipolars:
@@ -915,6 +932,9 @@ class ExtractionDeck:
         for capacitor in self.capacitors:
             if capacitor.name not in classes:
                 classes.append(capacitor.name)
+        for mom_capacitor in self.mom_capacitors:
+            if mom_capacitor.name not in classes:
+                classes.append(mom_capacitor.name)
         if self.resistors and "resistor" not in classes:
             classes.append("resistor")
         for diode in self.diodes:
@@ -942,13 +962,14 @@ class ExtractionDeck:
     @property
     def device_recognition_layers(self) -> frozenset[tuple[int, int]]:
         """Every ``(layer, datatype)`` this deck reads for
-        ``bipolars``/``capacitors``/``resistors``/``diodes`` device
-        recognition -- base/emitter/marker/collector; plate +
-        requires/excludes; body/marker/requires/excludes plus optional
-        terminal; anode/cathode/marker + requires/excludes -- regardless of
-        whether the same layer is also one of this deck's ``metals``/``vias``
-        connectivity levels (see :attr:`merge_layers`). ``None`` entries (an
-        absent optional layer) are skipped.
+        ``bipolars``/``capacitors``/``mom_capacitors``/``resistors``/
+        ``diodes`` device recognition -- base/emitter/marker/collector; plate
+        + requires/excludes; marker + per-metal port layers; body/marker/
+        requires/excludes plus optional terminal; anode/cathode/marker +
+        requires/excludes -- regardless of whether the same layer is also one
+        of this deck's ``metals``/``vias`` connectivity levels (see
+        :attr:`merge_layers`). ``None`` entries (an absent optional layer)
+        are skipped.
 
         A layer can legitimately serve both roles at once (sky130's met3/met4
         are simultaneously a ``metals`` connectivity level and a
@@ -976,6 +997,9 @@ class ExtractionDeck:
             layers.update(capacitor.bottom_plate_excludes)
             if capacitor.top_plate_via is not None:
                 layers.add(capacitor.top_plate_via)
+        for mom_capacitor in self.mom_capacitors:
+            layers.add(mom_capacitor.marker)
+            layers.update(pin for pin in mom_capacitor.metal_pins if pin is not None)
         for resistor in self.resistors:
             layers.add(resistor.body)
             layers.add(resistor.marker)
@@ -1431,6 +1455,92 @@ class CapacitorFlavour:
     name: str
     area_cap_f_um2: float
     perim_cap_f_um: float
+
+
+@dataclass(frozen=True)
+class MomCapacitorDevice:
+    """One drawn MoM (Metal-oxide-Metal) capacitor device-recognition entry
+    for an :class:`ExtractionDeck`'s optional ``mom_capacitors`` field (issue
+    #1466), consumed by ``extract.py``'s own ``kdb.GenericDeviceExtractor``
+    subclass -- a structurally distinct sibling of :class:`CapacitorDevice`
+    for a device family that mechanism cannot represent.
+
+    IHP's ``cap_cmomi`` (interdigitated) and ``cap_cmomf`` (metal fringe/
+    finger) MoM capacitors -- the family this entry was introduced for --
+    are recognised from a **single marker layer** covering the whole device
+    footprint (upstream's ``Recog.mom``/``Recog.momf``), containing exactly
+    two ``MkPin``-style per-metal port shapes, rather than from two
+    independently-drawn plate layers the way a MiM stack is. The two ports
+    can land on the *same* metal level (side by side) or on *adjacent*
+    metal levels (stacked) -- there is no fixed "top plate over bottom
+    plate" relationship to derive two ``kdb.Region`` inputs from the way
+    :class:`CapacitorDevice`'s ``top_plate``/``bottom_plate`` split does.
+    Terminals are told apart by *position* within the marker (sorted by
+    ``(x-center, y-center, metal index)``, first/last mapped to the two
+    terminal ids), not by which per-metal layer they are on, and the real
+    device's compact model (``C_total = density[N]*active_area + Cfeed``,
+    supplied by the SPICE/Verilog-A model) is not something the LVS
+    extractor computes at all -- unlike a MiM cap's plate-overlap
+    ``area_cap_f_um2``/``perim_cap_f_um`` coefficients, there is no
+    capacitance formula to transcribe here. This entry therefore reports
+    only the device's drawn dimensions (``W``/``L``, read off the marker's
+    own bounding box) as matched parameters, the same "dimension-matched,
+    not value-computed" shape a MOSFET already uses -- see
+    ``docs/json-contract.md``'s "MoM capacitor devices" note for the
+    resulting ``devices[].params`` shape (no ``c_f``/``area_um2``/
+    ``perimeter_um`` keys, only ``w_um``/``l_um``).
+
+    ``marker`` is the PDK's dedicated MoM device-recognition mark layer
+    (e.g. sg13g2's ``Recog.mom`` 99/39 for ``cap_cmomi``, ``Recog.momf``
+    99/40 for ``cap_cmomf``) -- unlike :class:`CapacitorDevice`, there is no
+    separate ``top_plate``/``bottom_plate`` pair, since the marker itself
+    *is* the whole recognised footprint.
+
+    ``metal_pins`` is a tuple of per-metal port layers, **index-aligned
+    with the owning deck's own ``metals`` field** (``metal_pins[i]``
+    corresponds to ``metals[i]``): the PDK's own per-metal ``MkPin``
+    drawing layer (e.g. sg13g2's ``Metal1.pin``/.../``Metal5.pin``, 8/2
+    through 67/2 -- distinct GDS numbers from ``metal_labels``' *text*
+    layers, which label a net rather than mark a device port) restricted to
+    shapes falling inside ``marker``. ``None`` at a given index means this
+    device has no port on that metal level -- either a level above the
+    device's own thin-metal stack ceiling (sg13g2's ``TopMetal1``/
+    ``TopMetal2``, which upstream's own extraction call never wires a pin
+    layer for) or a level the deck's own stack reaches by a different route
+    (sg13cmos5l's ``TopMetal1``, sitting where sg13g2 has ``Metal5``: cmos5l
+    forbids ``Metal5`` outright, so its instances can only ever populate
+    ``m1p``..``m4p``). ``extract.py`` raises
+    :class:`~klayout_tools.extract.ExtractError` for a deck whose entry's
+    ``metal_pins`` length does not match ``len(metals)`` exactly -- a
+    deck-authoring mistake, the same class of check
+    :func:`~klayout_tools.extract._resolve_resistors` and the main
+    capacitor loop already perform for their own layer fields. Each
+    non-``None`` per-metal port region is wired into that ``metals[i]``
+    connectivity node (mirroring upstream's own ``cap_cmomi_connections
+    .lvs``/``cap_cmomf_connections.lvs``, which tie each per-metal pin
+    *only* to its own metal's routed conductor -- never to every metal at
+    once, which would bridge two ports the real device keeps electrically
+    independent), so ordinary contact/via/metal routing to that metal
+    reaches this device's matching terminal.
+
+    ``name`` is the extracted device-class name (``devices[].class`` in the
+    JSON response, and one of the values :attr:`ExtractionDeck.device_classes`
+    reports for a deck that declares this entry).
+
+    ``provenance`` (issue #1466, the ``MomCapacitorDevice`` sibling of
+    :attr:`CapacitorDevice.provenance`) is a machine-readable citation of the
+    exact upstream PDK-LVS-deck source this entry's recognition geometry was
+    transcribed from (see :class:`RuleProvenance`'s own docstring). ``None``
+    (the default) means no structured provenance has been backfilled for
+    this entry yet -- the prose citation in the deck module's own inline
+    comment remains the only record, exactly as for every entry before this
+    field existed.
+    """
+
+    name: str
+    marker: tuple[int, int]
+    metal_pins: tuple[tuple[int, int] | None, ...]
+    provenance: RuleProvenance | None = None
 
 
 @dataclass(frozen=True)
