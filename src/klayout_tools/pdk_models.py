@@ -1169,9 +1169,20 @@ _RESISTOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
     "gf180mcu": ("r_length", "r_width"),
     "sg13g2": ("l", "w"),
 }
+#: Same convention for capacitors: sky130's MiM cells take ``l``/``w``;
+#: gf180mcu's take the ``c_``-prefixed spellings; sg13g2's `cap_cmim`/
+#: `cap_rfcmim` subcircuits take plain ``l``/``w`` (``.param l=7u w=7u`` in
+#: the same fetched `cap_mod.lib`/`rfcmim` model tree cited by
+#: `_CAPACITOR_MODEL_TABLE` above), matching `_RESISTOR_PARAM_STYLE`'s
+#: `sg13g2` row. Missing entries fall back to lowercase ``l``/``w`` at every
+#: call site -- but sg13g2 is listed explicitly because
+#: :func:`resolve_device_bindings` defaults to uppercase ``L``/``W`` instead
+#: (issue #1470 review): an omitted row there silently writes the wrong
+#: parameter spelling rather than the family's documented one.
 _CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
     "sky130": ("l", "w"),
     "gf180mcu": ("c_length", "c_width"),
+    "sg13g2": ("l", "w"),
 }
 
 
