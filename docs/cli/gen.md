@@ -194,7 +194,14 @@ generic default for this family only (see the `cap_array` section above).
   family must add both a real `tap` role *and* the implant-covered tie
   geometry, then verify the result classifies as a tie under `klt extract
   --deck sg13cmos5l` rather than assuming parity with `sg13g2`'s simpler tap
-  derivation.
+  derivation. **`mos_array` itself was exactly this trap** (issue #1473):
+  its own `flavor="pfet"` well shape drew a well with nothing tying it to a
+  net, so `klt extract --deck sg13cmos5l` reported every generated PMOS
+  body as unbiased. Fixed *without* adding a `tap` role — `mos_array` draws
+  its own well-tie tap pad directly on the shared `active` role (see the
+  `mos_array` section's own "Well-tie tap pad" note below) — so this list of
+  four still-deferred generators, which *do* go through a `tap` role, is
+  unaffected by that fix.
 - `cap_array`: this deck's module docstring states cmos5l has no MIM
   capacitor at all (a forbidden-layer requirement), so there is no
   `cap_top_plate`/`cap_bottom_plate` role for this generator to draw from.
@@ -410,7 +417,11 @@ a downstream matching/LVS consumer can pair index `2k`/`2k+1` as
 centroid-symmetric partners. (Physical placement is the same uniform grid
 either way — `topology` changes the *numbering*, not the layout; see
 `diff_pair` below for a generator that physically interleaves two distinct
-devices.) `device_count` is `rows * cols` (dummies excluded) except for
+devices.) `flavor="pfet"` on `sg13cmos5l` additionally contributes one
+shared `WELL_TAP` port (local-metal) for the whole array's well-tie tap pad
+— see "Well-tie tap pad" below — never a per-unit `U<i>_B`, since one pad
+ties the entire shared well every unit device in the array sits in.
+`device_count` is `rows * cols` (dummies excluded) except for
 `"series"` mode's `fingers > 1` case noted above.
 `drc_hints.matched_group_id` is `"mos_array:<rows>x<cols>:<topology>"`
 (`flavor` is not folded in — a matched group is always one generator call by
@@ -418,10 +429,37 @@ construction, so every instance in it already shares one `flavor`).
 
 `flavor="pfet"` additionally encloses every unit device's (real and dummy)
 active region in a single shared well shape, sized by `WELL_ENCLOSURE_MARGIN_UM`,
-on PDK families whose curated deck checks a well layer (both `sky130` and
-`gf180mcu`, as of this generator's `flavor` support — see `guard_ring` below
-for the layer numbers). `flavor="nfet"` (the default) draws no well shape at
-all — output for the default case is unchanged.
+on PDK families whose curated deck checks a well layer (`sky130`, `gf180mcu`,
+and `sg13cmos5l`, as of this generator's `flavor` support — see `guard_ring`
+below for the layer numbers). `flavor="nfet"` (the default) draws no well
+shape at all — output for the default case is unchanged.
+
+**Well-tie tap pad (issue #1473, `sg13cmos5l` only).** A drawn well with
+nothing tying it to a real net still leaves every PMOS body an anonymous,
+floating net under `klt extract` (`unbiased_pmos_body_nets[]`) — an LVS
+defect DRC never catches. On `sg13cmos5l` — whose curated deck has no
+distinct tap mask but derives a well tie from `nSD`-covered `Activ`
+diffusion *inside* `NWell` (`EXTRACTION_DECK.tap_nplus`) — `flavor="pfet"`
+additionally draws one small well-tie tap pad (active + contact + local
+metal, implanted with `nSD`, plus a fixed `"WELL_TAP"` net-name label so the
+tied well is never KLayout's anonymous `$<n>` placeholder) clear of every
+unit device's own diffusion by `MIN_SAME_LAYER_SPACING_UM`, and reports it
+as a shared `WELL_TAP` port (`ports[]`) a caller can route externally —
+`klt extract --deck sg13cmos5l` on the result reports an empty
+`unbiased_pmos_body_nets[]`. This is deliberately scoped to `sg13cmos5l`
+only: `gf180mcu`'s curated deck derives an equivalent well tie the identical
+way (`Nplus`-covered `Comp` inside `Nwell`), and likely has the same latent
+gap, but that was not verified by issue #1473 (its own friction report only
+tested `sg13cmos5l`) — `gf180mcu`'s/`sky130`'s `flavor="pfet"` output stays
+byte-for-byte unchanged (no `WELL_TAP` port, no tap-pad geometry) until a
+follow-on issue verifies the equivalent fix there. `flavor="nfet"`'s own
+substrate-tie gap (a `pSD`-covered tap outside every well, tying the NMOS
+body) was not addressed by this issue either: unlike a PMOS body, an NMOS
+body's terminal always falls back to the curated deck's synthesized
+`substrate_net` global regardless of any drawn tie, so `klt extract` never
+flags it as anonymous/unbiased the way it does a floating PMOS body — there
+is no equivalent `unbiased_nmos_body_nets[]` check for `flavor="nfet"` to
+satisfy.
 
 `voltage_flavor` (issue #1054) is a separate, orthogonal opt-in for a PDK's
 **medium-voltage/thick-oxide transistor variant** — a common multi-voltage-
@@ -456,7 +494,7 @@ marker with no conflict.
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
-| `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
+| `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer) or `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 
@@ -1211,7 +1249,7 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, `C<i>_TOP`/`_BOT` for `cap_array`, etc). |
+| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array` (plus a shared `WELL_TAP` on `flavor="pfet"`, `sg13cmos5l` only — issue #1473), `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, `C<i>_TOP`/`_BOT` for `cap_array`, etc). |
 | `net` | string \| null | The net this port carries. `null` for every generator except `well_island` (issue #1421), whose `TAP_*` ports carry its `params.net` — the one request field that feeds a port's net today. A `GAP_*` marker is never given one (it marks the *absence* of ring conductor). |
 | `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |

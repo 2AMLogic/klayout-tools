@@ -848,6 +848,16 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     #   verify the result classifies as a tie under `klt extract --deck
     #   sg13cmos5l` (never assume parity with `sg13g2`'s own, simpler tap
     #   derivation).
+    #
+    #   Update (issue #1473): `mos_array`'s own `flavor="pfet"` well shape
+    #   was exactly this "DRC-legal but silently unbiased" trap -- it drew
+    #   the well with nothing tying it to a net. Fixed *without* adding a
+    #   `"tap"` role: `mos_array` draws its own well-tie pad directly on the
+    #   shared `"active"` role (implant-covered by the new
+    #   `"well_tap_implant"` role below), never through `_ring_layer_params`
+    #   -- so `guard_ring`/`diff_pair`/`well_island` (which *do* go through
+    #   `_ring_layer_params`'s `"tap"` role) are still correctly deferred
+    #   above; this fix does not unblock them.
     # - `cap_array`: this deck's module docstring states cmos5l has no MIM
     #   capacitor at all (a forbidden-layer requirement on `MIM`/`Vmim`/etc.,
     #   confirmed against cmos5l's own forbidden-layer lists) -- there is no
@@ -922,6 +932,29 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "via1": (19, 0),  # Via1.drawing -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
         "metal3": (30, 0),  # Metal3.drawing -- EXTRACTION_DECK.metals[2]
         "via2": (29, 0),  # Via2.drawing -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
+        #
+        # Well-tie implant (issue #1473): `mos_array`'s own `flavor="pfet"`
+        # request draws the `well` shape above (enclosing the unit devices'
+        # active regions in `NWell`) but, without this role, nothing tied
+        # that well to a real net -- every generated PMOS body extracted
+        # unbiased (`klt extract --deck sg13cmos5l`'s own
+        # `unbiased_pmos_body_nets[]`, issue #555). This deck declares no
+        # distinct tap mask (`EXTRACTION_DECK.tap` is `None`, see the
+        # `_GENERATOR_FAMILY_DEFERRED` comment above), but does derive a well
+        # tie from `nSD`-covered `Activ` diffusion *inside* `NWell`
+        # (`EXTRACTION_DECK.tap_nplus`, issue #1414) -- the same "no
+        # dedicated tap layer, implant distinguishes the tie from an ordinary
+        # source/drain" shape `gf180mcu`'s own `"well_tap_implant"` entry
+        # above documents (there, `Nplus`/32,0 over the shared `Comp`/
+        # `"tap"`==`"active"` layer; here, `nSD`/7,0 over the shared `Activ`/
+        # `"active"` layer -- no separate `"tap"` role needed since
+        # `mos_array` draws its own tap pad directly on `"active"`, it never
+        # goes through `_ring_layer_params`'s `"tap"` role at all).
+        # `mos_array` draws one small `nSD`-covered `Activ` pad (+ contact +
+        # local metal) per array, clear of every unit device's own diffusion
+        # by `MIN_SAME_LAYER_SPACING_UM` (well inside this deck's own
+        # `activ.space.1` floor, 0.21um) -- see `_mos_array_well_tap_layout`.
+        "well_tap_implant": (7, 0),  # nSD.drawing -- EXTRACTION_DECK.tap_nplus
     },
 }
 
@@ -1242,6 +1275,64 @@ def _role_layer_info(family: str, role: str) -> Any:
     return kdb.LayerInfo(*pair) if pair is not None else None
 
 
+#: Families ``mos_array``'s own well-tie tap-pad geometry (issue #1473, see
+#: :func:`_mos_array_well_tap_layout`) has actually been *verified* against --
+#: DRC-clean under ``klt drc`` and re-extracting with an empty
+#: ``unbiased_pmos_body_nets[]`` under ``klt extract``. A family is added
+#: here only once that verification has actually been run, mirroring the
+#: same "verified, not assumed by analogy" bar :data:`_GENERATOR_FAMILY_DEFERRED`
+#: and :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` already hold themselves to.
+#:
+#: ``gf180mcu``'s own :data:`_PDK_ROLE_LAYERS` entry already declares a
+#: ``"well_tap_implant"`` role (added by issue #1421 for ``well_island``'s own
+#: use), and that family's curated deck derives an equivalent well tie the
+#: *identical* way sg13cmos5l's does (``tap_nplus`` -- ``Nplus`` 32/0, see
+#: ``EXTRACTION_DECK.tap_nplus`` in ``klayout_tools.decks.gf180mcu``) -- so
+#: the same "well drawn, nothing ties it" gap this issue fixes for
+#: ``sg13cmos5l`` plausibly reproduces on ``gf180mcu`` too. Issue #1473's own
+#: friction report explicitly did not measure that ("I only have the IHP
+#: families installed here"), so this table deliberately does *not* opt
+#: ``gf180mcu`` in unverified -- :func:`_mos_array_well_tap_role_layer`
+#: returns ``None`` for it even though the underlying role resolves, so
+#: ``mos_array``'s drawn geometry and ``ports[]`` on ``gf180mcu``/``sky130``
+#: stay byte-for-byte unchanged by this issue. A follow-on issue that wires
+#: this up for ``gf180mcu`` should add it here once verified DRC-clean and
+#: extract-clean against that family's own curated deck, never assumed.
+_MOS_ARRAY_WELL_TAP_FAMILIES: frozenset[str] = frozenset({"sg13cmos5l"})
+
+
+def _mos_array_well_tap_role_layer(family: str) -> Any:
+    """The ``"well_tap_implant"`` role's ``kdb.LayerInfo`` for ``family``,
+    scoped to :data:`_MOS_ARRAY_WELL_TAP_FAMILIES` -- ``None`` outside that
+    set, even when :data:`_PDK_ROLE_LAYERS` itself declares the role for a
+    different generator's own use (e.g. ``gf180mcu``, whose entry exists for
+    ``well_island``, not (yet) for ``mos_array``). Shared by
+    :func:`_device_layer_params` and :func:`_mos_array_describe` so both
+    resolve the exact same gate."""
+    if family not in _MOS_ARRAY_WELL_TAP_FAMILIES:
+        return None
+    return _role_layer_info(family, "well_tap_implant")
+
+
+#: Fixed net-name text ``mos_array`` draws on its own well-tie tap pad's
+#: metal (issue #1473), when one is drawn (see :data:`_MOS_ARRAY_WELL_TAP_FAMILIES`).
+#: Unlike ``well_island``'s own opt-in ``net`` request param (empty by
+#: default, drawing no label at all), ``mos_array`` has no per-request
+#: net-name param -- and the whole point of drawing this pad is to satisfy
+#: the *default* ``flavor='pfet'`` request's own ``klt extract
+#: unbiased_pmos_body_nets[]`` check, so the label cannot be conditional on a
+#: caller opting in. ``klt extract``'s own ``_detect_unbiased_pmos_body_nets``
+#: (see that function's docstring) only checks whether the body net carries
+#: *any* drawn label -- KLayout's ``Net.expanded_name()`` synthesizes an
+#: anonymous ``"$<n>"`` placeholder purely because no ``kdb.Text`` shape sits
+#: on the net's own conductor region, independent of whether that region is
+#: otherwise a real, physically-tied conductor -- so the literal text here is
+#: never itself read by `klt extract`/`klt gen-compose`, only its presence
+#: matters. Matches the port name (``WELL_TAP``) reported alongside it for
+#: easy cross-reference between `ports[]` and the extracted netlist.
+_MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
+
+
 #: Per-PDK-family medium-voltage/thick-oxide transistor *flavour* -> marker
 #: layer, selected by ``mos_array``'s/``diff_pair``'s ``voltage_flavor``
 #: request param (issue #1054). Mirrors :data:`_PDK_RES_FLAVOR_LAYERS`'s own
@@ -1389,6 +1480,12 @@ def _device_layer_params(
     family = _pdk_family(pdk_info["variant"])
     well = _role_layer_info(family, "well")
     dummy = _role_layer_info(family, "dummy")
+    well_tap_implant = _mos_array_well_tap_role_layer(family)
+    # Only resolved when a well-tie tap pad is actually drawn for this family
+    # (`well_tap_implant is not None`) -- the label exists purely to name
+    # *that* pad's own net (see `_MOS_ARRAY_WELL_TAP_NET_LABEL`'s docstring),
+    # never drawn on its own.
+    metal_label = _role_layer_info(family, "metal_label") if well_tap_implant else None
     voltage_flavor = params.get("voltage_flavor", "")
     voltage_flavor_mark = (
         _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
@@ -1402,6 +1499,25 @@ def _device_layer_params(
         "well_present": well is not None,
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
+        # Well-tie implant (issue #1473): unlike every other role above, this
+        # goes through :func:`_mos_array_well_tap_role_layer` rather than a
+        # bare :func:`_role_layer_info` call -- it resolves the role scoped
+        # to :data:`_MOS_ARRAY_WELL_TAP_FAMILIES` (verified families only,
+        # `sg13cmos5l` today), not every family whose table happens to
+        # declare `"well_tap_implant"` for a different generator's own use
+        # (`well_island`'s `_well_island_layer_params` resolves the same role
+        # unscoped, since that generator's own use of it is unaffected).
+        # ``mos_array``'s own consumer is
+        # :func:`_mos_array_well_tap_layout`, gated on ``flavor == 'pfet'``
+        # (see ``_MosArrayPCell.produce_impl``).
+        "well_tap_implant_layer": (
+            well_tap_implant if well_tap_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "well_tap_implant_present": well_tap_implant is not None,
+        "metal_label_layer": (
+            metal_label if metal_label is not None else kdb.LayerInfo(0, 0)
+        ),
+        "metal_label_present": metal_label is not None,
         "voltage_flavor_mark_layer": (
             voltage_flavor_mark
             if voltage_flavor_mark is not None
@@ -2156,6 +2272,54 @@ def _centroid_order(rows: int, cols: int) -> list[tuple[int, int]]:
     return ordered
 
 
+def _mos_array_well_tap_layout(
+    min_x0_um: float, min_y0_um: float, max_x1_um: float, max_y1_um: float
+) -> dict[str, Any]:
+    """Well-tie tap pad for ``mos_array``'s ``flavor='pfet'`` well, on a PDK
+    family whose curated deck derives a well tie from an implant-covered
+    ``"active"`` shape inside the well rather than a distinct tap mask (issue
+    #1473 -- see the ``"well_tap_implant"`` role in :data:`_PDK_ROLE_LAYERS`,
+    e.g. ``sg13cmos5l``'s ``nSD``/``EXTRACTION_DECK.tap_nplus``).
+
+    One pad ties the *entire* shared well: :func:`_mos_array_layout`'s own
+    ``well_box_um`` already merges every unit device's well enclosure into a
+    single shape, and the curated deck's own tie derivation
+    (``tap_nplus_region & active & nwell``) connects that single ``nwell``
+    conductor -- and therefore every PMOS body terminal sitting in it -- to
+    whatever this one pad's contact/metal reach. So this is drawn once per
+    array, never once per unit device, mirroring the "one net biases the
+    whole tub" fact the derivation itself relies on.
+
+    Placed :data:`MIN_SAME_LAYER_SPACING_UM` clear of the array's own active
+    bounding box (``(min_x0_um, min_y0_um, max_x1_um, max_y1_um)``, the same
+    box :func:`_mos_array_layout` margins into ``well_box_um``), on the
+    *same* shared ``"active"`` role every unit device's own source/drain
+    diffusion uses -- comfortably inside a curated deck's own same-layer
+    spacing floor (e.g. sg13cmos5l's ``activ.space.1``, 0.21um), so the
+    differently-implanted tap pad never collides with a real unit device's
+    diffusion under DRC."""
+    contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    x0 = max_x1_um + MIN_SAME_LAYER_SPACING_UM
+    y0 = min_y0_um
+    x1 = x0 + contact_region_um
+    y1 = y0 + contact_region_um
+    contact_half = CONTACT_SIZE_UM / 2.0
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    return {
+        "active": (x0, y0, x1, y1),
+        "contact": (
+            cx - contact_half,
+            cy - contact_half,
+            cx + contact_half,
+            cy + contact_half,
+        ),
+        "metal": (x0, y0, x1, y1),
+        "width_um": contact_region_um,
+        "xy": (cx, cy),
+    }
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -2167,6 +2331,7 @@ def _mos_array_layout(
     gate_contact: bool = False,
     finger_topology: str = "parallel",
     gate_pad_clearance_um: float = 0.0,
+    draw_well_tap: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -2183,7 +2348,14 @@ def _mos_array_layout(
     :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
-    used only when the caller requests ``flavor="pfet"``."""
+    used only when the caller requests ``flavor="pfet"``.
+
+    ``draw_well_tap`` (issue #1473) additionally computes ``well_tap`` (see
+    :func:`_mos_array_well_tap_layout`) -- the well-tie pad only a PDK
+    family with a ``"well_tap_implant"`` role needs -- and grows
+    ``well_box_um`` to enclose it too. ``None`` (the default, ``False``) when
+    not requested, so every caller that never asks for it keeps byte-for-byte
+    identical geometry."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -2228,6 +2400,17 @@ def _mos_array_layout(
     margin = WELL_ENCLOSURE_MARGIN_UM
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
 
+    well_tap = None
+    if draw_well_tap:
+        well_tap = _mos_array_well_tap_layout(min_x0, min_y0, max_x1, max_y1)
+        tap_box = well_tap["active"]
+        well_box = (
+            min(well_box[0], tap_box[0] - margin),
+            min(well_box[1], tap_box[1] - margin),
+            max(well_box[2], tap_box[2] + margin),
+            max(well_box[3], tap_box[3] + margin),
+        )
+
     return {
         "unit": unit,
         "col_pitch_um": col_pitch,
@@ -2235,6 +2418,7 @@ def _mos_array_layout(
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
+        "well_tap": well_tap,
     }
 
 
@@ -3733,6 +3917,35 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "well_tap_implant_layer",
+                self.TypeLayer,
+                "Well-tie implant layer drawn over the well-tap pad (only "
+                "used when flavor is 'pfet', well_present, and "
+                "well_tap_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_tap_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "a tap pad on the shared active role as a well tie",
+                default=False,
+            )
+            self.param(
+                "metal_label_layer",
+                self.TypeLayer,
+                "Label layer the well-tap pad's fixed net-name text is drawn "
+                "on (only used when well_tap_implant_present and "
+                "metal_label_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "metal_label_present",
+                self.TypeBoolean,
+                "Whether metal_label_layer is a real label layer for the resolved PDK",
+                default=False,
+            )
+            self.param(
                 "voltage_flavor_mark_layer",
                 self.TypeLayer,
                 "Medium-voltage/thick-oxide device-class marker drawing "
@@ -3764,6 +3977,19 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_poly = self.layout.layer(self.poly_layer)
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
+            # Well-tie tap pad (issue #1473): only meaningful for a drawn
+            # well (`flavor == 'pfet'` and `well_present`) on a family whose
+            # curated deck needs an implant mask to recognise a tap pad on
+            # the shared `active` role as a well tie (see
+            # `_mos_array_well_tap_layout`'s own docstring). Resolved once,
+            # up front, so `_mos_array_layout` computes (and
+            # `well_box_um` encloses) the exact same geometry this
+            # `produce_impl` draws below.
+            draw_well_tap = (
+                self.flavor == "pfet"
+                and self.well_present
+                and self.well_tap_implant_present
+            )
             info = _mos_array_layout(
                 self.w_um,
                 self.l_um,
@@ -3775,6 +4001,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.gate_contact,
                 self.finger_topology,
                 self.gate_pad_clearance_um,
+                draw_well_tap,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -3791,6 +4018,40 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             if self.flavor == "pfet" and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
                 _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
+
+            if draw_well_tap and info["well_tap"] is not None:
+                well_tap = info["well_tap"]
+                _insert_boxes(self.cell, li_active, dbu, [well_tap["active"]])
+                _insert_boxes(self.cell, li_contact, dbu, [well_tap["contact"]])
+                _insert_boxes(self.cell, li_metal, dbu, [well_tap["metal"]])
+                # Exactly coincident with the tap pad's own active box --
+                # never a blanket over anything else -- so only the tap pad
+                # itself is n+ implanted, mirroring `well_island`'s own
+                # `well_tap_implant` ring precedent.
+                _insert_boxes(
+                    self.cell,
+                    self.layout.layer(self.well_tap_implant_layer),
+                    dbu,
+                    [well_tap["active"]],
+                )
+                # Fixed net-name label (issue #1473, see
+                # `_MOS_ARRAY_WELL_TAP_NET_LABEL`'s own docstring): without
+                # *some* drawn label, `klt extract` always synthesizes an
+                # anonymous `$<n>` net for this tie regardless of how well it
+                # is physically connected, so `unbiased_pmos_body_nets[]`
+                # would still fire even though the well is genuinely tied.
+                if self.metal_label_present:
+                    tap_cx, tap_cy = well_tap["xy"]
+                    self.cell.shapes(self.layout.layer(self.metal_label_layer)).insert(
+                        kdb.Text(
+                            _MOS_ARRAY_WELL_TAP_NET_LABEL,
+                            kdb.Trans(
+                                kdb.Vector(
+                                    int(round(tap_cx / dbu)), int(round(tap_cy / dbu))
+                                )
+                            ),
+                        )
+                    )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
             # sized to enclose every unit device (real and dummy) -- the same
@@ -5593,6 +5854,14 @@ def _mos_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     family = _pdk_family(pdk_info["variant"])
+    # Must match the same gate `_MosArrayPCell.produce_impl` uses (issue
+    # #1473), so the reported `well_box_um`/well-tap port line up with the
+    # geometry actually drawn.
+    draw_well_tap = (
+        params["flavor"] == "pfet"
+        and _role_layer_info(family, "well") is not None
+        and _mos_array_well_tap_role_layer(family) is not None
+    )
     info = _mos_array_layout(
         params["w_um"],
         params["l_um"],
@@ -5607,6 +5876,7 @@ def _mos_array_describe(
         # the reported gate-port position is defined off the landing pad this
         # clearance moves (issue #1450).
         _gate_pad_clearance_um(family),
+        draw_well_tap,
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -5708,6 +5978,24 @@ def _mos_array_describe(
                     "direction_deg": 90,
                 }
             )
+
+    # Well-tie tap port (issue #1473): one shared port for the whole array's
+    # well -- `_mos_array_well_tap_layout`'s own docstring explains why a
+    # single pad ties every unit device's PMOS body in the array, so this is
+    # not an `U<i>_B`-per-unit port the way S/D/G are.
+    if info["well_tap"] is not None:
+        tap_x, tap_y = info["well_tap"]["xy"]
+        ports.append(
+            {
+                "name": "WELL_TAP",
+                "net": None,
+                "layer": metal_layer,
+                "x_um": tap_x,
+                "y_um": tap_y,
+                "width_um": info["well_tap"]["width_um"],
+                "direction_deg": 0,
+            }
+        )
 
     notes = []
     if params["l_um"] < GATE_LENGTH_SAFE_MIN_UM:
