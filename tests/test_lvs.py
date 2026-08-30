@@ -6476,6 +6476,209 @@ def test_normalize_unnamed_bipolar_like_subckt_passes_through():
     assert normalize_reference_netlist(text, deck="sky130").strip() == text.strip()
 
 
+# --------------------------------------------------------------------------- #
+# `reference.deck`'s map is derived from the deck's own declared device
+# classes, not a hand-maintained MOS-only list (issue #1464)
+# --------------------------------------------------------------------------- #
+
+from klayout_tools.decks import (  # noqa: E402
+    get_extraction_deck,
+    known_extraction_deck_names,
+)
+from klayout_tools.pdk_models import build_device_binding_map  # noqa: E402
+
+#: Device classes a registered deck declares that deliberately have **no**
+#: subcircuit to bind to, so `build_device_binding_map` must not invent one
+#: (see `pdk_models._RESISTOR_MODEL_TABLE`'s own comment): IHP ships
+#: `res_metal1`/`res_metal2` as a bare model-reference `R` card, not a
+#: `.subckt`. Kept as an explicit allowlist so a *new* undeclarable class has
+#: to be added here consciously rather than silently skipping the coverage
+#: assertion below.
+_SUBCKT_LESS_DEVICE_CLASSES = frozenset({"res_metal1", "res_metal2"})
+
+
+@pytest.mark.parametrize(
+    ("device_class", "instance"),
+    [("rsil", "XR1"), ("rppd", "XR2"), ("rhigh", "XR3")],
+)
+def test_normalize_sg13cmos5l_resistor_resolves_from_deck_alone(device_class, instance):
+    # Issue #1464's headline repro: sg13cmos5l's `EXTRACTION_DECK.resistors`
+    # has declared rsil/rppd/rhigh since #1415, but `_RESISTOR_MODEL_TABLE`
+    # has no ("sg13cmos5l", "sg13cmos5l") entry -- so `reference.deck`
+    # narrowed the map to that deck's four MOS names and the resistor call
+    # needed a hand-written `device_map`. The derived fallback closes it.
+    out = normalize_reference_netlist(
+        f"{instance} r0 r1 sub {device_class} l=10u w=0.5u\n", deck="sg13cmos5l"
+    )
+    assert out.strip() == (f"{instance[1:]} r0 r1 sub 0 {device_class} L=10U W=0.5U")
+
+
+def test_normalize_sg13g2_capacitor_resolves_from_deck_alone():
+    # The second, independent instance of the same gap found during
+    # curation: `_CAPACITOR_MODEL_TABLE` has no ("sg13g2", "sg13g2") entry
+    # even though sg13g2 has declared cap_cmim/rfcmim since #1456. A 5x5 um
+    # plate: area = 25 um^2, perimeter = 2*(5+5) = 20 um.
+    out = normalize_reference_netlist(
+        "XC1 PLUS MINUS cap_cmim w=5u l=5u\n", deck="sg13g2"
+    )
+    assert out.strip() == "C1 PLUS MINUS 0 cap_cmim A=25P P=20U"
+
+
+def test_normalize_sg13g2_resistors_still_resolve_from_curated_table():
+    # sg13g2 *does* have a curated resistor entry (#1457), so the derived
+    # fallback must not fire for that family at all -- the curated names
+    # keep working unchanged.
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 sub rppd l=10u w=0.5u\n", deck="sg13g2"
+    )
+    assert out.strip() == "R1 r0 r1 sub 0 rppd L=10U W=0.5U"
+
+
+def test_normalize_explicit_device_map_still_overrides_derived_binding():
+    # Acceptance criterion 3: an explicit `device_map` entry takes precedence
+    # over the derived binding for the same subcircuit name (the deck map is
+    # merged first, then `device_map` on top).
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 rppd res_len=10u res_wid=0.5u\n",
+        deck="sg13cmos5l",
+        device_map={
+            "rppd": {
+                "kind": "resistor",
+                "class": "my_custom_res",
+                "length_param": "res_len",
+                "width_param": "res_wid",
+            }
+        },
+    )
+    assert out.strip() == "R1 r0 r1 0 my_custom_res L=10U W=0.5U"
+    assert "rppd" not in out
+
+
+def test_normalize_sky130_non_identity_capacitor_mapping_unaffected():
+    # Edge case from the issue's test plan: sky130's capacitor family *is*
+    # curated, and its mapping is genuinely non-identity (declared class
+    # `sky130_fd_pr__model__cap_mim` -> real subcircuit
+    # `sky130_fd_pr__cap_mim_m3_1`). The derived fallback must neither
+    # override it nor add an assumed-identity alias under the class name.
+    out = normalize_reference_netlist(
+        "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u\n", deck="sky130"
+    )
+    assert out.strip() == "C1 c0 c1 0 sky130_fd_pr__model__cap_mim A=25P P=20U"
+
+    binding_map = build_device_binding_map("sky130")
+    assert binding_map["sky130_fd_pr__cap_mim_m3_1"].device_class == (
+        "sky130_fd_pr__model__cap_mim"
+    )
+    assert "sky130_fd_pr__model__cap_mim" not in binding_map
+
+
+def test_normalize_sg13g2_metal_resistor_carveout_is_not_fabricated():
+    # sg13g2 declares res_metal1/res_metal2 but its curated resistor entry
+    # deliberately omits them: IHP ships no `.subckt res_metal1` at all (a
+    # verified carve-out, see `_RESISTOR_MODEL_TABLE`). Because the fallback
+    # is gated on the whole (deck, family) pair being uncurated, those two
+    # are not invented -- the conversion still fails loudly.
+    with pytest.raises(NormalizeError, match="not a known device"):
+        normalize_reference_netlist("XR1 r0 r1 res_metal1 l=10u w=1u\n", deck="sg13g2")
+
+
+def test_normalize_gf180_bipolar_class_is_never_derived():
+    # gf180mcu declares a `bjt` class with no curated binding -- a *verified*
+    # "no such device cell" carve-out. Bipolar is recognised by subcircuit
+    # name alone (no geometry parameter to cross-check), so an assumed
+    # identity would silently rewrite a genuine hierarchical `X ... bjt`
+    # instance into a Q card. It must stay unbound: the instance passes
+    # through untouched.
+    text = "XQ1 c b e bjt\n"
+    assert normalize_reference_netlist(text, deck="gf180mcu").strip() == text.strip()
+    assert "bjt" not in build_device_binding_map("gf180mcu")
+
+
+def test_normalize_unknown_deck_device_error_lists_derived_classes():
+    # Acceptance criterion 4: when the "not a known device for the requested
+    # deck" error does fire, it must not misrepresent what the deck knows --
+    # the derived non-MOS classes are in the resolved map, so they are
+    # enumerated alongside the MOS names.
+    with pytest.raises(NormalizeError) as excinfo:
+        normalize_reference_netlist(
+            "XR1 r0 r1 not_a_real_resistor l=10u w=1u\n", deck="sg13cmos5l"
+        )
+    message = str(excinfo.value)
+    assert "not a known device for the requested deck" in message
+    for expected in ("rsil", "rppd", "rhigh", "sg13_lv_nmos"):
+        assert expected in message
+
+
+def test_build_device_binding_map_derived_fallback_shape():
+    # Unit-level assertion of the whole fallback contract, per deck.
+    assert set(build_device_binding_map("sg13cmos5l")) == {
+        "sg13_lv_nmos",
+        "sg13_lv_pmos",
+        "sg13_hv_nmos",
+        "sg13_hv_pmos",
+        "rsil",
+        "rppd",
+        "rhigh",
+    }
+    # sg13g2 gains only its capacitor family (resistors are curated, so
+    # res_metal1/res_metal2 stay out).
+    assert set(build_device_binding_map("sg13g2")) == {
+        "sg13_lv_nmos",
+        "sg13_lv_pmos",
+        "sg13_hv_nmos",
+        "sg13_hv_pmos",
+        "rsil",
+        "rppd",
+        "rhigh",
+        "cap_cmim",
+        "rfcmim",
+    }
+    # Both fully-curated decks are byte-for-byte unchanged: no derived entry
+    # is added to either.
+    assert set(build_device_binding_map("gf180mcu")) == {
+        "nfet_03v3",
+        "pfet_03v3",
+        "nfet_06v0",
+        "pfet_06v0",
+        "ppolyf_u",
+        "ppolyf_u_1k",
+        "ppolyf_u_2k",
+        "ppolyf_u_3k",
+        "cap_mim_2f0_m4m5_noshield",
+    }
+    assert set(build_device_binding_map("sky130")) == {
+        "sky130_fd_pr__nfet_01v8",
+        "sky130_fd_pr__pfet_01v8",
+        "sky130_fd_pr__nfet_g5v0d10v5",
+        "sky130_fd_pr__pfet_g5v0d10v5",
+        "sky130_fd_pr__res_generic_po",
+        "sky130_fd_pr__res_high_po",
+        "sky130_fd_pr__res_xhigh_po",
+        "sky130_fd_pr__cap_mim_m3_1",
+        "sky130_fd_pr__cap_mim_m3_2",
+        "sky130_fd_pr__pnp_05v5_W0p68L0p68",
+        "sky130_fd_pr__pnp_05v5_W3p40L3p40",
+    }
+
+
+def test_build_device_binding_map_derived_entries_match_deck_declarations():
+    # The "cannot drift from the deck again" property the issue asked for:
+    # every resistor/capacitor class a deck declares is resolvable through
+    # `reference.deck`, with no per-class table edit. Asserted against the
+    # deck objects themselves so a newly declared class fails here rather
+    # than silently regressing `klt lvs`'s reference side.
+    for deck_name in known_extraction_deck_names():
+        binding_map = build_device_binding_map(deck_name)
+        deck = get_extraction_deck(deck_name)
+        resolvable_classes = {lookup.device_class for lookup in binding_map.values()}
+        for resistor in deck.resistors:
+            if resistor.name in _SUBCKT_LESS_DEVICE_CLASSES:
+                continue
+            assert resistor.name in resolvable_classes, deck_name
+        for capacitor in deck.capacitors:
+            assert capacitor.name in resolvable_classes, deck_name
+
+
 def test_normalize_mos_missing_lw_after_name_match_raises_cleanly():
     # A recognised MOS subcircuit name with neither l nor w supplied used to
     # be unreachable (l/w presence was the *only* detection gate); the

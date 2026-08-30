@@ -217,12 +217,16 @@ Device subcircuit names resolve through the same curated table `klt extract
 --pdk` uses (`klayout_tools.pdk_models`), so the common case needs no map.
 When a device name is not one of the curated devices, supply it explicitly:
 
-- `reference.deck` — `"sky130"` / `"gf180mcu"`, selects that deck's device
-  map (validates names against it, and already covers MOS, resistor,
-  capacitor, and bipolar for both registered decks — see below). Adding a
-  new PDK family's device map (`_MOS_MODEL_TABLE`, `_KNOWN_PDK_FAMILIES`,
-  `_PDK_VARIANT_FAMILY_ALIASES` in `klayout_tools.pdk_models`) is covered
-  in [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
+- `reference.deck` — `"sky130"` / `"gf180mcu"` / `"sg13g2"` /
+  `"sg13cmos5l"`, selects that deck's device map (and validates names
+  against it). Its coverage is not a hand-maintained MOS list: every
+  resistor and capacitor class the named deck's own `ExtractionDeck`
+  declares is resolvable, so a deck recognises the same devices on this
+  reference side that it recognises for extraction (issue #1464 — see
+  "Per-deck coverage" below). Adding a new PDK family's device map
+  (`_MOS_MODEL_TABLE`, `_KNOWN_PDK_FAMILIES`, `_PDK_VARIANT_FAMILY_ALIASES`
+  in `klayout_tools.pdk_models`) is covered in
+  [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
 - `reference.device_map` — an explicit `{ "<subckt-name>": <override> }`
   override, merged on top of the deck's map, for a device subcircuit name
   the curated table does not cover. `<override>` is either a bare
@@ -283,6 +287,32 @@ parameter/unit mapping into a sign-off tool must never pass silently):
 A reference netlist that *mixes* plain-element (`M`/`R`/`C`/`Q`) cards and
 subckt-call `X` device cards converts correctly under `form:
 "subckt-call"` — the plain-element cards pass through unchanged.
+
+**Per-deck coverage** (issue #1464). What `reference.deck: "<deck>"` resolves
+is the union of two sources:
+
+| Source | Contributes | Example |
+|---|---|---|
+| Curated subcircuit-name tables in `klayout_tools.pdk_models` | Every MOS/resistor/capacitor/bipolar subcircuit name hand-verified against a real fetched PDK install, including the ones whose subcircuit name differs from the deck's device-class label | sky130's `sky130_fd_pr__cap_mim_m3_1` (class `sky130_fd_pr__model__cap_mim`), `sky130_fd_pr__pnp_05v5_W0p68L0p68` (class `pnp`) |
+| The named deck's own `ExtractionDeck.resistors`/`.capacitors` | One assumed-identity binding per declared class — the class name taken as its own subcircuit name — but **only** for a family that has no curated table entry for that deck at all | `sg13cmos5l`'s `rsil`/`rppd`/`rhigh`, `sg13g2`'s `cap_cmim`/`rfcmim` |
+
+The second source exists so a deck cannot recognise a device for extraction
+and then refuse to read that same device back here — the round-trip
+asymmetry issue #1464 reported. A curated entry always wins over a derived
+one, and a family the curated tables *do* cover is never extended by
+derivation, so a class a curated entry deliberately omits (`sg13g2`'s
+`res_metal1`/`res_metal2`, which the IHP PDK ships as a bare
+model-reference `R` card rather than a subcircuit) is not fabricated.
+Bipolar is never derived at all: it carries no geometry parameter to
+cross-check a name against, so an assumed identity could silently rewrite a
+genuine hierarchical instance into a `Q` card.
+
+Anything outside that union — including a subcircuit whose real upstream
+name differs from the deck's device-class label and has no curated entry yet
+(`sg13g2`'s `rfcmim` class, whose IHP subcircuit is `cap_rfcmim`) — still
+needs an explicit `reference.device_map` entry, and the
+"not a known device for the requested deck" error lists the full resolved
+set so the gap is visible from the failure itself.
 
 **gf180mcu MOS flavour subcircuits** (issue #1111): the curated table also
 recognises `nfet_06v0`/`pfet_06v0` (gf180mcu's `Dualgate`-scoped 5V/6V MOS
@@ -630,7 +660,7 @@ each resolves relative paths inside the document.
 | `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory (or the current working directory for the `-`/inline-JSON request forms — see the `<request>` bullet above). |
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
 | `reference.form` | string | `"plain-element"` (default), `"subckt-call"`, or `"gate-level-verilog"` (issue #1336). `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. `"gate-level-verilog"` reads `reference.netlist` as a `klt place-and-route` `verilog_path` gate-level Verilog netlist instead of SPICE and converts it to plain-element-shaped SPICE first — see "Digital gate-level LVS" above. |
-| `reference.deck` | string | Only used with `form: "subckt-call"`. `"sky130"`/`"gf180mcu"` — selects that deck's curated device-name map for the conversion (and validates device names against it). Omit to auto-resolve each device subcircuit name against the whole curated table. |
+| `reference.deck` | string | Only used with `form: "subckt-call"`. `"sky130"`/`"gf180mcu"`/`"sg13g2"`/`"sg13cmos5l"` — selects that deck's device-name map for the conversion (and validates device names against it). That map is the curated subcircuit-name tables plus, for a resistor/capacitor family those tables do not cover for this deck, one assumed-identity binding per class the deck's own `ExtractionDeck` declares (issue #1464) — see "Per-deck coverage" above. Omit to auto-resolve each device subcircuit name against the whole curated table (curated names only — the per-deck derived bindings are not part of that cross-deck table, so a deck-declared class it does not cover needs `reference.deck` or `reference.device_map`). |
 | `reference.device_map` | object\<string, string \| object\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": <override> }` overrides, merged on top of `reference.deck`'s map — for a device subcircuit name the curated table does not cover. Two `<override>` shapes (issue #1271): a bare string (`"<nfet\|pfet>"`, e.g. `"nfet"`) always means a 4-terminal MOS (`d g s b`) `l`/`w` binding — the original shape, unchanged, so every existing caller's `device_map` keeps working exactly as before. An object `{ "kind": "mos"\|"resistor"\|"capacitor"\|"bipolar", "class": "<device-class>", "length_param": "<param>", "width_param": "<param>" }` opts into an explicit non-MOS (or MOS) binding: `kind` and `class` (the plain-element device-class label, e.g. `"res_generic_po"`) are required; `length_param`/`width_param` (the real subcircuit's own call-site geometry parameter spellings, e.g. gf180mcu's `"r_length"`/`"r_width"`) default to `"l"`/`"w"` and are ignored for `kind: "bipolar"` (no geometry call-site parameter at all) and `kind: "mos"` (the MOS conversion always reads the literal `l`/`w` parameter keys). A malformed object entry (an unrecognised `kind`, a missing/empty `class`, or an empty `length_param`/`width_param`) is an application error (exit 1) naming the offending entry, never a silent fallback. A bare-string entry naming a subcircuit that is not actually MOS-shaped (wrong terminal count) still fails with the original `device_map only supports MOS-shaped ...` error — pass the object form naming the real `kind` instead, or `reference.deck` when the device is one of a registered deck's curated classes. |
 | `reference.library` | string | Required with `form: "gate-level-verilog"` (issue #1336); ignored otherwise. Names the standard-cell library (e.g. `"sky130_fd_sc_hd"`, `"gf180mcu_fd_sc_mcu9t5v0"`) whose real `libs.ref/<library>/spice/<library>.spice` (falling back to `.../cdl/<library>.cdl`) file resolves each instantiated cell type's pin order. Omitting it is an application error (exit 1). |
 | `reference.pdk` / `reference.pdk_root` | string | Only used with `form: "gate-level-verilog"`. Forwarded verbatim to `klt pdk`'s resolver (`find_pdk(variant=reference.pdk, root=reference.pdk_root)`) exactly like `klt extract`'s own `--pdk`/`--pdk-root` flags — see `docs/cli/pdk.md`. Omit both to fall back to `$PDK_ROOT`/the ciel/volare store search. An unresolvable PDK, or a resolved variant with no `libs.ref` asset, is an application error (exit 1). |

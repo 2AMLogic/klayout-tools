@@ -66,6 +66,22 @@ Any recognised device class with no curated binding entry is written as its
 bare primitive card (the pre-``--pdk`` form), never a guessed subcircuit call
 -- the gf180mcu-bipolar carve-out above is the only such case today.
 
+**The two directions are not symmetric** (issue #1464). The scope above is the
+*writing* direction (``klt extract --pdk``, :func:`resolve_device_bindings`),
+where a missing curated entry must fall back to the bare primitive card rather
+than guess. The *ingestion* direction (``klt lvs``'s
+``reference.form: "subckt-call"`` converter, :func:`build_device_binding_map`)
+additionally derives an assumed-identity binding -- declared LVS device-class
+name taken as its own subcircuit name -- for each ``resistors``/``capacitors``
+class of a deck whose corresponding family table has no curated entry at all,
+so ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` and ``sg13g2``'s
+``cap_cmim``/``rfcmim`` above are readable back without a hand-written
+``reference.device_map``. Guessing is safe there and unsafe here: the worst
+case reading is a failed or rejected conversion of a name no PDK ships, while
+the worst case writing is a shipped netlist that binds a subcircuit that does
+not exist. See :func:`build_device_binding_map` for that fallback's three
+guard rails.
+
 This table is intentionally a single small module, not scattered inline
 literals, so a future ``klt pdk device`` resolver can absorb/replace it
 without touching the delegate/writer plumbing.
@@ -722,12 +738,81 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
     return result
 
 
+def _declared_non_mos_classes(
+    deck_name: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(resistor class names, capacitor class names)`` the registered
+    :class:`~klayout_tools.decks.ExtractionDeck` for ``deck_name`` declares --
+    the deck-derived input to :func:`build_device_binding_map`'s
+    assumed-identity fallback (issue #1464).
+
+    Imported lazily, inside the function, on purpose: this module's whole
+    point is that the *ingestion* direction needs only deck-name-keyed static
+    tables (see :class:`DeviceLookup`), so a module-level ``decks`` import
+    would make every ``pdk_models`` consumer pay for the deck registry. An
+    unknown/unregistered deck yields ``((), ())`` rather than raising, so the
+    fallback can only ever *add* bindings -- it never turns a deck that
+    resolved before into one that fails.
+    """
+    from .decks import UnknownExtractionDeckError, get_extraction_deck
+
+    try:
+        deck = get_extraction_deck(deck_name)
+    except UnknownExtractionDeckError:
+        return (), ()
+    return (
+        tuple(resistor.name for resistor in deck.resistors),
+        tuple(capacitor.name for capacitor in deck.capacitors),
+    )
+
+
 def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     """Reverse of :func:`resolve_device_bindings`'s static (deck-object-free)
     portion: ``<subckt-name> -> DeviceLookup`` for every curated MOS,
     resistor, capacitor, and bipolar device this table knows for
     ``deck_name`` (issue #1130's device-family extension of
     :func:`build_subckt_to_class_map`).
+
+    **Assumed-identity fallback (issue #1464)**: a deck whose resistor (or
+    capacitor) family has *no* curated ``(deck_name, family)`` entry in
+    :data:`_RESISTOR_MODEL_TABLE` (:data:`_CAPACITOR_MODEL_TABLE`) at all
+    additionally gets one binding per class its own
+    ``ExtractionDeck.resistors``/``.capacitors`` declares, taking the
+    declared LVS device-class name as its subcircuit name. Without it, a deck
+    that recognises a device for *extraction* could not read that same device
+    back on ``klt lvs``'s reference side -- the round-trip asymmetry #1464
+    reported for ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` (declared since
+    #1415) and, independently, for ``sg13g2``'s ``cap_cmim``/``rfcmim``
+    (declared since #1456). Because it is derived, a *future* class a deck
+    declares is covered with no edit to this module at all.
+
+    Three deliberate limits on that fallback, each protecting a verified
+    curated fact from being overwritten by a guess:
+
+    - It is gated on the whole ``(deck_name, family)`` pair being absent, not
+      merely on the individual class being absent. A pair that *does* have a
+      curated entry was hand-verified against a real fetched PDK install --
+      including which declared classes deliberately have **no** subcircuit to
+      bind to (``sg13g2``'s ``res_metal1``/``res_metal2``, see
+      :data:`_RESISTOR_MODEL_TABLE`). Deriving identity for those would
+      fabricate exactly the bindings that verification ruled out.
+    - Every insertion is a :meth:`dict.setdefault`, so a curated entry always
+      wins -- notably sky130's genuinely non-identity
+      ``sky130_fd_pr__model__cap_mim -> sky130_fd_pr__cap_mim_m3_1``, which
+      the pair gate already keeps out of the fallback's reach.
+    - **Bipolar is excluded.** The only deck with a declared-but-unbound
+      bipolar is gf180mcu, whose absence from :data:`_BIPOLAR_MODEL_TABLE` is
+      a *verified* "no positively-identified device cell exists" carve-out
+      (``decks/gf180mcu.py``, ``docs/cli/extract.md`` -> "Scope limits"), not
+      an unvisited pair. A bipolar ``X`` card also carries no geometry
+      parameter to cross-check the name against (see
+      :func:`known_device_subckt_names`), so a fabricated ``bjt`` binding
+      would silently rewrite a genuine hierarchical ``X ... bjt`` instance
+      into a ``Q`` card.
+
+    The fallback is confined to this ingestion-direction function: it does
+    **not** feed :func:`resolve_device_bindings`, so ``klt extract --pdk``'s
+    bare-primitive-card carve-outs are untouched.
 
     Raises :class:`ModelBindingError` (via :func:`build_subckt_to_class_map`)
     for an unknown deck -- never returns a partial/guessed table.
@@ -738,16 +823,14 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     }
     family = deck_name
     res_len, res_wid = _RESISTOR_PARAM_STYLE.get(family, ("l", "w"))
-    for device_class, subckt in _RESISTOR_MODEL_TABLE.get(
-        (deck_name, family), {}
-    ).items():
+    res_table = _RESISTOR_MODEL_TABLE.get((deck_name, family))
+    for device_class, subckt in (res_table or {}).items():
         result.setdefault(
             subckt, DeviceLookup("resistor", device_class, res_len, res_wid)
         )
     cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
-    for device_class, subckt in _CAPACITOR_MODEL_TABLE.get(
-        (deck_name, family), {}
-    ).items():
+    cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family))
+    for device_class, subckt in (cap_table or {}).items():
         result.setdefault(
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
@@ -756,6 +839,20 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     ).items():
         for _nominal_ae, subckt in variants:
             result.setdefault(subckt, DeviceLookup("bipolar", device_class))
+    if res_table is None or cap_table is None:
+        declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
+        if res_table is None:
+            for device_class in declared_resistors:
+                result.setdefault(
+                    device_class,
+                    DeviceLookup("resistor", device_class, res_len, res_wid),
+                )
+        if cap_table is None:
+            for device_class in declared_capacitors:
+                result.setdefault(
+                    device_class,
+                    DeviceLookup("capacitor", device_class, cap_len, cap_wid),
+                )
     return result
 
 

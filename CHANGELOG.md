@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` converter now
+  resolves every resistor and capacitor class a deck's own `ExtractionDeck`
+  declares when `reference.deck` names that deck, instead of only the
+  hand-curated subcircuit names in `klayout_tools.pdk_models` (issue #1464).
+  Before this, a deck could recognise a device for *extraction* and then
+  refuse to read that same device back on the LVS reference side, forcing
+  the caller to hand-maintain a `reference.device_map` restating what the
+  deck already knew — and to discover the need for one from a failed run,
+  since the error's first suggestion was `reference.deck`. Two live
+  instances are closed: `sg13cmos5l`'s `rsil`/`rppd`/`rhigh` (declared since
+  issue #1415) and `sg13g2`'s `cap_cmim`/`rfcmim` (declared since issue
+  #1456). The derived binding assumes the declared LVS device-class name is
+  also the subcircuit name and only applies to a `(deck, family)` pair the
+  curated tables do not cover at all, so sky130's genuinely non-identity
+  `sky130_fd_pr__model__cap_mim` → `sky130_fd_pr__cap_mim_m3_1` mapping and
+  the verified "ships no `.subckt`" carve-outs (`sg13g2`'s
+  `res_metal1`/`res_metal2`, gf180mcu's `bjt`) are unaffected — `sky130` and
+  `gf180mcu` resolve exactly the same set of names as before. An explicit
+  `reference.device_map` entry still overrides a derived binding, and the
+  "not a known device for the requested deck" error now enumerates the
+  derived classes alongside the MOS names. The *writing* direction (`klt
+  extract --pdk`) is untouched: an unbound class still keeps its bare
+  primitive card. No `schema_version` bump — no field changed shape.
 - **Added**: `klt extract --deck sg13g2` now recognises the PDK's two MIM
   capacitors, `cap_cmim` and `rfcmim` (issue #1454) — closing out the
   deferral issue #1233 opened. `EXTRACTION_DECK.capacitors` declares a `MIM`
