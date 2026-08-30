@@ -94,17 +94,17 @@ are chosen to pass `klt drc --deck <family>` clean on every family listed for
 it below; a non-default `params` set is not guaranteed to (see each
 generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 
-| Generator | `sky130` | `gf180mcu` | `sg13g2` |
-| --------- | :------: | :--------: | :------: |
-| `mos_array` | yes | yes | yes |
-| `res_array` | yes | yes | yes |
-| `cap_array` | yes | no | yes |
-| `guard_ring` | yes | yes | yes |
-| `well_island` | yes | yes | no |
-| `diff_pair` | yes | yes | yes |
-| `esd_device` | yes | yes | no |
-| `bond_pad` | yes | yes | no |
-| `bjt_array` | yes | yes | no |
+| Generator | `sky130` | `gf180mcu` | `sg13g2` | `sg13cmos5l` |
+| --------- | :------: | :--------: | :------: | :----------: |
+| `mos_array` | yes | yes | yes | yes |
+| `res_array` | yes | yes | yes | yes |
+| `cap_array` | yes | no | yes | no |
+| `guard_ring` | yes | yes | yes | no |
+| `well_island` | yes | yes | no | no |
+| `diff_pair` | yes | yes | yes | no |
+| `esd_device` | yes | yes | no | no |
+| `bond_pad` | yes | yes | no | no |
+| `bjt_array` | yes | yes | no | no |
 
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
@@ -172,6 +172,54 @@ default output round-trips through `klt extract --deck sg13g2` to the
 `"cap_cmim"` device class (issue #1455); `TopMetal1`'s own coarse 1.64µm
 minimum-width DRC rule widens the drawn top-plate landing pad past the
 generic default for this family only (see the `cap_array` section above).
+
+**sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling, issue #1462).** Only
+`mos_array`/`res_array` are wired up against this family's curated deck
+(`klayout_tools.decks.sg13cmos5l`) — every other generator is deferred:
+
+- `bjt_array`: this deck's `EXTRACTION_DECK` declares no bipolar device
+  class at all (MOS and drawn poly resistors only), the identical gap
+  `sg13g2`'s own entry documents.
+- `guard_ring`/`diff_pair`/`well_island`/`esd_device`: this deck declares no
+  distinct `tap` mask (like `sg13g2`), but unlike `sg13g2` — whose curated
+  deck derives a well/substrate tie from plain `Activ ∩ nwell`, so an
+  undoped tap ring is at least DRC-legal there — this deck's own tie
+  derivation (`EXTRACTION_DECK.tap_nplus`/`.tap_pplus`) requires an
+  `nSD`/`pSD` implant *on top of* the tap shape. Reusing `sg13g2`'s
+  bare-`Activ` tap-ring pattern here unmodified would draw DRC-legal
+  geometry that silently fails to extract as a recognised tie (an
+  `unbiased_pmos_body_nets`/`device.body_unverified` surprise DRC would
+  never catch). Issue #1462 does not attempt that geometry change — a
+  follow-on issue that wires up any of these four generators for this
+  family must add both a real `tap` role *and* the implant-covered tie
+  geometry, then verify the result classifies as a tie under `klt extract
+  --deck sg13cmos5l` rather than assuming parity with `sg13g2`'s simpler tap
+  derivation.
+- `cap_array`: this deck's module docstring states cmos5l has no MIM
+  capacitor at all (a forbidden-layer requirement), so there is no
+  `cap_top_plate`/`cap_bottom_plate` role for this generator to draw from.
+- `bond_pad`: this deck cites no passivation-opening/pad-boundary layer, the
+  identical `sg13g2` gap.
+
+`mos_array`'s documented default `params` are DRC-clean against `klt drc
+--deck sg13cmos5l` and re-extract to the `nfet`/`pfet` device class (this
+deck also models an HV, `ThickGateOx`-gated MOS flavour, distinguished by
+`sim.py`'s own MOS-model-binding table — `mos_array` does not draw that
+marker itself, so its default output always extracts as the LV/default
+pair). Unlike `sg13g2` (issue #1450), this deck transcribes no
+`gatpoly.separation.activ.1`-shaped poly-to-unrelated-active spacing rule at
+all, so `mos_array`'s unit device needs no per-family gate-pad clearance
+here — verified against `klt drc --deck sg13cmos5l`, not assumed by analogy.
+`res_array` exposes this family's three recognised poly-resistor classes —
+`"generic"` (an alias of `"rsil"`, 7Ω/□, both spellings accepted and
+resolving to the identical mask set), `"rppd"` (260Ω/□), and `"rhigh"`
+(1360Ω/□) — transcribed byte-identically from `sg13g2`'s own table, since
+cmos5l's resistor LVS rules are themselves symlinks into the pinned sibling
+`ihp-sg13g2` checkout. The resolved PDK-family *name* also differs from
+every other family here the same way `sg13g2`'s own does: the real
+`ihp-sg13cmos5l` install's own directory name is `"ihp-sg13cmos5l"`, resolved
+via a `_PDK_VARIANT_FAMILY_ALIASES` entry rather than a literal-prefix match
+— see "Family key and resolution" below.
 
 #### Adding a third PDK family
 
@@ -485,6 +533,14 @@ gf180mcu or sg13g2 — or an sg13g2-only name on sky130 — raises a clear error
 listing the flavours that family does expose. As with the marker, no curated
 *DRC* deck checks these masks, so they never affect `klt drc` status.
 
+sg13cmos5l (issue #1462) exposes the identical three classes with the
+identical mask sets, transcribed byte-for-byte from `sg13g2`'s own table
+(cmos5l's resistor LVS rules are themselves symlinks into the pinned sibling
+`ihp-sg13g2` checkout) — with one difference: this family's lowest-sheet-rho
+class is reachable by *either* `"generic"` (the cross-family default every
+other family uses) or `"rsil"` (its own literal device-class name), both
+resolving to the identical `EXTBlock` + `Res` mask set.
+
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
 | `length_um`    | double | `2.0`   | Unit resistor body length (µm). Must be `> 0`. |
@@ -493,7 +549,7 @@ listing the flavours that family does expose. As with the marker, no curated
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
-| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on sg13g2, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. |
 
 ### `cap_array` (MiM capacitor array, issue #1117)
 
