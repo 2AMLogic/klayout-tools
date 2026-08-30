@@ -41,8 +41,10 @@ See `src/klayout_tools/decks/sg13cmos5l.py`'s module docstring for this
 deck's full provenance notes, scope (`width`/`space`/`enclosing` DRC checks
 across `Activ`/`GatPoly`/`Metal1`-`TopMetal1`/`Via1`-`Via3`/`TopVia1`; LV *and*
 HV MOSFET LVS device class pairs, plus the three poly resistors), and what was
-deliberately left un-transcribed and why (metal resistors, diodes, capacitors,
-parasitics).
+deliberately left un-transcribed and why (metal resistors, diodes,
+parasitics, and -- per issue #1463's investigation, deferred rather than
+absent, see the "MoM capacitors" section of that docstring and issue #1466
+-- capacitors).
 """
 
 from __future__ import annotations
@@ -726,7 +728,12 @@ def test_sg13cmos5l_recognises_the_three_poly_resistor_flavours():
     # The generic `"resistor"` device class is now live on this deck (it was
     # absent while `resistors` was empty); no diode/capacitor/bipolar class
     # joins it, so this starter's remaining device-recognition gaps stay
-    # visible in the same assertion.
+    # visible in the same assertion. `capacitors` stays empty even though
+    # cmos5l does have a MoM capacitor family (`cap_cmomi`/`cap_cmomf`,
+    # confirmed by #1463) -- its marker-scoped, topologically-matched shape
+    # does not fit `CapacitorDevice`, so recognising it needs new
+    # extraction machinery, filed as #1466. See `sg13cmos5l.py`'s "MoM
+    # capacitors" docstring section for the full investigation.
     assert EXTRACTION_DECK.device_classes == ("nfet", "pfet", "resistor")
     assert EXTRACTION_DECK.capacitors == ()
     assert EXTRACTION_DECK.bipolars == ()

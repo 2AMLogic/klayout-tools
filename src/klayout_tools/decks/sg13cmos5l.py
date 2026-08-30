@@ -64,8 +64,12 @@ recognition; it has since grown three follow-on increments the way
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
   but not transcribed by this issue -- see the resistor note below), plus
-  diodes, MoM capacitors (cmos5l has no MIM;
-  see "No MIM capacitors" below), and parasitics.
+  diodes and parasitics. MoM capacitors are a narrower case than "not yet
+  transcribed": #1463 confirmed cmos5l *does* have a MoM capacitor family
+  (``cap_cmomi``/``cap_cmomf``) but that this repo's ``CapacitorDevice``
+  mechanism cannot correctly represent it -- see "MoM capacitors" below
+  for the investigation and #1466 for the new device-recognition shape it
+  needs.
 
 Source, read directly from a real ``ihp-sg13cmos5l`` install (standalone
 clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0), **not**
@@ -207,6 +211,65 @@ forbidden-layer lists (that ``.drc``, or
 are declared. No further action needed for this pass; noted per #1400's own
 Background instruction, mirroring how ``sg13g2.py`` documents its own
 declined-device investigations (e.g. its "SiGe HBTs -- declined" section).
+
+MoM capacitors -- investigated (#1463), deferred to a new device shape
+(#1466), *not* declined: #1463 was filed on the premise that cmos5l's MIM-
+forbidden rule above left MoM (metal-oxide-metal) as "the only capacitor
+that family has," and asked whether cmos5l's own rule deck defines a
+recognisable MoM device. It does. This repo's *vendored*
+``pdks/ihp-open-pdk/ihp-sg13g2`` snapshot (pinned to release ``v0.3.0``,
+upstream commit ``5cccb161f7492697cfa52eb14dc03beb00bdca9e``, 2026-03-11)
+predates the relevant upstream change and shows no MoM ``extract_devices``
+call, which is what #1463's own Curator investigation found and correctly
+reported as inconclusive. But the two *live* commits this module's own
+constants above already pin for #1417's BEOL rules --
+``ihp-sg13cmos5l``'s ``607e18d4bd9214a52575c194b4181ef449f9252f`` (main,
+2026-08-25) and the sibling ``ihp-sg13g2`` pin it symlinks into,
+``d2cc0355f26235c777dfcc6867b390fa1e78083f`` (2026-08-11, five months
+after the vendored snapshot) -- tell a different story once fetched
+directly: cmos5l's own, non-symlinked top-level
+``libs.tech/klayout/tech/lvs/sg13cmos5l.lvs`` explicitly
+``%include``s both ``rule_decks/cap_cmomi_derivations.lvs`` and
+``rule_decks/cap_cmomf_derivations.lvs`` in its "CAP DERIVATIONS" stage,
+and the symlinked-shared ``cap_extraction.lvs`` (at the pinned sibling
+commit) calls ``extract_devices(CapMomExtractor.new('cap_cmomi'), ...)``
+and ``('cap_cmomf', ...)`` alongside the already-transcribed
+``cap_cmim``/``rfcmim``/``sg13_hv_svaricap`` (#1456). ``cap_cmomi``
+(interdigitated) and ``cap_cmomf`` (metal fringe/finger) are therefore
+genuine cmos5l devices, not an sg13g2-only artifact cmos5l merely happens
+to symlink in without using.
+
+They are, however, structurally incompatible with this repo's
+``CapacitorDevice`` mechanism (``decks/__init__.py``), which is why this
+deck's ``capacitors`` stays ``()`` rather than gaining two new entries.
+``CapacitorDevice``/``extract.py``'s consuming loop assume a purpose-drawn
+``top_plate`` layer overlapping a *different-layer* ``bottom_plate``
+conductor, handed to KLayout's native ``kdb.DeviceExtractorCapacitor`` as
+two disjoint regions, with ``c_f`` computed from
+``area_cap_f_um2``/``perim_cap_f_um`` against their overlap. ``cap_cmomi``/
+``cap_cmomf`` (``custom_mom_extractor.lvs``'s ``CapMomExtractor``, a
+``RBA::GenericDeviceExtractor`` subclass) recognise a device from a single
+marker layer covering the whole footprint (``Recog.mom`` 99/39 /
+``Recog.momf`` 99/40) containing exactly two metal-pin port shapes that
+can land on the *same* metal level (the common ``double``/``none`` PCell
+configuration) rather than on two independently-drawn plates -- there is
+no "top plate over bottom plate" relationship to derive two ``kdb``
+regions from. Their two terminals are told apart by *position* within the
+marker, not by which layer they are on, and are declared electrically
+equivalent for matching purposes. Most importantly, the real extractor
+does **not** compute a capacitance value at all: its own source comment
+states the value is supplied by the SPICE/Verilog-A compact model
+(``C_total = density[N]*active_area + Cfeed``), with the extractor itself
+only measuring ``w``/``l`` from the marker bounding box and matching
+topologically -- closer to how this codebase's own MOS recognition
+matches on dimensions than to how ``cap_cmim``/``rfcmim`` compute ``c_f``.
+Modelling ``cap_cmomi``/``cap_cmomf`` correctly needs a new device shape
+and new ``extract.py`` extraction logic (connected-component + port-by-
+position, no computed value), not a ``CapacitorDevice`` entry -- filed as
+#1466, which also covers ``sg13g2.py`` (the devices' native home; cmos5l
+reaches them only through the shared symlink, and cmos5l's own
+``TopMetal1``-topped stack means its instances can only ever populate the
+``m1p``..``m4p`` ports, never ``m5p``).
 
 Every DRC rule and every populated ``EXTRACTION_DECK`` provenance field
 below cites a real, independently-fetched line in cmos5l's own (or, for the
