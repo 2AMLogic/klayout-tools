@@ -4039,6 +4039,79 @@ def test_sg13g2_mos_device_generators_are_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+#: sg13g2's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
+#: `(44, 0)` `ThickGateOx.drawing` citation
+#: `klayout_tools.decks.sg13g2.EXTRACTION_DECK.mos_flavours`' single
+#: `MOSFlavour(flavour="hv", ...)` entry keys its `sg13_hv_nmos`/
+#: `sg13_hv_pmos` device-class split on.
+_SG13G2_VOLTAGE_FLAVOR_MARK_LAYER = (44, 0)  # ThickGateOx.drawing
+
+
+def test_sg13g2_mos_array_voltage_flavor_hv_draws_marker_and_is_drc_clean(
+    tmp_path, sg13g2_pdk_root
+):
+    """`voltage_flavor="hv"` draws sg13g2's `ThickGateOx` marker over the
+    unit device(s) and reports the selection in `drc_hints`, staying
+    DRC-clean (issue #1472, the sg13g2 family-coverage follow-on to
+    #1054/gf180mcu's `medium_voltage`)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_voltage_flavor_sg13g2.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "hv"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SG13G2_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert report["drc_hints"]["voltage_flavor"] == "hv"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+    drc_report = run_drc(str(output), "sg13g2")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13g2_mos_array_voltage_flavor_hv_extracts_as_sg13_hv_pmos(
+    tmp_path, sg13g2_pdk_root
+):
+    """The round-trip acceptance criterion of issue #1472: a `pfet` unit
+    device drawn with `voltage_flavor="hv"` extracts bound to the real
+    `sg13_hv_pmos` model under `klt extract --pdk`, not the thin-oxide
+    `sg13_lv_pmos` the same request draws without `voltage_flavor`."""
+    from pathlib import Path
+
+    output = tmp_path / "mos_array_voltage_flavor_sg13g2_extract.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "hv"},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(
+        str(output),
+        "sg13g2",
+        pdk_variant=_SG13G2_VARIANT,
+        pdk_root=str(sg13g2_pdk_root),
+    )
+
+    assert report["device_counts"].get("pfet", 0) > 0
+    cards = Path(report["netlist_path"]).read_text().splitlines()
+    device_cards = [line for line in cards if line and line[0] in ("M", "X")]
+    assert any(" sg13_hv_pmos " in line for line in device_cards)
+    assert not any(" sg13_lv_pmos " in line for line in device_cards)
+
+
 def test_sg13g2_gate_pad_clearance_lifts_pad_off_diffusion(tmp_path, sg13g2_pdk_root):
     """The clearance is drawn as an actual poly stem, not merely asserted via
     `klt drc`: the gate poly must stand exactly
@@ -4276,6 +4349,80 @@ def test_sg13cmos5l_mos_array_pfet_flavor_extracts_as_pfet(
 
     assert report["device_counts"].get("pfet", 0) > 0
     assert report["device_counts"].get("nfet", 0) == 0
+
+
+#: cmos5l's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
+#: `(44, 0)` `ThickGateOx.drawing` citation
+#: `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.mos_flavours`' single
+#: `MOSFlavour(flavour="hv", ...)` entry keys its `sg13_hv_nmos`/
+#: `sg13_hv_pmos` device-class split on -- byte-identical to sg13g2's own
+#: citation (both decks resolve from the same pinned IHP-Open-PDK
+#: `mos_extraction.lvs`, see `decks/sg13cmos5l.py`'s module docstring).
+_SG13CMOS5L_VOLTAGE_FLAVOR_MARK_LAYER = (44, 0)  # ThickGateOx.drawing
+
+
+def test_sg13cmos5l_mos_array_voltage_flavor_hv_draws_marker_and_is_drc_clean(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """`voltage_flavor="hv"` draws cmos5l's `ThickGateOx` marker over the
+    unit device(s) and reports the selection in `drc_hints`, staying
+    DRC-clean (issue #1472)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_voltage_flavor_sg13cmos5l.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "hv"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SG13CMOS5L_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert report["drc_hints"]["voltage_flavor"] == "hv"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+    drc_report = run_drc(str(output), "sg13cmos5l")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13cmos5l_mos_array_voltage_flavor_hv_extracts_as_sg13_hv_pmos(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """The round-trip acceptance criterion of issue #1472: a `pfet` unit
+    device drawn with `voltage_flavor="hv"` extracts bound to the real
+    `sg13_hv_pmos` model under `klt extract --pdk`, not the thin-oxide
+    `sg13_lv_pmos` the same request draws without `voltage_flavor`."""
+    from pathlib import Path
+
+    output = tmp_path / "mos_array_voltage_flavor_sg13cmos5l_extract.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "hv"},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(
+        str(output),
+        "sg13cmos5l",
+        pdk_variant=_SG13CMOS5L_VARIANT,
+        pdk_root=str(sg13cmos5l_pdk_root),
+    )
+
+    assert report["device_counts"].get("pfet", 0) > 0
+    cards = Path(report["netlist_path"]).read_text().splitlines()
+    device_cards = [line for line in cards if line and line[0] in ("M", "X")]
+    assert any(" sg13_hv_pmos " in line for line in device_cards)
+    assert not any(" sg13_lv_pmos " in line for line in device_cards)
 
 
 def test_sg13cmos5l_res_array_default_params_recognised_as_rsil(
