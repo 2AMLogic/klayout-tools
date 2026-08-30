@@ -793,6 +793,22 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "cap_bottom_plate": (67, 0),  # Metal5.drawing
         "cap_top_via": (129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
         "cap_top_via_metal": (126, 0),  # TopMetal1.drawing
+        # Second/third routing-metal roles + their connecting vias (issue
+        # #1474): sg13g2's curated *extraction* deck already declares a
+        # seven-level Metal1..TopMetal2 stack
+        # (`klayout_tools.decks.sg13g2.EXTRACTION_DECK.metals`/`.vias`), but
+        # until now this table exposed only the base `"metal"` role (Metal1),
+        # so `routing.cross_block_layer_role` had no second plane to name on
+        # this family at all -- every request setting it was rejected before
+        # any routing was attempted. `"metal2"`/`"via1"` and `"metal3"`/
+        # `"via2"` mirror the exact `sky130`/`gf180mcu` indexing convention
+        # established above (`"metal2"`/`"via1"` = `metals[1]`/`vias[0]`,
+        # `"metal3"`/`"via2"` = `metals[2]`/`vias[1]`) -- not a new
+        # convention invented for this family.
+        "metal2": (10, 0),  # Metal2.drawing -- EXTRACTION_DECK.metals[1]
+        "via1": (19, 0),  # Via1.drawing -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
+        "metal3": (30, 0),  # Metal3.drawing -- EXTRACTION_DECK.metals[2]
+        "via2": (29, 0),  # Via2.drawing -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
     },
     # sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling), issue #1462 -- the
     # fourth family this table supports. Every number here is transcribed
@@ -891,6 +907,21 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # issue #1421): naming a well polygon directly would let an
         # extracted body net read back as intended even when the physical
         # tie to it is broken or absent.
+        # Second/third routing-metal roles + their connecting vias (issue
+        # #1474): cmos5l's own curated *extraction* deck declares the same
+        # Metal1/Metal2/Metal3 prefix as `sg13g2`'s stack above (this deck's
+        # own module docstring: "cmos5l's real BEOL stack, Metal1 through
+        # TopMetal1" -- a documented prefix of sg13g2's Metal1..TopMetal2
+        # stack), so `"metal2"`/`"via1"`/`"metal3"`/`"via2"` resolve to the
+        # *same* layer/datatype pairs as `sg13g2`'s own entries above --
+        # transcribed independently from
+        # `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.metals`/`.vias`,
+        # not copied by analogy. Same `sky130`/`gf180mcu` indexing
+        # convention as every other family in this table.
+        "metal2": (10, 0),  # Metal2.drawing -- EXTRACTION_DECK.metals[1]
+        "via1": (19, 0),  # Via1.drawing -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
+        "metal3": (30, 0),  # Metal3.drawing -- EXTRACTION_DECK.metals[2]
+        "via2": (29, 0),  # Via2.drawing -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
     },
 }
 

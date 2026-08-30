@@ -154,7 +154,13 @@ cleanly.
   (below) rejects it. gf180mcu's own deck exposes the same third level
   (#1058): `"metal3"` (Metal3 `42/0`) plus its own connecting via role
   (`"via2"`, the Metal2↔Metal3 via, `38/0`) — usable the same way, from a
-  pin already on `"metal2"` (Metal2, one via hop away) only.
+  pin already on `"metal2"` (Metal2, one via hop away) only. IHP-Open-PDK's
+  `sg13g2`/`sg13cmos5l` (issue #1474) expose the identical two-level shape:
+  `"metal2"` (Metal2 `10/0`) plus `"via1"` (Via1 `19/0`, the Metal1↔Metal2
+  via) and `"metal3"` (Metal3 `30/0`) plus `"via2"` (Via2 `29/0`, the
+  Metal2↔Metal3 via) — both families resolve to the identical four values,
+  since `sg13cmos5l`'s own Metal1-TopMetal1 stack is a documented prefix of
+  `sg13g2`'s deeper Metal1-TopMetal2 stack.
 - **Net labels (#200, fixed)** — every routed 2-pin net also gets one
   `kdb.Text` label, named after its own `connectivity[].net` field, on the
   PDK-family label layer that pairs with the resolved routing layer (e.g.
@@ -554,7 +560,9 @@ Re-raising #433's Ask options 1/2 (the merged #433 fix implemented only
 option 3, "fail visibly"): a family whose curated `ExtractionDeck` already
 declares a second routing-metal level and the via that lands on it
 (sky130's `EXTRACTION_DECK.metals=((67,20),(68,20),(69,20))` /
-`.vias=((67,44),(68,44))`; gf180mcu's Metal1→Metal5 stack) now exposes that
+`.vias=((67,44),(68,44))`; gf180mcu's Metal1→Metal5 stack; IHP-Open-PDK's
+`sg13g2`/`sg13cmos5l`, issue #1474, Metal1→Metal3 of their own
+Metal1→TopMetal1/TopMetal2 stacks) now exposes that
 second level as a second `routing.layer_role` (`"metal2"`) plus the via role
 that connects it back to the base `"metal"` role (`"via1"`) — sourced
 directly from the deck's own `metals`/`vias` tuples in
@@ -625,18 +633,22 @@ Two cases are rejected instead, reporting the net unroutable rather than
 drawing something that does not connect:
 
 - A pin whose layer is a *different* metals-stack level than
-  `routing.layer_role`, more than one via hop away — sky130's/gf180mcu's
-  `"metal2"`/`"via1"` pair is always exactly one hop from `"metal"`, so this
-  case does not arise for either family's second level. Both families' third
-  level (`"metal3"`/`"via2"`, sky130 issue #508, gf180mcu issue #1058) is
+  `routing.layer_role`, more than one via hop away — sky130's/gf180mcu's/
+  `sg13g2`'s/`sg13cmos5l`'s `"metal2"`/`"via1"` pair is always exactly one
+  hop from `"metal"`, so this case does not arise for any family's second
+  level. Every family's third level (`"metal3"`/`"via2"`, sky130 issue #508,
+  gf180mcu issue #1058, `sg13g2`/`sg13cmos5l` issue #1474) is
   where it first becomes real: a `"metal3"` route to a pin still on the base
-  `"metal"` role (sky130 li1, gf180mcu Metal1) is two hops away and hits this
-  rejection — only a pin already on `"metal2"` (sky130 met1, gf180mcu
-  Metal2, one hop from `"metal3"`) resolves. gf180mcu's Metal4-5 levels
-  remain unexposed as `routing.layer_role` roles at all (its curated
-  `EXTRACTION_DECK` declares the full Metal1-Metal5 stack for extraction,
-  but `klayout_tools.gen._PDK_ROLE_LAYERS["gf180mcu"]` stops at `"metal3"`),
-  so this case stays unreachable for those levels on that family.
+  `"metal"` role (sky130 li1, gf180mcu Metal1, `sg13g2`/`sg13cmos5l` Metal1)
+  is two hops away and hits this rejection — only a pin already on
+  `"metal2"` (sky130 met1, gf180mcu Metal2, `sg13g2`/`sg13cmos5l` Metal2,
+  one hop from `"metal3"`) resolves. gf180mcu's Metal4-5 levels, and
+  `sg13g2`'s/`sg13cmos5l`'s own Metal4 and above (Metal4 through TopMetal2
+  on `sg13g2`, Metal4/TopMetal1 on `sg13cmos5l`), remain unexposed as
+  `routing.layer_role` roles at all (each curated `EXTRACTION_DECK` declares
+  the full metals stack for extraction, but `klayout_tools.gen
+  ._PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so this case
+  stays unreachable for those levels on any family.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
   drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
   metals stack lands on poly, so the backbone would end as an uncontacted

@@ -5122,6 +5122,30 @@ def test_resolve_cross_block_route_layer_gf180mcu():
     assert via_layer == (38, 0)
 
 
+def test_resolve_cross_block_route_layer_sg13g2():
+    # Issue #1474: before this family's `_PDK_ROLE_LAYERS` entry gained
+    # "metal2"/"via1"/"metal3"/"via2", every `cross_block_layer_role`
+    # request against "ihp-sg13g2" raised "not a known layer role" -- there
+    # was no second plane to name at all. "metal" (Metal1, 8/0) and
+    # "metal2" (Metal2, 10/0) are exactly one via hop apart (Via1, 19/0).
+    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+        "ihp-sg13g2", "metal", "metal2"
+    )
+    assert cross_layer == (10, 0)
+    assert via_layer == (19, 0)
+
+
+def test_resolve_cross_block_route_layer_sg13cmos5l():
+    # Same gap, same fix, on cmos5l (issue #1474) -- resolves to the
+    # identical layer/datatype pairs as sg13g2's own entry above, since
+    # cmos5l's Metal1-Metal3 prefix is byte-identical to sg13g2's.
+    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+        "ihp-sg13cmos5l", "metal", "metal2"
+    )
+    assert cross_layer == (10, 0)
+    assert via_layer == (19, 0)
+
+
 def test_compose_rejects_unknown_cross_block_layer_role(tmp_path, pdk_root):
     arr = _gen_block(
         tmp_path,
@@ -5357,6 +5381,95 @@ def test_compose_cross_block_layer_role_leaves_non_crossing_nets_on_primary_laye
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# sg13g2/sg13cmos5l second/third routing planes (issue #1474): before this
+# fix, `_PDK_ROLE_LAYERS["sg13g2"]`/`["sg13cmos5l"]` declared only the base
+# `"metal"` role, so `routing.cross_block_layer_role` had no second plane to
+# name at all on either family -- every such request raised "not a known
+# layer role" before any routing was attempted. These two tests exercise the
+# full `compose()` path end to end (not just `_resolve_cross_block_route_layer`
+# above) and confirm the composed output stays DRC-clean on each family.
+# --------------------------------------------------------------------------- #
+
+
+def _sg13_cross_block_layer_role_drc_clean(tmp_path, variant, family):
+    root = tmp_path / "pdk_install"
+    _make_install(root, variant)
+    m1 = _gen_block_variant(
+        tmp_path,
+        root,
+        variant,
+        "mos_array",
+        "m1",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    m2 = _gen_block_variant(
+        tmp_path,
+        root,
+        variant,
+        "mos_array",
+        "m2",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    output = tmp_path / f"{family}_cross_block.gds"
+    report = compose(
+        {
+            "pdk": {"variant": variant, "root": str(root)},
+            "blocks": [
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "GBIAS",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                }
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.3,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {
+                "cell_name": f"{family}_cross_block",
+                "output": str(output),
+            },
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+
+    drc_report = run_drc(str(output), family)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_cross_block_layer_role_metal2_routes_and_stays_drc_clean_sg13g2(
+    tmp_path,
+):
+    _sg13_cross_block_layer_role_drc_clean(tmp_path, "ihp-sg13g2", "sg13g2")
+
+
+def test_compose_cross_block_layer_role_metal2_routes_and_stays_drc_clean_sg13cmos5l(
+    tmp_path,
+):
+    _sg13_cross_block_layer_role_drc_clean(tmp_path, "ihp-sg13cmos5l", "sg13cmos5l")
 
 
 # --------------------------------------------------------------------------- #
