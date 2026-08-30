@@ -784,6 +784,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   `DCCURRENTDENSITY AVERAGE 2.8` met1/met2 limit (verified against a real
   sky130A install). See `docs/cli/power.md`.
 
+- **Fixed**: `klt gen mos_array`/`diff_pair`'s `voltage_flavor` param now
+  resolves on the `ihp-sg13g2`/`ihp-sg13cmos5l` PDK families (issue #1472).
+  `_PDK_VOLTAGE_FLAVOR_LAYERS` (`gen.py`) previously had entries only for
+  `gf180mcu`/`sky130` — both IHP families were added to the sibling
+  `_PDK_ROLE_LAYERS` table by #1448/#1462 without a matching
+  `_PDK_VOLTAGE_FLAVOR_LAYERS` entry, so a `voltage_flavor` request on either
+  family always resolved to no marker layer and silently drew the default
+  thin-oxide device, reported only via a `drc_hints.notes` entry a caller
+  could easily miss. Both families now share the flavour name `"hv"`,
+  transcribed from the curated decks' own
+  `EXTRACTION_DECK.mos_flavours[0].flavour` value, drawing their shared
+  `ThickGateOx` (44/0) marker — the same marker each deck's own
+  `mos_flavours` entry keys its `sg13_hv_nmos`/`sg13_hv_pmos` device-class
+  split on, so `voltage_flavor="hv"` now round-trips through `klt extract
+  --pdk` to the real thick-oxide model instead of the thin-oxide default. No
+  `schema_version` bump — additive per-family coverage of an existing field,
+  no shape changed.
+
 ## 0.3.0 (2026-08-21)
 
 ### Fixed since release

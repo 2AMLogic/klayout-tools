@@ -1242,12 +1242,33 @@ def _role_layer_info(family: str, role: str) -> Any:
 #: family resolves to no layer for *any* name -- reported via
 #: ``drc_hints.notes``, never silently dropped (see
 #: :func:`_voltage_flavor_mark_layer`).
+#:
+#: ``sg13g2``/``sg13cmos5l`` (issue #1472) both share the single flavour name
+#: ``"hv"``, transcribed directly from the curated decks' own
+#: ``EXTRACTION_DECK.mos_flavours`` entry rather than a second, private layer
+#: map -- ``klayout_tools.decks.sg13g2``/``klayout_tools.decks.sg13cmos5l``
+#: each declare exactly one ``MOSFlavour(marker=(44, 0), flavour="hv", ...)``
+#: (``ThickGateOx.drawing``), and ``pdk_models.py``'s own
+#: ``_MOS_MODEL_FLAVOURS[(deck_name, "sg13g2"/"sg13cmos5l")]`` table binds
+#: that same ``"hv"`` key to the real ``sg13_hv_nmos``/``sg13_hv_pmos``
+#: subcircuits -- so requesting ``voltage_flavor="hv"`` here draws the
+#: identical marker the deck already extracts a device-class split on,
+#: mirroring gf180mcu's own "reuse the deck's own marker citation" precedent
+#: above rather than inventing a new one.
 _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "gf180mcu": {
         "medium_voltage": (55, 0),  # Dualgate -- same citation as
         # _PDK_ROLE_LAYERS's "esd_mark" entry.
     },
     "sky130": {},
+    "sg13g2": {
+        "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
+        # decks.sg13g2.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hv").
+    },
+    "sg13cmos5l": {
+        "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
+        # decks.sg13cmos5l.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hv").
+    },
 }
 
 
