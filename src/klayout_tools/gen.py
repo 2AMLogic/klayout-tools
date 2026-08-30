@@ -666,10 +666,11 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     # cross-checked against a real fetched IHP-Open-PDK v0.3.0 install (the
     # same commit that deck's own module docstring pins).
     #
-    # `res_array`/`guard_ring` (#1448) and `mos_array`/`diff_pair` (#1450)
-    # are wired up to *run* on this family; `bjt_array`/`cap_array`/
-    # `esd_device`/`bond_pad`/`well_island` are still explicitly rejected
-    # (`_GENERATOR_FAMILY_DEFERRED`, `_cap_family_layers`'s plate check, and
+    # `res_array`/`guard_ring` (#1448), `mos_array`/`diff_pair` (#1450), and
+    # `cap_array` (#1455, once issue #1454 populated
+    # `EXTRACTION_DECK.capacitors` for `cap_cmim`/`rfcmim`) are wired up to
+    # *run* on this family; `bjt_array`/`esd_device`/`bond_pad`/`well_island`
+    # are still explicitly rejected (`_GENERATOR_FAMILY_DEFERRED`, and
     # `_bond_pad_layer_params`'s missing-role guard) rather than silently
     # producing untested output:
     #
@@ -685,18 +686,26 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     #   likely follow for free, but it also composes a ring/marker stack this
     #   issue did not verify on this family, so it stays deferred rather than
     #   shipped untested.
-    # - `bjt_array`/`cap_array` have no recognised device class in this
-    #   deck's `EXTRACTION_DECK` at all (`.bipolars`/`.capacitors` are both
-    #   empty), and `bond_pad`/`well_island` were not attempted by #1448
-    #   (no citable curated passivation-opening layer for the former; no
-    #   verification effort spent on the latter's well-tie-implant story for
-    #   the latter).
+    # - `bjt_array` still has no recognised device class in this deck's
+    #   `EXTRACTION_DECK` at all (`.bipolars` is empty), and `bond_pad`/
+    #   `well_island` were not attempted by #1448 (no citable curated
+    #   passivation-opening layer for the former; no verification effort
+    #   spent on the latter's well-tie-implant story for the latter).
+    #   `cap_array` was the one member of this group with a real recognised
+    #   device class blocked only on the deck's own metals/vias stack
+    #   reaching Metal5/TopMetal1 -- #1243 extended that stack and #1454
+    #   populated `EXTRACTION_DECK.capacitors`, so #1455 wires the
+    #   generator's own plate/via layer roles up to match (see the
+    #   `cap_top_plate`/`cap_bottom_plate`/`cap_top_via`/`cap_top_via_metal`
+    #   entries below).
     #
     # Every generator wired up here was verified DRC-clean against
     # `klt drc --deck sg13g2` on its documented default `params`, and
     # `res_array`'s default output round-trips through `klt extract --deck
     # sg13g2` to the `"rsil"` device class (see `_PDK_RES_FLAVOR_LAYERS`
-    # below) -- the same bar `docs/cli/gen.md`'s "Adding a third PDK family"
+    # below) -- `cap_array`'s own default output likewise round-trips to the
+    # `"cap_cmim"` device class (`klayout_tools.decks.sg13g2.EXTRACTION_DECK
+    # .capacitors[0]`) -- the same bar `docs/cli/gen.md`'s "Adding a third PDK family"
     # section states.
     "sg13g2": {
         "active": (1, 0),  # Activ.drawing -- EXTRACTION_DECK.active
@@ -736,8 +745,82 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # recognised poly resistor, 7 ohm/sq)'s `marker` field (issue #369's
         # precedent: without it, a drawn poly body extracts as plain
         # interconnect instead of a resistor device).
+        #
+        # MiM-capacitor plate roles (issue #1455), for `cap_array`: the
+        # *same* layer/datatype pairs
+        # `klayout_tools.decks.sg13g2.EXTRACTION_DECK.capacitors[0]`
+        # (`"cap_cmim"`) declares -- not a second, private map, transcribed
+        # from that entry's own `top_plate`/`bottom_plate`/`top_plate_via`/
+        # `top_plate_via_metal` fields (see that module's "MiM capacitors"
+        # docstring section), not from this issue's own filed description
+        # (whose suggested `cap_top_via` value, `TopVia1` 125/0, does not
+        # match the deck's actual `Vmim` 129/0 via -- verified against the
+        # curated deck, the source of truth, rather than the issue text).
+        # `cap_top_plate` is `MIM` (36/0), the purpose-drawn MiM top-plate
+        # mark; `cap_bottom_plate` is `Metal5` (67/0), the conductor the
+        # bottom plate is drawn on -- like sky130, sg13g2 needs no "virtual
+        # bottom plate" oversize derivation, so the generator draws the
+        # bottom plate as an ordinary, generously sized conductor around the
+        # top-plate mark. `cap_top_via`/`cap_top_via_metal` are `Vmim`/
+        # `TopMetal1` (129/0, 126/0) -- the real via that lands directly on
+        # the top plate and the metal it connects up to, giving the drawn
+        # top plate a routable local-metal landing pad instead of an
+        # isolated node (mirrors sky130's `via3`/`met4` precedent). Neither
+        # `cap_cmim`'s own `top_plate_excludes`/`bottom_plate_excludes`
+        # (`PWell.block`/`Ind.*`, `Metal5.res`) nor `rfcmim`'s distinguishing
+        # `PWell.block` `..._requires` term are drawn by this generator, so
+        # its output always classifies as the base `"cap_cmim"` flavour, not
+        # `"rfcmim"` -- matching `res_array`'s own "generic" default
+        # precedent for a family with more than one recognised flavour of a
+        # device class (`cap_array` has no `flavor` param yet -- see
+        # `_cap_family_layers`'s docstring). This deck's own curated *DRC*
+        # deck transcribes no rule against `MIM`/`Vmim` (36/0, 129/0) at all
+        # (verified: no `layer=(36, ...)`/`layer=(129, ...)` entry in
+        # `klayout_tools.decks.sg13g2.DECK`), only against `Metal5`/
+        # `TopMetal1` (`metal5.width.1`/`metal5.space.1`,
+        # `topmetal1.width.1`/`topmetal1.space.1`) -- so `klt drc --deck
+        # sg13g2` never checks the plate/via layers themselves, only the
+        # bottom-plate conductor and the via's landing pad, the identical
+        # "the layer is real, just uncheckable for its own purpose" situation
+        # this table's own `well`/`tap` entries above document.
+        # `topmetal1.width.1`'s 1.64um minimum (far coarser than sky130's
+        # `met4.width.1` 0.3um) is wider than this generator's generic
+        # `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` landing-pad default
+        # (0.42um) -- see `_PDK_CAP_TOP_VIA_METAL_MIN_W_UM` below, which
+        # widens the drawn pad (and its reported `C<i>_TOP` port width) for
+        # this family only, leaving sky130/gf180mcu byte-for-byte unchanged.
+        "cap_top_plate": (36, 0),  # MIM.drawing
+        "cap_bottom_plate": (67, 0),  # Metal5.drawing
+        "cap_top_via": (129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
+        "cap_top_via_metal": (126, 0),  # TopMetal1.drawing
     },
 }
+
+#: Per-PDK-family minimum drawn width (um) for `cap_array`'s top-plate via
+#: landing pad (`cap_top_via_metal`), keyed the same way
+#: :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` keys its own per-family
+#: geometry override. A family absent from this table draws the generic
+#: `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42um) pad every other
+#: generator role uses (see :func:`_cap_top_via_metal_min_w_um`).
+#:
+#: - ``sg13g2``: 1.64um -- `topmetal1.width.1`
+#:   (`klayout_tools.decks.sg13g2`'s `5_22_topmetal1.drc` rule "TM1.a", "Min.
+#:   TopMetal1 width"), far coarser than sky130's `met4.width.1` (0.3um) or
+#:   gf180mcu's own metal-width rules the generic pad size was originally
+#:   sized against. Without this override, `cap_array`'s default-sized
+#:   landing pad would violate `klt drc --deck sg13g2` on every request.
+_PDK_CAP_TOP_VIA_METAL_MIN_W_UM: dict[str, float] = {
+    "sg13g2": 1.64,  # topmetal1.width.1 (TM1.a)
+}
+
+
+def _cap_top_via_metal_min_w_um(family: str) -> float:
+    """Per-family minimum drawn width (um) for `cap_array`'s top-plate via
+    landing pad (see :data:`_PDK_CAP_TOP_VIA_METAL_MIN_W_UM`), or ``0.0``
+    for a family with no override (the generic
+    ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` pad applies unchanged)."""
+    return _PDK_CAP_TOP_VIA_METAL_MIN_W_UM.get(family, 0.0)
+
 
 #: Generators whose current geometry is not wired up for a family that
 #: :func:`_pdk_family` otherwise resolves successfully -- distinct from an
@@ -1173,12 +1256,13 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
 
     Raises :class:`GenError` for a family with no ``cap_top_plate``/
     ``cap_bottom_plate`` configured -- mirrors :func:`_res_flavor_layers`'s
-    own unsupported-value error. Only ``sky130`` is wired up as of issue
-    #1117; gf180mcu's own MiM stack needs an additional "virtual bottom
-    plate" oversize derivation (see
+    own unsupported-value error. ``sky130`` (issue #1117) and ``sg13g2``
+    (issue #1455, once #1454 populated that family's
+    ``EXTRACTION_DECK.capacitors``) are wired up; gf180mcu's own MiM stack
+    needs an additional "virtual bottom plate" oversize derivation (see
     :class:`klayout_tools.decks.CapacitorDevice`'s ``bottom_plate_oversize_um``
-    docstring) that is out of this generator's initial scope -- a family
-    missing these keys is a documented "not implemented yet" state, not a
+    docstring) that is out of this generator's scope -- a family missing
+    these keys is a documented "not implemented yet" state, not a
     deck-authoring bug the way an unresolvable family name in
     :func:`_pdk_family` is."""
     roles = _PDK_ROLE_LAYERS[family]
@@ -1187,7 +1271,8 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     if top is None or bottom is None:
         raise GenError(
             f"generator 'cap_array': PDK family '{family}' has no MiM "
-            "capacitor plate layers configured -- supported families: sky130"
+            "capacitor plate layers configured -- supported families: "
+            "sky130, sg13g2"
         )
     return {
         "cap_top_plate": top,
@@ -1205,11 +1290,17 @@ def _cap_array_layer_params(
     pad) -- the capacitor sibling of :func:`_resistor_layer_params`.
 
     ``cap_top_via_present``/``cap_top_via_metal_present`` follow the
-    ``res_mark_present`` precedent even though sky130 (the only family
-    :func:`_cap_family_layers` resolves today) always sets both -- a future
-    family that declares plates but not a top-plate via can still resolve
-    cleanly, matching :class:`~klayout_tools.decks.CapacitorDevice`'s own
-    ``top_plate_via``/``top_plate_via_metal`` being optional fields."""
+    ``res_mark_present`` precedent even though both families
+    :func:`_cap_family_layers` resolves today (sky130, sg13g2) always set
+    both -- a future family that declares plates but not a top-plate via can
+    still resolve cleanly, matching
+    :class:`~klayout_tools.decks.CapacitorDevice`'s own ``top_plate_via``/
+    ``top_plate_via_metal`` being optional fields.
+
+    Also resolves ``cap_top_via_metal_min_w_um`` (issue #1455, see
+    :func:`_cap_top_via_metal_min_w_um`) -- the per-family minimum drawn
+    width for the top-plate via landing pad, ``0.0`` for every family but
+    sg13g2."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
@@ -1229,6 +1320,7 @@ def _cap_array_layer_params(
             else kdb.LayerInfo(0, 0)
         ),
         "cap_top_via_metal_present": top_via_metal is not None,
+        "cap_top_via_metal_min_w_um": _cap_top_via_metal_min_w_um(family),
     }
 
 
@@ -2058,7 +2150,9 @@ def _res_array_layout(
     }
 
 
-def _cap_unit_layout(plate_w_um: float, plate_h_um: float) -> dict[str, Any]:
+def _cap_unit_layout(
+    plate_w_um: float, plate_h_um: float, top_via_metal_min_w_um: float = 0.0
+) -> dict[str, Any]:
     """One unit MiM capacitor cell: a ``plate_w_um`` x ``plate_h_um``
     top-plate mark (sky130's ``capm``) centred over a larger bottom-plate
     conductor (``met3``), with a top-plate via + local-metal landing pad
@@ -2066,14 +2160,23 @@ def _cap_unit_layout(plate_w_um: float, plate_h_um: float) -> dict[str, Any]:
     :func:`_res_unit_layout`, with a single centred via/pad standing in for
     that function's two end contacts (a MiM cap has no resistive body to
     keep a via clear of, so the via lands in the middle of the plate rather
-    than at either end)."""
+    than at either end).
+
+    ``top_via_metal_min_w_um`` (issue #1455, resolved per PDK family by
+    :func:`_cap_top_via_metal_min_w_um`) widens the drawn landing pad past
+    the generic ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` default when a
+    family's own top-plate-via-metal layer carries a coarser minimum-width
+    DRC rule than that default satisfies (sg13g2's ``TopMetal1``, 1.64um vs.
+    sky130's ``met4``, 0.3um) -- the default ``0.0`` leaves sky130/gf180mcu
+    byte-for-byte unchanged."""
     margin = CAP_BOTTOM_PLATE_MARGIN_UM
     bottom_w = plate_w_um + 2 * margin
     bottom_h = plate_h_um + 2 * margin
     cx, cy = bottom_w / 2.0, bottom_h / 2.0
 
     via_half = CONTACT_SIZE_UM / 2.0
-    pad_half = (CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM) / 2.0
+    pad_side = max(CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
+    pad_half = pad_side / 2.0
     top_via_box = _snap_square_box_um(cx, cy, via_half, _GRID_DBU_UM)
     top_via_metal_box = _snap_square_box_um(cx, cy, pad_half, _GRID_DBU_UM)
 
@@ -2096,7 +2199,11 @@ def _cap_unit_layout(plate_w_um: float, plate_h_um: float) -> dict[str, Any]:
 
 
 def _cap_array_layout(
-    plate_w_um: float, plate_h_um: float, spacing_um: float, num: int
+    plate_w_um: float,
+    plate_h_um: float,
+    spacing_um: float,
+    num: int,
+    top_via_metal_min_w_um: float = 0.0,
 ) -> dict[str, Any]:
     """``num`` matched unit MiM capacitors (see :func:`_cap_unit_layout`) in
     a single row, spaced ``spacing_um`` apart -- the capacitor sibling of
@@ -2104,8 +2211,11 @@ def _cap_array_layout(
     ``rows`` folding or ``dummy`` padding yet (issue #1117 scopes this
     generator's first increment to the core plate/via geometry; both are
     natural `res_array`-parity follow-ups, not correctness gaps -- a MiM
-    cap array with only a handful of matched units rarely needs either)."""
-    unit = _cap_unit_layout(plate_w_um, plate_h_um)
+    cap array with only a handful of matched units rarely needs either).
+
+    ``top_via_metal_min_w_um`` is forwarded to :func:`_cap_unit_layout`
+    unchanged (issue #1455)."""
+    unit = _cap_unit_layout(plate_w_um, plate_h_um, top_via_metal_min_w_um)
     pitch = unit["total_w_um"] + spacing_um
     cells = [{"idx": i, "x0_um": i * pitch, "y0_um": 0.0} for i in range(num)]
     return {"unit": unit, "pitch_um": pitch, "cells": cells}
@@ -3757,6 +3867,15 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "layer for the resolved PDK",
                 default=False,
             )
+            self.param(
+                "cap_top_via_metal_min_w_um",
+                self.TypeDouble,
+                "Minimum drawn width (um) for the top-plate via landing pad "
+                "on the resolved PDK family (issue #1455) -- 0.0 for a "
+                "family with no override, leaving the generic landing-pad "
+                "size unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
@@ -3766,7 +3885,11 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_top = self.layout.layer(self.cap_top_plate_layer)
             li_bottom = self.layout.layer(self.cap_bottom_plate_layer)
             info = _cap_array_layout(
-                self.plate_w_um, self.plate_h_um, self.spacing_um, self.num
+                self.plate_w_um,
+                self.plate_h_um,
+                self.spacing_um,
+                self.num,
+                self.cap_top_via_metal_min_w_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -5545,8 +5668,13 @@ def _cap_array_describe(
 ) -> dict[str, Any]:
     family = _pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
+    top_via_metal_min_w_um = _cap_top_via_metal_min_w_um(family)
     info = _cap_array_layout(
-        params["plate_w_um"], params["plate_h_um"], params["spacing_um"], params["num"]
+        params["plate_w_um"],
+        params["plate_h_um"],
+        params["spacing_um"],
+        params["num"],
+        top_via_metal_min_w_um,
     )
     unit = info["unit"]
     bottom_pair = layers["cap_bottom_plate"]
@@ -5562,8 +5690,12 @@ def _cap_array_describe(
         "datatype": top_via_metal_pair[1],
         "name": None,
     }
+    # Mirrors `_cap_unit_layout`'s own pad sizing (issue #1455): the wider of
+    # the generic landing-pad default and this family's minimum drawn width
+    # (`0.0` for every family but sg13g2), so a reported `C<i>_TOP` port
+    # width always matches the shape actually drawn.
     top_port_width_um = (
-        CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+        max(CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
         if layers["cap_top_via_metal"] is not None
         else params["plate_w_um"]
     )

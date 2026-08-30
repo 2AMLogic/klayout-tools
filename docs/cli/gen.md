@@ -98,7 +98,7 @@ generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 | --------- | :------: | :--------: | :------: |
 | `mos_array` | yes | yes | yes |
 | `res_array` | yes | yes | yes |
-| `cap_array` | yes | no | no |
+| `cap_array` | yes | no | yes |
 | `guard_ring` | yes | yes | yes |
 | `well_island` | yes | yes | no |
 | `diff_pair` | yes | yes | yes |
@@ -106,15 +106,23 @@ generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 | `bond_pad` | yes | yes | no |
 | `bjt_array` | yes | yes | no |
 
-**sg13g2 (IHP-Open-PDK, issues #1448/#1450).** `res_array`/`guard_ring`
-(#1448) and `mos_array`/`diff_pair` (#1450) are wired up against this
-family's curated deck (`klayout_tools.decks.sg13g2`) today;
-`bjt_array`/`cap_array`/`esd_device`/`bond_pad`/`well_island` are not:
+**sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
+(#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
+up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
+`bjt_array`/`esd_device`/`bond_pad`/`well_island` are not:
 
-- `bjt_array`/`cap_array` have no recognised device class in this deck's
+- `bjt_array` has no recognised device class in this deck's
   `EXTRACTION_DECK` at all (it declares `nfet`/`pfet`/three drawn poly
-  resistors/two junction diodes only — see that module's own "Device-class
-  coverage" note — no bipolars, no MiM capacitors).
+  resistors/two junction diodes/two MiM capacitors only — see that module's
+  own "Device-class coverage" note — no bipolars). `cap_array` was
+  originally excluded here too (`EXTRACTION_DECK.capacitors` was empty), but
+  issue #1454 populated it (`cap_cmim`/`rfcmim`, once #1243 extended this
+  deck's own metals/vias stack up through `Metal5`/`TopMetal1`) and issue
+  #1455 wired the generator's own `cap_top_plate`/`cap_bottom_plate`/
+  `cap_top_via`/`cap_top_via_metal` layer roles up to match (`MIM`/`Metal5`/
+  `Vmim`/`TopMetal1`) — the drawn output classifies as the base `cap_cmim`
+  flavour (never `rfcmim`, this generator's own `flavor`-less first
+  increment).
 - `mos_array` (and, since it composes `mos_array`'s own unit-device drawing,
   `diff_pair`) initially failed a **real** DRC check on this family:
   `gatpoly.separation.activ.1` (`Gat.d`, "minimum GatPoly space to unrelated
@@ -159,7 +167,11 @@ still rejected there, with an error naming this family's own flavours.
 declares no distinct tap mask, the same "shared with transistor active"
 situation `gf180mcu`'s own `Comp` reuse documents) — DRC-clean, but not
 itself recognised as a distinct tap/tie device by `klt extract --deck
-sg13g2` (no currently-supported family's `guard_ring` output is).
+sg13g2` (no currently-supported family's `guard_ring` output is). `cap_array`'s
+default output round-trips through `klt extract --deck sg13g2` to the
+`"cap_cmim"` device class (issue #1455); `TopMetal1`'s own coarse 1.64µm
+minimum-width DRC rule widens the drawn top-plate landing pad past the
+generic default for this family only (see the `cap_array` section above).
 
 #### Adding a third PDK family
 
@@ -487,28 +499,38 @@ listing the flavours that family does expose. As with the marker, no curated
 
 A row of `num` matched unit MiM (Metal-Insulator-Metal) capacitor cells, each
 a top-plate-metal-over-bottom-plate-metal stack (sky130's `capm` top-plate
-mark over a `met3` bottom-plate conductor) with a `via3`/`met4` top-plate via
-and local-metal landing pad, so the top terminal is directly routable — the
-capacitor sibling of `res_array`, drawing the *same* layer/datatype numbers
-`klayout_tools.decks.sky130`'s `EXTRACTION_DECK.capacitors[0]` entry
-(`sky130_fd_pr__model__cap_mim`) declares, never a second, private layer map.
+mark over a `met3` bottom-plate conductor; sg13g2's `MIM` top-plate mark over
+a `Metal5` bottom-plate conductor, issue #1455) with a top-plate via and
+local-metal landing pad (sky130's `via3`/`met4`; sg13g2's `Vmim`/`TopMetal1`),
+so the top terminal is directly routable — the capacitor sibling of
+`res_array`, drawing the *same* layer/datatype numbers each family's own
+curated `EXTRACTION_DECK.capacitors[0]` entry declares
+(`klayout_tools.decks.sky130`'s `sky130_fd_pr__model__cap_mim`;
+`klayout_tools.decks.sg13g2`'s `cap_cmim`), never a second, private layer map.
 Each unit gets two ports: `C<i>_BOT` on the bottom-plate conductor's local-left
 edge, and `C<i>_TOP` on the top-plate via/landing-pad centre (an interior
 point, so — like `mos_array`'s gate-contact port — it reports a fixed
 `direction_deg` rather than a geometrically-derived one). `device_count` is
 `num`. `drc_hints.matched_group_id` is `"cap_array:<num>"`.
 
-Only `sky130` is supported today — gf180mcu's own MiM stack (`FuseTop` top
+`sky130` and `sg13g2` are supported — gf180mcu's own MiM stack (`FuseTop` top
 plate over an oversized "virtual" `Metal4` bottom plate, per
 `CapacitorDevice.bottom_plate_oversize_um`) needs an additional sizing
 derivation this generator does not yet implement; requesting `cap_array` for
 any other PDK family raises a clear application error (exit code `1`) rather
-than silently drawing sky130's layer numbers onto the wrong stack. Neither
-`rows` folding (`res_array`'s own boustrophedon fold, issue #415) nor `dummy`
+than silently drawing sky130's layer numbers onto the wrong stack. On
+sg13g2, `TopMetal1`'s own coarse minimum-width DRC rule (1.64µm, vs.
+sky130's `met4` at 0.3µm) widens the drawn top-plate landing pad (and its
+reported `C<i>_TOP` port width) past the generic default for that family
+only — sky130/gf180mcu geometry is byte-for-byte unchanged. Neither `rows`
+folding (`res_array`'s own boustrophedon fold, issue #415) nor `dummy`
 padding elements are implemented yet either — both are natural `res_array`-
 parity follow-ups, not correctness gaps for a first `cap_array` `num`-only
 generator. There is also no `flavor` param (`res_array`'s own #463) — sky130's
-second MiM stack (`capm2`/`met4`) is out of this generator's initial scope.
+second MiM stack (`capm2`/`met4`) and sg13g2's RF variant (`rfcmim`) are out
+of this generator's initial scope; every family's drawn output classifies as
+its base flavour (`sky130_fd_pr__model__cap_mim`/`cap_cmim`), never the
+RF/second-stack variant.
 
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
