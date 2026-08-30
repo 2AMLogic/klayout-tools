@@ -4108,6 +4108,41 @@ def test_geometry_style_is_per_pdk_family(tmp_path):
     )
 
 
+def test_sg13g2_capacitor_bindings_use_lowercase_l_w_params():
+    """Issue #1470 review: sg13g2's `cap_cmim`/`cap_rfcmim` subcircuits
+    declare lowercase `l`/`w` (`.param l=7u w=7u` in IHP's own
+    `capacitors_mod.lib`), the same spelling its `rsil`/`rppd`/`rhigh`
+    resistor subcircuits use.
+
+    `resolve_device_bindings` -- the *writing* direction behind
+    `klt extract --pdk` -- defaults to uppercase `L`/`W` when a family has no
+    `_CAPACITOR_PARAM_STYLE` row, unlike the two reading-direction call sites
+    which default to lowercase. Adding sg13g2's capacitors to
+    `_CAPACITOR_MODEL_TABLE` activated this path for the family for the first
+    time, so this pins the parameter spelling the emitted `X` card actually
+    carries, for both the curated capacitor classes and their resistor
+    siblings (whose `_RESISTOR_PARAM_STYLE` row already covered them)."""
+    from klayout_tools.pdk_models import resolve_device_bindings
+
+    deck = get_extraction_deck("sg13g2")
+    bindings = resolve_device_bindings("sg13g2", "sg13g2", deck)
+
+    caps = {name: b for name, b in bindings.items() if b.kind == "capacitor"}
+    assert {(name, b.subckt) for name, b in caps.items()} == {
+        ("cap_cmim", "cap_cmim"),
+        ("rfcmim", "cap_rfcmim"),
+    }
+    for name, binding in caps.items():
+        assert (binding.length_param, binding.width_param) == ("l", "w"), name
+
+    # The sibling family this mirrors, asserted alongside so a future
+    # divergence between the two tables is visible in one place.
+    resistors = [b for b in bindings.values() if b.kind == "resistor"]
+    assert resistors
+    for binding in resistors:
+        assert (binding.length_param, binding.width_param) == ("l", "w")
+
+
 # --- real-PDK + ngspice proof for the bound MOS card (issue #1396) ---------- #
 #
 # Every assertion above pins the *written text*. This one closes the loop the

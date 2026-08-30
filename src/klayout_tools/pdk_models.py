@@ -47,12 +47,12 @@ of issue #1231 -- ``sg13g2``; MOS only, as of issue #1400 -- ``sg13cmos5l``):
   semiconductor-resistor-with-model-reference card that a consumer's own
   simulation deck must supply the ``.model`` for) -- the same documented
   bare-primitive carve-out gf180mcu's bipolar gets below.
-- **Capacitor** (sky130/gf180mcu) -- every ``CapacitorDevice`` class each deck
-  declares, with plate ``L``/``W`` derived from the extracted plate area and
-  perimeter via :func:`equivalent_rectangle_um`. sg13g2's two MIM capacitors
-  (``cap_cmim``/``rfcmim``, issue #1454) have no curated entry yet and keep
-  their bare ``C``-card form -- the same documented bare-primitive carve-out
-  that deck's own poly resistors get above.
+- **Capacitor** (sky130/gf180mcu, plus -- issue #1470 -- sg13g2's two MIM
+  capacitors) -- every ``CapacitorDevice`` class each deck declares, with
+  plate ``L``/``W`` derived from the extracted plate area and perimeter via
+  :func:`equivalent_rectangle_um`. sg13g2's ``cap_cmim`` (declared since
+  #1456) binds to its own identically-named subcircuit; ``rfcmim`` binds to
+  ``cap_rfcmim``, IHP's real upstream name for the device.
 - **Bipolar** -- **sky130 only** (``sky130_fd_pr__pnp_05v5``). gf180mcu's
   bipolar is deliberately left **unbound** (its recognised ``bjt`` device
   keeps KLayout's bare ``Q``-card form), because the gf180mcu deck itself has
@@ -74,12 +74,11 @@ than guess. The *ingestion* direction (``klt lvs``'s
 additionally derives an assumed-identity binding -- declared LVS device-class
 name taken as its own subcircuit name -- for each ``resistors``/``capacitors``
 class of a deck whose corresponding family table has no curated entry at all,
-so ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` and ``sg13g2``'s ``cap_cmim``
-above are readable back without a hand-written ``reference.device_map``.
-That fallback only helps where the identity assumption actually holds
-upstream: ``sg13g2``'s other declared MIM class, ``rfcmim``, ships as
-``.subckt cap_rfcmim``, so it still needs an explicit
-``reference.device_map`` entry (see :func:`build_device_binding_map` and
+so ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` are readable back without a
+hand-written ``reference.device_map``. That fallback only helps where the
+identity assumption actually holds upstream -- it does not, for example, cover
+a family with even one non-identity class, since the fallback is gated on the
+whole ``(deck_name, family)`` pair (see :func:`build_device_binding_map` and
 ``docs/cli/lvs.md`` -> "Per-deck coverage"). Guessing is safe there and unsafe
 here: the worst case reading is a failed or rejected conversion of a name no
 PDK ships, while the worst case writing is a shipped netlist that binds a
@@ -797,23 +796,27 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     declared LVS device-class name as its subcircuit name. Without it, a deck
     that recognises a device for *extraction* could not read that same device
     back on ``klt lvs``'s reference side -- the round-trip asymmetry #1464
-    reported for ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` (declared since
-    #1415) and, independently, for ``sg13g2``'s ``cap_cmim`` (declared since
-    #1456). Because it is derived, a *future* class a deck declares is
-    covered with no edit to this module at all.
+    originally reported for ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh``
+    (declared since #1415) and, independently, for ``sg13g2``'s ``cap_cmim``
+    (declared since #1456; now covered by a curated entry instead -- see
+    below). Because it is derived, a *future* class a deck declares is
+    covered with no edit to this module at all, as long as its declared
+    class name is genuinely its own subcircuit name.
 
     **What the identity assumption does not close.** A derived binding is
     only reachable by a real netlist when the declared class name *is* the
     upstream subcircuit name. ``sg13g2``'s other declared MIM capacitor,
-    ``rfcmim``, is the live counter-example: IHP ships it as ``.subckt
+    ``rfcmim``, was the live counter-example: IHP ships it as ``.subckt
     cap_rfcmim`` (see ``decks/sg13g2.py``), so the derived ``rfcmim`` key
-    never matches an IHP-fetched reference netlist and ``cap_rfcmim`` still
-    requires an explicit ``reference.device_map`` entry. Deriving a
-    ``cap_<class>`` alias too is deliberately *not* done -- that is a second
-    guess with no verified name behind it, exactly the failure mode the
-    guard rails below exist to prevent. Closing it properly means a curated
-    ``_CAPACITOR_MODEL_TABLE`` entry for ``("sg13g2", "sg13g2")``, verified
-    against a fetched install.
+    never matched an IHP-fetched reference netlist and ``cap_rfcmim`` did not
+    resolve. Deriving a ``cap_<class>`` alias in code was deliberately *not*
+    done -- that would be a second guess with no verified name behind it,
+    exactly the failure mode the guard rails below exist to prevent. It is
+    closed instead (issue #1470) by a curated ``_CAPACITOR_MODEL_TABLE``
+    entry for ``("sg13g2", "sg13g2")``, verified against a fetched install,
+    mapping ``rfcmim -> cap_rfcmim`` (and ``cap_cmim -> cap_cmim``, since
+    adding that entry at all takes the whole family out of the fallback's
+    reach -- see the next bullet).
 
     Three deliberate limits on that fallback, each protecting a verified
     curated fact from being overwritten by a guess:
@@ -1105,6 +1108,28 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
     ("gf180mcu", "gf180mcu"): {
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
     },
+    # sg13g2's two declared MIM capacitor classes (issue #1470; classes
+    # recognised by issue #1456). Confirmed against a real fetched
+    # IHP-Open-PDK v0.3.0 install (`scripts/fetch-ihp-sg13g2.sh`):
+    # `libs.tech/ngspice/models/capacitors_mod.lib` declares `.subckt
+    # cap_cmim PLUS MINUS` and `.subckt cap_rfcmim PLUS MINUS bn` -- the
+    # latter is IHP's real upstream name for `rfcmim`, not `rfcmim` itself,
+    # so the assumed-identity fallback in `build_device_binding_map` never
+    # reached it (that derived `rfcmim` key was inert -- present but never
+    # matched by a genuine IHP-fetched reference netlist). Both subcircuits
+    # take plain `l`/`w` in raw metres (e.g. `.param l=7u w=7u`), the same
+    # convention already established for this family's MOS/resistor
+    # bindings -- see `_CAPACITOR_PARAM_STYLE` below. `cap_cmim` is listed
+    # here too, even though it is its own subcircuit name and was
+    # previously covered by the derived fallback: the fallback is gated on
+    # the whole `(deck_name, family)` pair being absent from this table, so
+    # adding a curated `sg13g2` entry at all disables derivation for the
+    # rest of the family and `cap_cmim` must be listed explicitly or it
+    # would silently regress to unbound.
+    ("sg13g2", "sg13g2"): {
+        "cap_cmim": "cap_cmim",
+        "rfcmim": "cap_rfcmim",
+    },
 }
 
 #: (deck_name, pdk_variant_family) -> {deck BipolarDevice.class_name ->
@@ -1144,9 +1169,20 @@ _RESISTOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
     "gf180mcu": ("r_length", "r_width"),
     "sg13g2": ("l", "w"),
 }
+#: Same convention for capacitors: sky130's MiM cells take ``l``/``w``;
+#: gf180mcu's take the ``c_``-prefixed spellings; sg13g2's `cap_cmim`/
+#: `cap_rfcmim` subcircuits take plain ``l``/``w`` (``.param l=7u w=7u`` in
+#: the same fetched `cap_mod.lib`/`rfcmim` model tree cited by
+#: `_CAPACITOR_MODEL_TABLE` above), matching `_RESISTOR_PARAM_STYLE`'s
+#: `sg13g2` row. Missing entries fall back to lowercase ``l``/``w`` at every
+#: call site -- but sg13g2 is listed explicitly because
+#: :func:`resolve_device_bindings` defaults to uppercase ``L``/``W`` instead
+#: (issue #1470 review): an omitted row there silently writes the wrong
+#: parameter spelling rather than the family's documented one.
 _CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
     "sky130": ("l", "w"),
     "gf180mcu": ("c_length", "c_width"),
+    "sg13g2": ("l", "w"),
 }
 
 

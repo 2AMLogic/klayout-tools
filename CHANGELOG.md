@@ -24,12 +24,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   deck already knew — and to discover the need for one from a failed run,
   since the error's first suggestion was `reference.deck`. Closed by this:
   `sg13cmos5l`'s `rsil`/`rppd`/`rhigh` (declared since issue #1415) and
-  `sg13g2`'s `cap_cmim` (declared since issue #1456). **Not** closed by
-  this, and called out so the gap is not mistaken for coverage: `sg13g2`'s
+  `sg13g2`'s `cap_cmim` (declared since issue #1456; later moved from this
+  derived binding to a curated table entry by issue #1470, with no change in
+  behavior for callers). **Not** closed by this at the time: `sg13g2`'s
   other declared MIM class, `rfcmim`. The derived binding takes the declared
   class name as its own subcircuit name, but IHP ships that device as
   `.subckt cap_rfcmim`, so a real reference netlist calling `cap_rfcmim`
-  still needs an explicit `reference.device_map` entry (see
+  needed an explicit `reference.device_map` entry until issue #1470 (below)
+  closed it with a curated table entry instead (see
   `docs/cli/lvs.md` → "Per-deck coverage"). The derived binding only applies
   to a `(deck, family)` pair the
   curated tables do not cover at all, so sky130's genuinely non-identity
@@ -42,6 +44,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   derived classes alongside the MOS names. The *writing* direction (`klt
   extract --pdk`) is untouched: an unbound class still keeps its bare
   primitive card. No `schema_version` bump — no field changed shape.
+- **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` converter now
+  resolves `sg13g2`'s `rfcmim` MIM capacitor from `reference.deck: "sg13g2"`
+  alone (issue #1470) — the one live gap issue #1464/#1468 left open. IHP's
+  real subcircuit name for the device is `cap_rfcmim`, not `rfcmim`, so the
+  assumed-identity derivation `klayout_tools.pdk_models.build_device_binding_map`
+  falls back to (see the entry above) never reached it; a caller had to
+  hand-write `"device_map": {"cap_rfcmim": {"kind": "capacitor", "class":
+  "rfcmim"}}`. Closed by a new curated `_CAPACITOR_MODEL_TABLE` entry for
+  `("sg13g2", "sg13g2")`, verified against a real fetched IHP-Open-PDK v0.3.0
+  install's `libs.tech/ngspice/models/capacitors_mod.lib`, mapping `rfcmim ->
+  cap_rfcmim` and `cap_cmim -> cap_cmim`. `cap_cmim` had to move into this
+  same curated entry alongside it: the derived fallback is gated on the
+  whole `(deck, family)` pair, so adding any curated entry for `sg13g2`'s
+  capacitor family takes `cap_cmim` out of derivation's reach too — its
+  resolution behavior for callers is unchanged, only its internal source.
+  Because the curated table also feeds the *writing* direction
+  (`resolve_device_bindings`), `klt extract --pdk` now binds sg13g2's
+  `cap_cmim`/`rfcmim` devices to their real subcircuits too, instead of
+  leaving them as bare `C` cards (see `docs/cli/extract.md` → "Coverage").
+  No `schema_version` bump — no field changed shape.
 - **Added**: `klt extract --deck sg13g2` now recognises the PDK's two MIM
   capacitors, `cap_cmim` and `rfcmim` (issue #1454) — closing out the
   deferral issue #1233 opened. `EXTRACTION_DECK.capacitors` declares a `MIM`
