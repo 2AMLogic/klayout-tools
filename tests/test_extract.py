@@ -4685,9 +4685,10 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
         # sg13g2 declares MOS (thin- and thick-oxide, the latter via
         # `mos_flavours`, which deliberately shares the `nfet`/`pfet` class
         # labels) plus its drawn poly/metal resistors (issues #1231/#1235),
-        # its two curated antenna diodes (issue #1234) and its two MIM
-        # capacitors (issue #1454, which trail the MOS roles ahead of the
-        # `"resistor"` role) -- no curated bipolar entries yet.
+        # its two curated antenna diodes (issue #1234), its two MIM
+        # capacitors (issue #1454) and its two MoM capacitors (issue #1466,
+        # which trail the MIM capacitors ahead of the `"resistor"` role) --
+        # no curated bipolar entries yet.
         (
             "sg13g2",
             (
@@ -4695,6 +4696,8 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "pfet",
                 "cap_cmim",
                 "rfcmim",
+                "cap_cmomi",
+                "cap_cmomf",
                 "resistor",
                 "dantenna",
                 "dpantenna",

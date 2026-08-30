@@ -133,6 +133,11 @@ Recognised today:
   ``Vmim`` (129/0) via up to ``TopMetal1`` (126/0) -- see "MIM capacitors"
   below for the deferral history and ``EXTRACTION_DECK``'s own
   ``capacitors`` note for the derivation.
+- **MoM capacitors** (issue #1466, found while investigating #1463) --
+  ``cap_cmomi``/``cap_cmomf``, a single-marker/per-metal-multi-port device
+  family :class:`~klayout_tools.decks.CapacitorDevice` cannot represent --
+  see "MoM capacitors" below and ``EXTRACTION_DECK``'s own
+  ``mom_capacitors`` note for the full derivation.
 
 Still unrecognised, each tracked as its own follow-on issue rather than left
 a silent gap (a device class this deck cannot recognise extracts as ordinary
@@ -219,6 +224,43 @@ against upstream's own worked ``C=74.620f`` example for a 7x7um plate. See
 derivation and this entry's documented approximations (notably: ``rfcmim``
 is a 3-terminal RF device upstream, modelled here as its 2-terminal
 plate-to-plate core only).
+
+### MoM capacitors -- new device shape (issue #1466, found investigating #1463)
+
+#1463 investigated whether this deck's rule sources define a recognisable
+MoM (metal-oxide-metal) capacitor and, checking against this repo's
+*vendored* ``pdks/ihp-open-pdk/ihp-sg13g2`` snapshot (pinned to release
+``v0.3.0``, upstream commit ``5cccb161f7492697cfa52eb14dc03beb00bdca9e``),
+correctly found no MoM ``extract_devices`` call at all. Fetching
+``sg13cmos5l.py``'s own newer, live-pinned sibling commit
+(``IHP-GmbH/IHP-Open-PDK`` at ``d2cc0355f26235c777dfcc6867b390fa1e78083f``,
+2026-08-11 -- five months after the vendored ``v0.3.0`` snapshot) tells a
+different story: that commit's ``cap_extraction.lvs`` declares both
+``cap_cmomi`` (interdigitated) and ``cap_cmomf`` (metal fringe/finger),
+recognised by ``custom_mom_extractor.lvs``'s ``CapMomExtractor``, an
+``RBA::GenericDeviceExtractor`` subclass structurally incompatible with
+:class:`~klayout_tools.decks.CapacitorDevice`: one marker layer covering
+the whole device footprint (not two independently-drawn plate layers),
+exactly two per-metal port shapes told apart by *position* rather than by
+declared layer (they can land on the same metal or on adjacent, stacked
+metals), and no computed capacitance value at all (the real device matches
+on topology, like a MOSFET, with its real ``C`` supplied by the SPICE/
+Verilog-A model). See :class:`~klayout_tools.decks.MomCapacitorDevice`'s
+own docstring for the full structural comparison against
+``CapacitorDevice``, and ``extract.py``'s ``_build_mom_capacitor_extractor``
+for the Python transcription of ``CapMomExtractor`` itself.
+
+``EXTRACTION_DECK.mom_capacitors`` declares both flavours, told apart
+solely by their own distinct marker layer (``Recog.mom`` 99/39 for
+``cap_cmomi``, ``Recog.momf`` 99/40 for ``cap_cmomf``) -- see
+``EXTRACTION_DECK``'s own ``mom_capacitors`` comment for the full
+transcription and citations. ``sg13cmos5l.py`` gained its own pair of
+entries in the same PR -- these are genuinely cmos5l devices too, not an
+sg13g2-only artifact it merely symlinks in unused (cmos5l's own top-level
+``sg13cmos5l.lvs`` ``%include``s both derivation files directly) -- with
+one family-specific difference: cmos5l tops out at ``TopMetal1`` with no
+``Metal5``, so its own ``metal_pins`` stops at ``Metal4.pin`` and a cmos5l
+instance can only ever populate ``m1p``..``m4p`` ports.
 
 ### Schottky diode (``schottky_nbl1``) -- investigated, declined (issue #1234)
 
@@ -387,6 +429,7 @@ from . import (
     DrcRule,
     ExtractionDeck,
     LayerRC,
+    MomCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
@@ -430,6 +473,37 @@ def _sg13g2_lvs_provenance(source_file: str, rule_id: str) -> RuleProvenance:
         source_path=f"{_LVS_RULE_DECKS}/{source_file}",
         rule_id=rule_id,
         commit=_IHP_OPEN_PDK_COMMIT,
+    )
+
+
+# `cap_cmomi`/`cap_cmomf` (issue #1466) postdate `_IHP_OPEN_PDK_COMMIT`
+# (`5cccb161f...`, the `v0.3.0` tag every other `_sg13g2_lvs_provenance`
+# citation above verifies against): that commit's `cap_extraction.lvs` has
+# no MoM `extract_devices` call at all (confirmed by #1463's own Curator
+# investigation against this repo's vendored snapshot of the same tag).
+# `sg13cmos5l.py`'s own module docstring independently pins a *newer* live
+# commit for its own (different) purposes -- `IHP-GmbH/IHP-Open-PDK` at
+# `d2cc0355f26235c777dfcc6867b390fa1e78083f` (2026-08-11) -- and fetching
+# that commit directly from GitHub shows `cap_extraction.lvs` there *does*
+# declare both devices, alongside `cap_cmomi_derivations.lvs`/
+# `cap_cmomf_derivations.lvs`/`custom_mom_extractor.lvs`. This helper cites
+# that newer commit explicitly, rather than reusing `_sg13g2_lvs_provenance`
+# (which would misrepresent these two entries as verified against a tag that
+# does not contain them) -- the two MoM entries below are the only rules in
+# this module pinned to this commit rather than `_IHP_OPEN_PDK_COMMIT`.
+_IHP_OPEN_PDK_MOM_COMMIT = "d2cc0355f26235c777dfcc6867b390fa1e78083f"
+
+
+def _sg13g2_mom_provenance(source_file: str, rule_id: str) -> RuleProvenance:
+    """Build a :class:`RuleProvenance` for a sg13g2 MoM-capacitor
+    device-recognition rule (issue #1466) -- the ``_IHP_OPEN_PDK_MOM_COMMIT``
+    sibling of :func:`_sg13g2_lvs_provenance` (see that constant's own
+    comment for why these two entries need a distinct, newer commit)."""
+    return RuleProvenance(
+        source_repo=_IHP_OPEN_PDK_REPO,
+        source_path=f"{_LVS_RULE_DECKS}/{source_file}",
+        rule_id=rule_id,
+        commit=_IHP_OPEN_PDK_MOM_COMMIT,
     )
 
 
@@ -1517,6 +1591,86 @@ EXTRACTION_DECK = ExtractionDeck(
             top_plate_via=(129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
             top_plate_via_metal=(126, 0),  # TopMetal1.drawing
             provenance=_sg13g2_lvs_provenance("cap_extraction.lvs", "rfcmim"),
+        ),
+    ),
+    # Drawn MoM (Metal-oxide-Metal) capacitors (issue #1466, found while
+    # investigating #1463): `cap_cmomi` (interdigitated) and `cap_cmomf`
+    # (metal fringe/finger), a structurally distinct capacitor family from
+    # `capacitors` above -- see `MomCapacitorDevice`'s own docstring for the
+    # full rationale for why this needed a new device shape rather than a
+    # `CapacitorDevice` entry. Transcribed from `cap_cmomi_derivations.lvs`/
+    # `cap_cmomf_derivations.lvs` (marker + per-metal port derivation),
+    # `cap_extraction.lvs` (the `extract_devices(CapMomExtractor.new(...))`
+    # calls), `custom_mom_extractor.lvs` (`CapMomExtractor`, the
+    # `RBA::GenericDeviceExtractor` subclass `extract.py`'s own
+    # `_build_mom_capacitor_extractor` is a Python transcription of), and
+    # `cap_cmomi_connections.lvs`/`cap_cmomf_connections.lvs` (per-metal port
+    # connectivity) -- all fetched directly from the live
+    # `IHP-GmbH/IHP-Open-PDK` commit `_IHP_OPEN_PDK_MOM_COMMIT` pins (see that
+    # constant's own comment for why this is a *different*, newer commit than
+    # every other rule in this module):
+    #
+    #   cap_cmomi_marker = recog_mom            # Recog.mom, GDS 99/39
+    #   cap_cmomi_m1_ports = metal1_pin.and(cap_cmomi_marker)   # ditto m2p..m5p
+    #   extract_devices(CapMomExtractor.new('cap_cmomi'),
+    #     { 'core' => cap_cmomi_marker, 'm1p' => cap_cmomi_m1_ports, ...,
+    #       'm5p' => cap_cmomi_m5_ports, 'dev_mk' => cap_cmomi_marker })
+    #   connect(cap_cmomi_m1_ports, metal1_con)   # ditto m2..m5, own metal only
+    #
+    #   cap_cmomf_marker = recog_momf            # Recog.momf, GDS 99/40
+    #   (cap_cmomf's own derivation/extraction/connections are byte-identical
+    #   in shape, told apart from cap_cmomi only by this one marker layer)
+    #
+    # `CapMomExtractor` (a `RBA::GenericDeviceExtractor`) recognises each
+    # marker's connected component, finds the (exactly two) per-metal `MkPin`
+    # port polygons touching it, sorts them by `(x-center, y-center, metal
+    # index)`, and assigns the first/last to the class's two terminals --
+    # declared EQUIVALENT (order is arbitrary; DeviceCustomMIM's own
+    # `mim_top`/`mim_btm` terminal ids are not semantically "top"/"bottom"
+    # here the way they are for `cap_cmim` above, since the two ports can be
+    # side by side *or* stacked on adjacent metals). `l`/`w` are read off the
+    # marker's own bounding-box width/height -- not a plate-overlap area --
+    # and the extractor does **not** compute a capacitance value at all: its
+    # own source comment states "the LVS extractor does NOT compute C; LVS
+    # matches devices on topology; the value C_total =
+    # density[N]*active_area + Cfeed is supplied by the SPICE/Verilog-A
+    # model." `MomCapacitorDevice.metal_pins` therefore has one entry per
+    # `metals` level (`Metal1.pin` 8/2 through `Metal5.pin` 67/2, `None` for
+    # `TopMetal1`/`TopMetal2` -- upstream's own `cap_extraction.lvs` call
+    # only ever wires up `m1p`..`m5p`, never a `TopMetal1`/`TopMetal2` pin
+    # layer, since this device family lives entirely on the g2 thin-metal
+    # stack), and each entry reports only `w_um`/`l_um` in `devices[].params`
+    # -- no `c_f`/`area_um2`/`perimeter_um` keys, since none of those apply
+    # to a topologically-matched, dimension-only device (see
+    # `docs/json-contract.md`'s "MoM capacitor devices" note).
+    mom_capacitors=(
+        MomCapacitorDevice(
+            name="cap_cmomi",  # upstream LVS device-class name
+            marker=(99, 39),  # Recog.mom
+            metal_pins=(
+                (8, 2),  # Metal1.pin
+                (10, 2),  # Metal2.pin
+                (30, 2),  # Metal3.pin
+                (50, 2),  # Metal4.pin
+                (67, 2),  # Metal5.pin
+                None,  # TopMetal1 -- this device family never reaches it
+                None,  # TopMetal2 -- ditto
+            ),
+            provenance=_sg13g2_mom_provenance("cap_extraction.lvs", "cap_cmomi"),
+        ),
+        MomCapacitorDevice(
+            name="cap_cmomf",  # upstream LVS device-class name
+            marker=(99, 40),  # Recog.momf
+            metal_pins=(
+                (8, 2),  # Metal1.pin
+                (10, 2),  # Metal2.pin
+                (30, 2),  # Metal3.pin
+                (50, 2),  # Metal4.pin
+                (67, 2),  # Metal5.pin
+                None,  # TopMetal1
+                None,  # TopMetal2
+            ),
+            provenance=_sg13g2_mom_provenance("cap_extraction.lvs", "cap_cmomf"),
         ),
     ),
     # Drawn precision poly resistors (issue #1231), transcribed from

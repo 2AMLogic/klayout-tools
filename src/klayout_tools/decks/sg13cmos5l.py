@@ -60,16 +60,18 @@ recognition; it has since grown three follow-on increments the way
   unbiased well net (``unbiased_pmos_body_nets[]``/
   ``device.body_unverified`` on every ``sg13cmos5l`` layout, regardless of
   drawn tap geometry).
+- **Added by #1466**: ``cap_cmomi``/``cap_cmomf``, this family's MoM
+  (metal-oxide-metal) capacitors -- see ``EXTRACTION_DECK.mom_capacitors``
+  below, and "MoM capacitors" further down for the #1463 investigation and
+  the reason they needed a whole new device-recognition shape
+  (:class:`~klayout_tools.decks.MomCapacitorDevice`) rather than a
+  ``CapacitorDevice`` entry. ``capacitors`` itself stays ``()``: cmos5l's
+  own forbidden-layer rule blocks the MiM stack outright.
 - **Still out of scope**, left for follow-on issues: the
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
   but not transcribed by this issue -- see the resistor note below), plus
-  diodes and parasitics. MoM capacitors are a narrower case than "not yet
-  transcribed": #1463 confirmed cmos5l *does* have a MoM capacitor family
-  (``cap_cmomi``/``cap_cmomf``) but that this repo's ``CapacitorDevice``
-  mechanism cannot correctly represent it -- see "MoM capacitors" below
-  for the investigation and #1466 for the new device-recognition shape it
-  needs.
+  diodes and parasitics.
 
 Source, read directly from a real ``ihp-sg13cmos5l`` install (standalone
 clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0), **not**
@@ -212,8 +214,8 @@ are declared. No further action needed for this pass; noted per #1400's own
 Background instruction, mirroring how ``sg13g2.py`` documents its own
 declined-device investigations (e.g. its "SiGe HBTs -- declined" section).
 
-MoM capacitors -- investigated (#1463), deferred to a new device shape
-(#1466), *not* declined: #1463 was filed on the premise that cmos5l's MIM-
+MoM capacitors -- investigated (#1463), recognised by a new device shape
+(#1466): #1463 was filed on the premise that cmos5l's MIM-
 forbidden rule above left MoM (metal-oxide-metal) as "the only capacitor
 that family has," and asked whether cmos5l's own rule deck defines a
 recognisable MoM device. It does. This repo's *vendored*
@@ -241,7 +243,8 @@ to symlink in without using.
 
 They are, however, structurally incompatible with this repo's
 ``CapacitorDevice`` mechanism (``decks/__init__.py``), which is why this
-deck's ``capacitors`` stays ``()`` rather than gaining two new entries.
+deck's ``capacitors`` stays ``()`` and the two entries live in the separate
+``EXTRACTION_DECK.mom_capacitors`` field instead.
 ``CapacitorDevice``/``extract.py``'s consuming loop assume a purpose-drawn
 ``top_plate`` layer overlapping a *different-layer* ``bottom_plate``
 conductor, handed to KLayout's native ``kdb.DeviceExtractorCapacitor`` as
@@ -263,13 +266,19 @@ states the value is supplied by the SPICE/Verilog-A compact model
 only measuring ``w``/``l`` from the marker bounding box and matching
 topologically -- closer to how this codebase's own MOS recognition
 matches on dimensions than to how ``cap_cmim``/``rfcmim`` compute ``c_f``.
-Modelling ``cap_cmomi``/``cap_cmomf`` correctly needs a new device shape
-and new ``extract.py`` extraction logic (connected-component + port-by-
-position, no computed value), not a ``CapacitorDevice`` entry -- filed as
-#1466, which also covers ``sg13g2.py`` (the devices' native home; cmos5l
-reaches them only through the shared symlink, and cmos5l's own
-``TopMetal1``-topped stack means its instances can only ever populate the
-``m1p``..``m4p`` ports, never ``m5p``).
+Modelling ``cap_cmomi``/``cap_cmomf`` correctly therefore needed a new
+device shape and new ``extract.py`` extraction logic (connected-component +
+port-by-position, no computed value), not a ``CapacitorDevice`` entry.
+#1466 landed both: :class:`~klayout_tools.decks.MomCapacitorDevice` (see its
+own docstring for the full structural comparison) plus ``extract.py``'s
+``_build_mom_capacitor_extractor``, a Python transcription of
+``CapMomExtractor`` itself, and curated entries for **both** this deck and
+``sg13g2.py`` (the devices' native home; cmos5l reaches them only through
+the shared symlink). One family-specific consequence of cmos5l's own
+``TopMetal1``-topped stack: its instances can only ever populate the
+``m1p``..``m4p`` ports, never ``m5p``, so this deck's
+``mom_capacitors[].metal_pins`` stops at ``Metal4.pin`` where ``sg13g2.py``'s
+own reaches ``Metal5.pin``.
 
 Every DRC rule and every populated ``EXTRACTION_DECK`` provenance field
 below cites a real, independently-fetched line in cmos5l's own (or, for the
@@ -292,6 +301,7 @@ from __future__ import annotations
 from . import (
     DrcRule,
     ExtractionDeck,
+    MomCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
@@ -1216,6 +1226,76 @@ EXTRACTION_DECK = ExtractionDeck(
             bulk_to_substrate=True,  # upstream connects `rhigh_sub` to pwell
             provenance=_cmos5l_shared_g2_provenance(
                 f"{_LVS_RULE_DECKS}/res_extraction.lvs", "rhigh"
+            ),
+        ),
+    ),
+    # Drawn MoM (Metal-oxide-Metal) capacitors (issue #1466, the corrected
+    # follow-on to #1463): `cap_cmomi` (interdigitated) and `cap_cmomf`
+    # (metal fringe/finger) -- the capacitor family the module docstring's
+    # "MoM capacitors" section investigated and deferred to a new device
+    # shape. `capacitors` above stays `()` (a MiM stack cmos5l's own
+    # forbidden-layer rule blocks outright); these two live in the separate
+    # `mom_capacitors` field because they are structurally a different
+    # device -- see `MomCapacitorDevice`'s own docstring for why.
+    #
+    # Every source below is one of cmos5l's own symlinks into the pinned
+    # sibling `ihp-sg13g2` checkout (`_IHP_OPEN_PDK_G2_PIN_COMMIT`), so the
+    # rule text is byte-identical to `sg13g2.py`'s own entries and
+    # `_cmos5l_shared_g2_provenance` is the right citation helper --
+    # verified per-file against cmos5l's own `607e18d4b...` tree, where
+    # `rule_decks/cap_cmom{i,f}_{derivations,connections}.lvs`,
+    # `cap_extraction.lvs`, `custom_mom_extractor.lvs` and
+    # `layers_definitions.lvs` are all mode-120000 symlinks. What is *not*
+    # inherited by analogy is that cmos5l uses them: its own, non-symlinked
+    # top-level `libs.tech/klayout/tech/lvs/sg13cmos5l.lvs` `%include`s both
+    # `rule_decks/cap_cmomi_derivations.lvs` and
+    # `rule_decks/cap_cmomf_derivations.lvs` in its "CAP DERIVATIONS" stage
+    # and `rule_decks/cap_extraction.lvs` in its "CAP EXTRACTION" stage.
+    #
+    #   cap_cmomi_marker = recog_mom            # Recog.mom, GDS 99/39
+    #   cap_cmomi_m1_ports = metal1_pin.and(cap_cmomi_marker)   # ditto m2..m5
+    #   extract_devices(CapMomExtractor.new('cap_cmomi'),
+    #     { 'core' => cap_cmomi_marker, 'm1p' => cap_cmomi_m1_ports, ...,
+    #       'm5p' => cap_cmomi_m5_ports, 'dev_mk' => cap_cmomi_marker })
+    #   connect(cap_cmomi_m1_ports, metal1_con)   # ditto m2..m5, own metal only
+    #
+    # `metal_pins` has one entry per `metals` level above, so cmos5l's
+    # M1-M2-M3-M4-TopMetal1 stack maps to `Metal1.pin` (8/2) through
+    # `Metal4.pin` (50/2) plus `None` for `TopMetal1`. Two levels upstream's
+    # own shared `cap_extraction.lvs` call names are unreachable here and
+    # deliberately absent rather than mapped: `Metal5.pin` (67/2, upstream's
+    # `m5p`) has no `metals` level at all in cmos5l -- `Metal5` 67/0 is on
+    # this deck's own forbidden-layer list (see the module docstring) -- and
+    # `TopMetal1` is a level upstream's MoM call never wires a pin layer for
+    # in either family, since the device lives entirely on the thin-metal
+    # stack. A cmos5l instance can therefore only ever populate `m1p`..`m4p`.
+    mom_capacitors=(
+        MomCapacitorDevice(
+            name="cap_cmomi",  # upstream LVS device-class name
+            marker=(99, 39),  # Recog.mom
+            metal_pins=(
+                (8, 2),  # Metal1.pin
+                (10, 2),  # Metal2.pin
+                (30, 2),  # Metal3.pin
+                (50, 2),  # Metal4.pin
+                None,  # TopMetal1 -- this device family never reaches it
+            ),
+            provenance=_cmos5l_shared_g2_provenance(
+                f"{_LVS_RULE_DECKS}/cap_extraction.lvs", "cap_cmomi"
+            ),
+        ),
+        MomCapacitorDevice(
+            name="cap_cmomf",  # upstream LVS device-class name
+            marker=(99, 40),  # Recog.momf
+            metal_pins=(
+                (8, 2),  # Metal1.pin
+                (10, 2),  # Metal2.pin
+                (30, 2),  # Metal3.pin
+                (50, 2),  # Metal4.pin
+                None,  # TopMetal1 -- ditto
+            ),
+            provenance=_cmos5l_shared_g2_provenance(
+                f"{_LVS_RULE_DECKS}/cap_extraction.lvs", "cap_cmomf"
             ),
         ),
     ),

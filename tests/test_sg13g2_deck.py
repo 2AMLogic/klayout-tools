@@ -130,10 +130,19 @@ def test_sg13g2_extraction_deck_curated_device_families():
     per-instance collector derivation, not a compound multi-layer marker) --
     see `test_sg13g2_schottky_nbl1_declined_after_investigation` below.
 
+    `mom_capacitors` is populated as of issue #1466 (found while
+    investigating #1463): `cap_cmomi`/`cap_cmomf`, a structurally distinct
+    MoM capacitor family `CapacitorDevice` cannot represent -- see
+    `sg13g2.py`'s "MoM capacitors" docstring section for the full history.
+
     Named explicitly here so a future extension of this deck must update
     this assertion, rather than silently leaving the coverage-discipline
     test below out of sync."""
     assert {c.name for c in EXTRACTION_DECK.capacitors} == {"cap_cmim", "rfcmim"}
+    assert {c.name for c in EXTRACTION_DECK.mom_capacitors} == {
+        "cap_cmomi",
+        "cap_cmomf",
+    }
     assert EXTRACTION_DECK.bipolars == ()
     assert {d.name for d in EXTRACTION_DECK.diodes} == {"dantenna", "dpantenna"}
     assert {r.name for r in EXTRACTION_DECK.resistors} == {
@@ -148,6 +157,8 @@ def test_sg13g2_extraction_deck_curated_device_families():
         "pfet",
         "cap_cmim",
         "rfcmim",
+        "cap_cmomi",
+        "cap_cmomf",
         "resistor",
         "dantenna",
         "dpantenna",
@@ -1067,6 +1078,201 @@ def test_sg13g2_metal5_without_mim_marker_is_not_a_capacitor(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# MoM capacitors (issue #1466, found while investigating #1463)
+# --------------------------------------------------------------------------- #
+
+# `cap_cmomi`/`cap_cmomf` postdate this module's own `_IHP_OPEN_PDK_COMMIT`
+# (the `v0.3.0` tag) -- see `sg13g2.py`'s `_IHP_OPEN_PDK_MOM_COMMIT` comment
+# for why these entries cite a different, newer commit.
+_IHP_OPEN_PDK_MOM_COMMIT = "d2cc0355f26235c777dfcc6867b390fa1e78083f"
+
+
+def test_sg13g2_mom_capacitor_provenance_cites_cap_extraction_lvs():
+    """Both curated MoM-capacitor entries carry a `provenance` citing the
+    real, live-fetched `cap_extraction.lvs` `extract_devices(CapMomExtractor
+    .new(...))` calls they were transcribed from (issue #1466) -- pinned to
+    `_IHP_OPEN_PDK_MOM_COMMIT`, not this module's default
+    `_IHP_OPEN_PDK_COMMIT` (that older `v0.3.0` tag has no MoM
+    `extract_devices` call at all -- see `sg13g2.py`'s own "MoM capacitors"
+    docstring section)."""
+    by_name = {c.name: c for c in EXTRACTION_DECK.mom_capacitors}
+    assert set(by_name) == {"cap_cmomi", "cap_cmomf"}
+    for name in ("cap_cmomi", "cap_cmomf"):
+        assert by_name[name].provenance == RuleProvenance(
+            source_repo="IHP-GmbH/IHP-Open-PDK",
+            source_path=(
+                "ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/cap_extraction.lvs"
+            ),
+            rule_id=name,
+            commit=_IHP_OPEN_PDK_MOM_COMMIT,
+        )
+
+
+def _make_sg13g2_mom_layout(*, marker: tuple[int, int]) -> kdb.Layout:
+    """A 10x4um MoM-capacitor marker with two `Metal1.pin` (8/2) port shapes
+    side by side (the `double`/`none` PCell port-placement option -- both
+    ports on the *same* metal level) -- mirrors the PDK's own
+    `cap_cmomi_derivations.lvs`/`cap_cmomf_derivations.lvs` port derivation
+    (`metal1_pin.and(marker)`). Each port is contacted out to its own
+    `Metal1` routing stub and labelled, so a correct extraction reports two
+    distinct, real (not anonymous single-shape) nets. `marker` is the
+    device's own recognition layer (`Recog.mom` 99/39 for `cap_cmomi`,
+    `Recog.momf` 99/40 for `cap_cmomf`) -- the only layer that tells the two
+    devices apart, since everything else about this layout is identical."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: float, y: float) -> None:
+        li = layout.layer(*layer)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(marker, _box_um(0, 0, 10, 4))  # device marker, 10um x 4um
+    draw((8, 2), _box_um(0, 0, 1, 1))  # Metal1.pin, PLUS
+    draw((8, 2), _box_um(9, 3, 10, 4))  # Metal1.pin, MINUS
+    draw((8, 0), _box_um(-2, 0, 0, 1))  # Metal1 routing stub off PLUS
+    draw((8, 0), _box_um(10, 3, 12, 4))  # Metal1 routing stub off MINUS
+    label((8, 25), "PLUS_NET", -1, 0.5)
+    label((8, 25), "MINUS_NET", 11, 3.5)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_golden_pair_sg13g2_mom_capacitor_w_l_matches_marker_geometry(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """A drawn 10x4um MoM-cap marker with two side-by-side `Metal1.pin` ports
+    extracts as `cap_cmomi`/`cap_cmomf` with `w_um`/`l_um` read straight off
+    the marker's own bounding box (`l` -> X extent, `w` -> Y extent -- the
+    real device's own axis mapping, transcribed from
+    `custom_mom_extractor.lvs`), both port nets on distinct, correctly-named
+    terminals, and **no** `c_f`/`area_um2`/`perimeter_um` key at all: unlike
+    `cap_cmim`/`rfcmim`, this device's real compact model computes its own
+    capacitance from `density[N]*active_area + Cfeed`, not from anything
+    `klt extract` measures -- see `docs/json-contract.md`'s "MoM capacitor
+    devices" note for the JSON-shape decision this documents."""
+    mom_capacitor = next(c for c in EXTRACTION_DECK.mom_capacitors if c.name == name)
+    assert mom_capacitor.provenance.rule_id == name
+
+    path = _write_gds(_make_sg13g2_mom_layout(marker=marker), tmp_path / f"{name}.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"] == {"w_um": pytest.approx(4.0), "l_um": pytest.approx(10.0)}
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"PLUS_NET", "MINUS_NET"}
+
+
+def test_sg13g2_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
+    tmp_path: Path,
+):
+    """The `same`-feed PCell configuration stacks the two ports on *adjacent*
+    metal levels at identical (x, y) rather than side by side -- the
+    structural case a two-different-layer `CapacitorDevice` split cannot
+    express at all (issue #1466's whole rationale for a new device shape).
+    Both ports must still resolve to their own metal's distinct net, never
+    bridged through the shared marker footprint."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: float, y: float) -> None:
+        li = layout.layer(*layer)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw((99, 39), _box_um(0, 0, 6, 6))  # Recog.mom marker
+    draw((50, 2), _box_um(1, 1, 2, 2))  # Metal4.pin
+    draw((67, 2), _box_um(1, 1, 2, 2))  # Metal5.pin, same (x, y) -- stacked
+    draw((50, 0), _box_um(-3, 1, 1, 2))  # Metal4 routing stub
+    draw((67, 0), _box_um(2, 1, 5, 2))  # Metal5 routing stub
+    label((50, 25), "M4_NET", -2, 1.5)
+    label((67, 25), "M5_NET", 4, 1.5)
+
+    path = _write_gds(layout, tmp_path / "cap_cmomi_stacked.gds")
+    report = run_extract(
+        path, "sg13g2", output=str(tmp_path / "cap_cmomi_stacked.spice")
+    )
+
+    assert report["device_counts"] == {"cap_cmomi": 1}
+    (device,) = report["devices"]
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"M4_NET", "M5_NET"}
+    assert device["params"] == {"w_um": pytest.approx(6.0), "l_um": pytest.approx(6.0)}
+
+
+def test_sg13g2_mom_capacitor_malformed_marker_is_dropped_with_warning(
+    tmp_path: Path,
+):
+    """A marker with anything other than exactly two port polygons under it
+    (here: three) is not extracted as a device at all -- mirroring upstream's
+    own `CapMomExtractor` guard ("expected exactly 2 port regions ... found
+    N") rather than guessing which two of N ports belong together. The drop
+    is reported as a warning naming the device, not silently swallowed."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(99, 39)).insert(_box_um(0, 0, 6, 6))
+    top.shapes(layout.layer(8, 2)).insert(_box_um(0, 0, 0.5, 0.5))
+    top.shapes(layout.layer(8, 2)).insert(_box_um(1, 1, 1.5, 1.5))
+    top.shapes(layout.layer(8, 2)).insert(_box_um(5, 5, 5.5, 5.5))
+
+    path = _write_gds(layout, tmp_path / "cap_cmomi_malformed.gds")
+    report = run_extract(
+        path, "sg13g2", output=str(tmp_path / "cap_cmomi_malformed.spice")
+    )
+
+    assert report["device_counts"] == {}
+    assert any(
+        "cap_cmomi" in warning and "expected exactly 2 port" in warning
+        for warning in report["warnings"]
+    )
+
+
+def test_sg13g2_mom_capacitor_flavours_are_told_apart_solely_by_marker_layer():
+    """`cap_cmomi`/`cap_cmomf` share byte-identical recognition geometry
+    (marker + per-metal pin ports) and are told apart *only* by which marker
+    layer is drawn -- mirroring `test_sg13g2_mim_capacitor_flavours_are_
+    mutually_exclusive`'s own `cap_cmim`/`rfcmim` discipline, for a
+    "distinguished by drawn mask alone" family rather than a
+    `PWell.block`-gated one."""
+    by_name = {c.name: c for c in EXTRACTION_DECK.mom_capacitors}
+    assert by_name["cap_cmomi"].marker == (99, 39)
+    assert by_name["cap_cmomf"].marker == (99, 40)
+    assert by_name["cap_cmomi"].marker != by_name["cap_cmomf"].marker
+    assert by_name["cap_cmomi"].metal_pins == by_name["cap_cmomf"].metal_pins
+
+
+def test_sg13g2_mom_capacitor_metal_pins_reach_only_the_thin_metal_stack():
+    """Both entries' `metal_pins` cover exactly `Metal1.pin`..`Metal5.pin`
+    (8/2, 10/2, 30/2, 50/2, 67/2) -- `None` for `TopMetal1`/`TopMetal2` --
+    matching upstream's own `cap_extraction.lvs` call, which only ever wires
+    up `m1p`..`m5p`: this device family lives entirely on the g2 thin-metal
+    stack, never reaching the two top-metal levels this deck's own `metals`
+    stack (issue #1243) otherwise tracks."""
+    for capacitor in EXTRACTION_DECK.mom_capacitors:
+        assert len(capacitor.metal_pins) == len(EXTRACTION_DECK.metals)
+        assert capacitor.metal_pins == (
+            (8, 2),
+            (10, 2),
+            (30, 2),
+            (50, 2),
+            (67, 2),
+            None,
+            None,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Antenna diodes (issue #1234)
 # --------------------------------------------------------------------------- #
 
@@ -1198,6 +1404,9 @@ def _provenanced_device_rule_ids() -> set[str]:
     for capacitor in EXTRACTION_DECK.capacitors:
         if capacitor.provenance is not None:
             ids.add(capacitor.provenance.rule_id)
+    for mom_capacitor in EXTRACTION_DECK.mom_capacitors:
+        if mom_capacitor.provenance is not None:
+            ids.add(mom_capacitor.provenance.rule_id)
     for bipolar in EXTRACTION_DECK.bipolars:
         if bipolar.provenance is not None:
             ids.add(bipolar.provenance.rule_id)
@@ -1222,6 +1431,8 @@ _GOLDEN_PAIR_TESTED_RULE_IDS = frozenset(
         "dpantenna",
         "cap_cmim",
         "rfcmim",
+        "cap_cmomi",
+        "cap_cmomf",
     }
 )
 
