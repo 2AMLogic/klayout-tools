@@ -295,13 +295,28 @@ def test_sg13g2_derives_well_substrate_taps_from_implant_layers():
     `tap_pplus` fix (#1084) -- declares `tap_nplus`/`tap_pplus` so
     `extract.py` can derive an equivalent well-/substrate-tie region from
     the same `nSD`/`pSD` implant layers already used for MOS source/drain
-    recognition. `well_label` stays `None` too: sg13g2 has no datatype-5
-    -style pin/label text layer distinct from its per-metal `*_text` layers
-    (see the module's own `EXTRACTION_DECK` docstring note)."""
+    recognition. `well_label` stays `None`: sg13g2 has no datatype-25-style
+    `.text` text layer for `NWell` distinct from its per-metal `*_text`
+    layers (see the module's own `EXTRACTION_DECK` docstring note).
+    `poly_label` is unrelated to this fix and is *not* `None` -- see
+    `test_sg13g2_poly_label_is_gatpoly_label` below for issue #1476's own
+    coverage of that field."""
     assert EXTRACTION_DECK.tap is None
     assert EXTRACTION_DECK.tap_nplus == (7, 0)  # nSD.drawing
     assert EXTRACTION_DECK.tap_pplus == (14, 0)  # pSD.drawing
     assert EXTRACTION_DECK.well_label is None
+
+
+def test_sg13g2_poly_label_is_gatpoly_label():
+    """Issue #1476: `EXTRACTION_DECK.poly_label` is `GatPoly.label` (5/1),
+    sourced from `pdks/ihp-open-pdk/ihp-sg13g2/libs.tech/klayout/tech/
+    sg13g2.lyp`'s own `<name>GatPoly.label</name>`/`<source>5/1</source>`
+    layer-properties entry, and empirically confirmed against
+    `sg13g2-bandgap`'s own `layout/common.py`, which already draws every
+    MOS gate's name on that same `(5, 1)` layer via
+    `L_GATPOLY_LABEL = (5, 1)` -- see the deck module's own note directly
+    above `EXTRACTION_DECK`'s definition for the full citation."""
+    assert EXTRACTION_DECK.poly_label == (5, 1)  # GatPoly.label
 
 
 # --------------------------------------------------------------------------- #
@@ -374,6 +389,84 @@ def test_golden_pair_sg13g2_nfet_l_w_matches_drawn_geometry(tmp_path: Path):
     assert device["nets"]["g"] == "G"
     assert device["nets"]["b"] == "vsubs"  # no drawn PWell tap -> substrate_net
     assert EXTRACTION_DECK.nfet_provenance.rule_id == "sg13_lv_nmos"
+
+
+def _make_bare_poly_gate_nmos_layout(gate_label: str) -> kdb.Layout:
+    """One NMOS whose gate is a bare `GatPoly` bar with NO gate contact/
+    metal -- only a text on `GatPoly.label` (5/1, `poly_label`) names it.
+    Mirrors `sg13g2-bandgap`'s own `MKFB.gate`/`MSENSE.gate` shape (issue
+    #1476, `sg13g2-bandgap#4` item 4): a `klt gen`-style MOS device gate
+    with no metal landing pad, which -- before this fix -- had no layer on
+    which a drawn label could name it. Mirrors `test_extract.py`'s own
+    `_make_bare_poly_gate_layout` (issue #210, the sky130 precedent this
+    deck-specific test adapts)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
+    draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um, bare
+
+    draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
+    draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
+    draw(8, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    draw(8, 0, _box_um(1.6, 0.2, 2.0, 0.8))  # Metal1 (drain pad)
+    label(8, 25, "S", 0.2, 0.5)  # Metal1.text
+    label(8, 25, "D", 1.8, 0.5)
+
+    # The gate: labelled ONLY on GatPoly.label (5/1), no Cont/Metal1 anywhere
+    # near it.
+    label(5, 1, gate_label, 1.0, 1.1)
+
+    return layout
+
+
+def test_sg13g2_bare_poly_gate_named_via_poly_label(tmp_path: Path):
+    """Issue #1476: a text on `GatPoly.label` (5/1, `poly_label`) names a
+    bare-poly gate that has no metal landing pad, so it survives extraction
+    as a NAMED pin instead of an anonymous `$N` net -- and device extraction
+    is unaffected (still exactly one nfet). Mirrors `test_extract.py`'s own
+    `test_bare_poly_gate_named_via_poly_label` (issue #210)."""
+    path = _write_gds(
+        _make_bare_poly_gate_nmos_layout("MSENSE_GATE"), tmp_path / "bare_gate.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "bare_gate.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["nets"]["g"] == "MSENSE_GATE"
+    pin_names = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "MSENSE_GATE" in pin_names
+
+
+def test_sg13g2_bare_poly_gate_anonymous_without_poly_label(tmp_path: Path):
+    """Control: the same layout with NO poly label leaves the gate an
+    anonymous `$N` net (the pre-#1476 friction this issue fixes), while
+    device extraction is identical -- proving the `poly_label` text is what
+    promotes the gate, not a geometry change."""
+    layout = _make_bare_poly_gate_nmos_layout("UNUSED")
+    # Drop the GatPoly.label text, keeping every other shape/label.
+    poly_label = layout.layer(5, 1)
+    layout.top_cell().shapes(poly_label).clear()
+    path = _write_gds(layout, tmp_path / "bare_gate_nolabel.gds")
+
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "nolabel.spice"))
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    # Anonymous, unbiasable -- KLayout's own auto-generated "$n" placeholder,
+    # backslash-escaped to match the written netlist's own node spelling
+    # (issue #1162).
+    assert device["nets"]["g"].startswith("\\$")
 
 
 def _make_pmos_layout(*, thick_gate_ox: bool = False) -> kdb.Layout:

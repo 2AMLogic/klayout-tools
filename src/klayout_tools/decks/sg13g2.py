@@ -1322,12 +1322,45 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # (see `general_derivations.lvs`, cited above). `tap`/`well_label` stay
 # `None`: sg13g2 draws no distinct tap mask (the derivation above is the
 # whole point), and -- as this module's own `metal_labels` note below
-# explains -- sg13g2 has no datatype-5-style pin/label text layer distinct
-# from its per-metal `*_text` layers, so there is no `well_label` candidate
-# either. A layout drawing no tie extracts exactly as it always did (both
+# explains -- sg13g2 has no datatype-25-style `.text` text layer for `NWell`
+# distinct from its per-metal `*_text` layers, so there is no `well_label`
+# candidate (unlike `poly_label`, fixed by issue #1476 below -- see the
+# note directly above `EXTRACTION_DECK`'s definition). A layout drawing no
+# tie extracts exactly as it always did (both
 # `tap_nplus`/`tap_pplus` are additive-only derivation inputs -- see
 # `ExtractionDeck.tap_nplus`/`.tap_pplus`'s own docstring for the exact
 # derivation `extract.py` performs).
+#
+# Issue #1476 (blocking sg13g2-bandgap's `bandgap_startup` LVS, see the
+# `sg13g2-bandgap#4` tracker's "Permanent blockers" item 4): `poly_label`
+# is now `GatPoly.label` (5/1), sourced from the vendored
+# `pdks/ihp-open-pdk/ihp-sg13g2/libs.tech/klayout/tech/sg13g2.lyp`'s own
+# layer-properties table (a real `<name>GatPoly.label</name>`/
+# `<source>5/1</source>` entry there), so a bare `GatPoly` gate with no
+# metal landing pad (exactly `bandgap_startup`'s `MKFB.gate`/`MSENSE.gate`
+# shape) can be named by a drawn text instead of extracting anonymous.
+# Two GDS purposes exist on `GatPoly` for this: `.label` (5/1) and `.pin`
+# (5/2) -- neither is the `labels(n, 25)`/`.text` convention
+# `metal_labels` below uses (`GatPoly` has no `.text`/datatype-25 purpose
+# at all), so unlike `metal_labels` this can't be read straight off
+# `layers_def.drc`'s own `get_polygons()` calls (that file only ever reads
+# `GatPoly.pin` (5/2) as a *polygon* region for LVS device recognition,
+# never as text -- see the `well_label`/`poly_label` note above `tap`
+# above, which used to (and, for `well_label`, still does) treat that as
+# disqualifying). `.label` (5/1) is the one chosen here instead, on
+# empirical grounds: `sg13g2-bandgap`'s own `layout/common.py` (the
+# downstream consumer this fix unblocks) already declares
+# `L_GATPOLY_LABEL = (5, 1)` and draws `b.label(L_GATPOLY_LABEL, gate_net,
+# x0, y0)` on every MOS gate in `draw_hv_mos` -- i.e. downstream tooling
+# was already drawing its gate-naming text on `GatPoly.label` before this
+# deck could recognise it, exactly the signal the issue's own curator note
+# said to check for ("the most direct verification available is checking
+# what layer/datatype sg13g2-bandgap's own bandgap_startup layout ...
+# currently draws its ... label on"). `well_label` stays `None`: sg13g2 has
+# no `NWell` analogue of this fix (no drawn PWell/NWell tie layer this
+# deck's own well/substrate-tap derivation, described above, would need a
+# label for) -- see that note for the full explanation, unaffected by this
+# change.
 #
 # `active`/`poly`/`nwell`/`contact` layer numbers verified against
 # `layers_def.drc`'s own `get_polygons(layer, datatype)` declarations
@@ -1353,12 +1386,15 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # `metal3_text`/`metal4_text`/`metal5_text`/`topmetal1_text`/
 # `topmetal2_text`) -- genuine KLayout text layers (unlike the `_pin`
 # datatype-2 layers in that same file, which are *polygon* pin-shape
-# regions, not text -- so sg13g2 has no `well_label`/`poly_label` analogue
-# to sky130's datatype-5 `.pin` text-layer convention; both stay `None`, the
-# same "this curated deck declines to model a pin text layer it has no
-# clean single-layer candidate for" default `ExtractionDeck`'s own
-# docstring describes). TopVia1/TopVia2 are cut layers, not conductors, so
-# -- like Via1-Via4 -- they carry no `metal_labels` entry of their own.
+# regions, not text -- so sg13g2 has no `well_label` analogue to sky130's
+# datatype-5 `.pin` text-layer convention; it stays `None`, the same "this
+# curated deck declines to model a pin text layer it has no clean
+# single-layer candidate for" default `ExtractionDeck`'s own docstring
+# describes). `poly_label` is a different case -- see the note directly
+# above `EXTRACTION_DECK`'s definition for why `GatPoly` (unlike `NWell`)
+# does have a usable candidate, fixed by issue #1476. TopVia1/TopVia2 are
+# cut layers, not conductors, so -- like Via1-Via4 -- they carry no
+# `metal_labels` entry of their own.
 EXTRACTION_DECK = ExtractionDeck(
     active=(1, 0),  # Activ.drawing
     poly=(5, 0),  # GatPoly.drawing
@@ -1399,7 +1435,7 @@ EXTRACTION_DECK = ExtractionDeck(
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
     well_label=None,
-    poly_label=None,
+    poly_label=(5, 1),  # GatPoly.label -- issue #1476
     nfet_class="nfet",
     pfet_class="pfet",
     substrate_net="vsubs",

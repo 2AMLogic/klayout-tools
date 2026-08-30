@@ -67,6 +67,11 @@ recognition; it has since grown three follow-on increments the way
   (:class:`~klayout_tools.decks.MomCapacitorDevice`) rather than a
   ``CapacitorDevice`` entry. ``capacitors`` itself stays ``()``: cmos5l's
   own forbidden-layer rule blocks the MiM stack outright.
+- **Added by #1476** (the cmos5l sibling of ``sg13g2.py``'s own
+  ``poly_label`` fix): ``poly_label`` is now ``GatPoly.pin`` (5/2) -- see
+  ``EXTRACTION_DECK.poly_label``'s own inline note for why ``.pin`` rather
+  than the ``.label`` (5/1) purpose ``sg13g2.py`` picked for the identical
+  layer-numbering gap.
 - **Still out of scope**, left for follow-on issues: the
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
@@ -960,6 +965,24 @@ EXTRACTION_DECK = ExtractionDeck(
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
     well_label=(31, 2),  # NWell.pin
+    # Issue #1476 (the cmos5l sibling of sg13g2.py's own poly_label fix, same
+    # gap shape: a bare `GatPoly` gate with no Metal1 landing pad extracted
+    # anonymous). `GatPoly` carries two candidate GDS purposes for this --
+    # `.label` (5/1, the choice `sg13g2.py` made, on evidence that
+    # `sg13g2-bandgap`'s own downstream layout code already draws gate names
+    # there) and `.pin` (5/2). This deck picks `.pin` (5/2) instead, for
+    # *internal* consistency rather than cross-deck consistency: every other
+    # `EXTRACTION_DECK` label field this module declares --
+    # `well_label` (`NWell.pin`, 31/2) above and every `metal_labels` entry
+    # below -- already uses the datatype-2 `.pin` purpose, not `.text`/
+    # `.label` (see the module docstring's own note on that choice). Using
+    # `GatPoly.pin` here keeps `poly_label` consistent with that established
+    # per-level convention rather than mixing purposes within one deck.
+    # `sg13cmos5l` shares sg13g2's exact GDS layer numbering (`poly=(5, 0)`
+    # above, independently confirmed identical -- see the module docstring),
+    # so `GatPoly.pin` is the same `5/2` pair `sg13g2.py`'s own module
+    # docstring cites from `sg13g2.lyp`.
+    poly_label=(5, 2),  # GatPoly.pin
     contact=(6, 0),  # Cont.drawing -- lands directly on Metal1, no li1-like
     # local-interconnect level (same single-first-metal-level shape as
     # sg13g2.py's own deck).
