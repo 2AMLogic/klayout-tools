@@ -750,10 +750,13 @@ def _build_subckt_map(
     issue #1464 also derives an assumed-identity binding for each
     resistor/capacitor class the named deck's own ``ExtractionDeck`` declares
     but whose family the curated tables do not cover for that deck (e.g.
-    ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh``, ``sg13g2``'s
-    ``cap_cmim``/``rfcmim``) -- so a deck that recognises a device for
-    *extraction* can read that same device back here without a hand-written
-    ``device_map``. ``device_map`` is still applied *after* ``deck``
+    ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh``, ``sg13g2``'s ``cap_cmim``)
+    -- so a deck that recognises a device for *extraction* can read that
+    same device back here without a hand-written ``device_map``, wherever
+    the declared class name is also the upstream subcircuit name.
+    (``sg13g2``'s ``rfcmim`` is the case where it is not: IHP ships
+    ``.subckt cap_rfcmim``, so that one still needs ``device_map``.)
+    ``device_map`` is still applied *after* ``deck``
     (``dict.update``, not ``setdefault``), so an explicit override wins over
     a curated **and** a derived binding alike.
     """

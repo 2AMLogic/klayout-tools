@@ -22,11 +22,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   refuse to read that same device back on the LVS reference side, forcing
   the caller to hand-maintain a `reference.device_map` restating what the
   deck already knew — and to discover the need for one from a failed run,
-  since the error's first suggestion was `reference.deck`. Two live
-  instances are closed: `sg13cmos5l`'s `rsil`/`rppd`/`rhigh` (declared since
-  issue #1415) and `sg13g2`'s `cap_cmim`/`rfcmim` (declared since issue
-  #1456). The derived binding assumes the declared LVS device-class name is
-  also the subcircuit name and only applies to a `(deck, family)` pair the
+  since the error's first suggestion was `reference.deck`. Closed by this:
+  `sg13cmos5l`'s `rsil`/`rppd`/`rhigh` (declared since issue #1415) and
+  `sg13g2`'s `cap_cmim` (declared since issue #1456). **Not** closed by
+  this, and called out so the gap is not mistaken for coverage: `sg13g2`'s
+  other declared MIM class, `rfcmim`. The derived binding takes the declared
+  class name as its own subcircuit name, but IHP ships that device as
+  `.subckt cap_rfcmim`, so a real reference netlist calling `cap_rfcmim`
+  still needs an explicit `reference.device_map` entry (see
+  `docs/cli/lvs.md` → "Per-deck coverage"). The derived binding only applies
+  to a `(deck, family)` pair the
   curated tables do not cover at all, so sky130's genuinely non-identity
   `sky130_fd_pr__model__cap_mim` → `sky130_fd_pr__cap_mim_m3_1` mapping and
   the verified "ships no `.subckt`" carve-outs (`sg13g2`'s

@@ -74,13 +74,17 @@ than guess. The *ingestion* direction (``klt lvs``'s
 additionally derives an assumed-identity binding -- declared LVS device-class
 name taken as its own subcircuit name -- for each ``resistors``/``capacitors``
 class of a deck whose corresponding family table has no curated entry at all,
-so ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` and ``sg13g2``'s
-``cap_cmim``/``rfcmim`` above are readable back without a hand-written
-``reference.device_map``. Guessing is safe there and unsafe here: the worst
-case reading is a failed or rejected conversion of a name no PDK ships, while
-the worst case writing is a shipped netlist that binds a subcircuit that does
-not exist. See :func:`build_device_binding_map` for that fallback's three
-guard rails.
+so ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` and ``sg13g2``'s ``cap_cmim``
+above are readable back without a hand-written ``reference.device_map``.
+That fallback only helps where the identity assumption actually holds
+upstream: ``sg13g2``'s other declared MIM class, ``rfcmim``, ships as
+``.subckt cap_rfcmim``, so it still needs an explicit
+``reference.device_map`` entry (see :func:`build_device_binding_map` and
+``docs/cli/lvs.md`` -> "Per-deck coverage"). Guessing is safe there and unsafe
+here: the worst case reading is a failed or rejected conversion of a name no
+PDK ships, while the worst case writing is a shipped netlist that binds a
+subcircuit that does not exist. See :func:`build_device_binding_map` for that
+fallback's three guard rails.
 
 This table is intentionally a single small module, not scattered inline
 literals, so a future ``klt pdk device`` resolver can absorb/replace it
@@ -782,9 +786,22 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     that recognises a device for *extraction* could not read that same device
     back on ``klt lvs``'s reference side -- the round-trip asymmetry #1464
     reported for ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` (declared since
-    #1415) and, independently, for ``sg13g2``'s ``cap_cmim``/``rfcmim``
-    (declared since #1456). Because it is derived, a *future* class a deck
-    declares is covered with no edit to this module at all.
+    #1415) and, independently, for ``sg13g2``'s ``cap_cmim`` (declared since
+    #1456). Because it is derived, a *future* class a deck declares is
+    covered with no edit to this module at all.
+
+    **What the identity assumption does not close.** A derived binding is
+    only reachable by a real netlist when the declared class name *is* the
+    upstream subcircuit name. ``sg13g2``'s other declared MIM capacitor,
+    ``rfcmim``, is the live counter-example: IHP ships it as ``.subckt
+    cap_rfcmim`` (see ``decks/sg13g2.py``), so the derived ``rfcmim`` key
+    never matches an IHP-fetched reference netlist and ``cap_rfcmim`` still
+    requires an explicit ``reference.device_map`` entry. Deriving a
+    ``cap_<class>`` alias too is deliberately *not* done -- that is a second
+    guess with no verified name behind it, exactly the failure mode the
+    guard rails below exist to prevent. Closing it properly means a curated
+    ``_CAPACITOR_MODEL_TABLE`` entry for ``("sg13g2", "sg13g2")``, verified
+    against a fetched install.
 
     Three deliberate limits on that fallback, each protecting a verified
     curated fact from being overwritten by a guess:

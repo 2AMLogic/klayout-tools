@@ -6518,10 +6518,39 @@ def test_normalize_sg13g2_capacitor_resolves_from_deck_alone():
     # curation: `_CAPACITOR_MODEL_TABLE` has no ("sg13g2", "sg13g2") entry
     # even though sg13g2 has declared cap_cmim/rfcmim since #1456. A 5x5 um
     # plate: area = 25 um^2, perimeter = 2*(5+5) = 20 um.
+    #
+    # Only `cap_cmim` is closed by the derived fallback -- see
+    # `test_normalize_sg13g2_rfcmim_real_subckt_still_needs_device_map` for
+    # its sibling class, whose real subcircuit name is *not* the class name.
     out = normalize_reference_netlist(
         "XC1 PLUS MINUS cap_cmim w=5u l=5u\n", deck="sg13g2"
     )
     assert out.strip() == "C1 PLUS MINUS 0 cap_cmim A=25P P=20U"
+
+
+def test_normalize_sg13g2_rfcmim_real_subckt_still_needs_device_map():
+    # The derived fallback binds the *declared class* name as its own
+    # subcircuit name, so it only closes the round trip where that identity
+    # actually holds upstream. sg13g2's other declared MIM capacitor is the
+    # live counter-example: IHP ships it as `.subckt cap_rfcmim`, not
+    # `.subckt rfcmim` (see `decks/sg13g2.py`'s `rfcmim` CapacitorDevice
+    # comment). So the real name still does not resolve from `reference.deck`
+    # alone and an explicit `device_map` entry is still required -- the same
+    # shape of carve-out as res_metal1/res_metal2, pinned here so the
+    # documented gap cannot silently close or silently widen.
+    with pytest.raises(NormalizeError, match="not a known device"):
+        normalize_reference_netlist(
+            "XC1 PLUS MINUS cap_rfcmim w=5u l=5u\n", deck="sg13g2"
+        )
+    assert "cap_rfcmim" not in build_device_binding_map("sg13g2")
+
+    # An explicit `reference.device_map` override is the documented remedy.
+    out = normalize_reference_netlist(
+        "XC1 PLUS MINUS cap_rfcmim w=5u l=5u\n",
+        deck="sg13g2",
+        device_map={"cap_rfcmim": {"kind": "capacitor", "class": "rfcmim"}},
+    )
+    assert out.strip() == "C1 PLUS MINUS 0 rfcmim A=25P P=20U"
 
 
 def test_normalize_sg13g2_resistors_still_resolve_from_curated_table():
@@ -6621,7 +6650,10 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rhigh",
     }
     # sg13g2 gains only its capacitor family (resistors are curated, so
-    # res_metal1/res_metal2 stay out).
+    # res_metal1/res_metal2 stay out). Note the derived `rfcmim` key is
+    # *inert* in practice -- IHP's real subcircuit is `cap_rfcmim`, so no
+    # genuine reference netlist hits it; see
+    # `test_normalize_sg13g2_rfcmim_real_subckt_still_needs_device_map`.
     assert set(build_device_binding_map("sg13g2")) == {
         "sg13_lv_nmos",
         "sg13_lv_pmos",

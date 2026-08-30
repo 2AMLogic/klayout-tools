@@ -294,7 +294,7 @@ is the union of two sources:
 | Source | Contributes | Example |
 |---|---|---|
 | Curated subcircuit-name tables in `klayout_tools.pdk_models` | Every MOS/resistor/capacitor/bipolar subcircuit name hand-verified against a real fetched PDK install, including the ones whose subcircuit name differs from the deck's device-class label | sky130's `sky130_fd_pr__cap_mim_m3_1` (class `sky130_fd_pr__model__cap_mim`), `sky130_fd_pr__pnp_05v5_W0p68L0p68` (class `pnp`) |
-| The named deck's own `ExtractionDeck.resistors`/`.capacitors` | One assumed-identity binding per declared class — the class name taken as its own subcircuit name — but **only** for a family that has no curated table entry for that deck at all | `sg13cmos5l`'s `rsil`/`rppd`/`rhigh`, `sg13g2`'s `cap_cmim`/`rfcmim` |
+| The named deck's own `ExtractionDeck.resistors`/`.capacitors` | One assumed-identity binding per declared class — the class name taken as its own subcircuit name — but **only** for a family that has no curated table entry for that deck at all, and only useful where that identity assumption actually holds upstream | `sg13cmos5l`'s `rsil`/`rppd`/`rhigh`, `sg13g2`'s `cap_cmim` |
 
 The second source exists so a deck cannot recognise a device for extraction
 and then refuse to read that same device back here — the round-trip
@@ -309,10 +309,29 @@ genuine hierarchical instance into a `Q` card.
 
 Anything outside that union — including a subcircuit whose real upstream
 name differs from the deck's device-class label and has no curated entry yet
-(`sg13g2`'s `rfcmim` class, whose IHP subcircuit is `cap_rfcmim`) — still
-needs an explicit `reference.device_map` entry, and the
+— still needs an explicit `reference.device_map` entry, and the
 "not a known device for the requested deck" error lists the full resolved
 set so the gap is visible from the failure itself.
+
+**The one live case of that today is `sg13g2`'s `rfcmim`.** The deck declares
+the class, so derivation binds the name `rfcmim` — but IHP ships the device as
+`.subckt cap_rfcmim`, so that derived binding never matches a genuine
+IHP-fetched reference netlist, and `cap_rfcmim` itself does not resolve. Of
+`sg13g2`'s two declared MIM capacitors, only `cap_cmim` round-trips from
+`reference.deck` alone; `rfcmim` needs an explicit override:
+
+```json
+"device_map": {
+  "cap_rfcmim": { "kind": "capacitor", "class": "rfcmim" }
+}
+```
+
+Derivation is deliberately not taught to guess `cap_<class>`-style aliases:
+the identity assumption is the only one that can be made without a
+hand-verified name, and a wrong guess here is a silently wrong device binding.
+Closing this properly means adding a curated `_CAPACITOR_MODEL_TABLE` entry
+for `("sg13g2", "sg13g2")` once the full set of IHP MIM subcircuit names is
+verified against a fetched install.
 
 **gf180mcu MOS flavour subcircuits** (issue #1111): the curated table also
 recognises `nfet_06v0`/`pfet_06v0` (gf180mcu's `Dualgate`-scoped 5V/6V MOS
