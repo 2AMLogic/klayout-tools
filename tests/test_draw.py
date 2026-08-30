@@ -327,94 +327,6 @@ def test_array_lands_exactly_on_pitch_regardless_of_float_accumulation(tmp_path)
     assert xs == [i * pitch_dbu for i in range(10)]
 
 
-def test_array_not_object_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"shape\[0\]\.array must be a JSON object"):
-        _draw(
-            tmp_path,
-            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "array": [1, 2]}]},
-        )
-
-
-def test_array_missing_pitch_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"array\.pitch_um must be"):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [
-                    {
-                        "layer": [1, 0],
-                        "rect_um": [0, 0, 1, 1],
-                        "array": {"count": [2, 2]},
-                    }
-                ]
-            },
-        )
-
-
-def test_array_bad_pitch_length_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"array\.pitch_um must be"):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [
-                    {
-                        "layer": [1, 0],
-                        "rect_um": [0, 0, 1, 1],
-                        "array": {"pitch_um": [1.0], "count": [2, 2]},
-                    }
-                ]
-            },
-        )
-
-
-def test_array_missing_count_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"array\.count must be"):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [
-                    {
-                        "layer": [1, 0],
-                        "rect_um": [0, 0, 1, 1],
-                        "array": {"pitch_um": [1.0, 1.0]},
-                    }
-                ]
-            },
-        )
-
-
-def test_array_non_positive_count_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"array\.count must be"):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [
-                    {
-                        "layer": [1, 0],
-                        "rect_um": [0, 0, 1, 1],
-                        "array": {"pitch_um": [1.0, 1.0], "count": [0, 2]},
-                    }
-                ]
-            },
-        )
-
-
-def test_array_non_integer_count_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"array\.count must be"):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [
-                    {
-                        "layer": [1, 0],
-                        "rect_um": [0, 0, 1, 1],
-                        "array": {"pitch_um": [1.0, 1.0], "count": [2.5, 2]},
-                    }
-                ]
-            },
-        )
-
-
 def test_oasis_output_by_extension(tmp_path):
     _, output = _draw(
         tmp_path,
@@ -446,30 +358,92 @@ def test_response_stamped_not_design_legal(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_empty_shapes_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="must not be empty"):
-        _draw(tmp_path, {"shapes": []})
-
-
-def test_missing_shapes_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="params.shapes is required"):
-        _draw(tmp_path, {})
-
-
-def test_bad_layer_pair_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="layer must be a"):
-        _draw(tmp_path, {"shapes": [{"layer": [1], "rect_um": [0, 0, 1, 1]}]})
-
-
-def test_negative_layer_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="layer must be a"):
-        _draw(tmp_path, {"shapes": [{"layer": [-1, 0], "rect_um": [0, 0, 1, 1]}]})
-
-
-def test_two_geometry_keys_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="exactly one geometry key"):
-        _draw(
-            tmp_path,
+@pytest.mark.parametrize(
+    "params, match",
+    [
+        pytest.param(
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "array": [1, 2]}]},
+            r"shape\[0\]\.array must be a JSON object",
+            id="array_not_object",
+        ),
+        pytest.param(
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"count": [2, 2]},
+                    }
+                ]
+            },
+            r"array\.pitch_um must be",
+            id="array_missing_pitch",
+        ),
+        pytest.param(
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0], "count": [2, 2]},
+                    }
+                ]
+            },
+            r"array\.pitch_um must be",
+            id="array_bad_pitch_length",
+        ),
+        pytest.param(
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0, 1.0]},
+                    }
+                ]
+            },
+            r"array\.count must be",
+            id="array_missing_count",
+        ),
+        pytest.param(
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0, 1.0], "count": [0, 2]},
+                    }
+                ]
+            },
+            r"array\.count must be",
+            id="array_non_positive_count",
+        ),
+        pytest.param(
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0, 1.0], "count": [2.5, 2]},
+                    }
+                ]
+            },
+            r"array\.count must be",
+            id="array_non_integer_count",
+        ),
+        pytest.param({"shapes": []}, "must not be empty", id="empty_shapes"),
+        pytest.param({}, "params.shapes is required", id="missing_shapes"),
+        pytest.param(
+            {"shapes": [{"layer": [1], "rect_um": [0, 0, 1, 1]}]},
+            "layer must be a",
+            id="bad_layer_pair",
+        ),
+        pytest.param(
+            {"shapes": [{"layer": [-1, 0], "rect_um": [0, 0, 1, 1]}]},
+            "layer must be a",
+            id="negative_layer",
+        ),
+        pytest.param(
             {
                 "shapes": [
                     {
@@ -479,41 +453,75 @@ def test_two_geometry_keys_is_an_error(tmp_path):
                     }
                 ]
             },
-        )
-
-
-def test_no_geometry_key_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="exactly one geometry key"):
-        _draw(tmp_path, {"shapes": [{"layer": [1, 0]}]})
-
-
-def test_bad_rect_length_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="rect_um must be"):
-        _draw(tmp_path, {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1]}]})
-
-
-def test_short_polygon_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="at least 3"):
-        _draw(tmp_path, {"shapes": [{"layer": [1, 0], "polygon_um": [[0, 0], [1, 1]]}]})
-
-
-def test_bad_dbu_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="dbu_um must be a positive number"):
-        _draw(
-            tmp_path,
+            "exactly one geometry key",
+            id="two_geometry_keys",
+        ),
+        pytest.param(
+            {"shapes": [{"layer": [1, 0]}]},
+            "exactly one geometry key",
+            id="no_geometry_key",
+        ),
+        pytest.param(
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1]}]},
+            "rect_um must be",
+            id="bad_rect_length",
+        ),
+        pytest.param(
+            {"shapes": [{"layer": [1, 0], "polygon_um": [[0, 0], [1, 1]]}]},
+            "at least 3",
+            id="short_polygon",
+        ),
+        pytest.param(
             {"dbu_um": 0, "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]},
-        )
-
-
-def test_label_missing_text_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match="label\\[0\\].text"):
-        _draw(
-            tmp_path,
+            "dbu_um must be a positive number",
+            id="bad_dbu",
+        ),
+        pytest.param(
             {
                 "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}],
                 "labels": [{"layer": [1, 0], "at_um": [0, 0]}],
             },
-        )
+            "label\\[0\\].text",
+            id="label_missing_text",
+        ),
+        pytest.param(
+            {"dbu_nm": 1, "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]},
+            r"params has unknown key\(s\): dbu_nm",
+            id="unknown_params_key",
+        ),
+        pytest.param(
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "rect_nm": []}]},
+            r"shape\[0\] has unknown key\(s\): rect_nm",
+            id="unknown_shape_key",
+        ),
+        pytest.param(
+            {
+                "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}],
+                "labels": [
+                    {"layer": [1, 0], "text": "IN", "at_um": [0, 0], "at_nm": [0, 0]}
+                ],
+            },
+            r"label\[0\] has unknown key\(s\): at_nm",
+            id="unknown_label_key",
+        ),
+        pytest.param(
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [2, 2], "counts": [2, 2]},
+                    }
+                ]
+            },
+            r"shape\[0\]\.array has unknown key\(s\): counts",
+            id="unknown_array_key",
+        ),
+    ],
+)
+def test_draw_rejects_invalid_params(tmp_path, params, match):
+    with pytest.raises(DrawError, match=match):
+        _draw(tmp_path, params)
 
 
 def test_output_dir_missing_is_an_error(tmp_path):
@@ -542,14 +550,6 @@ def test_unknown_top_level_request_key_is_an_error(tmp_path):
         draw(request)
 
 
-def test_unknown_params_key_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"params has unknown key\(s\): dbu_nm"):
-        _draw(
-            tmp_path,
-            {"dbu_nm": 1, "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]},
-        )
-
-
 def test_unknown_options_key_is_an_error(tmp_path):
     request = {
         "schema": REQUEST_SCHEMA,
@@ -558,46 +558,6 @@ def test_unknown_options_key_is_an_error(tmp_path):
     }
     with pytest.raises(DrawError, match=r"options has unknown key\(s\): cellname"):
         draw(request)
-
-
-def test_unknown_shape_key_is_an_error(tmp_path):
-    """A typo in a real shape key is caught by name, not silently dropped."""
-    with pytest.raises(DrawError, match=r"shape\[0\] has unknown key\(s\): rect_nm"):
-        _draw(
-            tmp_path,
-            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "rect_nm": []}]},
-        )
-
-
-def test_unknown_label_key_is_an_error(tmp_path):
-    with pytest.raises(DrawError, match=r"label\[0\] has unknown key\(s\): at_nm"):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}],
-                "labels": [
-                    {"layer": [1, 0], "text": "IN", "at_um": [0, 0], "at_nm": [0, 0]}
-                ],
-            },
-        )
-
-
-def test_unknown_array_key_is_an_error(tmp_path):
-    with pytest.raises(
-        DrawError, match=r"shape\[0\]\.array has unknown key\(s\): counts"
-    ):
-        _draw(
-            tmp_path,
-            {
-                "shapes": [
-                    {
-                        "layer": [1, 0],
-                        "rect_um": [0, 0, 1, 1],
-                        "array": {"pitch_um": [2, 2], "counts": [2, 2]},
-                    }
-                ]
-            },
-        )
 
 
 def test_unknown_key_error_names_the_allowed_keys_and_escape_hatch(tmp_path):
