@@ -744,6 +744,21 @@ def _build_subckt_map(
     device fails with a clear, named error (:func:`_convert_mos_card`)
     rather than an opaque terminal-count mismatch indistinguishable from a
     genuinely malformed netlist.
+
+    ``deck``'s contribution comes from
+    :func:`~klayout_tools.pdk_models.build_device_binding_map`, which since
+    issue #1464 also derives an assumed-identity binding for each
+    resistor/capacitor class the named deck's own ``ExtractionDeck`` declares
+    but whose family the curated tables do not cover for that deck (e.g.
+    ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh``, ``sg13g2``'s ``cap_cmim``)
+    -- so a deck that recognises a device for *extraction* can read that
+    same device back here without a hand-written ``device_map``, wherever
+    the declared class name is also the upstream subcircuit name.
+    (``sg13g2``'s ``rfcmim`` is the case where it is not: IHP ships
+    ``.subckt cap_rfcmim``, so that one still needs ``device_map``.)
+    ``device_map`` is still applied *after* ``deck``
+    (``dict.update``, not ``setdefault``), so an explicit override wins over
+    a curated **and** a derived binding alike.
     """
     resolved: dict[str, DeviceLookup] = {}
     if deck is not None:
@@ -772,7 +787,9 @@ def normalize_reference_netlist(
 ) -> str:
     """Convert subckt-call-form SPICE ``text`` to the plain-element form.
 
-    ``deck`` selects the curated device map (``"sky130"``/``"gf180mcu"``);
+    ``deck`` selects that registered deck's device map (``"sky130"``/
+    ``"gf180mcu"``/``"sg13g2"``/``"sg13cmos5l"`` -- see
+    :func:`_build_subckt_map` for what that map covers);
     ``device_map`` is an explicit ``<subckt-name> -> <override>`` override
     (merged on top of the deck's map), where ``<override>`` is either a bare
     device-class string (always a MOS ``l``/``w`` binding, unchanged since
