@@ -6514,37 +6514,37 @@ def test_normalize_sg13cmos5l_resistor_resolves_from_deck_alone(device_class, in
 
 
 def test_normalize_sg13g2_capacitor_resolves_from_deck_alone():
-    # The second, independent instance of the same gap found during
-    # curation: `_CAPACITOR_MODEL_TABLE` has no ("sg13g2", "sg13g2") entry
-    # even though sg13g2 has declared cap_cmim/rfcmim since #1456. A 5x5 um
-    # plate: area = 25 um^2, perimeter = 2*(5+5) = 20 um.
+    # `_CAPACITOR_MODEL_TABLE` now has a curated ("sg13g2", "sg13g2") entry
+    # (issue #1470) covering both capacitor classes sg13g2 has declared since
+    # #1456. A 5x5 um plate: area = 25 um^2, perimeter = 2*(5+5) = 20 um.
     #
-    # Only `cap_cmim` is closed by the derived fallback -- see
-    # `test_normalize_sg13g2_rfcmim_real_subckt_still_needs_device_map` for
-    # its sibling class, whose real subcircuit name is *not* the class name.
+    # `cap_cmim` is its own real subcircuit name -- see
+    # `test_normalize_sg13g2_rfcmim_resolves_from_deck_alone` for its sibling
+    # class, whose real subcircuit name is *not* the class name.
     out = normalize_reference_netlist(
         "XC1 PLUS MINUS cap_cmim w=5u l=5u\n", deck="sg13g2"
     )
     assert out.strip() == "C1 PLUS MINUS 0 cap_cmim A=25P P=20U"
 
 
-def test_normalize_sg13g2_rfcmim_real_subckt_still_needs_device_map():
-    # The derived fallback binds the *declared class* name as its own
-    # subcircuit name, so it only closes the round trip where that identity
-    # actually holds upstream. sg13g2's other declared MIM capacitor is the
-    # live counter-example: IHP ships it as `.subckt cap_rfcmim`, not
-    # `.subckt rfcmim` (see `decks/sg13g2.py`'s `rfcmim` CapacitorDevice
-    # comment). So the real name still does not resolve from `reference.deck`
-    # alone and an explicit `device_map` entry is still required -- the same
-    # shape of carve-out as res_metal1/res_metal2, pinned here so the
-    # documented gap cannot silently close or silently widen.
-    with pytest.raises(NormalizeError, match="not a known device"):
-        normalize_reference_netlist(
-            "XC1 PLUS MINUS cap_rfcmim w=5u l=5u\n", deck="sg13g2"
-        )
-    assert "cap_rfcmim" not in build_device_binding_map("sg13g2")
+def test_normalize_sg13g2_rfcmim_resolves_from_deck_alone():
+    # Issue #1470: the assumed-identity fallback binds the *declared class*
+    # name as its own subcircuit name, so it never closed sg13g2's `rfcmim`
+    # -- IHP ships it as `.subckt cap_rfcmim`, not `.subckt rfcmim` (see
+    # `decks/sg13g2.py`'s `rfcmim` CapacitorDevice comment). A curated
+    # `_CAPACITOR_MODEL_TABLE` entry (verified against a real fetched IHP
+    # install) now maps `rfcmim -> cap_rfcmim` explicitly, so a reference
+    # netlist calling the device by its real upstream name resolves with no
+    # `device_map` override.
+    out = normalize_reference_netlist(
+        "XC1 PLUS MINUS cap_rfcmim w=5u l=5u\n", deck="sg13g2"
+    )
+    assert out.strip() == "C1 PLUS MINUS 0 rfcmim A=25P P=20U"
+    assert "cap_rfcmim" in build_device_binding_map("sg13g2")
 
-    # An explicit `reference.device_map` override is the documented remedy.
+    # A hand-written `device_map` override is no longer required, but an
+    # explicit one still works and still takes precedence (issue #1464
+    # acceptance criterion 3, re-checked here for this specific class).
     out = normalize_reference_netlist(
         "XC1 PLUS MINUS cap_rfcmim w=5u l=5u\n",
         deck="sg13g2",
@@ -6649,11 +6649,11 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2 gains only its capacitor family (resistors are curated, so
-    # res_metal1/res_metal2 stay out). Note the derived `rfcmim` key is
-    # *inert* in practice -- IHP's real subcircuit is `cap_rfcmim`, so no
-    # genuine reference netlist hits it; see
-    # `test_normalize_sg13g2_rfcmim_real_subckt_still_needs_device_map`.
+    # sg13g2's capacitor family is now fully curated too (issue #1470), so
+    # neither capacitor key comes from the derived fallback any more. The
+    # dict is keyed by *subcircuit* name, not device-class name: `rfcmim`'s
+    # real subcircuit is `cap_rfcmim`, so that is the key that appears here,
+    # even though the device-class name `rfcmim` is unchanged.
     assert set(build_device_binding_map("sg13g2")) == {
         "sg13_lv_nmos",
         "sg13_lv_pmos",
@@ -6663,7 +6663,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
         "cap_cmim",
-        "rfcmim",
+        "cap_rfcmim",
     }
     # Both fully-curated decks are byte-for-byte unchanged: no derived entry
     # is added to either.

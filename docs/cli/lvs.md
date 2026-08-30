@@ -293,8 +293,8 @@ is the union of two sources:
 
 | Source | Contributes | Example |
 |---|---|---|
-| Curated subcircuit-name tables in `klayout_tools.pdk_models` | Every MOS/resistor/capacitor/bipolar subcircuit name hand-verified against a real fetched PDK install, including the ones whose subcircuit name differs from the deck's device-class label | sky130's `sky130_fd_pr__cap_mim_m3_1` (class `sky130_fd_pr__model__cap_mim`), `sky130_fd_pr__pnp_05v5_W0p68L0p68` (class `pnp`) |
-| The named deck's own `ExtractionDeck.resistors`/`.capacitors` | One assumed-identity binding per declared class — the class name taken as its own subcircuit name — but **only** for a family that has no curated table entry for that deck at all, and only useful where that identity assumption actually holds upstream | `sg13cmos5l`'s `rsil`/`rppd`/`rhigh`, `sg13g2`'s `cap_cmim` |
+| Curated subcircuit-name tables in `klayout_tools.pdk_models` | Every MOS/resistor/capacitor/bipolar subcircuit name hand-verified against a real fetched PDK install, including the ones whose subcircuit name differs from the deck's device-class label | sky130's `sky130_fd_pr__cap_mim_m3_1` (class `sky130_fd_pr__model__cap_mim`), `sky130_fd_pr__pnp_05v5_W0p68L0p68` (class `pnp`), sg13g2's `cap_rfcmim` (class `rfcmim`, issue #1470) |
+| The named deck's own `ExtractionDeck.resistors`/`.capacitors` | One assumed-identity binding per declared class — the class name taken as its own subcircuit name — but **only** for a family that has no curated table entry for that deck at all, and only useful where that identity assumption actually holds upstream | `sg13cmos5l`'s `rsil`/`rppd`/`rhigh` |
 
 The second source exists so a deck cannot recognise a device for extraction
 and then refuse to read that same device back here — the round-trip
@@ -313,25 +313,26 @@ name differs from the deck's device-class label and has no curated entry yet
 "not a known device for the requested deck" error lists the full resolved
 set so the gap is visible from the failure itself.
 
-**The one live case of that today is `sg13g2`'s `rfcmim`.** The deck declares
-the class, so derivation binds the name `rfcmim` — but IHP ships the device as
-`.subckt cap_rfcmim`, so that derived binding never matches a genuine
-IHP-fetched reference netlist, and `cap_rfcmim` itself does not resolve. Of
-`sg13g2`'s two declared MIM capacitors, only `cap_cmim` round-trips from
-`reference.deck` alone; `rfcmim` needs an explicit override:
+**`sg13g2`'s `rfcmim` was the one live case of that gap** (issue #1470, now
+closed). Derivation binds the *declared class* name as its own subcircuit
+name, so it never reached `rfcmim`: IHP ships the device as `.subckt
+cap_rfcmim`, not `.subckt rfcmim`. Derivation is deliberately not taught to
+guess `cap_<class>`-style aliases — the identity assumption is the only one
+that can be made without a hand-verified name, and a wrong guess here is a
+silently wrong device binding. The gap is closed instead by a curated
+`_CAPACITOR_MODEL_TABLE` entry for `("sg13g2", "sg13g2")`, verified against a
+real fetched IHP-Open-PDK v0.3.0 install, mapping `rfcmim -> cap_rfcmim` (and
+`cap_cmim -> cap_cmim`, since a curated entry for the pair takes the whole
+family out of the derived fallback's reach — see the table above). Both of
+`sg13g2`'s declared MIM capacitors now round-trip from `reference.deck`
+alone, with no `device_map` override required:
 
-```json
-"device_map": {
-  "cap_rfcmim": { "kind": "capacitor", "class": "rfcmim" }
-}
+```
+XC1 PLUS MINUS cap_rfcmim w=5u l=5u
 ```
 
-Derivation is deliberately not taught to guess `cap_<class>`-style aliases:
-the identity assumption is the only one that can be made without a
-hand-verified name, and a wrong guess here is a silently wrong device binding.
-Closing this properly means adding a curated `_CAPACITOR_MODEL_TABLE` entry
-for `("sg13g2", "sg13g2")` once the full set of IHP MIM subcircuit names is
-verified against a fetched install.
+converts to `C1 PLUS MINUS 0 rfcmim A=25P P=20U` with no `reference.device_map`
+entry at all.
 
 **gf180mcu MOS flavour subcircuits** (issue #1111): the curated table also
 recognises `nfet_06v0`/`pfet_06v0` (gf180mcu's `Dualgate`-scoped 5V/6V MOS

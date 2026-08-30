@@ -2242,7 +2242,7 @@ recognised analog device classes):
 |---|---|---|---|---|
 | MOS (`nfet`/`pfet`) | ✅ (plus `hvi`-scoped `g5v0d10v5` flavour, issue #1369) | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
 | Resistor | ✅ | ✅ (all flavours) | ✅ `rsil`/`rppd`/`rhigh` (issue #1457); ❌ `res_metal1`/`res_metal2` (verified carve-out — no real subcircuit exists) | `l`/`w` (sky130 or sg13g2) or `r_length`/`r_width` (gf180mcu), read off the device |
-| Capacitor (MiM) | ✅ | ✅ | ❌ (bare `C` card — `cap_cmim`/`rfcmim` are recognised as of issue #1454, but no curated model table yet) | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
+| Capacitor (MiM) | ✅ | ✅ | ✅ `cap_cmim`/`rfcmim` (issue #1470) | `l`/`w` (sky130 or sg13g2) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Capacitor (MoM) | — (no MoM recognition in that deck) | — (no MoM recognition in that deck) | ❌ (bare, unmodelled-value card — `cap_cmomi`/`cap_cmomf` are recognised as of issue #1466, on `sg13g2` **and** `sg13cmos5l`, with no `C` at all to bind; a curated `--pdk` model table is out of scope until this device gets a real compact model to bind against) | n/a |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
 
@@ -2278,6 +2278,14 @@ yet" gap: the same install defines no `.subckt`/`.model` for either name
 anywhere, so there is no real subcircuit for this table to bind to — they
 keep the bare `R`-card form under `--pdk`, unchanged from today, matching the
 "Scope limits" carve-out discipline below.
+
+sg13g2 capacitor note (issue #1470): `cap_cmim` binds to its real,
+identically-named subcircuit; `rfcmim` binds to `cap_rfcmim`, IHP's real
+upstream name for the device (not `rfcmim` itself) — both confirmed in the
+same fetched IHP-Open-PDK v0.3.0 install's
+`libs.tech/ngspice/models/capacitors_mod.lib` (`.subckt cap_cmim PLUS MINUS`
+/ `.subckt cap_rfcmim PLUS MINUS bn`), both taking plain `l`/`w` in raw
+metres, the same convention as this family's MOS/resistor bindings.
 
 Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
 (`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer
