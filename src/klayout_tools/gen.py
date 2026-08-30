@@ -794,6 +794,104 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "cap_top_via": (129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
         "cap_top_via_metal": (126, 0),  # TopMetal1.drawing
     },
+    # sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling), issue #1462 -- the
+    # fourth family this table supports. Every number here is transcribed
+    # from `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK` (never a second,
+    # private layer map) -- that deck's own module docstring documents each
+    # value's provenance against a real, independently-fetched
+    # `ihp-sg13cmos5l` install.
+    #
+    # Only `mos_array`/`res_array` are wired up to *run* on this family
+    # (issue #1462's own scope); `guard_ring`/`diff_pair`/`well_island`/
+    # `bjt_array`/`esd_device`/`bond_pad`/`cap_array` are all deferred --
+    # see `_GENERATOR_FAMILY_DEFERRED` and `_cap_family_layers`'s/
+    # `_bond_pad_layer_params`'s own missing-role checks:
+    #
+    # - `bjt_array`: this deck's `EXTRACTION_DECK` declares no bipolar
+    #   device class at all (MOS/resistors only, per its own module
+    #   docstring's scope note) -- the identical gap `sg13g2`'s own entry
+    #   above documents.
+    # - `esd_device`/`guard_ring`/`diff_pair`/`well_island`: this deck
+    #   declares no distinct `tap` mask (`EXTRACTION_DECK.tap` is `None`,
+    #   the same "no distinct tap layer" shape `sg13g2`'s own `"tap"` entry
+    #   documents) -- but unlike `sg13g2` (whose curated deck derives a well/
+    #   substrate tie from plain `Activ ∩ nwell`, so drawing an undoped
+    #   `"tap"` ring alone is at least DRC-legal there), this deck's own tie
+    #   derivation (`EXTRACTION_DECK.tap_nplus`/`.tap_pplus`, see that
+    #   module's own docstring) requires an `nSD`/`pSD` implant *on top* of
+    #   the tap shape -- so reusing `sg13g2`'s bare-`Activ` tap-ring pattern
+    #   here unmodified would draw geometry that is DRC-legal but silently
+    #   fails to extract as a recognised tie (an `unbiased_pmos_body_nets`/
+    #   `device.body_unverified` surprise, not caught by DRC at all).
+    #   Issue #1462 does not attempt that geometry change (`mos_array`/
+    #   `res_array` need no `"tap"` role to satisfy their own AC), so this
+    #   table deliberately omits a `"tap"` entry rather than copy `sg13g2`'s
+    #   pattern unverified -- a follow-on issue that wires up `guard_ring`/
+    #   `diff_pair`/`well_island`/`esd_device` for this family must add both
+    #   a real `"tap"` role *and* the implant-covered tie geometry, then
+    #   verify the result classifies as a tie under `klt extract --deck
+    #   sg13cmos5l` (never assume parity with `sg13g2`'s own, simpler tap
+    #   derivation).
+    # - `cap_array`: this deck's module docstring states cmos5l has no MIM
+    #   capacitor at all (a forbidden-layer requirement on `MIM`/`Vmim`/etc.,
+    #   confirmed against cmos5l's own forbidden-layer lists) -- there is no
+    #   `cap_top_plate`/`cap_bottom_plate` role to populate, so
+    #   `_cap_family_layers`'s own existing missing-role check already
+    #   raises a clear error naming the families that *are* configured
+    #   (unchanged by this table, since neither key is added here).
+    # - `bond_pad`: this deck cites no passivation-opening/pad-boundary
+    #   layer (no `"pad"`/`"top_metal"` role below), so
+    #   `_bond_pad_layer_params`'s own existing missing-role check already
+    #   raises a clear error, the identical `sg13g2` precedent.
+    #
+    # `mos_array`'s documented default `params` were verified DRC-clean
+    # against `klt drc --deck sg13cmos5l` and re-extract to the `nfet`/
+    # `pfet` device class; `res_array`'s default output round-trips through
+    # `klt extract --deck sg13cmos5l` to the `"rsil"` device class (see
+    # `_PDK_RES_FLAVOR_LAYERS` below) -- the same bar
+    # `docs/cli/gen.md`'s "Adding a third PDK family" section states. Unlike
+    # `sg13g2` (issue #1450), this deck transcribes no
+    # `gatpoly.separation.activ.1`-shaped rule at all (its curated `DECK`
+    # checks only `activ`/`gatpoly`/`metal1..topmetal1`/`via1..topvia1`
+    # width/space/enclosure -- no poly-to-unrelated-active spacing rule), so
+    # `mos_array`'s unit device needs no per-family gate-pad clearance here
+    # (`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` has no `"sg13cmos5l"` entry,
+    # resolving to the pre-#1450 `0.0` default) -- verified by running `klt
+    # drc --deck sg13cmos5l` against the generator's own output, not assumed
+    # by analogy to `sg13g2`.
+    "sg13cmos5l": {
+        "active": (1, 0),  # Activ.drawing -- EXTRACTION_DECK.active
+        "poly": (5, 0),  # GatPoly.drawing -- EXTRACTION_DECK.poly
+        "contact": (6, 0),  # Cont.drawing -- EXTRACTION_DECK.contact
+        "metal": (8, 0),  # Metal1.drawing -- EXTRACTION_DECK.metals[0]
+        "well": (31, 0),  # NWell.drawing -- EXTRACTION_DECK.nwell; lets a
+        # `flavor="pfet"` mos_array request enclose the unit device's active
+        # region in a well, the same `well`/`well_present` mechanism every
+        # other family uses.
+        "res_mark": (128, 0),  # PolyRes.drawing --
+        # EXTRACTION_DECK.resistors[*].marker (every flavour shares it,
+        # `rsil`/`rppd`/`rhigh` are distinguished by the implant/block masks
+        # over it -- see `_PDK_RES_FLAVOR_LAYERS` below), the same "marker
+        # alone selects the base device class" precedent `sky130`'s/
+        # `gf180mcu`'s/`sg13g2`'s own `res_mark` entries document (issue
+        # #369).
+        "metal_label": (8, 2),  # Metal1.pin -- EXTRACTION_DECK.metal_labels[0].
+        # This deck's own convention picks `.pin` (datatype 2), *not*
+        # `sg13g2`'s `.text` (datatype 25) -- confirmed against this deck's
+        # own module docstring ("a deliberate consistency choice, not a
+        # cmos5l-versus-sg13g2 layer-map difference"), not a transcription
+        # slip. No `klt gen` generator draws on this role for this family
+        # today (only `well_island` does, and it is deferred above).
+        "well_label": (31, 2),  # NWell.pin -- EXTRACTION_DECK.well_label; no
+        # `sg13g2` counterpart exists at all (that deck declares no
+        # `well_label`). Recorded here for completeness/future use, but
+        # deliberately unread by every current generator -- no `klt gen`
+        # generator anywhere resolves a `"well_label"` role (see the
+        # sky130 `"metal_label"` entry's own "well-label tautology" note,
+        # issue #1421): naming a well polygon directly would let an
+        # extracted body net read back as intended even when the physical
+        # tie to it is broken or absent.
+    },
 }
 
 #: Per-PDK-family minimum drawn width (um) for `cap_array`'s top-plate via
@@ -838,10 +936,28 @@ def _cap_top_via_metal_min_w_um(family: str) -> float:
 #: device recognition at all (`bjt_array`), and `esd_device`/`well_island`
 #: were simply not attempted by this issue (see `docs/cli/gen.md`'s
 #: "PDK-family support" section) -- not a discovered defect in either.
+#:
+#: sg13cmos5l (issue #1462) adds ``bjt_array``/``esd_device`` for the same
+#: "no bipolar device class"/"not attempted" reasons as sg13g2's own entries,
+#: plus ``well_island`` (same "not attempted" reason). ``guard_ring``/
+#: ``diff_pair`` are *also* deferred here for this family -- unlike
+#: sg13g2, where both resolve every mandatory role fine (``"tap"`` there is
+#: real, if shared with ``"active"``): this family's own
+#: :data:`_PDK_ROLE_LAYERS` entry deliberately carries no ``"tap"`` role at
+#: all (see that entry's own comment), so ``guard_ring``'s ring layer
+#: resolution would otherwise pass a ``None`` ``tap_layer`` straight to a
+#: PCell parameter that requires a real ``kdb.LayerInfo`` -- an opaque
+#: PCell-level crash rather than this module's own clear ``GenError``.
+#: Deferring both here up front (via :func:`_ring_layer_params`'s own
+#: ``generator_name``-parametrized call, since ``diff_pair`` composes the
+#: same ring-layer resolution ``guard_ring`` uses) keeps that failure
+#: legible instead.
 _GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
-    "bjt_array": ("sg13g2",),
-    "esd_device": ("sg13g2",),
-    "well_island": ("sg13g2",),
+    "bjt_array": ("sg13g2", "sg13cmos5l"),
+    "esd_device": ("sg13g2", "sg13cmos5l"),
+    "well_island": ("sg13g2", "sg13cmos5l"),
+    "guard_ring": ("sg13cmos5l",),
+    "diff_pair": ("sg13cmos5l",),
 }
 
 
@@ -939,6 +1055,56 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
         # masks: unlike rppd it requires nSD present *alongside* pSD (the
         # doping combination its higher sheet rho comes from), which is also
         # exactly what rppd's own `excludes` subtracts.
+        "rhigh": (
+            (111, 0),  # EXTBlock
+            (14, 0),  # pSD      -\ both implants present together
+            (7, 0),  # nSD       -/
+            (28, 0),  # SalBlock -- unsalicided, same as rppd
+        ),
+    },
+    "sg13cmos5l": {
+        # All three entries below come straight from
+        # `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.resistors`' own
+        # `requires` sets (issue #1462) -- byte-identical to `sg13g2`'s own
+        # table above, since cmos5l's resistor LVS rules are themselves
+        # symlinks into the pinned sibling `ihp-sg13g2` checkout (see that
+        # deck module's own docstring), independently re-verified against
+        # cmos5l's own `EXTRACTION_DECK.resistors` rather than assumed
+        # identical by analogy.
+        #
+        # `"generic"` is this family's default (`_DEFAULT_RES_FLAVOR`),
+        # matching every other family's own "first entry is `\"generic\"`"
+        # convention -- `rsil` (7 ohm/sq) is this family's lowest-sheet-rho
+        # class, `EXTRACTION_DECK.resistors["rsil"].requires`.
+        "generic": (
+            (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
+            (24, 0),  # RES       -- the silicided-resistor marker itself
+        ),
+        # `"rsil"` is a deliberate alias of `"generic"` above (identical
+        # mask set) -- issue #1462's own acceptance criteria and test plan
+        # request `res_array`'s `flavor` param by this family's literal
+        # device-class name (`flavor="rsil"`), not only via the
+        # family-agnostic `"generic"` spelling every other family exposes
+        # for its own lowest-sheet-rho class. Both names resolve to the same
+        # `requires` set, so `flavor="rsil"` and an unspecified `flavor`
+        # (which defaults to `_DEFAULT_RES_FLAVOR`, `"generic"`) draw
+        # byte-identical geometry.
+        "rsil": (
+            (111, 0),  # EXTBlock
+            (24, 0),  # RES
+        ),
+        # rppd (260 ohm/sq): p+ doped, unsalicided poly --
+        # `EXTRACTION_DECK.resistors["rppd"].requires`. Three masks; rsil's
+        # own `excludes` (pSD, SalBlock, nSD) rule it out here.
+        "rppd": (
+            (111, 0),  # EXTBlock
+            (14, 0),  # pSD      -- p+ doped poly
+            (28, 0),  # SalBlock -- unsalicided (vs. rsil's 7 ohm/sq)
+        ),
+        # rhigh (1360 ohm/sq): the highest-sheet-rho class --
+        # `EXTRACTION_DECK.resistors["rhigh"].requires`. Four masks: unlike
+        # rppd it requires nSD present *alongside* pSD (the doping
+        # combination its higher sheet rho comes from).
         "rhigh": (
             (111, 0),  # EXTBlock
             (14, 0),  # pSD      -\ both implants present together
@@ -1325,13 +1491,19 @@ def _cap_array_layer_params(
 
 
 def _ring_layer_params(
-    pdk_info: dict[str, Any], params: dict[str, Any]
+    pdk_info: dict[str, Any],
+    params: dict[str, Any],
+    generator_name: str = "guard_ring",
 ) -> dict[str, Any]:
     """Hidden layer params for a generator drawing a guard ring
-    (``guard_ring``, and the optional ring half of ``diff_pair``)."""
+    (``guard_ring``, and the optional ring half of ``diff_pair``, which
+    passes its own ``generator_name`` so a deferred family's error names the
+    generator actually invoked rather than always ``'guard_ring'`` -- see
+    :data:`_GENERATOR_FAMILY_DEFERRED`'s ``sg13cmos5l`` entries)."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _reject_deferred_family(generator_name, family)
     well = _role_layer_info(family, "well")
     return {
         "tap_layer": _role_layer_info(family, "tap"),
@@ -1348,7 +1520,9 @@ def _diff_pair_layer_params(
     """``diff_pair`` composes a unit-device array and an optional guard ring
     -- union of both their hidden layer params."""
     layer_params = _device_layer_params(pdk_info, params)
-    layer_params.update(_ring_layer_params(pdk_info, params))
+    layer_params.update(
+        _ring_layer_params(pdk_info, params, generator_name="diff_pair")
+    )
     return layer_params
 
 

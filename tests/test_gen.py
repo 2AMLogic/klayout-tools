@@ -4170,6 +4170,332 @@ def test_sg13g2_bond_pad_rejected(tmp_path, sg13g2_pdk_root):
 
 
 # --------------------------------------------------------------------------- #
+# sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling) support (issue #1462) --
+# the fourth family `klayout_tools.gen._PDK_ROLE_LAYERS` supports. Only
+# `mos_array`/`res_array` are wired up to *run* on this family -- see that
+# table's own "sg13cmos5l" entry, and `docs/cli/gen.md`'s "PDK-family
+# support" section, for why every other generator is explicitly deferred.
+#
+# The resolved `--pdk`/`$PDK` *variant* string for a real ihp-sg13cmos5l
+# install is `"ihp-sg13cmos5l"` (the install directory's own name, mirroring
+# `"ihp-sg13g2"`'s own shape above), not a `"sg13cmos5l"`-prefixed string.
+# --------------------------------------------------------------------------- #
+
+_SG13CMOS5L_VARIANT = "ihp-sg13cmos5l"
+_SG13CMOS5L_GENERATORS = ("res_array", "mos_array")
+
+#: cmos5l's poly-resistor marker plus the `requires` masks its three
+#: recognised poly-resistor classes are keyed off in
+#: `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.resistors` -- the same
+#: numbers `gen._PDK_RES_FLAVOR_LAYERS`'s own `"sg13cmos5l"` entry draws
+#: (issue #1462), byte-identical to sg13g2's own citations (issue #1451).
+_SG13CMOS5L_RES_MARK_LAYER = (128, 0)  # PolyRes -- every flavour's marker
+_SG13CMOS5L_EXTBLOCK_LAYER = (111, 0)  # EXTBlock -- every flavour's head term
+_SG13CMOS5L_RES_LAYER = (24, 0)  # RES -- rsil ("generic") only
+_SG13CMOS5L_PSD_LAYER = (14, 0)  # pSD -- rppd/rhigh
+_SG13CMOS5L_NSD_LAYER = (7, 0)  # nSD -- rhigh only (rppd excludes it)
+_SG13CMOS5L_SALBLOCK_LAYER = (28, 0)  # SalBlock -- rppd/rhigh
+
+
+@pytest.fixture()
+def sg13cmos5l_pdk_root(tmp_path):
+    root = tmp_path / "pdk_install"
+    _make_install(root, _SG13CMOS5L_VARIANT)
+    return root
+
+
+def test_pdk_family_resolves_ihp_sg13cmos5l_variant_alias():
+    """`_pdk_family` must resolve the real-world `"ihp-sg13cmos5l"` variant
+    string to the `"sg13cmos5l"` family key -- the same
+    `_PDK_VARIANT_FAMILY_ALIASES` mechanism `"ihp-sg13g2"` relies on."""
+    assert gen._pdk_family(_SG13CMOS5L_VARIANT) == "sg13cmos5l"
+
+
+@pytest.mark.parametrize("generator_name", _SG13CMOS5L_GENERATORS)
+def test_sg13cmos5l_generator_default_params_are_drc_clean(
+    generator_name, tmp_path, sg13cmos5l_pdk_root
+):
+    """`mos_array`/`res_array`'s documented default `params` must pass `klt
+    drc --deck sg13cmos5l` clean."""
+    output = tmp_path / f"{generator_name}_sg13cmos5l.gds"
+    report = generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["pdk"]["variant"] == _SG13CMOS5L_VARIANT
+
+    drc_report = run_drc(str(output), "sg13cmos5l")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13cmos5l_mos_array_default_params_extract_as_nfet(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """`mos_array`'s default output (`flavor="nfet"`) must round-trip through
+    `klt extract --deck sg13cmos5l` to the `"nfet"` device class, with no
+    `pfet` devices -- the LV pair this deck's curated
+    `EXTRACTION_DECK.nfet_provenance`/`.pfet_provenance` recognise by
+    default (issue #1462's own AC: "re-extracts to the expected MOS
+    class")."""
+    output = tmp_path / "mos_array_sg13cmos5l_nfet.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13cmos5l")
+
+    assert report["device_counts"].get("nfet", 0) > 0
+    assert report["device_counts"].get("pfet", 0) == 0
+    assert report["status"] == "extracted"
+
+
+def test_sg13cmos5l_mos_array_pfet_flavor_extracts_as_pfet(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """`flavor="pfet"` encloses the unit device's active region in this
+    family's `NWell` role, so it must extract as `"pfet"` rather than the
+    default `"nfet"`."""
+    output = tmp_path / "mos_array_sg13cmos5l_pfet.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": "pfet"},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13cmos5l")
+
+    assert report["device_counts"].get("pfet", 0) > 0
+    assert report["device_counts"].get("nfet", 0) == 0
+
+
+def test_sg13cmos5l_res_array_default_params_recognised_as_rsil(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """`res_array`'s default output (`flavor="generic"`) round-trips through
+    `klt extract --deck sg13cmos5l` to the `"rsil"` device class
+    (`res_mark`/`EXTBlock`/`RES`, matching
+    `EXTRACTION_DECK.resistors[0]`'s `marker`/`requires`)."""
+    output = tmp_path / "res_array_sg13cmos5l.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13cmos5l")
+
+    assert report["device_counts"].get("rsil", 0) > 0
+
+
+def test_sg13cmos5l_res_array_explicit_rsil_matches_default(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """This family's lowest-sheet-rho flavour is reachable by *either* the
+    cross-family default spelling (`"generic"`, left implicit here) or its
+    own literal device-class name (`"rsil"`, issue #1462's own Test Plan) --
+    both must draw byte-identical geometry."""
+    output_default = tmp_path / "res_array_sg13cmos5l_default.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_rsil = tmp_path / "res_array_sg13cmos5l_rsil.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": "rsil"},
+            "options": {"output": str(output_rsil)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_rsil)
+
+
+@pytest.mark.parametrize(
+    ("flavor", "expected_layers", "absent_layers"),
+    [
+        (
+            "rppd",
+            (
+                _SG13CMOS5L_EXTBLOCK_LAYER,
+                _SG13CMOS5L_PSD_LAYER,
+                _SG13CMOS5L_SALBLOCK_LAYER,
+            ),
+            (_SG13CMOS5L_NSD_LAYER, _SG13CMOS5L_RES_LAYER),
+        ),
+        (
+            "rhigh",
+            (
+                _SG13CMOS5L_EXTBLOCK_LAYER,
+                _SG13CMOS5L_PSD_LAYER,
+                _SG13CMOS5L_NSD_LAYER,
+                _SG13CMOS5L_SALBLOCK_LAYER,
+            ),
+            (_SG13CMOS5L_RES_LAYER,),
+        ),
+    ],
+)
+def test_sg13cmos5l_res_array_higher_sheet_rho_flavor_draws_its_requires_masks(
+    tmp_path, sg13cmos5l_pdk_root, flavor, expected_layers, absent_layers
+):
+    """`rppd` (3 masks) and `rhigh` (4 masks) each draw exactly the
+    `requires` set their `EXTRACTION_DECK.resistors` entry is keyed off,
+    byte-identical to sg13g2's own mask sets (issue #1451)."""
+    output = tmp_path / f"res_array_sg13cmos5l_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _SG13CMOS5L_RES_MARK_LAYER in present
+    for layer in expected_layers:
+        assert layer in present, f"{flavor} must draw {layer}"
+    for layer in absent_layers:
+        assert layer not in present, f"{flavor} must not draw {layer}"
+
+
+@pytest.mark.parametrize(
+    ("flavor", "device_class"), [("rppd", "rppd"), ("rhigh", "rhigh")]
+)
+def test_sg13cmos5l_res_array_higher_sheet_rho_flavor_extracts_as_matching_class(
+    tmp_path, sg13cmos5l_pdk_root, flavor, device_class
+):
+    """The end-to-end acceptance bar from issue #1462's Test Plan: each
+    higher-sheet-rho flavour must classify through (unmodified) `klt extract
+    --deck sg13cmos5l` as its own device class -- never the base `rsil`."""
+    output = tmp_path / f"res_array_sg13cmos5l_{flavor}_extract.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(str(output), "sg13cmos5l")
+
+    assert report["device_counts"].get(device_class, 0) > 0
+    assert report["device_counts"].get("rsil", 0) == 0
+
+
+@pytest.mark.parametrize("flavor", ("rppd", "rhigh"))
+def test_sg13cmos5l_res_array_higher_sheet_rho_flavor_is_drc_clean(
+    tmp_path, sg13cmos5l_pdk_root, flavor
+):
+    """The widened flavours hold the same `klt drc --deck sg13cmos5l` clean
+    bar as the default (`"generic"`/`"rsil"`) flavour."""
+    output = tmp_path / f"res_array_sg13cmos5l_{flavor}_drc.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "sg13cmos5l")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13cmos5l_res_array_rejects_sky130_only_flavor(tmp_path, sg13cmos5l_pdk_root):
+    """sg13cmos5l exposes `"generic"`/`"rsil"`/`"rppd"`/`"rhigh"` -- a
+    sky130-only flavour name is rejected with a clear error."""
+    with pytest.raises(GenError, match="not a recognised poly-resistor flavour"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {
+                    "variant": _SG13CMOS5L_VARIANT,
+                    "root": str(sg13cmos5l_pdk_root),
+                },
+                "params": {"flavor": "xhigh"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "generator_name",
+    ("bjt_array", "esd_device", "well_island", "guard_ring", "diff_pair"),
+)
+def test_sg13cmos5l_deferred_generators_rejected(
+    generator_name, tmp_path, sg13cmos5l_pdk_root
+):
+    """`bjt_array` (no bipolar device recognition in this deck's curated
+    extraction deck), `esd_device`/`well_island` (not attempted by this
+    issue), and `guard_ring`/`diff_pair` (this family declares no distinct
+    `tap` role -- see `_PDK_ROLE_LAYERS`'s own comment) are all explicitly
+    deferred rather than silently accepted with untested/uncheckable
+    geometry."""
+    with pytest.raises(GenError, match="not yet supported by this generator"):
+        generate(
+            {
+                "generator": generator_name,
+                "pdk": {
+                    "variant": _SG13CMOS5L_VARIANT,
+                    "root": str(sg13cmos5l_pdk_root),
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_sg13cmos5l_cap_array_rejected(tmp_path, sg13cmos5l_pdk_root):
+    """sg13cmos5l has no MIM capacitor (a forbidden-layer requirement on
+    this deck) -- `cap_array` raises a clear error instead of crashing on a
+    missing plate layer."""
+    with pytest.raises(GenError, match="no MiM"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {
+                    "variant": _SG13CMOS5L_VARIANT,
+                    "root": str(sg13cmos5l_pdk_root),
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_sg13cmos5l_bond_pad_rejected(tmp_path, sg13cmos5l_pdk_root):
+    """sg13cmos5l's curated deck cites no passivation-opening/pad-boundary
+    layer -- `bond_pad` raises a clear error instead of crashing on a `None`
+    layer param."""
+    with pytest.raises(GenError, match="no bond-pad"):
+        generate(
+            {
+                "generator": "bond_pad",
+                "pdk": {
+                    "variant": _SG13CMOS5L_VARIANT,
+                    "root": str(sg13cmos5l_pdk_root),
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Phase 4: bjt_array -- matched vertical-bipolar (PNP/BJT) array (Epic #152
 # phase 4, #176). Drawn from base layers per docs/design/gen-bjt-array-spike.md.
 # --------------------------------------------------------------------------- #
