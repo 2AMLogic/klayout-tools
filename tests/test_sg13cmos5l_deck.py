@@ -509,6 +509,92 @@ def test_golden_pair_sg13cmos5l_nfet_l_w_matches_drawn_geometry(tmp_path: Path):
     assert EXTRACTION_DECK.nfet_provenance.rule_id == "sg13_lv_nmos"
 
 
+def test_sg13cmos5l_poly_label_is_gatpoly_pin():
+    """Issue #1476 (the cmos5l sibling of `sg13g2.py`'s own `poly_label`
+    fix): `EXTRACTION_DECK.poly_label` is `GatPoly.pin` (5/2) -- kept
+    consistent with this deck's own established `.pin`-purpose convention
+    (`well_label`/`metal_labels` above all use datatype-2 `.pin`, not
+    `.text`/`.label`), rather than the `.label` (5/1) purpose `sg13g2.py`
+    picked for the identical `GatPoly` layer-numbering gap. See
+    `EXTRACTION_DECK.poly_label`'s own inline comment for the full
+    reasoning."""
+    assert EXTRACTION_DECK.poly_label == (5, 2)  # GatPoly.pin
+
+
+def _make_bare_poly_gate_nfet_layout(gate_label: str) -> kdb.Layout:
+    """One NMOS whose gate is a bare `GatPoly` bar with NO gate contact/
+    metal -- only a text on `GatPoly.pin` (5/2, `poly_label`) names it.
+    Mirrors `sg13g2.py`'s own `_make_bare_poly_gate_nmos_layout` (issue
+    #1476's sg13g2 test), adapted to cmos5l's own `poly_label` layer
+    choice."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(1, 0, _box_um(0, 0, 2, 1))  # Activ.drawing, W=1um
+    draw(5, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # GatPoly.drawing gate, L=0.4um, bare
+
+    draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Cont (source side)
+    draw(6, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Cont (drain side)
+    draw(8, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    draw(8, 0, _box_um(1.6, 0.2, 2.0, 0.8))  # Metal1 (drain pad)
+    label(8, 2, "S", 0.2, 0.5)  # Metal1.pin
+    label(8, 2, "D", 1.8, 0.5)
+
+    # The gate: labelled ONLY on GatPoly.pin (5/2), no Cont/Metal1 anywhere
+    # near it.
+    label(5, 2, gate_label, 1.0, 1.1)
+
+    return layout
+
+
+def test_sg13cmos5l_bare_poly_gate_named_via_poly_label(tmp_path: Path):
+    """Issue #1476: a text on `GatPoly.pin` (5/2, `poly_label`) names a
+    bare-poly gate that has no metal landing pad, so it survives extraction
+    as a NAMED pin instead of an anonymous `$N` net -- and device extraction
+    is unaffected (still exactly one nfet)."""
+    path = _write_gds(
+        _make_bare_poly_gate_nfet_layout("GATEN"), tmp_path / "bare_gate.gds"
+    )
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "bare_gate.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["nets"]["g"] == "GATEN"
+    pin_names = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "GATEN" in pin_names
+
+
+def test_sg13cmos5l_bare_poly_gate_anonymous_without_poly_label(tmp_path: Path):
+    """Control: the same layout with NO poly label leaves the gate an
+    anonymous `$N` net (the pre-#1476 friction this issue fixes), while
+    device extraction is identical -- proving the `poly_label` text is what
+    promotes the gate, not a geometry change."""
+    layout = _make_bare_poly_gate_nfet_layout("UNUSED")
+    # Drop the GatPoly.pin text, keeping every other shape/label.
+    poly_pin = layout.layer(5, 2)
+    layout.top_cell().shapes(poly_pin).clear()
+    path = _write_gds(layout, tmp_path / "bare_gate_nolabel.gds")
+
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "nolabel.spice"))
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    # Anonymous, unbiasable -- KLayout's own auto-generated "$n" placeholder,
+    # backslash-escaped to match the written netlist's own node spelling
+    # (issue #1162).
+    assert device["nets"]["g"].startswith("\\$")
+
+
 def _make_pfet_layout(*, thick_gate_ox: bool = False) -> kdb.Layout:
     """The `_make_nfet_layout` geometry with the same active/poly/contact
     stack, wrapped in `NWell.drawing` (active *inside* `NWell` recognises as
