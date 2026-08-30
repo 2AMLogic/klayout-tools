@@ -39,12 +39,19 @@ two disagree, this document (and the code) win.
   `sg13_lv_*` flavour and, as of issue #1416, the thick-oxide `sg13_hv_*`
   flavour scoped to the same `ThickGateOx` 44/0) plus the same three drawn
   poly resistors (`rsil`, `rppd`, `rhigh`, added by issue #1415); it has
-  **no** curated capacitor, bipolar or diode entries yet, and — although
-  issue #1417 has since extended this deck's metal stack to the full
-  `Metal1`-`TopMetal1` stack those bodies sit on — the `res_metal1`..
-  `res_topmetal1` metal-resistor family is not transcribed by this deck yet
-  — see `src/klayout_tools/decks/sg13cmos5l.py`'s own docstring for each gap
-  and why.
+  **no** curated bipolar or diode entries yet, and — although issue #1417
+  has since extended this deck's metal stack to the full `Metal1`-
+  `TopMetal1` stack those bodies sit on — the `res_metal1`..`res_topmetal1`
+  metal-resistor family is not transcribed by this deck yet. It also has no
+  curated capacitor entry, but not because none exists: issue #1463
+  confirmed cmos5l has a MoM capacitor family (`cap_cmomi`/`cap_cmomf`),
+  found by fetching the live upstream commits this deck's own docstring
+  already pins rather than this repo's older vendored PDK snapshot — but
+  that device's marker-scoped, multi-metal-port, topologically-matched (no
+  computed capacitance value) shape does not fit this repo's `CapacitorDevice`
+  mechanism, so recognising it needs new device-recognition machinery, filed
+  as issue #1466 — see `src/klayout_tools/decks/sg13cmos5l.py`'s own
+  docstring for the full investigation and each other gap and why.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
   "next to the input" convention `klt render`/`klt sim` already use). The
