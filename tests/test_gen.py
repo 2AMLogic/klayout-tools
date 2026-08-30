@@ -3728,11 +3728,12 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 # sg13g2 (IHP-Open-PDK) support (issue #1448) -- the third family
 # `klayout_tools.gen._PDK_ROLE_LAYERS` supports, following #1266's own
 # "Adding a third PDK family" contribution guide. `res_array`/`guard_ring`
-# (#1448) and `mos_array`/`diff_pair` (#1450, via the family-resolved
-# gate-pad clearance `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` supplies) are wired
-# up to *run* on this family -- see that table's own "sg13g2" entry for the
-# rationale on why `bjt_array`/`cap_array`/`esd_device`/`bond_pad`/
-# `well_island` are still explicitly deferred.
+# (#1448), `mos_array`/`diff_pair` (#1450, via the family-resolved
+# gate-pad clearance `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` supplies), and
+# `cap_array` (#1455, once #1454 populated `EXTRACTION_DECK.capacitors`) are
+# wired up to *run* on this family -- see that table's own "sg13g2" entry for
+# the rationale on why `bjt_array`/`esd_device`/`bond_pad`/`well_island` are
+# still explicitly deferred.
 #
 # The resolved `--pdk`/`$PDK` *variant* string for a real IHP-Open-PDK
 # install is `"ihp-sg13g2"` (the install directory's own name -- see
@@ -3742,7 +3743,16 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 # --------------------------------------------------------------------------- #
 
 _SG13G2_VARIANT = "ihp-sg13g2"
-_SG13G2_GENERATORS = ("res_array", "guard_ring", "mos_array", "diff_pair")
+_SG13G2_GENERATORS = ("res_array", "guard_ring", "mos_array", "diff_pair", "cap_array")
+
+#: sg13g2's MiM-capacitor plate/via stack (issue #1455) -- the *same*
+#: layer/datatype pairs `klayout_tools.decks.sg13g2.EXTRACTION_DECK
+#: .capacitors[0]` (`"cap_cmim"`) declares: `MIM` top plate, `Metal5`
+#: bottom plate, `Vmim`/`TopMetal1` top-plate via + landing pad.
+_SG13G2_CAP_TOP_PLATE_LAYER = (36, 0)  # MIM.drawing
+_SG13G2_CAP_BOTTOM_PLATE_LAYER = (67, 0)  # Metal5.drawing
+_SG13G2_CAP_TOP_VIA_LAYER = (129, 0)  # Vmim.drawing
+_SG13G2_CAP_TOP_VIA_METAL_LAYER = (126, 0)  # TopMetal1.drawing
 
 #: sg13g2's poly-resistor marker plus the `requires` masks its three
 #: recognised poly-resistor classes are keyed off in
@@ -4100,18 +4110,49 @@ def test_sg13g2_deferred_generators_rejected(generator_name, tmp_path, sg13g2_pd
         )
 
 
-def test_sg13g2_cap_array_rejected(tmp_path, sg13g2_pdk_root):
-    """sg13g2's curated extraction deck declares no MiM-capacitor recognition
-    at all (`EXTRACTION_DECK.capacitors` is empty) -- `cap_array` stays
-    sky130-only, mirroring gf180mcu's own pre-existing exclusion."""
-    with pytest.raises(GenError, match="no MiM capacitor plate layers"):
-        generate(
-            {
-                "generator": "cap_array",
-                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
-                "options": {"output": str(tmp_path / "out.gds")},
-            }
-        )
+def test_sg13g2_cap_array_draws_mim_stack_layers(tmp_path, sg13g2_pdk_root):
+    """The generator must draw sg13g2's `MIM`/`Metal5` MiM plate pair plus
+    the `Vmim`/`TopMetal1` top-plate via/landing pad -- the same
+    layer/datatype numbers
+    `klayout_tools.decks.sg13g2.EXTRACTION_DECK.capacitors[0]` (`"cap_cmim"`)
+    declares (issue #1455, the sg13g2 counterpart of
+    `test_cap_array_draws_sky130_mim_stack_layers`)."""
+    output = tmp_path / "cap_array_sg13g2_layers.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"plate_w_um": 5, "plate_h_um": 5, "num": 1},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _SG13G2_CAP_TOP_PLATE_LAYER in present
+    assert _SG13G2_CAP_BOTTOM_PLATE_LAYER in present
+    assert _SG13G2_CAP_TOP_VIA_LAYER in present
+    assert _SG13G2_CAP_TOP_VIA_METAL_LAYER in present
+
+
+def test_sg13g2_cap_array_extracts_as_cap_cmim_device(tmp_path, sg13g2_pdk_root):
+    """The end-to-end acceptance bar from issue #1455: `cap_array`'s own
+    sg13g2 output, run through (unmodified) `klt extract`, must be
+    recognised as the `"cap_cmim"` `CapacitorDevice`
+    (`klayout_tools.decks.sg13g2.EXTRACTION_DECK.capacitors[0]`, landed by
+    issue #1454) -- proving the generator's plate/via layer numbers agree
+    with the extractor's, not just that the geometry looks plausible."""
+    gds_path = tmp_path / "cap_array_sg13g2_extract.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"num": 3},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), "sg13g2")
+
+    assert report["device_counts"].get("cap_cmim", 0) == 3
 
 
 def test_sg13g2_bond_pad_rejected(tmp_path, sg13g2_pdk_root):
