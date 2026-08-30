@@ -4334,9 +4334,12 @@ def test_sg13cmos5l_mos_array_pfet_flavor_extracts_as_pfet(
 ):
     """`flavor="pfet"` encloses the unit device's active region in this
     family's `NWell` role, so it must extract as `"pfet"` rather than the
-    default `"nfet"`."""
+    default `"nfet"`. It must also draw a well-tie tap pad (issue #1473) --
+    reported as a `WELL_TAP` port -- so the well is never an unbiased,
+    anonymous net under `klt extract`'s own `unbiased_pmos_body_nets[]`
+    check."""
     output = tmp_path / "mos_array_sg13cmos5l_pfet.gds"
-    generate(
+    response = generate(
         {
             "generator": "mos_array",
             "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
@@ -4345,10 +4348,94 @@ def test_sg13cmos5l_mos_array_pfet_flavor_extracts_as_pfet(
         }
     )
 
+    assert "WELL_TAP" in {p["name"] for p in response["ports"]}
+
     report = run_extract(str(output), "sg13cmos5l")
 
     assert report["device_counts"].get("pfet", 0) > 0
     assert report["device_counts"].get("nfet", 0) == 0
+    assert report["unbiased_pmos_body_nets"] == []
+
+
+def test_sg13cmos5l_mos_array_pfet_flavor_default_omits_well_tap_port(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """The default `flavor="nfet"` draws no well at all, so it must not
+    report a `WELL_TAP` port either -- the well-tie tap pad (issue #1473) is
+    only meaningful alongside a drawn well."""
+    output = tmp_path / "mos_array_sg13cmos5l_nfet_no_tap.gds"
+    response = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    assert "WELL_TAP" not in {p["name"] for p in response["ports"]}
+
+
+def test_sg13cmos5l_mos_array_pfet_flavor_friction_report_repro(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """The exact reproduction from issue #1473's own friction report: a
+    `flavor='pfet'` array with `w_um=5.0, l_um=0.5, rows=1, cols=2,
+    gate_contact=true` must stay DRC-clean *and* re-extract with an empty
+    `unbiased_pmos_body_nets[]` -- before this issue's fix, the well was
+    drawn but nothing tied it, so every generated PMOS body extracted
+    unbiased."""
+    output = tmp_path / "mos_array_sg13cmos5l_pfet_repro.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {
+                "w_um": 5.0,
+                "l_um": 0.5,
+                "rows": 1,
+                "cols": 2,
+                "flavor": "pfet",
+                "gate_contact": True,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "sg13cmos5l")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    report = run_extract(str(output), "sg13cmos5l")
+    assert report["device_counts"].get("pfet", 0) > 0
+    assert report["unbiased_pmos_body_nets"] == []
+
+
+def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
+    tmp_path, both_pdk_root
+):
+    """Issue #1473 deliberately scopes its `mos_array` well-tie tap pad to
+    `sg13cmos5l` only (see `_MOS_ARRAY_WELL_TAP_FAMILIES`) -- `gf180mcu`'s
+    own `_PDK_ROLE_LAYERS` entry already declares a `"well_tap_implant"` role
+    (added by issue #1421 for `well_island`'s own use), so a naive
+    role-presence-only gate would have silently started drawing a tap pad
+    for `gf180mcu` too, changing its drawn geometry/`ports[]` as an
+    unverified side effect of this issue. Pins that `gf180mcu`'s own
+    `flavor='pfet'` output stays byte-for-byte unaffected: no `WELL_TAP`
+    port, and the DRC-clean bar from `test_mos_array_flavor_pfet_extracts_as_pfet`
+    still holds."""
+    output = tmp_path / "mos_array_gf180mcu_pfet.gds"
+    response = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": "pfet"},
+            "options": {"output": str(output)},
+        }
+    )
+
+    assert "WELL_TAP" not in {p["name"] for p in response["ports"]}
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 #: cmos5l's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
