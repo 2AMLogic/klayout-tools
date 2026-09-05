@@ -2987,6 +2987,19 @@ def _diff_pair_layout(
     classic differential-pair "A B / B A" layout; it generalises the same
     way for any ``splits``, each column always holding one A and one B.
 
+    Both rows place their unit device at the same ``x0_um = col *
+    col_pitch``, so the two legs **share one x column per terminal** -- A's
+    and B's ports in a given column differ only in ``y_um`` (issue #1495).
+    That is a property of the interleave, not an oversight: separating the
+    legs in x by a constant per-leg offset would shift one leg's x centroid
+    relative to the other's, destroying exactly the gradient cancellation
+    this layout exists to provide. (Nor is there a cleverer uniform-pitch
+    ordering for odd ``splits``: placing ``2 * splits`` units at distinct
+    multiples of one pitch and partitioning them into two equal-x-centroid
+    halves needs the position sum ``splits * (2 * splits - 1)`` to be even,
+    which fails for every odd ``splits``.) The caveat is documented for
+    callers in ``docs/cli/gen.md`` and surfaced in ``klt gen --list``.
+
     ``ring_padding_um``/``row_spacing_um`` (issue #484) are the ring-to-core
     padding and the device-row-to-device-row gap, both fixed at their
     present-day values by default so omitting them reproduces prior geometry
@@ -4865,7 +4878,17 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "splits",
                 self.TypeInt,
-                "Interleaved sub-instances per device (cross-quad splits)",
+                "Interleaved sub-instances per device (cross-quad splits). "
+                "The two legs share one x column per terminal: every column "
+                "of the 2-row checkerboard holds one Q1 and one Q2 "
+                "sub-instance at the same x, so Q1_<n>_S/_D/_G and that "
+                "column's Q2_* ports report identical x_um and differ only "
+                "in y_um by one row pitch. A one-column-per-pin floorplan "
+                "(one vertical routing column per pin, one horizontal track "
+                "per net) therefore cannot give the two legs' distinct nets "
+                "separate columns -- see docs/cli/gen.md's diff_pair section "
+                "for why this is inherent to the common-centroid interleave, "
+                "and for the routing styles that do work",
                 default=2,
             )
             self.param(
@@ -7713,7 +7736,11 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
             "(Q1/Q2, or M1/M2 with params.mirror) split into params.splits "
             "sub-instances each and interleaved in a true common-centroid "
             "cross-quad pattern, optionally enclosed by an automatically-"
-            "sized guard ring -- family 4, composing families 1 and 3."
+            "sized guard ring -- family 4, composing families 1 and 3. The "
+            "interleave puts one Q1 and one Q2 sub-instance in every column, "
+            "so the two legs share one x column per terminal -- read "
+            "docs/cli/gen.md's diff_pair section before floorplanning a "
+            "one-column-per-net routing grid around it."
         ),
         dbu=0.001,
         validate=_diff_pair_validate,

@@ -912,6 +912,31 @@ routing opening — see `guard_ring`'s "Ring routing openings" above).
 `"diff_pair:mirror:<splits>"` with `params.mirror`; `flavor` is not folded in
 — see `mos_array`'s equivalent note above).
 
+**Both legs share one x column per terminal.** Every column of the 2-row
+checkerboard holds exactly one `Q1` and one `Q2` sub-instance, and both rows
+place their unit device at the same `x0 = col * col_pitch` — so `Q1_<n>_S`
+and that column's `Q2_*_S` report **identical `x_um`**, differing only in
+`y_um` by one row pitch (likewise `_D` and `_G`). Across the whole cell the
+two legs' sets of port x values are equal, for every `splits`. A composed
+floorplan in the **one-column-per-pin** style (one horizontal track per net,
+reached by a single vertical routing column per pin) therefore cannot route
+the two legs: their distinct nets would have to share a column. Route
+the two rows out in opposite `y` directions instead — the `_S`/`_D` ports
+face `direction_deg` `180`/`0` and the gates `90`; widen `row_spacing_um`
+for the band between the rows and `ring_padding_um` for the band outside the
+outermost active edge — or, if a one-column-per-net grid is mandatory, place
+two independent `mos_array` singles side by side and give up the
+common-centroid interleave.
+
+This is inherent to common-centroid interleaving, not a fixable oversight,
+and in particular it is *not* removable by a per-leg x offset: pushing one
+leg off the shared column by a constant shifts that leg's x centroid
+relative to the other's, which is precisely the gradient cancellation the
+generator exists to provide. Nor is there a cleverer ordering in general —
+placing `2 * splits` units at distinct multiples of one pitch and splitting
+them into two halves with an equal x centroid requires the position sum
+`splits * (2 * splits - 1)` to be even, which fails for every odd `splits`.
+
 `flavor="pfet"` (composable with `mirror` — a mirror-labelled `pfet` pair is
 a PMOS current mirror) encloses the device pair's own active footprint in a
 well, independent of `add_guard_ring` (a PMOS pair with no automatic ring
@@ -939,7 +964,7 @@ which cites no such marker layer) draws nothing and is reported via
 | ------------------ | ------ | ------- | ----------- |
 | `w_um`             | double | `0.42`  | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
 | `l_um`             | double | `0.28`  | Gate length (µm). Must be `> 0`. Composes `mos_array`'s unit device, so it inherits the same S/D-pad-to-gate padding (issue #1187) below `0.28`um — see `mos_array`'s own `l_um` row above. |
-| `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. |
+| `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. Every column holds one `Q1` and one `Q2` sub-instance at the same x, at any `splits` — see "Both legs share one x column per terminal" above before floorplanning a one-column-per-net grid around this generator. |
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
 | `ring_gap_side`    | string | `""`    | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
 | `ring_gap_um`      | double | `0.0`   | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
