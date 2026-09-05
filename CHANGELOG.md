@@ -10,7 +10,9 @@ instead. This file is the source of truth for which categories exist as of a
 given date; pin `provenance.deck` (sha256) and `provenance.klayout_version`,
 not `klt --version`, if you need to detect this kind of drift. See
 [`RELEASING.md`](RELEASING.md)'s "Release cadence" section for when the
-`## Unreleased` entries below actually ship to PyPI.
+`## Unreleased
+
+## 0.4.0 (2026-09-05)` entries below actually ship to PyPI.
 
 ## Unreleased
 
