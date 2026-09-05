@@ -49,6 +49,34 @@
       "git_tag": "v0.3.0",
       "git_commit": "ad33e638780b9297674b7c8e3980e223d5c9224a",
       "package_version": "0.3.0"
+    },
+    {
+      "deck": "gf180mcu",
+      "content_hash": "sha256:79e71a1e7d84be3cfc82e4c70afbdf7b743ac1f361fb8e981f57831014d2e8b0",
+      "git_tag": "v0.4.0",
+      "git_commit": "34548dc1353cc6ff71e89ed2a91db7f6902b4b27",
+      "package_version": "0.4.0"
+    },
+    {
+      "deck": "sg13cmos5l",
+      "content_hash": "sha256:5b5309ecd586f527d6df271384f18e8f1fcd528a09935544b46aed563b66a92e",
+      "git_tag": "v0.4.0",
+      "git_commit": "34548dc1353cc6ff71e89ed2a91db7f6902b4b27",
+      "package_version": "0.4.0"
+    },
+    {
+      "deck": "sg13g2",
+      "content_hash": "sha256:894326a4e37fb24fef2f7ffc6ae1da55a0e262b0f0bc1c09adc4862909278fda",
+      "git_tag": "v0.4.0",
+      "git_commit": "34548dc1353cc6ff71e89ed2a91db7f6902b4b27",
+      "package_version": "0.4.0"
+    },
+    {
+      "deck": "sky130",
+      "content_hash": "sha256:5afac7ab8561545859f5e2e74f4621c6ffc052756dc8fe344ea263398e96b240",
+      "git_tag": "v0.4.0",
+      "git_commit": "34548dc1353cc6ff71e89ed2a91db7f6902b4b27",
+      "package_version": "0.4.0"
     }
   ]
 }
