@@ -38,6 +38,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   resolved (no open_pdks layer-map file, an undeclared LEF macro/pin, a pin
   centre not covered by drawn conductor) is named in that field and keeps the
   previous `$<id>` fallback rather than failing the merge.
+- **Added**: `klt gen mos_array` gains `add_guard_ring` (default `false`,
+  preserving byte-for-byte existing geometry) plus `ring_gap_side`/
+  `ring_gap_um`/`ring_gap_offset_um`/`ring_padding_um` (issue #1493),
+  matching `diff_pair`'s existing param set and composing the same
+  `_ring_layout`/ring-gap machinery (#434). This closes the "guard/tap ring
+  around a matched device group" idiom `mos_array` — unlike `diff_pair`/
+  `esd_device`/`bjt_array` — previously had no way to draw for itself: a
+  caller needed a separately generated `guard_ring` block placed inside the
+  array's cavity, which `klt gen-compose` could never route to (every
+  backbone segment crossing the enclosing block's bbox was rejected as a
+  collision, with no way to express "this block encloses that one"). With
+  the ring composed directly into the array's own geometry, reporting its
+  own `TAP_*`/`GAP_*` ports, a route from the array's own device port to its
+  own ring's tap port is an ordinary same-block self-net — already covered
+  by the existing pin-block edge-margin allowance, so no `gen-compose`
+  change was needed. Deferred on `sg13cmos5l` (no `"tap"` role in that
+  family's curated deck) *only* when a request actually sets
+  `add_guard_ring: true` — every other `mos_array` request on that family is
+  unaffected. A general `gen-compose`-level declared-enclosure relationship
+  for a ring around a *separately*-generated block remains a non-goal for
+  this issue.
 - **Fixed**: `klt lvs` no longer reports one comparer event twice when a
   `hints.same_nets` pair is refused after the comparer had already associated
   the two nets (issue #1484). Declaring such a pair used to add a

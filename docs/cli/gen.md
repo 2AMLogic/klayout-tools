@@ -201,7 +201,14 @@ generic default for this family only (see the `cap_array` section above).
   its own well-tie tap pad directly on the shared `active` role (see the
   `mos_array` section's own "Well-tie tap pad" note below) — so this list of
   four still-deferred generators, which *do* go through a `tap` role, is
-  unaffected by that fix.
+  unaffected by that fix. `mos_array`'s own `add_guard_ring` (issue #1493)
+  hits this identical `tap`-role gap, but — unlike the four generators
+  above, which are unconditionally deferred for this family — only when a
+  request actually sets `add_guard_ring: true`: every other `mos_array`
+  request on this family (the overwhelming majority, since the param
+  defaults `false`) never touches ring-layer resolution at all, so it is
+  unaffected. A request that does set it gets this module's own clear
+  `GenError` naming the family, not a crash.
 - `cap_array`: this deck's module docstring states cmos5l has no MIM
   capacitor at all (a forbidden-layer requirement), so there is no
   `cap_top_plate`/`cap_bottom_plate` role for this generator to draw from.
@@ -485,6 +492,35 @@ and is reported via a `drc_hints.notes` entry, never silently dropped.
 and `voltage_flavor="medium_voltage"`/`"hv"` draws both the well and the
 marker with no conflict.
 
+**`add_guard_ring` (issue #1493).** Encloses the array in an
+automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
+`add_guard_ring` composes `guard_ring`'s ring-drawing (`ring_gap_side`/
+`ring_gap_um`/`ring_gap_offset_um`/`ring_padding_um` are the identical
+param set — see `guard_ring`'s "Ring routing openings" above and
+`diff_pair`'s own row descriptions below). The ring is sized off the array's
+own shared-footprint box (`well_box_um` — the same box `flavor="pfet"`'s
+well shape and `voltage_flavor`'s marker already enclose) plus
+`ring_padding_um`, so it always clears every real and dummy unit device
+regardless of `flavor`. Reports `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` ports
+(local-metal) when `add_guard_ring` is `true` (and a `GAP_<side>` marker when
+the ring carries a routing opening). Unlike `diff_pair`'s `add_guard_ring`
+(which defaults `true`, since a guard ring is that generator's own primary
+composition), `mos_array`'s defaults to `false` — the ring is a strictly
+additive, opt-in capability here, so a request that omits it draws
+byte-for-byte identical geometry to every `mos_array` request that predates
+this param. The ring's own well tie (independent of, and merging with, the
+array's own `flavor="pfet"` well on the same well layer) is gated on
+`flavor == "pfet"` exactly like `diff_pair`'s equivalent ring well tie — the
+default `flavor="nfet"` never gets enclosed in a well by requesting a ring
+alone. Because the ring composes directly into the block's own geometry
+(rather than requiring a separately generated `guard_ring` block placed
+inside the array's cavity), `klt gen-compose` can route a net between the
+array's own device ports and its own ring's `TAP_*` ports as an ordinary
+same-block self-net — no `gen-compose`-level change was needed for this
+(issue #1493's own scope: a general declared-enclosure relationship for a
+ring around a *separately*-generated block is an explicit non-goal, tracked
+as a future follow-up if still needed).
+
 | `params` field | Type   | Default            | Description |
 | -------------- | ------ | ------------------ | ----------- |
 | `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
@@ -497,6 +533,11 @@ marker with no conflict.
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer) or `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
+| `add_guard_ring` | bool | `false`           | Enclose the array in an automatically-sized tap/guard ring (issue #1493) — see above. Unlike `diff_pair`'s own param of the same name, defaults to `false`. |
+| `ring_gap_side` | string | `""`              | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
+| `ring_gap_um`  | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_offset_um` | double | `0.0`         | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
+| `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 
 ### `res_array` (family 2: resistor/capacitor array)
 

@@ -1016,12 +1016,25 @@ def _cap_top_via_metal_min_w_um(family: str) -> float:
 #: ``generator_name``-parametrized call, since ``diff_pair`` composes the
 #: same ring-layer resolution ``guard_ring`` uses) keeps that failure
 #: legible instead.
+#:
+#: ``mos_array``'s own ``sg13cmos5l`` entry (issue #1493) is *conditional* in
+#: a way none of the entries above are: :func:`_mos_array_layer_params` only
+#: consults this table (via :func:`_ring_layer_params`'s
+#: ``generator_name="mos_array"`` call) when the request actually sets
+#: ``params.add_guard_ring`` -- every existing no-ring ``mos_array`` request
+#: on this family (predating #1493) never reaches this check at all, so it
+#: keeps working unchanged. Only a request that *does* ask for
+#: ``add_guard_ring`` on this family hits this entry, turning what would
+#: otherwise be the same opaque ``None``-``tap_layer`` PCell crash
+#: ``guard_ring``/``diff_pair`` avoid above into this module's own clear
+#: ``GenError``.
 _GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
     "bjt_array": ("sg13g2", "sg13cmos5l"),
     "esd_device": ("sg13g2", "sg13cmos5l"),
     "well_island": ("sg13g2", "sg13cmos5l"),
     "guard_ring": ("sg13cmos5l",),
     "diff_pair": ("sg13cmos5l",),
+    "mos_array": ("sg13cmos5l",),
 }
 
 
@@ -1694,6 +1707,38 @@ def _diff_pair_layer_params(
     return layer_params
 
 
+def _mos_array_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """``mos_array`` composes a unit-device array's own layer roles
+    (:func:`_device_layer_params`) and, only when ``params.add_guard_ring``
+    is actually requested, ``guard_ring``'s ring role
+    (:func:`_ring_layer_params`, issue #1493).
+
+    This is deliberately *conditional*, unlike :func:`_diff_pair_layer_params`/
+    :func:`_esd_device_layer_params` (which always resolve the ring role,
+    since a ring is those generators' own primary composition and both are
+    listed in :data:`_GENERATOR_FAMILY_DEFERRED` outright for a family with
+    no ``"tap"`` role). ``mos_array``'s guard ring is opt-in and defaults to
+    off: resolving the ring role unconditionally would regress every
+    existing no-ring ``mos_array`` request on such a family (e.g.
+    ``sg13cmos5l``, which has no ``"tap"`` role but carries passing
+    ``mos_array`` coverage predating this issue). ``tap_layer`` falls back to
+    ``kdb.LayerInfo(0, 0)`` when the ring role is not resolved -- unused by
+    ``produce_impl`` unless ``add_guard_ring`` is set, mirroring every other
+    ``*_layer``-without-a-``*_present``-gate default in this module."""
+    import klayout.db as kdb
+
+    layer_params = _device_layer_params(pdk_info, params)
+    if params.get("add_guard_ring"):
+        layer_params.update(
+            _ring_layer_params(pdk_info, params, generator_name="mos_array")
+        )
+    else:
+        layer_params.setdefault("tap_layer", kdb.LayerInfo(0, 0))
+    return layer_params
+
+
 def _bjt_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2332,6 +2377,11 @@ def _mos_array_layout(
     finger_topology: str = "parallel",
     gate_pad_clearance_um: float = 0.0,
     draw_well_tap: bool = False,
+    add_guard_ring: bool = False,
+    ring_gap_side: str = "",
+    ring_gap_um: float = 0.0,
+    ring_gap_offset_um: float = 0.0,
+    ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -2355,7 +2405,26 @@ def _mos_array_layout(
     family with a ``"well_tap_implant"`` role needs -- and grows
     ``well_box_um`` to enclose it too. ``None`` (the default, ``False``) when
     not requested, so every caller that never asks for it keeps byte-for-byte
-    identical geometry."""
+    identical geometry.
+
+    ``add_guard_ring`` (issue #1493) additionally encloses the array in an
+    automatically-sized tap/guard ring (``_ring_layout``, the same helper
+    ``diff_pair``/``bjt_array``/``esd_device`` already compose), sized off
+    ``well_box_um`` -- the array's own shared-footprint box regardless of
+    ``flavor`` (it is computed unconditionally above; only *drawing* it as a
+    well is gated on ``flavor == 'pfet'``) -- plus ``ring_padding_um``. This
+    mirrors :func:`_bjt_array_layout`'s own ring-around-``well_box_um``
+    composition (there fixed at :data:`BJT_COLLECTOR_GAP_UM` rather than a
+    caller-supplied padding) more closely than :func:`_diff_pair_layout`'s
+    (whose own core box always starts at the origin): ``well_box_um`` can
+    start at a negative offset once ``dummy`` columns extend left of column
+    0, so ``ring_offset_um`` is derived from ``well_box_um``'s own corner
+    rather than assumed to be ``-(ring_w + padding)``. ``ring_gap_side``/
+    ``ring_gap_um``/``ring_gap_offset_um`` cut one routing opening through the
+    ring (#434), exactly as they do for every other ring-composing generator.
+    ``None``/``(0.0, 0.0)`` (the defaults, ``add_guard_ring=False``) when not
+    requested, so every existing caller keeps byte-for-byte identical
+    geometry."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -2411,6 +2480,26 @@ def _mos_array_layout(
             max(well_box[3], tap_box[3] + margin),
         )
 
+    ring = None
+    ring_offset = (0.0, 0.0)
+    if add_guard_ring:
+        padding = ring_padding_um
+        ring_w = GUARD_RING_DEFAULT_WIDTH_UM
+        inner_x0 = well_box[0] - padding
+        inner_y0 = well_box[1] - padding
+        inner_w = (well_box[2] - well_box[0]) + 2 * padding
+        inner_h = (well_box[3] - well_box[1]) + 2 * padding
+        ring = _ring_layout(
+            inner_w,
+            inner_h,
+            ring_w,
+            GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
+            ring_gap_side,
+            ring_gap_um,
+            ring_gap_offset_um,
+        )
+        ring_offset = (inner_x0 - ring_w, inner_y0 - ring_w)
+
     return {
         "unit": unit,
         "col_pitch_um": col_pitch,
@@ -2419,6 +2508,8 @@ def _mos_array_layout(
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
         "well_tap": well_tap,
+        "ring": ring,
+        "ring_offset_um": ring_offset,
     }
 
 
@@ -3967,6 +4058,48 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
                 default=0.0,
             )
+            self.param(
+                "add_guard_ring",
+                self.TypeBoolean,
+                "Enclose the array in an automatically-sized tap/guard ring "
+                "(issue #1493)",
+                default=False,
+            )
+            self.param(
+                "ring_gap_side",
+                self.TypeString,
+                "Cut one routing opening through the guard ring on this side: "
+                "'' (default, closed ring), 'N', 'S', 'E' or 'W'",
+                default="",
+            )
+            self.param(
+                "ring_gap_um",
+                self.TypeDouble,
+                "Length of the guard-ring opening along its side (um), when "
+                "ring_gap_side is set",
+                default=0.0,
+            )
+            self.param(
+                "ring_gap_offset_um",
+                self.TypeDouble,
+                "Shift of the guard-ring opening from its side's midpoint (um): "
+                "+x on 'N'/'S', +y on 'E'/'W'",
+                default=0.0,
+            )
+            self.param(
+                "ring_padding_um",
+                self.TypeDouble,
+                "Padding between the array's own shared-footprint box "
+                "(well_box_um) and the guard ring's inner edge (um), when "
+                "add_guard_ring is set",
+                default=GUARD_RING_DEFAULT_PADDING_UM,
+            )
+            self.param(
+                "tap_layer",
+                self.TypeLayer,
+                "Guard ring tap drawing layer (only used when add_guard_ring is set)",
+                default=kdb.LayerInfo(0, 0),
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -4002,6 +4135,11 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.finger_topology,
                 self.gate_pad_clearance_um,
                 draw_well_tap,
+                self.add_guard_ring,
+                self.ring_gap_side,
+                self.ring_gap_um,
+                self.ring_gap_offset_um,
+                self.ring_padding_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -4051,6 +4189,59 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                                 )
                             ),
                         )
+                    )
+
+            # Automatically-sized tap/guard ring (issue #1493): composed the
+            # same way `diff_pair`/`esd_device`/`bjt_array` already compose
+            # `_ring_layout`, sized off `well_box_um` (the array's own
+            # shared-footprint box, computed above regardless of `flavor`).
+            if info["ring"] is not None and self.add_guard_ring:
+                li_tap = self.layout.layer(self.tap_layer)
+                ox, oy = info["ring_offset_um"]
+                ring = info["ring"]
+                gap_box = (
+                    _shift_box(ring["gap"]["box_um"], ox, oy)
+                    if ring["gap"] is not None
+                    else None
+                )
+                _insert_ring(
+                    self.cell,
+                    li_tap,
+                    dbu,
+                    _shift_box(ring["outer_box_um"], ox, oy),
+                    _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
+                )
+                _insert_ring(
+                    self.cell,
+                    li_metal,
+                    dbu,
+                    _shift_box(ring["outer_box_um"], ox, oy),
+                    _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
+                )
+                _insert_boxes(
+                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
+                )
+                # The ring's own well tie (independent of the device-array
+                # well drawn above, which already merges with it on the same
+                # `well_layer` -- mirrors `_diff_pair_layout`'s identical
+                # "both land on the same layer, so they simply merge" ring
+                # well-tie composition): only for `flavor == 'pfet'`, so the
+                # default `flavor='nfet'` case never encloses an NMOS array
+                # in a well the way #421's diff_pair regression test guards
+                # against.
+                if self.well_present and self.flavor == "pfet":
+                    li_well = self.layout.layer(self.well_layer)
+                    margin = WELL_ENCLOSURE_MARGIN_UM
+                    ring_well_box = (
+                        -margin,
+                        -margin,
+                        ring["outer_w_um"] + margin,
+                        ring["outer_h_um"] + margin,
+                    )
+                    _insert_boxes(
+                        self.cell, li_well, dbu, [_shift_box(ring_well_box, ox, oy)]
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
@@ -5822,6 +6013,38 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             "generator 'mos_array': params.finger_topology must be 'parallel' "
             "or 'series'"
         )
+    if params["ring_padding_um"] < 0:
+        raise GenError("generator 'mos_array': params.ring_padding_um must be >= 0")
+
+    # `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um` are validated against
+    # a hypothetical ring (`add_guard_ring=True`) regardless of the request's
+    # own `add_guard_ring` value -- the same PDK-agnostic-validate-time
+    # position `_diff_pair_validate`/`_esd_device_validate`/
+    # `_bjt_array_validate` already take (this function runs before the PDK
+    # family is resolved, see `_GeneratorSpec.validate`'s own docstring).
+    inner_w_um, inner_h_um = _auto_ring_inner_size_um(
+        _mos_array_layout(
+            params["w_um"],
+            params["l_um"],
+            params["fingers"],
+            params["rows"],
+            params["cols"],
+            params["dummy"],
+            params["topology"],
+            params["gate_contact"],
+            params["finger_topology"],
+            add_guard_ring=True,
+            ring_padding_um=params["ring_padding_um"],
+        )
+    )
+    _validate_ring_gap(
+        "mos_array",
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        inner_w_um,
+        inner_h_um,
+    )
 
 
 def _voltage_flavor_hints(
@@ -5877,6 +6100,11 @@ def _mos_array_describe(
         # clearance moves (issue #1450).
         _gate_pad_clearance_um(family),
         draw_well_tap,
+        params["add_guard_ring"],
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        params["ring_padding_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -5997,7 +6225,31 @@ def _mos_array_describe(
             }
         )
 
-    notes = []
+    # Automatically-sized tap/guard ring (issue #1493): reports the same
+    # `TAP_<side>`/`GAP_<side>` ports `diff_pair`/`esd_device`/`bjt_array`
+    # already report for their own composed rings.
+    ring_drawn = info["ring"] is not None and params["add_guard_ring"]
+    if ring_drawn:
+        ports.extend(
+            _ring_ports(
+                info["ring"],
+                info["ring_offset_um"],
+                "TAP_",
+                metal_layer,
+                GUARD_RING_DEFAULT_WIDTH_UM,
+                metal_layer,
+            )
+        )
+
+    # Unlike `diff_pair` (`add_guard_ring` defaults `True`, so an *explicit*
+    # opt-out earns a note), `mos_array`'s guard ring defaults `False` (issue
+    # #1493's own regression-safety bar) -- the overwhelmingly common no-ring
+    # case would otherwise gain a notes[] entry on every existing caller.
+    # `_ring_gap_notes` alone still covers the "ring_gap_side set but no ring
+    # drawn" case.
+    notes = _ring_gap_notes(
+        info["ring"] if ring_drawn else None, params["ring_gap_side"]
+    )
     if params["l_um"] < GATE_LENGTH_SAFE_MIN_UM:
         notes.append(
             f"gate length below {GATE_LENGTH_SAFE_MIN_UM}um (this generator's own "
@@ -7649,7 +7901,7 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         dbu=0.001,
         validate=_mos_array_validate,
         describe=_mos_array_describe,
-        layer_params=_device_layer_params,
+        layer_params=_mos_array_layer_params,
     ),
     "res_array": _GeneratorSpec(
         name="res_array",
