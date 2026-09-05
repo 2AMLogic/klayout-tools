@@ -1650,6 +1650,162 @@ R2 GND $2 2k
     assert response["status"] == "mismatch"
 
 
+def test_differently_named_but_identical_nets_match_without_any_finding(tmp_path):
+    """Issue #1484, ground truth for the two tests below: `NetlistComparer`
+    pairs two *topologically identical* nets whose names differ on each side
+    with no finding at all -- it does not care about names.
+
+    So the `topology` "nets were paired despite a name/identity conflict"
+    entry can only ever arise for a pair that is **not** topologically
+    identical, which is why no `hints.same_nets` entry can clear it (see
+    `test_same_nets_hint_on_a_flagged_pairing_does_not_double_report`)."""
+    reference_spice = """
+.subckt cell VDD VSS
+R1 VDD FB 1k
+R2 FB VSS 1k
+R3 VDD N3 1k
+R4 N3 VSS 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell VDD VSS
+R1 VDD OUT 1k
+R2 OUT VSS 1k
+R3 VDD N3 1k
+R4 N3 VSS 1k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "cell"},
+            "reference": {"netlist": reference_path, "top": "cell"},
+        },
+    )
+    report = run_lvs(path)
+
+    # `OUT` (layout) vs `FB` (reference) -- the exact "one child's `out` port
+    # wired to another child's `fb` port" composition shape issue #1484
+    # describes -- is a clean match, needing no hint at all.
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert ("OUT", "FB") in {
+        (entry["layout"], entry["reference"]) for entry in report["net_correspondence"]
+    }
+
+
+def test_same_nets_hint_on_a_flagged_pairing_does_not_double_report(tmp_path):
+    """Issue #1484: declaring `hints.same_nets` for a pair the comparer
+    already reported as a `topology` "name/identity conflict" must not make
+    the report *worse*.
+
+    The comparer emits a both-sided `net_mismatch` for `OUT`/`FB` here
+    because the two nets are genuinely not identical topologically (`R2`'s
+    resistance differs), not because their names differ -- see
+    `test_differently_named_but_identical_nets_match_without_any_finding`.
+    `same_nets(..., must_match=True)` on such a pair is refused, so the
+    `hints.rejected` entry is correct and stays; what must **not** happen is
+    the pre-fix behaviour of reporting the *same* comparer event twice
+    (`hints.rejected` **plus** `topology`), which raised the mismatch count
+    purely for declaring the hint."""
+    reference_spice = """
+.subckt cell VDD VSS
+R1 VDD FB 1k
+R2 FB VSS 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell VDD VSS
+R1 VDD OUT 1k
+R2 OUT VSS 2k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+
+    no_hint = run_lvs(
+        _write_request(
+            tmp_path / "no_hint.json",
+            {
+                "layout": {"netlist": layout_path, "top": "cell"},
+                "reference": {"netlist": reference_path, "top": "cell"},
+            },
+        )
+    )
+    assert no_hint["status"] == "mismatch"
+    assert no_hint["category_counts"] == {"device.property": 1, "topology": 1}
+    (conflict,) = [m for m in no_hint["mismatches"] if m["category"] == "topology"]
+    assert conflict["net"] == {"layout": "OUT", "reference": "FB"}
+    assert "name/identity conflict" in conflict["description"]
+
+    with_hint = run_lvs(
+        _write_request(
+            tmp_path / "with_hint.json",
+            {
+                "layout": {"netlist": layout_path, "top": "cell"},
+                "reference": {"netlist": reference_path, "top": "cell"},
+                "hints": {"same_nets": [["OUT", "FB"]]},
+            },
+        )
+    )
+    # The `topology` duplicate is gone; the one, narrower `hints.rejected`
+    # entry takes its place -- same mismatch count as without the hint, not
+    # one more.
+    assert with_hint["category_counts"] == {"device.property": 1, "hints.rejected": 1}
+    assert with_hint["mismatch_count"] == no_hint["mismatch_count"]
+    assert not [m for m in with_hint["mismatches"] if m["category"] == "topology"]
+    (rejected,) = [
+        m for m in with_hint["mismatches"] if m["category"] == "hints.rejected"
+    ]
+    assert rejected["severity"] == "error"
+    assert rejected["net"] == {"layout": "OUT", "reference": "FB"}
+    # The description says *why* the assertion was refused, so a caller does
+    # not re-declare the hint expecting a different answer.
+    assert "not identical topologically" in rejected["description"]
+    # The real defect is still reported, unchanged.
+    assert with_hint["status"] == "mismatch"
+
+
+def test_same_nets_hint_rejection_does_not_suppress_an_unrelated_topology_entry(
+    tmp_path,
+):
+    """Issue #1484 guard rail: the `topology` suppression is keyed to the
+    *declared* pair, not to "a hint was declared somewhere". A conflict
+    reported for a different net pair in the same run survives."""
+    reference_spice = """
+.subckt cell VDD VSS
+R1 VDD FB 1k
+R2 FB VSS 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell VDD GNDL
+R1 VDD OUT 1k
+R2 OUT GNDL 2k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "cell"},
+                "reference": {"netlist": reference_path, "top": "cell"},
+                "hints": {"same_nets": [["OUT", "FB"]]},
+            },
+        )
+    )
+
+    (rejected,) = [m for m in report["mismatches"] if m["category"] == "hints.rejected"]
+    assert rejected["net"] == {"layout": "OUT", "reference": "FB"}
+    # `GNDL`/`VSS` was never declared -- its own conflict entry is untouched.
+    (conflict,) = [m for m in report["mismatches"] if m["category"] == "topology"]
+    assert conflict["net"] == {"layout": "GNDL", "reference": "VSS"}
+
+
 def test_same_nets_hint_unknown_layout_net_raises(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)

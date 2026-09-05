@@ -3387,6 +3387,13 @@ def _build_mismatches(
     # event that yields `device.property`. Recover that here.
     degraded = _degraded_param_pair(logger)
 
+    # Issue #499/#1484: how the comparer answered each declared
+    # `hints.same_nets` assertion -- needed twice below (to decide which
+    # declared pairs are `hints.rejected` findings, and to suppress the
+    # `topology` entry that would otherwise report the same comparer event a
+    # second time).
+    hint_outcomes = _same_nets_hint_outcomes(logger, same_nets_hints)
+
     mismatches.extend(
         _classify_net_mismatches(
             logger.net_mismatches,
@@ -3397,6 +3404,7 @@ def _build_mismatches(
             explained_reference_nets=(
                 degraded.explained_reference_nets if degraded else frozenset()
             ),
+            hint_reported_pairs=hint_outcomes.refused_after_pairing,
         )
     )
 
@@ -3613,26 +3621,47 @@ def _build_mismatches(
     # every declared pair. If the comparer did not end up confirming that
     # pair as a match, the caller's assertion was refused, and that
     # disagreement is reported here rather than silently dropped. Detected
-    # structurally (declared pair vs. `logger.matched_net_keys`, both keyed
-    # by the top circuit's `top_scope`), not by parsing the comparer's own
+    # structurally (declared pair vs. the comparer's own pairing events, both
+    # keyed by the top circuit's `top_scope` -- see
+    # `_same_nets_hint_outcomes`), not by parsing the comparer's own
     # `log_entry` text -- this field's own contract (docs/cli/lvs.md,
     # "mismatches[].description") requires a curated description, never raw
     # `NetlistComparer` log text.
     top_scope = getattr(logger, "top_scope", None)
-    matched_net_keys = set(getattr(logger, "matched_net_keys", None) or ())
     for layout_name, reference_name in same_nets_hints or ():
         pair = ((top_scope, layout_name), (top_scope, reference_name))
-        if top_scope is None or pair not in matched_net_keys:
-            mismatches.append(
-                _mismatch(
-                    CATEGORY_HINTS_REJECTED,
-                    "error",
-                    "hints.same_nets declared this pairing, but the "
-                    "comparer did not confirm it as a topological match",
-                    "both",
-                    net={"layout": layout_name, "reference": reference_name},
-                )
+        if pair in hint_outcomes.confirmed:
+            continue
+        # Issue #1484: distinguish the two ways an assertion is refused. A
+        # pair the comparer associated and then flagged (a both-sided
+        # `net_mismatch`) is refused *because the two nets are not
+        # topologically identical* -- the real difference is reported
+        # elsewhere in this same `mismatches[]`, and no hint can paper over
+        # it. Saying so is the difference between an actionable report and a
+        # caller re-declaring the hint expecting a different answer.
+        if pair in hint_outcomes.refused_after_pairing:
+            description = (
+                "hints.same_nets declared this pairing, but the comparer "
+                "associated the two nets and found them not identical "
+                "topologically -- the underlying structural difference is "
+                "reported separately in this same mismatches[]; a "
+                "hints.same_nets entry cannot resolve it (see "
+                'docs/cli/lvs.md, "hints.rejected")'
             )
+        else:
+            description = (
+                "hints.same_nets declared this pairing, but the comparer "
+                "did not confirm it as a topological match"
+            )
+        mismatches.append(
+            _mismatch(
+                CATEGORY_HINTS_REJECTED,
+                "error",
+                description,
+                "both",
+                net={"layout": layout_name, "reference": reference_name},
+            )
+        )
 
     mismatches.sort(key=_sort_key)
     return mismatches
@@ -3642,6 +3671,63 @@ def _build_mismatches(
 #: ``scope`` counter for why identity is keyed this way rather than by the
 #: net's circuit (which is not readable from a const reference).
 _NetKey = tuple[int, str]
+
+
+class _SameNetsHintOutcomes(NamedTuple):
+    """How the comparer answered each declared ``hints.same_nets`` assertion,
+    in :data:`_NetKey` pair terms (issue #499 / issue #1484).
+
+    ``confirmed`` -- the comparer paired the two nets cleanly
+    (``match_nets``/``match_ambiguous_nets``). The assertion was honored;
+    nothing is reported.
+
+    ``refused_after_pairing`` -- the comparer associated the declared pair but
+    reported it as a **both-sided** ``net_mismatch``. Empirically (KLayout
+    0.30.x) that is exactly the shape a *refused* ``same_nets(...,
+    must_match=True)`` assertion takes: ``NetlistComparer`` logs "Nets A vs. B
+    are paired explicitly, but are not identical topologically" and emits the
+    pair as a net mismatch. It is still a ``hints.rejected`` finding -- but the
+    same event *also* drives :func:`_classify_net_mismatches`'s ``topology``
+    "nets were paired despite a name/identity conflict" entry, so reporting
+    both would describe one comparer event twice and make declaring the hint
+    strictly worse than not declaring it (issue #1484). The narrower,
+    caller-attributed ``hints.rejected`` entry wins; the ``topology``
+    duplicate is suppressed.
+    """
+
+    confirmed: frozenset[tuple[_NetKey, _NetKey]]
+    refused_after_pairing: frozenset[tuple[_NetKey, _NetKey]]
+
+
+def _same_nets_hint_outcomes(
+    logger: Any,
+    same_nets_hints: list[tuple[str, str]] | None,
+) -> _SameNetsHintOutcomes:
+    """Classify each declared ``hints.same_nets`` pair -- see
+    :class:`_SameNetsHintOutcomes`.
+
+    Both buckets are empty when the top circuit pair was never compared
+    (``top_scope is None``), so every declared pair is then reported
+    ``hints.rejected`` with the generic description, exactly as before.
+    """
+    top_scope = getattr(logger, "top_scope", None)
+    declared = {
+        ((top_scope, layout_name), (top_scope, reference_name))
+        for layout_name, reference_name in same_nets_hints or ()
+    }
+    if top_scope is None or not declared:
+        return _SameNetsHintOutcomes(frozenset(), frozenset())
+    matched = set(getattr(logger, "matched_net_keys", None) or ())
+    flagged = {
+        (key_a, key_b)
+        for key_a, key_b in getattr(logger, "net_mismatch_keys", None) or ()
+        if key_a is not None and key_b is not None
+    }
+    confirmed = declared & matched
+    return _SameNetsHintOutcomes(
+        frozenset(confirmed),
+        frozenset((declared & flagged) - confirmed),
+    )
 
 
 class _DegradedParamPair(NamedTuple):
@@ -4121,6 +4207,7 @@ def _classify_net_mismatches(
     event_keys: list[tuple[_NetKey | None, _NetKey | None]] | None = None,
     explained_layout_nets: frozenset[_NetKey] = frozenset(),
     explained_reference_nets: frozenset[_NetKey] = frozenset(),
+    hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Classify raw ``net_mismatch`` events into ``net.unmatched``/
     ``net.merged``/``net.split``/``topology`` entries -- see this module's
@@ -4135,6 +4222,19 @@ def _classify_net_mismatches(
     reads the parameter defect instead of four fine nets. ``event_keys`` is
     the compare logger's key list, parallel to ``events`` (omitted by the
     fake-logger unit tests, in which case nothing is ever "explained").
+
+    ``hint_reported_pairs`` (issue #1484, from
+    :func:`_same_nets_hint_outcomes`) names the both-sided net-mismatch events
+    already reported as ``hints.rejected`` by :func:`_build_mismatches`
+    because the caller declared that exact pair via ``hints.same_nets``. A
+    renamed pairing in that set is *not* also reported as a ``topology``
+    "name/identity conflict": both entries describe the one comparer event,
+    and the ``hints.rejected`` one is strictly more informative (it names the
+    caller's own assertion). Without this, declaring a ``hints.same_nets``
+    entry for such a pair could only ever *raise* the mismatch count. Pairs in
+    this set still count as renamed pairings for the merge/split heuristic
+    above -- suppressing a duplicate report does not make a leftover one-sided
+    net stop being a split or a merge.
     """
     keys: list[tuple[_NetKey | None, _NetKey | None]] = (
         list(event_keys) if event_keys is not None else [(None, None)] * len(events)
@@ -4146,9 +4246,10 @@ def _classify_net_mismatches(
     one_sided_reference = [
         (b, key) for (a, b), key in tagged if a is None and b is not None
     ]
-    both_sided = [(a, b) for a, b in events if a is not None and b is not None]
     both_sided_renamed = [
-        (a, b) for a, b in both_sided if a.expanded_name() != b.expanded_name()
+        (a, b, key)
+        for (a, b), key in tagged
+        if a is not None and b is not None and a.expanded_name() != b.expanded_name()
     ]
 
     entries: list[dict[str, Any]] = []
@@ -4210,7 +4311,12 @@ def _classify_net_mismatches(
     # cause, reported once); a differing-name pairing with no accompanying
     # leftover is its own, otherwise-unreported finding, standalone.
     if not one_sided_layout and not one_sided_reference:
-        for a, b in both_sided_renamed:
+        for a, b, key in both_sided_renamed:
+            if key in hint_reported_pairs:
+                # Issue #1484: this exact event is already reported, more
+                # specifically, as the `hints.rejected` entry for the
+                # caller's own `hints.same_nets` declaration.
+                continue
             entries.append(
                 _mismatch(
                     CATEGORY_TOPOLOGY,
