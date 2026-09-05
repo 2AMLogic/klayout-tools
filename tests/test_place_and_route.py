@@ -1679,7 +1679,14 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
     def fake_merge(**kwargs):
         calls.append(kwargs)
         Path(kwargs["out_path"]).write_text("fake gds\n")
-        return {"path": None, "resolution": "none"}
+        return {
+            "path": None,
+            "resolution": "none",
+            "def_net_names": {
+                "single_pin_markers": 0,
+                "unresolved_single_pin_nets": [],
+            },
+        }
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
     return calls
@@ -1782,6 +1789,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert os.path.isfile(report["verilog_path"])
     assert len(merge_calls) == 1
     assert merge_calls[0]["hdl_toplevel"] == "gcd"
+    # Issue #1029 / #1488: both additive merge-report fields reach the
+    # response envelope as independent siblings, not as one blended object.
+    assert report["layer_map"] == {"path": None, "resolution": "none"}
+    assert report["def_net_names"] == {
+        "single_pin_markers": 0,
+        "unresolved_single_pin_nets": [],
+    }
 
     provenance = report["provenance"]
     assert provenance["klt_version"]
@@ -3125,6 +3139,10 @@ def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     assert report["def_path"] is None
     assert report["gds_path"] is None
     assert report["verilog_path"] is None
+    # No merge ran, so neither merge-derived additive field has a value to
+    # report (issue #1029's `layer_map`, issue #1488's `def_net_names`).
+    assert report["layer_map"] is None
+    assert report["def_net_names"] is None
     assert len(merge_calls) == 0
     assert [stage["name"] for stage in report["stages"]] == ["floorplan", "place"]
     # place-stage metrics are present at top level (the last completed
@@ -4502,7 +4520,13 @@ def test_merge_def_to_gds_success(tmp_path):
     result.read(str(out_path))
     assert result.top_cell().name == "top"
     # `_fake_pdk_info`'s `assets.klayout` is `None` -- no map file to find.
-    assert result_info == {"path": None, "resolution": "none"}
+    assert result_info == {
+        "path": None,
+        "resolution": "none",
+        # This DEF declares no `NETS` section at all, so the issue #1488
+        # single-pin marker pass has nothing to do.
+        "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
+    }
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -4596,7 +4620,11 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
     )
 
     assert out_path.is_file()
-    assert result_info == {"path": str(map_path), "resolution": "family"}
+    assert result_info == {
+        "path": str(map_path),
+        "resolution": "family",
+        "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
+    }
 
 
 def test_merge_def_to_gds_missing_top_cell(tmp_path):
@@ -5413,6 +5441,365 @@ def test_merge_def_to_gds_caps_measured_overhang_at_site_height(tmp_path):
             macros=[],
             out_path=str(tmp_path / "out.gds"),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Unrouted single-pin DEF net names (issue #1488): KLayout's LEF/DEF reader
+# only stamps `net_property_name` onto the *routed* geometry it draws in the
+# top cell, so a net whose whole physical presence is one standard cell's own
+# pin (a tie cell's output with nothing to route to) reaches `klt extract
+# --def-net-names` with no name carrier at all. The merge synthesizes one.
+# --------------------------------------------------------------------------- #
+
+
+def _write_tie_cell_tech_lef(path: Path) -> None:
+    """`_write_tiny_tech_lef`'s shape, but routing on `li1` (the layer
+    sky130's own extraction deck lists first in `metals`, and the layer a
+    real sky130 standard cell draws its output pin on) and with a taller
+    `SITE` so the tie-cell GDS view below fits inside one row."""
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        'BUSBITCHARS "[]" ;\n'
+        'DIVIDERCHAR "/" ;\n'
+        "UNITS\n"
+        "  DATABASE MICRONS 1000 ;\n"
+        "END UNITS\n"
+        "MANUFACTURINGGRID 0.005 ;\n"
+        "SITE unithd\n"
+        "  SYMMETRY Y ;\n"
+        "  CLASS CORE ;\n"
+        "  SIZE 0.46 BY 4.00 ;\n"
+        "END unithd\n"
+        "LAYER li1\n"
+        "  TYPE ROUTING ;\n"
+        "  DIRECTION HORIZONTAL ;\n"
+        "  WIDTH 0.14 ;\n"
+        "  PITCH 0.34 ;\n"
+        "END li1\n",
+        encoding="utf-8",
+    )
+
+
+def _write_tie_cell_lef(path: Path, *, pin_name: str = "HI") -> None:
+    """A one-output-pin standard cell (the tie-cell shape issue #1488 is
+    about): a single `li1` `PORT` rectangle covering the drain pad the GDS
+    view below draws, and no input signal pin at all."""
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        'BUSBITCHARS "[]" ;\n'
+        'DIVIDERCHAR "/" ;\n'
+        "UNITS\n"
+        "  DATABASE MICRONS 1000 ;\n"
+        "END UNITS\n"
+        "MACRO tiecell\n"
+        "  CLASS CORE ;\n"
+        "  SITE unithd ;\n"
+        "  SIZE 2.0 BY 4.0 ;\n"
+        f"  PIN {pin_name}\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ; RECT 1.6 0.2 2.0 0.8 ;\n"
+        "    END\n"
+        f"  END {pin_name}\n"
+        "END tiecell\n",
+        encoding="utf-8",
+    )
+
+
+def _write_tie_cell_gds(path: Path) -> None:
+    """A GDS view for the `tiecell` macro above carrying *real* sky130-deck
+    device geometry (one NMOS + one PMOS sharing a poly gate, contacted up to
+    `li1`), so extraction of the merged layout produces genuine nets rather
+    than bare, purged metal islands. Shaped after `tests/test_extract.py`'s
+    own `_make_inverter_layout`, minus every text label -- an unlabelled net
+    is exactly what a DEF->GDS merge leaves behind for an internal net, and
+    is what `--def-net-names` has to rename."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("tiecell")
+
+    def draw(layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (nmos active)
+    draw(65, 20, kdb.Box(0, 2000, 2000, 3000))  # diff.drawing (pmos active)
+    draw(64, 20, kdb.Box(-500, 1500, 2500, 3500))  # nwell.drawing
+    draw(66, 20, kdb.Box(800, -200, 1200, 3200))  # poly.drawing (shared gate)
+    for y0 in (0, 2000):
+        draw(66, 44, kdb.Box(100, y0 + 300, 300, y0 + 700))  # licon1 (S)
+        draw(66, 44, kdb.Box(1700, y0 + 300, 1900, y0 + 700))  # licon1 (D)
+        draw(67, 20, kdb.Box(0, y0 + 200, 400, y0 + 800))  # li1 (S pad)
+        draw(67, 20, kdb.Box(1600, y0 + 200, 2000, y0 + 800))  # li1 (D pad)
+    draw(66, 44, kdb.Box(900, 1400, 1100, 1600))  # gate contact
+    draw(67, 20, kdb.Box(850, 1350, 1150, 1650))
+    draw(65, 44, kdb.Box(-400, 2400, -200, 2600))  # tap.drawing (nwell tap)
+    layout.write(str(path))
+
+
+def _write_li1_layer_map(path: Path) -> None:
+    """The three `li1` rows a real open_pdks `sky130A.map` carries, in the
+    same whitespace-delimited `<lef layer> <purposes> <gds layer> <gds
+    datatype>` shape -- the `NET` purpose (67/20) is what the merge resolves
+    a LEF `PORT`'s own layer name through."""
+    path.write_text(
+        "li1     NET,SPNET,VIA            67  20\n"
+        "li1     LEFPIN,PIN               67  16\n"
+        "NAME    li1/LABEL,li1/LEFPIN     67  5\n",
+        encoding="utf-8",
+    )
+
+
+def _write_tie_cell_def(path: Path, *, nets: str) -> None:
+    """Two `tiecell` instances placed far apart, with a caller-supplied
+    `NETS` section body (one `- <net> ...` record per line)."""
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        'DIVIDERCHAR "/" ;\n'
+        'BUSBITCHARS "[]" ;\n'
+        "DESIGN top ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( -1000 -1000 ) ( 20000 20000 ) ;\n"
+        "ROW ROW_0 unithd 0 0 N DO 10 BY 1 STEP 2000 0 ;\n"
+        "COMPONENTS 2 ;\n"
+        "- u_tie1 tiecell + PLACED ( 0 0 ) N ;\n"
+        "- u_tie2 tiecell + PLACED ( 6000 8000 ) N ;\n"
+        "END COMPONENTS\n"
+        f"NETS {len([line for line in nets.splitlines() if line.strip()])} ;\n"
+        f"{nets}"
+        "END NETS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+
+
+def _tie_cell_merge_inputs(tmp_path: Path, *, layer_map: bool = True) -> dict:
+    """Every `_merge_def_to_gds` keyword the tie-cell fixture needs, with the
+    standard-cell GDS view (and, optionally, the `li1` layer map) written to
+    the open_pdks-shaped locations `_resolve_gds_view`/`_resolve_layer_map`
+    look in."""
+    root = tmp_path / "install"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tie_cell_tech_lef(tech_lef)
+    _write_tie_cell_lef(cell_lef)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_tie_cell_gds(gds_dir / "sky130_fd_sc_hd.gds")
+
+    pdk_info = _fake_pdk_info(root)
+    if layer_map:
+        tech_dir = root / "sky130A" / "libs.tech" / "klayout" / "tech"
+        tech_dir.mkdir(parents=True)
+        _write_li1_layer_map(tech_dir / "sky130A.map")
+        pdk_info["assets"]["klayout"] = str(tech_dir.parent)
+
+    return {
+        "tech_lef": str(tech_lef),
+        "cell_lef": str(cell_lef),
+        "pdk_info": pdk_info,
+        "cell_library": "sky130_fd_sc_hd",
+        "hdl_toplevel": "top",
+        "macros": [],
+    }
+
+
+def _stamped_def_net_names(gds_path: Path) -> dict[str, tuple[int, int, int, int]]:
+    """`{<DEF net name>: <bbox as a dbu 4-tuple>}` for every top-cell shape in
+    `gds_path` carrying the DEF net-name shape property `--def-net-names`
+    reads (`extract_abstract._DEF_NET_NAME_PROPERTY_ID`, i.e. `1`)."""
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    top = layout.top_cell()
+    stamped: dict[str, tuple[int, int, int, int]] = {}
+    for layer_index in layout.layer_indexes():
+        for shape in top.shapes(layer_index).each():
+            name = shape.property(extract_module._DEF_NET_NAME_PROPERTY_ID)
+            if isinstance(name, str) and name:
+                box = shape.bbox()
+                stamped[name] = (box.left, box.bottom, box.right, box.top)
+    return stamped
+
+
+def test_merge_stamps_def_net_names_on_unrouted_single_pin_nets(tmp_path):
+    """Issue #1488's core defect: two structurally identical tie cells, each
+    driving its own one-pin net with no `ROUTED` section at all. KLayout's
+    DEF reader draws no top-cell geometry for either net, so neither carried
+    a `net_property_name` stamp anywhere `--def-net-names` could see it. The
+    merge now synthesizes one marker shape per such net, on the pin's own
+    resolved GDS layer, at the pin's own placed location -- distinct per
+    instance, never a shared macro-cell annotation."""
+    inputs = _tie_cell_merge_inputs(tmp_path)
+    def_path = tmp_path / "design.def"
+    _write_tie_cell_def(
+        def_path,
+        nets="- net_hi_1 ( u_tie1 HI ) + USE SIGNAL ;\n"
+        "- net_hi_2 ( u_tie2 HI ) + USE SIGNAL ;\n",
+    )
+    out_path = tmp_path / "out.gds"
+
+    result = place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    assert result["def_net_names"] == {
+        "single_pin_markers": 2,
+        "unresolved_single_pin_nets": [],
+    }
+    stamped = _stamped_def_net_names(out_path)
+    assert set(stamped) == {"net_hi_1", "net_hi_2"}
+    # Each marker sits at its *own* instance's placed pin centre -- the LEF
+    # `PORT` rect's centre (1.8, 0.5) um, plus that instance's placement.
+    assert stamped["net_hi_1"] == (1799, 499, 1801, 501)
+    assert stamped["net_hi_2"] == (7799, 8499, 7801, 8501)
+
+
+def test_merge_single_pin_net_markers_survive_extraction(tmp_path):
+    """The acceptance measurement for issue #1488, end to end: the merged
+    GDS extracts with `--def-net-names` to the DEF's own two net names,
+    where a default extraction (and a pre-fix `--def-net-names` run) can only
+    synthesize `$<id>` placeholders for them."""
+    inputs = _tie_cell_merge_inputs(tmp_path)
+    def_path = tmp_path / "design.def"
+    _write_tie_cell_def(
+        def_path,
+        nets="- net_hi_1 ( u_tie1 HI ) + USE SIGNAL ;\n"
+        "- net_hi_2 ( u_tie2 HI ) + USE SIGNAL ;\n",
+    )
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    default_names = {
+        net["name"]
+        for net in extract_module.run_extract(
+            str(out_path), "sky130", output=str(tmp_path / "default.spice")
+        )["nets"]
+    }
+    def_names = {
+        net["name"]
+        for net in extract_module.run_extract(
+            str(out_path),
+            "sky130",
+            output=str(tmp_path / "def_names.spice"),
+            def_net_names=True,
+        )["nets"]
+    }
+
+    assert not {"net_hi_1", "net_hi_2"} & default_names
+    assert {"net_hi_1", "net_hi_2"} <= def_names
+
+
+def test_merge_leaves_routed_single_pin_nets_to_their_own_routed_metal(tmp_path):
+    """Scoped conservatively: a net KLayout's DEF reader already stamped
+    (because it *does* carry a `ROUTED` section, even with a single instance
+    pin -- e.g. a net whose other terminal is a top-level `PIN`) is left
+    exactly as the well-tested routed-metal path produced it, so this fix
+    cannot perturb issue #951's behaviour."""
+    inputs = _tie_cell_merge_inputs(tmp_path)
+    def_path = tmp_path / "design.def"
+    _write_tie_cell_def(
+        def_path,
+        nets="- net_hi_1 ( u_tie1 HI ) + ROUTED li1 ( 1800 500 ) ( 3000 * ) ;\n"
+        "- net_hi_2 ( u_tie2 HI ) + USE SIGNAL ;\n",
+    )
+    out_path = tmp_path / "out.gds"
+
+    result = place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    assert result["def_net_names"] == {
+        "single_pin_markers": 1,
+        "unresolved_single_pin_nets": [],
+    }
+    stamped = _stamped_def_net_names(out_path)
+    assert set(stamped) == {"net_hi_1", "net_hi_2"}
+    # `net_hi_1`'s name still rides its own routed wire (a 0.14 um-wide
+    # `li1` segment running from x = 1.8 um out to x = 3.0 um, with KLayout's
+    # own half-width square end extensions), not a synthesized marker.
+    assert stamped["net_hi_1"] == (1730, 430, 3070, 570)
+
+
+def test_merge_reports_unresolvable_single_pin_nets_without_crashing(tmp_path):
+    """The degrade-gracefully path (issue #1488's own edge case): a single-pin
+    net whose pin geometry cannot be resolved -- here because the DEF names a
+    pin the LEF macro never declares -- is reported by name rather than
+    crashing the merge, and simply keeps the pre-fix synthesized-`$<id>`
+    fallback downstream."""
+    inputs = _tie_cell_merge_inputs(tmp_path)
+    def_path = tmp_path / "design.def"
+    _write_tie_cell_def(
+        def_path,
+        nets="- net_hi_1 ( u_tie1 NOSUCHPIN ) + USE SIGNAL ;\n"
+        "- net_hi_2 ( u_tie2 HI ) + USE SIGNAL ;\n",
+    )
+    out_path = tmp_path / "out.gds"
+
+    result = place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    assert result["def_net_names"] == {
+        "single_pin_markers": 1,
+        "unresolved_single_pin_nets": ["net_hi_1"],
+    }
+    assert out_path.is_file()
+    assert set(_stamped_def_net_names(out_path)) == {"net_hi_2"}
+
+
+def test_merge_reports_unresolved_single_pin_nets_without_a_layer_map(tmp_path):
+    """No open_pdks layer-map file means no way to resolve a LEF `PORT`'s own
+    layer name to the GDS layer the cell's view actually draws that pin on,
+    so every single-pin net is reported unresolved rather than guessed at --
+    the same "degrade gracefully, never fabricate" posture `_resolve_layer_map`
+    itself takes (`resolution: "none"`)."""
+    inputs = _tie_cell_merge_inputs(tmp_path, layer_map=False)
+    def_path = tmp_path / "design.def"
+    _write_tie_cell_def(
+        def_path,
+        nets="- net_hi_1 ( u_tie1 HI ) + USE SIGNAL ;\n"
+        "- net_hi_2 ( u_tie2 HI ) + USE SIGNAL ;\n",
+    )
+    out_path = tmp_path / "out.gds"
+
+    result = place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    assert result["resolution"] == "none"
+    assert result["def_net_names"] == {
+        "single_pin_markers": 0,
+        "unresolved_single_pin_nets": ["net_hi_1", "net_hi_2"],
+    }
+    assert _stamped_def_net_names(out_path) == {}
+
+
+def test_merged_gds_carries_def_component_names_as_instance_properties(tmp_path):
+    """Characterisation of the KLayout behaviour the marker pass is built on
+    (`LEFDEFReaderConfiguration.instance_property_name`, whose default is
+    property `1`, verified against klayout 0.30.10): each placed instance
+    already carries its own DEF `COMPONENTS` name, which is what lets a
+    `(instance, pin)` connection from the DEF's `NETS` section be resolved to
+    *one* placement rather than to the macro cell every instance shares. The
+    merge relies on the default and never sets the option, so this also
+    guards the assumption against a future KLayout default change."""
+    inputs = _tie_cell_merge_inputs(tmp_path)
+    def_path = tmp_path / "design.def"
+    _write_tie_cell_def(def_path, nets="- net_hi_1 ( u_tie1 HI ) + USE SIGNAL ;\n")
+    out_path = tmp_path / "out.gds"
+
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(out_path))
+    assert [inst.properties() for inst in layout.top_cell().each_inst()] == [
+        {place_and_route._DEF_INSTANCE_NAME_PROPERTY_ID: "u_tie1"},
+        {place_and_route._DEF_INSTANCE_NAME_PROPERTY_ID: "u_tie2"},
+    ]
 
 
 # --------------------------------------------------------------------------- #

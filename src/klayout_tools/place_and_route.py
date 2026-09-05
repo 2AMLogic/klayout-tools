@@ -511,7 +511,7 @@ from typing import Any
 from ._layout import write_layout
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
-from .lef_header import read_lef_header
+from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import (
     PdkNotFoundError,
     find_pdk,
@@ -532,6 +532,32 @@ SUPPORTED_ENGINES = ("openroad",)
 #: The four stages ``target_stage`` names, in execution order -- see this
 #: module's own docstring "Stage granularity and invocation shape".
 STAGE_ORDER = ("floorplan", "place", "cts", "route")
+
+#: The user-property key KLayout's own LEF/DEF reader records each DEF
+#: ``COMPONENTS`` entry's **instance name** under, on the ``kdb.Instance`` it
+#: places for that entry -- ``LEFDEFReaderConfiguration.instance_property_name``,
+#: whose KLayout default is ``1`` (verified against klayout 0.30.10).
+#: :func:`_merge_def_to_gds` never overrides it, exactly as it never overrides
+#: ``net_property_name`` (the *shape* property id, coincidentally also ``1``,
+#: that ``klt extract --def-net-names`` reads -- a different object kind, so
+#: the two never collide).
+#:
+#: This is what makes a DEF ``NETS`` connection (``( <instance> <pin> )``)
+#: resolvable to **one placement**: a standard cell's own pin geometry lives
+#: in the macro cell every instance of that cell type shares, so the pin name
+#: alone identifies nothing. See
+#: :func:`_stamp_single_pin_def_net_names` (issue #1488).
+_DEF_INSTANCE_NAME_PROPERTY_ID = 1
+
+#: Half-width, in database units, of the marker box
+#: :func:`_stamp_single_pin_def_net_names` draws to carry an unrouted
+#: single-pin net's DEF name. Deliberately tiny (a 2 dbu square, i.e. 2 nm on
+#: a 0.001 um-dbu PDK) *and* only ever drawn where the merged layout already
+#: has drawn conductor covering it, so the marker is a geometric no-op: every
+#: consumer of the merged GDS -- DRC, LVS, extraction's own region merge --
+#: sees exactly the same merged polygons it saw before, and the marker
+#: contributes only its shape property.
+_SINGLE_PIN_NET_MARKER_HALF_DBU = 1
 
 #: Valid ``request.macros[].orientation`` values -- OpenROAD's own
 #: orientation vocabulary (the same set ``place_macro``/``place_cell``
@@ -1313,6 +1339,7 @@ def run_place_and_route(
     verilog_path: str | None = None
     spef_sta: dict[str, Any] | None = None
     layer_map_info: dict[str, Any] | None = None
+    def_net_names_info: dict[str, Any] | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
@@ -1321,7 +1348,7 @@ def run_place_and_route(
         # rather than threaded back out, exactly as `def_path` above and the
         # `-output_drc` report path earlier already are.
         verilog_path = os.path.join(output_dir, f"{hdl_toplevel}.v")
-        layer_map_info = _merge_def_to_gds(
+        merge_info = _merge_def_to_gds(
             def_path=def_path,
             tech_lef=tech_lef,
             cell_lef=cell_lef,
@@ -1331,6 +1358,11 @@ def run_place_and_route(
             macros=macros,
             out_path=gds_path,
         )
+        layer_map_info = {
+            "path": merge_info["path"],
+            "resolution": merge_info["resolution"],
+        }
+        def_net_names_info = merge_info["def_net_names"]
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -1520,6 +1552,17 @@ def run_place_and_route(
         # this response for a caller to notice. `null` unless
         # `stage_reached` is `"route"`, mirroring `gds_path`/`verilog_path`.
         "layer_map": layer_map_info,
+        # Additive field (issue #1488): what the DEF->GDS merge's own
+        # single-pin net-name marker pass did, so a caller can tell an
+        # unrouted tie-cell-style net that *did* get its real DEF name back
+        # from one that silently kept extraction's synthesized `$<id>`.
+        # `single_pin_markers` counts the marker shapes synthesized;
+        # `unresolved_single_pin_nets` names every single-pin net the pass
+        # could not resolve pin geometry for (no layer map, an undeclared
+        # LEF macro/pin, a pin centre not covered by drawn conductor) --
+        # those keep the pre-#1488 fallback rather than failing the merge.
+        # `null` unless `stage_reached` is `"route"`, mirroring `layer_map`.
+        "def_net_names": def_net_names_info,
         # Additive field (issue #996): the `write_verilog`-produced,
         # *as-built* gate-level netlist -- the design as CTS/timing repair/
         # antenna repair actually left it, i.e. the netlist the routed
@@ -4310,6 +4353,211 @@ def _cell_library_max_overhang_um(
     return max_overhang_um
 
 
+def _lef_net_layer_gds_map(map_path: str | None) -> dict[str, tuple[int, int]]:
+    """``{<LEF layer name>: (<GDS layer>, <GDS datatype>)}`` for the ``NET``
+    purpose of every entry in the open_pdks KLayout LEF/DEF layer-map file at
+    ``map_path`` -- i.e. the exact ``(layer, datatype)`` KLayout's own DEF
+    reader draws that LEF layer's *routed net* geometry on, which is also the
+    ``(layer, datatype)`` an extraction deck lists in its own ``metals``
+    (sky130: ``li1`` -> ``67/20``, ``met1`` -> ``68/20``, ...).
+
+    File shape is the same whitespace-delimited
+    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``
+    ``lef_abstract.py``'s own :func:`~klayout_tools.lef_abstract.
+    _load_gds_to_lef_layer_map` parses -- this is the same file read in the
+    opposite direction (LEF name -> GDS pair, restricted to the one purpose
+    that names drawn routing), kept local here for the same
+    "each verb module is self-contained" reason :func:`_resolve_layer_map`
+    is duplicated between the two modules.
+
+    Returns ``{}`` for ``None`` (no map file resolved) or an unreadable/
+    malformed file -- callers treat that as "cannot resolve", never as an
+    error, matching :func:`_resolve_layer_map`'s own degrade-gracefully
+    posture.
+    """
+    if map_path is None:
+        return {}
+    mapping: dict[str, tuple[int, int]] = {}
+    try:
+        with open(map_path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                parts = line.split("#", 1)[0].split()
+                if len(parts) < 4 or parts[0] in ("NAME", "DIEAREA"):
+                    continue
+                if "NET" not in parts[1].split(","):
+                    continue
+                try:
+                    mapping.setdefault(parts[0], (int(parts[-2]), int(parts[-1])))
+                except ValueError:
+                    continue
+    except OSError:
+        return {}
+    return mapping
+
+
+def _box_is_inside_drawn_geometry(
+    kdb: Any, top_cell: Any, layer_index: int, box: Any
+) -> bool:
+    """Whether ``box`` lies entirely within geometry already drawn on
+    ``layer_index`` somewhere under ``top_cell`` (recursively, i.e. including
+    a placed standard cell's own shapes).
+
+    Region-based rather than a per-shape point test so paths, polygons and
+    boxes are all handled identically, and so a box straddling two abutting
+    shapes still counts as covered. Bounded to the shapes actually touching
+    ``box`` (a tiny marker square), so this is a cheap region query, not a
+    full-layer flatten.
+    """
+    covering = kdb.Region(top_cell.begin_shapes_rec_touching(layer_index, box))
+    return (kdb.Region(box) - covering).is_empty()
+
+
+def _stamp_single_pin_def_net_names(
+    kdb: Any,
+    *,
+    layout: Any,
+    top_cell: Any,
+    def_path: str,
+    lef_paths: Iterable[str],
+    layer_map_path: str | None,
+) -> dict[str, Any]:
+    """Give every **unrouted single-pin** DEF net a shape carrying its own DEF
+    net name, so ``klt extract --def-net-names`` can recover it (issue #1488).
+
+    KLayout's LEF/DEF reader stamps ``net_property_name`` (shape property
+    ``1``) only onto the routed-metal geometry it draws *in the top cell*
+    from a ``NETS``/``SPECIALNETS`` record's ``ROUTED``/``NEW`` wires. A net
+    with exactly one instance pin and nothing to route to -- a tie cell's
+    output, a synthesis-inserted constant driver -- has no such wire, so
+    nothing anywhere carried its name and ``--def-net-names`` fell back to
+    extraction's synthesized ``$<id>``. That is not cosmetic: several
+    structurally identical unnamed nets are exactly what makes ``klt lvs``
+    report an ambiguous-pairing ``topology`` warning per net.
+
+    The net's only physical presence is its instance's **pin geometry**,
+    which lives inside the standard cell's own macro cell (shared by every
+    instance of that cell type) rather than in the top cell -- so no change
+    to what property id ``extract_abstract._def_net_name_probes`` reads could
+    have found it. This resolves the pin to a top-cell *point* instead, and
+    draws the missing name carrier there:
+
+    1. :func:`~klayout_tools.extract_spef.def_net_instance_pins` parses the
+       DEF's own ``NETS`` section into ``{net: ((instance, pin), ...)}`` --
+       already built (and tested) for issue #961's SPEF ``*CONN``
+       correlation, and already covering wireless records.
+    2. Nets a routed-metal shape *already* names are skipped, so the
+       well-tested issue #951 path is untouched. (A single-pin net can still
+       be routed: ``def_net_instance_pins`` drops top-level ``PIN`` design-port
+       connections, so a port net with one instance pin looks single-pin here
+       while genuinely carrying wires.)
+    3. Each remaining net's one ``(instance, pin)`` is resolved to a placement
+       via :data:`_DEF_INSTANCE_NAME_PROPERTY_ID`, and to macro-local pin
+       geometry via :func:`~klayout_tools.lef_header.read_lef_macro_pin_ports`
+       -- the same LEF-pin-plus-instance-transform technique
+       ``extract_abstract.py``'s ``--abstract-cells`` pin resolution uses.
+    4. A :data:`_SINGLE_PIN_NET_MARKER_HALF_DBU`-sized marker box carrying the
+       DEF name under the same shape property id is drawn at that point, on
+       the pin's own layer -- but **only** where the merged layout already has
+       drawn conductor covering it, which is what makes the marker both a
+       geometric no-op and a point ``LayoutToNetlist.probe_net`` resolves to
+       the real net rather than to an isolated island.
+
+    Returns ``{"single_pin_markers": <int>, "unresolved_single_pin_nets":
+    [<net name>, ...]}``. A net lands in ``unresolved_single_pin_nets`` when
+    any step above cannot be completed (no layer-map file to resolve the LEF
+    ``PORT`` layer through, a macro/pin the LEF never declares, a pin whose
+    centre is not covered by drawn geometry) -- never an error: the merge
+    still produces its GDS and that net simply keeps today's synthesized
+    ``$<id>`` fallback downstream.
+    """
+    # Local import, mirroring `_post_route_spef_metrics`'s own -- and the
+    # module's `klayout.db` convention -- rather than a module-level one.
+    from .extract import _DEF_NET_NAME_PROPERTY_ID, def_net_instance_pins
+
+    report: dict[str, Any] = {
+        "single_pin_markers": 0,
+        "unresolved_single_pin_nets": [],
+    }
+
+    single_pin_nets = {
+        net_name: pins[0]
+        for net_name, pins in def_net_instance_pins(def_path).items()
+        if len(pins) == 1
+    }
+    if not single_pin_nets:
+        return report
+
+    named_by_routing: set[str] = set()
+    for layer_index in layout.layer_indexes():
+        for shape in top_cell.shapes(layer_index).each():
+            value = shape.property(_DEF_NET_NAME_PROPERTY_ID)
+            if isinstance(value, str) and value:
+                named_by_routing.add(value)
+    pending = {
+        net_name: connection
+        for net_name, connection in single_pin_nets.items()
+        if net_name not in named_by_routing
+    }
+    if not pending:
+        return report
+
+    placements: dict[str, tuple[str, Any]] = {}
+    for inst in top_cell.each_inst():
+        properties = inst.properties()
+        component = (
+            properties.get(_DEF_INSTANCE_NAME_PROPERTY_ID) if properties else None
+        )
+        if isinstance(component, str) and component:
+            placements.setdefault(component, (inst.cell.name, inst.cplx_trans))
+
+    pin_ports: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for lef_path in lef_paths:
+        try:
+            pin_ports.update(read_lef_macro_pin_ports(lef_path))
+        except OSError:
+            continue
+
+    lef_to_gds = _lef_net_layer_gds_map(layer_map_path)
+    dbu = layout.dbu
+    half = _SINGLE_PIN_NET_MARKER_HALF_DBU
+    unresolved: list[str] = []
+
+    for net_name, (component, pin_name) in pending.items():
+        placement = placements.get(component)
+        if placement is None:
+            unresolved.append(net_name)
+            continue
+        macro_cell, trans = placement
+        stamped = False
+        for port in pin_ports.get(macro_cell, {}).get(pin_name, ()):
+            gds_layer = lef_to_gds.get(port["layer"])
+            if gds_layer is None:
+                continue
+            layer_index = layout.find_layer(*gds_layer)
+            if layer_index is None:
+                continue
+            x0, y0, x1, y1 = port["bbox_um"]
+            point = trans * kdb.Point(
+                round((x0 + x1) / 2 / dbu), round((y0 + y1) / 2 / dbu)
+            )
+            marker = kdb.Box(
+                point.x - half, point.y - half, point.x + half, point.y + half
+            )
+            if not _box_is_inside_drawn_geometry(kdb, top_cell, layer_index, marker):
+                continue
+            shape = top_cell.shapes(layer_index).insert(marker)
+            shape.set_property(_DEF_NET_NAME_PROPERTY_ID, net_name)
+            stamped = True
+            break
+        if stamped:
+            report["single_pin_markers"] += 1
+        else:
+            unresolved.append(net_name)
+
+    report["unresolved_single_pin_nets"] = sorted(unresolved)
+    return report
+
+
 def _merge_def_to_gds(
     *,
     def_path: str,
@@ -4339,12 +4587,14 @@ def _merge_def_to_gds(
     placement/obstruction verification does not need a real GDS view) is
     expected to stay empty, not an error.
 
-    Returns ``{"path": <str | None>, "resolution": <str>}`` describing the
-    :func:`_resolve_layer_map` result actually applied (or not) to this
-    merge, so the caller can surface it in the response envelope's
-    ``layer_map`` field (issue #1029) -- a caller has no other way to tell
-    whether the merged GDS's routing shapes got a guaranteed-matching
-    layer/datatype assignment.
+    Returns ``{"path": <str | None>, "resolution": <str>, "def_net_names":
+    {...}}``. ``path``/``resolution`` describe the :func:`_resolve_layer_map`
+    result actually applied (or not) to this merge, so the caller can surface
+    it in the response envelope's ``layer_map`` field (issue #1029) -- a
+    caller has no other way to tell whether the merged GDS's routing shapes
+    got a guaranteed-matching layer/datatype assignment. ``def_net_names`` is
+    :func:`_stamp_single_pin_def_net_names`'s own report (issue #1488), which
+    the caller surfaces as the sibling ``def_net_names`` response field.
     """
     import klayout.db as kdb
 
@@ -4422,6 +4672,22 @@ def _merge_def_to_gds(
     top_only.dbu = main_layout.dbu
     top = top_only.create_cell(hdl_toplevel)
     top.copy_tree(main_layout.cell(hdl_toplevel))
+
+    # Issue #1488: give each *unrouted single-pin* DEF net a shape carrying
+    # its own DEF net name, since the reader only ever stamped
+    # `net_property_name` onto routed geometry. Runs on the merged
+    # `top_only`/`top` pair (not `main_layout`) because the coverage guard
+    # inside needs the standard-cell GDS view's real drawn conductor, and
+    # before the checks below so everything they verify covers the final,
+    # as-written geometry.
+    def_net_names_info = _stamp_single_pin_def_net_names(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        def_path=def_path,
+        lef_paths=[cell_lef, *(macro["lef"] for macro in macros)],
+        layer_map_path=layer_map_path,
+    )
 
     # Abstract-only macro instances (no `gds` declared) are expected to stay
     # empty -- exempt their own LEF MACRO cell name from the missing-cell
@@ -4533,7 +4799,11 @@ def _merge_def_to_gds(
     # not just a byte-identical DEF (#1367).
     write_layout(top_only, out_path, PlaceAndRouteError)
 
-    return {"path": layer_map_path, "resolution": layer_map_resolution}
+    return {
+        "path": layer_map_path,
+        "resolution": layer_map_resolution,
+        "def_net_names": def_net_names_info,
+    }
 
 
 __all__ = [

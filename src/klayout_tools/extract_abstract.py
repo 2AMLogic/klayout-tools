@@ -69,6 +69,16 @@ if TYPE_CHECKING:
 #: synthesised ``$<id>`` placeholder or by joining whatever standard-cell pin
 #: labels happen to touch it (``A,X``), and neither is what OpenSTA calls that
 #: net (``_019_``, ``req_msg[3]``, ...).
+#:
+#: Issue #1488 added a **second producer** of this same property, without
+#: changing anything on this side: KLayout only ever stamps it onto the routed
+#: geometry it draws, so an *unrouted single-pin* net (a tie-cell output with
+#: nothing to route to) had no carrier at all, and
+#: :func:`klayout_tools.place_and_route._stamp_single_pin_def_net_names` now
+#: synthesizes one during the merge -- a tiny marker shape drawn inside the
+#: standard cell's own already-drawn pin metal, in the top cell, carrying this
+#: same property id. :func:`_def_net_name_probes` below therefore finds it on
+#: exactly the terms it already finds routed metal on.
 _DEF_NET_NAME_PROPERTY_ID = 1
 
 #: How many independent probe points :func:`_def_net_name_probes` keeps per
@@ -731,7 +741,9 @@ def _def_net_name_probes(
     recursive flatten: a DEF->GDS merge draws the DEF's ``NETS``/
     ``SPECIALNETS`` routed geometry directly in the top cell, and a *sub*-cell
     shape carrying property 1 would be a standard cell's own internal
-    annotation, not a top-level net name.
+    annotation, not a top-level net name. (Issue #1488's unrouted single-pin
+    net markers are synthesized into the **top** cell for exactly that reason,
+    even though the pin geometry they sit inside belongs to a sub-cell.)
 
     Several candidates rather than one because
     :func:`_apply_def_net_name_overrides` resolves each name through

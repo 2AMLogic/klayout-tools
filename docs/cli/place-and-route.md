@@ -750,12 +750,62 @@ carries every standard cell's *internal* nodes (819 of `gcd`'s 1356
 by construction, so the SPEF-side ratio cannot reach 1 and says nothing
 about annotation quality; the design-side ratio is the one that does.
 
-**`modexp`'s 4 unmatched nets are correct behaviour, not a gap.** They are
-`_0583_`…`_0586_` — tie-cell (`conb_1`) `LO` outputs whose DEF entry is
+**`modexp`'s 4 unmatched nets were the shape issue #1488 later closed.** They
+are `_0583_`…`_0586_` — tie-cell (`conb_1`) `LO` outputs whose DEF entry is
 `- _0583_ ( _1300_ LO ) + USE SIGNAL ;` with **no `ROUTED` geometry at
-all**. A net with no wire has no shape to carry a net-name property, and
-equally has no interconnect parasitics to report. `annotation_complete` is
-`false` for that run, correctly and conservatively.
+all**. A net with no wire had no shape to carry a net-name property (it
+equally has no interconnect parasitics to report, so `annotation_complete`
+stayed `false` for that run, correctly and conservatively). The merge now
+synthesizes that missing name carrier from the net's own pin geometry — see
+"Unrouted single-pin net names" below.
+
+### Unrouted single-pin net names (issue #1488)
+
+The `net_property_name` mechanism above only reaches geometry KLayout's DEF
+reader **draws**: a `NETS` record's `ROUTED`/`NEW` wires, in the top cell. A
+net with exactly one instance pin and nothing to route to — the tie-cell
+outputs above, and any synthesis-inserted constant driver — has no wire, so
+nothing carried its name and `klt extract --def-net-names` fell back to
+extraction's synthesized `$<id>`. That is not cosmetic: several
+structurally identical unnamed nets in one design are exactly what makes a
+downstream `klt lvs` comparison report an ambiguous-pairing `topology`
+warning per net (`status` stays `"match"`, but `mismatch_count` climbs and a
+caller has to know to special-case them).
+
+Such a net's only physical presence is its instance's **pin geometry**,
+which lives inside the standard cell's own macro cell — shared by every
+instance of that cell type, and referenced from the top cell rather than
+drawn into it — so no change to which property `--def-net-names` reads could
+have found it. The merge closes it from the other side instead, resolving
+each such net to a *point* and drawing the missing name carrier there:
+
+1. The DEF's own `NETS` section gives each net's `(instance, pin)` list (the
+   same parse issue #961's SPEF `*CONN` correlation already uses). Only nets
+   with exactly one entry are considered, and only those no routed-metal
+   shape already names — so the issue #951 path above is untouched.
+2. KLayout's LEF/DEF reader already records each DEF `COMPONENTS` entry's own
+   instance name on the placement it creates
+   (`LEFDEFReaderConfiguration.instance_property_name`, default property
+   `1`), which is what resolves `(instance, pin)` to **one** placement rather
+   than to the macro cell every instance shares.
+3. The macro's LEF `PIN`/`PORT` rectangle, mapped through that placement's
+   transform, gives the pin's placed centre; the open_pdks layer-map file
+   (`layer_map` above) maps the `PORT`'s LEF layer name to the GDS
+   layer/datatype the cell's GDS view draws that pin on.
+4. A 2 dbu marker box carrying the DEF net name under the same shape property
+   is drawn there — but only where the merged layout **already** has drawn
+   conductor covering it. That is what makes the marker both a geometric
+   no-op (it vanishes into the pad it sits inside on the region merge every
+   DRC/LVS/extraction consumer performs) and a point
+   `LayoutToNetlist.probe_net` resolves to the real net rather than to an
+   isolated island.
+
+The additive `def_net_names` response field reports what the pass did.
+Anything it could not resolve — no layer-map file to translate the `PORT`
+layer name through, a macro or pin the LEF never declares, a pin centre not
+covered by drawn conductor — is named in
+`def_net_names.unresolved_single_pin_nets` and simply keeps the pre-#1488
+`$<id>` fallback downstream; the merge itself never fails over it.
 
 ### `*PORTS` lists only real design ports (issue #961 defect 1, fixed)
 
@@ -1320,6 +1370,10 @@ unsure).
     "path": "/abs/path/pdk/sky130A/libs.tech/klayout/tech/sky130A.map",
     "resolution": "exact"
   },
+  "def_net_names": {
+    "single_pin_markers": 4,
+    "unresolved_single_pin_nets": []
+  },
   "verilog_path": "/abs/path/.klt/place-and-route/gcd.v",
   "spef_sta": {
     "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
@@ -1403,6 +1457,7 @@ unsure).
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
 | `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
+| `def_net_names` | object \| null | Additive field (issue #1488). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own unrouted-single-pin net-name marker pass — see "Unrouted single-pin net names" above. `single_pin_markers` — how many marker shapes were synthesized (one per unrouted single-pin net whose pin geometry resolved); `0` is the normal value for a design with no tie-cell-style nets, and says nothing is missing. `unresolved_single_pin_nets` — every single-pin net the pass could **not** resolve, by DEF net name (sorted): no layer-map file to translate the LEF `PORT` layer name through, a macro or pin the LEF never declares, or a pin centre not covered by drawn conductor. Those nets keep extraction's synthesized `$<id>` name under `klt extract --def-net-names`, exactly as before this field existed — never a merge failure. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. |
