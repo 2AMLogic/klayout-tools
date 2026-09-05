@@ -16,6 +16,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract --def-net-names` now recovers the real DEF net name
+  for an **unrouted single-pin** net — a tie-cell output, or any
+  synthesis-inserted constant driver whose net has one instance pin and
+  nothing to route to (issue #1488). KLayout's LEF/DEF reader stamps its
+  net-name shape property only onto the routed geometry it draws in the top
+  cell, so such a net had no name carrier anywhere and extracted as a
+  synthesized `$<id>`; several structurally identical ones in a design are
+  exactly what makes a downstream `klt lvs` run report an ambiguous-pairing
+  `topology` warning per net. `klt place-and-route`'s DEF→GDS merge now
+  synthesizes the missing carrier from the net's own pin geometry (the DEF
+  `COMPONENTS` instance name KLayout records on each placement, the LEF
+  `PIN`/`PORT` rectangle, and the instance's placement transform), as a 2 dbu
+  marker shape drawn *inside* the already-drawn conductor — a geometric no-op
+  for DRC/LVS/extraction, needing no change to what `--def-net-names` reads.
+  Nets a routed-metal shape already names are untouched, so issue #951's
+  behaviour is unchanged. **Additive response field** on `klt
+  place-and-route`: `def_net_names` (`single_pin_markers`,
+  `unresolved_single_pin_nets`), `null` unless `stage_reached` is `"route"`,
+  mirroring `layer_map`. A single-pin net whose pin geometry cannot be
+  resolved (no open_pdks layer-map file, an undeclared LEF macro/pin, a pin
+  centre not covered by drawn conductor) is named in that field and keeps the
+  previous `$<id>` fallback rather than failing the merge.
 - **Fixed**: `klt lvs` no longer reports one comparer event twice when a
   `hints.same_nets` pair is refused after the comparer had already associated
   the two nets (issue #1484). Declaring such a pair used to add a

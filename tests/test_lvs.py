@@ -1608,6 +1608,92 @@ R2 VDD $2 1k
     assert with_hint["mismatches"] == []
 
 
+def test_recovered_def_net_names_remove_the_tie_cell_pairing_warning(tmp_path):
+    """Issue #1488's downstream symptom, measured directly: two symmetric,
+    single-terminal tie-cell output nets whose real DEF names the layout side
+    lost (`klt extract --def-net-names` fell back to `$<id>` for an *unrouted*
+    single-pin net, since KLayout only stamps its net-name shape property onto
+    routed metal). The comparer still proves the two netlists equivalent -- a
+    swap is a valid isomorphism -- but has nothing to tell the two anonymous
+    layout nets apart with, so it reports one `topology`/warning
+    ambiguous-pairing finding per net and inflates `mismatch_count`, which a
+    caller then has to know to special-case.
+
+    Recovering the real names (what `klt place-and-route`'s DEF->GDS merge now
+    synthesizes a marker shape for -- see
+    `tests/test_place_and_route.py::test_merge_stamps_def_net_names_on_unrouted_single_pin_nets`
+    and `::test_merge_single_pin_net_markers_survive_extraction` for the
+    producing half) removes the ambiguity at its source, with no
+    `hints.same_nets` workaround needed -- unlike
+    `test_same_nets_hint_resolves_an_otherwise_ambiguous_match` above, which
+    resolves the identical shape from the caller's side instead."""
+    # Two structurally identical tie cells, each driving its own dedicated
+    # net with no other connection -- flattened, each such net still touches
+    # both of its own cell's device terminals (so this is the *generic*
+    # ambiguous-pairing finding, not issue #596's distinct single-terminal
+    # one).
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt cell VDD GND
+R1 VDD net_hi_1 1k
+R2 net_hi_1 GND 2k
+R3 VDD net_hi_2 1k
+R4 net_hi_2 GND 2k
+.ends
+""",
+    )
+    # Pre-#1488: neither tie net carried a DEF name into extraction.
+    anonymous_path = _write(
+        tmp_path / "anonymous.spice",
+        """
+.subckt cell VDD GND
+R1 VDD $1 1k
+R2 $1 GND 2k
+R3 VDD $2 1k
+R4 $2 GND 2k
+.ends
+""",
+    )
+    # Post-#1488: each net's real DEF name reaches the layout netlist.
+    named_path = _write(
+        tmp_path / "named.spice",
+        """
+.subckt cell VDD GND
+R1 VDD net_hi_1 1k
+R2 net_hi_1 GND 2k
+R3 VDD net_hi_2 1k
+R4 net_hi_2 GND 2k
+.ends
+""",
+    )
+
+    def _compare(layout_netlist: str, name: str) -> dict:
+        return run_lvs(
+            _write_request(
+                tmp_path / f"{name}.json",
+                {
+                    "layout": {"netlist": layout_netlist, "top": "cell"},
+                    "reference": {"netlist": reference_path, "top": "cell"},
+                },
+            )
+        )
+
+    anonymous = _compare(anonymous_path, "anonymous")
+    assert anonymous["status"] == "match"
+    assert anonymous["category_counts"] == {"topology": 2}
+    assert all(entry["severity"] == "warning" for entry in anonymous["mismatches"])
+    assert all(
+        "paired ambiguously" in entry["description"]
+        for entry in anonymous["mismatches"]
+    )
+
+    named = _compare(named_path, "named")
+    assert named["status"] == "match"
+    assert named["mismatch_count"] == 0
+    assert named["mismatches"] == []
+
+
 def test_same_nets_hint_rejected_pairing_is_reported(tmp_path):
     """Issue #499: a `hints.same_nets` pair the comparer refuses (the two
     nets are not topologically equivalent, unlike the symmetric-swap case

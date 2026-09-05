@@ -3131,8 +3131,10 @@ before this feature existed).
 
 ### DEF-derived net names (`--def-net-names`, issue #951, Epic #700 Phase 3)
 
-`--def-net-names` names each routed net from the **DEF net name** rather
-than from GDS text labels.
+`--def-net-names` names each net the DEF names — every *routed* net from the
+DEF net name its own routed metal carries, plus (issue #1488) every
+**unrouted single-pin** net from the marker shape the DEF→GDS merge
+synthesizes for it — rather than from GDS text labels.
 
 **Why it exists.** Extraction's default naming source is text labels
 (see "Coverage" above). On a routed GDS produced by
@@ -3156,6 +3158,27 @@ that design's DEF net names on its routed metal — which is why closing this
 gap required no fixture regeneration.) This flag reads that property off the
 routed-metal shapes, resolves each name to its extracted net, and renames
 it, overriding the label-derived name.
+
+**Unrouted single-pin nets (issue #1488).** KLayout stamps that property only
+onto the geometry it *draws* — a `NETS` record's `ROUTED`/`NEW` wires, in the
+top cell. A net with exactly one instance pin and nothing to route to (a
+tie-cell output, a synthesis-inserted constant driver) has no wire, so nothing
+carried its name and it reached extraction as a synthesized `$<id>`. Its only
+physical presence is the standard cell's own **pin geometry**, which lives
+inside the shared macro cell rather than the top cell — so no change to what
+this flag reads could have found it. `klt place-and-route`'s DEF→GDS merge
+now closes that from the other side: it resolves each such net's one
+`(instance, pin)` connection to a placed point (the DEF component name
+KLayout records on each instance, plus the LEF `PIN`/`PORT` rectangle and the
+instance's placement transform) and draws a 2 dbu marker shape there carrying
+the same property, on the pin's own layer, **inside** the already-drawn
+conductor — so the marker is a geometric no-op for DRC/LVS/extraction and
+this flag needs no special case for it. Nets the merge could not resolve
+(no open_pdks layer-map file, an undeclared LEF macro/pin, a pin centre not
+covered by drawn conductor) are named in that command's own
+`def_net_names.unresolved_single_pin_nets` response field and keep the
+`$<id>` fallback; see
+[`docs/cli/place-and-route.md`](place-and-route.md).
 
 ```
 klt extract routed.gds --deck sky130 --def-net-names \

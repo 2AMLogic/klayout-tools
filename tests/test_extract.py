@@ -14067,6 +14067,48 @@ def test_def_net_names_ignores_other_property_ids(tmp_path):
     )
 
 
+def test_def_net_names_resolves_a_marker_box_drawn_inside_existing_metal(tmp_path):
+    """Issue #1488: an *unrouted* single-pin net (a tie cell's output with
+    nothing to route to) has no routed-metal shape for KLayout's DEF reader
+    to stamp, so `klt place-and-route`'s DEF->GDS merge synthesizes the name
+    carrier itself -- a 2 dbu marker box drawn at the placed pin's own
+    centre, strictly *inside* the standard cell's own drawn pin metal so it
+    is a geometric no-op after the region merge every consumer performs.
+
+    That is a very different shape from the wire-sized routed-metal shape
+    the fixtures above use, so assert directly that a marker of exactly that
+    size still resolves through `LayoutToNetlist.probe_net` to the real
+    extracted net (rather than to nothing, or to an isolated island): the
+    marker merges into the pad it sits inside, so the probe point lands on
+    the pad's own net."""
+    layout = _make_inverter_layout()
+    top = layout.cell("TOP")
+    li1 = layout.layer(67, 20)
+    # (1800, 2500) is the centre of the PMOS-side drain pad (li1
+    # 1600..2000 x 2200..2800) -- the same point a LEF `PIN` `PORT` rect's
+    # centre resolves to once the instance's placement transform is applied.
+    marker = top.shapes(li1).insert(kdb.Box(1799, 2499, 1801, 2501))
+    marker.set_property(1, "_042_")
+    layout_path = _write_gds(layout, tmp_path / "marker.gds")
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "marker.spice"),
+        def_net_names=True,
+    )
+
+    names = {net["name"] for net in report["nets"]}
+    assert "_042_" in names
+    # Only that one net moved: the NMOS-side drain pad is a separate net
+    # that merely shares the `Y` label, and keeps it.
+    assert "Y" in names
+    # Nothing was left unresolved -- the marker is a real, probeable point.
+    assert not [
+        warning for warning in report["warnings"] if "--def-net-names" in warning
+    ]
+
+
 def test_def_net_names_cli_flag_is_wired(tmp_path, capsys):
     """The CLI surface reaches `run_extract`'s kwarg (issue #951)."""
     layout_path = _inverter_with_def_net_property(tmp_path)
