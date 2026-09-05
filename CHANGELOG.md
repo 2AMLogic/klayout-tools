@@ -31,6 +31,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   schema change). No geometry change: every generated cell is byte-for-byte
   what it was.
 
+- **Fixed**: `klt gen cap_array`'s reported `C<i>_TOP` port now lands on a
+  routable escape pad instead of the unit cell's own interior centre (issue
+  #1494). The bottom plate spans almost the entire unit footprint (only
+  `CAP_BOTTOM_PLATE_MARGIN_UM`, 0.5um, clear on each side), so the old centre
+  position sat directly over it -- a caller stepping a via stack down from
+  there to route on lower metal had no way to avoid landing on the bottom
+  plate's own sheet, silently merging the two plate nets (invisible to DRC,
+  since nothing about it violates a same-layer spacing/width rule; only
+  extraction would report the merge, with the real top-plate net left
+  anonymous). `_cap_unit_layout` now draws a same-layer stub running north
+  from the original via-landing pad, clear past the bottom plate's own top
+  edge, ending in a second pad whose own bounding box no longer touches --
+  let alone overlaps -- the bottom plate; `C<i>_TOP` is reported there
+  instead, with a geometrically real `direction_deg` (due north) rather than
+  the previous fixed placeholder. Both currently-supported families (sky130,
+  sg13g2) draw this escape by default -- no opt-in param, matching this
+  repo's existing `ring_gap_side` precedent of not gating correct behavior
+  behind a flag. A hypothetical family with plates but no top-plate-via-metal
+  layer (not exercised by any currently-supported family) keeps the old,
+  unroutable centre position and gains a `drc_hints.notes` warning instead.
+  No `schema_version` bump -- no field changed shape, only the `C<i>_TOP`
+  port's `x_um`/`y_um`/`direction_deg` *values*.
 - **Fixed**: `klt extract --def-net-names` now recovers the real DEF net name
   for an **unrouted single-pin** net — a tie-cell output, or any
   synthesis-inserted constant driver whose net has one instance pin and

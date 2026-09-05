@@ -602,16 +602,24 @@ a top-plate-metal-over-bottom-plate-metal stack (sky130's `capm` top-plate
 mark over a `met3` bottom-plate conductor; sg13g2's `MIM` top-plate mark over
 a `Metal5` bottom-plate conductor, issue #1455) with a top-plate via and
 local-metal landing pad (sky130's `via3`/`met4`; sg13g2's `Vmim`/`TopMetal1`),
-so the top terminal is directly routable — the capacitor sibling of
-`res_array`, drawing the *same* layer/datatype numbers each family's own
-curated `EXTRACTION_DECK.capacitors[0]` entry declares
+plus a same-layer escape stub and second landing pad (issue #1494) reaching
+past the unit cell's own bounding box — the capacitor sibling of `res_array`,
+drawing the *same* layer/datatype numbers each family's own curated
+`EXTRACTION_DECK.capacitors[0]` entry declares
 (`klayout_tools.decks.sky130`'s `sky130_fd_pr__model__cap_mim`;
 `klayout_tools.decks.sg13g2`'s `cap_cmim`), never a second, private layer map.
-Each unit gets two ports: `C<i>_BOT` on the bottom-plate conductor's local-left
-edge, and `C<i>_TOP` on the top-plate via/landing-pad centre (an interior
-point, so — like `mos_array`'s gate-contact port — it reports a fixed
-`direction_deg` rather than a geometrically-derived one). `device_count` is
-`num`. `drc_hints.matched_group_id` is `"cap_array:<num>"`.
+Each unit gets two ports: `C<i>_BOT` on the bottom-plate conductor's
+local-left edge, and `C<i>_TOP` on the escape pad, due north of the unit cell
+and clear of the bottom plate's own footprint — unlike the via/landing-pad
+centre directly over the bottom plate, a via stack landed at `C<i>_TOP`
+(following the family's own metal/via stack) does not touch, let alone
+merge with, the bottom plate's layer/net. `direction_deg` for `C<i>_TOP` is
+therefore a real, geometrically-derived `90` (due north), not a placeholder.
+(A family with plates but no top-plate-via-metal layer — not exercised by
+any currently-supported family — falls back to the old, unroutable interior
+centre with a fixed `direction_deg` and a `drc_hints.notes` warning, mirroring
+`mos_array`'s interior gate-contact port.) `device_count` is `num`.
+`drc_hints.matched_group_id` is `"cap_array:<num>"`.
 
 `sky130` and `sg13g2` are supported — gf180mcu's own MiM stack (`FuseTop` top
 plate over an oversized "virtual" `Metal4` bottom plate, per
