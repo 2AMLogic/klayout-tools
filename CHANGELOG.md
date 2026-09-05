@@ -16,6 +16,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Documented**: `klt gen diff_pair` places both legs at the **same x column
+  per terminal** — the common-centroid checkerboard puts one `Q1` and one
+  `Q2` sub-instance in every column at the same `x0`, so `Q1_<n>_S`/`_D`/`_G`
+  and that column's `Q2_*` ports report identical `x_um` and differ only in
+  `y_um`. Previously a caller only discovered this by reading `gen.py` or by
+  hitting the routing conflict: a one-column-per-pin floorplan (one
+  horizontal track per net, one vertical routing column per pin) cannot give
+  the two legs' distinct nets separate columns (issue #1495). The caveat, why
+  it is inherent to the interleave rather than a fixable oversight, and the
+  routing styles that do work are now in `docs/cli/gen.md`'s `diff_pair`
+  section, and surfaced in `klt gen --list` (the `diff_pair` `summary` and its
+  `splits` param `description` — both are free-text fields, so this is not a
+  schema change). No geometry change: every generated cell is byte-for-byte
+  what it was.
+
 - **Fixed**: `klt extract --def-net-names` now recovers the real DEF net name
   for an **unrouted single-pin** net — a tie-cell output, or any
   synthesis-inserted constant driver whose net has one instance pin and

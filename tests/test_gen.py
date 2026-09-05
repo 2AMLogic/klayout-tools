@@ -3206,6 +3206,70 @@ def test_diff_pair_composes_mos_array_unit_and_guard_ring(tmp_path, pdk_root):
     assert {"TAP_N", "TAP_S", "TAP_E", "TAP_W"} <= port_names
 
 
+@pytest.mark.parametrize("splits", [1, 2, 3, 4])
+def test_diff_pair_legs_share_one_x_column_per_terminal(tmp_path, pdk_root, splits):
+    """Issue #1495: the common-centroid checkerboard puts exactly one Q1 and
+    one Q2 sub-instance in every column of the 2-row grid, both at the same
+    ``x0``, so the two legs' port x columns coincide terminal-for-terminal.
+
+    This is the executable form of the caveat `docs/cli/gen.md` and `klt gen
+    --list` now state -- a caller planning a one-vertical-column-per-pin
+    floorplan must be able to rely on the documented behaviour, so pin it
+    here rather than leaving it as prose only."""
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"splits": splits, "add_guard_ring": False},
+            "options": {"output": str(tmp_path / f"diff_pair_{splits}.gds")},
+        }
+    )
+    for terminal in ("S", "D", "G"):
+        leg_1 = {
+            p["x_um"]
+            for p in report["ports"]
+            if p["name"].startswith("Q1_") and p["name"].endswith(f"_{terminal}")
+        }
+        leg_2 = {
+            p["x_um"]
+            for p in report["ports"]
+            if p["name"].startswith("Q2_") and p["name"].endswith(f"_{terminal}")
+        }
+        assert leg_1, f"expected Q1 *_{terminal} ports"
+        assert leg_1 == leg_2, (
+            f"the two legs' *_{terminal} ports are documented to share one x "
+            f"column per logical column (splits={splits})"
+        )
+
+
+def test_list_generators_diff_pair_documents_shared_x_columns():
+    """Issue #1495: `klt gen --list` is the surface a caller reads before
+    floorplanning around a generator, so the shared-x-column caveat must be
+    discoverable there -- in the summary and in `splits`' own description."""
+    report = list_generators()
+    generator = next(g for g in report["generators"] if g["name"] == "diff_pair")
+    splits = next(p for p in generator["params"] if p["name"] == "splits")
+
+    assert "x column" in generator["summary"]
+    assert "x column" in splits["description"]
+    # The consequence, not just the fact: a one-column-per-pin floorplan is
+    # ruled out by it.
+    assert "one-column-per-pin" in splits["description"]
+
+
+def test_docs_gen_md_diff_pair_documents_shared_x_columns():
+    """Issue #1495: the same caveat, stated in the reference docs next to the
+    checkerboard description that implies it."""
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "cli" / "gen.md").read_text(
+        encoding="utf-8"
+    )
+    section = doc.split("### `diff_pair`")[1].split("### `bjt_array`")[0]
+    assert "share one x column per terminal" in section
+    assert "one-column-per-pin" in section
+
+
 def test_diff_pair_mirror_naming(tmp_path, pdk_root):
     output = tmp_path / "current_mirror.gds"
     report = generate(
