@@ -261,7 +261,21 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   **not** inferred — emit explicit unit suffixes (see "Unit suffixes
   matter" below). Every other parameter is dropped: the parasitic-only
   `ad`/`as`/`pd`/`ps`/`nrd`/`nrs`/`sa`/`sb`/`sd` (which `klt extract` does
-  not carry either) and any other model parameter.
+  not carry either) and any other model parameter. **A folded `nf>1` call
+  is expanded, not rejected** (issue #1487): it converts to `nf` parallel
+  unit-width plain `M` cards instead of one, named deterministically
+  `<instance>_f0`, `<instance>_f1`, ... so device identity (and therefore
+  LVS pairing) is stable across repeated conversions. `w` on the call site
+  is the device's **total** (un-folded) width — the verified SPICE/BSIM
+  convention (confirmed empirically against the installed sky130A ngspice
+  model library: a diode-connected device measures the same drain current
+  at `nf=1` and `nf=4` for the same `w`, and a quarter of that current at
+  `w/4`) — so each expanded finger gets `w / nf`, matching the per-finger
+  width a real drawn multi-finger layout extracts as. Pair this with
+  `options.combine_devices` (see below) to reconcile the expanded fingers
+  against a real layout's own folded fingers. `nf` must be a positive
+  integer — a fractional or negative value is still a hard error, since
+  there is no way to fold a fractional number of physical gate fingers.
 - **Resistor and capacitor** convert to plain `R`/`C` cards the same way —
   their own length/width call-site parameters (`l`/`w` for sky130,
   `r_length`/`r_width` or `c_length`/`c_width` for gf180mcu) are carried
@@ -276,13 +290,16 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   optional `mult`, carried onto the plain-element `Q` card's `NE`
   (KLayout's `DeviceClassBJT3Transistor` natively represents multiple
   parallel emitters via `NE`).
-- `nf`/`m`/`mult` > 1 on a MOS/resistor/capacitor call (a multi-finger/
-  multiplied device the curated plain-element form cannot represent) is
-  **rejected** with a specific error naming the device — never silently
-  dropped or misinterpreted. Flatten it (one device per drawn gate) in the
-  schematic netlist first. Bipolar's `mult` is the one exception: it is
-  carried onto `NE`, not rejected, since `DeviceClassBJT3Transistor` can
-  represent multiple parallel emitters that way.
+- `nf`/`m`/`mult` > 1 on a resistor/capacitor call, and `m`/`mult` > 1 on a
+  MOS call (a multiplied device the curated plain-element form cannot
+  represent) is **rejected** with a specific error naming the device —
+  never silently dropped or misinterpreted. Flatten it (one device per
+  drawn gate) in the schematic netlist first. Two exceptions: bipolar's
+  `mult` is carried onto `NE`, not rejected, since
+  `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
+  way; and MOS's own `nf` is *expanded*, not rejected (see above) — `m`/
+  `mult` on a MOS call is a different, whole-device replication count (not
+  finger-folding) and is still rejected exactly like resistor/capacitor's.
 
 A reference netlist that *mixes* plain-element (`M`/`R`/`C`/`Q`) cards and
 subckt-call `X` device cards converts correctly under `form:
