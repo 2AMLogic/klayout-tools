@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs` no longer reports one comparer event twice when a
+  `hints.same_nets` pair is refused after the comparer had already associated
+  the two nets (issue #1484). Declaring such a pair used to add a
+  `hints.rejected` entry *alongside* the pre-existing `topology` "nets were
+  paired despite a name/identity conflict" entry for the identical pair, so
+  declaring the hint could only raise the mismatch count — the exact opposite
+  of what a caller reaching for the hint wants. The narrower, caller-attributed
+  `hints.rejected` entry now replaces the `topology` duplicate for that one
+  pair; a conflict reported for any other net pair in the same run is
+  untouched, and a pair the comparer never associated at all still reports
+  `hints.rejected` exactly as before. No category was added or removed. The
+  `hints.rejected` `description` now also distinguishes the two refusal shapes
+  ("the comparer did not confirm it as a topological match" vs. "the comparer
+  associated the two nets and found them not identical topologically"), and
+  `docs/cli/lvs.md` states the limitation the issue asked to be written down:
+  `NetlistComparer` matches differently-named but topologically identical nets
+  with no finding at all, so a `topology` name/identity conflict always means
+  the nets genuinely differ — no `hints.same_nets` entry can clear one, and
+  the fix is the underlying structural difference.
 - **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` converter now
   resolves every resistor and capacitor class a deck's own `ExtractionDeck`
   declares when `reference.deck` names that deck, instead of only the
