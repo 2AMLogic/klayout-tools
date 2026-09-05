@@ -2351,6 +2351,59 @@ def test_cap_array_draws_sky130_mim_stack_layers(tmp_path, pdk_root):
     assert _SKY130_CAP_TOP_VIA_METAL_LAYER in present
 
 
+def test_cap_array_top_port_is_clear_of_bottom_plate(tmp_path, pdk_root):
+    """Issue #1494: `C<i>_TOP` must be directly routable -- a via stack
+    landed at the reported position (a `width_um`-wide square, matching the
+    generator's own via/metal-stack conventions) must not touch, let alone
+    overlap, the bottom plate's own conductor shape. Before the fix,
+    `C<i>_TOP` sat at the unit's interior centre, directly on top of the
+    bottom plate; a via landed there would have silently shorted the two
+    plates together (invisible to DRC, since nothing here violates a
+    same-layer spacing/width rule -- only a net-merge extraction would
+    catch it)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "cap_array_escape.gds"
+    report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 2},
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    dbu = layout.dbu
+    top_cell = layout.top_cell()
+    bottom_layer_index = layout.layer(*_SKY130_CAP_BOTTOM_PLATE_LAYER)
+    bottom_region = kdb.Region(top_cell.begin_shapes_rec(bottom_layer_index))
+    assert not bottom_region.is_empty()
+
+    top_ports = [p for p in report["ports"] if p["name"].endswith("_TOP")]
+    assert len(top_ports) == 2
+    for port in top_ports:
+        assert port["direction_deg"] == 90
+        half = port["width_um"] / 2.0
+        via_box = kdb.Box(
+            int(round((port["x_um"] - half) / dbu)),
+            int(round((port["y_um"] - half) / dbu)),
+            int(round((port["x_um"] + half) / dbu)),
+            int(round((port["y_um"] + half) / dbu)),
+        )
+        overlap = kdb.Region(via_box) & bottom_region
+        assert overlap.is_empty(), (
+            f"{port['name']} at ({port['x_um']}, {port['y_um']}) overlaps "
+            "the bottom plate -- a via stack landed here would short the "
+            "two plates together"
+        )
+
+    # The fallback "no escape possible" note must NOT fire for sky130 --
+    # it has a real top-plate-via-metal layer to escape on.
+    assert not any("interior centre" in note for note in report["drc_hints"]["notes"])
+
+
 def test_cap_array_gf180mcu_is_not_yet_supported(tmp_path, both_pdk_root):
     """gf180mcu's MiM stack (`FuseTop`/`Metal4`, with a "virtual bottom
     plate" oversize derivation) is out of this generator's initial scope

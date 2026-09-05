@@ -315,6 +315,17 @@ SD_PAD_GATE_GAP_MIN_UM = 0.25
 #: question either.
 CAP_BOTTOM_PLATE_MARGIN_UM = 0.5
 
+#: Clearance (um) `cap_array`'s top-plate escape pad (issue #1494) keeps
+#: beyond the bottom plate's own top edge before landing. Like
+#: `CAP_BOTTOM_PLATE_MARGIN_UM` itself, this is an implementation choice, not
+#: a transcribed DRC rule (no curated deck constrains an escape pad's
+#: clearance from an unrelated layer) -- reusing that same margin value keeps
+#: the escape pad's own bounding box well clear of the bottom plate's sheet,
+#: the exact silent-short hazard issue #1494 diagnosed (a via stepping down
+#: at the *reported* port position must never be able to land on the bottom
+#: plate).
+CAP_TOP_ESCAPE_CLEARANCE_UM = CAP_BOTTOM_PLATE_MARGIN_UM
+
 #: Guard ring sizing `diff_pair` uses for its own, automatically-generated
 #: ring. `GUARD_RING_DEFAULT_PADDING_UM` is the default for `diff_pair`'s own
 #: `ring_padding_um` param (issue #484) -- the ring's thickness itself
@@ -2578,7 +2589,19 @@ def _cap_unit_layout(
     family's own top-plate-via-metal layer carries a coarser minimum-width
     DRC rule than that default satisfies (sg13g2's ``TopMetal1``, 1.64um vs.
     sky130's ``met4``, 0.3um) -- the default ``0.0`` leaves sky130/gf180mcu
-    byte-for-byte unchanged."""
+    byte-for-byte unchanged.
+
+    On top of the via-enclosing landing pad centred on the plate (which sits
+    directly over the bottom plate -- unroutable in isolation, issue #1494),
+    this also draws a same-layer escape: a stub running north from that
+    centred pad, clear past the bottom plate's own top edge by
+    :data:`CAP_TOP_ESCAPE_CLEARANCE_UM`, ending in a second landing pad
+    (``top_escape_xy``) whose own bounding box no longer touches -- let alone
+    overlaps -- the bottom plate. A via stack landed at ``top_escape_xy``
+    using the family's own metal/via stack can step straight down without
+    ever crossing the bottom plate's footprint, unlike the centred
+    ``top_xy`` (kept for reference/backward compatibility) that a further
+    via step would silently short to the bottom plate."""
     margin = CAP_BOTTOM_PLATE_MARGIN_UM
     bottom_w = plate_w_um + 2 * margin
     bottom_h = plate_h_um + 2 * margin
@@ -2590,21 +2613,41 @@ def _cap_unit_layout(
     top_via_box = _snap_square_box_um(cx, cy, via_half, _GRID_DBU_UM)
     top_via_metal_box = _snap_square_box_um(cx, cy, pad_half, _GRID_DBU_UM)
 
+    # Escape stub + landing pad (issue #1494): same layer/width as
+    # `top_via_metal_box` (so it inherits that pad's own family-specific
+    # minimum-width compliance, e.g. sg13g2's `TopMetal1`), running straight
+    # north from the centred pad's top edge to a landing pad entirely beyond
+    # `bottom_h` -- i.e. entirely outside the bottom plate's own bounding
+    # box, not merely touching it.
+    escape_pad_cy = bottom_h + CAP_TOP_ESCAPE_CLEARANCE_UM + pad_half
+    escape_pad_box = _snap_square_box_um(cx, escape_pad_cy, pad_half, _GRID_DBU_UM)
+    escape_stub_box = (
+        cx - pad_half,
+        top_via_metal_box[3],
+        cx + pad_half,
+        escape_pad_box[1],
+    )
+
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
         "bottom_plate": [(0.0, 0.0, bottom_w, bottom_h)],
         "top_plate": [(margin, margin, margin + plate_w_um, margin + plate_h_um)],
         "top_via": [top_via_box],
-        "top_via_metal": [top_via_metal_box],
+        "top_via_metal": [top_via_metal_box, escape_stub_box, escape_pad_box],
     }
     return {
         "total_w_um": bottom_w,
         "total_h_um": bottom_h,
         "boxes_um": boxes,
         # Bottom-plate port: the conductor's own local-left edge, mirroring
-        # `_res_unit_layout`'s `a_xy`. Top-plate port: the via/landing-pad
-        # centre -- the same point `top_via`/`top_via_metal` are drawn at.
+        # `_res_unit_layout`'s `a_xy`. Legacy top-plate centre: the
+        # via/landing-pad centre -- the same point `top_via`/the original
+        # `top_via_metal` pad are drawn at (issue #1494: unroutable, kept
+        # only for internal reference). Escape top-plate port: the landing
+        # pad past the bottom plate's own bbox -- the point
+        # `_cap_array_describe` reports as `C{idx}_TOP` today.
         "bot_xy": (0.0, cy),
         "top_xy": (cx, cy),
+        "top_escape_xy": (cx, escape_pad_cy),
     }
 
 
@@ -6231,17 +6274,18 @@ def _cap_array_describe(
     # the generic landing-pad default and this family's minimum drawn width
     # (`0.0` for every family but sg13g2), so a reported `C<i>_TOP` port
     # width always matches the shape actually drawn.
+    has_top_via_metal = layers["cap_top_via_metal"] is not None
     top_port_width_um = (
         max(CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
-        if layers["cap_top_via_metal"] is not None
+        if has_top_via_metal
         else params["plate_w_um"]
     )
 
+    notes = []
     ports = []
     for c in info["cells"]:
         idx = c["idx"]
         bot_xy = unit["bot_xy"]
-        top_xy = unit["top_xy"]
         ports.append(
             {
                 "name": f"C{idx}_BOT",
@@ -6253,6 +6297,36 @@ def _cap_array_describe(
                 "direction_deg": 180,
             }
         )
+        if has_top_via_metal:
+            # Escape port (issue #1494): the landing pad past the bottom
+            # plate's own bbox (`_cap_unit_layout`'s `top_escape_xy`), not
+            # the interior centre directly over the bottom plate -- a via
+            # stack landed here can step down through the family's own
+            # metal/via stack without ever crossing the bottom plate's
+            # footprint. It faces due north out of the unit cell, so
+            # `direction_deg` is now the same geometrically-derived value
+            # `RING_SIDE_DIRECTIONS["N"]` reports for an edge-side port, not
+            # a fixed placeholder.
+            top_xy = unit["top_escape_xy"]
+            direction_deg = RING_SIDE_DIRECTIONS["N"]
+        else:
+            # No top-plate-via-metal layer configured for this family (not
+            # exercised by any currently-supported family -- see
+            # `_cap_family_layers`'s docstring): fall back to the legacy
+            # interior centre, since there is no landing-metal layer to
+            # escape on. There is no single geometrically-correct outward
+            # direction for an interior point, so this reports a fixed
+            # value, mirroring `mos_array`'s interior gate-contact port
+            # (`_mos_unit_layout`'s own `g_xy`, always `270`).
+            top_xy = unit["top_xy"]
+            direction_deg = 90
+            notes.append(
+                f"C{idx}_TOP is reported at the unit's interior centre, "
+                "directly over the bottom plate -- this PDK family has no "
+                "top-plate-via-metal layer to draw a routable escape pad "
+                "on; a via stack landed here may short the two plates "
+                "together"
+            )
         ports.append(
             {
                 "name": f"C{idx}_TOP",
@@ -6261,16 +6335,10 @@ def _cap_array_describe(
                 "x_um": c["x0_um"] + top_xy[0],
                 "y_um": c["y0_um"] + top_xy[1],
                 "width_um": top_port_width_um,
-                # The top-plate via/landing pad sits at the unit cell's own
-                # interior centre, not on an edge -- there is no single
-                # geometrically-correct outward direction, so this reports a
-                # fixed value, mirroring `mos_array`'s interior gate-contact
-                # port (`_mos_unit_layout`'s own `g_xy`, always `270`).
-                "direction_deg": 90,
+                "direction_deg": direction_deg,
             }
         )
 
-    notes = []
     if 0 <= params["spacing_um"] < MIN_SAME_LAYER_SPACING_UM:
         notes.append(
             "spacing_um is below the recommended "
