@@ -16,6 +16,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen compose`'s router now validates `routing.width_um` and
+  sizes its via-drop squares against the **resolved PDK deck's own
+  minimum-width DRC rules** — the same `ExtractionDeck`/`DrcRule` set `klt
+  drc` judges the composed layout with — instead of the documented `0.17um`
+  default and the PDK-independent `_VIA_DROP_SIZE_UM` (`0.22um`) constant
+  (issue #1501). On a family whose minimums exceed those values (e.g.
+  gf180mcu's `metal1.width.1` = `0.23um`, `via1.width.1` = `0.26um`), `compose`
+  previously drew guaranteed-illegal geometry with no error or warning at
+  generation time — 172 `metal1.width.1` violations on the documented default,
+  284 `via1.width.1` violations on every `metal2` route's via-drops, per the
+  issue's own measured reproduction. `compose` now rejects a `routing.width_um`
+  below the resolved deck's own minimum for the requested layer (and any
+  `cross_block_layer_role` fallback layer), naming the violated rule and its
+  threshold, and sizes each via-drop's square to `max(_VIA_DROP_SIZE_UM,
+  <deck's own via-layer width floor>)` per distinct via layer actually drawn.
+  A PDK family whose deck cannot be resolved, or a layer with no matching
+  `"width"` rule, keeps the prior constants unchanged. No `schema_version`
+  bump — `compose`'s success-path payload shape is unchanged; the new failure
+  mode reuses the existing `GenComposeError` application-error path.
 - **Documented**: `klt gen diff_pair` places both legs at the **same x column
   per terminal** — the common-centroid checkerboard puts one `Q1` and one
   `Q2` sub-instance in every column at the same `x0`, so `Q1_<n>_S`/`_D`/`_G`

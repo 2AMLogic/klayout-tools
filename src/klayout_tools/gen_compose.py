@@ -1411,6 +1411,47 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     return pair
 
 
+def _min_width_um_for_layer(
+    variant: str, layer: tuple[int, int] | None
+) -> tuple[float, str] | None:
+    """Resolve the tightest applicable minimum-*width* DRC rule for ``layer``
+    from the resolved PDK family's own curated deck -- the *same*
+    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges composed geometry
+    with, never a private, hard-coded threshold (issue #1501).
+
+    Mirrors ``compose()``'s own same-layer minimum-*spacing* lookup (issue
+    #1386's ``_min_spacing_um_for_layer``), generalised to ``"width"`` rules
+    and lifted to module scope so both the ``routing.width_um`` validation
+    and the via-drop square sizing below can share it. Returns
+    ``(threshold_um, rule_id)`` for the widest matching ``"width"`` rule on
+    ``layer`` (a layer can carry more than one width rule from different DRM
+    sections; the widest is the true floor), or ``None`` when ``layer`` is
+    ``None``, the layer has no such rule in the resolved deck, or the PDK
+    family/deck cannot be resolved at all -- an unresolvable family degrades
+    this check to a no-op, exactly like #1386's spacing lookup does.
+    """
+    if layer is None:
+        return None
+    try:
+        family = _pdk_family(variant)
+        deck_rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except (GenError, UnknownDeckError):
+        return None
+    best: tuple[float, str] | None = None
+    for rule in deck_rules:
+        if (
+            rule.check == "width"
+            and rule.layer == layer
+            and rule.other_layer is None
+            and rule.derived_layer is None
+        ):
+            threshold_um = rule.threshold_dbu * nominal_dbu_um
+            if best is None or threshold_um > best[0]:
+                best = (threshold_um, rule.id)
+    return best
+
+
 def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
     """The ``(layer, datatype)`` a port's own reported ``layer{layer,
     datatype}`` geometry names, or ``None`` when it is missing/malformed.
@@ -4358,6 +4399,24 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         width_um = float(raw_width)
         route_layer = _resolve_route_layer(pdk_info["variant"], layer_role)
+        # #1501: routing.width_um must clear the resolved PDK deck's own
+        # minimum-width rule for route_layer -- the same deck `klt drc`
+        # judges the drawn backbone with. Without this, a request that omits
+        # `routing.width_um` (or names one below the deck's own floor, e.g.
+        # gf180mcu's metal1.width.1 = 0.23um vs. the documented 0.17um
+        # default) draws a guaranteed-illegal backbone with no error or
+        # warning at generation time, and the resulting `klt drc` violation
+        # count is silently mis-attributed to placement/routing rather than
+        # this units mismatch.
+        route_width_floor = _min_width_um_for_layer(pdk_info["variant"], route_layer)
+        if route_width_floor is not None and width_um < route_width_floor[0] - 1e-9:
+            floor_um, rule_id = route_width_floor
+            raise GenComposeError(
+                f"request.routing.width_um ({width_um}um) is narrower than "
+                f"the resolved PDK deck's own minimum width for "
+                f"routing.layer_role '{layer_role}' -- '{rule_id}' requires "
+                f">= {floor_um}um"
+            )
         label_layer = _resolve_label_layer(pdk_info["variant"], route_layer)
         if label_layer is None:
             notes.append(
@@ -4381,6 +4440,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             cross_route_layer, _cross_via_layer = _resolve_cross_block_route_layer(
                 pdk_info["variant"], layer_role, cross_layer_role
             )
+            # #1501: a leg that falls back to cross_route_layer still draws
+            # at the same routing.width_um -- validate it against this
+            # second layer's own deck minimum too, exactly as route_layer
+            # was above.
+            cross_width_floor = _min_width_um_for_layer(
+                pdk_info["variant"], cross_route_layer
+            )
+            if cross_width_floor is not None and width_um < cross_width_floor[0] - 1e-9:
+                floor_um, rule_id = cross_width_floor
+                raise GenComposeError(
+                    f"request.routing.width_um ({width_um}um) is narrower "
+                    "than the resolved PDK deck's own minimum width for "
+                    f"routing.cross_block_layer_role '{cross_layer_role}' -- "
+                    f"'{rule_id}' requires >= {floor_um}um"
+                )
             cross_label_layer = _resolve_label_layer(
                 pdk_info["variant"], cross_route_layer
             )
@@ -4793,6 +4867,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         if strategy == "array"
         else None
     )
+    # #1501: `_VIA_DROP_SIZE_UM` (`gen.CONTACT_SIZE_UM`, a PDK-independent
+    # constant) is a guaranteed `viaN.width.1` violation on any family whose
+    # via-width minimum exceeds it (e.g. gf180mcu's `via1.width.1` = 0.26um
+    # vs. the 0.22um constant). Derive a per-via_layer floor from the same
+    # resolved deck `klt drc` judges the drawn via square with -- one lookup
+    # per *distinct* via_layer actually used across every drawn via-drop,
+    # never a private threshold. A layer with no matching "width" rule (or an
+    # unresolvable PDK family) keeps exactly `_VIA_DROP_SIZE_UM`, unchanged.
+    via_drop_size_um: dict[tuple[int, int], float] = {}
+    for route in routed_geometry:
+        for drop in route.get("via_drops", []):
+            via_pair = drop["via_layer"]
+            if via_pair not in via_drop_size_um:
+                floor = _min_width_um_for_layer(pdk_info["variant"], via_pair)
+                via_drop_size_um[via_pair] = max(
+                    _VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0
+                )
     _write_composed_gds(
         blocks,
         order,
@@ -4804,6 +4895,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         label_layer,
         pin_placements,
         array_placement=array_placement_gds,
+        via_drop_size_um=via_drop_size_um,
     )
 
     # --- drc_hints: matched-group echo + tightest spacing used --------------
@@ -4911,6 +5003,7 @@ def _write_composed_gds(
     label_layer: tuple[int, int] | None = None,
     pin_placements: list[dict[str, Any]] | None = None,
     array_placement: dict[str, Any] | None = None,
+    via_drop_size_um: dict[tuple[int, int], float] | None = None,
 ) -> None:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -4960,8 +5053,15 @@ def _write_composed_gds(
     Each entry's ``via_drops`` (resolved by :func:`route_two_pin`'s check 5,
     issue #454) is a list of ``{x_um, y_um, via_layer, port_layer}`` -- one
     per endpoint that needed to drop from ``route_layer`` down to its own
-    pin's layer. Each drop draws a via square (``_VIA_DROP_SIZE_UM``) on
-    ``via_layer`` plus a landing-pad square (``_VIA_LANDING_SIZE_UM``, sized
+    pin's layer. Each drop draws a via square on ``via_layer``, sized to
+    ``via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)`` (issue #1501: the
+    caller -- :func:`compose` -- resolves this per distinct ``via_layer``
+    against the same curated deck ``klt drc`` judges the drawn square with,
+    so a family whose ``viaN.width.1`` exceeds the PDK-independent
+    ``_VIA_DROP_SIZE_UM`` constant still draws a DRC-clean via; a caller that
+    omits ``via_drop_size_um`` -- e.g. a pre-#1501 unit test constructing
+    ``routed_geometry`` directly -- keeps exactly ``_VIA_DROP_SIZE_UM`` for
+    every drop, unchanged), plus a landing-pad square (``_VIA_LANDING_SIZE_UM``, sized
     independently of the route's own trace width so the via's enclosure
     requirement holds regardless) on *both* ``route_layer`` and the pin's own
     layer, all centered on the pin's exact composed-frame position -- the
@@ -5136,7 +5236,14 @@ def _write_composed_gds(
             # point (manhattan_backbone's endpoints are the raw pin
             # positions), so the landing pad always overlaps -- and merges
             # with -- the trace.
-            via_half_dbu = int(round((_VIA_DROP_SIZE_UM / 2.0) / dbu))
+            #
+            # The via square's own side (#1501) is looked up per `via_layer`
+            # in `via_drop_size_um` -- resolved by `compose()` against the
+            # same curated deck `klt drc` judges the drawn square with --
+            # falling back to the PDK-independent `_VIA_DROP_SIZE_UM`
+            # constant for any layer the caller didn't resolve a floor for
+            # (an unresolvable PDK family, or a pre-#1501 caller that never
+            # populates `via_drop_size_um` at all).
             landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
             for drop in route.get("via_drops", []):
                 via_pair = drop["via_layer"]
@@ -5145,6 +5252,8 @@ def _write_composed_gds(
                 port_layer_index = layout.layer(port_pair[0], port_pair[1])
                 cx = int(round(drop["x_um"] / dbu))
                 cy = int(round(drop["y_um"] / dbu))
+                via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
+                via_half_dbu = int(round((via_size_um / 2.0) / dbu))
                 top.shapes(via_layer_index).insert(
                     kdb.Box(
                         cx - via_half_dbu,

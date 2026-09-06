@@ -74,6 +74,19 @@ cleanly.
   `routed` and `route_length_um` per net. A net the router cannot connect is
   reported in `unrouted_nets[]` (a **partial success**, exit code `3`), not a
   hard failure.
+  - **`routing.width_um` is floored by the resolved PDK deck's own
+    minimum-width rule (issue #1501).** The floor is looked up in the same
+    `ExtractionDeck`/`DrcRule` set `klt drc --deck <family>` judges the
+    composed layout with — never a second, private threshold — for both the
+    requested `routing.layer_role` and any `cross_block_layer_role` fallback
+    layer a leg draws on. A `width_um` narrower than that floor is an
+    application error (exit `1`) naming the violated rule id and its
+    threshold in µm, rather than silently drawing sub-minimum metal (e.g.
+    gf180mcu's `metal1.width.1` = `0.23um` rejects the documented `0.17um`
+    default). Each via-drop's own square (`_VIA_DROP_SIZE_UM` by default) is
+    floored the same way against the drop's `via_layer`, so a family whose
+    via-width minimum exceeds that constant (e.g. gf180mcu's `via1.width.1` =
+    `0.26um`) still draws a DRC-clean via.
 - **Declare-only connectivity (no `routing`, #1188)** — `routing` is
   optional: omitting it (or passing `{}`) with a non-empty `connectivity[]`
   still validates every net's `{block, port}` pins against the referenced
