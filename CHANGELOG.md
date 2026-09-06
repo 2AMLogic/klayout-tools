@@ -16,6 +16,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt mom --touchstone <path>` writes a standard 2-port
+  Touchstone (`.s2p`) file from the de-embedded S-parameters
+  `report["full_wave_sweep"][i]["s_parameters"]` already computes (issue
+  #1518) — the interchange format SPICE-family tools (ngspice, Xyce, ADS,
+  …) expect for N-port network data. Follows Touchstone Rev 1.1 (`# HZ S RI
+  R <z0>` option line, `S11 S21 S12 S22`-per-line data order, no lossy
+  magnitude/phase round-trip). Raises a clear `MomError` (exit code 1) if
+  the report has no S-parameters (`ports` unset in the spec file) or if the
+  two ports' `reference_impedance_ohm` differ — Touchstone v1.1's single
+  scalar `R <z0>` cannot represent two different real reference
+  impedances, and this writer never silently averages them or emits the
+  inconsistently-supported Touchstone v2.0 `[Reference]` syntax. See
+  `docs/cli/mom.md`'s "Exporting Touchstone (`.s2p`)" section.
+
 - **Fixed**: `klt gen-compose` no longer hard-refuses composing blocks whose
   GDS inputs disagree on `dbu`, as long as every disagreement is an exact
   integer ratio (issue #1514, a regression from #1512). `klt gen`'s output

@@ -2523,6 +2523,19 @@ def create_parser() -> argparse.ArgumentParser:
             "top cell, unlike klt layers' default of summing across all)"
         ),
     )
+    mom_parser.add_argument(
+        "--touchstone",
+        default=None,
+        metavar="PATH",
+        help=(
+            "write a standard 2-port Touchstone (.s2p) file to PATH from the "
+            "report's full_wave_sweep S-parameters (issue #1518) -- requires "
+            "'ports' (exactly two entries) in the spec file; errors clearly if "
+            "the report has no S-parameters or the two ports' "
+            "reference_impedance_ohm differ. See docs/cli/mom.md's Touchstone "
+            "export section"
+        ),
+    )
     _add_format_arg(mom_parser)
     mom_parser.set_defaults(func=mom_cmd.run)
 
