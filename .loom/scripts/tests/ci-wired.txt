@@ -45,7 +45,6 @@ test-check-ci-status.sh
 test-check-config-no-host-paths.sh
 test-check-duplicate.sh
 test-check-conflict-markers.sh
-test-check-dep-recheck-idempotency.sh
 test-check-evaluating-staleness.sh
 test-check-git-identity.sh
 test-check-host-sleep.sh
@@ -156,6 +155,7 @@ test-merge-pr-worktree-path.sh
 test-merge-pr-worktree-remove-diagnosis.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
+test-post-verdict.sh
 test-pr-worktree-isolation.sh
 test-probe-tokens-fallback.sh
 test-provision-codex-hooks.sh
