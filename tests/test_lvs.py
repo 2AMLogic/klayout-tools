@@ -1683,6 +1683,74 @@ def test_a_genuine_split_still_classifies_as_net_split_when_composed(tmp_path):
     ]
 
 
+# Block D: a genuinely ambiguous-but-resolvable pairing -- two symmetric
+# resistors dangling off unlabelled nets, the same shape as
+# `test_same_nets_hint_resolves_an_otherwise_ambiguous_match`. The comparer
+# resolves the swap on its own (a valid isomorphism), so alone this is
+# `status: "match"` with two `topology`/`"warning"` "ambiguous pairing,
+# resolved structurally" entries -- an already-tolerated residual, not a
+# defect.
+_ISLAND_D_REFERENCE = """R1 D_VDD D_P1 1k
+R2 D_VDD D_P2 1k
+"""
+_ISLAND_D_LAYOUT = """R1 D_VDD $1 1k
+R2 D_VDD $2 1k
+"""
+_ISLAND_D_PINS = "D_VDD"
+
+# Block E: electrically unrelated and *also* clean (no defect of its own) --
+# another ambiguous-but-resolvable pair, contributing only more candidates to
+# disambiguate among, never a real mismatch.
+_ISLAND_E_REFERENCE = """R8 E_VDD E_P1 1k
+R9 E_VDD E_P2 1k
+"""
+_ISLAND_E_LAYOUT = """R8 E_VDD $3 1k
+R9 E_VDD $4 1k
+"""
+_ISLAND_E_PINS = "E_VDD"
+
+
+def test_composing_a_clean_unrelated_block_does_not_flip_status_or_severity(tmp_path):
+    """Issue #1533's third acceptance criterion, checked end to end (not just
+    at the classification layer): an already-tolerated `severity: "warning"`
+    ambiguous-pairing result for one circuit must not change status,
+    severity, or category when that circuit is composed alongside an
+    unrelated, independently structurally-anonymous block -- even when that
+    block is itself defect-free and only adds more candidates to the
+    comparer's own ambiguity pool.
+
+    This is also the acceptance criterion #1 instrumentation: block D's
+    ambiguous pairing is resolved by `NetlistComparer.compare()` itself (an
+    `ambiguous_net_matches` log event, not a `net_mismatch`), so composing in
+    block E's *also-resolvable* pairing tests whether the comparer's own
+    verdict -- not just this module's classification -- is sensitive to the
+    surrounding candidate pool. It is not: `compare()` returns the same
+    `True` either way, matching the documented default (`klt lvs` never sets
+    `max_branch_complexity`, so the backtracking search is unbounded, not
+    budget-limited by the size of an unrelated component)."""
+    alone = _compare_islands(
+        tmp_path, "alone", _ISLAND_D_PINS, _ISLAND_D_LAYOUT, _ISLAND_D_REFERENCE
+    )
+    assert alone["status"] == "match"
+    assert alone["category_counts"] == {"topology": 2}
+    assert all(m["severity"] == "warning" for m in alone["mismatches"])
+
+    composed = _compare_islands(
+        tmp_path,
+        "composed",
+        f"{_ISLAND_D_PINS} {_ISLAND_E_PINS}",
+        _ISLAND_D_LAYOUT + _ISLAND_E_LAYOUT,
+        _ISLAND_D_REFERENCE + _ISLAND_E_REFERENCE,
+    )
+    assert composed["status"] == "match"
+    composed_d = [
+        m
+        for m in composed["mismatches"]
+        if (m["net"] or {}).get("reference") in {"D_P1", "D_P2"}
+    ]
+    assert composed_d == alone["mismatches"]
+
+
 # --------------------------------------------------------------------------- #
 # hints.same_nets / hints.equivalent_pins
 # --------------------------------------------------------------------------- #
