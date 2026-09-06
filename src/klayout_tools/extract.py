@@ -2142,10 +2142,25 @@ def run_extract(
             net_instance_pins=def_net_connections,
         )
 
-    writer = (
-        kdb.NetlistSpiceWriter(create_model_binding_delegate(model_bindings))
-        if model_bindings is not None
-        else kdb.NetlistSpiceWriter()
+    # Issue #1503: every synthesized substrate identity `_tie_substrate_nets_
+    # to_ground` just tied to ground (`substrate_dc_tie["nets"]`, already
+    # computed above as part of `parasitics_report`) is declared SPICE-global
+    # via `.GLOBAL` -- see `create_model_binding_delegate`'s `global_nets`
+    # docstring paragraph and `_tie_substrate_nets_to_ground`'s own docstring
+    # for why. `[]` (the pre-#1503 default) whenever `--parasitics` was not
+    # given or synthesized no substrate identity at all, in which case
+    # `create_model_binding_delegate`'s `write_header` override emits
+    # nothing and this is a no-op.
+    substrate_global_nets: list[str] = []
+    if parasitics_report is not None:
+        substrate_global_nets = [
+            entry["net"] for entry in parasitics_report["substrate_dc_tie"]["nets"]
+        ]
+    writer = kdb.NetlistSpiceWriter(
+        create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=substrate_global_nets,
+        )
     )
     writer.use_net_names = True
     netlist_description = f"extracted by klt extract --deck {deck_name}"
@@ -7672,7 +7687,11 @@ def _tie_substrate_nets_to_ground(
     """Give every *synthesized* substrate identity in ``circuit`` a DC path
     to SPICE's global ground node ``0``, via one large shunt resistor per net
     (``R<net>_dctie <net> 0 1e12``), and report what was written (issue
-    #1263).
+    #1263). The tied net names are also declared SPICE-global by the caller
+    (``run_extract``, via ``create_model_binding_delegate``'s ``global_nets``
+    -- see issue #1503 below): this function only builds the *name list* and
+    the shunt devices; the ``.GLOBAL`` card itself is written later, once per
+    netlist, by the SPICE writer delegate's ``write_header`` hook.
 
     **Why this is needed.** ``--parasitics`` hangs each net's lumped ground
     capacitance off the deck's ``substrate_net`` (``vsubs`` for sky130 and
@@ -7690,27 +7709,63 @@ def _tie_substrate_nets_to_ground(
     a silently untrustworthy post-layout result, not a hard error.
 
     Being a *pin* does not save it: ``make_top_level_pins()`` promotes the
-    substrate net like any other named net, but a promoted pin wired to an
-    equally-undriven node in the caller's testbench is just as floating. The
-    missing DC tie, not the pin-exposure status, is the defect.
+    substrate net like any other named net *when that net already exists at
+    promotion time* (e.g. a MOS body terminal strapped it during device
+    extraction) -- but the net this function ties is minted by
+    ``_inject_parasitics`` itself, which runs *after* ``make_top_level_
+    pins()``/``_reconcile_top_pins`` have already finished (see "Pin
+    interface untouched" below), so it is never a candidate for promotion in
+    the first place. A promoted pin wired to an equally-undriven node in the
+    caller's testbench would float just the same regardless -- the missing
+    DC path, not the pin-exposure status, is the defect this function fixes.
 
-    **Why a shunt resistor to node ``0``, inside the ``.SUBCKT``.** Node
-    ``0`` is SPICE's *global* ground: it means the same node inside a
-    subcircuit body as at the top level, needing neither a ``.global``
-    declaration (which is conventionally a top-level card, not a
-    ``.SUBCKT``-body one) nor any cooperation from the instantiating
-    testbench. So the tie travels with the extracted file itself and works
-    identically for a caller who runs ``klt extract --parasitics`` and
-    assembles their own testbench, for ``klt pex``'s orchestration, and for
-    anything downstream that re-includes the same artifact.
+    **Why a shunt resistor to node ``0``, plus ``.GLOBAL`` (issue #1503).**
+    Node ``0`` is SPICE's *global* ground: it means the same node inside a
+    subcircuit body as at the top level, needing no cooperation from the
+    instantiating testbench. That much was true before issue #1503 and still
+    holds -- the shunt itself needs nothing from the caller. What issue
+    #1503 fixes is the *other* end of the resistor: pre-#1503, the tied net
+    itself (``vsubs``, or a ``_iso<n>`` variant) was neither a pin nor
+    ``.global`` -- purely local to the ``.SUBCKT`` body -- so an
+    ``X``-instantiated testbench's own same-named node was a *different*,
+    electrically disconnected SPICE node from the instance's internal one
+    (``vsubs`` at the top level vs. ``x1.vsubs`` once flattened). The DC tie
+    kept the *instance's own* node from floating (no more singular-matrix
+    error), but the parasitic ground-capacitance model it anchors was then
+    silently computed against a node the testbench could not reach or drive.
+    Declaring the net ``.GLOBAL`` (written once, before the first
+    ``.SUBCKT``, by the SPICE writer's ``write_header`` hook -- see
+    ``create_model_binding_delegate``) makes every occurrence of that literal
+    net name, in every scope, refer to the *same* physical node: the
+    top-level testbench's own ``vsubs``, this ``.SUBCKT``'s internal
+    reference, and every other ``X``-instantiation of it, are now all one
+    node -- exactly the property a caller driving or measuring the substrate
+    reference at the top level needs. A ``.global`` card was previously
+    treated as conventionally top-level-only and rejected inside a
+    ``.SUBCKT`` body; per ngspice's own ``.global`` semantics (it may appear
+    anywhere and applies netlist-wide regardless of position) writing it once
+    at the top of the file -- not inside the body -- satisfies both: the
+    written file keeps a conventional top-level ``.global`` card, and the
+    coverage is netlist-wide.
+
+    **A declared pin's local formal-argument binding still wins.** Where a
+    synthesized substrate net *is* also a declared ``.SUBCKT`` pin (the MOS
+    body-terminal case above), each instantiation's own call-site argument
+    already gives that pin's local name a specific bound node distinct from
+    a global declaration -- SPICE resolves an occurrence against a
+    subcircuit's own formal pin list before falling back to a ``.global``
+    name, so declaring the same literal name ``.global`` alongside it is
+    inert for that one subcircuit (no conflict) while still applying to any
+    other scope that references the same name without binding it as a pin.
 
     **Idempotent with a hand-authored tie.** A testbench that already
     supplies its own ``.global vsubs`` + ``Vsubs vsubs 0 DC 0`` (or
     ``.options rshunt=1e12``) keeps working unchanged: a 1 Tohm resistor in
-    parallel with an ideal 0 V source draws ~0 A and moves no node voltage
-    -- there is no duplicate instance name to clash, because this card lives
-    in the subcircuit's own namespace. Existing fixtures that hand-author
-    the workaround are left in place for exactly that reason.
+    parallel with an ideal 0 V source draws ~0 A and moves no node voltage;
+    a duplicate ``.global vsubs`` declaration (this function's own, plus the
+    testbench's) is itself idempotent -- ngspice tolerates re-declaring the
+    same name global. Existing fixtures that hand-author the workaround are
+    left in place for exactly that reason.
 
     **Harmless where nothing floats.** On a net that already has a real DC
     path, adding a 1 Tohm leakage path to ground is below every simulator
@@ -7723,12 +7778,19 @@ def _tie_substrate_nets_to_ground(
     top_pins`` have already run, so it stays internal and the written
     ``.SUBCKT``'s declared pin count is unchanged -- which is what keeps
     ``klt pex``'s ``pin_count_mismatch``/``flat_dut_mismatch`` diagnostics
-    (issue #1258) reading the same interface they did before.
+    (issue #1258) reading the same interface they did before. The new
+    ``.GLOBAL`` card (issue #1503) does not change this either: it is a
+    top-of-file directive, not a pin declaration.
 
     Returns the additive ``parasitics.substrate_dc_tie`` report block:
-    ``{"resistance_ohm": float, "nets": [{"net": str, "device": str}, ...]}``
-    -- ``nets`` empty (and no card written) when this circuit carries no
-    synthesized substrate identity at all.
+    ``{"resistance_ohm": float, "nets": [{"net": str, "device": str}, ...],
+    "node_scope": "global"}`` -- ``nets`` empty (and no card written, no
+    ``.GLOBAL`` line emitted) when this circuit carries no synthesized
+    substrate identity at all. ``node_scope`` is additive (issue #1503): a
+    constant ``"global"`` describing that every ``nets[].net`` identity is
+    declared SPICE-global (not merely tied to ground), so a caller can
+    detect the node-scoping guarantee programmatically instead of reading
+    the generated SPICE for a ``.GLOBAL`` card.
     """
     tied_nets = [
         net
@@ -7763,6 +7825,12 @@ def _tie_substrate_nets_to_ground(
     return {
         "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
         "nets": entries,
+        # Additive field (issue #1503): constant `"global"` -- every
+        # `nets[].net` identity above is also declared SPICE-global (see
+        # this function's own docstring), not merely tied to ground. Present
+        # even when `nets` is `[]` (nothing to scope, but the policy is
+        # still accurately described as "global" for this build).
+        "node_scope": "global",
     }
 
 

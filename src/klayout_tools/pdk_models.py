@@ -263,6 +263,7 @@ micrometre-unit-suffixed literal for gf180mcu (whose ``r_length``/
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -1309,12 +1310,29 @@ def _select_bipolar_variant(
 
 def create_model_binding_delegate(
     bindings: dict[str, DeviceBinding],
+    global_nets: Sequence[str] = (),
 ) -> kdb.NetlistSpiceWriterDelegate:
     """Build a ``kdb.NetlistSpiceWriterDelegate`` that writes any device whose
     class name is a key of ``bindings`` as an ``X`` subcircuit call per its
     :class:`DeviceBinding`, and defers every other device (an unbound
     recognised class, e.g. gf180mcu's ``bjt``, or a future deck's new class) to
     KLayout's default primitive-card behavior.
+
+    ``global_nets`` (issue #1503) is an independent, additive concern: when
+    non-empty, the delegate's ``write_header`` override emits one
+    ``.GLOBAL <net> <net> ...`` card, once, before the first ``.SUBCKT`` --
+    the same top-of-file position KLayout's ``NetlistSpiceWriter`` calls
+    ``write_header`` from (before it iterates device classes or circuits at
+    all -- confirmed against ``dbNetlistSpiceWriter.cc``'s ``do_write``).
+    ``extract.py``'s ``_tie_substrate_nets_to_ground`` (issue #1263) uses this
+    to make its synthesized substrate identities (``vsubs`` and any
+    ``_iso<n>`` variant) SPICE-global, so the one DC-tie shunt written inside
+    the ``.SUBCKT`` body reaches every ``X``-instantiation and the
+    instantiating testbench's own same-named node alike, rather than being
+    trapped as a per-instance-local node -- see that function's docstring for
+    the full rationale. Empty (the default) reproduces the pre-#1503
+    behavior exactly: no header line, identical output for a caller that
+    passes no PDK model bindings and no global nets.
 
     ``import klayout.db`` is deferred to call time (mirrors every other
     KLayout import in ``extract.py``) so importing this module never pays
@@ -1323,9 +1341,16 @@ def create_model_binding_delegate(
     import klayout.db as kdb
 
     class _ModelBindingSpiceWriterDelegate(kdb.NetlistSpiceWriterDelegate):
-        def __init__(self, mapping: dict[str, DeviceBinding]) -> None:
+        def __init__(
+            self, mapping: dict[str, DeviceBinding], global_net_names: Sequence[str]
+        ) -> None:
             super().__init__()
             self._bindings = mapping
+            self._global_nets = list(global_net_names)
+
+        def write_header(self) -> None:
+            if self._global_nets:
+                self.emit_line(".GLOBAL " + " ".join(self._global_nets))
 
         def _device_param(self, device: kdb.Device, name: str) -> float | None:
             for param in device.device_class().parameter_definitions():
@@ -1423,4 +1448,4 @@ def create_model_binding_delegate(
                 f"{binding.width_param}={_format_um(width_um, style)}{extra_params}"
             )
 
-    return _ModelBindingSpiceWriterDelegate(bindings)
+    return _ModelBindingSpiceWriterDelegate(bindings, global_nets)
