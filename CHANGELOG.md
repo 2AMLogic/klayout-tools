@@ -16,6 +16,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose` no longer hard-refuses composing blocks whose
+  GDS inputs disagree on `dbu`, as long as every disagreement is an exact
+  integer ratio (issue #1514, a regression from #1512). `klt gen`'s output
+  dbu is now resolved from the target PDK's own tech LEF `DATABASE MICRONS`
+  (#1512) — `0.0005um` for a gf180mcu-family PDK instead of the prior fixed
+  `0.001um` — but `klt draw` (deliberately PDK-unaware, #230) and any GDS
+  from an older `klt gen` build still always write `0.001um`, so composing
+  either against a freshly-generated gf180mcu-family `klt gen` block used to
+  hit the same `"which does not match the composed cell's dbu"` error
+  #1496 fixed for the opposite pairing. `gen-compose` now resolves the
+  composed layout's own dbu as the *finest* dbu among all blocks, and
+  rescales every coarser block's geometry (and any internal hierarchy or
+  array pitch) losslessly onto that grid via a `kdb.ICplxTrans` integer
+  magnification — the same rescale mechanics `klt place-and-route`'s
+  `_merge_gds_view` already uses for the analogous DEF/LEF-merge problem
+  (#1090). Composing blocks whose dbus differ by a *non*-integer ratio (a
+  genuine cross-PDK composition mistake, not a reconcilable grid mismatch)
+  still raises `GenComposeError`. Each rescaled block adds one entry to the
+  response's `warnings[]` naming the block, its original dbu, and the
+  composed dbu it was rescaled onto — additive field usage only, no
+  `schema_version` bump.
+
 - **Added**: `klt extract --pin-source-cells CELL[,CELL...]` (issue #1513) is
   a third, *positional* declared-pin mechanism for composing several
   already-independently-verified blocks — at least one of them a

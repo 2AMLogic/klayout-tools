@@ -8087,23 +8087,221 @@ def test_compose_gen_block_with_place_and_route_style_gds_same_gf180mcu_pdk(
     assert composed_layout.dbu == pytest.approx(0.0005)
 
 
-def test_compose_still_rejects_mismatched_dbu_across_different_pdks(
+# --------------------------------------------------------------------------- #
+# `klt draw`-style (always dbu=0.001, #230) block composed against a
+# gf180mcu-family `klt gen` block (dbu=0.0005, #1512) -- issue #1514.
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_reconciles_drawn_style_dbu_against_gf180mcu_gen_block(
     tmp_path, both_pdk_root
 ):
+    """The exact issue #1514 repro: `klt draw` always writes `dbu=0.001`
+    (no PDK awareness, #230), but a `klt gen guard_ring --pdk gf180mcuD`
+    block now resolves `dbu=0.0005` from the tech LEF (#1512). Composing the
+    two together used to hit the "must share the same dbu" refusal
+    unconditionally; the ratio (2x) is an exact integer, so it must now
+    reconcile instead: the composed cell is written at the *finer* 0.0005
+    grid, and the coarser (drawn-style) block's geometry is losslessly
+    rescaled onto it -- verified against the block's own literal drawn
+    coordinates, not just its reported bbox."""
+    variant_dir = both_pdk_root / "gf180mcuD"
+    techlef_dir = variant_dir / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
+    techlef_dir.mkdir(parents=True, exist_ok=True)
+    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
+        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
+    )
+
+    ring_report = _gen_block_variant(
+        tmp_path, both_pdk_root, "gf180mcuD", "guard_ring", "ring0"
+    )
+    import klayout.db as kdb
+
+    ring_layout = kdb.Layout()
+    ring_layout.read(ring_report["gds_path"])
+    assert ring_layout.dbu == pytest.approx(0.0005)
+
+    drawn_gds = _write_place_and_route_style_gds(
+        tmp_path / "drawn.gds", "drawn_top", 1.0, 0.15, dbu=0.001
+    )
+    output = tmp_path / "composed.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [
+                {"id": "ring", "generator_report": ring_report},
+                {
+                    "id": "drawn",
+                    "cell": {"gds_path": drawn_gds, "cell_name": "drawn_top"},
+                },
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["ring", "drawn"],
+                "origins_um": {
+                    "ring": {"x": 0.0, "y": 0.0},
+                    "drawn": {"x": 2.0, "y": 2.0},
+                },
+            },
+            "options": {"cell_name": "composed_0", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    # The composed dbu is the *finest* of the two (0.0005) -- not the
+    # drawn block's own, coarser 0.001.
+    assert report["dbu_um"] == pytest.approx(0.0005)
+    assert any("drawn" in w and "rescaled" in w for w in report["warnings"])
+
+    drawn_block = next(b for b in report["blocks"] if b["id"] == "drawn")
+    assert drawn_block["offset_um"] == {"x": 2.0, "y": 2.0}
+
+    composed_layout = kdb.Layout()
+    composed_layout.read(str(output))
+    assert composed_layout.dbu == pytest.approx(0.0005)
+
+    # The drawn block's own sub-cell, named "<block_id>__<cell_name>" by
+    # `_write_composed_gds` -- read its geometry directly to confirm it was
+    # rescaled (not reinterpreted): a box drawn (0,0)-(1000,150) at the
+    # block's own dbu=0.001 is exactly 1.0um x 0.15um; reinterpreting those
+    # same integer coordinates at the composed dbu=0.0005 without rescaling
+    # would silently read back as 2.0um x 0.3um instead.
+    drawn_cell = composed_layout.cell("drawn__drawn_top")
+    assert drawn_cell is not None
+    li1 = composed_layout.find_layer(67, 20)
+    assert li1 is not None
+    shapes = list(drawn_cell.shapes(li1).each())
+    assert len(shapes) == 1
+    box = shapes[0].box
+    assert box.width() * composed_layout.dbu == pytest.approx(1.0)
+    assert box.height() * composed_layout.dbu == pytest.approx(0.15)
+
+
+def test_compose_dbu_rescale_preserves_block_hierarchy_and_array_pitch(
+    tmp_path, both_pdk_root
+):
+    """The rescale must remap a coarser block's *whole* layout -- its internal
+    cell hierarchy and any instance-array step vectors -- not just the shapes
+    sitting directly in its top cell. A block whose own top cell instances a
+    leaf as a 3x2 array is the case that would silently break if only shapes
+    were scaled: the array pitch would stay at its raw integer value and halve
+    in microns on the finer grid, tearing the array apart (#1514)."""
+    import klayout.db as kdb
+
+    variant_dir = both_pdk_root / "gf180mcuD"
+    techlef_dir = variant_dir / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
+    techlef_dir.mkdir(parents=True, exist_ok=True)
+    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
+        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
+    )
+
+    ring_report = _gen_block_variant(
+        tmp_path, both_pdk_root, "gf180mcuD", "guard_ring", "ring0"
+    )
+
+    # A `klt draw`-style hierarchical block at the coarse 0.001 grid.
+    drawn_gds = tmp_path / "drawn_hier.gds"
+    src = kdb.Layout()
+    src.dbu = 0.001
+    src_li1 = src.layer(67, 20)
+    leaf = src.create_cell("drawn_leaf")
+    leaf.shapes(src_li1).insert(kdb.Box(0, 0, 1000, 150))  # 1.0um x 0.15um
+    hier_top = src.create_cell("drawn_hier_top")
+    hier_top.insert(
+        kdb.CellInstArray(
+            leaf.cell_index(),
+            kdb.Trans(0, False, 5000, 7000),  # 5.0um, 7.0um
+            kdb.Vector(3000, 0),  # 3.0um column pitch
+            kdb.Vector(0, 2000),  # 2.0um row pitch
+            3,
+            2,
+        )
+    )
+    expected_bbox_um = hier_top.dbbox()
+    src.write(str(drawn_gds))
+
+    output = tmp_path / "composed.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [
+                {"id": "ring", "generator_report": ring_report},
+                {
+                    "id": "drawn",
+                    "cell": {
+                        "gds_path": str(drawn_gds),
+                        "cell_name": "drawn_hier_top",
+                    },
+                },
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["ring", "drawn"],
+                "origins_um": {
+                    "ring": {"x": 0.0, "y": 0.0},
+                    "drawn": {"x": 40.0, "y": 40.0},
+                },
+            },
+            "options": {"cell_name": "composed_0", "output": str(output)},
+        }
+    )
+    assert report["dbu_um"] == pytest.approx(0.0005)
+
+    composed_layout = kdb.Layout()
+    composed_layout.read(str(output))
+    assert composed_layout.dbu == pytest.approx(0.0005)
+
+    drawn_cell = composed_layout.cell("drawn__drawn_hier_top")
+    assert drawn_cell is not None
+    # The block's own hierarchy survived (the leaf is still a separate cell,
+    # instanced as an array -- not flattened away by the rescale).
+    insts = list(drawn_cell.each_inst())
+    assert len(insts) == 1
+    inst = insts[0]
+    # ...and every micron-space dimension is unchanged: array pitch, counts,
+    # the instance's own displacement, and the leaf's own drawn box. (The
+    # a/b axes are compared as an unordered pair: a GDS AREF round-trip
+    # reports them rows-first, independent of this rescale.)
+    axes = {
+        (
+            round(inst.a.x * composed_layout.dbu, 6),
+            round(inst.a.y * composed_layout.dbu, 6),
+            inst.na,
+        ),
+        (
+            round(inst.b.x * composed_layout.dbu, 6),
+            round(inst.b.y * composed_layout.dbu, 6),
+            inst.nb,
+        ),
+    }
+    assert axes == {(3.0, 0.0, 3), (0.0, 2.0, 2)}
+    assert inst.trans.disp.x * composed_layout.dbu == pytest.approx(5.0)
+    assert inst.trans.disp.y * composed_layout.dbu == pytest.approx(7.0)
+
+    composed_bbox = drawn_cell.dbbox()
+    assert composed_bbox.left == pytest.approx(expected_bbox_um.left)
+    assert composed_bbox.bottom == pytest.approx(expected_bbox_um.bottom)
+    assert composed_bbox.right == pytest.approx(expected_bbox_um.right)
+    assert composed_bbox.top == pytest.approx(expected_bbox_um.top)
+
+
+def test_compose_still_rejects_non_integer_ratio_dbu_mismatch(tmp_path, both_pdk_root):
     """A block generated against sky130A (dbu 0.001, no tech LEF resolver
-    override in this fixture) composed alongside a gf180mcu-style GDS at
-    0.0005 is a genuine cross-PDK composition mistake -- the existing
-    mismatch error must still fire, not be silently papered over (#1496's
-    own explicit non-goal)."""
+    override in this fixture) composed alongside a GDS at a dbu whose ratio
+    to 0.001 is *not* an exact integer (0.001 / 0.0004 == 2.5) is a genuine,
+    irreconcilable composition mistake -- the mismatch error must still
+    fire, not be silently (and lossily) rescaled (#1514, narrowing #1496's
+    original blanket refusal to only the non-integer-ratio case)."""
     sky_report = _gen_block_variant(
         tmp_path, both_pdk_root, "sky130A", "guard_ring", "ring0"
     )
     macro_gds = _write_place_and_route_style_gds(
-        tmp_path / "macro.gds", "macro_top", 5.0, 5.0, dbu=0.0005
+        tmp_path / "macro.gds", "macro_top", 5.0, 5.0, dbu=0.0004
     )
     output = tmp_path / "composed.gds"
 
-    with pytest.raises(GenComposeError, match="must share the same dbu"):
+    with pytest.raises(GenComposeError, match="does not evenly divide"):
         compose(
             {
                 "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
