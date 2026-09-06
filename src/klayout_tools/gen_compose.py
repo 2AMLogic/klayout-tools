@@ -2630,6 +2630,67 @@ def _drawn_leg_footprint_region(
     return region
 
 
+def _pad_self_notch_violation_um(
+    pad_box_um: tuple[float, float, float, float],
+    geometry: dict[str, Any],
+    spacing_um: float,
+) -> float | None:
+    """Whether a newly drawn pad box (a via-drop landing pad or a
+    stub-widen box -- both wider than the route's own backbone, drawn
+    independent of ``routing.width_um``) comes within ``spacing_um`` of the
+    *same block's* own other drawn shapes on the pad's own layer, once
+    merged with them (issue #1520).
+
+    ``geometry`` is :func:`read_block_layer_geometry`'s result for the pad's
+    owning block, on the pad's own layer. The pad is *meant* to land on --
+    and merge with -- the block's own wire at the declared port; that touch
+    is never a violation. But the merged shape can still have a self-notch
+    elsewhere the caller never chose: e.g. a perpendicular leg of the very
+    same wire, near a corner the declared port happens to sit close to. A
+    rule-deck same-layer ``"space"`` check (e.g. sky130's ``li1.space.1``) is
+    net-agnostic, so that notch is a real ``klt drc`` violation even though
+    both shapes are the same electrical node -- exactly the class of mistake
+    #1520 reports gen-compose drawing silently.
+
+    ``kdb.Region.notch_check`` is the tool for this: a same-*polygon*
+    self-space check, as opposed to :func:`_leg_conflict`'s own
+    inflate-and-intersect test (used against a *different* net's
+    already-accepted region) or :func:`_self_net_drawn_short`'s
+    "exclude the shape the route lands on" test -- both of which report
+    nothing here, since the pad and the wire it lands on are, after
+    ``region.merge()``, literally the same polygon; the violation is a
+    self-notch of *that* polygon, not a conflict between two separate ones.
+
+    Returns the closest found spacing (um), or ``None`` when nothing in the
+    merged shape violates ``spacing_um`` (including when ``spacing_um`` is
+    non-positive, or the pad does not even reach the block's own geometry at
+    the resolution ``geometry["dbu"]`` provides).
+    """
+    import klayout.db as kdb
+
+    dbu = geometry["dbu"]
+    spacing_dbu = int(round(spacing_um / dbu))
+    if spacing_dbu <= 0:
+        return None
+
+    x0_um, y0_um, x1_um, y1_um = pad_box_um
+    combined = kdb.Region()
+    combined.insert(geometry["region"])
+    combined.insert(
+        kdb.Box(
+            int(round(x0_um / dbu)),
+            int(round(y0_um / dbu)),
+            int(round(x1_um / dbu)),
+            int(round(y1_um / dbu)),
+        )
+    )
+    combined.merge()
+    violations = combined.notch_check(spacing_dbu)
+    if violations.is_empty():
+        return None
+    return min(edge_pair.distance() for edge_pair in violations) * dbu
+
+
 def _self_net_drawn_short(
     points_um: list[tuple[float, float]],
     geometry: dict[str, Any],
@@ -3605,6 +3666,12 @@ def route_two_pin(
                         "y_um": pos[1],
                         "via_layer": via_layer,
                         "port_layer": port_layer,
+                        # block_id (#1520): which endpoint's own block this
+                        # drop's landing pad lands on -- lets a caller-side
+                        # conflict check (compose()'s own _leg_conflict) test
+                        # the pad against *that* block's own drawn geometry,
+                        # not just against other already-accepted nets.
+                        "block_id": pin["block"],
                     }
                 )
 
@@ -3613,14 +3680,16 @@ def route_two_pin(
     # only route_layer, to compare against each port's own reported layer),
     # for both endpoints.
     stub_widen: list[dict[str, Any]] = []
-    for port, pos, direction, stub_len_um in (
-        (port_a, a, dir_a, stub_a_um),
-        (port_b, b, dir_b, stub_b_um),
+    for pin, port, pos, direction, stub_len_um in (
+        (pin_a, port_a, a, dir_a, stub_a_um),
+        (pin_b, port_b, b, dir_b, stub_b_um),
     ):
         widen = _endpoint_stub_widen_um(
             port, pos, direction, stub_len_um, width_um, effective_route_layer
         )
         if widen is not None:
+            # block_id (#1520): same purpose as via_drops' own block_id above.
+            widen["block_id"] = pin["block"]
             stub_widen.append(widen)
 
     # Same-block cross-layer conflict retry (#1393, see docstring): only
@@ -4492,6 +4561,28 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return cross_block_geometry_cache
 
+    # Own-block pad self-notch check (#1520): unlike the two caches above --
+    # each keyed by block_id alone, for exactly one fixed layer
+    # (route_layer/cross_route_layer) -- a via-drop's landing pad or a
+    # stub-widen box can land on *any* declared port's own layer, which
+    # varies per pin (a via-drop exists precisely because that layer differs
+    # from route_layer). So this cache is keyed by (block_id, layer) instead,
+    # read lazily the same way, and reused by every leg that drops onto the
+    # same block/layer pair.
+    own_block_layer_geometry_cache: dict[
+        tuple[str, tuple[int, int]], dict[str, Any] | None
+    ] = {}
+
+    def _own_block_layer_geometry(
+        block_id: str, layer: tuple[int, int]
+    ) -> dict[str, Any] | None:
+        key = (block_id, layer)
+        if key not in own_block_layer_geometry_cache:
+            own_block_layer_geometry_cache[key] = read_block_layer_geometry(
+                block_id, blocks[block_id], offsets_um[block_id], layer
+            )
+        return own_block_layer_geometry_cache[key]
+
     # dbu for the route-vs-route collision check below (#1057), read lazily
     # (only once connectivity[] actually has a net to check) from any one
     # block's own GDS -- this pre-flight check only ever compares continuous
@@ -4550,8 +4641,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # Minimum same-layer spacing cache (issue #1386): looked up at most once
     # per distinct effective route layer actually used, from the *same*
     # curated DRC deck `klt drc --deck <family>` runs -- never a second,
-    # private threshold table. Feeds the spacing-aware half of
-    # `_leg_conflict` below: #1057's original route-vs-route check only ever
+    # private threshold table. Feeds both the spacing-aware route-vs-route
+    # half of `_leg_conflict` below and its own-block pad self-notch check
+    # (#1520, added later in the same function): #1057's original
+    # route-vs-route check only ever
     # caught a literal footprint *overlap*, which is a strict subset of what
     # a same-layer minimum-spacing rule (e.g. sky130's `li1.space.1`/
     # `met1.space.1`) actually forbids -- two legs whose footprints never
@@ -4690,6 +4783,94 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         f"deck's own '{rule_id}' minimum same-layer spacing "
                         "rule (no literal overlap, but still a real `klt "
                         "drc` violation on the composed layout)"
+                    )
+
+            # Own-block pad self-notch check (#1520): everything above
+            # compares this leg's drawn footprint against a *different*
+            # net's already-accepted geometry. Nothing yet checks a
+            # via-drop's landing pad or a stub-widen box -- both drawn
+            # independent of routing.width_um, at a fixed size sized from
+            # the PDK's own contact-enclosure convention -- against the
+            # *same* block's own other drawn shapes on the pad's own layer.
+            # A pad legitimately lands on (merges with) the wire at its own
+            # declared port; that touch is never a violation. But when that
+            # port was hand-declared on a pre-existing `blocks[].cell`
+            # stream's own internal wire (the only way to declare a port on
+            # a cell no `klt` verb generated -- see the module docstring's
+            # "blocks[].cell" note), the pad can still land close enough to
+            # a *different* part of that same wire (e.g. a perpendicular leg
+            # near a corner the port sits close to) to violate the resolved
+            # deck's own same-layer spacing rule -- a real `klt drc` finding
+            # even though both shapes are the same electrical node, since a
+            # rule-deck space check is net-agnostic.
+            # :func:`_pad_self_notch_violation_um` catches exactly this via
+            # ``kdb.Region.notch_check`` (a same-*polygon* self-space check),
+            # which the overlap/inflate comparisons above cannot see -- the
+            # pad and the wire it lands on merge into one polygon, so there
+            # is no *other* shape here to intersect against.
+            pad_boxes: list[
+                tuple[tuple[int, int], str, tuple[float, float, float, float]]
+            ] = []
+            landing_half_um = _VIA_LANDING_SIZE_UM / 2.0
+            for drop in via_drops:
+                block_id = drop.get("block_id")
+                if block_id is None:
+                    continue  # pre-#1520 caller-built via_drops -- skip, not an error
+                cx, cy = drop["x_um"], drop["y_um"]
+                box = (
+                    cx - landing_half_um,
+                    cy - landing_half_um,
+                    cx + landing_half_um,
+                    cy + landing_half_um,
+                )
+                # The landing pad is drawn on *both* the pin's own layer and
+                # this leg's own effective route layer (see
+                # _write_composed_gds) -- dict.fromkeys dedupes the common
+                # case where both happen to be the same tuple.
+                for pad_layer in dict.fromkeys(
+                    layer_pair
+                    for layer_pair in (drop["port_layer"], layer)
+                    if layer_pair is not None
+                ):
+                    pad_boxes.append((pad_layer, block_id, box))
+            for widen in stub_widen:
+                block_id = widen.get("block_id")
+                if block_id is None or layer is None:
+                    continue  # pre-#1520 caller-built stub_widen -- skip
+                cx, cy = widen["x_um"], widen["y_um"]
+                half_um = widen["width_um"] / 2.0
+                length_um = widen["length_um"]
+                if widen["direction_deg"] == 90:
+                    box = (cx - half_um, cy, cx + half_um, cy + length_um)
+                else:  # 270
+                    box = (cx - half_um, cy - length_um, cx + half_um, cy)
+                pad_boxes.append((layer, block_id, box))
+
+            for pad_layer, block_id, box in pad_boxes:
+                pad_spacing = _min_spacing_um_for_layer(pad_layer)
+                if pad_spacing is None:
+                    continue
+                pad_spacing_um, pad_rule_id = pad_spacing
+                pad_geometry = _own_block_layer_geometry(block_id, pad_layer)
+                if pad_geometry is None:
+                    continue
+                violation_um = _pad_self_notch_violation_um(
+                    box, pad_geometry, pad_spacing_um
+                )
+                if violation_um is not None:
+                    return (
+                        f"draws a pad ({box[0]:.4g}, {box[1]:.4g}) - "
+                        f"({box[2]:.4g}, {box[3]:.4g}) on layer {pad_layer} "
+                        f"that comes within {violation_um:.4g}um of block "
+                        f"'{block_id}''s own drawn geometry on that layer -- "
+                        f"closer than the resolved deck's own '{pad_rule_id}' "
+                        "minimum same-layer spacing rule (no literal overlap "
+                        "with a *different* shape -- the pad merges with the "
+                        "wire it lands on -- but a real `klt drc` finding "
+                        "against a *different* part of that same wire, e.g. "
+                        "a perpendicular leg near a corner the declared port "
+                        "sits close to; move the declared port further along "
+                        "its own wire, away from the corner)"
                     )
             return None
 

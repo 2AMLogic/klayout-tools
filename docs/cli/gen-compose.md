@@ -566,6 +566,32 @@ into the circuit.)
   spacing rule against each other, so they are no longer compared at all.
   Like #1057, this remains an advisory heuristic, not a substitute for
   `klt drc` — see "Geometry is advisory" above.
+- **A via-drop landing pad (or stub-widen box) is checked against its *own*
+  block's other drawn geometry, not just against `bbox_um`/`ports[]` (#1520,
+  fixed).** The two checks above only ever compare a candidate leg's own
+  footprint against *other* nets' already-accepted geometry. Nothing
+  previously checked the fixed-size landing pad a via-drop draws (or a
+  stub-widen box, #496) against the geometry of the **same block it lands
+  on** — a gap that matters specifically for a `blocks[].cell` block (an
+  existing stream this command did not generate): the only way to declare a
+  port on such a block is to hand-declare it on geometry the cell already
+  contains, since a pre-existing stream never reports its own `ports[]`. A
+  port declared on an internal wire is legitimate, but the fixed-size pad
+  drawn there (`_VIA_LANDING_SIZE_UM`, independent of `width_um` — see
+  "Via-drop routing" below) can land close enough to a *different* part of
+  that same wire (e.g. a perpendicular leg near a corner the port sits close
+  to) to violate the resolved deck's own same-layer spacing rule. The pad
+  legitimately touches (merges with) the wire at its own declared port —
+  that is never a violation — but the merged shape can still have a
+  self-notch elsewhere, which is a real `klt drc` finding (a rule-deck
+  `"space"` check is net-agnostic) even though both shapes are the same
+  electrical node. This is now caught before anything is drawn: the net is
+  reported **unroutable** (`unrouted_nets[]`, `routed: false`, a
+  `legs[].reason` entry naming the block and the violated rule id) instead
+  of silently composing `routed: true` with the violation left for a later
+  `klt drc` run to discover. As with the two checks above, this is an
+  advisory heuristic against the block's own drawn shapes on the pad's
+  layer, not a substitute for `klt drc`.
 
 ## Via-drop routing (metal2/via, #454)
 

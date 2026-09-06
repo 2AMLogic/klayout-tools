@@ -16,6 +16,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose` now rejects a via-drop landing pad (or
+  stub-widen box) that would DRC-violate against its *own* placed block's
+  drawn geometry, instead of silently drawing it (issue #1520). A
+  `blocks[].cell` block (an existing GDS stream this command did not
+  generate) is modelled by its `bbox_um` plus its declared `ports[]` —
+  hand-declared, since a pre-existing stream never reports its own ports.
+  Declaring a port on an internal wire is legitimate, but the fixed-size
+  landing pad `gen-compose` draws there (independent of `width_um`) could
+  land close enough to a *different* part of that same wire (e.g. a
+  perpendicular leg near a corner) to violate the resolved deck's own
+  same-layer minimum-spacing rule — a real `klt drc` finding even though
+  both shapes are the same electrical node, since a rule-deck spacing check
+  is net-agnostic. This is now caught via `kdb.Region.notch_check` (a
+  same-polygon self-space check, as opposed to the existing route-vs-route
+  overlap/inflate check, which cannot see it: the pad merges with the wire
+  it lands on into one polygon, so there is no separate shape to compare
+  against) before anything is drawn — the net is reported **unroutable**
+  (`unrouted_nets[]`, `routed: false`, a `legs[].reason` entry naming the
+  block and the violated rule id) rather than composing `routed: true`
+  with the violation left for a later `klt drc` run to discover. See
+  `docs/cli/gen-compose.md`'s new bullet under "Known limitations".
+
 - **Added**: `klt mom --touchstone <path>` writes a standard 2-port
   Touchstone (`.s2p`) file from the de-embedded S-parameters
   `report["full_wave_sweep"][i]["s_parameters"]` already computes (issue
