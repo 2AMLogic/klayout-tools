@@ -6219,6 +6219,29 @@ def _apply_device_parameter_corrections(
     approximation in KLayout's own multi-term series-capacitor combine,
     unrelated to and unaffected by whether this correction runs before or
     after combining, so it is out of scope here.)
+
+    **Caveat (issue #1497):** the "each simple per-device sum" claim above
+    describes ``combine_devices()``'s *documented* algorithm, not an
+    unconditional guarantee about every call's actual result. A reported
+    observation (10/10 repeat calls against one real, large -- roughly
+    1000-device/20-group -- capacitor-only extracted netlist) found the
+    primary ``C`` parameter sometimes left at a single pre-combine
+    instance's own value instead of the group's summed total, while the
+    same group's secondary ``A``/``P`` parameters combined correctly, with
+    no exception raised. Neither that report's own reduction attempt nor a
+    follow-up investigation could force this from a from-scratch synthetic
+    netlist built directly via the ``klayout.db`` device/circuit API at a
+    comparable scale, so it remains unconfirmed against this module's own
+    extraction path specifically. ``klt lvs``'s ``options.combine_devices``
+    wrapper (``lvs.py``'s ``_correct_capacitor_combine_parameters``)
+    defends against it unconditionally -- by checking and, if necessary,
+    correcting ``C`` against a pre-combine sum-conservation invariant after
+    every combine, independent of whether the underlying KLayout behavior
+    can be reproduced on demand -- rather than by patching this deferred-
+    application argument, which only concerns *when* ``perim_cap_f_um`` is
+    applied, not whether KLayout's own combine correctly sums the resulting
+    ``C``. See ``docs/cli/lvs.md``'s "`device.combine_parameter_corrected`"
+    section for the full mitigation.
     """
     perim_cap_lookup = {
         capacitor.name: capacitor.perim_cap_f_um

@@ -16,6 +16,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt lvs`'s `options.combine_devices: true` now checks every
+  combined capacitor device's `C` parameter against the pre-combine sum of
+  the parallel group KLayout's own `Netlist.combine_devices()` folded it
+  from, and corrects it in place when the two disagree (issue #1497). A
+  parallel capacitor's `C` is mathematically a simple per-device sum — the
+  same rule `klt extract`'s `C = area_cap_f_um2 * A + perim_cap_f_um * P`
+  deck formula relies on — so the total is a conserved quantity combining can
+  only redistribute, never change; a reported observation (10/10 repeat
+  calls against one real ~1000-device/~20-group extracted netlist) found
+  KLayout's own combine sometimes leaving `C` at a single pre-combine
+  instance's own value instead of the group's summed total, while the same
+  group's secondary `A`/`P` parameters combined correctly — with no
+  exception raised and no existing `device.combine_incomplete` warning to
+  catch it (that category only covers the unrelated #1185/#466
+  `RuntimeError`-on-partial-match failure mode, which never fires here).
+  Neither that report's own reduction attempt nor a follow-up investigation
+  here could force a reliable reproduction from a from-scratch synthetic
+  netlist at a comparable scale, so this check is applied unconditionally as
+  a defensive invariant rather than gated behind a confirmed repro. **New
+  `mismatches[].category`**: `device.combine_parameter_corrected`, always
+  `severity: "warning"` (never changes `status`), naming every corrected
+  device and its before/after `C` values — see `docs/cli/lvs.md`'s
+  `device.combine_parameter_corrected` section. Independent of the existing
+  `device.combine_incomplete`/`options.combine_devices_max_attempts` retry
+  mitigation, which is unaffected.
+
 - **Fixed**: `klt gen compose`'s router now validates `routing.width_um` and
   sizes its via-drop squares against the **resolved PDK deck's own
   minimum-width DRC rules** — the same `ExtractionDeck`/`DrcRule` set `klt
