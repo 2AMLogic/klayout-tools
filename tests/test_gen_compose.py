@@ -3977,6 +3977,152 @@ def test_compose_gf180mcu_row_routes_a_non_adjacent_device_pair(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+def _gf180mcu_two_device_metal_request(both_pdk_root, tmp_path, width_um, output):
+    """A minimal gf180mcu two-block, one-net `compose()` request routed on
+    `routing.layer_role: "metal"` (Metal1) at ``width_um`` -- shared by
+    issue #1501's own default-width regression pair below."""
+    reports = [
+        _gen_block_variant(
+            tmp_path,
+            both_pdk_root,
+            "gf180mcuD",
+            "mos_array",
+            f"width_probe_{index}",
+            rows=1,
+            cols=1,
+            dummy=0,
+            gate_contact=True,
+        )
+        for index in range(2)
+    ]
+    return {
+        "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+        "blocks": [
+            {"id": f"b{index + 1}", "generator_report": block}
+            for index, block in enumerate(reports)
+        ],
+        "placement": {
+            "strategy": "row",
+            "order": ["b1", "b2"],
+            "spacing_um": 2.0,
+        },
+        "connectivity": [
+            {
+                "net": "BUS",
+                "pins": [
+                    {"block": "b1", "port": "U0_D"},
+                    {"block": "b2", "port": "U0_S"},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": width_um},
+        "options": {"cell_name": "width_probe", "output": str(output)},
+    }
+
+
+def test_compose_gf180mcu_default_routing_width_below_deck_minimum_is_rejected(
+    tmp_path, both_pdk_root
+):
+    # Issue #1501, table row 1: the documented `routing.width_um` default
+    # (0.17um, `layout_plan_execute._DEFAULT_ROUTING`) is *below* gf180mcu's
+    # own `metal1.width.1` minimum (0.23um) -- previously this drew a
+    # guaranteed-illegal backbone with no error/warning; it must now be
+    # rejected at generation time, naming the violated rule and its
+    # threshold, rather than silently composing sub-minimum metal.
+    output = tmp_path / "width_probe_below_min.gds"
+    request = _gf180mcu_two_device_metal_request(both_pdk_root, tmp_path, 0.17, output)
+    with pytest.raises(GenComposeError, match="metal1.width.1"):
+        compose(request)
+    assert not output.exists()
+
+
+def test_compose_gf180mcu_routing_width_at_deck_minimum_is_accepted_and_drc_clean(
+    tmp_path, both_pdk_root
+):
+    # Issue #1501, table row 2: the *same* request, only `routing.width_um`
+    # raised to the resolved deck's own minimum (0.23um, `metal1.width.1`),
+    # composes successfully and stays `klt drc --deck gf180mcu` clean --
+    # confirming the rejection above is really a units-mismatch catch, not
+    # an over-broad one that also blocks the legal case.
+    output = tmp_path / "width_probe_at_min.gds"
+    request = _gf180mcu_two_device_metal_request(both_pdk_root, tmp_path, 0.23, output)
+    report = compose(request)
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_gf180mcu_metal2_via_drop_uses_deck_via_width_floor_and_is_drc_clean(
+    tmp_path, both_pdk_root
+):
+    # Issue #1501, table 2 (the via-drop instance): `_VIA_DROP_SIZE_UM`
+    # (`gen.CONTACT_SIZE_UM`, 0.22um) is a PDK-independent constant -- below
+    # gf180mcu's own `via1.width.1` minimum (0.26um). A `metal2` route to a
+    # `"metal"`-role (Metal1) gate pad needs a via1 drop at each endpoint
+    # (mirrors the sky130 `test_compose_bjt_array_self_net_bus_routes_...`
+    # via-drop DRC-clean test above, one level up gf180mcu's own metals
+    # stack) -- previously guaranteed a `via1.width.1` violation at every
+    # drop; the via square must now be sized to the resolved deck's own
+    # floor instead, and the composed layout must stay DRC-clean.
+    m = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "m",
+        rows=1,
+        cols=3,
+        topology="array",
+        gate_contact=True,
+    )
+    output = tmp_path / "gf180mcu_metal2_via_drop.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [{"id": "m", "generator_report": m}],
+            "placement": {"strategy": "row", "order": ["m"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "GBUS",
+                    "pins": [
+                        {"block": "m", "port": "U0_G"},
+                        {"block": "m", "port": "U2_G"},
+                    ],
+                }
+            ],
+            # metal2.width.1 = 0.28um (satisfied exactly, per the issue's own
+            # reproduction table) -- isolates this test to the via-drop
+            # instance alone, not a metal2-backbone width violation too.
+            "routing": {"layer_role": "metal2", "width_um": 0.28},
+            "options": {"cell_name": "gf180mcu_metal2_via_drop", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("gf180mcu_metal2_via_drop")
+    via1 = layout.layer(35, 0)
+    via1_shapes = list(top.shapes(via1).each())
+    assert via1_shapes  # at least one via1 drop was drawn
+    # Every drawn via1 box must clear the deck's own 0.26um minimum side --
+    # not merely the old 0.22um constant.
+    dbu = layout.dbu
+    for shape in via1_shapes:
+        box = shape.box
+        assert (box.width() * dbu) >= 0.26 - 1e-9
+        assert (box.height() * dbu) >= 0.26 - 1e-9
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 def test_compose_route_two_pin_waypoints_um_rejects_malformed_entries(
     tmp_path, pdk_root
 ):
