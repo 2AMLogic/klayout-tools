@@ -8914,3 +8914,202 @@ def test_compose_routes_a_via_drop_landing_pad_placed_clear_of_the_own_wire_corn
 
     drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
     assert drc_report["violation_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Own-block pad self-notch check, stub-widen half (issue #1520 x #496): the
+# same check, reached through the *other* pad shape `compose()` feeds it.
+#
+# A stub-widen box (`_endpoint_stub_widen_um`) is drawn when a north/south-
+# facing port's own reported `width_um` exceeds `routing.width_um` AND the
+# port's pad already sits on the route layer -- i.e. no via-drop happens at
+# all, so this path draws a `width_um`-independent box that the via-drop
+# tests above never exercise. On a `blocks[].cell` block that box can notch a
+# neighbouring leg of the very wire it lands on, exactly as a landing pad
+# can. The scenario is deliberately vertical (the source block sits *above*
+# the wire block, both ports facing each other): a north-facing port inset
+# from its own block's top edge can only be approached from the north without
+# the backbone plowing sideways through the block's own interior.
+# --------------------------------------------------------------------------- #
+
+
+def _write_u_wire_gds(
+    path, cell_name, right_leg_x, left_leg_x=2.5, left_top=1.5, right_top=1.8, w=0.17
+):
+    """Fabricate a library stream holding one li1 (67/20) "U"-shaped wire --
+    two vertical legs joined by a bottom bar, so the whole thing is a single
+    merged polygon (what makes a `notch_check` self-notch, rather than a
+    two-shape spacing conflict, the right tool). A port is declared later at
+    the top of the *left* leg; ``right_leg_x`` decides whether the widened
+    stub drawn there notches the right leg or clears it.
+
+    The right leg is deliberately *taller* than the left one, so the declared
+    port is inset from the block's own top edge and the widen box drawn above
+    it sits alongside a real neighbouring leg rather than above everything.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    cell = layout.create_cell(cell_name)
+
+    def d(v):
+        return int(round(v / layout.dbu))
+
+    cell.shapes(li1).insert(
+        kdb.Box(d(left_leg_x - w / 2), 0, d(left_leg_x + w / 2), d(left_top))
+    )
+    cell.shapes(li1).insert(
+        kdb.Box(d(right_leg_x - w / 2), 0, d(right_leg_x + w / 2), d(right_top))
+    )
+    cell.shapes(li1).insert(
+        kdb.Box(d(left_leg_x - w / 2), 0, d(right_leg_x + w / 2), d(w))
+    )
+    layout.write(str(path))
+    return str(path)
+
+
+def _u_wire_compose_request(tmp_path, pdk_root, right_leg_x, cell_name, output):
+    """#1520's reproducer for the stub-widen pad shape: a source block ``u0``
+    placed directly *above* the U-wire block ``u1``, wired on ``metal``
+    (li1 -- the same layer both ports' own pads sit on, so `_resolve_via_drop_layer`
+    finds nothing to do and **no via-drop landing pad is ever built**), down to
+    a north-facing port declared at the top of ``u1``'s own left leg whose
+    reported ``width_um`` (0.42) exceeds the route's own 0.17 -- the exact and
+    only condition under which `_endpoint_stub_widen_um` fires.
+    """
+    gds = _write_library_gds(tmp_path / "u_src.gds", {"src": (1.0, 1.0)})
+    wire_gds = _write_u_wire_gds(tmp_path / f"{cell_name}.gds", cell_name, right_leg_x)
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "u0",
+                "cell": {
+                    "gds_path": gds,
+                    "cell_name": "src",
+                    "ports": [
+                        {
+                            "name": "Y",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 0.5,
+                            "y_um": 0.0,
+                            "width_um": 0.17,
+                            "direction_deg": 270,
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "u1",
+                "cell": {
+                    "gds_path": wire_gds,
+                    "cell_name": cell_name,
+                    "ports": [
+                        {
+                            "name": "o",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 2.5,
+                            "y_um": 1.5,
+                            # Wider than routing.width_um below -- this is what
+                            # arms the stub-widen box (#496).
+                            "width_um": 0.42,
+                            "direction_deg": 90,
+                        }
+                    ],
+                },
+            },
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["u0", "u1"],
+            "origins_um": {"u0": {"x": 7.0, "y": 4.0}, "u1": {"x": 5.0, "y": 0.0}},
+        },
+        "connectivity": [
+            {
+                "net": "N1",
+                "pins": [{"block": "u0", "port": "Y"}, {"block": "u1", "port": "o"}],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {"cell_name": cell_name + "_top", "output": str(output)},
+    }
+
+
+def test_compose_rejects_a_stub_widen_box_that_would_self_notch_the_own_wire(
+    tmp_path, pdk_root
+):
+    # The stub-widen twin of the via-drop rejection above: the declared port
+    # ("o", at the top of u1's left leg) is widened out to its own 0.42um
+    # reported pad width for the length of its stub, which brings the box's
+    # right edge within 0.105um of the taller right leg of the same wire --
+    # less than li1.space.1's 0.17um minimum. Before #1520 this composed
+    # `routed: true` with the violation drawn in (confirmed independently
+    # below by running `klt drc` on the pre-fix output).
+    output = tmp_path / "stub_widen_near.gds"
+    request = _u_wire_compose_request(tmp_path, pdk_root, 2.9, "u_wire_near", output)
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["N1"]
+    assert report["nets"][0]["routed"] is False
+    reason = report["nets"][0]["legs"][0]["reason"]
+    assert "li1.space.1" in reason
+    assert "u1" in reason
+    # The rejected box is 0.42um wide x 0.17um tall (the port's own pad width
+    # by the stub's own length), anchored *at* the port and extending in its
+    # facing direction -- the stub-widen shape. A via-drop landing pad would
+    # instead be a 0.42um square centred on the port ((7.29, 1.29) - (7.71,
+    # 1.71)); asserting the exact box pins which of the two pad shapes this
+    # test actually exercises.
+    assert "(7.29, 1.5) - (7.71, 1.67)" in reason
+    # No violating metal was ever drawn into the composed output.
+    assert output.is_file()
+    drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
+    assert drc_report["violation_count"] == 0
+
+
+def test_run_drc_confirms_the_rejected_stub_widen_box_was_a_real_violation(
+    tmp_path, pdk_root, monkeypatch
+):
+    # Independent confirmation that the rejection above closes a *real* `klt
+    # drc` violation rather than a scenario that was already clean: with the
+    # new self-notch check neutered (simulating pre-#1520 behaviour -- the
+    # same technique #496's own pre-fix test uses on
+    # `_endpoint_stub_widen_um`), the identical request composes `routed:
+    # true`, and `klt drc` -- a separate engine that shares none of
+    # gen_compose's notch_check machinery -- finds exactly the li1.space.1
+    # gap the check predicted.
+    monkeypatch.setattr(
+        gen_compose, "_pad_self_notch_violation_um", lambda *args, **kwargs: None
+    )
+    output = tmp_path / "stub_widen_prefix.gds"
+    request = _u_wire_compose_request(tmp_path, pdk_root, 2.9, "u_wire_prefix", output)
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
+    assert drc_report["violation_count"] == 1
+    assert drc_report["violations"][0]["rule"] == "li1.space.1"
+
+
+def test_compose_routes_a_stub_widen_box_placed_clear_of_the_own_wire_leg(
+    tmp_path, pdk_root
+):
+    # Control case: the same U-wire, the same stub-widen mechanism, the same
+    # 0.42um-wide declared port -- but the neighbouring leg sits at x=3.4
+    # instead of 2.9, far enough that the widened stub never comes near it.
+    # #1520's fix must not reject a legitimate placement, only the one that
+    # actually violates spacing.
+    output = tmp_path / "stub_widen_far.gds"
+    request = _u_wire_compose_request(tmp_path, pdk_root, 3.4, "u_wire_far", output)
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert output.is_file()
+
+    drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
+    assert drc_report["violation_count"] == 0
