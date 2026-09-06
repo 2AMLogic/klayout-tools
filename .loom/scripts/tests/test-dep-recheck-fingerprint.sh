@@ -1,41 +1,29 @@
 #!/usr/bin/env bash
-# test-dep-recheck-fingerprint.sh - Unit tests for dep-recheck-fingerprint.sh,
-# the deterministic CONCLUSION_HASH builder for Curator's "Re-check
-# Idempotency" rule (#1528).
+# test-dep-recheck-fingerprint.sh - Unit tests for dep-recheck-fingerprint.sh
+# (#7281), the shared fingerprint computation behind curator.md's "Re-check
+# Idempotency" (#4986) and "Checking Operator-Only Premises" (#6849) sections.
 #
-# The defect under test: #1523/#1524 made the *decision* deterministic, but
-# left the *input* to that decision (CONCLUSION_HASH) hand-rolled, with a
-# free-text BLOCK_REASON. Identical dependency state therefore hashed
-# differently across passes whenever the wording drifted, a differing hash is
-# classified CHANGED, and CHANGED always permits a comment. So the whole
-# guard degraded to "comment on every pass" — three distinct hashes for one
-# unchanged blocker state on #528 on 2026-09-06 alone.
+# The regression under test is production hash churn: #6335/#6805 accumulated
+# dozens of distinct `CONCLUSION_HASH` values over weeks despite an unchanged
+# blocking condition, because every Curator pass hand-rolled the computation
+# from prose instead of sharing one tested implementation. T3/T4 are the
+# direct regression tests — a PR's `mergeable`/`mergeStateStatus` flickering
+# through `UNKNOWN` (GitHub has not finished computing it yet) must not, on
+# its own, change the hash.
 #
-# The two properties that matter are opposite-signed, and both are asserted
-# here:
-#   STABILITY   two independent invocations over an unchanged blocker state
-#               produce a byte-identical hash (scenarios a/e/f)
-#   SENSITIVITY the hash still moves when the REAL state moves — a label
-#               appears, the blocker closes, the verdict flips (c/d/i)
-# A fix that only had stability would be worse than the bug: it would suppress
-# genuine state changes.
-#
-# Black-box: the SUT is a full CLI, driven as a subprocess. `gh` is stubbed on
-# PATH (canned JSON per ref, with the SUT's own `--jq` expression applied by
-# real jq inside the stub) so the SUT's real forge-parsing code path runs
-# against realistic payloads and no network call is ever made. Scenario (b)
-# pins the fixture to a value verified against the LIVE forge and quoted
-# independently in issue #1528's body, so the fixture cannot silently drift
-# into agreeing only with itself.
+# Strategy: most tests drive `--stdin` directly (pure function, no `gh` at
+# all — the simplest and fastest way to pin down the hashing/decision logic).
+# A smaller set of tests stub `gh` on PATH to cover the `--number` live-fetch
+# path end to end.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-dep-recheck-fingerprint.sh
 
-set -uo pipefail
+set -euo pipefail
 
-TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
-SUT="$SCRIPTS_DIR/dep-recheck-fingerprint.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET_SCRIPT="$HELPERS_DIR/dep-recheck-fingerprint.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,309 +56,254 @@ assert_ne() {
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
         echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Both were: '$a' (expected them to differ)"
+        echo "    Both sides were: '$a'"
     fi
 }
 
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected to contain: '$needle'"
-        echo "    Actual: '$haystack'"
-    fi
+[[ -x "$TARGET_SCRIPT" ]] || {
+    echo -e "${RED}FATAL${NC}: $TARGET_SCRIPT missing or not executable"
+    exit 2
+}
+command -v jq >/dev/null 2>&1 || {
+    echo -e "${RED}FATAL${NC}: jq required"
+    exit 2
 }
 
-if [[ ! -x "$SUT" ]]; then
-    echo -e "${RED}FATAL${NC}: SUT not found or not executable: $SUT"
-    exit 1
-fi
-command -v jq >/dev/null 2>&1 || { echo -e "${RED}FATAL${NC}: jq required"; exit 1; }
+field() { # <output> <KEY>
+    grep -E "^$2=" <<<"$1" | head -n 1 | cut -d= -f2-
+}
 
-TMP_ROOT="$(mktemp -d)"
-# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below
-cleanup() { rm -rf "$TMP_ROOT"; }
-trap cleanup EXIT
+echo "Testing dep-recheck-fingerprint.sh..."
+echo ""
 
-STUB_DIR="$TMP_ROOT/stub"
-FIXTURES="$TMP_ROOT/fixtures"
-mkdir -p "$STUB_DIR" "$FIXTURES"
+# --- T0: usage errors --------------------------------------------------------
+rc=0
+"$TARGET_SCRIPT" bogus --stdin >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0a: unknown subcommand is a usage error"
+rc=0
+"$TARGET_SCRIPT" dep-recheck >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0b: neither --number nor --stdin is a usage error"
+rc=0
+echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --number 1 >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0c: --stdin and --number together is a usage error"
+rc=0
+echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict bogus >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0d: an invalid --verdict value is a usage error"
 
-# --- gh stub -------------------------------------------------------------------
-# Serves canned JSON per ref and applies the SUT's own --jq expression with
-# real jq, so the SUT's real parsing/formatting path is exercised end to end.
-# Unknown refs exit non-zero with empty stdout, which is exactly how real `gh`
-# behaves for a ref that does not resolve.
-cat > "$STUB_DIR/gh" <<'STUB'
+# --- T1: identical input twice -> identical hash (the core determinism bug) --
+FIXTURE_BLOCKED='{"prs":[{"number":4743,"state":"OPEN","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out1="$(echo "$FIXTURE_BLOCKED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out2="$(echo "$FIXTURE_BLOCKED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$(field "$out1" CONCLUSION_HASH)" "$(field "$out2" CONCLUSION_HASH)" \
+    "T1a: identical input JSON produces an identical hash across repeated invocations"
+assert_eq "blocked" "$(field "$out1" VERDICT)" "T1b: an OPEN PR with a blocking label is VERDICT=blocked"
+assert_ne "" "$(field "$out1" CONCLUSION_HASH)" "T1c: CONCLUSION_HASH is non-empty"
+
+# --- T2: no linked PR at all -> VERDICT=clear, empty BLOCKERS ---------------
+out="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "clear" "$(field "$out" VERDICT)" "T2: an empty prs list defaults to VERDICT=clear"
+assert_eq "" "$(field "$out" BLOCKERS)" "T2: BLOCKERS is empty when there are no linked PRs"
+
+# --- T3: THE #7281 REGRESSION - transient UNKNOWN must not flip the verdict -
+# A PR blocking purely on merge-state (no blocking label): CONFLICTING today.
+FIXTURE_CONFLICTING='{"prs":[{"number":100,"state":"OPEN","labels":[],"mergeable":"CONFLICTING","mergeStateStatus":"CONFLICTING"}]}'
+out_conflicting="$(echo "$FIXTURE_CONFLICTING" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "blocked" "$(field "$out_conflicting" VERDICT)" "T3a: merge-state CONFLICTING alone (no label) is VERDICT=blocked"
+
+# Same PR, same state/labels, but GitHub has not finished computing mergeable
+# yet (a transient read, not a real change).
+FIXTURE_UNKNOWN='{"prs":[{"number":100,"state":"OPEN","labels":[],"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}]}'
+out_unknown="$(echo "$FIXTURE_UNKNOWN" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "blocked" "$(field "$out_unknown" VERDICT)" \
+    "T3b: a transient UNKNOWN merge state fails safe to still-blocked, not clear (#7281)"
+assert_eq "$(field "$out_conflicting" CONCLUSION_HASH)" "$(field "$out_unknown" CONCLUSION_HASH)" \
+    "T3c: CONFLICTING -> UNKNOWN (state/labels unchanged) does not change CONCLUSION_HASH"
+
+# --- T4: only mergeStateStatus (not mergeable) reporting UNKNOWN, same rule -
+FIXTURE_UNKNOWN_STATUS_ONLY='{"prs":[{"number":100,"state":"OPEN","labels":[],"mergeable":"CONFLICTING","mergeStateStatus":"UNKNOWN"}]}'
+out="$(echo "$FIXTURE_UNKNOWN_STATUS_ONLY" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "blocked" "$(field "$out" VERDICT)" "T4: mergeStateStatus=UNKNOWN alone still fails safe to blocked"
+
+# --- T5: a genuinely different PR state DOES change the hash ---------------
+FIXTURE_CLEARED='{"prs":[{"number":100,"state":"OPEN","labels":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out_cleared="$(echo "$FIXTURE_CLEARED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "clear" "$(field "$out_cleared" VERDICT)" "T5a: a confirmed-clean merge state with no blocking label is VERDICT=clear"
+assert_ne "$(field "$out_conflicting" CONCLUSION_HASH)" "$(field "$out_cleared" CONCLUSION_HASH)" \
+    "T5b: CONFLICTING -> confirmed MERGEABLE (a real change) changes CONCLUSION_HASH"
+
+FIXTURE_LABEL_ADDED='{"prs":[{"number":4743,"state":"OPEN","labels":["loom:changes-requested","loom:blocked"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out_label_added="$(echo "$FIXTURE_LABEL_ADDED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_ne "$(field "$out1" CONCLUSION_HASH)" "$(field "$out_label_added" CONCLUSION_HASH)" \
+    "T5c: an added block-bearing label (a real change) changes CONCLUSION_HASH"
+
+FIXTURE_MERGED='{"prs":[{"number":4743,"state":"MERGED","labels":["loom:changes-requested"],"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}]}'
+out_merged="$(echo "$FIXTURE_MERGED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "clear" "$(field "$out_merged" VERDICT)" "T5d: a MERGED PR no longer blocks regardless of its labels/merge state"
+assert_ne "$(field "$out1" CONCLUSION_HASH)" "$(field "$out_merged" CONCLUSION_HASH)" \
+    "T5e: OPEN -> MERGED (a real change) changes CONCLUSION_HASH"
+
+# --- T6: label ordering churn from the API never looks like a changed
+#         conclusion (labels are sorted before hashing) -------------------
+FIXTURE_LABELS_A='{"prs":[{"number":1,"state":"OPEN","labels":["loom:blocked","loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+FIXTURE_LABELS_B='{"prs":[{"number":1,"state":"OPEN","labels":["loom:changes-requested","loom:blocked"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out_a="$(echo "$FIXTURE_LABELS_A" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_b="$(echo "$FIXTURE_LABELS_B" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$(field "$out_a" CONCLUSION_HASH)" "$(field "$out_b" CONCLUSION_HASH)" \
+    "T6a: label ordering does not affect CONCLUSION_HASH"
+FIXTURE_PRS_ORDER_A='{"prs":[{"number":1,"state":"OPEN","labels":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"},{"number":2,"state":"OPEN","labels":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+FIXTURE_PRS_ORDER_B='{"prs":[{"number":2,"state":"OPEN","labels":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"},{"number":1,"state":"OPEN","labels":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out_pa="$(echo "$FIXTURE_PRS_ORDER_A" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_pb="$(echo "$FIXTURE_PRS_ORDER_B" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$(field "$out_pa" CONCLUSION_HASH)" "$(field "$out_pb" CONCLUSION_HASH)" \
+    "T6b: the order PRs are returned in does not affect CONCLUSION_HASH"
+
+# --- T7: --verdict overrides the mechanical computation (secondary heuristic,
+#         no linked PR at all) ----------------------------------------------
+out="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "doctor cycle exhausted")"
+assert_eq "blocked" "$(field "$out" VERDICT)" "T7a: --verdict overrides the mechanical (empty-prs -> clear) default"
+assert_eq "doctor cycle exhausted" "$(field "$out" BLOCK_REASON)" "T7b: --block-reason is echoed back and folded into the hash"
+out2="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "Sweep coordination: blocking")"
+assert_ne "$(field "$out" CONCLUSION_HASH)" "$(field "$out2" CONCLUSION_HASH)" \
+    "T7c: a changed --block-reason (same verdict) still changes CONCLUSION_HASH"
+
+# --- T8: --orthogonal folds into the hash without disturbing the ordinary
+#         (empty) case -------------------------------------------------------
+out_ordinary="$(echo "$FIXTURE_CLEARED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_orthogonal="$(echo "$FIXTURE_CLEARED" | "$TARGET_SCRIPT" dep-recheck --stdin --orthogonal "epic-open-but-complete:owner/repo#14")"
+assert_ne "$(field "$out_ordinary" CONCLUSION_HASH)" "$(field "$out_orthogonal" CONCLUSION_HASH)" \
+    "T8a: a non-empty --orthogonal changes CONCLUSION_HASH (the 'changed conclusion always comments' row fires)"
+out_orthogonal2="$(echo "$FIXTURE_CLEARED" | "$TARGET_SCRIPT" dep-recheck --stdin --orthogonal "")"
+assert_eq "$(field "$out_ordinary" CONCLUSION_HASH)" "$(field "$out_orthogonal2" CONCLUSION_HASH)" \
+    "T8b: an empty --orthogonal (the default) leaves the hash exactly as before"
+
+# --- T9: --json output -------------------------------------------------------
+out="$(echo "$FIXTURE_BLOCKED" | "$TARGET_SCRIPT" dep-recheck --stdin --json)"
+assert_eq "blocked" "$(jq -r '.verdict' <<<"$out")" "T9a: --json reports verdict"
+assert_ne "" "$(jq -r '.conclusion_hash' <<<"$out")" "T9b: --json reports a non-empty conclusion_hash"
+
+# --- T10: operator-premise - identical input twice -> identical hash -------
+FIXTURE_STALE='{"refs":[{"number":14,"state":"CLOSED"},{"number":22,"state":"OPEN"}]}'
+p1="$(echo "$FIXTURE_STALE" | "$TARGET_SCRIPT" operator-premise --stdin)"
+p2="$(echo "$FIXTURE_STALE" | "$TARGET_SCRIPT" operator-premise --stdin)"
+assert_eq "stale-premise" "$(field "$p1" VERDICT)" "T10a: any closed reference is VERDICT=stale-premise"
+assert_eq "$(field "$p1" CONCLUSION_HASH)" "$(field "$p2" CONCLUSION_HASH)" \
+    "T10b: operator-premise identical input twice produces an identical hash"
+
+# --- T11: operator-premise - every reference open -> no hash at all --------
+FIXTURE_ALL_OPEN='{"refs":[{"number":14,"state":"OPEN"},{"number":22,"state":"OPEN"}]}'
+p="$(echo "$FIXTURE_ALL_OPEN" | "$TARGET_SCRIPT" operator-premise --stdin)"
+assert_eq "open" "$(field "$p" VERDICT)" "T11a: every reference open is VERDICT=open"
+assert_eq "" "$(field "$p" CONCLUSION_HASH)" "T11b: no hash is computed when every reference is still open (nothing to report)"
+
+# --- T12: operator-premise - a genuinely different reference set changes
+#          the hash, ref ordering does not -----------------------------------
+FIXTURE_STALE_OTHER='{"refs":[{"number":14,"state":"OPEN"},{"number":22,"state":"CLOSED"}]}'
+p_other="$(echo "$FIXTURE_STALE_OTHER" | "$TARGET_SCRIPT" operator-premise --stdin)"
+assert_ne "$(field "$p1" CONCLUSION_HASH)" "$(field "$p_other" CONCLUSION_HASH)" \
+    "T12a: a different closed reference changes CONCLUSION_HASH"
+FIXTURE_STALE_REORDERED='{"refs":[{"number":22,"state":"OPEN"},{"number":14,"state":"CLOSED"}]}'
+p_reordered="$(echo "$FIXTURE_STALE_REORDERED" | "$TARGET_SCRIPT" operator-premise --stdin)"
+assert_eq "$(field "$p1" CONCLUSION_HASH)" "$(field "$p_reordered" CONCLUSION_HASH)" \
+    "T12b: reference ordering does not affect operator-premise CONCLUSION_HASH"
+
+# --- T13: live --number mode (stubbed gh) -----------------------------------
+STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
+
+cat >"$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
-DIR="$LOOM_FP_STUB_DIR"
+D="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
 
-kind="${1:-}"; verb="${2:-}"; shift 2 || true
-
-num=""
-repo=""
-jq_expr=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --repo) repo="$2"; shift 2 ;;
-    --json) shift 2 ;;
-    --jq) jq_expr="$2"; shift 2 ;;
-    *) [[ -z "$num" ]] && num="$1"; shift ;;
-  esac
-done
-
-key="$num"
-[[ -n "$repo" ]] && key="$(printf '%s' "$repo" | tr '/' '_')#$num"
-
-case "$kind:$verb" in
-  issue:view) canned="$DIR/issue-$key.json" ;;
-  pr:view)    canned="$DIR/pr-$key.json" ;;
-  *) echo "stub gh: unhandled $kind $verb" >&2; exit 3 ;;
+case "${1:-}" in
+  issue)
+    shift
+    sub="$1"; shift
+    num=""
+    jqexpr=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) shift 2 ;;
+        --jq) jqexpr="${2:-}"; shift 2 ;;
+        --repo) shift 2 ;;
+        *) [[ -z "$num" ]] && num="$1"; shift ;;
+      esac
+    done
+    if [[ "$sub" == "view" ]]; then
+      f="$D/issue-$num.json"
+      [[ -f "$f" ]] || { echo "stub gh: missing $f" >&2; exit 1; }
+      if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi
+    else
+      echo "stub gh: unhandled issue sub '$sub'" >&2; exit 3
+    fi
+    ;;
+  pr)
+    shift
+    sub="$1"; shift
+    num=""
+    jqexpr=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) shift 2 ;;
+        --jq) jqexpr="${2:-}"; shift 2 ;;
+        --repo) shift 2 ;;
+        *) [[ -z "$num" ]] && num="$1"; shift ;;
+      esac
+    done
+    if [[ "$sub" == "view" ]]; then
+      f="$D/pr-$num.json"
+      [[ -f "$f" ]] || { echo "stub gh: missing $f" >&2; exit 1; }
+      if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi
+    else
+      echo "stub gh: unhandled pr sub '$sub'" >&2; exit 3
+    fi
+    ;;
+  *) echo "stub gh: unhandled args: $*" >&2; exit 3 ;;
 esac
-
-[[ -f "$canned" ]] || exit 1
-if [[ -n "$jq_expr" ]]; then
-  jq -r "$jq_expr" < "$canned"
-else
-  cat "$canned"
-fi
 STUB
 chmod +x "$STUB_DIR/gh"
-export LOOM_FP_STUB_DIR="$FIXTURES"
+export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 
-# --- fixture helpers -----------------------------------------------------------
-labels_json() {
-    local out="" l
-    for l in "$@"; do
-        [[ -n "$out" ]] && out="$out,"
-        out="$out{\"name\":\"$l\"}"
-    done
-    printf '[%s]' "$out"
-}
+jq -n '{closedByPullRequestsReferences: [{number: 4743}]}' >"$STUB_DIR/issue-6335.json"
+# NOTE: this is the REAL, unflattened shape `gh pr view --json labels`
+# actually returns — an array of label OBJECTS, not plain strings. Do NOT
+# pre-flatten this in the test stub (that masked the #7304 regression: the
+# real _fetch_dep_recheck_json() never flattened labels, but this stub used
+# to do the flattening for it, so the live-mode test validated a shape the
+# script doesn't actually produce).
+jq -n '{number: 4743, state: "OPEN", labels: [{id:"x", name:"loom:changes-requested", color:"ABCDEF"}], mergeable: "CONFLICTING", mergeStateStatus: "CONFLICTING"}' \
+    >"$STUB_DIR/pr-4743.json"
 
-write_issue() {
-    # write_issue <key> <state> [label ...]
-    local key="$1" state="$2"; shift 2
-    printf '{"number":%s,"state":"%s","labels":%s,"closedByPullRequestsReferences":[]}\n' \
-        "${key##*#}" "$state" "$(labels_json "$@")" > "$FIXTURES/issue-$key.json"
-}
+out="$("$TARGET_SCRIPT" dep-recheck --number 6335 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out" VERDICT)" "T13a: live --number mode fetches the issue's linked PRs and computes VERDICT"
+assert_contains_hash="$(field "$out" CONCLUSION_HASH)"
+assert_ne "" "$assert_contains_hash" "T13b: live --number mode emits a non-empty CONCLUSION_HASH"
 
-write_issue_with_prs() {
-    # write_issue_with_prs <key> <state> <pr#>[,<pr#>...]
-    local key="$1" state="$2" prs="$3" refs="" p
-    for p in ${prs//,/ }; do
-        [[ -n "$refs" ]] && refs="$refs,"
-        refs="$refs{\"number\":$p}"
-    done
-    printf '{"number":%s,"state":"%s","labels":[],"closedByPullRequestsReferences":[%s]}\n' \
-        "${key##*#}" "$state" "$refs" > "$FIXTURES/issue-$key.json"
-}
+# --- T13d/T13e: THE #7304 REGRESSION - a labeled, CONFLICTING PR fetched via
+# the real gh label-object shape must not crash jq, and the label must
+# actually be recognized by _dep_recheck_verdict (not silently ignored).
+jq -n '{closedByPullRequestsReferences: [{number: 9999}]}' >"$STUB_DIR/issue-6336.json"
+jq -n '{number: 9999, state: "OPEN", labels: [{id:"a", name:"loom:blocked", color:"111111"}, {id:"b", name:"loom:pr", color:"222222"}], mergeable: "MERGEABLE", mergeStateStatus: "CLEAN"}' \
+    >"$STUB_DIR/pr-9999.json"
 
-write_pr() {
-    # write_pr <key> <state> [label ...]
-    local key="$1" state="$2"; shift 2
-    printf '{"number":%s,"state":"%s","labels":%s}\n' \
-        "${key##*#}" "$state" "$(labels_json "$@")" > "$FIXTURES/pr-$key.json"
-}
+out_labeled="$("$TARGET_SCRIPT" dep-recheck --number 6336 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_labeled" VERDICT)" \
+    "T13d: a labeled (loom:blocked), non-conflicting, real-shape PR is still VERDICT=blocked (label match works on real gh objects, not just the --stdin fixture shape)"
+assert_eq "9999:OPEN:loom:blocked,loom:pr" "$(field "$out_labeled" BLOCKERS)" \
+    "T13e: BLOCKERS renders plain sorted label names from the real gh label-object shape without a jq type error"
 
-hash_of() { printf '%s\n' "$1" | sed -n 's/^CONCLUSION_HASH=//p'; }
+jq -n '{number: 20,state: "OPEN"}' >"$STUB_DIR/issue-20.json"
+jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"
+p="$("$TARGET_SCRIPT" operator-premise --refs "20 22" --repo owner/repo)"
+assert_eq "stale-premise" "$(field "$p" VERDICT)" "T13c: live operator-premise mode checks each --refs number's state"
 
-echo "Testing dep-recheck-fingerprint.sh"
-echo "=================================="
-echo
+# --- Summary ---
+echo ""
+echo "────────────────────────────────"
+echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 
-# --- (a) determinism across two independent invocations ------------------------
-echo "(a) Two independent passes, unchanged blocker state -> identical hash"
-write_issue 378 OPEN loom:architect loom:epic-phase loom:operator-only
-write_issue 528 OPEN
-
-OUT1="$("$SUT" --verdict blocked --issue 528 --blocker 378)"
-RC1=$?
-OUT2="$("$SUT" --verdict blocked --issue 528 --blocker 378)"
-assert_eq "0" "$RC1" "(a) exit 0"
-assert_eq "$OUT1" "$OUT2" "(a) full output byte-identical across two invocations"
-H_CANONICAL="$(hash_of "$OUT1")"
-assert_contains "$OUT1" "REASON=378:OPEN:loom:architect,loom:epic-phase,loom:operator-only" \
-    "(a) BLOCK_REASON is the canonical <ref>:<STATE>:<sorted loom:-labels> triple"
-
-# --- (b) the canonical hash matches the independently-verified live value ------
-echo
-echo "(b) Canonical hash equals the value verified against the live forge"
-# #1528 quotes 7004d3c3258ab254 for #528's canonical state, computed by hand
-# from the real forge BEFORE this script existed. Pinning it here means the
-# fixture agrees with reality, not merely with itself.
-assert_eq "7004d3c3258ab254" "$H_CANONICAL" \
-    "(b) matches #1528's independently hand-computed 7004d3c3258ab254"
-
-# --- (c) sensitivity: a loom: label appears on the blocker ---------------------
-echo
-echo "(c) Genuine state change (label added to blocker) -> hash MUST change"
-write_issue 378 OPEN loom:architect loom:epic-phase loom:operator-only loom:urgent
-H_LABEL_ADDED="$(hash_of "$("$SUT" --verdict blocked --issue 528 --blocker 378)")"
-assert_ne "$H_CANONICAL" "$H_LABEL_ADDED" "(c) added loom:urgent changes the hash"
-
-# --- (d) sensitivity: the blocker closes ---------------------------------------
-echo
-echo "(d) Genuine state change (blocker closes) -> hash MUST change"
-write_issue 378 CLOSED loom:architect loom:epic-phase loom:operator-only
-H_CLOSED="$(hash_of "$("$SUT" --verdict blocked --issue 528 --blocker 378)")"
-assert_ne "$H_CANONICAL" "$H_CLOSED" "(d) OPEN -> CLOSED changes the hash"
-
-# --- (e) stability: label ORDER churn from the API is not a change -------------
-echo
-echo "(e) API label-order churn -> hash MUST NOT change"
-write_issue 378 OPEN loom:operator-only loom:architect loom:epic-phase
-H_REORDERED="$(hash_of "$("$SUT" --verdict blocked --issue 528 --blocker 378)")"
-assert_eq "$H_CANONICAL" "$H_REORDERED" "(e) labels are sorted before hashing"
-
-# --- (f) stability: blocker-ref argument order is not a change -----------------
-echo
-echo "(f) --blocker argument order -> hash MUST NOT change"
-write_issue 111 OPEN loom:blocked
-write_issue 222 OPEN loom:operator-only
-H_AB="$(hash_of "$("$SUT" --verdict blocked --no-linked-prs --blocker 111 --blocker 222)")"
-H_BA="$(hash_of "$("$SUT" --verdict blocked --no-linked-prs --blocker 222 --blocker 111)")"
-assert_eq "$H_AB" "$H_BA" "(f) reason lines are sorted before hashing"
-
-# --- (g) the anti-prose guard --------------------------------------------------
-echo
-echo "(g) A prose --reason-key is REJECTED (this is the #1528 defect, structurally)"
-ERR="$("$SUT" --verdict blocked --no-linked-prs \
-    --reason-key 'still blocked pending the design epic' 2>&1 >/dev/null)"
-RC=$?
-assert_eq "2" "$RC" "(g) prose reason-key -> exit 2"
-assert_contains "$ERR" "no whitespace/prose" "(g) stderr names the reason"
-
-echo
-echo "(g2) A canonical token reason-key is accepted"
-OUT="$("$SUT" --verdict blocked --no-linked-prs --reason-key 'release:rjwalters/loom:>v0.18.0')"
-assert_eq "0" "$?" "(g2) canonical token -> exit 0"
-assert_contains "$OUT" "REASON=release:rjwalters/loom:>v0.18.0" "(g2) token passes through verbatim"
-
-# --- (h) BLOCK_REASON is secondary-heuristic-only ------------------------------
-echo
-echo "(h) --blocker alongside a primary-check blocker -> usage error"
-write_issue_with_prs 900 OPEN 901
-write_pr 901 OPEN loom:changes-requested
-ERR="$("$SUT" --verdict blocked --issue 900 --blocker 378 2>&1 >/dev/null)"
-RC=$?
-assert_eq "2" "$RC" "(h) exit 2 when the primary check already supplied BLOCKERS"
-assert_contains "$ERR" "SECONDARY heuristic only" "(h) stderr explains the invariant"
-
-echo
-echo "(h2) Primary-check blockers alone produce the linked-PR fingerprint"
-OUT="$("$SUT" --verdict blocked --issue 900)"
-assert_eq "0" "$?" "(h2) exit 0"
-assert_contains "$OUT" "BLOCKER=901:OPEN:loom:changes-requested" "(h2) canonical linked-PR line"
-
-echo
-echo "(h3) A label change on the linked PR moves the hash"
-H_PR_BEFORE="$(hash_of "$OUT")"
-write_pr 901 OPEN loom:blocked loom:changes-requested
-H_PR_AFTER="$(hash_of "$("$SUT" --verdict blocked --issue 900)")"
-assert_ne "$H_PR_BEFORE" "$H_PR_AFTER" "(h3) linked-PR labels are part of the fingerprint"
-
-# --- (i) verdict flip ----------------------------------------------------------
-echo
-echo "(i) blocked -> clear is always a changed conclusion"
-H_BLOCKED_EMPTY="$(hash_of "$("$SUT" --verdict blocked --no-linked-prs)")"
-H_CLEAR_EMPTY="$(hash_of "$("$SUT" --verdict clear --no-linked-prs)")"
-assert_ne "$H_BLOCKED_EMPTY" "$H_CLEAR_EMPTY" "(i) the verdict prefix prevents collision"
-
-# --- (j) verdict/blocker-set consistency ---------------------------------------
-echo
-echo "(j) --verdict clear with a non-empty blocker set -> usage error"
-write_issue 378 OPEN loom:architect
-ERR="$("$SUT" --verdict clear --no-linked-prs --blocker 378 2>&1 >/dev/null)"
-RC=$?
-assert_eq "2" "$RC" "(j) exit 2"
-assert_contains "$ERR" "inconsistent" "(j) stderr explains the inconsistency"
-
-# --- (k) an unresolvable blocker must NOT silently yield a hash ----------------
-echo
-echo "(k) Unresolvable blocker ref -> exit 2, no fingerprint emitted"
-OUT="$("$SUT" --verdict blocked --no-linked-prs --blocker 424242 2>/dev/null)"
-RC=$?
-assert_eq "2" "$RC" "(k) exit 2 rather than hashing an empty reason"
-assert_eq "" "$(hash_of "$OUT")" "(k) no CONCLUSION_HASH on the failure path"
-
-echo
-echo "(k2) A malformed blocker ref -> exit 2"
-ERR="$("$SUT" --verdict blocked --no-linked-prs --blocker 'not-a-ref' 2>&1 >/dev/null)"
-RC=$?
-assert_eq "2" "$RC" "(k2) exit 2"
-assert_contains "$ERR" "<owner>/<repo>#<number>" "(k2) stderr shows the accepted shapes"
-
-# --- (l) usage errors ----------------------------------------------------------
-echo
-echo "(l) Usage validation"
-"$SUT" --no-linked-prs >/dev/null 2>&1
-assert_eq "2" "$?" "(l) missing --verdict -> exit 2"
-"$SUT" --verdict blocked >/dev/null 2>&1
-assert_eq "2" "$?" "(l) no blocker source -> exit 2"
-"$SUT" --verdict blocked --issue 528 --no-linked-prs >/dev/null 2>&1
-assert_eq "2" "$?" "(l) two blocker sources -> exit 2"
-"$SUT" --verdict maybe --no-linked-prs >/dev/null 2>&1
-assert_eq "2" "$?" "(l) invalid verdict -> exit 2"
-"$SUT" --verdict blocked --issue abc >/dev/null 2>&1
-assert_eq "2" "$?" "(l) non-numeric --issue -> exit 2"
-"$SUT" --verdict blocked --bogus >/dev/null 2>&1
-assert_eq "2" "$?" "(l) unknown flag -> exit 2"
-
-# --- (m) --hash-only / --blockers-file -----------------------------------------
-echo
-echo "(m) --hash-only and --blockers-file"
-write_issue 378 OPEN loom:architect loom:epic-phase loom:operator-only
-HASH_ONLY="$("$SUT" --verdict blocked --issue 528 --blocker 378 --hash-only)"
-assert_eq "7004d3c3258ab254" "$HASH_ONLY" "(m) --hash-only prints just the hash"
-
-printf '901:OPEN:loom:changes-requested\n' > "$TMP_ROOT/blockers.txt"
-OUT="$("$SUT" --verdict blocked --blockers-file "$TMP_ROOT/blockers.txt")"
-assert_eq "0" "$?" "(m) --blockers-file exit 0"
-assert_contains "$OUT" "BLOCKER=901:OPEN:loom:changes-requested" "(m) --blockers-file line preserved"
-
-printf '222:OPEN:loom:b\n111:OPEN:loom:a\n' > "$TMP_ROOT/unsorted.txt"
-printf '111:OPEN:loom:a\n222:OPEN:loom:b\n' > "$TMP_ROOT/sorted.txt"
-H_U="$("$SUT" --verdict blocked --blockers-file "$TMP_ROOT/unsorted.txt" --hash-only)"
-H_S="$("$SUT" --verdict blocked --blockers-file "$TMP_ROOT/sorted.txt" --hash-only)"
-assert_eq "$H_S" "$H_U" "(m) BLOCKERS file order churn does not change the hash"
-
-"$SUT" --verdict blocked --blockers-file "$TMP_ROOT/nope.txt" >/dev/null 2>&1
-assert_eq "2" "$?" "(m) missing --blockers-file -> exit 2"
-
-# --- (n) the fingerprint feeds the idempotency guard unchanged -----------------
-echo
-echo "(n) RECHECK_MARKER is the exact shape check-dep-recheck-idempotency.sh parses"
-OUT="$("$SUT" --verdict blocked --issue 528 --blocker 378)"
-MARKER="$(printf '%s\n' "$OUT" | sed -n 's/^RECHECK_MARKER=//p')"
-assert_eq "<!-- curator:dep-recheck:7004d3c3258ab254 -->" "$MARKER" "(n) marker shape"
-GUARD="$SCRIPTS_DIR/check-dep-recheck-idempotency.sh"
-if [[ -x "$GUARD" ]]; then
-    printf '[{"created_at":"2026-09-06T00:00:00Z","body":"still blocked %s"}]\n' "$MARKER" \
-        > "$TMP_ROOT/history.json"
-    GOUT="$("$GUARD" --file "$TMP_ROOT/history.json" \
-        --assume-new-hash "7004d3c3258ab254" --assume-new-at "2026-09-06T04:00:00Z")"
-    GRC=$?
-    assert_eq "20" "$GRC" "(n) guard reads the marker back and says SKIP"
-    assert_contains "$GOUT" "DECISION=SKIP" "(n) DECISION=SKIP"
-else
-    echo "  SKIP: check-dep-recheck-idempotency.sh not executable"
-fi
-
-echo
-echo "=================================="
-echo "Tests run:    $TESTS_RUN"
-echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC}"
-if [[ "$TESTS_FAILED" -gt 0 ]]; then
-    echo -e "Tests failed: ${RED}$TESTS_FAILED${NC}"
+if [[ $TESTS_FAILED -gt 0 ]]; then
     exit 1
 fi
-echo -e "${GREEN}All tests passed${NC}"
 exit 0

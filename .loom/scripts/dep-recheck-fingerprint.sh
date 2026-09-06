@@ -1,282 +1,375 @@
 #!/usr/bin/env bash
-# dep-recheck-fingerprint.sh — deterministic CONCLUSION_HASH computation for
-# Curator's "Re-check Idempotency" rule (`.claude/commands/loom/curator.md`
-# § "Re-check Idempotency: never re-post an unchanged conclusion (#4986)").
+# dep-recheck-fingerprint.sh - Deterministically compute the VERDICT/BLOCKERS/
+# CONCLUSION_HASH fingerprint behind curator.md's "Re-check Idempotency"
+# (#4986) and "Checking Operator-Only Premises" (#6849) sections (#7281).
 #
-# Why this exists (#1528): #1523/#1524 replaced the *decision* half of that
-# rule (find PRIOR, compare hashes, check the staleness window) with
-# check-dep-recheck-idempotency.sh, because a hand-rolled jq/date snippet was
-# being reproduced unfaithfully on every pass. The exact same failure then
-# recurred one layer up, in the *input* to that decision: `CONCLUSION_HASH`
-# was still built by hand, and its `BLOCK_REASON` component was specified as
-# free-text prose ("fold the cited justification in"). Identical underlying
-# dependency state therefore hashed differently from pass to pass purely
-# because the wording differed — and a differing hash is classified CHANGED,
-# which always permits a comment. That is the "guard can only be as good as
-# the hash it is fed" defect.
+# WHY THIS EXISTS (#7281)
 #
-# Live evidence (#528, `curator:dep-recheck` marker history, verified
-# 2026-09-06): ten consecutive days 2026-08-27 -> 2026-09-05 produced exactly
-# one heartbeat per day, every one carrying the SAME hash
-# `bb3b15b9f3db0761`, despite ~20 Curator dispatches per day. Idempotency
-# held. Then on 2026-09-06 the same unchanged blocker state produced THREE
-# different hashes — `5342934786687480` (01:21Z), `bb3b15b9f3db0761`
-# (08:23Z / 12:48Z / 16:24Z) and `28b66af6ee975a56` (16:33Z). Each flip reset
-# PRIOR, so the following pass saw CHANGED and posted again. High dispatch
-# frequency alone had been survivable for ten days; hash instability is what
-# turned it into a comment storm.
+#   Both sections used to define their CONCLUSION_HASH as inline bash embedded
+#   in the role prompt TEXT, re-derived independently by every Curator agent
+#   invocation from natural-language instructions rather than one canonical
+#   implementation — exactly the failure mode `claim-staleness.sh` (#6514) was
+#   extracted to prevent for the sibling claim-staleness computation. In
+#   production this let the fingerprint churn across dozens of distinct hash
+#   values on #6335/#6805 over weeks with an unchanged blocking condition,
+#   defeating the "never re-post an unchanged conclusion" guard and spamming
+#   near-duplicate comments.
 #
-# This script is the single deterministic implementation of the fingerprint.
-# It builds every component from machine-checkable forge state — never prose —
-# so two independent passes over an unchanged dependency state always produce
-# byte-identical output, and any *real* change (a blocker closing, a
-# `loom:` label appearing or clearing, a verdict flip) still changes it.
+#   The specific non-determinism this script closes: a superseding-block PR
+#   whose `mergeable`/`mergeStateStatus` is transiently `UNKNOWN` (GitHub has
+#   not finished computing it yet) used to be read as "not conflicting", so a
+#   PR that was blocking purely on merge-state (no blocking label) could
+#   appear to "clear" for one pass and re-block the next, flipping VERDICT
+#   back and forth with nothing about the PR actually changing. This script
+#   fails safe instead: `UNKNOWN` on either field is treated the same as
+#   `CONFLICTING`/`DIRTY` for merge-state purposes (the codebase's existing
+#   "never stomp on missing data" convention — see `claim-staleness.sh`'s
+#   `unknown` -> `fresh` fail-safe), so a real value flickering through
+#   `UNKNOWN` and back does not change VERDICT, and therefore does not change
+#   CONCLUSION_HASH, on its own.
 #
-# Canonical component shapes (both are `<ref>:<STATE>:<sorted loom:-labels>`,
-# the shape curator.md's linked-PR BLOCKERS fingerprint already used — it was
-# the stable half all along, precisely because it is derived from
-# `gh pr view --json number,state,labels` output rather than from prose):
+# WHAT THIS SCRIPT DOES NOT DO
 #
-#   BLOCKERS      one line per PR that would close this issue (primary check)
-#   BLOCK_REASON  one line per blocker cited by the secondary heuristic, used
-#                 ONLY when there is no linked PR
+#   It does not compare against a prior marker, decide comment/skip/heartbeat,
+#   or post anything — that four-way decision (see curator.md "Re-check
+#   Idempotency") stays in curator.md, reading the emitted CONCLUSION_HASH
+#   against the most recent `<!-- curator:dep-recheck:... -->` /
+#   `<!-- curator:operator-premise-recheck:... -->` marker exactly as before.
+#   This script only answers "what did THIS pass conclude", deterministically.
+#
+#   It also does not compute `BLOCK_REASON` (the free-text justification used
+#   only when there is no linked PR at all, from the secondary heuristic) or
+#   `ORTHOGONAL` (the diagnosed-but-orthogonal-blocker identity, #6516) —
+#   both are judgment calls made by reading prose/comments, not mechanical
+#   PR-state facts. Pass them through via `--block-reason` / `--orthogonal`
+#   so they still fold into CONCLUSION_HASH exactly as the old inline formula
+#   did; the script's job is to stop the *mechanical* half (VERDICT + BLOCKERS
+#   from current PR/ref state) from being hand-rolled and drifting.
 #
 # Usage:
-#   dep-recheck-fingerprint.sh --verdict <blocked|clear>
-#       [--issue <n> | --blockers-file <f> | --no-linked-prs]
-#       [--blocker <ref>]... [--reason-key <token>]... [--hash-only]
+#   dep-recheck-fingerprint.sh dep-recheck (--number N [--repo OWNER/NAME] | --stdin)
+#       [--verdict blocked|clear] [--block-reason TEXT] [--orthogonal ID] [--json]
+#   dep-recheck-fingerprint.sh operator-premise (--refs "N1 N2 ..." [--repo OWNER/NAME] | --stdin)
+#       [--json]
 #
-#   --verdict <v>        Required. `blocked` or `clear`. Prefixed to the hash
-#                        input so a blocked->clear flip can never collide with
-#                        clear->blocked.
-#   --issue <n>          Issue being re-checked. Its linked PRs (the primary
-#                        superseding-block check) become BLOCKERS, resolved
-#                        live via `gh`.
-#   --blockers-file <f>  Offline/test source for BLOCKERS: one pre-resolved
-#                        `<ref>:<STATE>:<labels>` line per blocker. Mutually
-#                        exclusive with --issue.
-#   --no-linked-prs      Assert there are no linked PRs (BLOCKERS empty)
-#                        without making a forge call. Mutually exclusive with
-#                        --issue and --blockers-file.
-#   --blocker <ref>      Repeatable. A blocker cited by the secondary
-#                        heuristic: a bare same-repo number (`378`) or a
-#                        cross-repo ref (`owner/repo#5325`). Resolved live via
-#                        `gh` to `<ref>:<STATE>:<sorted loom:-labels>`.
-#   --reason-key <tok>   Repeatable. Canonical token for a blocker that is not
-#                        a forge issue/PR at all (e.g. an unreleased upstream
-#                        tag: `release:rjwalters/loom:>v0.18.0`). Validated
-#                        against ^[A-Za-z0-9._:/+@#=<>,-]+$ — whitespace is
-#                        REJECTED, which is what structurally prevents prose
-#                        from re-entering the fingerprint.
-#   --hash-only          Print only the 16-hex CONCLUSION_HASH.
+# Subcommands:
+#   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
+#                       (blocked|clear), BLOCKERS (one "<pr#>:<state>:<sorted
+#                       loom: labels>" line per PR in `closedByPullRequestsReferences`,
+#                       sorted), and CONCLUSION_HASH.
+#   operator-premise    The "Checking Operator-Only Premises" fingerprint:
+#                       VERDICT (stale-premise|open), REFS (one "<ref#>:<state>"
+#                       line per checked reference, sorted), and
+#                       CONCLUSION_HASH — left EMPTY when VERDICT=open, per
+#                       "no comment this pass" (nothing to report, nothing to
+#                       compare).
 #
-# Output (stdout — one KEY=VALUE per line, machine-parseable; multi-valued
-# components are emitted as repeated single-line keys rather than embedded
-# newlines, so a caller can parse with `sed -n 's/^KEY=//p'`):
-#   VERDICT=<blocked|clear>
-#   BLOCKER=<line>            (zero or more, sorted)
-#   REASON=<line>             (zero or more, sorted)
-#   CONCLUSION_HASH=<16 hex>
-#   RECHECK_MARKER=<!-- curator:dep-recheck:<hash> -->
+# Input modes (either one, mutually exclusive):
+#   --number N [--repo OWNER/NAME]   Live mode: fetch current PR/ref state via
+#                                     `gh issue view` / `gh pr view`. `dep-recheck`
+#                                     derives its own PR list from the issue's
+#                                     `closedByPullRequestsReferences`;
+#                                     `operator-premise` requires the caller's
+#                                     already-extracted `--refs "N1 N2 ..."`
+#                                     (this script does not parse issue body
+#                                     text for `Blocked by #N` etc. — that
+#                                     extraction stays in curator.md, tightly
+#                                     coupled to the phrasings it recognizes).
+#   --stdin                          Offline mode: read a JSON document on
+#                                     stdin instead of calling `gh` (used by
+#                                     the test suite, and available to any
+#                                     caller that already has the PR/ref state
+#                                     in hand). Shape:
+#                                       dep-recheck:      {"prs": [{"number":N,
+#                                         "state":"OPEN","labels":["..."],
+#                                         "mergeable":"CONFLICTING",
+#                                         "mergeStateStatus":"DIRTY"}, ...]}
+#                                       operator-premise: {"refs": [{"number":N,
+#                                         "state":"OPEN"}, ...]}
+#
+# Options:
+#   --verdict blocked|clear   `dep-recheck` only: override the mechanically
+#                             computed VERDICT. Required when `prs` is empty
+#                             and the true verdict comes from the secondary
+#                             heuristic (no linked PR at all) rather than PR
+#                             state — the script cannot infer that case on its
+#                             own. Ignored (a no-op) when omitted and `prs` is
+#                             non-empty: the mechanical computation stands.
+#   --block-reason TEXT       `dep-recheck` only: folded into CONCLUSION_HASH
+#                             verbatim, empty by default. Only meaningful
+#                             alongside an empty `prs` list (the secondary
+#                             heuristic path) — see curator.md.
+#   --orthogonal ID           `dep-recheck` only: the diagnosed-but-orthogonal
+#                             condition's stable identity (#6516), folded into
+#                             CONCLUSION_HASH verbatim, empty by default (the
+#                             ordinary case — every existing fingerprint is
+#                             unaffected when this is empty).
+#   --repo OWNER/NAME         Target repo for live mode (default: the cwd's
+#                             git remote).
+#   --json                    Emit a JSON object instead of KEY=VALUE lines.
 #
 # Exit codes:
-#   0 = fingerprint computed
-#   2 = usage or environment error (including a --reason-key containing
-#       whitespace, and the mutually-exclusive-source violations below)
+#   0  evaluation completed (branch on VERDICT / CONCLUSION_HASH)
+#   2  usage error
+#   3  missing dependency (gh or jq)
 #
-# INVARIANT ENFORCED HERE, NOT LEFT TO THE CALLER: BLOCK_REASON exists only
-# for the secondary heuristic. Passing --blocker/--reason-key while BLOCKERS
-# is non-empty is a usage error (exit 2), mirroring curator.md's "Leave empty
-# when the primary check supplied the blockers."
+# `eval`-safe like `claim-staleness.sh`: KEY=VALUE output is built only from a
+# fixed enum, a hex hash and pre-sorted plain-text lines — never raw forge
+# text — so no comment/PR body content can reach your shell via `eval`.
 
-set -uo pipefail
+set -euo pipefail
 
-VERDICT=""
-ISSUE=""
-BLOCKERS_FILE=""
-NO_LINKED_PRS=0
-HASH_ONLY=0
-BLOCKER_REFS=()
-REASON_KEYS=()
+SCRIPT_NAME="$(basename "$0")"
 
-usage() {
-  echo "Usage: $0 --verdict <blocked|clear> (--issue <n> | --blockers-file <f> | --no-linked-prs) [--blocker <ref>]... [--reason-key <token>]... [--hash-only]" >&2
+_usage() {
+    # Keep this range in sync with the header comment block above.
+    sed -n '/^# Usage:/,/^# text — so no comment.*body content can reach your shell via .eval.\.$/p' "$0" | sed 's/^# \{0,1\}//'
 }
+
+_die() {
+    echo "$SCRIPT_NAME: $1" >&2
+    exit "${2:-2}"
+}
+
+SUBCOMMAND="${1:-}"
+case "$SUBCOMMAND" in
+    dep-recheck | operator-premise) shift ;;
+    -h | --help)
+        _usage
+        exit 0
+        ;;
+    "") _die "missing subcommand (dep-recheck | operator-premise); see --help" ;;
+    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise)" ;;
+esac
+
+NUMBER=""
+REPO_ARG=""
+REFS_ARG=""
+USE_STDIN=false
+VERDICT_OVERRIDE=""
+BLOCK_REASON=""
+ORTHOGONAL=""
+JSON_OUTPUT=false
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --verdict) VERDICT="${2:-}"; shift 2 ;;
-    --issue) ISSUE="${2:-}"; shift 2 ;;
-    --blockers-file) BLOCKERS_FILE="${2:-}"; shift 2 ;;
-    --no-linked-prs) NO_LINKED_PRS=1; shift ;;
-    --blocker) BLOCKER_REFS+=("${2:-}"); shift 2 ;;
-    --reason-key) REASON_KEYS+=("${2:-}"); shift 2 ;;
-    --hash-only) HASH_ONLY=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *)
-      echo "ERROR: unknown argument: $1" >&2
-      usage
-      exit 2
-      ;;
-  esac
+    case "$1" in
+        --number)
+            NUMBER="${2:-}"
+            shift 2
+            ;;
+        --repo)
+            REPO_ARG="${2:-}"
+            shift 2
+            ;;
+        --refs)
+            REFS_ARG="${2:-}"
+            shift 2
+            ;;
+        --stdin)
+            USE_STDIN=true
+            shift
+            ;;
+        --verdict)
+            VERDICT_OVERRIDE="${2:-}"
+            shift 2
+            ;;
+        --block-reason)
+            BLOCK_REASON="${2:-}"
+            shift 2
+            ;;
+        --orthogonal)
+            ORTHOGONAL="${2:-}"
+            shift 2
+            ;;
+        --json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        -h | --help)
+            _usage
+            exit 0
+            ;;
+        *) _die "unknown option '$1'" ;;
+    esac
 done
 
-if [[ "$VERDICT" != "blocked" && "$VERDICT" != "clear" ]]; then
-  echo "ERROR: --verdict must be 'blocked' or 'clear', got: '$VERDICT'" >&2
-  usage
-  exit 2
+command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
+
+if [[ "$USE_STDIN" == true ]]; then
+    [[ -z "$NUMBER" ]] || _die "--stdin and --number are mutually exclusive"
+    [[ -z "$REFS_ARG" ]] || _die "--stdin and --refs are mutually exclusive"
+elif [[ "$SUBCOMMAND" == "dep-recheck" ]]; then
+    [[ -n "$NUMBER" ]] || _die "one of --number or --stdin is required"
+    [[ "$NUMBER" =~ ^[0-9]+$ ]] || _die "--number must be a positive integer (got '$NUMBER')"
+    command -v gh >/dev/null 2>&1 || _die "gh CLI not found on PATH" 3
+else
+    # operator-premise's live mode fetches each --refs number independently;
+    # it never needs the parent issue's own number.
+    [[ -n "$REFS_ARG" ]] || _die "one of --refs or --stdin is required"
+    command -v gh >/dev/null 2>&1 || _die "gh CLI not found on PATH" 3
 fi
 
-SOURCE_COUNT=0
-[[ -n "$ISSUE" ]] && SOURCE_COUNT=$((SOURCE_COUNT + 1))
-[[ -n "$BLOCKERS_FILE" ]] && SOURCE_COUNT=$((SOURCE_COUNT + 1))
-[[ "$NO_LINKED_PRS" -eq 1 ]] && SOURCE_COUNT=$((SOURCE_COUNT + 1))
-if [[ "$SOURCE_COUNT" -ne 1 ]]; then
-  echo "ERROR: exactly one of --issue, --blockers-file, --no-linked-prs is required" >&2
-  usage
-  exit 2
-fi
-if [[ -n "$ISSUE" && ! "$ISSUE" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: --issue must be numeric" >&2
-  exit 2
-fi
-if [[ -n "$BLOCKERS_FILE" && ! -f "$BLOCKERS_FILE" ]]; then
-  echo "ERROR: --blockers-file not found: $BLOCKERS_FILE" >&2
-  exit 2
+if [[ -n "$VERDICT_OVERRIDE" && "$VERDICT_OVERRIDE" != "blocked" && "$VERDICT_OVERRIDE" != "clear" ]]; then
+    _die "--verdict must be 'blocked' or 'clear' (got '$VERDICT_OVERRIDE')"
 fi
 
-# --- the anti-prose guard ------------------------------------------------------
-# A --reason-key is a canonical token, not a sentence. Rejecting whitespace is
-# what makes "fold in the cited justification" un-writable: there is no way to
-# smuggle "still blocked pending the design epic" through this argument.
-REASON_KEY_RE='^[A-Za-z0-9._:/+@#=<>,-]+$'
-for KEY in ${REASON_KEYS+"${REASON_KEYS[@]}"}; do
-  if [[ ! "$KEY" =~ $REASON_KEY_RE ]]; then
-    echo "ERROR: --reason-key must be a canonical token matching $REASON_KEY_RE (no whitespace/prose), got: '$KEY'" >&2
-    echo "HINT: describe the blocker as machine-checkable state, e.g. 'release:rjwalters/loom:>v0.18.0', not as a sentence." >&2
-    exit 2
-  fi
-done
+REPO_FLAG=()
+[[ -n "$REPO_ARG" ]] && REPO_FLAG=(--repo "$REPO_ARG")
 
-sha256_hex_stdin() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  else
-    return 1
-  fi
+_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256
+    else
+        cksum
+    fi
 }
 
-need_gh() {
-  command -v gh >/dev/null 2>&1 || { echo "ERROR: 'gh' not found on PATH" >&2; exit 2; }
+# --- dep-recheck -------------------------------------------------------------
+
+_fetch_dep_recheck_json() {
+    local issue_json pr_nums pr_json pr
+    issue_json="$(gh issue view "$NUMBER" "${REPO_FLAG[@]}" --json closedByPullRequestsReferences)" ||
+        _die "gh issue view $NUMBER failed — cannot compute a fingerprint from a failed read (fail safe: never guess 'clear' on missing data)" 1
+    pr_nums="$(printf '%s\n' "$issue_json" | jq -r '.closedByPullRequestsReferences[].number')" ||
+        _die "unexpected response shape from gh issue view $NUMBER (missing closedByPullRequestsReferences)" 1
+    pr_json="[]"
+    if [[ -n "$pr_nums" ]]; then
+        pr_json="["
+        local first=true
+        for pr in $pr_nums; do
+            local one
+            one="$(gh pr view "$pr" "${REPO_FLAG[@]}" --json number,state,labels,mergeable,mergeStateStatus)" ||
+                _die "gh pr view $pr failed — cannot compute a fingerprint from a failed read" 1
+            # `gh pr view --json labels` returns an array of label OBJECTS
+            # ({"name": "loom:pr", ...}), not plain strings. Normalize to
+            # plain name strings here, once, so every downstream consumer
+            # (_dep_recheck_blockers, _dep_recheck_verdict) can keep assuming
+            # the same string-array shape the --stdin fixtures already use.
+            one="$(jq -c '{number, state, labels: [.labels[].name], mergeable, mergeStateStatus}' <<<"$one")"
+            [[ "$first" == true ]] && first=false || pr_json+=","
+            pr_json+="$one"
+        done
+        pr_json+="]"
+    fi
+    jq -n --argjson prs "$pr_json" '{prs: $prs}'
 }
 
-# ref_state_labels <ref> -- print "<ref>:<STATE>:<sorted loom:-labels>" for a
-# forge issue or PR. <ref> is a bare number (this repo) or `owner/repo#N`.
-# Tries the issue endpoint first, then the PR endpoint, since a cited blocker
-# may legitimately be either.
-#
-# Returns 1 (never `exit`s) on an unresolvable ref: callers invoke this in a
-# command substitution, where an `exit` would only kill the subshell and be
-# silently absorbed into an empty — but still hashable — fingerprint. A
-# fingerprint computed from a blocker the script could not actually read is
-# exactly the class of silent wrong answer this whole script exists to
-# eliminate, so the failure has to be visible to the caller.
-ref_state_labels() {
-  local ref="$1"
-  local num="$ref"
-  local out=""
-  local repo_args=()
-  if [[ "$ref" == *"#"* ]]; then
-    repo_args=(--repo "${ref%%#*}")
-    num="${ref##*#}"
-  fi
-  if [[ ! "$num" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: --blocker must be <number> or <owner>/<repo>#<number>, got: '$ref'" >&2
-    return 1
-  fi
-  local jq_expr='"\(.state):\([.labels[].name | select(startswith("loom:"))] | sort | join(","))"'
-  out="$(gh issue view "$num" ${repo_args+"${repo_args[@]}"} --json state,labels --jq "$jq_expr" 2>/dev/null)"
-  if [[ -z "$out" ]]; then
-    out="$(gh pr view "$num" ${repo_args+"${repo_args[@]}"} --json state,labels --jq "$jq_expr" 2>/dev/null)"
-  fi
-  if [[ -z "$out" ]]; then
-    echo "ERROR: could not resolve blocker ref '$ref' as an issue or PR" >&2
-    return 1
-  fi
-  printf '%s:%s\n' "$ref" "$out"
+# One "<pr#>:<state>:<sorted loom: labels>" line per PR, sorted — matches the
+# original inline formula exactly (ordering churn from the API never looks
+# like a changed conclusion).
+_dep_recheck_blockers() {
+    jq -r '.prs | sort_by(.number) | .[]
+        | "\(.number):\(.state):\([.labels[] | select(startswith("loom:"))] | sort | join(","))"' <<<"$1" | sort
 }
 
-# --- BLOCKERS (primary check: PRs that would close this issue) -----------------
-BLOCKERS=""
-if [[ -n "$BLOCKERS_FILE" ]]; then
-  BLOCKERS="$(grep -v '^[[:space:]]*$' "$BLOCKERS_FILE" | sort)"
-elif [[ -n "$ISSUE" ]]; then
-  need_gh
-  PR_NUMBERS="$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
-    --jq '.closedByPullRequestsReferences[].number' 2>/dev/null)"
-  if [[ -n "$PR_NUMBERS" ]]; then
-    BLOCKERS="$(while IFS= read -r PR; do
-      [[ -n "$PR" ]] || continue
-      gh pr view "$PR" --json number,state,labels --jq \
-        '"\(.number):\(.state):\([.labels[].name | select(startswith("loom:"))] | sort | join(","))"'
-    done <<<"$PR_NUMBERS" | sort)"
-  fi
-fi
-
-# --- BLOCK_REASON (secondary heuristic only) -----------------------------------
-REASON_LINES=()
-for REF in ${BLOCKER_REFS+"${BLOCKER_REFS[@]}"}; do
-  need_gh
-  RESOLVED="$(ref_state_labels "$REF")" || exit 2
-  [[ -n "$RESOLVED" ]] || { echo "ERROR: empty resolution for blocker ref '$REF'" >&2; exit 2; }
-  REASON_LINES+=("$RESOLVED")
-done
-for KEY in ${REASON_KEYS+"${REASON_KEYS[@]}"}; do
-  REASON_LINES+=("$KEY")
-done
-
-BLOCK_REASON=""
-if [[ ${#REASON_LINES[@]} -gt 0 ]]; then
-  if [[ -n "$BLOCKERS" ]]; then
-    echo "ERROR: --blocker/--reason-key are for the SECONDARY heuristic only; the primary check already supplied BLOCKERS." >&2
-    echo "HINT: curator.md — 'Leave empty when the primary check supplied the blockers.'" >&2
-    exit 2
-  fi
-  BLOCK_REASON="$(printf '%s\n' "${REASON_LINES[@]}" | sort)"
-fi
-
-if [[ "$VERDICT" == "clear" && ( -n "$BLOCKERS" || -n "$BLOCK_REASON" ) ]]; then
-  echo "ERROR: --verdict clear is inconsistent with a non-empty blocker set" >&2
-  exit 2
-fi
-
-# --- the hash ------------------------------------------------------------------
-# Byte-identical to curator.md's long-standing formula:
-#   printf '%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" | sha256 | cut 16
-# Verified against the value #1528 reported for #528's canonical state:
-#   blocked / (empty) / 378:OPEN:loom:architect,loom:epic-phase,loom:operator-only
-#   -> 7004d3c3258ab254
-CONCLUSION_HASH="$(printf '%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" \
-  | sha256_hex_stdin)" || {
-  echo "ERROR: neither 'shasum' nor 'sha256sum' found on PATH" >&2
-  exit 2
+# A PR blocks iff it is OPEN and either carries a block-bearing label, or its
+# merge state is CONFLICTING/DIRTY, or (#7281 fix) its merge state is
+# transiently UNKNOWN — fail-safe: treat "we don't know yet" the same as
+# "still conflicting" rather than as "clear", so a value flickering through
+# UNKNOWN and back does not flip VERDICT on its own.
+_dep_recheck_verdict() {
+    jq -r '
+      [.prs[] | select(.state == "OPEN") | select(
+          ([.labels[] | select(. == "loom:changes-requested" or . == "loom:blocked")] | length) > 0
+          or (.mergeable == "CONFLICTING")
+          or (.mergeStateStatus == "DIRTY" or .mergeStateStatus == "CONFLICTING")
+          or (.mergeable == "UNKNOWN")
+          or (.mergeStateStatus == "UNKNOWN")
+      )] | length > 0
+    ' <<<"$1" | grep -qx true && echo "blocked" || echo "clear"
 }
-CONCLUSION_HASH="${CONCLUSION_HASH:0:16}"
 
-if [[ "$HASH_ONLY" -eq 1 ]]; then
-  printf '%s\n' "$CONCLUSION_HASH"
-  exit 0
-fi
+_run_dep_recheck() {
+    local input_json blockers verdict hash
+    if [[ "$USE_STDIN" == true ]]; then
+        input_json="$(cat)"
+    else
+        input_json="$(_fetch_dep_recheck_json)"
+    fi
+    jq -e '.prs' >/dev/null 2>&1 <<<"$input_json" || _die "input JSON must have a top-level 'prs' array"
 
-echo "VERDICT=$VERDICT"
-if [[ -n "$BLOCKERS" ]]; then
-  while IFS= read -r LINE; do echo "BLOCKER=$LINE"; done <<<"$BLOCKERS"
-fi
-if [[ -n "$BLOCK_REASON" ]]; then
-  while IFS= read -r LINE; do echo "REASON=$LINE"; done <<<"$BLOCK_REASON"
-fi
-echo "CONCLUSION_HASH=$CONCLUSION_HASH"
-echo "RECHECK_MARKER=<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
-exit 0
+    blockers="$(_dep_recheck_blockers "$input_json")"
+    if [[ -n "$VERDICT_OVERRIDE" ]]; then
+        verdict="$VERDICT_OVERRIDE"
+    else
+        verdict="$(_dep_recheck_verdict "$input_json")"
+    fi
+    hash="$(printf '%s\n%s\n%s\n%s' "$verdict" "$blockers" "$BLOCK_REASON" "$ORTHOGONAL" | _sha256 | awk '{print substr($1, 1, 16)}')"
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg verdict "$verdict" --arg blockers "$blockers" --arg reason "$BLOCK_REASON" \
+            --arg orthogonal "$ORTHOGONAL" --arg hash "$hash" \
+            '{verdict: $verdict, blockers: $blockers, block_reason: $reason, orthogonal: $orthogonal, conclusion_hash: $hash}'
+    else
+        echo "VERDICT=$verdict"
+        echo "BLOCKERS=$blockers"
+        echo "BLOCK_REASON=$BLOCK_REASON"
+        echo "ORTHOGONAL=$ORTHOGONAL"
+        echo "CONCLUSION_HASH=$hash"
+    fi
+}
+
+# --- operator-premise ---------------------------------------------------------
+
+_fetch_operator_premise_json() {
+    local refs_json ref state
+    refs_json="[]"
+    for ref in $REFS_ARG; do
+        # A reference is either an issue or a PR — try issue first, and only
+        # fall back to `pr view` when that lookup itself fails (the expected
+        # shape of "this reference turns out to be a PR, not an issue"). If
+        # BOTH fail, that is a real read failure (bad number, API outage,
+        # permissions) — die rather than silently defaulting to a status that
+        # would misreport as "closed" (fail safe: never guess "stale-premise"
+        # on missing data).
+        state="$(gh issue view "$ref" "${REPO_FLAG[@]}" --json state --jq '.state' 2>/dev/null || true)"
+        if [[ -z "$state" ]]; then
+            state="$(gh pr view "$ref" "${REPO_FLAG[@]}" --json state --jq '.state' 2>/dev/null || true)"
+        fi
+        [[ -n "$state" ]] || _die "could not read state for reference #$ref (neither gh issue view nor gh pr view succeeded)" 1
+        refs_json="$(jq --argjson n "$ref" --arg s "$state" '. + [{number: $n, state: $s}]' <<<"$refs_json")"
+    done
+    jq -n --argjson refs "$refs_json" '{refs: $refs}'
+}
+
+_operator_premise_refs() {
+    jq -r '.refs | sort_by(.number) | .[] | "\(.number):\(.state)"' <<<"$1" | sort
+}
+
+_run_operator_premise() {
+    local input_json refs verdict hash
+    if [[ "$USE_STDIN" == true ]]; then
+        input_json="$(cat)"
+    else
+        [[ -n "$REFS_ARG" ]] || _die "operator-premise live mode requires --refs \"N1 N2 ...\""
+        input_json="$(_fetch_operator_premise_json)"
+    fi
+    jq -e '.refs' >/dev/null 2>&1 <<<"$input_json" || _die "input JSON must have a top-level 'refs' array"
+
+    refs="$(_operator_premise_refs "$input_json")"
+    if jq -e '[.refs[] | select(.state != "OPEN")] | length > 0' >/dev/null 2>&1 <<<"$input_json"; then
+        verdict="stale-premise"
+        hash="$(printf '%s\n%s' "$verdict" "$refs" | _sha256 | awk '{print substr($1, 1, 16)}')"
+    else
+        # Nothing to report: no comment this pass, so no hash is computed or
+        # compared either (mirrors the dep-recheck "all clear" non-event).
+        verdict="open"
+        hash=""
+    fi
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg verdict "$verdict" --arg refs "$refs" --arg hash "$hash" \
+            '{verdict: $verdict, refs: $refs, conclusion_hash: $hash}'
+    else
+        echo "VERDICT=$verdict"
+        echo "REFS=$refs"
+        echo "CONCLUSION_HASH=$hash"
+    fi
+}
+
+case "$SUBCOMMAND" in
+    dep-recheck) _run_dep_recheck ;;
+    operator-premise) _run_operator_premise ;;
+esac
