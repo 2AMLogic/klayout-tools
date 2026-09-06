@@ -6925,6 +6925,53 @@ def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
     )
 
 
+def test_compose_routes_mos_array_device_port_to_its_own_ring_tap_port(
+    tmp_path, pdk_root
+):
+    """Issue #1493's own repro, resolved: with `mos_array.add_guard_ring`
+    now composing the ring as *part of* the block (rather than a separately
+    generated `guard_ring` block placed inside its cavity), a self-net from
+    the device's own port to the ring's own `TAP_*` port is an ordinary
+    same-block self-net -- already covered by the existing pin-block edge-
+    margin allowance the obstacle-overlap check gives a route's own two pin
+    blocks, with no `gen-compose`-level change needed (the issue's own scope
+    recommendation: option (a) only, option (b)'s general `encloses`
+    declaration is out of scope)."""
+    mp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "mp",
+        rows=1,
+        cols=1,
+        dummy=0,
+        add_guard_ring=True,
+        flavor="pfet",
+    )
+    output = tmp_path / "mos_array_ring_self_net.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "mp", "generator_report": mp}],
+            "placement": {"strategy": "row", "order": ["mp"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "vdd",
+                    "pins": [
+                        {"block": "mp", "port": "U0_S"},
+                        {"block": "mp", "port": "TAP_W"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "mos_array_ring_self_net", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert output.is_file()
+
+
 # --------------------------------------------------------------------------- #
 # Stub-widen (#496): a north/south-facing port's *drawn* pad can be wider
 # than the route's own `width_um` -- the un-widened stub still leaves the

@@ -826,6 +826,10 @@ def test_mos_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk
         {"dummy": -1},
         {"topology": "bogus"},
         {"flavor": "bogus"},
+        {"ring_padding_um": -0.1},
+        {"ring_gap_side": "bogus"},
+        {"ring_gap_um": 1.0},  # ring_gap_um without ring_gap_side
+        {"ring_gap_side": "N", "ring_gap_um": 0.1},  # narrower than min spacing
     ],
 )
 def test_mos_array_invalid_params_rejected(tmp_path, pdk_root, params):
@@ -928,6 +932,209 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# `add_guard_ring` (issue #1493): `mos_array` composes `_ring_layout` the same
+# way `diff_pair`/`esd_device`/`bjt_array` already do, mirroring `diff_pair`'s
+# own `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um`/`ring_padding_um`
+# param set -- but defaulting `add_guard_ring` to `False` (unlike
+# `diff_pair`'s `True`), since `mos_array`'s ring is a strictly additive,
+# opt-in capability rather than the generator's own primary composition.
+# --------------------------------------------------------------------------- #
+
+
+def test_mos_array_add_guard_ring_default_is_false_and_geometry_unchanged(
+    tmp_path, pdk_root
+):
+    """`add_guard_ring` defaults to `False` -- a request that omits it draws
+    byte-for-byte identical geometry to one that names `False` explicitly,
+    and no TAP_* ports are reported (issue #1493's regression-safety bar)."""
+    implicit = tmp_path / "implicit.gds"
+    explicit = tmp_path / "explicit.gds"
+    implicit_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(implicit)},
+        }
+    )
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"add_guard_ring": False},
+            "options": {"output": str(explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(implicit, explicit)
+    port_names = {p["name"] for p in implicit_report["ports"]}
+    assert not port_names & {"TAP_N", "TAP_S", "TAP_E", "TAP_W"}
+
+
+def test_mos_array_composes_guard_ring_and_reports_tap_ports(tmp_path, pdk_root):
+    """`add_guard_ring=True` encloses the array in an automatically-sized
+    tap/guard ring -- the same composition `diff_pair` already demonstrates
+    for a pair of devices -- and reports `TAP_<side>` ports on the metal
+    role, on top of the array's own `U<i>_S/D/G` ports."""
+    output = tmp_path / "mos_array_ring.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 2, "cols": 2, "dummy": 0, "add_guard_ring": True},
+            "options": {"output": str(output)},
+        }
+    )
+    port_names = {p["name"] for p in report["ports"]}
+    assert {"U0_S", "U0_D", "U0_G"} <= port_names
+    assert {"TAP_N", "TAP_S", "TAP_E", "TAP_W"} <= port_names
+    assert report["device_count"] == 4
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "well_pair"),
+    [
+        ("sky130A", "sky130", (64, 20)),
+        ("gf180mcuD", "gf180mcu", (21, 0)),
+    ],
+)
+def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, well_pair
+):
+    """`add_guard_ring=True` + `flavor='pfet'` draws the ring's own well tie
+    (independent of, and merging with, the device array's own well) -- the
+    same composition `diff_pair`'s equivalent test covers."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"mos_array_ring_pfet_{deck}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"add_guard_ring": True, "flavor": "pfet"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert well_pair in present
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("variant", "well_pair"),
+    [
+        ("sky130A", (64, 20)),
+        ("gf180mcuD", (21, 0)),
+    ],
+)
+def test_mos_array_guard_ring_flavor_nfet_draws_no_well(
+    tmp_path, both_pdk_root, variant, well_pair
+):
+    """Regression guard mirroring issue #421's `diff_pair` test: with the
+    default `flavor='nfet'`, `add_guard_ring=True` must NOT draw a well
+    shape -- the ring's own well-tie block is gated on `flavor == 'pfet'`,
+    just like the device array's own well block."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"mos_array_ring_nfet_{variant}.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"add_guard_ring": True},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert well_pair not in present
+
+
+def test_mos_array_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_root):
+    """`mos_array`'s automatically-sized guard ring takes the same opening
+    request `diff_pair`/`esd_device`/`bjt_array` already support -- reported
+    in the block's own frame and still DRC clean on the curated sky130 deck."""
+    output = tmp_path / "mos_array_gap.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "rows": 2,
+                "cols": 2,
+                "dummy": 1,
+                "add_guard_ring": True,
+                "flavor": "pfet",
+                "ring_gap_side": "N",
+                "ring_gap_um": 1.0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_N"
+    assert gap["direction_deg"] == 90
+    assert gap["width_um"] == 1.0
+    assert {"TAP_S", "TAP_E", "TAP_W"} <= {p["name"] for p in report["ports"]}
+    assert any("routing opening" in n for n in report["drc_hints"]["notes"])
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_mos_array_ring_gap_without_a_ring_is_noted_not_drawn(tmp_path, pdk_root):
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "add_guard_ring": False,
+                "ring_gap_side": "E",
+                "ring_gap_um": 1.0,
+            },
+            "options": {"output": str(tmp_path / "out.gds")},
+        }
+    )
+    assert not [p for p in report["ports"] if p["name"].startswith("GAP_")]
+    assert any("no ring is drawn" in n for n in report["drc_hints"]["notes"])
+
+
+def test_mos_array_add_guard_ring_on_sg13cmos5l_is_a_clean_error(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """`sg13cmos5l` has no `"tap"` role (see `_GENERATOR_FAMILY_DEFERRED`'s
+    own comment), so requesting `add_guard_ring=True` there must raise this
+    module's own clear `GenError` -- not an opaque PCell-level crash from a
+    `None` `tap_layer`. A request that never asks for the ring is unaffected
+    (see `test_sg13cmos5l_generator_default_params_are_drc_clean` above)."""
+    with pytest.raises(GenError, match="not yet supported"):
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {
+                    "variant": _SG13CMOS5L_VARIANT,
+                    "root": str(sg13cmos5l_pdk_root),
+                },
+                "params": {"add_guard_ring": True},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
 
 
 @pytest.mark.parametrize("l_um", [0.05, 0.1, gen.SD_PAD_GATE_GAP_MIN_UM - 1e-6])
