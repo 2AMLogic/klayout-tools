@@ -280,6 +280,129 @@ def test_execute_group_orientation_reaches_compose_and_routes_same_facing_drain_
 
 
 # ---------------------------------------------------------------------------
+# request.routing (#1502): `_resolve_routing_spec()` forwards
+# `cross_block_layer_role` through to `gen_compose.compose()` instead of
+# silently dropping it, and rejects an unrecognised `request.routing` key.
+# ---------------------------------------------------------------------------
+
+# An 8-unit bjt_array bussing three emitters (devices 0/1/2) into one shared
+# node "EBUS" -- a real netlist-derived reproduction of the same self-net
+# same-block pad crossing `test_gen_compose.py`'s own
+# `test_compose_rejects_self_net_that_crosses_another_pad_on_same_block` /
+# `test_compose_cross_block_layer_role_routes_the_exact_433_reproduction`
+# pair exercises directly against `compose()`: `route_bundle()` (issue #1073)
+# resolves this 3-pin bundle net into two adjacent legs (0-1, 1-2), each one
+# routed via `route_two_pin`, and each one's backbone jogs directly over the
+# base pad sitting between the two emitters it connects. Every other
+# terminal (base, collector) is unique/shared-but-unmapped so no other net
+# competes for the same routing.
+_BJT_BUS_NETLIST = """
+.subckt bjt_bus C B0 B1 B2 B3 B4 B5 B6 B7 Q3E Q4E Q5E Q6E Q7E EBUS
+Q0 C B0 EBUS qnpn
+Q1 C B1 EBUS qnpn
+Q2 C B2 EBUS qnpn
+Q3 C B3 Q3E qnpn
+Q4 C B4 Q4E qnpn
+Q5 C B5 Q5E qnpn
+Q6 C B6 Q6E qnpn
+Q7 C B7 Q7E qnpn
+.ends
+"""
+
+
+def _bjt_bus_request(tmp_path, pdk_root, routing: dict) -> dict:
+    netlist_path = _write(tmp_path, "bjt_bus.spice", _BJT_BUS_NETLIST)
+    return {
+        "schema": "klt.layout_plan.request/1",
+        "netlist": {"path": netlist_path, "top": "bjt_bus"},
+        "pdk": _pdk_spec(pdk_root),
+        "device_groups": [
+            {
+                "id": "arr",
+                "devices": [str(i) for i in range(8)],
+                "generator": "bjt_array",
+                "topology": "array",
+                "params": {
+                    "rows": 1,
+                    "cols": 8,
+                    "dummy": 0,
+                    "add_collector_ring": False,
+                },
+            }
+        ],
+        "rows": [{"order": ["arr"], "spacing_um": 1.0}],
+        "routing": routing,
+        "options": {
+            "cell_name": "bjt_bus_0",
+            "output": str(tmp_path / "bjt_bus_0.gds"),
+        },
+    }
+
+
+def test_execute_self_net_crossing_leg_is_unrouted_without_cross_block_layer_role(
+    tmp_path, pdk_root
+):
+    request = _bjt_bus_request(
+        tmp_path, pdk_root, {"layer_role": "metal", "width_um": 0.17}
+    )
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert "EBUS" in response["unrouted_nets"]
+    assert partial_success(response) is True
+    assert exit_code_for(response) == 3
+    nets_by_name = {net["net"]: net for net in response["nets"]}
+    assert nets_by_name["EBUS"]["routed"] is False
+
+
+def test_execute_cross_block_layer_role_routes_the_self_net_crossing_leg(
+    tmp_path, pdk_root
+):
+    # Byte-identical request to the test above except for
+    # `routing.cross_block_layer_role: "metal2"` -- before issue #1502 this
+    # field was silently dropped by `_resolve_routing_spec()` and never
+    # reached `compose()` at all, so this request produced the identical
+    # `unrouted_nets == ["EBUS"]` result as the unqualified request above.
+    request = _bjt_bus_request(
+        tmp_path,
+        pdk_root,
+        {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+        },
+    )
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["unrouted_nets"] == []
+    nets_by_name = {net["net"]: net for net in response["nets"]}
+    ebus = nets_by_name["EBUS"]
+    assert ebus["routed"] is True
+    assert all(leg["routed"] for leg in ebus["legs"])
+
+
+def test_resolve_routing_spec_rejects_unknown_key(tmp_path, pdk_root):
+    request = _bjt_bus_request(
+        tmp_path,
+        pdk_root,
+        {"layer_role": "metal", "width_um": 0.17, "bogus_key": "oops"},
+    )
+    with pytest.raises(LayoutPlanExecuteError, match="unknown field"):
+        execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+
+def test_resolve_routing_spec_rejects_non_string_cross_block_layer_role(
+    tmp_path, pdk_root
+):
+    request = _bjt_bus_request(
+        tmp_path,
+        pdk_root,
+        {"layer_role": "metal", "width_um": 0.17, "cross_block_layer_role": 42},
+    )
+    with pytest.raises(LayoutPlanExecuteError, match="cross_block_layer_role"):
+        execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
 # Per-group parameter resolution: netlist-derived sizing + override warning.
 # ---------------------------------------------------------------------------
 
