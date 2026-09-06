@@ -2650,6 +2650,546 @@ def test_compose_rejects_waypoints_um_on_a_bundle_net(tmp_path, pdk_root):
         compose(request)
 
 
+# --------------------------------------------------------------------------- #
+# connectivity[].legs[] (#1529): per-leg waypoints_um for a bundle net, so a
+# multi-pin net can be hand-routed without decomposing it into N separate
+# 2-pin connectivity[] entries -- a decomposition that had to keep every pair
+# pin-adjacent to avoid the accepted-leg overlap check below mistaking two
+# legs of the *same* net for a short between different nets.
+# --------------------------------------------------------------------------- #
+
+
+def _leg_bundle_request(pdk_root, reports, output, cell_name, legs, net="VBIAS"):
+    ids = [f"b{index + 1}" for index in range(len(reports))]
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": block_id, "generator_report": report}
+            for block_id, report in zip(ids, reports, strict=True)
+        ],
+        "placement": {"strategy": "row", "order": ids, "spacing_um": 2.0},
+        "connectivity": [
+            {
+                "net": net,
+                "pins": [{"block": block_id, "port": "U0_G"} for block_id in ids],
+                "legs": legs,
+            },
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.42},
+        "options": {"cell_name": cell_name, "output": str(output)},
+    }
+
+
+def test_compose_rejects_legs_and_waypoints_um_together(tmp_path, pdk_root):
+    # The two fields are mutually exclusive: 'waypoints_um' steers a 2-pin
+    # net's single backbone, 'legs' steers one or more named legs -- a
+    # caller who wants both should express the 2-pin path as a single-entry
+    # 'legs' instead.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 2)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": "b1", "port": "U0_G"}, {"block": "b2", "port": "U0_G"}],
+        tmp_path / "legs_and_waypoints.gds",
+        "legs_and_waypoints_0",
+    )
+    request["connectivity"][0]["waypoints_um"] = [[1.0, 5.0]]
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G"},
+            "to_pin": {"block": "b2", "port": "U0_G"},
+            "waypoints_um": [[1.0, 5.0]],
+        }
+    ]
+    with pytest.raises(
+        GenComposeError, match="cannot set both 'waypoints_um' and 'legs'"
+    ):
+        compose(request)
+
+
+def test_compose_rejects_leg_endpoint_not_in_the_nets_own_pins(tmp_path, pdk_root):
+    # from_pin/to_pin must match one of *this* connectivity entry's own
+    # pins[] -- not merely a valid port anywhere in the request -- so a leg
+    # can't smuggle in an unrelated port.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2)],
+        tmp_path / "leg_bad_pin.gds",
+        "leg_bad_pin_0",
+    )
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G"},
+            # b3 is a real block/port, but not one of this net's own pins[].
+            "to_pin": {"block": "b3", "port": "U0_G"},
+        }
+    ]
+    with pytest.raises(
+        GenComposeError, match="must match one of this connectivity entry"
+    ):
+        compose(request)
+
+
+def test_compose_rejects_leg_naming_the_same_pin_twice(tmp_path, pdk_root):
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+        tmp_path / "leg_same_pin.gds",
+        "leg_same_pin_0",
+    )
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G"},
+            "to_pin": {"block": "b1", "port": "U0_G"},
+        }
+    ]
+    with pytest.raises(GenComposeError, match="must name different pins"):
+        compose(request)
+
+
+@pytest.mark.parametrize(
+    "legs, match",
+    [
+        ([], "non-empty array"),
+        ("not-a-list", "non-empty array"),
+        ([1], "must be a JSON object"),
+        ([{"from_pin": {"block": "b1", "port": "U0_G"}}], "to_pin"),
+        (
+            [{"from_pin": {"block": "b1"}, "to_pin": {"block": "b2", "port": "U0_G"}}],
+            "string 'block'/'port' fields",
+        ),
+    ],
+)
+def test_compose_rejects_malformed_legs_entries(tmp_path, pdk_root, legs, match):
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+        tmp_path / "leg_malformed.gds",
+        "leg_malformed_0",
+    )
+    request["connectivity"][0]["legs"] = legs
+    with pytest.raises(GenComposeError, match=match):
+        compose(request)
+
+
+def test_route_bundle_seeds_an_explicit_leg_then_completes_the_rest_automatically(
+    tmp_path, pdk_root
+):
+    # #1529 acceptance criteria: an explicit leg forces a *specific* pin
+    # pair -- not the nearest-pair default the automatic search would have
+    # picked -- and is routed through the caller's own waypoints_um, while
+    # every pin the explicit leg doesn't cover still completes via the
+    # ordinary nearest-first spanning-tree search.
+    ids, blocks, offsets, placed, pins, route_layer, gate_x = _route_bundle_row_fixture(
+        tmp_path, pdk_root, 4
+    )
+    detour_y = 5.0
+    explicit_legs = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G"},
+            "to_pin": {"block": "b3", "port": "U0_G"},
+            "waypoints_um": [[gate_x("b1"), detour_y], [gate_x("b3"), detour_y]],
+        }
+    ]
+
+    result = gen_compose.route_bundle(
+        pins,
+        blocks,
+        offsets,
+        placed,
+        0.42,
+        route_layer,
+        explicit_legs=explicit_legs,
+    )
+
+    assert result["routed"] is True
+    assert result["status"] == "routed"
+
+    by_blocks = {
+        frozenset(pin["block"] for pin in leg["pins"]): leg for leg in result["legs"]
+    }
+    # The forced pair is drawn -- not the nearest-pair default (b1-b2).
+    assert frozenset({"b1", "b3"}) in by_blocks
+    explicit_leg = by_blocks[frozenset({"b1", "b3"})]
+    # The drawn path actually passes through the caller's own waypoints,
+    # not just any path connecting the two pins.
+    ys = [round(y, 6) for _, y in explicit_leg["points_um"]]
+    assert detour_y in ys
+
+    # b2 and b4 (not covered by the explicit leg) still joined the net --
+    # via ordinary auto-selected legs completing the spanning tree.
+    all_blocks_routed = {
+        block_id
+        for leg in result["legs"]
+        for block_id in [p["block"] for p in leg["pins"]]
+    }
+    assert all_blocks_routed == set(ids)
+    assert len(result["legs"]) == 3  # 1 explicit + 2 to bring in b2 and b4
+
+
+def test_route_bundle_explicit_leg_without_waypoints_still_forces_the_pair(
+    tmp_path, pdk_root
+):
+    # waypoints_um is optional per leg: omitting it still forces that
+    # specific pin pair into the tree (instead of the nearest-pair default),
+    # leaving the path itself to route_two_pin's default backbone.
+    ids, blocks, offsets, placed, pins, route_layer, gate_x = _route_bundle_row_fixture(
+        tmp_path, pdk_root, 3
+    )
+    explicit_legs = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G"},
+            "to_pin": {"block": "b3", "port": "U0_G"},
+        }
+    ]
+
+    result = gen_compose.route_bundle(
+        pins,
+        blocks,
+        offsets,
+        placed,
+        0.42,
+        route_layer,
+        explicit_legs=explicit_legs,
+    )
+
+    assert result["routed"] is True
+    by_blocks = {
+        frozenset(pin["block"] for pin in leg["pins"]): leg for leg in result["legs"]
+    }
+    assert frozenset({"b1", "b3"}) in by_blocks
+    assert set(by_blocks) == {frozenset({"b1", "b3"}), frozenset({"b2", "b3"})} or set(
+        by_blocks
+    ) == {frozenset({"b1", "b3"}), frozenset({"b1", "b2"})}
+
+
+def test_route_bundle_keeps_a_rejected_explicit_leg_even_when_the_net_routes(
+    tmp_path, pdk_root
+):
+    # A caller-named leg is intent, not a router guess. When it is rejected
+    # but the automatic search still connects the net another way, the net is
+    # legitimately `status: "routed"` -- but the rejected named leg must stay
+    # in `legs[]` with its own reason, or the response would report a fully
+    # routed net with no trace that the requested path was never drawn. A
+    # rejected *auto* candidate is still dropped from a routed net's legs[]
+    # (unchanged, #1169).
+    ids, blocks, offsets, placed, pins, route_layer, gate_x = _route_bundle_row_fixture(
+        tmp_path, pdk_root, 3
+    )
+    b1_x, b3_x = gate_x("b1"), gate_x("b3")
+
+    def _reject_the_b1_b3_pair(points_um, via_drops=None, stub_widen=None, layer=None):
+        endpoints = {round(points_um[0][0], 6), round(points_um[-1][0], 6)}
+        if endpoints == {b1_x, b3_x}:
+            return "simulated collision with an already-routed net"
+        return None
+
+    result = gen_compose.route_bundle(
+        pins,
+        blocks,
+        offsets,
+        placed,
+        0.42,
+        route_layer,
+        leg_conflict=_reject_the_b1_b3_pair,
+        explicit_legs=[
+            {
+                "from_pin": {"block": "b1", "port": "U0_G"},
+                "to_pin": {"block": "b3", "port": "U0_G"},
+            }
+        ],
+    )
+
+    # b1-b2 and b2-b3 still complete the tree, so the net itself is routed.
+    assert result["routed"] is True
+    assert result["status"] == "routed"
+
+    by_blocks = {
+        frozenset(pin["block"] for pin in leg["pins"]): leg for leg in result["legs"]
+    }
+    rejected = by_blocks[frozenset({"b1", "b3"})]
+    assert rejected["routed"] is False
+    assert "simulated collision" in rejected["reason"]
+    assert rejected["route_length_um"] is None
+    # The two auto legs that did the work are there and drawn.
+    assert set(by_blocks) == {
+        frozenset({"b1", "b3"}),
+        frozenset({"b1", "b2"}),
+        frozenset({"b2", "b3"}),
+    }
+    # route_length_um only ever sums *drawn* legs.
+    assert result["route_length_um"] == pytest.approx(
+        sum(leg["route_length_um"] for leg in result["legs"] if leg["routed"])
+    )
+
+
+def test_compose_reports_a_rejected_explicit_leg_on_an_otherwise_routed_net(
+    tmp_path, pdk_root
+):
+    # The same retention rule as seen through the public `klt gen-compose`
+    # response: the rejected named leg is reported in `nets[].legs[]` in the
+    # ordinary 4-field leg shape (no `explicit` marker leaks into the JSON
+    # contract), and the net is not listed in `unrouted_nets` because every
+    # pin did join one component.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    output = tmp_path / "rejected_leg.gds"
+    request = _leg_bundle_request(
+        pdk_root,
+        reports,
+        output,
+        "rejected_leg_0",
+        legs=[
+            {
+                "from_pin": {"block": "b1", "port": "U0_G"},
+                "to_pin": {"block": "b3", "port": "U0_G"},
+                # A waypoint far outside every block, reached by a path that
+                # must cross b2's bbox -- the obstacle-overlap check rejects
+                # it, so this named leg cannot be drawn as asked.
+                "waypoints_um": [[0.0, -40.0]],
+            }
+        ],
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert net["status"] == "routed"
+    rejected = [leg for leg in net["legs"] if not leg["routed"]]
+    assert len(rejected) == 1
+    assert {pin["block"] for pin in rejected[0]["pins"]} == {"b1", "b3"}
+    assert rejected[0]["reason"]
+    assert set(rejected[0]) == {"pins", "routed", "route_length_um", "reason"}
+    # The net still connected all three blocks through automatic legs.
+    assert {
+        block_id
+        for leg in net["legs"]
+        if leg["routed"]
+        for block_id in [pin["block"] for pin in leg["pins"]]
+    } == {"b1", "b2", "b3"}
+
+
+def test_compose_routes_bundle_net_with_two_non_adjacent_explicit_legs(
+    tmp_path, pdk_root
+):
+    # The exact footgun the issue reports: two legs of *one* bundle net that
+    # do not share a pin, whose drawn footprints geometrically overlap --
+    # "redundant metal at worst", never a short, since they belong to the
+    # same net. Split across two 2-pin connectivity[] entries (the pre-#1529
+    # workaround), this is rejected outright by the accepted-leg overlap
+    # check (see the regression assertion below); declared as one entry's
+    # legs[], both route cleanly because they are never compared against
+    # each other in the first place -- accepted_route_regions only ever
+    # sees an *already-committed* (different) net.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 4)
+    ids = [f"b{index + 1}" for index in range(4)]
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": block_id, "generator_report": report}
+            for block_id, report in zip(ids, reports, strict=True)
+        ]
+    )
+    bboxes = {block_id: blocks[block_id]["bbox_um"] for block_id in ids}
+    offsets = compute_row_offsets(ids, bboxes, spacing_um=2.0)
+
+    def _gate_x(block_id):
+        gate = blocks[block_id]["ports"]["U0_G"]
+        return round(gate["x_um"] + offsets[block_id]["x"], 6)
+
+    xs = {block_id: _gate_x(block_id) for block_id in ids}
+    detour_y = 5.0
+    # b1-b2's detour line runs well past b2 (to just short of b4); b3-b4's
+    # detour line runs back before b3 (to just past b1) -- their footprints
+    # overlap for most of the row at the same y, on the same layer.
+    b1_b2_waypoints = [[xs["b1"], detour_y], [xs["b3"] + 1.0, detour_y]]
+    b3_b4_waypoints = [[xs["b2"] - 1.0, detour_y], [xs["b4"], detour_y]]
+
+    # --- Regression: the pre-#1529 workaround (two 2-pin entries sharing a
+    # net name) hits the pin-adjacency footgun the issue reports. ----------
+    old_workaround_request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": "b1", "port": "U0_G"}, {"block": "b2", "port": "U0_G"}],
+        tmp_path / "old_workaround.gds",
+        "old_workaround_0",
+    )
+    old_workaround_request["connectivity"][0]["waypoints_um"] = b1_b2_waypoints
+    old_workaround_request["connectivity"].append(
+        {
+            "net": "VBIAS",
+            "pins": [{"block": "b3", "port": "U0_G"}, {"block": "b4", "port": "U0_G"}],
+            "waypoints_um": b3_b4_waypoints,
+        }
+    )
+    old_result = compose(old_workaround_request)
+    assert old_result["unrouted_nets"] == ["VBIAS"]
+    blocked_leg = old_result["nets"][1]["legs"][0]
+    assert "crosses already-routed net 'VBIAS'" in blocked_leg["reason"]
+
+    # --- Fixed: one connectivity[] entry, legs[] for both non-adjacent
+    # pairs -- both route cleanly, and the remaining pin (b2/b3, whichever
+    # isn't already joined) completes automatically. -----------------------
+    fixed_request = _leg_bundle_request(
+        pdk_root,
+        reports,
+        tmp_path / "fixed_legs.gds",
+        "fixed_legs_0",
+        legs=[
+            {
+                "from_pin": {"block": "b1", "port": "U0_G"},
+                "to_pin": {"block": "b2", "port": "U0_G"},
+                "waypoints_um": b1_b2_waypoints,
+            },
+            {
+                "from_pin": {"block": "b3", "port": "U0_G"},
+                "to_pin": {"block": "b4", "port": "U0_G"},
+                "waypoints_um": b3_b4_waypoints,
+            },
+        ],
+    )
+    fixed_result = compose(fixed_request)
+    assert fixed_result["unrouted_nets"] == []
+    net = fixed_result["nets"][0]
+    assert net["routed"] is True
+    assert all(leg["routed"] for leg in net["legs"])
+    drawn_pairs = {
+        frozenset(pin["block"] for pin in leg["pins"]) for leg in net["legs"]
+    }
+    assert frozenset({"b1", "b2"}) in drawn_pairs
+    assert frozenset({"b3", "b4"}) in drawn_pairs
+    # All four blocks ended up in the one spanning tree.
+    assert {
+        block_id
+        for leg in net["legs"]
+        for block_id in [p["block"] for p in leg["pins"]]
+    } == set(ids)
+
+    # Prove the *detour* was actually drawn, not just a topology that
+    # coincidentally matches what the plain nearest-first default (b1-b2,
+    # b2-b3, b3-b4) would have produced on its own with `legs[]` silently
+    # ignored: metal must exist at the supplied detour_y, on both waypoints
+    # neither pin's own default stub height would ever reach.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(tmp_path / "fixed_legs.gds"))
+    li1 = kdb.Region(
+        layout.cell("fixed_legs_0").begin_shapes_rec(layout.layer(67, 20))
+    ).merged()
+
+    def _has_metal_at(x_um, y_um):
+        x, y = (int(round(v / layout.dbu)) for v in (x_um, y_um))
+        return not li1.interacting(
+            kdb.Region(kdb.Box(x - 1, y - 1, x + 1, y + 1))
+        ).is_empty()
+
+    assert _has_metal_at(xs["b1"], detour_y)
+    assert _has_metal_at(xs["b3"] + 1.0, detour_y)
+    assert _has_metal_at(xs["b2"] - 1.0, detour_y)
+    assert _has_metal_at(xs["b4"], detour_y)
+
+    drc_report = run_drc(str(tmp_path / "fixed_legs.gds"), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_routes_bjt_emitter_bus_via_legs_clearing_pre_existing_base_pads(
+    tmp_path, pdk_root
+):
+    # #1529's own motivating shape, using the exact reproduction
+    # test_compose_rejects_self_net_that_crosses_another_pad_on_same_block
+    # already established: bussing 3 emitters (Q0_E, Q1_E, Q2_E) of an
+    # 8-unit bjt_array into one node, where each pair's direct backbone
+    # would jog straight over the base pad sitting between them (Q0_B,
+    # Q1_B) -- pre-existing same-layer geometry on the very same block.
+    # Before #1529 that net had no way to steer around it without splitting
+    # into 2-pin entries (which also individually fail the self-net
+    # pad-crossing check, #433, with no waypoints_um to clear it, since
+    # waypoints_um was 2-pin-only... but *bundle* two-pin decomposition
+    # still can't attach a path to an ambiguous leg -- this net has always
+    # needed >2 pins in one entry). `legs[]` supplies a per-leg detour
+    # (up over the block's own bbox top, clearing every base pad) for each
+    # of the two legs the 3-pin bus needs, all within one connectivity[]
+    # entry.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    ports = {p["name"]: p for p in arr["ports"]}
+    detour_y = arr["bbox_um"]["y1"] + 1.0
+    width_um = 0.17
+    output = tmp_path / "bjt_bus_legs.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                        {"block": "arr", "port": "Q2_E"},
+                    ],
+                    "legs": [
+                        {
+                            "from_pin": {"block": "arr", "port": "Q0_E"},
+                            "to_pin": {"block": "arr", "port": "Q1_E"},
+                            "waypoints_um": [
+                                [ports["Q0_E"]["x_um"], detour_y],
+                                [ports["Q1_E"]["x_um"], detour_y],
+                            ],
+                        },
+                        {
+                            "from_pin": {"block": "arr", "port": "Q1_E"},
+                            "to_pin": {"block": "arr", "port": "Q2_E"},
+                            "waypoints_um": [
+                                [ports["Q1_E"]["x_um"], detour_y],
+                                [ports["Q2_E"]["x_um"], detour_y],
+                            ],
+                        },
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": width_um},
+            "options": {"cell_name": "bjt_bus_legs", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert net["status"] == "routed"
+    assert all(leg["routed"] for leg in net["legs"])
+    # Both hand-routed legs are reported the same shape auto-selected legs
+    # are (no new response fields for an explicit leg).
+    for leg in net["legs"]:
+        assert set(leg) == {"pins", "routed", "route_length_um", "reason"}
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    result = extract.run_extract(str(output), "sky130", top="bjt_bus_legs")
+    emitter_nets = [
+        d["nets"]["e"] for d in result["devices"] if d["nets"].get("e") == "EBUS"
+    ]
+    assert len(emitter_nets) == 3  # all three emitters merged onto one node
+
+
 def test_compose_reports_a_two_pin_net_as_a_single_leg(tmp_path, pdk_root):
     # The 2-pin path is the degenerate one-leg case of the same router --
     # `nets[].legs[]` is present for every net, so a consumer never has to

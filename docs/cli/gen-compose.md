@@ -141,8 +141,22 @@ cleanly.
     net gets exactly one `kdb.Text` (same as a 2-pin net's single path).
   - `waypoints_um` (#634) steers a single backbone and is therefore only
     accepted on a **2-pin** net; supplying it on a >2-pin net is an
-    application error (exit `1`), never a silently ignored field. Split the
-    net into 2-pin `connectivity[]` entries to steer individual legs.
+    application error (exit `1`), never a silently ignored field. Use
+    `legs[]` (#1529, below) to steer one or more individual legs of a
+    bundle net by name instead.
+  - **`legs[]` (#1529)** — an optional array of
+    `{from_pin, to_pin, waypoints_um}` objects, each naming one leg of
+    *this* net (`from_pin`/`to_pin` must match two of the entry's own
+    `pins[]`) and, optionally, the same `[x_um, y_um]` waypoint list
+    `waypoints_um` accepts for a 2-pin net. Every named leg is routed and
+    seeded into the spanning tree **before** the automatic nearest-first
+    search runs, so a caller can hand-route one or more legs of a large
+    bundle net (steering around pre-existing geometry, or simply forcing a
+    specific pair together) while every pin not named in `legs[]` still
+    completes automatically. See "Hand-routing individual legs of a bundle
+    net with `legs[]`" below for the full worked example, including why
+    this removes the need for the N-entry, pin-adjacent decomposition the
+    accepted-leg overlap check otherwise demands.
 - **Via-drop routing (#454)** — a family whose curated extraction deck
   declares a second routing-metal level exposes it as a second
   `routing.layer_role` (sky130's `"metal2"`, resolving to met1 `68/20`;
@@ -383,6 +397,85 @@ into the circuit.)
     "waypoints_um": [[-0.17, 1.0], [11.09, 1.0]]
   }
   ```
+- **Hand-routing individual legs of a bundle net with `legs[]` (#1529,
+  fixed).** `waypoints_um` above steers a single backbone, so it is only
+  accepted on a 2-pin `connectivity[]` entry (see "Bundle (>2-pin) routing"
+  above) — a bundle net has no single backbone for a caller-supplied path
+  to belong to. Before this, the only way to hand-route part of a bundle
+  net was to decompose it into several 2-pin `connectivity[]` entries
+  sharing one `net` name — which then had to stay **pin-adjacent** (each
+  entry sharing a pin with the next, forming a chain) to avoid a separate,
+  easy-to-trip footgun: the accepted-leg route-vs-route collision check
+  (see "Two distinct nets whose backbones cross are no longer a silent
+  short" below) exempts two legs from being compared only when they
+  **share a pin** — an intended merge, not a short. Two entries of the
+  *same* net that don't happen to share a pin (a trunk-and-branch
+  decomposition, two sub-chains later bridged) were compared as if they
+  belonged to *different* nets, and rejected with a
+  `"crosses already-routed net '<net>'"` message that reads like a
+  contradiction when both sides are the same net.
+
+  `connectivity[].legs[]` removes the need for that decomposition. Each
+  entry is `{"from_pin": {block, port}, "to_pin": {block, port},
+  "waypoints_um": [[x, y], ...]}` — `from_pin`/`to_pin` must each match one
+  of *this* connectivity entry's own `pins[]` (not merely a valid port
+  anywhere in the request), and `waypoints_um` is optional per leg (omit it
+  to force that specific pin pair into the spanning tree without steering
+  its path). Every named leg is routed through the same
+  `route_two_pin()`/routability-check path as any other leg — nothing is
+  exempted, only steered — and is seeded into the spanning tree **before**
+  the automatic nearest-first search runs, so any pin the caller's
+  `legs[]` doesn't cover still completes automatically. Because every named
+  leg of one `legs[]` array belongs to the *same* `route_bundle()` call,
+  they are never compared against each other by the route-vs-route
+  collision check in the first place (that check only ever compares a
+  candidate leg against an *already-committed, different* net's regions) —
+  so two non-adjacent legs of one bundle net, even ones whose drawn
+  footprints overlap, route cleanly with no pin-adjacency ordering required.
+  `waypoints_um` (top-level) and `legs[]` are mutually exclusive on one
+  `connectivity[]` entry — an application error (exit `1`) if both are
+  supplied; express a 2-pin net's own steered path as a single-entry
+  `legs[]` instead if it also needs a named `from_pin`/`to_pin` leg.
+
+  ```json
+  {
+    "net": "VDD",
+    "pins": [
+      { "block": "cellA", "port": "VDD" },
+      { "block": "cellB", "port": "VDD" },
+      { "block": "cellC", "port": "VDD" }
+    ],
+    "legs": [
+      {
+        "from_pin": { "block": "cellA", "port": "VDD" },
+        "to_pin": { "block": "cellB", "port": "VDD" },
+        "waypoints_um": [[10.0, 25.0], [40.0, 25.0]]
+      },
+      {
+        "from_pin": { "block": "cellB", "port": "VDD" },
+        "to_pin": { "block": "cellC", "port": "VDD" }
+      }
+    ]
+  }
+  ```
+
+  Here the `cellA`–`cellB` leg is steered around a specific obstacle (an
+  explicit detour at `y=25.0`); the `cellB`–`cellC` leg names the pair to
+  connect but omits `waypoints_um`, leaving its path to the default
+  backbone. A pin left out of `legs[]` entirely (not shown above) would
+  still be picked up by the automatic spanning-tree search, exactly as it
+  is with no `legs[]` at all.
+
+  A named leg is *steered, not exempted*, so it can still be rejected (its
+  path crosses an unrelated block, or collides with an already-routed
+  net). That does not fail the net on its own — the automatic search still
+  runs and may connect those two pins another way — but, unlike a rejected
+  auto-selected candidate, **a rejected named leg is still reported** in
+  `nets[].legs[]` (`routed: false`, with its own `reason`) even when the
+  net as a whole comes back `status: "routed"`. A caller who supplied
+  `legs[]` must therefore check `nets[].legs[].routed`, not just
+  `nets[].routed`, to confirm the path it asked for is the path that was
+  drawn.
 - **Routing around an unrelated block, not just detecting it (#1167,
   fixed).** The obstacle-overlap check above used to reject *any* backbone
   crossing a third block's bbox, so in a row only **immediately adjacent**
@@ -570,6 +663,26 @@ into the circuit.)
   do — are exempt from this check: both backbones necessarily converge on
   the identical point from the identical direction there, so the resulting
   overlap is the caller's intended merge, not an accidental short.
+  **This exemption is keyed on sharing a literal pin, not on sharing a
+  `net` name (#1529).** A bundle net hand-decomposed into several 2-pin
+  `connectivity[]` entries is checked one entry at a time, in declaration
+  order — so two of those entries are only exempt from each other when
+  their `pins[]` share a `{block, port}` pin. A trunk-and-branch
+  decomposition (two chains later bridged, a branch hung off a mid-trunk
+  pin the branch entry doesn't itself name, …) produces a pair of entries
+  that share a `net` name but no literal pin, and that pair is compared as
+  if it belonged to *different* nets — rejected with
+  `"crosses already-routed net '<net>'"` even though both sides are the
+  same net. Working within the decomposition means keeping every 2-pin
+  entry pin-adjacent to the next so they form one unbroken chain — which
+  constrains the *topology* the caller may express, not just its
+  declaration order (a star, where every leg leaves one hub pin, is fine;
+  two separate chains later bridged are not). The better fix, since #1529,
+  is to declare the whole net as one `connectivity[]` entry and
+  use `legs[]` (see "Hand-routing individual legs of a bundle net with
+  `legs[]`" above) instead of decomposing it at all: every leg named in one
+  entry's `legs[]` belongs to the same `route_bundle()` call, so this
+  exemption's pin-sharing test never even runs between them.
 - **Route-vs-route collision is spacing-aware, not just overlap-aware
   (#1386, fixed).** #1057 above only ever caught a literal positive-area
   overlap between two accepted backbones (plus their via-drop landing pads
@@ -1122,7 +1235,8 @@ exit codes).
 | `placement.row_pitch_um`/`placement.col_pitch_um` | number | **Required when `strategy: "array"`**, otherwise not read. The fixed spacing between adjacent tile origins along each axis — each must be `> 0` (a zero or negative pitch is an application error, exit 1, even for a degenerate `rows: 1` or `cols: 1` array, where the corresponding pitch is otherwise unused geometrically). |
 | `placement.origin_um` | object | Optional, **`strategy: "array"` only** — the base (row 0, col 0) tile's own `{"x": number, "y": number}` origin, i.e. that block's `offset_um`. Defaults to `{"x": 0.0, "y": 0.0}` when omitted, mirroring `"row"` placement's own implicit first-block origin. A non-numeric `x`/`y` is an application error (exit 1). |
 | `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. Every net's `pins[]` are always validated against the referenced blocks' own reported ports, whether or not `routing` is supplied (#1188 — see below). When `routing` is supplied, a **2-pin** net is routed point-to-point; a **>2-pin** (bundle) net is routed as a spanning tree of two-pin legs, nearest pair first (#1073) — see "Scope". Pin order is not a routing order. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
-| `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1), as is supplying it on a **>2-pin** net (#1073 — a bundle net's spanning tree has no single backbone for the path to belong to; split the net into 2-pin entries to steer individual legs). Omitting it changes nothing (today's fixed one-jog/corner shape). |
+| `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1), as is supplying it on a **>2-pin** net (#1073 — a bundle net's spanning tree has no single backbone for the path to belong to; use `legs[]` to steer individual legs by name instead), or supplying it together with `legs[]` on the same entry (#1529 — mutually exclusive). Omitting it changes nothing (today's fixed one-jog/corner shape). |
+| `connectivity[].legs[]` | array\<object\> | Optional (#1529). An array of `{from_pin, to_pin, waypoints_um}` objects, each steering one leg of *this* net by name — `from_pin`/`to_pin` are `{block, port}` objects that must each match one of this same entry's own `pins[]`, and `waypoints_um` is the same optional `[x_um, y_um]` list format as the top-level field (omit it to force just that pin pair into the spanning tree, without steering its path). See "Hand-routing individual legs of a bundle net with `legs[]`" below. A `from_pin`/`to_pin` not present in this entry's `pins[]`, a leg naming the same pin as both endpoints, a non-object leg entry, or a malformed `waypoints_um` is an application error (exit 1), as is supplying `legs[]` together with the top-level `waypoints_um` on the same entry. Omitting it changes nothing (every pin routes via the automatic nearest-first spanning-tree search, as before #1529). |
 | `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
 | `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |
@@ -1225,7 +1339,7 @@ exit codes).
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
 | `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean — `true` only when *every* pin joined one component), `route_length_um` (summed wire length in um across the net's **drawn** legs, or `null` when zero legs were drawn — for a caller doing a first-order parasitic estimate before extraction), `status` (below), and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). Under a declare-only request (`routing` absent/`{}`, #1188), every net reports `routed: false`, `status: "unrouted"`, `route_length_um: null`, and every leg's `reason: "routing not requested"` — validated against the blocks' own ports, but never drawn. |
 | `nets[].status` | string | One of `"routed"` (every pin connected into one component), `"partial"` (at least one leg drawn, but the net is not fully connected), or `"unrouted"` (no leg was ever accepted, including every net under a declare-only request, #1188) — issue #1169. Distinguishes a partially-drawn net from a fully-undrawn one: both report `routed: false`, so a caller must read `status` (not just count `legs[].routed`) to tell them apart. |
-| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, and `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. |
+| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, and `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |

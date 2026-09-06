@@ -1184,7 +1184,7 @@ def _validate_block_port(
 
 
 def _parse_waypoints_um(
-    raw_waypoints: Any, *, net: str, index: int
+    raw_waypoints: Any, *, net: str, index: int, field: str = "waypoints_um"
 ) -> list[tuple[float, float]] | None:
     """Parse the optional ``connectivity[<index>].waypoints_um`` field (#634).
 
@@ -1193,10 +1193,15 @@ def _parse_waypoints_um(
     pairs, forced through in order by :func:`manhattan_backbone` between the
     two ports' own stubs. Malformed input is an application error (exit 1),
     the same treatment every other ``connectivity[]`` field gets.
+
+    ``field`` (#1529) overrides the field name in error messages -- used by
+    :func:`_parse_legs` so a malformed per-leg waypoint path is reported as
+    ``legs[<i>].waypoints_um``, not the bare top-level field name shared by
+    every leg.
     """
     if raw_waypoints is None:
         return None
-    where = f"request.connectivity[{index}] (net '{net}').waypoints_um"
+    where = f"request.connectivity[{index}] (net '{net}').{field}"
     if not isinstance(raw_waypoints, list) or not raw_waypoints:
         raise GenComposeError(
             f"{where} must be a non-empty array of [x_um, y_um] pairs"
@@ -1216,6 +1221,97 @@ def _parse_waypoints_um(
             )
         parsed.append((float(waypoint[0]), float(waypoint[1])))
     return parsed
+
+
+def _parse_legs(
+    raw_legs: Any,
+    *,
+    net: str,
+    index: int,
+    parsed_pins: list[dict[str, str]],
+) -> list[dict[str, Any]] | None:
+    """Parse the optional ``connectivity[<index>].legs`` field (#1529).
+
+    ``waypoints_um`` steers a 2-pin net's single backbone; a bundle (>2-pin)
+    net has no single backbone for that path to belong to, so the only way
+    to hand-route part of one was to decompose the net into N separate
+    2-pin ``connectivity[]`` entries -- which then had to be pin-adjacent
+    (chained) to avoid the accepted-leg overlap check (see
+    :func:`compose`'s ``_leg_conflict``) mistaking two legs of the *same*
+    net for a short between *different* nets. ``legs[]`` removes the need
+    for that decomposition: each entry names one caller-steered leg of
+    *this* connectivity entry's own net, seeded into
+    :func:`route_bundle`'s spanning tree ahead of its automatic
+    nearest-first search, so the rest of a large bundle net can still route
+    itself.
+
+    ``None``/absent means "no explicit legs" (today's behaviour, unchanged).
+    Every other value must be a non-empty array of
+    ``{"from_pin": {block, port}, "to_pin": {block, port},
+    "waypoints_um": [[x_um, y_um], ...] | omitted}`` objects:
+
+    - ``from_pin``/``to_pin`` must each match one of ``parsed_pins`` --
+      *this* connectivity entry's own already-validated ``pins[]`` -- by
+      ``(block, port)``, not merely be a valid port anywhere in the request;
+      a leg can only steer a connection its own net's ``pins[]`` already
+      declares. They must also name two different pins.
+    - ``waypoints_um`` is optional *per leg*: omitting it still forces that
+      specific pin pair into the spanning tree (skipping whatever pair the
+      nearest-first search would otherwise have picked for them) while
+      leaving the path itself to :func:`route_two_pin`'s default backbone;
+      supplying it steers that leg's path exactly as the top-level
+      ``waypoints_um`` field steers a 2-pin net's only leg.
+
+    Malformed input is an application error (exit 1), the same treatment
+    every other ``connectivity[]`` field gets.
+    """
+    if raw_legs is None:
+        return None
+    where = f"request.connectivity[{index}] (net '{net}').legs"
+    if not isinstance(raw_legs, list) or not raw_legs:
+        raise GenComposeError(f"{where} must be a non-empty array of leg objects")
+
+    pin_lookup = {(pin["block"], pin["port"]) for pin in parsed_pins}
+
+    def _parse_endpoint(
+        raw_endpoint: Any, field: str, leg_index: int
+    ) -> dict[str, str]:
+        endpoint_where = f"{where}[{leg_index}].{field}"
+        if not isinstance(raw_endpoint, dict):
+            raise GenComposeError(f"{endpoint_where} must be a JSON object")
+        block_id = raw_endpoint.get("block")
+        port = raw_endpoint.get("port")
+        if not isinstance(block_id, str) or not isinstance(port, str):
+            raise GenComposeError(
+                f"{endpoint_where} must have string 'block'/'port' fields"
+            )
+        if (block_id, port) not in pin_lookup:
+            raise GenComposeError(
+                f"{endpoint_where} (block '{block_id}', port '{port}') must "
+                "match one of this connectivity entry's own pins[] entries"
+            )
+        return {"block": block_id, "port": port}
+
+    legs: list[dict[str, Any]] = []
+    for leg_index, raw_leg in enumerate(raw_legs):
+        if not isinstance(raw_leg, dict):
+            raise GenComposeError(f"{where}[{leg_index}] must be a JSON object")
+        from_pin = _parse_endpoint(raw_leg.get("from_pin"), "from_pin", leg_index)
+        to_pin = _parse_endpoint(raw_leg.get("to_pin"), "to_pin", leg_index)
+        if from_pin == to_pin:
+            raise GenComposeError(
+                f"{where}[{leg_index}].from_pin and .to_pin must name different pins"
+            )
+        leg_waypoints = _parse_waypoints_um(
+            raw_leg.get("waypoints_um"),
+            net=net,
+            index=index,
+            field=f"legs[{leg_index}].waypoints_um",
+        )
+        legs.append(
+            {"from_pin": from_pin, "to_pin": to_pin, "waypoints_um": leg_waypoints}
+        )
+    return legs
 
 
 def _parse_connectivity(
@@ -1272,18 +1368,39 @@ def _parse_connectivity(
         # A bundle net (>2 pins, #1073) is routed as a spanning tree of legs
         # (see route_bundle) -- a single caller-supplied path has no
         # unambiguous leg to belong to, so combining the two is an application
-        # error rather than a silently ignored field.
+        # error rather than a silently ignored field. `legs[]` (#1529, below)
+        # is the escape hatch: a per-leg waypoints_um that *is* unambiguous,
+        # because each leg names its own two pins.
         if waypoints_um is not None and len(parsed_pins) != 2:
             raise GenComposeError(
                 f"request.connectivity[{index}] (net '{net}').waypoints_um is "
                 f"only supported for a 2-pin net -- this net has "
                 f"{len(parsed_pins)} pins, which routes as a spanning tree of "
                 "two-pin legs, and a single waypoint path cannot be attributed "
-                "to one of them; split the net into 2-pin connectivity[] "
-                "entries to steer individual legs"
+                "to one of them; use 'legs[]' to steer one or more individual "
+                "legs by name instead"
             )
+
+        legs = _parse_legs(
+            entry.get("legs"), net=net, index=index, parsed_pins=parsed_pins
+        )
+        if legs is not None and waypoints_um is not None:
+            raise GenComposeError(
+                f"request.connectivity[{index}] (net '{net}') cannot set both "
+                "'waypoints_um' and 'legs' -- 'waypoints_um' steers a 2-pin "
+                "net's single backbone, 'legs' steers one or more named legs "
+                "of any net (2-pin or bundle); use a single-entry 'legs' "
+                "instead of 'waypoints_um' if a 2-pin net also needs a named "
+                "from_pin/to_pin leg"
+            )
+
         connectivity.append(
-            {"net": net, "pins": parsed_pins, "waypoints_um": waypoints_um}
+            {
+                "net": net,
+                "pins": parsed_pins,
+                "waypoints_um": waypoints_um,
+                "legs": legs,
+            }
         )
 
     return connectivity
@@ -3924,6 +4041,7 @@ def route_bundle(
     waypoints_um: list[tuple[float, float]] | None = None,
     cross_block_route_layer: tuple[int, int] | None = None,
     cross_block_geometry_for: Any = None,
+    explicit_legs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4030,6 +4148,35 @@ def route_bundle(
     :func:`_parse_connectivity`, which rejects that combination at request-parse
     time).
 
+    ``explicit_legs`` (issue #1529) is the bundle-net counterpart:
+    ``[{"from_pin": {block, port}, "to_pin": {block, port}, "waypoints_um":
+    [...] | None}, ...]``, each pair already validated (by
+    :func:`_parse_connectivity`/:func:`_parse_legs`) to be members of this
+    net's own ``pins``. Every explicit leg is routed and unioned into the
+    spanning tree **before** the automatic nearest-first search runs (seeded
+    first, not merely preferred) -- so a caller can hand-route one or more
+    legs of a large bundle net (steering around pre-existing geometry, or
+    just forcing a specific pair together) while every pin the explicit legs
+    don't cover still completes automatically, exactly as it would with no
+    ``explicit_legs`` at all. Because they are committed to this call's own
+    ``legs`` list before ``compose()`` ever records this net's regions in
+    ``accepted_route_regions``, two explicit legs of the same net are never
+    compared against each other by the route-vs-route collision check
+    (``leg_conflict``) -- unlike the old workaround of splitting one bundle
+    net into several 2-pin ``connectivity[]`` entries, which had to keep
+    every pair pin-adjacent to get that same exemption. Mutually exclusive
+    with ``waypoints_um`` (only meaningful for a 2-pin net in the first
+    place); supplying both raises :class:`GenComposeError`.
+
+    An explicit leg that is *rejected* (unroutable path, or a
+    ``leg_conflict``) does not fail the net -- the automatic search still
+    runs and may connect those pins another way -- but, unlike a rejected
+    auto-selected candidate, it is **kept in the returned** ``legs[]`` even
+    for a fully-routed net, with ``routed: False`` and its own ``reason``.
+    A named leg is caller intent, not a router guess: silently dropping it
+    would let ``status: "routed"`` hide the fact that the requested path
+    was never drawn.
+
     Returns ``{"routed": bool, "route_length_um": float | None, "legs": [...],
     "reason": str | None, "status": str}``, where ``routed`` is ``True`` only
     when *every* pin joined one component (unchanged from before #1169),
@@ -4045,7 +4192,10 @@ def route_bundle(
     :func:`route_two_pin` returns, consumed by ``compose()`` (``route_layer``
     is the *effective* layer that leg actually drew on, #1168 -- and it is
     per *leg*, not per net, so a partially-routed net's drawn legs may sit on
-    different layers).
+    different layers). A leg that came from ``explicit_legs`` also carries
+    ``"explicit": True`` -- an internal marker for the retention rule above,
+    not part of the ``klt gen-compose`` response (``compose()`` projects
+    every leg down to ``pins``/``routed``/``route_length_um``/``reason``).
     """
     if len(pins) < 2:
         raise GenComposeError("route_bundle() needs at least 2 pins")
@@ -4053,6 +4203,12 @@ def route_bundle(
         raise GenComposeError(
             "waypoints_um applies to a 2-pin net's single backbone -- it cannot "
             f"be attributed to any one leg of a {len(pins)}-pin net"
+        )
+    if waypoints_um is not None and explicit_legs:
+        raise GenComposeError(
+            "waypoints_um and explicit_legs are mutually exclusive -- "
+            "waypoints_um steers a 2-pin net's single backbone, "
+            "explicit_legs steers one or more named legs"
         )
 
     pin_count = len(pins)
@@ -4098,33 +4254,28 @@ def route_bundle(
         key=lambda pair: (_candidate_distance_um(pair), pair[0], pair[1]),
     )
 
-    legs: list[dict[str, Any]] = []
-    total_length_um = 0.0
-    for i, j in candidates:
-        if components == 1:
-            break
-        if _find(i) == _find(j):
-            continue  # already connected through other legs -- no leg needed
-
-        # Own-block geometry (issue #1527): for an *inter*-block leg (unlike
-        # a same-block self-net, always fetched below), also fetched for
-        # whichever endpoint's own block is a `blocks[].cell` block -- an
-        # existing GDS/OASIS stream this command did not generate, whose
-        # `ports[]` are hand-declared by the caller directly on the stream's
-        # own internal geometry (see `_parse_cell_block`). That is the one
-        # block kind where "every merged shape not touching my own declared
-        # port is a genuinely different net" actually holds: a
-        # `generator_report` block can legitimately carry drawn geometry no
-        # `ports[]` entry names (e.g. `mos_array`'s own unreported dummy
-        # matching columns, deliberately excluded from `klt extract`'s
-        # netlist via its own dummy-suppression convention, #295/#462) that
-        # this check cannot tell apart from a real obstacle -- so it is
-        # scoped to `cell` blocks only, see route_two_pin()'s own "own-block
-        # escape check" docstring. block_geometry_for()/
-        # cross_block_geometry_for() each return the *same* growing
-        # {block_id: geometry} cache object regardless of which block id is
-        # requested (populating it lazily, once per block), so the two
-        # assignments below always end up pointing at one dict either way.
+    # Own-block geometry (issue #1527): for an *inter*-block leg (unlike a
+    # same-block self-net, always fetched below), also fetched for whichever
+    # endpoint's own block is a `blocks[].cell` block -- an existing
+    # GDS/OASIS stream this command did not generate, whose `ports[]` are
+    # hand-declared by the caller directly on the stream's own internal
+    # geometry (see `_parse_cell_block`). That is the one block kind where
+    # "every merged shape not touching my own declared port is a genuinely
+    # different net" actually holds: a `generator_report` block can
+    # legitimately carry drawn geometry no `ports[]` entry names (e.g.
+    # `mos_array`'s own unreported dummy matching columns, deliberately
+    # excluded from `klt extract`'s netlist via its own dummy-suppression
+    # convention, #295/#462) that this check cannot tell apart from a real
+    # obstacle -- so it is scoped to `cell` blocks only, see
+    # route_two_pin()'s own "own-block escape check" docstring.
+    # block_geometry_for()/cross_block_geometry_for() each return the *same*
+    # growing {block_id: geometry} cache object regardless of which block id
+    # is requested (populating it lazily, once per block), so the two
+    # assignments below always end up pointing at one dict either way.
+    # Shared by both the explicit-legs loop and the automatic candidate loop
+    # below (#1529) -- previously duplicated inline in the candidate loop
+    # only, since explicit legs did not exist yet.
+    def _leg_geometry(i: int, j: int) -> tuple[Any, Any]:
         geometry = None
         cross_geometry = None
         if block_geometry_for is not None:
@@ -4141,6 +4292,101 @@ def route_bundle(
                 for pin in (pins[i], pins[j]):
                     if blocks[pin["block"]].get("source") == "cell":
                         cross_geometry = cross_block_geometry_for(pin["block"])
+        return geometry, cross_geometry
+
+    legs: list[dict[str, Any]] = []
+    total_length_um = 0.0
+
+    # Explicit legs (#1529): caller-steered pin pairs, routed and seeded into
+    # the spanning tree *before* the automatic nearest-first search below.
+    # Each is resolved to its pin indices via `first_seen` -- from_pin/to_pin
+    # were already validated (at request-parse time, see _parse_legs) to be
+    # members of this net's own pins[], so every (block, port) key here is
+    # guaranteed present when route_bundle() is reached through compose()'s
+    # normal request path; the lookup is still defensive (a direct caller of
+    # route_bundle() could pass a mismatched pins/explicit_legs pair). Routed
+    # through the exact same route_two_pin()/leg_conflict path as an
+    # auto-selected candidate, so every routability check still applies --
+    # an explicit leg is steered, not exempted. Unlike an auto candidate,
+    # an explicit leg is always attempted even when its two pins are already
+    # in one component (a caller may want redundant strap metal), and it is
+    # never skipped in favour of "the next candidate" -- there is only one
+    # candidate for a named pair.
+    for leg_spec in explicit_legs or ():
+        from_pin, to_pin = leg_spec["from_pin"], leg_spec["to_pin"]
+        i = first_seen.get((from_pin["block"], from_pin["port"]))
+        j = first_seen.get((to_pin["block"], to_pin["port"]))
+        if i is None or j is None:
+            raise GenComposeError(
+                "route_bundle(): explicit_legs entry references a "
+                "from_pin/to_pin not present in this net's own pins -- "
+                "validated at request-parse time, so this indicates a "
+                "direct caller with a mismatched pins/explicit_legs pair"
+            )
+        geometry, cross_geometry = _leg_geometry(i, j)
+        result = route_two_pin(
+            pins[i],
+            pins[j],
+            blocks,
+            offsets_um,
+            placed_bboxes_um,
+            width_um,
+            route_layer,
+            extraction_deck,
+            geometry,
+            waypoints_um=leg_spec.get("waypoints_um"),
+            cross_block_route_layer=cross_block_route_layer,
+            cross_block_geometry=cross_geometry,
+            leg_conflict=leg_conflict,
+        )
+        reason = None if result["routed"] else result["reason"]
+        if result["routed"] and leg_conflict is not None:
+            reason = leg_conflict(
+                result["points_um"],
+                result.get("via_drops", []),
+                result.get("stub_widen", []),
+                result.get("route_layer"),
+            )
+        if reason is None and result["routed"]:
+            if _union(i, j):
+                components -= 1
+            total_length_um += result["route_length_um"]
+            legs.append(
+                {
+                    "pins": [pins[i], pins[j]],
+                    "pin_indices": (i, j),
+                    "explicit": True,
+                    "routed": True,
+                    "route_length_um": result["route_length_um"],
+                    "reason": None,
+                    "points_um": result["points_um"],
+                    "via_drops": result.get("via_drops", []),
+                    "stub_widen": result.get("stub_widen", []),
+                    "route_layer": result.get("route_layer"),
+                }
+            )
+        else:
+            legs.append(
+                {
+                    "pins": [pins[i], pins[j]],
+                    "pin_indices": (i, j),
+                    "explicit": True,
+                    "routed": False,
+                    "route_length_um": None,
+                    "reason": reason,
+                    "points_um": None,
+                    "via_drops": [],
+                    "stub_widen": [],
+                }
+            )
+
+    for i, j in candidates:
+        if components == 1:
+            break
+        if _find(i) == _find(j):
+            continue  # already connected through other legs -- no leg needed
+
+        geometry, cross_geometry = _leg_geometry(i, j)
         result = route_two_pin(
             pins[i],
             pins[j],
@@ -4201,8 +4447,17 @@ def route_bundle(
             "routed": True,
             "route_length_um": total_length_um,
             # Only the accepted legs: a candidate the router rejected on the
-            # way to a working spanning tree is not part of the result.
-            "legs": [leg for leg in legs if leg["routed"]],
+            # way to a working spanning tree is not part of the result --
+            # *except* a rejected caller-named `explicit_legs` leg (#1529),
+            # which is kept. An auto-selected candidate is the router's own
+            # guess and its rejection is an implementation detail; a named
+            # leg is caller intent, and dropping it would let the automatic
+            # search silently re-route around the caller's own steering and
+            # still report `status: "routed"` with no trace that the
+            # requested path was never drawn.
+            "legs": [
+                leg for leg in legs if leg["routed"] or leg.get("explicit", False)
+            ],
             "reason": None,
             "status": "routed",
         }
@@ -5051,6 +5306,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 waypoints_um=entry.get("waypoints_um"),
                 cross_block_route_layer=cross_route_layer,
                 cross_block_geometry_for=_cross_block_geometry_for,
+                explicit_legs=entry.get("legs"),
             )
         nets.append(
             {

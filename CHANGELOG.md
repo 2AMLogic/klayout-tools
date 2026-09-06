@@ -16,6 +16,38 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen-compose`'s `connectivity[].legs[]` field lets a caller
+  hand-route individual legs of a bundle (>2-pin) net by name (issue #1529).
+  `waypoints_um` steers a 2-pin net's single backbone but was rejected
+  outright on any net with more than two pins, since a bundle net's spanning
+  tree has no single unambiguous leg for a caller-supplied path to belong
+  to — the only workaround was decomposing the net into several 2-pin
+  `connectivity[]` entries sharing one `net` name, which then had to stay
+  pin-adjacent (each entry sharing a literal pin with the next) to avoid the
+  route-vs-route collision check's accepted-leg exemption — keyed on sharing
+  a pin, not a `net` name — rejecting two legs of the *same* net as if they
+  were a short between different nets. `legs[]` is an array of
+  `{from_pin, to_pin, waypoints_um}` objects, each naming one leg of the
+  entry's own net (`from_pin`/`to_pin` must match two of that entry's own
+  `pins[]`); every named leg is routed through the same
+  routability-check path as any other leg (nothing is exempted, only
+  steered) and seeded into the spanning tree before the automatic
+  nearest-first search runs, so any pin not named in `legs[]` still
+  completes automatically. Because every leg in one `legs[]` array belongs
+  to the same net, they are never compared against each other by the
+  route-vs-route collision check, so non-adjacent legs of one bundle net
+  route cleanly with no pin-adjacency ordering required. Mutually exclusive
+  with the top-level `waypoints_um` on the same entry (an application
+  error, exit 1, if both are supplied). A named leg the router *rejects*
+  (its path crosses an unrelated block, or collides with an already-routed
+  net) does not fail the net by itself — the automatic search still runs —
+  but, unlike a rejected auto-selected candidate, it stays in
+  `nets[].legs[]` with `routed: false` and its own `reason` even when the
+  net comes back `status: "routed"`, so the automatic search can never
+  silently re-route around the caller's own steering. See
+  `docs/cli/gen-compose.md`'s "Hand-routing individual legs of a bundle net
+  with `legs[]`" section.
+
 - **Fixed**: `klt gen-compose` now rejects an inter-block leg whose escape
   from a coordinate-tapped `blocks[].cell` port would draw a silent short to
   a *different* net already present inside that same block, instead of
