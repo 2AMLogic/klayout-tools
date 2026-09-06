@@ -1271,30 +1271,42 @@ CONCLUSION_HASH=$(printf '%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" \
   | _sha256 | awk '{print substr($1, 1, 16)}')
 RECHECK_MARKER="<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
 
-# Most recent prior Curator re-check comment, of ANY conclusion.
-PRIOR=$(printf '%s\n' "$ISSUE_JSON" | jq -c '[.comments[] | select(.body | test("<!-- curator:dep-recheck:"))] | last // {}')
-PRIOR_HASH=$(printf '%s\n' "$PRIOR" | jq -r '.body // ""' \
-  | sed -n 's|.*<!-- curator:dep-recheck:\([0-9a-f]\{1,\}\) -->.*|\1|p' | tail -n 1)
-PRIOR_AT=$(printf '%s\n' "$PRIOR" | jq -r '.createdAt // empty')
-
-# Age in hours (portable: BSD `date -j -f` on macOS, GNU `date -d` elsewhere).
-_epoch() { date -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || date -d "$1" +%s; }
-if [ -n "$PRIOR_AT" ]; then
-  PRIOR_AGE_H=$(( ( $(date +%s) - $(_epoch "$PRIOR_AT") ) / 3600 ))
-else
-  PRIOR_AGE_H=""   # no prior re-check comment at all
-fi
+# DECISION MODE: hand this exact CONCLUSION_HASH to check-dep-recheck-idempotency.sh
+# and act on ITS output — do not hand-derive PRIOR/age yourself. #1523 traced a
+# live incident (three near-duplicate heartbeats on #528/#527/#56/#55 within an
+# 11.5h window, the last two sharing an identical hash only ~4.5h apart) to this
+# exact step being re-derived by hand on every pass instead of freshly computed:
+# the posted comment cited a multi-day-old baseline instead of the true
+# immediately-preceding comment, consistent with the decision having been
+# narrated from memory of a prior pass rather than recomputed live. The script
+# is the single deterministic implementation of "find PRIOR, compare hashes,
+# check the window" — run it, don't reimplement it in your head.
+DECISION_OUT=$(./.loom/scripts/check-dep-recheck-idempotency.sh --issue "$ISSUE_NUMBER" --assume-new-hash "$CONCLUSION_HASH")
+DECISION_RC=$?
+DECISION=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^DECISION=//p')
+PRIOR_HASH=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^PRIOR_HASH=//p')
+PRIOR_AT=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^PRIOR_AT=//p')
+PRIOR_AGE_H=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^AGE_HOURS=//p')
 ```
 
-**Three-way decision** (run it *before* posting, and before any `loom:curating`
-claim you would only take in order to comment):
+**Decision** (run it *before* posting, and before any `loom:curating` claim you
+would only take in order to comment) — act on `$DECISION_RC` / `$DECISION`
+directly, never re-derive this table by hand:
 
-| Prior re-check comment | Action |
-|---|---|
-| **None** (first-ever check on this issue) | **Comment.** Always report the first conclusion — never skip a first pass. |
-| Present, **different** `CONCLUSION_HASH` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. |
-| Present, **same** hash, newer than the staleness window | **Skip silently.** No comment, no label change, no claim. Leave the issue exactly as found. |
-| Present, **same** hash, older than the staleness window | **Comment once** (heartbeat). Posting refreshes the marker's timestamp, so the next window starts over. |
+| `$DECISION` | `$DECISION_RC` | Action |
+|---|---|---|
+| `NONE` (first-ever check on this issue) | `0` | **Comment.** Always report the first conclusion — never skip a first pass. |
+| `CHANGED` (different `CONCLUSION_HASH` than `$PRIOR_HASH`) | `0` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. |
+| `SKIP` (same hash as `$PRIOR_HASH`, newer than the staleness window) | `20` | **Skip silently.** No comment, no label change, no claim. Leave the issue exactly as found. |
+| `STALE` (same hash as `$PRIOR_HASH`, older than the staleness window) | `0` | **Comment once** (heartbeat). Posting refreshes the marker's timestamp, so the next window starts over. |
+
+`check-dep-recheck-idempotency.sh` also has an AUDIT mode (omit
+`--assume-new-hash`) that scans an issue's *entire* `curator:dep-recheck`
+history for an already-committed violation (any chronologically adjacent pair
+sharing a hash less than the staleness window apart) — this is the regression
+guard #1523 added; run it against a suspect issue to confirm/refute a reported
+duplicate-heartbeat pattern before assuming the live decision logic above is
+at fault.
 
 Pre-existing "still blocked" comments written before this section landed carry
 no marker, so `PRIOR_HASH` is empty and the first pass after them counts as
