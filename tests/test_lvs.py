@@ -7084,6 +7084,103 @@ def test_normalize_mos_lw_handling_unchanged_by_device_family_extension():
     assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1492: a bare (unsuffixed, non-exponent) L=/W= literal on a
+# subckt-call device used to always be read as SI metres and rescaled by
+# 1e6 -- silently wrong for sky130's real xschem/ngspice flow, whose
+# schematic-form netlists carry an ambient `.option scale=1.0u` and write
+# already-micrometre bare literals. Fixed by resolving the bare-literal unit
+# per `deck`'s own `pdk_models.geometry_style_for_family` convention.
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_sky130_bare_literal_reads_as_micrometres():
+    # The issue's own reproduction: a bare `L=0.15`/`W=0.84` on a sky130
+    # device must convert to `L=0.15U`/`W=0.84U` (already-micrometres under
+    # sky130's ambient `.option scale=1.0u`), not `L=150000U` (SI metres).
+    src = (
+        ".subckt inv a y vdd vss\n"
+        "XMp y a vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=0.84\n"
+        ".ends\n"
+    )
+    out = normalize_reference_netlist(src, deck="sky130")
+    assert "L=0.15U W=0.84U" in out
+    assert "L=150000U" not in out
+    assert "W=840000U" not in out
+
+
+def test_normalize_sky130_explicit_suffix_still_si_metres_regression():
+    # Regression: an explicit unit suffix is unambiguous and unaffected by
+    # the bare-literal fix -- still parsed as SI metres times the suffix.
+    src = (
+        ".subckt inv a y vdd vss\n"
+        "XMp y a vdd vdd sky130_fd_pr__pfet_01v8 L=0.15u W=0.84u\n"
+        ".ends\n"
+    )
+    out = normalize_reference_netlist(src, deck="sky130")
+    assert "L=0.15U W=0.84U" in out
+
+
+def test_normalize_sky130_exponent_still_si_metres_regression():
+    # Regression: an explicit exponent literal is likewise unambiguous SI
+    # metres, unaffected by the bare-literal fix.
+    src = (
+        ".subckt inv a y vdd vss\n"
+        "XMp y a vdd vdd sky130_fd_pr__pfet_01v8 L=1.5e-7 W=8.4e-7\n"
+        ".ends\n"
+    )
+    out = normalize_reference_netlist(src, deck="sky130")
+    assert "L=0.15U W=0.84U" in out
+
+
+def test_normalize_gf180_bare_literal_still_si_metres_unchanged():
+    # gf180mcu ships no ambient `.option scale` -- a bare literal there is
+    # genuinely SI metres, unchanged from before this issue.
+    src = (
+        ".subckt inv A Y VPWR VGND\n"
+        "XM1 Y A VGND VGND nfet_03v3 L=1.5e-7 W=6.5e-7\n"
+        ".ends\n"
+    )
+    baseline = normalize_reference_netlist(src, deck="gf180mcu")
+
+    bare_src = (
+        ".subckt inv A Y VPWR VGND\n"
+        "XM1 Y A VGND VGND nfet_03v3 L=0.00000015 W=0.00000065\n"
+        ".ends\n"
+    )
+    out = normalize_reference_netlist(bare_src, deck="gf180mcu")
+    assert out == baseline
+    assert "L=0.15U W=0.65U" in out
+
+
+def test_normalize_sg13g2_bare_literal_still_si_metres_unchanged():
+    # sg13g2 is also absent from `_GEOMETRY_STYLE_BY_FAMILY` (no ambient
+    # `.option scale`), so a bare literal there is unaffected by this issue.
+    out = normalize_reference_netlist(
+        "XM1 d g s b sg13_lv_nmos L=0.00000015 W=0.00000065\n", deck="sg13g2"
+    )
+    assert "L=0.15U W=0.65U" in out
+
+
+def test_normalize_bare_literal_without_deck_raises_units_diagnostic():
+    # Requested behaviour (3): with no `deck` given, there is no per-family
+    # convention to resolve a bare literal against -- this must be a loud,
+    # units-naming NormalizeError, not a silent (and previously wrong)
+    # metres assumption that produces an indistinguishable device.unmatched
+    # avalanche downstream.
+    with pytest.raises(NormalizeError, match=r"(?i)unit"):
+        normalize_reference_netlist(
+            "XMp y a vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=0.84\n"
+        )
+
+
+def test_normalize_bare_literal_without_deck_names_device_and_value():
+    with pytest.raises(NormalizeError, match=r"'Mp'.*'L'.*'0\.15'"):
+        normalize_reference_netlist(
+            "XMp y a vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=0.84\n"
+        )
+
+
 def test_detect_reports_resistor_and_capacitor_and_bipolar():
     text = (
         "XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u\n"

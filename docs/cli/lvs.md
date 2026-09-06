@@ -374,14 +374,35 @@ consistently, but produces a nonsensical absolute value in a
 `device.property` mismatch's reported numbers. Always write reference
 netlists with explicit unit suffixes on `W`/`L`.
 
-This is a **reader-side** rule and is deliberately unaffected by issue
-#1396, which changed only what `klt extract --pdk sky130*` writes onto a
-**simulation-form** `X` card (bare micrometres, matching that vendor deck's
-own `.option scale=1.0u`). `klt lvs`'s layout netlist is the unbound
-`M`-card form, which still carries explicit suffixes. If you do hand a
-`--pdk sky130*`-bound netlist to `klt lvs` as a `subckt-call` reference,
-add the suffixes back first — the normalizer cannot tell a bare-micrometre
-literal from SI metres without side information.
+This is a **reader-side** rule for `form: "plain-element"` (the default),
+and is deliberately unaffected by issue #1396, which changed only what `klt
+extract --pdk sky130*` writes onto a **simulation-form** `X` card (bare
+micrometres, matching that vendor deck's own `.option scale=1.0u`). `klt
+lvs`'s layout netlist is the unbound `M`-card form, which still carries
+explicit suffixes.
+
+**`form: "subckt-call"` resolves a bare literal per `reference.deck`
+(issue #1492).** A real xschem/ngspice schematic-flow netlist for a deck
+whose model library sets an ambient `.option scale=1.0u` (confirmed for
+sky130 against a real fetched `open_pdks` install) writes a *bare*
+`L=0.15`/`W=0.84` meaning already-micrometres, not SI metres — handing that
+straight to `NetlistSpiceReader` (or reading it as `1.5e-1` SI metres) used
+to silently multiply every device geometry by `1e6` with no diagnostic
+pointing at units, indistinguishable from a genuine topology mismatch.
+`normalize_reference_netlist` now resolves this per `reference.deck`'s
+`klayout_tools.pdk_models.geometry_style_for_family` convention instead of
+always assuming SI metres:
+
+- `sky130` (`GEOMETRY_STYLE_BARE_UM`): a bare literal is read as
+  already-micrometres, matching its real `.option scale=1.0u` convention.
+- `gf180mcu`/`sg13g2`/`sg13cmos5l` (`GEOMETRY_STYLE_UNIT_SUFFIX`, unchanged):
+  a bare literal is still SI metres — these decks' model libraries set no
+  ambient scale.
+- No `reference.deck` given: a bare literal is now a hard `NormalizeError`
+  naming the ambiguous device/parameter/value, rather than a silent
+  metres assumption — pass `reference.deck`, or write an explicit unit
+  suffix or exponent literal (`L=0.5u` / `L=0.15e-6`), either of which is
+  unambiguous and unaffected by `reference.deck` either way.
 
 ## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
 

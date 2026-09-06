@@ -76,6 +76,19 @@ plausible netlist that compares clean when it shouldn't). So:
   dropped -- ``ad``/``as``/``pd``/``ps``/``nrd``/``nrs``/``sa``/``sb``/``sd``
   (parasitic-only, not carried by ``klt extract`` either) and any other model
   parameter -- matching the plain-element form's geometric-only scope.
+  **A *bare* (unsuffixed, non-exponent) literal is not assumed to be SI
+  metres unconditionally (issue #1492)**: it is resolved per ``deck``'s own
+  :func:`~klayout_tools.pdk_models.geometry_style_for_family` convention --
+  sky130's real schematic-flow netlists carry an ambient ``.option
+  scale=1.0u`` and write already-micrometre bare literals (``L=0.15`` means
+  0.15 um, matching a real fetched sky130A SRAM netlist -- see
+  ``pdk_models.py``'s module docstring), while gf180mcu/sg13g2/sg13cmos5l
+  ship no such ambient scale and a bare literal there is genuinely SI metres,
+  unchanged from before this issue. Without ``deck`` (no family known to
+  resolve the convention), a bare literal is a hard error rather than a
+  silent metres assumption -- previously, a unitless-and-scaled schematic
+  export silently mis-scaled every device geometry by ``1e6`` with no
+  diagnostic (see :func:`_parse_um`).
 - ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied device the curated
   plain-element resistor/capacitor forms cannot represent) is **rejected**
   with a specific error naming the device and value, never silently
@@ -103,11 +116,13 @@ from __future__ import annotations
 import re
 
 from .pdk_models import (
+    GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
     ModelBindingError,
     _format_um,
     _format_um2,
     build_device_binding_map,
+    geometry_style_for_family,
     known_device_subckt_names,
 )
 
@@ -253,18 +268,43 @@ def _merge_continuations(lines: list[str]) -> list[str]:
     return logical
 
 
-def _parse_um(raw_value: str, *, device: str, param: str) -> float:
-    """Parse a SPICE ``L``/``W`` literal (``0.5u``, ``1.5e-6``, ``500n``) to
-    micrometres, raising :class:`NormalizeError` for anything that is not a
-    plain number (e.g. a ``'...'`` expression the plain-element form cannot
-    carry).
+def _parse_um(
+    raw_value: str,
+    *,
+    device: str,
+    param: str,
+    geometry_style: str | None = None,
+) -> float:
+    """Parse a SPICE ``L``/``W`` literal (``0.5u``, ``1.5e-6``, ``500n``,
+    ``0.15``) to micrometres, raising :class:`NormalizeError` for anything
+    that is not a plain number (e.g. a ``'...'`` expression the plain-element
+    form cannot carry) or for a *bare* (unsuffixed, non-exponent) literal
+    whose unit cannot be resolved (see below).
 
-    The base unit for a MOS ``W``/``L`` is metres per the SPICE standard, so
-    a bare number is metres and an engineering suffix multiplies it; the
-    result is scaled to micrometres. A ``.option scale`` bare-micrometre
-    convention is *not* inferred (it cannot be told apart from SI metres
-    without side information) -- callers whose flow uses it must emit explicit
-    unit suffixes, the same requirement ``docs/cli/lvs.md`` already documents.
+    An explicit engineering suffix (``u``/``n``/...) or exponent (``1.5e-6``)
+    is unambiguous SPICE SI metres per the standard, and is parsed the same
+    way regardless of ``geometry_style`` (issue #1492) -- this is the path
+    the module's docstring's "explicit unit suffix... converts correctly"
+    claim covers, and it is unchanged by this function.
+    ``geometry_style`` -- normally
+    :func:`~klayout_tools.pdk_models.geometry_style_for_family` resolved from
+    the caller's ``deck`` -- only disambiguates a genuinely *bare* literal
+    (no suffix, no exponent), which is otherwise ambiguous: it might be SI
+    metres (the SPICE default), or it might already be micrometres under a
+    vendor deck's ambient ``.option scale=1.0u`` (confirmed for sky130, see
+    :data:`~klayout_tools.pdk_models._GEOMETRY_STYLE_BY_FAMILY`):
+
+    - :data:`~klayout_tools.pdk_models.GEOMETRY_STYLE_BARE_UM` (sky130): the
+      bare mantissa *is* the micrometre value already -- no ``1e6`` scaling.
+    - :data:`~klayout_tools.pdk_models.GEOMETRY_STYLE_UNIT_SUFFIX` (every
+      other curated family -- gf180mcu/sg13g2/sg13cmos5l ship no ambient
+      ``.option scale`` and declare raw-metre subcircuit defaults): unchanged
+      from before this issue -- a bare number is SI metres.
+    - ``None`` (no ``deck`` given, so no family is known to resolve the
+      convention): raises :class:`NormalizeError` naming the ambiguity,
+      rather than silently assuming metres -- a wrong silent assumption here
+      previously produced a plausible-looking but ~1e6x-mis-scaled netlist
+      with no diagnostic (issue #1492).
     """
     match = _NUMBER_RE.match(raw_value.strip())
     if match is None:
@@ -274,8 +314,29 @@ def _parse_um(raw_value: str, *, device: str, param: str) -> float:
             "plain-element form cannot carry an expression; write an explicit "
             "geometric value (e.g. L=0.5u)"
         )
-    mantissa = float(match.group(1))
-    suffix = match.group(2).lower()
+    mantissa_text = match.group(1)
+    mantissa = float(mantissa_text)
+    raw_suffix = match.group(2)
+    # An exponent (`1.5e-7`) is captured into the mantissa group by
+    # `_NUMBER_RE`, not the suffix group -- so an empty `raw_suffix` alone
+    # does not mean "bare"; it must also lack an exponent marker to be a
+    # genuinely ambiguous bare literal (issue #1492).
+    has_exponent = "e" in mantissa_text.lower()
+    if not raw_suffix and not has_exponent:
+        if geometry_style is None:
+            raise NormalizeError(
+                f"device '{device}': parameter '{param.upper()}' value "
+                f"'{raw_value}' has no unit suffix or exponent, so it is "
+                "ambiguous whether it is SI metres or already-micrometres "
+                "under an ambient SPICE '.option scale' (e.g. sky130's "
+                "'.option scale=1.0u' convention) -- pass reference.deck "
+                '(e.g. "sky130") so the convention can be resolved, or '
+                "write an explicit unit-suffixed or exponent literal "
+                "(e.g. L=0.5u or L=0.15e-6) instead"
+            )
+        if geometry_style == GEOMETRY_STYLE_BARE_UM:
+            return mantissa
+    suffix = raw_suffix.lower()
     multiplier = 1.0
     for name, value in _SPICE_SUFFIXES:
         if suffix.startswith(name):
@@ -307,6 +368,7 @@ def _convert_x_card(
     line: str,
     subckt_to_binding: dict[str, DeviceLookup] | None,
     device_map_names: frozenset[str] = frozenset(),
+    geometry_style: str | None = None,
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -323,6 +385,13 @@ def _convert_x_card(
     ``deck``'s curated table) -- see :func:`_build_subckt_map`'s docstring.
     It is only used to give a clearer error (issue #1163) when such an
     override does not actually describe a MOS-shaped device.
+
+    ``geometry_style`` (issue #1492) is the caller's resolved
+    ``deck``-derived :func:`~klayout_tools.pdk_models.geometry_style_for_family`
+    result (``None`` when no ``deck`` was given) -- forwarded to
+    :func:`_parse_um` so a *bare* (unsuffixed) ``L``/``W``-style literal is
+    interpreted per the deck's own ``.option scale`` convention instead of
+    always assuming SI metres.
     """
     tokens = _tokenize(line)
     if not tokens:
@@ -361,11 +430,16 @@ def _convert_x_card(
             lookup,
             params,
             from_device_map=subckt_name in device_map_names,
+            geometry_style=geometry_style,
         )
     if lookup.kind == "resistor":
-        return _convert_geometry_card(instance, nodes, subckt_name, lookup, params)
+        return _convert_geometry_card(
+            instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
+        )
     if lookup.kind == "capacitor":
-        return _convert_capacitor_card(instance, nodes, subckt_name, lookup, params)
+        return _convert_capacitor_card(
+            instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
+        )
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
 
 
@@ -377,6 +451,7 @@ def _convert_mos_card(
     params: dict[str, str],
     *,
     from_device_map: bool = False,
+    geometry_style: str | None = None,
 ) -> str:
     """The original #280 MOS conversion (``d g s b`` -> plain ``M`` card),
     now (issue #1487) also expanding a folded ``nf>1`` call into ``nf``
@@ -428,8 +503,12 @@ def _convert_mos_card(
                 "call must supply both L and W"
             )
 
-    l_um = _parse_um(params["l"], device=instance, param="l")
-    w_um = _parse_um(params["w"], device=instance, param="w")
+    l_um = _parse_um(
+        params["l"], device=instance, param="l", geometry_style=geometry_style
+    )
+    w_um = _parse_um(
+        params["w"], device=instance, param="w", geometry_style=geometry_style
+    )
 
     if finger_count == 1:
         return (
@@ -526,6 +605,8 @@ def _convert_geometry_card(
     subckt_name: str,
     lookup: DeviceLookup,
     params: dict[str, str],
+    *,
+    geometry_style: str | None = None,
 ) -> str:
     """Convert a resistor call to a plain-element ``R`` card.
 
@@ -545,7 +626,9 @@ def _convert_geometry_card(
     not validated here -- nodes pass through positionally, unchanged.
     """
     _reject_multiplicity(instance, subckt_name, params)
-    extra = _geometry_suffix(instance, subckt_name, lookup, params)
+    extra = _geometry_suffix(
+        instance, subckt_name, lookup, params, geometry_style=geometry_style
+    )
     return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
 
 
@@ -555,6 +638,8 @@ def _convert_capacitor_card(
     subckt_name: str,
     lookup: DeviceLookup,
     params: dict[str, str],
+    *,
+    geometry_style: str | None = None,
 ) -> str:
     """Convert a capacitor call to a plain-element ``C`` card.
 
@@ -584,10 +669,16 @@ def _convert_capacitor_card(
     if has_length or has_width:
         _require_both(instance, subckt_name, lookup, has_length, has_width)
         l_um = _parse_um(
-            params[lookup.length_param], device=instance, param=lookup.length_param
+            params[lookup.length_param],
+            device=instance,
+            param=lookup.length_param,
+            geometry_style=geometry_style,
         )
         w_um = _parse_um(
-            params[lookup.width_param], device=instance, param=lookup.width_param
+            params[lookup.width_param],
+            device=instance,
+            param=lookup.width_param,
+            geometry_style=geometry_style,
         )
         area_um2 = l_um * w_um
         perimeter_um = 2.0 * (l_um + w_um)
@@ -643,6 +734,8 @@ def _geometry_suffix(
     subckt_name: str,
     lookup: DeviceLookup,
     params: dict[str, str],
+    *,
+    geometry_style: str | None = None,
 ) -> str:
     """The ``" L=...U W=...U"`` suffix carried from ``lookup``'s own
     length/width call-site parameters, or ``""`` when the call supplies
@@ -653,10 +746,16 @@ def _geometry_suffix(
         return ""
     _require_both(instance, subckt_name, lookup, has_length, has_width)
     l_um = _parse_um(
-        params[lookup.length_param], device=instance, param=lookup.length_param
+        params[lookup.length_param],
+        device=instance,
+        param=lookup.length_param,
+        geometry_style=geometry_style,
     )
     w_um = _parse_um(
-        params[lookup.width_param], device=instance, param=lookup.width_param
+        params[lookup.width_param],
+        device=instance,
+        param=lookup.width_param,
+        geometry_style=geometry_style,
     )
     return f" L={_format_um(l_um)} W={_format_um(w_um)}"
 
@@ -929,8 +1028,21 @@ def normalize_reference_netlist(
     through unchanged, so a netlist that *mixes* plain-element and subckt-call
     device lines converts correctly. Raises :class:`NormalizeError` for any
     device card that cannot be converted correctly and unambiguously.
+
+    A *bare* (unsuffixed, non-exponent) ``L``/``W``-style geometry literal
+    (issue #1492) is resolved per ``deck``'s own
+    :func:`~klayout_tools.pdk_models.geometry_style_for_family` convention --
+    e.g. sky130's real ``.option scale=1.0u`` netlists write already-
+    micrometre bare literals (``L=0.15`` means ``0.15`` um, not ``0.15`` m).
+    Without ``deck``, no such convention is known, so a bare literal raises
+    :class:`NormalizeError` instead of silently assuming SI metres (a wrong
+    assumption there previously produced a plausible-looking but
+    ~1e6x-mis-scaled netlist with no diagnostic pointing at units). An
+    explicit unit suffix or exponent is unaffected either way -- see
+    :func:`_parse_um`.
     """
     subckt_to_binding, device_map_names = _build_subckt_map(deck, device_map)
+    geometry_style = geometry_style_for_family(deck) if deck is not None else None
     logical_lines = _merge_continuations(text.splitlines())
 
     out: list[str] = []
@@ -941,7 +1053,11 @@ def normalize_reference_netlist(
             continue
         first = stripped.split(None, 1)[0]
         if first and first[0] in "Xx":
-            out.append(_convert_x_card(line, subckt_to_binding, device_map_names))
+            out.append(
+                _convert_x_card(
+                    line, subckt_to_binding, device_map_names, geometry_style
+                )
+            )
         else:
             out.append(line)
     return "\n".join(out) + "\n"

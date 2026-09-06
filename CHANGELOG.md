@@ -53,6 +53,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   unroutable centre position and gains a `drc_hints.notes` warning instead.
   No `schema_version` bump -- no field changed shape, only the `C<i>_TOP`
   port's `x_um`/`y_um`/`direction_deg` *values*.
+
+- **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` conversion no longer
+  silently mis-scales a *bare* (unsuffixed, non-exponent) `L=`/`W=` literal
+  on a device subcircuit call by `1e6` for a deck whose real schematic-flow
+  netlists carry an ambient SPICE `.option scale=1.0u` (issue #1492).
+  `normalize_reference_netlist` previously always read a bare literal as SI
+  metres, so a real sky130 xschem/ngspice netlist's `L=0.15` (meaning `0.15`
+  um under sky130's own `.option scale=1.0u` convention, confirmed against a
+  real fetched `open_pdks` install) converted to `L=150000U` — a plausible-
+  looking but wildly wrong device geometry that produced an indistinguishable
+  `device.unmatched`/`net.unmatched` avalanche with no diagnostic pointing at
+  units. A bare literal is now resolved per `reference.deck`'s own
+  `klayout_tools.pdk_models.geometry_style_for_family` convention: sky130
+  reads it as already-micrometres; `gf180mcu`/`sg13g2`/`sg13cmos5l` (which
+  set no ambient scale) are unchanged, still SI metres. An explicit unit
+  suffix (`L=0.15u`) or exponent (`L=0.15e-6`) was already unambiguous and is
+  unaffected either way. With no `reference.deck` given, a bare literal is
+  now a loud `NormalizeError` (surfacing as the usual application-level `klt
+  lvs` error) naming the offending device/parameter/value, instead of a
+  silent metres assumption.
+
 - **Fixed**: `klt extract --def-net-names` now recovers the real DEF net name
   for an **unrouted single-pin** net — a tie-cell output, or any
   synthesis-inserted constant driver whose net has one instance pin and
