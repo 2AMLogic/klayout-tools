@@ -1033,7 +1033,27 @@ def run_pex(
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
 
-    extracted_netlist_path = extract_report["netlist_path"]
+    # Issue #1525: `run_extract`'s own `netlist_path` field echoes `-o`/
+    # `--output` back exactly as the caller spelled it (relative stays
+    # relative) -- fine for `klt extract`'s own standalone report (still
+    # resolves against this process's cwd, which never changes), but this
+    # module bakes the same string *verbatim, as text* into the generated
+    # extracted-side testbench's `.include` line (`_prepare_extracted_request`
+    # -> `_rewrite_dut_include`). That testbench is then handed to `run_sim`,
+    # whose per-corner `ngspice -b` invocation resolves a relative `.include`
+    # against the *including file's own directory* (a corner-scoped
+    # subdirectory nested under `work_dir`/`--outdir`), not this process's
+    # cwd -- so a relative `netlist_path` resolves correctly only by
+    # coincidence (`work_dir` happening to equal the caller's cwd). Resolving
+    # to an absolute path here, once, immediately after extraction and before
+    # `work_dir` is even computed (so still unambiguously relative to the
+    # caller's own invocation cwd), makes the `.include` line resolve
+    # correctly regardless of `-o`/`--outdir`'s own relative/absolute shape.
+    # `_report_path` below (issue #1261) still renders this run's own
+    # `netlist`/`reference_netlist` JSON fields as repo-relative
+    # `{path, scope}` -- an absolute `extracted_netlist_path` does not leak
+    # into this module's user-facing report.
+    extracted_netlist_path = os.path.abspath(extract_report["netlist_path"])
 
     work_dir = (
         os.path.abspath(artifacts_dir)

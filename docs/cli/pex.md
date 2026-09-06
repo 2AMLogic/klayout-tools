@@ -126,7 +126,14 @@ Rload RB 0 1k
 For the extracted-side run, `klt pex` rewrites *only* that one
 `.include`/`.inc` line to point at the extraction's own written netlist —
 every source, load, `.model` card, and measurement in the testbench is
-byte-identical between the two runs. A testbench with no `.include`/`.inc`
+byte-identical between the two runs. That rewritten line always names an
+**absolute path** to the extracted netlist (issue #1525), regardless of
+whether `-o`/`--outdir` were themselves given as relative or absolute paths:
+each `klt sim` corner runs `ngspice -b` from a corner-scoped working
+directory nested under `--outdir`, which resolves a relative `.include`
+against *that* directory rather than the original invocation's `cwd` — an
+absolute extracted-netlist path sidesteps that mismatch entirely. A
+testbench with no `.include`/`.inc`
 directive at all has no single swap point this command can use without also
 parsing/rewriting device cards, which is out of scope — it is refused up
 front with a clear error, not partially run.
