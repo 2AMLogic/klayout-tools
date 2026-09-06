@@ -16,6 +16,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose` now rejects an inter-block leg whose escape
+  from a coordinate-tapped `blocks[].cell` port would draw a silent short to
+  a *different* net already present inside that same block, instead of
+  silently drawing it (issue #1527). A `blocks[].cell` block (an existing
+  GDS/OASIS stream this command did not generate) publishes no `ports[]` of
+  its own — a caller taps a net by coordinate, hand-declaring a port
+  directly on one of the block's own internal wires. `route_two_pin()`
+  already models the block a leg starts/ends in by its `bbox_um` only, with
+  an unavoidable margin (`_port_edge_margin_um`) exempting the port's own
+  approach stub from that check — so the one region a coordinate-tapped
+  leg is guaranteed to draw metal in (its own approach stub) was the one
+  region with no obstacle model, and an escape direction that happened to
+  run across a different net's metal already drawn inside the same block
+  composed `routed: true` and DRC-clean (two overlapping shapes on one layer
+  merge into one polygon — a short, not a spacing violation, so no rule deck
+  can see it) while `klt extract` silently merged the two nets. This is now
+  caught the same way the existing route-vs-route check (#1057) is: the leg
+  is compared against its own block's other drawn shapes on the route layer
+  (excluding only the shape its own port lands on), and rejected into
+  `unrouted_nets[]` with a `legs[].reason` naming the block instead of being
+  drawn. Scoped to `blocks[].cell` endpoints only — a `generator_report`
+  block (e.g. `mos_array`'s own unreported `dummy` matching columns,
+  suppressed from `klt extract`'s netlist by convention) can legitimately
+  draw real geometry this check cannot tell apart from an obstacle, so it is
+  left to the existing whole-block bbox check. See `docs/cli/gen-compose.md`'s
+  new bullet under "Known limitations", and the corrected "Geometry is
+  advisory" note on what `unrouted_nets: []` plus a clean `klt drc` does and
+  does not prove for a coordinate-tapped composition.
+
 - **Fixed**: `klt pex` no longer fails every extracted-side corner with
   "Could not find include file" when `-o`/`--output` and/or `--outdir` are
   given as *relative* paths (issue #1525). The extracted-side testbench

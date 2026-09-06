@@ -244,6 +244,34 @@ cleanly.
   needs no further check" and skips the follow-up `klt drc` run is not
   supported and will eventually compose a violation this command did not
   catch.
+- **`unrouted_nets: []` plus a clean `klt drc` is not a connectivity
+  guarantee either — read this the other way round from the bullet above
+  (issue #1527).** The bullet above is about *rule compliance*: a leg that
+  reports `routed: true` can still fail `klt drc`. The risk this bullet is
+  about is the opposite and, for a coordinate-tapped composition, the more
+  dangerous one: a leg that is both `routed: true` **and** `klt drc`-clean
+  can still be *electrically wrong*. Two overlapping shapes on the same
+  layer merge into one polygon in the output GDS — a **short**, not a
+  spacing violation — so no rule deck, however complete, can see it; only
+  `klt extract`'s netlist (net count, merged label sets) can. This matters
+  specifically when a `blocks[].cell` block's net is tapped by
+  **coordinate** (`blocks[].cell.ports[]` names a point on the block's own
+  internal wire, since a pre-existing stream never reports its own
+  `ports[]` — see "Hierarchical composition and library cells (#1189)"
+  below): the one region a coordinate-tapped leg is guaranteed to draw metal
+  in — its own approach stub, inside the block it taps — is checked against
+  that block's *other* drawn geometry only since #1527 (see "An inter-block
+  leg's own approach stub is no longer a silent short to its own block"
+  below), and only for a `blocks[].cell` endpoint, not a `generator_report`
+  one (a generator can legitimately draw real, unreported geometry near a
+  port — e.g. `mos_array`'s own `dummy` matching columns, already excluded
+  from `klt extract`'s netlist by its own dummy-suppression convention —
+  that this heuristic cannot tell apart from an actual obstacle). A clean
+  `unrouted_nets: []` plus a clean `klt drc` run is therefore still not
+  proof of the intended connectivity; a net-by-net `klt extract` diff
+  against the previous composition (device counts, merged label sets) is
+  the only proof, and is worth the extra step precisely because the two
+  signals a caller naturally trusts both say "fine" when they are not.
 
 ## Known limitations (found during phase 3 bring-up, #196)
 
@@ -296,6 +324,9 @@ into the circuit.)
   and not aware of a block's *internal* geometry beyond its `bbox_um` and
   `ports[]`) — full obstacle avoidance (needed once `"grid"` placement
   lands, per the spike's own open questions) remains its own follow-up.
+  (A narrower, `blocks[].cell`-scoped exception to "not aware of internal
+  geometry" was added later — see "An inter-block leg's own approach stub
+  is no longer a silent short to its own block (#1527, fixed)" below.)
   Case **(2)** now also has a remedy that keeps the ring: see "Routing
   through a ring opening" below.
 - **The obstacle-overlap check above is `routing.width_um`-aware, not just a
@@ -592,6 +623,45 @@ into the circuit.)
   `klt drc` run to discover. As with the two checks above, this is an
   advisory heuristic against the block's own drawn shapes on the pad's
   layer, not a substitute for `klt drc`.
+- **An inter-block leg's own approach stub is no longer a silent short to
+  its own block (#1527, fixed).** The self-net drawn-metal check above
+  (#453/#469) only ever ran for a **same-block** self-net — a leg whose two
+  pins sit on *different* blocks skipped it entirely, even though such a leg
+  still draws an approach stub inside *each* endpoint's own block on its way
+  out, exactly like a self-net's backbone does. Nothing checked that stub
+  against the block's other drawn geometry: the whole-block bbox check
+  (#199) above only ever modelled a pin's own block by its `bbox_um`, with
+  an unavoidable margin (`_port_edge_margin_um`) exempting the approach stub
+  from being flagged at all — so the one region a leg is *guaranteed* to
+  draw metal in was the one region with no obstacle model. This mattered
+  most for a `blocks[].cell` block tapped by **coordinate**: the declared
+  port sits on one of the block's own internal wires (see "Hierarchical
+  composition and library cells (#1189)" below), and an escape direction
+  that happened to run across a *different* net already drawn inside that
+  same block composed `routed: true` and DRC-clean (a metal-on-metal overlap
+  merges into one polygon — a short, not a spacing violation, invisible to
+  any rule deck) while `klt extract` silently merged the two nets onto one
+  node. `route_two_pin()` now runs the same drawn-metal comparison the
+  same-block self-net check above uses, once per endpoint whose own block is
+  a `blocks[].cell` block: that endpoint's drawn leg against its *own*
+  block's other drawn shapes on the route layer, excluding only the shape
+  its own port lands on. A crossing is reported **unroutable**
+  (`unrouted_nets[]`, `routed: false`, a `legs[].reason` entry naming the
+  block) instead of drawn. **Deliberately scoped to `blocks[].cell`
+  endpoints, not every block.** A `blocks[].cell` block's every `ports[]`
+  entry is hand-declared by the caller directly onto the stream's own
+  geometry, so "every merged shape my own port does not land on is a
+  genuinely different net" is a sound assumption there. It is not sound for
+  a `generator_report` block: e.g. `mos_array`'s own `dummy` matching
+  columns (added by default) draw real, unreported metal pads flanking the
+  array purely for layout matching, already excluded from the netlist by
+  `klt extract`'s own dummy-suppression convention (#295/#462) — this check
+  cannot tell that apart from an actual obstacle, so a `generator_report`
+  endpoint is left to the coarser whole-block bbox check above, unchanged.
+  As with the checks above, this is an advisory heuristic against the
+  block's own drawn shapes on the route layer, not a substitute for `klt
+  extract` — see "`unrouted_nets: []` plus a clean `klt drc` is not a
+  connectivity guarantee either" above.
 
 ## Via-drop routing (metal2/via, #454)
 
