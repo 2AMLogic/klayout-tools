@@ -359,8 +359,11 @@ than only in a PR description:
 - **No `klt` CLI subcommand** — library-only surface, mirroring Phase B.
 - **`request.routing`** — Phase B's merged schema has no `routing` field;
   this module accepts an optional, additive one (`layer_role`/`width_um`,
-  identical shape to `gen-compose.compose()`'s own), defaulting to
-  `{"layer_role": "metal", "width_um": 0.17}` when omitted.
+  defaulting to `{"layer_role": "metal", "width_um": 0.17}` when omitted,
+  plus the optional `cross_block_layer_role` `gen-compose.compose()` also
+  reads, forwarded through unchanged — issue #1502). An unrecognised
+  `request.routing` key is a usage error, mirroring `request.pdk`/
+  `request.netlist`'s own unknown-key rejection.
 
 ## See also
 

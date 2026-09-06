@@ -112,9 +112,14 @@ description alone):
    pipeline. Revisit once a real caller wants a shell-level entry point.
 7. **Routing layer/width**: Phase B's merged schema has no ``routing``
    field. This module accepts an optional, additive ``request.routing``
-   field (the identical shape ``gen_compose.compose()`` already takes --
-   ``layer_role``/``width_um``), defaulting to
-   ``{"layer_role": "metal", "width_um": 0.17}`` when omitted. Every other
+   field -- ``layer_role``/``width_um``, defaulting to
+   ``{"layer_role": "metal", "width_um": 0.17}`` when omitted, plus the
+   optional ``cross_block_layer_role`` :func:`gen_compose.compose` also
+   reads (issue #1502) -- forwarded through unchanged since this module
+   does not re-validate its meaning, only its shape (a non-empty string).
+   These three are the only keys :data:`_ALLOWED_ROUTING_KEYS` recognises;
+   an unrecognised ``request.routing`` key is a usage error, mirroring
+   ``layout_plan._ALLOWED_PDK_KEYS``/``_ALLOWED_NETLIST_KEYS``. Every other
    request field is untouched -- Phase B's validator already ignores
    unknown top-level keys (``additionalProperties: true``), so a document
    carrying ``routing`` still validates unchanged against Phase B's schema.
@@ -152,6 +157,13 @@ SCHEMA_VERSION = 1
 #: used throughout this project's own gen-compose examples/docs
 #: (``docs/cli/gen-compose.md``).
 _DEFAULT_ROUTING = {"layer_role": "metal", "width_um": 0.17}
+
+#: Allowed keys in ``request.routing`` -- mirrors
+#: ``klayout_tools.layout_plan._ALLOWED_PDK_KEYS``/``_ALLOWED_NETLIST_KEYS``:
+#: an unrecognised key is a usage error rather than a silent drop. Kept in
+#: sync with ``gen_compose.compose()``'s own ``routing`` field handling --
+#: see the module docstring's scope decision 7.
+_ALLOWED_ROUTING_KEYS = {"layer_role", "width_um", "cross_block_layer_role"}
 
 #: Which digest terminal names map onto which generated-port suffix, per
 #: generator -- see the module docstring's scope decision 3. A generator
@@ -236,6 +248,14 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise LayoutPlanExecuteError("request.routing must be a JSON object when given")
 
+    unknown = set(raw) - _ALLOWED_ROUTING_KEYS
+    if unknown:
+        allowed = ", ".join(sorted(_ALLOWED_ROUTING_KEYS))
+        raise LayoutPlanExecuteError(
+            "request.routing has unknown field(s): "
+            f"{', '.join(sorted(unknown))} -- allowed: {allowed}"
+        )
+
     layer_role = raw.get("layer_role", _DEFAULT_ROUTING["layer_role"])
     if not isinstance(layer_role, str) or not layer_role:
         raise LayoutPlanExecuteError(
@@ -250,7 +270,22 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
         raise LayoutPlanExecuteError(
             "request.routing.width_um must be a positive number when given"
         )
-    return {"layer_role": layer_role, "width_um": float(width_um)}
+    resolved = {"layer_role": layer_role, "width_um": float(width_um)}
+
+    # cross_block_layer_role (#1502): forwarded through unchanged --
+    # gen_compose.compose() re-validates its type/non-emptiness itself
+    # (see the module docstring's scope decision 7), so this module only
+    # checks presence, not meaning.
+    if "cross_block_layer_role" in raw:
+        cross_block_layer_role = raw["cross_block_layer_role"]
+        if not isinstance(cross_block_layer_role, str) or not cross_block_layer_role:
+            raise LayoutPlanExecuteError(
+                "request.routing.cross_block_layer_role must be a non-empty "
+                "string when given"
+            )
+        resolved["cross_block_layer_role"] = cross_block_layer_role
+
+    return resolved
 
 
 def _netlist_derived_size_params(
