@@ -4287,6 +4287,254 @@ def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
 
 
 # --------------------------------------------------------------------------- #
+# combine_devices() silent capacitor C corruption (issue #1497)
+# --------------------------------------------------------------------------- #
+
+# Distinct from the partial-match `RuntimeError` shape above: KLayout's own
+# `Netlist.combine_devices()` can also return *normally* with a capacitor
+# device's primary `C` parameter left at a single pre-combine instance's own
+# value instead of the parallel group's summed total, while that same
+# group's secondary `A`/`P` parameters combine correctly -- no exception, no
+# `device.combine_incomplete` warning. Reported reliably (10/10 repeat
+# calls) against one real ~1000-device/~20-group extracted netlist; neither
+# that report's own reduction attempt nor a follow-up investigation here
+# could force it from a from-scratch synthetic netlist at a comparable scale
+# (consistent with `_COMBINE_DEVICES_MAX_ATTEMPTS`'s documented root cause:
+# KLayout's internal grouping keyed on process-heap-address-dependent
+# `db::Net*` pointer values, not on netlist content). These tests instead
+# exercise the actual code under test -- `_correct_capacitor_combine_
+# parameters`'s sum-conservation check and correction -- by monkeypatching
+# `Netlist.combine_devices()` to run the real merge and then deliberately
+# corrupt `C` afterward, the same "force the reported outcome, exercise the
+# real handling code" strategy the `RuntimeError` tests above use.
+
+
+def _build_parallel_capacitor_netlist(counts_by_net, c_unit=1e-15):
+    """A single flat `TOP` circuit with, for each `(net_name, count)` pair
+    in `counts_by_net`, `count` parallel `kdb.DeviceClassCapacitor` devices
+    sharing `net_name` and a common `COMMON` net -- the shape
+    `combine_devices()` folds into one device per net (issue #1497's own
+    reproduction sketch, minus the module-level fixture duplication)."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    device_class = kdb.DeviceClassCapacitor()
+    device_class.name = "cap"
+    netlist.add(device_class)
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+
+    common = circuit.create_net("COMMON")
+    circuit.connect_pin(circuit.create_pin("COMMON"), common)
+
+    for net_name, count in counts_by_net.items():
+        net = circuit.create_net(net_name)
+        circuit.connect_pin(circuit.create_pin(net_name), net)
+        for i in range(count):
+            device = circuit.create_device(device_class, f"{net_name}_{i}")
+            device.connect_terminal("A", net)
+            device.connect_terminal("B", common)
+            device.set_parameter("C", c_unit)
+            device.set_parameter("A", 1.0)
+            device.set_parameter("P", 2.0)
+
+    return netlist
+
+
+def test_correct_capacitor_combine_parameters_fixes_simulated_wrong_c(monkeypatch):
+    """`_correct_capacitor_combine_parameters` overwrites a post-combine
+    capacitor's `C` with its pre-combine group's summed total when the two
+    disagree, and reports one `device.combine_parameter_corrected` warning
+    naming the corrected device."""
+    import klayout.db as kdb
+
+    netlist = _build_parallel_capacitor_netlist({"G0": 8}, c_unit=1e-15)
+    pre_combine_snapshot = netlist.dup()
+
+    real_combine_devices = kdb.Netlist.combine_devices
+
+    def _combine_then_corrupt_c(self):
+        real_combine_devices(self)
+        for circuit in self.each_circuit():
+            for device in circuit.each_device():
+                if isinstance(device.device_class(), kdb.DeviceClassCapacitor):
+                    # Corrupt to a single pre-combine instance's own value --
+                    # exactly the reported shape (A/P, untouched here, would
+                    # still be the correctly-summed 8.0/16.0).
+                    device.set_parameter("C", 1e-15)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _combine_then_corrupt_c)
+    netlist.combine_devices()
+
+    circuit = next(iter(netlist.each_circuit()))
+    device = next(iter(circuit.each_device()))
+    assert device.parameter("C") == pytest.approx(1e-15)  # sanity: corrupted
+    assert device.parameter("A") == pytest.approx(8.0)  # unaffected by corruption
+
+    warning = lvs._correct_capacitor_combine_parameters(
+        pre_combine_snapshot, netlist, "layout"
+    )
+
+    assert warning is not None
+    assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+    assert warning["severity"] == "warning"
+    assert warning["side"] == "layout"
+    assert device.parameter("C") == pytest.approx(8e-15)
+
+
+def test_correct_capacitor_combine_parameters_returns_none_when_already_correct():
+    """No warning, and no mutation, when `combine_devices()` already
+    combined `C` correctly -- the common (unpatched, real KLayout) case:
+    this is a defensive invariant check, not a fix applied unconditionally
+    to every combined capacitor."""
+    netlist = _build_parallel_capacitor_netlist({"G0": 8, "G1": 3}, c_unit=1e-15)
+    pre_combine_snapshot = netlist.dup()
+
+    netlist.combine_devices()
+
+    warning = lvs._correct_capacitor_combine_parameters(
+        pre_combine_snapshot, netlist, "layout"
+    )
+
+    assert warning is None
+    circuit = next(iter(netlist.each_circuit()))
+    c_values = sorted(device.parameter("C") for device in circuit.each_device())
+    assert c_values == pytest.approx([3e-15, 8e-15])
+
+
+def test_correct_capacitor_combine_parameters_ignores_non_capacitor_devices(
+    tmp_path,
+):
+    """The sum-conservation check only ever inspects capacitor-class
+    devices -- a MOS/resistor combine (which does *not* follow simple-sum
+    parallel-combine semantics for every parameter) must never be touched by
+    this function, even when it runs over the same netlist."""
+    import klayout.db as kdb
+
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    netlist = kdb.Netlist()
+    netlist.read(layout_path, kdb.NetlistSpiceReader())
+    pre_combine_snapshot = netlist.dup()
+
+    netlist.combine_devices()
+
+    warning = lvs._correct_capacitor_combine_parameters(
+        pre_combine_snapshot, netlist, "layout"
+    )
+
+    assert warning is None
+
+
+def test_run_lvs_corrects_capacitor_c_from_simulated_combine_bug(tmp_path, monkeypatch):
+    """End-to-end (issue #1497): `klt lvs` corrects a capacitor's post-
+    combine `C` left inconsistent with its pre-combine group's sum, reports
+    a `device.combine_parameter_corrected` warning, and still reaches
+    `status: "match"` against a reference that declares the correctly-
+    combined value -- simulating KLayout's own reported silent-wrong-C shape
+    by monkeypatching `combine_devices()` to run the real merge and then
+    corrupt `C`, but only on a netlist where an actual parallel merge
+    happened (device count dropped). The reference side already declares
+    one lumped device per net, so it never merges and is never corrupted --
+    exactly like the layout/reference asymmetry `_apply_reference_device_
+    bulk`'s tests rely on elsewhere in this file."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+
+    def _combine_then_corrupt_c_if_merged(self):
+        pre_count = sum(1 for c in self.each_circuit() for _ in c.each_device())
+        real_combine_devices(self)
+        post_count = sum(1 for c in self.each_circuit() for _ in c.each_device())
+        if post_count < pre_count:
+            for circuit in self.each_circuit():
+                for device in circuit.each_device():
+                    if isinstance(device.device_class(), kdb.DeviceClassCapacitor):
+                        device.set_parameter("C", 1e-15)
+
+    monkeypatch.setattr(
+        kdb.Netlist, "combine_devices", _combine_then_corrupt_c_if_merged
+    )
+
+    layout_spice = """
+.subckt TOP G0 G1 COMMON
+C1 G0 COMMON 1e-15
+C2 G0 COMMON 1e-15
+C3 G1 COMMON 2e-15
+.ends
+"""
+    reference_spice = """
+.subckt TOP G0 G1 COMMON
+C1 G0 COMMON 2e-15
+C2 G1 COMMON 2e-15
+.ends
+"""
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    reference_path = _write(tmp_path / "reference.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "TOP"},
+                "reference": {"netlist": reference_path, "top": "TOP"},
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+    correction_warnings = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+    ]
+    assert len(correction_warnings) == 1
+    assert correction_warnings[0]["severity"] == "warning"
+    assert correction_warnings[0]["side"] == "layout"
+    assert report["counts"]["devices"]["layout"] == 2
+    assert report["status"] == "match"
+
+
+def test_run_lvs_capacitor_combine_unaffected_when_no_corruption(tmp_path):
+    """Regression guard: an ordinary (non-monkeypatched) `options.
+    combine_devices: true` capacitor compare never emits a
+    `device.combine_parameter_corrected` warning -- the correction path is a
+    defensive check, not something every capacitor combine triggers."""
+    layout_spice = """
+.subckt TOP G0 G1 COMMON
+C1 G0 COMMON 1e-15
+C2 G0 COMMON 1e-15
+C3 G1 COMMON 2e-15
+.ends
+"""
+    reference_spice = """
+.subckt TOP G0 G1 COMMON
+C1 G0 COMMON 2e-15
+C2 G1 COMMON 2e-15
+.ends
+"""
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    reference_path = _write(tmp_path / "reference.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "TOP"},
+                "reference": {"netlist": reference_path, "top": "TOP"},
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+        for m in report["mismatches"]
+    )
+
+
+# --------------------------------------------------------------------------- #
 # options.combine_devices_max_attempts (issue #1412): the caller-configurable
 # retry budget behind `_combine_devices_safely`'s bounded-retry mitigation
 # (issue #1185), threaded through `run_lvs` end-to-end.
