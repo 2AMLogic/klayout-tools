@@ -4884,7 +4884,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 via_drop_size_um[via_pair] = max(
                     _VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0
                 )
-    _write_composed_gds(
+    composed_dbu_um = _write_composed_gds(
         blocks,
         order,
         offsets_um,
@@ -4950,6 +4950,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "variant": pdk_info["variant"],
             "version": pdk_info["version"],
         },
+        "dbu_um": composed_dbu_um,
         "bbox_um": composed_bbox_um,
         "ports": composed_ports,
         "blocks": response_blocks,
@@ -5004,10 +5005,12 @@ def _write_composed_gds(
     pin_placements: list[dict[str, Any]] | None = None,
     array_placement: dict[str, Any] | None = None,
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
-) -> None:
+) -> float:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
-    routed metal.
+    routed metal. Returns the composed layout's own dbu -- the one shared
+    value every block's stream declared (see the mismatch check below), which
+    :func:`compose` echoes as the response's ``dbu_um`` (issue #1496).
 
     Each block's GDS is read into its own scratch :class:`kdb.Layout`, its
     reported top cell (``generator_report.cell_name``) is duplicated
@@ -5311,3 +5314,4 @@ def _write_composed_gds(
             )
 
     write_layout(layout, output_path, GenComposeError)
+    return layout.dbu

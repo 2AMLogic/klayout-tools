@@ -7998,6 +7998,133 @@ def test_compose_cell_block_port_direction_deg_normalises_to_int(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# `klt gen`-family + `klt place_and_route`-family compose at a resolved
+# non-1000-DATABASE-MICRONS PDK's own dbu (issue #1496) -- a `klt gen` block
+# and a `blocks[].cell` entry standing in for a `place_and_route`-produced
+# GDS (dbu already correctly resolved from the tech LEF, #1032) must compose
+# without the "must share the same dbu" `GenComposeError` when generated
+# against the *same* resolved PDK. A block generated against a genuinely
+# *different* PDK variant (a real cross-PDK composition mistake) must still
+# raise it.
+# --------------------------------------------------------------------------- #
+
+
+def _write_place_and_route_style_gds(path, cell_name, width_um, height_um, dbu):
+    """Fabricate a single-cell stream at an explicit ``dbu`` -- a stand-in for
+    a `klt place_and_route`-produced GDS, whose dbu is resolved from the
+    target PDK's own tech LEF (#1032) rather than always 0.001, the same
+    shape `_write_library_gds` uses but with the dbu made a parameter so it
+    can mimic a non-1000-DATABASE-MICRONS PDK (e.g. gf180mcu's 0.0005)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    li1 = layout.layer(67, 20)
+    cell = layout.create_cell(cell_name)
+    cell.shapes(li1).insert(
+        kdb.Box(0, 0, int(round(width_um / dbu)), int(round(height_um / dbu)))
+    )
+    layout.write(str(path))
+    return str(path)
+
+
+def test_compose_gen_block_with_place_and_route_style_gds_same_gf180mcu_pdk(
+    tmp_path, both_pdk_root
+):
+    """The core regression: a `klt gen guard_ring` block and a
+    `place_and_route`-style GDS, both resolved against the same gf180mcuD
+    PDK (tech LEF declaring `DATABASE MICRONS 2000`), compose cleanly -- both
+    now resolve dbu 0.0005 from the same tech LEF, by construction (#1496)."""
+    variant_dir = both_pdk_root / "gf180mcuD"
+    techlef_dir = variant_dir / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
+    techlef_dir.mkdir(parents=True, exist_ok=True)
+    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
+        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
+    )
+
+    ring_report = _gen_block_variant(
+        tmp_path, both_pdk_root, "gf180mcuD", "guard_ring", "ring0"
+    )
+    assert ring_report["gds_path"]
+    import klayout.db as kdb
+
+    ring_layout = kdb.Layout()
+    ring_layout.read(ring_report["gds_path"])
+    assert ring_layout.dbu == pytest.approx(0.0005)
+
+    macro_gds = _write_place_and_route_style_gds(
+        tmp_path / "macro.gds", "macro_top", 5.0, 5.0, dbu=0.0005
+    )
+    output = tmp_path / "composed.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [
+                {"id": "ring", "generator_report": ring_report},
+                {
+                    "id": "macro",
+                    "cell": {"gds_path": macro_gds, "cell_name": "macro_top"},
+                },
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["ring", "macro"],
+                "spacing_um": 1.0,
+            },
+            "options": {"cell_name": "composed_0", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert [b["id"] for b in report["blocks"]] == ["ring", "macro"]
+    # The composed cell is written at the shared, PDK-resolved dbu -- and
+    # says so, so a caller can nest this response as a block in another
+    # compose (#1189) without re-reading the stream (#1496).
+    assert report["dbu_um"] == pytest.approx(0.0005)
+    composed_layout = kdb.Layout()
+    composed_layout.read(str(output))
+    assert composed_layout.dbu == pytest.approx(0.0005)
+
+
+def test_compose_still_rejects_mismatched_dbu_across_different_pdks(
+    tmp_path, both_pdk_root
+):
+    """A block generated against sky130A (dbu 0.001, no tech LEF resolver
+    override in this fixture) composed alongside a gf180mcu-style GDS at
+    0.0005 is a genuine cross-PDK composition mistake -- the existing
+    mismatch error must still fire, not be silently papered over (#1496's
+    own explicit non-goal)."""
+    sky_report = _gen_block_variant(
+        tmp_path, both_pdk_root, "sky130A", "guard_ring", "ring0"
+    )
+    macro_gds = _write_place_and_route_style_gds(
+        tmp_path / "macro.gds", "macro_top", 5.0, 5.0, dbu=0.0005
+    )
+    output = tmp_path / "composed.gds"
+
+    with pytest.raises(GenComposeError, match="must share the same dbu"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+                "blocks": [
+                    {"id": "ring", "generator_report": sky_report},
+                    {
+                        "id": "macro",
+                        "cell": {"gds_path": macro_gds, "cell_name": "macro_top"},
+                    },
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["ring", "macro"],
+                    "spacing_um": 1.0,
+                },
+                "options": {"cell_name": "composed_0", "output": str(output)},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Hierarchical composition -- a gen-compose response as a block (#1189)
 # --------------------------------------------------------------------------- #
 

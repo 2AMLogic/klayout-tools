@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 from .pdk_models import _pdk_variant_family
 
 if TYPE_CHECKING:
@@ -128,8 +128,8 @@ _HIDDEN_PARAMS = {
 #: size rule at all; gf180mcu's ``contact.width.1`` is 0.22um).
 CONTACT_SIZE_UM = 0.22
 
-#: The dbu (database unit, um) every ``_GeneratorSpec.dbu`` entry uses --
-#: see the literal ``dbu=0.001`` on each ``_GENERATOR_SPECS`` entry below.
+#: The coarsest grid (um) any generator's geometry is placed on -- the
+#: ``dbu=0.001`` fallback every ``_GENERATOR_SPECS`` entry below declares.
 #: Used by :func:`_snap_square_box_um` to pre-round a contact's centre to
 #: the manufacturing grid *before* building its box, so the later,
 #: independent per-edge ``int(round(x / dbu))`` conversion in
@@ -137,9 +137,17 @@ CONTACT_SIZE_UM = 0.22
 #: silently draw a contact 1 dbu narrower/shorter than ``CONTACT_SIZE_UM``
 #: -- exactly the ``contact.width.1`` failure mode diagnosed in issue #685
 #: (``CONTACT_SIZE_UM`` has zero DRC margin above gf180mcu's ``CO.1``
-#: threshold, so a single dbu of rounding slop is enough to trip it). If a
-#: generator ever ships with a different dbu, this needs to become a real
-#: parameter instead of a shared constant.
+#: threshold, so a single dbu of rounding slop is enough to trip it).
+#:
+#: This stays a *fixed* 0.001 even though :func:`_produce` now resolves the
+#: output layout's own dbu from the resolved PDK's tech LEF (issue #1496,
+#: e.g. 0.0005 for gf180mcu's ``DATABASE MICRONS 2000``), and it is exactly
+#: as safe there: a coordinate pre-snapped to a 0.001 grid is *exactly*
+#: representable on any finer dbu that divides 0.001, so ``int(round())``
+#: introduces no error at all rather than the sub-dbu slop #685 fixed. It is
+#: deliberately not re-derived per-request from the resolved dbu -- doing so
+#: would move geometry (a finer snap grid moves a contact's centre) on the
+#: very PDKs this constant was validated against.
 _GRID_DBU_UM = 0.001
 
 #: Margin (um) an active/poly/tap region must keep around a contact it
@@ -3643,12 +3651,21 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
             "cell_name": str,
             "gds_path": str,
             "pdk": {"name": str, "variant": str, "version": str | None},
+            "dbu_um": float,
             "bbox_um": {"x0": float, "y0": float, "x1": float, "y1": float},
             "device_count": int,
             "ports": [...],
             "drc_hints": {...},
             "warnings": [...],
         }
+
+    ``dbu_um`` (issue #1496) reports the database unit the output stream was
+    actually written at -- resolved from the *resolved PDK's own tech LEF*
+    (``DATABASE MICRONS``) by :func:`~klayout_tools.pdk.resolve_pdk_dbu`, not
+    a fixed ``0.001`` -- so a caller can confirm two blocks agree before
+    handing them to ``klt gen-compose`` (which requires one shared dbu across
+    every block) without a separate ``klt stats`` round-trip. Additive field,
+    no ``schema_version`` bump (see ``docs/json-contract.md``).
 
     Raises :class:`GenError` for an unknown generator, an unresolvable PDK,
     invalid/out-of-range ``params``, or a write failure (e.g. the
@@ -3720,6 +3737,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
             "variant": pdk_info["variant"],
             "version": pdk_info["version"],
         },
+        "dbu_um": dbu,
         "bbox_um": bbox_um,
         "device_count": described["device_count"],
         "ports": described["ports"],
@@ -3822,6 +3840,17 @@ def _produce(
     except ``resistor_strip``) can resolve its hidden layer params against
     the *resolved* PDK family rather than a fixed default -- see
     :func:`_device_layer_params` and friends.
+
+    The output layout's dbu is resolved from ``pdk_info``'s own tech LEF via
+    :func:`~klayout_tools.pdk.resolve_pdk_dbu` (issue #1496) -- e.g. 0.0005
+    for gf180mcu's ``DATABASE MICRONS 2000`` -- so a ``klt gen`` output
+    agrees, by construction, with a ``klt place_and_route`` output resolved
+    against the same PDK (both derive their dbu from the same tech LEF, the
+    way `place_and_route`'s own DEF/GDS merge already does per issue #1032).
+    Falls back to ``spec.dbu`` (the generator's hardcoded default, historically
+    always 0.001) when the resolver returns ``None`` -- a PDK whose tech LEF
+    is missing or unparsable never fails a `klt gen` request that previously
+    succeeded, it just keeps today's hardcoded dbu.
     """
     import klayout.db as kdb
 
@@ -3832,7 +3861,7 @@ def _produce(
     pcell_values.update(spec.layer_params(pdk_info, resolved_params))
 
     layout = kdb.Layout()
-    layout.dbu = spec.dbu
+    layout.dbu = resolve_pdk_dbu(pdk_info) or spec.dbu
     pcell_var = layout.add_pcell_variant(lib, decl.id(), pcell_values)
     top = layout.create_cell(cell_name)
     top.insert(kdb.CellInstArray(pcell_var, kdb.Trans()))
@@ -5968,6 +5997,12 @@ class _GeneratorSpec:
 
     name: str
     summary: str
+    #: Fallback output database unit (um) -- used only when the resolved
+    #: PDK's own tech LEF declares no ``DATABASE MICRONS`` value (or ships
+    #: no readable tech LEF at all), since :func:`_produce` prefers
+    #: :func:`~klayout_tools.pdk.resolve_pdk_dbu`'s PDK-derived answer
+    #: (issue #1496). Every registered generator declares ``0.001``, the dbu
+    #: `klt gen` unconditionally wrote at before that change.
     dbu: float
     validate: Callable[[dict[str, Any]], None]
     describe: Callable[[dict[str, Any], float, dict[str, Any]], dict[str, Any]]

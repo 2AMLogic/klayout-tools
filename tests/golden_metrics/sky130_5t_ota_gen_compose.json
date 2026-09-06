@@ -44,6 +44,7 @@
       "tol_pct": 2
     },
     "gen_compose.blocks_count": 3,
+    "gen_compose.dbu_um": 0.001,
     "gen_compose.drc_hints.matched_groups_count": 3,
     "gen_compose.drc_hints.min_spacing_um": 2.0,
     "gen_compose.drc_hints.notes_count": 0,
