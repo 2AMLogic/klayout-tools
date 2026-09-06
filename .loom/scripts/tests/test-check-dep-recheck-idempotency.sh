@@ -253,5 +253,120 @@ run_sut --file "$WORK_DIR/wrapped.json"
 assert_eq "1" "$RC" "(p) wrapped {comments:[...]} shape parses and still flags the violation"
 
 echo ""
+echo "--- CONCLUSION_HASH stability (#1528) ---"
+#
+# This SUT is a pure function of the hash history it is handed, so it can only
+# be as good as the hashes its callers compute. #1528 reported that the
+# duplicate heartbeats survived #1523/#1524 because the CALLER's
+# CONCLUSION_HASH was unstable: curator.md built BLOCK_REASON from free-text
+# prose, so two passes describing the IDENTICAL blocker state in different
+# words produced different hashes -- and a different hash is CHANGED, which
+# always permits a comment regardless of the staleness window.
+#
+# (q*) are the negative fixtures: they reproduce that failure mode against
+# this SUT, proving the duplicate is permitted with no bug in this script.
+# (r*)/(s*) are the positive fixtures: the same scenarios re-run with hashes
+# produced by dep-recheck-fingerprint.sh, which builds every component from
+# machine-checkable state.
+
+FP="$SCRIPTS_DIR/dep-recheck-fingerprint.sh"
+
+# The legacy, now-removed caller formula, kept ONLY as a fixture generator so
+# the failure mode stays reproducible after the real code path is gone.
+legacy_hash() {
+    # legacy_hash <verdict> <blockers> <block_reason-as-prose>
+    printf '%s\n%s\n%s' "$1" "$2" "$3" | {
+        if command -v shasum >/dev/null 2>&1; then shasum -a 256
+        else sha256sum; fi
+    } | awk '{print substr($1, 1, 16)}'
+}
+
+# (q0) The live-reported drift, straight from #528's real history: the
+#      2026-09-05T13:42:50Z heartbeat (bb3b15b9f3db0761) is followed 11.6h
+#      later -- well inside the 24h window -- by a DIFFERENT hash for the same
+#      unchanged blocker state. The SUT correctly says CHANGED; that is the
+#      point. The duplicate was licensed upstream of here.
+cat > "$WORK_DIR/1528-drift-prior.json" <<'EOF'
+[
+  {"created_at":"2026-09-05T13:42:50Z","body":"still blocked <!-- curator:dep-recheck:bb3b15b9f3db0761 -->"}
+]
+EOF
+run_sut --file "$WORK_DIR/1528-drift-prior.json" \
+    --assume-new-hash "5342934786687480" --assume-new-at "2026-09-06T01:21:21Z"
+assert_eq "0" "$RC" "(q0) drifted hash 11.6h later -> exit 0 (comment permitted)"
+assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(q0) DECISION=CHANGED — the window never gets consulted"
+
+# (q1) Same thing, mechanically: two prose wordings of ONE unchanged state
+#      (#378 still open, still loom:operator-only, no linked PR) hash
+#      differently under the removed free-text formula.
+PROSE_A="$(legacy_hash blocked "" "blocked on #378 (design epic still unfiled, operator-only)")"
+PROSE_B="$(legacy_hash blocked "" "still blocked: #378 remains open and operator-only, no design epic yet")"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$PROSE_A" != "$PROSE_B" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (q1) free-text BLOCK_REASON: two wordings of one state hash differently"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (q1) expected the prose wordings to hash differently"
+fi
+
+printf '[{"created_at":"2026-09-06T08:00:00Z","body":"still blocked <!-- curator:dep-recheck:%s -->"}]\n' \
+    "$PROSE_A" > "$WORK_DIR/1528-prose-prior.json"
+run_sut --file "$WORK_DIR/1528-prose-prior.json" \
+    --assume-new-hash "$PROSE_B" --assume-new-at "2026-09-06T12:00:00Z"
+assert_eq "0" "$RC" "(q2) prose-drifted rerun 4h later -> exit 0 (duplicate permitted)"
+assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(q2) DECISION=CHANGED on an unchanged state — the #1528 defect"
+
+if [[ -x "$FP" ]]; then
+    # (r) The fix: the same unchanged state, fingerprinted canonically by two
+    #     independent invocations, is now SKIPped inside the window.
+    CANON_STATE='378:OPEN:loom:architect,loom:epic-phase,loom:operator-only'
+    CANON_A="$("$FP" --verdict blocked --no-linked-prs --reason-key "$CANON_STATE" --hash-only)"
+    CANON_B="$("$FP" --verdict blocked --no-linked-prs --reason-key "$CANON_STATE" --hash-only)"
+    assert_eq "$CANON_A" "$CANON_B" "(r1) two independent canonical passes -> identical CONCLUSION_HASH"
+    assert_eq "7004d3c3258ab254" "$CANON_A" "(r1) equals the value #1528 hand-computed from the live forge"
+
+    printf '[{"created_at":"2026-09-06T08:00:00Z","body":"still blocked <!-- curator:dep-recheck:%s -->"}]\n' \
+        "$CANON_A" > "$WORK_DIR/1528-canonical-prior.json"
+    run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
+        --assume-new-hash "$CANON_B" --assume-new-at "2026-09-06T12:00:00Z"
+    assert_eq "20" "$RC" "(r2) canonical rerun 4h later -> exit 20 (SKIP), the duplicate is suppressed"
+    assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(r2) DECISION=SKIP"
+    assert_eq "2026-09-06T08:00:00Z" "$(get_field "$OUT" PRIOR_AT)" "(r2) PRIOR_AT is the true immediately-preceding comment"
+
+    # (r3) ...and the 9-minute regap from the incident report is suppressed too.
+    run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
+        --assume-new-hash "$CANON_B" --assume-new-at "2026-09-06T08:09:00Z"
+    assert_eq "20" "$RC" "(r3) canonical rerun 9 minutes later -> SKIP"
+
+    # (r4) Past the window, the heartbeat still fires — suppression is not silence.
+    run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
+        --assume-new-hash "$CANON_B" --assume-new-at "2026-09-07T09:00:00Z"
+    assert_eq "0" "$RC" "(r4) canonical rerun past 24h -> exit 0"
+    assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(r4) DECISION=STALE (heartbeat still posts)"
+
+    # (s) Sensitivity: the canonicalization must NOT swallow a real change.
+    CANON_CHANGED="$("$FP" --verdict blocked --no-linked-prs \
+        --reason-key "378:OPEN:loom:architect,loom:epic-phase,loom:operator-only,loom:urgent" --hash-only)"
+    run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
+        --assume-new-hash "$CANON_CHANGED" --assume-new-at "2026-09-06T12:00:00Z"
+    assert_eq "0" "$RC" "(s1) a real label change 4h later -> exit 0"
+    assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(s1) DECISION=CHANGED — genuine changes are still reported"
+
+    CANON_CLOSED="$("$FP" --verdict blocked --no-linked-prs \
+        --reason-key "378:CLOSED:loom:architect,loom:epic-phase,loom:operator-only" --hash-only)"
+    run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
+        --assume-new-hash "$CANON_CLOSED" --assume-new-at "2026-09-06T09:00:00Z"
+    assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(s2) blocker closing 1h later is still CHANGED"
+
+    CANON_CLEAR="$("$FP" --verdict clear --no-linked-prs --hash-only)"
+    run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
+        --assume-new-hash "$CANON_CLEAR" --assume-new-at "2026-09-06T09:00:00Z"
+    assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(s3) blocked -> clear 1h later is still CHANGED"
+else
+    echo "  SKIP: dep-recheck-fingerprint.sh not executable — canonical fixtures skipped"
+fi
+
+echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]] || exit 1

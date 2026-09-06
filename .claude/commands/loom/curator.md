@@ -1237,39 +1237,59 @@ different blocking number, a blocker that closed or merged, a label that
 appeared or cleared, or a flip between `blocked` and `clear` is a **changed**
 conclusion.
 
+**Every component of the fingerprint is machine-checkable forge state — never
+prose (#1528).** Both the linked-PR blockers *and* the secondary-heuristic
+block reason use the identical canonical shape
+`<ref>:<STATE>:<sorted loom:-labels>`. This is not a style preference: a
+fingerprint that folds in a free-text justification hashes differently every
+time the wording drifts, a differing hash is classified `CHANGED`, and
+`CHANGED` always permits a comment — so the guard below silently degrades to
+"comment on every pass". That is exactly what happened after #1523/#1524
+landed: on #528 the ten days 2026-08-27 → 2026-09-05 each produced one
+heartbeat carrying the same hash `bb3b15b9f3db0761` (idempotency holding
+against ~20 dispatches/day), then 2026-09-06 produced **three** different
+hashes for an unchanged blocker state — `5342934786687480`,
+`bb3b15b9f3db0761`, `28b66af6ee975a56` — each flip resetting `PRIOR` and
+licensing another comment.
+
 Embed the fingerprint as a marker in every re-check comment you post, so the
 next pass can compare mechanically instead of re-reading prose:
 
 ```bash
 ISSUE_NUMBER=<number>
-ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json comments,closedByPullRequestsReferences)
 
-_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256
-  else cksum; fi
-}
-
-# One "<pr#>:<state>:<sorted block labels>" line per current blocker, sorted so
-# ordering churn from the API never looks like a changed conclusion. Prefix with
-# the verdict so blocked→clear can never collide with clear→blocked.
-# NOTE: `printf '%s\n' "$VAR" | jq`, never `echo "$VAR" | jq` — zsh's `echo`
-# builtin reinterprets `\n`/`\t` escapes by default, corrupting captured
-# `gh --json` output (a literal `\n` inside a body/comment string becomes a
-# raw newline) before jq ever parses it (#5094).
-BLOCKERS=$(for PR in $(printf '%s\n' "$ISSUE_JSON" | jq -r '.closedByPullRequestsReferences[].number'); do
-  gh pr view "$PR" --json number,state,labels --jq \
-    '"\(.number):\(.state):\([.labels[].name | select(startswith("loom:"))] | sort | join(","))"'
-done | sort)
-VERDICT=blocked   # or "clear" once the superseding-block check passes
-# When there is no linked PR and the block came from the secondary heuristic,
-# BLOCKERS is empty — fold the cited justification in so a *changed* reason
-# ("doctor cycle exhausted" → "Sweep coordination: blocking") still reads as a
-# changed conclusion. Leave empty when the primary check supplied the blockers.
-BLOCK_REASON=""
-CONCLUSION_HASH=$(printf '%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" \
-  | _sha256 | awk '{print substr($1, 1, 16)}')
-RECHECK_MARKER="<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
+# FINGERPRINT: compute CONCLUSION_HASH with dep-recheck-fingerprint.sh — do not
+# hand-roll the sha256/jq pipeline, and above all do not hand-write
+# BLOCK_REASON. The script derives every component from live `gh` state and
+# REJECTS a `--reason-key` containing whitespace, so a sentence cannot re-enter
+# the hash. Flags:
+#   --verdict blocked|clear   the verdict, prefixed so blocked→clear and
+#                             clear→blocked can never collide
+#   --issue <n>               resolves this issue's linked PRs (the primary
+#                             superseding-block check) into BLOCKERS
+#   --blocker <ref>           ONLY when the primary check found no linked PR:
+#                             the blocker the secondary heuristic cited, as a
+#                             bare number (378) or a cross-repo ref
+#                             (rjwalters/loom#5325). Resolved live to
+#                             "<ref>:<STATE>:<sorted loom:-labels>".
+#   --reason-key <token>      ONLY for a blocker that is not a forge issue/PR
+#                             at all (e.g. release:rjwalters/loom:>v0.18.0).
+#                             Canonical token, never a sentence.
+# Passing --blocker/--reason-key when the primary check DID supply blockers is
+# a usage error (exit 2) — BLOCK_REASON exists only for the secondary heuristic.
+BLOCKER_REF=   # empty when a linked PR supplied the block; else e.g. 378 or rjwalters/loom#5325
+# Build the argv as an ARRAY, not an unquoted `${VAR:+--flag "$VAR"}` expansion:
+# that idiom word-splits under bash but expands to a SINGLE argv entry under
+# zsh, so the flag arrives as the literal string `--blocker 378` and the script
+# exits 2 on an unknown argument. Arrays behave identically in both shells.
+FP_ARGS=(--verdict blocked --issue "$ISSUE_NUMBER")
+[ -n "$BLOCKER_REF" ] && FP_ARGS+=(--blocker "$BLOCKER_REF")
+FP_OUT=$(./.loom/scripts/dep-recheck-fingerprint.sh "${FP_ARGS[@]}") \
+  || { echo "fingerprint failed — do NOT post a comment"; exit 2; }
+# `printf '%s\n' "$VAR" | ...`, never `echo "$VAR" | ...` — zsh's `echo` builtin
+# reinterprets `\n`/`\t` escapes by default and corrupts captured output (#5094).
+CONCLUSION_HASH=$(printf '%s\n' "$FP_OUT" | sed -n 's/^CONCLUSION_HASH=//p')
+RECHECK_MARKER=$(printf '%s\n' "$FP_OUT" | sed -n 's/^RECHECK_MARKER=//p')
 
 # DECISION MODE: hand this exact CONCLUSION_HASH to check-dep-recheck-idempotency.sh
 # and act on ITS output — do not hand-derive PRIOR/age yourself. #1523 traced a
@@ -1313,9 +1333,28 @@ no marker, so `PRIOR_HASH` is empty and the first pass after them counts as
 "none" — it posts one marked comment and every unchanged pass after that skips.
 That one-time re-post is expected; do not try to parse legacy prose to avoid it.
 
+The same one-time re-post applies to markers written before the canonical
+`BLOCK_REASON` above (#1528): a hash derived from prose will not equal the
+canonical hash for the identical state, so the first pass after this change
+reads `CHANGED` and posts once. E.g. #528's prose-era marker was
+`bb3b15b9f3db0761`; its canonical fingerprint for the same unchanged state
+(`378:OPEN:loom:architect,loom:epic-phase,loom:operator-only`) is
+`7004d3c3258ab254`. After that single re-post the hash is stable by
+construction. Do not "fix" this by reverse-engineering an old prose hash.
+
 **Staleness window**: 24h (`LOOM_DEP_RECHECK_HEARTBEAT_HOURS`, default `24`). It
 exists so a genuinely long-stalled issue still shows periodic proof-of-life
 rather than going silent forever; it is *not* a licence to re-confirm hourly.
+
+**The window is doing real work, because dispatch is nowhere near daily.**
+Verified 2026-09-06 against `~/.loom/daemon.log` on this fleet host:
+`loom-daemon`'s `role_runner` dispatches a `curator` tick per managed
+workspace roughly every 60–90 minutes (20 klayout-tools curator ticks in
+24h). The 24h window is therefore crossed by ~20 *different* invocations per
+day, none of which shares memory with any other. That is survivable — and was
+survived for ten straight days — **only** while the fingerprint is stable, so
+treat any temptation to "just describe the blocker in your own words" as
+directly re-opening a comment storm.
 
 A silent skip is a complete outcome, not a deferral: do **not** also strip or
 add labels, and do **not** hand the issue to another role "because nothing was
