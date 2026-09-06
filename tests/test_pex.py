@@ -998,6 +998,80 @@ def test_run_pex_pin_count_mismatch_reactive_fallback_when_preflight_cannot_see_
     )
 
 
+def test_run_pex_relative_output_bakes_absolute_include_line(tmp_path, monkeypatch):
+    """Issue #1525 (no-`ngspice`-required unit coverage): even with a
+    relative `-o`/`--output`, the generated extracted-side testbench's
+    `.include` line must name an *absolute* path -- that is the actual file
+    `run_sim`'s per-corner `ngspice -b` call resolves a relative `.include`
+    against (the generated testbench's own directory, nested under
+    `--outdir`), not the caller's cwd. `run_sim` is monkeypatched so this is
+    covered on machines without `ngspice` too; the end-to-end
+    simulate-and-pass coverage lives in
+    `test_run_pex_relative_output_and_outdir_extracted_side_still_simulates`.
+    """
+    import klayout_tools.pex as pex_module
+
+    schematic_report = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+        ],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+    calls = {"n": 0}
+    captured: dict[str, str] = {}
+
+    def _fake_run_sim(request_path, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return schematic_report
+        with open(request_path, encoding="utf-8") as handle:
+            captured["extracted_body"] = json.load(handle)["netlist"]
+        return {
+            "corners": [
+                {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.39)]},
+            ],
+            "corner_count": 1,
+            "measurements": [{"name": "vout"}],
+        }
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    root = _make_fake_repo(tmp_path)
+    _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = root / "schematic_dut.spice"
+    _write_schematic_dut(dut)
+    tb = root / "testbench.spice"
+    _write_testbench(tb, dut)
+    request = _write_request(root / "request.json", tb)
+
+    monkeypatch.chdir(root)
+    report = run_pex(
+        "res.gds",
+        [str(request)],
+        "sky130",
+        output=os.path.join("relative-out", "extracted.spice"),
+        artifacts_dir=os.path.join("relative-out", "pex"),
+    )
+
+    assert calls["n"] == 2
+    assert "extracted_body" in captured
+    with open(captured["extracted_body"], encoding="utf-8") as handle:
+        body_text = handle.read()
+    include_line = next(
+        line
+        for line in body_text.splitlines()
+        if line.strip().lower().startswith((".include", ".inc"))
+    )
+    include_target = include_line.split(None, 1)[1].strip().strip('"').strip("'")
+    assert os.path.isabs(include_target), (
+        f"extracted-side .include line must be absolute, got: {include_line!r}"
+    )
+    assert os.path.isfile(include_target)
+    # A relative `-o` does not leak into this run's own JSON report.
+    assert report["netlist"]["scope"] == "repo"
+
+
 def test_run_pex_unrelated_sim_error_still_aborts(
     tmp_path, resistor_layout, monkeypatch
 ):
@@ -1638,6 +1712,85 @@ def test_run_pex_outdir_absolute_path_still_works(tmp_path):
 
     assert report["status"] != "error" or report.get("errored", 0) == 0
     assert outdir.is_dir()
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_relative_output_and_outdir_extracted_side_still_simulates(
+    tmp_path,
+):
+    """Issue #1525: `-o`/`--output` and `--outdir`, both given *relative* to
+    the caller's own cwd, must not break the extracted-side simulation.
+
+    Before the fix, `run_extract`'s `netlist_path` (which `-o`/`--output`
+    controls) was echoed back exactly as spelled -- relative stays relative
+    -- and that same relative string was baked verbatim into the generated
+    extracted-side testbench's `.include` line. `run_sim`'s per-corner
+    `ngspice -b` invocation resolves that line's `.include` against the
+    *generated testbench file's own directory* (a corner-scoped subdirectory
+    nested under `--outdir`), not the original cwd, so a relative `-o` value
+    that was valid from the caller's cwd resolved to nothing there and every
+    extracted-side corner errored with "Could not find include file".
+    """
+    root = _make_fake_repo(tmp_path)
+    _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    _write_request(root / "request.json", tb)
+
+    cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        report = run_pex(
+            "res.gds",
+            ["request.json"],
+            "sky130",
+            output=os.path.join("out", "extracted.spice"),
+            artifacts_dir=os.path.join("out", "pex"),
+        )
+    finally:
+        os.chdir(cwd)
+
+    assert (root / "out" / "extracted.spice").is_file()
+    assert report["errored"] == 0
+    assert report["status"] == "pass"
+    for row in report["delta"]:
+        assert row["extracted_value"] is not None
+    # The fix must not leak an absolute path into this run's own report --
+    # `netlist` stays repo-relative (issue #1261), same shape a relative
+    # `-o` already produced before this fix.
+    assert report["netlist"]["scope"] == "repo"
+    assert report["netlist"]["path"] == "out/extracted.spice"
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_mixed_absolute_output_relative_outdir_still_simulates(tmp_path):
+    """Issue #1525 edge case: an absolute `-o`/`--output` with a *relative*
+    `--outdir` must also simulate cleanly -- both share the same
+    unresolved-`netlist_path` root cause, so both directions are covered."""
+    root = tmp_path
+    _write_gds(_make_sky130_poly_resistor_layout(), root / "res.gds")
+    dut = _write_schematic_dut(root / "schematic_dut.spice")
+    tb = _write_testbench(root / "testbench.spice", dut)
+    _write_request(root / "request.json", tb)
+
+    absolute_output = root / "extracted.spice"
+
+    cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        report = run_pex(
+            "res.gds",
+            ["request.json"],
+            "sky130",
+            output=str(absolute_output),
+            artifacts_dir="pex-out",
+        )
+    finally:
+        os.chdir(cwd)
+
+    assert absolute_output.is_file()
+    assert report["errored"] == 0
+    assert report["status"] == "pass"
 
 
 @_SKIP_NO_NGSPICE

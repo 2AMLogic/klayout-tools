@@ -16,6 +16,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt pex` no longer fails every extracted-side corner with
+  "Could not find include file" when `-o`/`--output` and/or `--outdir` are
+  given as *relative* paths (issue #1525). The extracted-side testbench
+  `klt pex` generates re-points its `.include` line at the freshly-extracted
+  netlist; that line named the caller's `-o` value verbatim, but each `klt
+  sim` corner runs `ngspice -b` from a corner-scoped working directory
+  nested under `--outdir`, which resolves a relative `.include` against
+  *that* directory, not the invocation's own cwd — so a relative `-o` that
+  was perfectly valid from the caller's cwd resolved to nothing there. The
+  extracted netlist path is now resolved to absolute internally before it is
+  written into the generated testbench, regardless of how `-o`/`--outdir`
+  were spelled; this run's own JSON report continues to render `netlist` as
+  a repo-relative `{path, scope}` object (issue #1261), so the fix does not
+  leak an absolute path into committed evidence. See "The DUT `.include`
+  swap" in `docs/cli/pex.md`.
+
 - **Fixed**: `klt gen-compose` now rejects a via-drop landing pad (or
   stub-widen box) that would DRC-violate against its *own* placed block's
   drawn geometry, instead of silently drawing it (issue #1520). A
