@@ -16,6 +16,37 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt extract --pin-source-cells CELL[,CELL...]` (issue #1513) is
+  a third, *positional* declared-pin mechanism for composing several
+  already-independently-verified blocks — at least one of them a
+  placed-and-routed macro with generic internal pin labels (`A`, `X`, `Q`,
+  `Y`, ...) — into one flat top-level layout via `klt gen-compose` plus
+  hand-drawn interconnect, where the composition itself has no single
+  governing DEF to anchor `--def-pins` on. `--top-cell-pins` cannot help
+  (a composition's own hand-drawn interconnect labels necessarily live in
+  an *instanced* sub-cell, not literally in the new top cell, so
+  `--top-cell-pins` demotes them right alongside the genuine internal
+  noise it targets); `--pins`/`--def-pins` match by string, so two
+  independently-labelled macros that coincidentally share a generic pin
+  name (e.g. both use `CLK` internally) both stay promoted once that
+  string is declared, with no way to keep only the intended one.
+  `--pin-source-cells` resolves each drawn pin-name label found anywhere
+  under the top cell whose immediate owning cell is one of the named
+  cells to its actual extracted net by probing that label's own
+  composed-frame position, rather than by matching its text — demoting
+  every currently-promoted pin not reached this way, exactly as
+  `--pins`/`--def-pins` demote on a miss. Applied after `--pins`'s and
+  `--def-pins`'s own reconciliations (when given), so it can only further
+  restrict. Off by default (omitting the flag is byte-identical to
+  extraction before this feature existed). `klt lvs` exposes the same
+  control as the `layout.pin_source_cells` request field, mirroring
+  `layout.declared_pins`/`layout.top_cell_pins`. See
+  `docs/cli/extract.md`'s "Pin-source cells" section. The same pass also
+  documents (in `docs/cli/extract.md`'s "Declared pin set" section) that a
+  `--format json`-reported `nets[].name` (`|`-joined by
+  `spice_safe_net_name`) must not be pasted directly into `--pins`, whose
+  own matching reads the promoted net's `,`-joined internal name instead.
+
 - **Fixed**: `klt extract --parasitics`'s substrate DC-tie (issue #1263) now
   also declares its tied net(s) SPICE-**global** (issue #1503), closing the
   gap where an `X`-instantiated testbench's own `vsubs` (or `vsubs_iso<n>`)

@@ -2002,6 +2002,28 @@ before this flag existed. `klt lvs` exposes the same control as the
 `layout.declared_pins` request field (a JSON array of net name strings —
 see [`docs/cli/lvs.md`](lvs.md)).
 
+**Do not paste a `--format json`-reported `nets[].name` straight into
+`--pins`** (issue #1513). `--pins`'s own matching reads a promoted net's
+*internal* name, which KLayout spells with a comma between joined labels
+(`Net.name`, e.g. `A,CLK`) — but every JSON-reported surface
+(`nets[].name`, `merged_net_labels[]`) and the written SPICE go through
+`spice_safe_net_name`, which rewrites that same join to a `|` (`A|CLK`,
+see ["Merged net labels"](#merged-net-labels-issue-470) above) before
+either is ever written out. A `--pins` value built by round-tripping a
+name straight out of `nets[].name` therefore never matches — `--pins
+A|CLK` is compared against the net's own `,`-joined `A,CLK` and always
+misses, silently demoting the net exactly as if it had been mistyped, with
+no error distinguishing "no such net" from "wrong separator". Re-derive the
+comma-joined form yourself (`nets[].name.replace("|", ",")`, the *exact*
+inverse of `spice_safe_net_name`) before handing a name back to `--pins`,
+or declare only a single (never-joined) label — the two forms agree on
+any name that never needed escaping in the first place. Also note that a
+name containing its own comma component (e.g. `A,CLK`) can never be spelled
+as a single `--pins` token at all, since `--pins`'s own list separator is
+the same character — see ["DEF-derived declared pins"](#def-derived-declared-pins---def-pins-issue-1390)
+and ["Pin-source cells"](#pin-source-cells-issue-1513) below for two ways
+around that.
+
 ## DEF-derived declared pins (`--def-pins`, issue #1390)
 
 `--pins` needs the caller to already have the design's port list in hand.
@@ -2058,6 +2080,67 @@ asked for its restriction to apply, and silently skipping it would demote
 them is harmless (the below-top-label pass is a structural no-op on a
 DEF-merged layout, see above) but does not need to be done, since
 `--def-pins` alone already covers the DEF-merge case fully.
+
+## Pin-source cells (`--pin-source-cells`, issue #1513)
+
+`--top-cell-pins` and `--def-pins` both cover a *single* governing DEF's
+worth of layout — a hand-drawn hierarchical block, or one `klt
+place-and-route`-produced macro. Neither covers **composing several
+already-independently-verified blocks** — at least one of them a
+placed-and-routed standard-cell macro with its own generic internal pin
+labels (`A`, `X`, `Q`, `Y`, `D`, `S`, ...) — into one flat top-level layout
+via `klt gen-compose` plus hand-drawn interconnect, where the *composition*
+itself has no single governing DEF to anchor `--def-pins` on:
+
+- `--top-cell-pins` demotes every genuine top-level pin: a `gen-compose`d
+  assembly's own hand-drawn interconnect labels necessarily live in an
+  *instanced* sub-cell (the routing cell the composition step created),
+  never literally in the new top cell's own shapes — exactly the below-top
+  case `--top-cell-pins` is built to exclude.
+- `--pins`/`--def-pins` match by **string**, not by which physical label
+  drew it: once *two* independently-labelled macros happen to share a
+  generic pin-name spelling (e.g. both use `CLK` internally), declaring
+  that string with `--def-pins` promotes **both** the intended net and the
+  unrelated one — there is no way, using only a joined-name component
+  match, to tell "the net whose only relevant component is this string"
+  from "any net carrying this string as one of several".
+
+`--pin-source-cells CELL[,CELL...]` (a comma-separated list of cell names)
+sidesteps both failure modes by identifying a **specific physical label**,
+not a name or a cell-nesting depth: for every drawn pin-name label anywhere
+under the top cell — at any depth, in any instance — whose *immediate
+owning cell* has one of these names, `klt extract` probes that label's own
+composed-frame position against the deck's own conductor geometry
+(`LayoutToNetlist.probe_net`) to recover the **real extracted net** that
+label names, independent of what string it spells or what other net
+elsewhere happens to carry the same string. Every currently-promoted pin
+whose net is not reached this way is demoted, exactly as `--pins`/
+`--def-pins` demote on a miss.
+
+Name the cell a composition step's own hand-drawn interconnect script draws
+its top-level pin labels into — for a block composed in by `klt
+gen-compose`, that is the `f"{block_id}__{src_cell_name}"` sub-cell
+`gen-compose` itself creates for that block; for a hand-authored
+interconnect step, whatever cell its own drawing code targets:
+
+```
+$ klt extract composed_top.gds --deck sky130 \
+    --pin-source-cells interconnect__route_top --format json
+```
+
+A label found in a named cell that resolves to no drawn conductor at its
+own position (a label with no underlying shape, or one erased by a
+black-box/abstract-cell mask) is reported in `warnings` rather than
+silently ignored. Applied *after* `--pins`/`--def-pins`'s own
+reconciliation (when either is also given) — it can only further restrict,
+never re-promote a net either of those already kept internal; combining
+`--pin-source-cells` with an earlier demoting flag on the *same* net
+reports a separate `warnings` entry explaining why the net stayed internal
+regardless. Omitting `--pin-source-cells` (the default) skips this
+reconciliation entirely, byte-for-byte identical to extraction before this
+flag existed. `klt lvs` exposes the same control as the
+`layout.pin_source_cells` request field (a JSON array of cell name strings
+— see [`docs/cli/lvs.md`](lvs.md)).
 
 ## Matched-device geometry check (`--matched-group`, issue #1018)
 

@@ -1514,10 +1514,10 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     since ``committed["layout"]`` is actually a SPICE netlist, not a
     layout stream, in that case. ``reference.form`` (a non-default
     ``"subckt-call"`` reference), ``reference.device_map``/``device_bulk``
-    and ``layout.top_cell_pins``/``declared_pins`` are never echoed anywhere
-    in the response and are always omitted (reconstructed as each option's
-    own default). Use ``--check`` (cheap mode) instead when any of these
-    apply.
+    and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells`` are
+    never echoed anywhere in the response and are always omitted
+    (reconstructed as each option's own default). Use ``--check`` (cheap
+    mode) instead when any of these apply.
     """
     deck = get_path(committed, ("provenance", "deck"))
     has_deck = isinstance(deck, dict) and deck.get("name") is not None
@@ -1778,6 +1778,34 @@ def _resolve_layout(
                     "request.layout.declared_pins must not be empty when given "
                     "-- omit the field entirely to keep every named net promoted"
                 )
+
+        # Issue #1513: `pin_source_cells` is the *positional* counterpart to
+        # `declared_pins` above -- a set of cell names whose own drawn
+        # pin-name labels (anywhere in the hierarchy, at any depth) are
+        # resolved to their real net by probing each label's own position,
+        # not by matching a promoted net's string. See `klt extract
+        # --pin-source-cells`'s own docstring (`extract.py`) for the full
+        # rationale (a `klt gen-compose`d assembly with no governing
+        # top-level DEF, where neither `top_cell_pins`/`declared_pins`'s
+        # per-cell-depth/per-net-string matching can cleanly isolate the
+        # design's own genuine top-level ports).
+        pin_source_cells_spec = layout_spec.get("pin_source_cells")
+        pin_source_cells: frozenset[str] | None = None
+        if pin_source_cells_spec is not None:
+            if not isinstance(pin_source_cells_spec, list) or not all(
+                isinstance(name, str) for name in pin_source_cells_spec
+            ):
+                raise LvsError(
+                    "request.layout.pin_source_cells must be a list of cell "
+                    "name strings"
+                )
+            pin_source_cells = frozenset(pin_source_cells_spec)
+            if not pin_source_cells:
+                raise LvsError(
+                    "request.layout.pin_source_cells must not be empty when "
+                    "given -- omit the field entirely to skip this "
+                    "reconciliation"
+                )
         try:
             # LVS is topological -- no parasitics_deck, so the 5th return
             # (parasitic_nets) is always None here and is ignored. The 6th
@@ -1823,6 +1851,11 @@ def _resolve_layout(
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
+                # Issue #1513: `request.layout.pin_source_cells` -- the
+                # positional counterpart to `declared_pins` above. `None`
+                # when the field was never given, unchanged from every
+                # request that predates it.
+                pin_source_cells=pin_source_cells,
                 # Issue #559: defer the resistor `fixed_offset_ohm`
                 # correction when `combine_devices` will run -- applying it
                 # here, before the fold, would have KLayout's native series

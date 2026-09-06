@@ -653,6 +653,7 @@ def run_extract(
     mom_rlc_inductance_nh: float | None = None,
     matched_device_groups: Mapping[str, Sequence[str]] | None = None,
     def_pins: frozenset[str] | None = None,
+    pin_source_cells: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -754,6 +755,48 @@ def run_extract(
     byte-identical to today's behavior. See ``docs/cli/extract.md``'s
     "DEF-derived declared pins" section for a worked example against the
     real `gcd` corpus fixture.
+
+    ``pin_source_cells`` (the ``--pin-source-cells`` flag, issue #1513) is a
+    third, *positional* declared-pin mechanism for the case neither
+    ``declared_pins`` nor ``def_pins`` can express cleanly: composing
+    several already-independently-verified blocks -- at least one of them a
+    placed-and-routed macro with its own generic internal pin labels (``A``,
+    ``X``, ``Q``, ``Y``, ...) -- into one flat top-level layout via `klt
+    gen-compose` plus hand-drawn interconnect, with no single governing DEF
+    of the *composition* itself to anchor ``def_pins`` on. ``top_cell_pins_only``
+    cannot help either: the composition's own hand-drawn interconnect labels
+    necessarily live in an *instanced* sub-cell (the routing cell the
+    composition step created), not literally in the new top cell, so
+    ``--top-cell-pins`` demotes them right alongside the genuine internal
+    noise it is meant to exclude. And ``declared_pins``/``def_pins`` match by
+    *string* -- a promoted net's own comma-joined name -- which cannot
+    distinguish two distinct, unrelated nets that both happen to carry the
+    same generic label text as one of several joined components (e.g. two
+    independently-labelled macros that each happen to use ``CLK``
+    internally): declaring that string promotes *both*, not just the
+    intended one.
+
+    ``pin_source_cells`` is a set of cell names (the ``--pin-source-cells``
+    flag's comma-separated argument): every drawn pin-name label found
+    anywhere under the top cell whose *immediate owning cell* has one of
+    these names is resolved to its actual extracted net by probing that
+    label's own composed-frame position (:func:`_pin_source_cell_net_names`)
+    -- not by matching its string against anything. This sidesteps both
+    failure modes at once: a label drawn in an instanced sub-cell is found
+    (unlike ``--top-cell-pins``, which excludes it by cell depth alone), and
+    two coincidentally-same-spelled labels in *different* cells resolve to
+    two different, independently-tracked nets (unlike ``def_pins``'s
+    component-string match, which cannot tell them apart at all). Every
+    currently-promoted pin whose net was not reached this way is demoted,
+    exactly as ``declared_pins``/``def_pins`` demote on a miss; a
+    ``warnings`` entry lists any net demoted this way, and a separate entry
+    lists any label found in a named cell that resolved to no drawn
+    conductor at its own position. Applied *after* ``declared_pins``'s and
+    ``def_pins``'s own reconciliations (when given), so it can only further
+    restrict -- it never re-promotes a net either of those already kept
+    internal. ``None`` (the default) skips this reconciliation entirely --
+    byte-identical to today's behavior. See ``docs/cli/extract.md``'s
+    "Pin-source cells" section for the full mechanism and a worked example.
 
     Two additional cause-agnostic ``warnings`` entries (issue #1385) fire
     independent of any flag above: one when the layout carries zero text on
@@ -1581,6 +1624,7 @@ def run_extract(
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
         def_pins=def_pins,
+        pin_source_cells=pin_source_cells,
     )
 
     if mom_net is not None:
@@ -2425,6 +2469,7 @@ def extract_netlist_from_layout(
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
     def_pins: frozenset[str] | None = None,
+    pin_source_cells: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -2510,6 +2555,14 @@ def extract_netlist_from_layout(
     DEF-merged layout's net names routinely collide two or more labels onto
     one net). ``None`` skips this reconciliation. See :func:`run_extract`
     for the full rationale.
+
+    ``pin_source_cells`` (issue #1513): a *positional* counterpart to
+    ``declared_pins``/``def_pins`` for a `klt gen-compose`d assembly with
+    no governing top-level DEF -- forwarded to :func:`_extract_netlist`,
+    which keeps a promoted net whenever it resolves, by probing a label's
+    own composed-frame position (not by matching its string), from a text
+    shape drawn inside one of these named cells. ``None`` skips this
+    reconciliation. See :func:`run_extract` for the full rationale.
 
     ``parasitics_deck`` is optional: when ``None`` (the default, and what
     ``klt lvs``'s inline-extraction path always passes -- LVS is topological
@@ -2648,6 +2701,7 @@ def extract_netlist_from_layout(
         def_net_names=def_net_names,
         critical_nets=critical_nets,
         def_pins=def_pins,
+        pin_source_cells=pin_source_cells,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -3047,6 +3101,123 @@ def _reconcile_top_pins(
         circuit.remove_pin(pin_id)
 
     return sorted(affected)
+
+
+def _pin_source_cell_net_names(
+    l2n: kdb.LayoutToNetlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+    cell_names: frozenset[str],
+) -> tuple[set[str], list[str]]:
+    """Resolve every drawn pin-name label physically located inside an
+    instance of one of ``cell_names`` -- anywhere in ``top_cell``'s
+    hierarchy, at any depth -- to the actual extracted net at that exact
+    position (issue #1513).
+
+    This is the *positional* counterpart to ``declared_pins``/``def_pins``'s
+    *string* matching against a promoted net's own (possibly comma-joined)
+    name. Both of those defeat KLayout's flat-extraction convention of
+    joining every text label found on one electrical net into a single
+    ``Net.name`` in a different way: ``--pins``'s own comma item-separator
+    collides with that join's separator (a net named ``A,CLK`` can never be
+    spelled as one ``--pins`` token), and ``--def-pins``'s component-match
+    fallback (``set(name.split(",")) & def_pins``, below) is *too*
+    permissive once two independently-labelled macros are composed --
+    literally the same declared component string (e.g. ``CLK``) drawn by
+    two unrelated macros' own internal, generic labels keeps *both* nets
+    promoted, with no way to tell "the net whose only relevant label is
+    this one" from "any net carrying this label as one of several".
+
+    ``cell_names`` sidesteps both failure modes by identifying a **specific
+    physical label**, not a name: for each of ``deck``'s own label layers
+    (``well_label``/``poly_label``/``metal_labels``), every text shape drawn
+    *anywhere* under ``top_cell`` -- via ``Cell.begin_shapes_rec``, exactly
+    like ``_label_layer_strings(recursive=True)`` -- whose *immediate owning
+    cell* (``RecursiveShapeIterator.cell()``) has a name in ``cell_names`` is
+    probed at its own composed-frame position
+    (``RecursiveShapeIterator.trans()`` applied to the label's local
+    position, then ``LayoutToNetlist.probe_net`` on the label layer's own
+    conductor region -- ``nwell``/``tap`` for ``well_label``, ``poly`` for
+    ``poly_label``, ``metals[i]`` for ``metal_labels[i]``) to recover the
+    *real* ``kdb.Net`` object that label names, independent of what string
+    it happens to spell or what other, unrelated net elsewhere in the
+    layout happens to carry the same string.
+
+    A caller names the cell(s) a `gen-compose`d assembly's own hand-drawn
+    interconnect script draws its top-level pin labels into (e.g. the
+    ``f"{block_id}__{src_cell_name}"`` sub-cell `klt gen-compose` itself
+    creates for a composed-in block, or a hand-authored interconnect
+    block's own top cell) -- unlike ``--top-cell-pins``, this deliberately
+    *does not* require that cell to be ``top_cell`` itself, since a
+    composed assembly's own interconnect labels necessarily live in an
+    *instanced* sub-cell, not literally in the new top cell's own shapes
+    (issue #291's own below-top-label heuristic demotes them for exactly
+    this reason).
+
+    Returns ``(promoted_names, unresolved_labels)``: ``promoted_names`` is
+    the set of ``Net.name`` values reached this way (a name that also
+    happens to carry other, unrelated joined labels is still kept whole --
+    ``_reconcile_top_pins``'s keep-list matches on the full name, same as
+    ``declared_pins``); ``unresolved_labels`` is every label string found in
+    a named cell that resolved to no conductor at its own position at all
+    (a label drawn with no underlying drawn shape, or one erased by a
+    black-box/abstract-cell mask), sorted and de-duplicated, for the
+    caller's own warning -- mirroring ``def_pins``'s "matched no promoted
+    net" report.
+
+    Empty ``cell_names`` -- and thus the whole ``pin_source_cells``
+    reconciliation this feeds -- returns ``(set(), [])`` (a no-op keep-list,
+    meaning "demote everything"), never called by
+    :func:`_extract_netlist` for a ``None`` ``pin_source_cells`` in the
+    first place (byte-identical-default invariant, same as every other
+    declared-pin mechanism above).
+    """
+    import klayout.db as kdb
+
+    if not cell_names:
+        return set(), []
+
+    probe_targets: list[tuple[tuple[int, int] | None, list[kdb.Region]]] = [
+        (deck.well_label, [nwell, tap]),
+        (deck.poly_label, [poly]),
+    ] + [
+        (layer, [metals[index]])
+        for index, layer in enumerate(deck.metal_labels)
+        if index < len(metals)
+    ]
+
+    promoted_names: set[str] = set()
+    unresolved_labels: set[str] = set()
+    for layer_pair, probe_regions in probe_targets:
+        if layer_pair is None:
+            continue
+        layer_index = layout.find_layer(*layer_pair)
+        if layer_index is None:
+            continue
+        iterator = top_cell.begin_shapes_rec(layer_index)
+        while not iterator.at_end():
+            shape = iterator.shape()
+            if shape.is_text() and iterator.cell().name in cell_names:
+                text_string = shape.text_string
+                local = shape.text_trans.disp
+                point = iterator.trans() * kdb.Point(local.x, local.y)
+                net = None
+                for region in probe_regions:
+                    net = l2n.probe_net(region, point)
+                    if net is not None:
+                        break
+                if net is not None and net.name:
+                    promoted_names.add(net.name)
+                else:
+                    unresolved_labels.add(text_string)
+            iterator.next()
+
+    return promoted_names, sorted(unresolved_labels)
 
 
 def _promote_orphan_named_nets(netlist: kdb.Netlist) -> None:
@@ -4397,6 +4568,7 @@ def _extract_netlist(
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
     def_pins: frozenset[str] | None = None,
+    pin_source_cells: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -4496,6 +4668,14 @@ def _extract_netlist(
     promoted net's comma-joined label set (not just a whole-string match --
     see :func:`run_extract`'s own docstring for why) against this set and
     demoting every net with no intersection. ``None`` skips this entirely.
+
+    ``pin_source_cells`` (issue #1513): applied right after ``def_pins``'s
+    own pass -- a set of cell names whose own drawn pin-name labels
+    (anywhere in the hierarchy, at any depth) are resolved to their real
+    extracted net by probing each label's own composed-frame position
+    (:func:`_pin_source_cell_net_names`), demoting every promoted pin not
+    reached this way. ``None`` skips this entirely. See
+    :func:`run_extract`'s own docstring for the full rationale.
 
     ``abstract_cell_patterns``/``abstract_instances``/``lef_macros`` (issue
     #620): ``abstract_instances`` is the already-collected
@@ -5886,18 +6066,95 @@ def _extract_netlist(
                 f"matched no promoted net's label set in the layout: {joined}"
             )
 
+    # Issue #1513: `pin_source_cells`'s own probe-based declared-pin
+    # reconciliation -- a *positional* counterpart to `declared_pins`/
+    # `def_pins` above, for a `klt gen-compose`d assembly of several
+    # pre-labelled macros with no governing top-level DEF of its own to
+    # anchor `def_pins` on. Neither `--top-cell-pins` (a composition's own
+    # hand-drawn interconnect labels necessarily live in an *instanced*
+    # sub-cell, not literally in the new top cell) nor `declared_pins`/
+    # `def_pins` (their string-based matching cannot tell "the net whose
+    # only relevant joined component is this string" from "any net with
+    # this string as one of several", once two independently-labelled
+    # macros happen to share a generic pin-name spelling) can express this
+    # cleanly -- see `_pin_source_cell_net_names`'s own docstring. Applied
+    # after `declared_pins`'s and `def_pins`'s own passes (when given), so
+    # it can only further restrict -- it never re-promotes a net either of
+    # those already kept internal.
+    if pin_source_cells is not None:
+        top_circuit = netlist.circuit_by_name(top_cell.name)
+        promoted_names = set()
+        if top_circuit is not None:
+            for pin in top_circuit.each_pin():
+                pin_net = top_circuit.net_for_pin(pin.id())
+                if pin_net is not None and pin_net.name:
+                    promoted_names.add(pin_net.name)
+
+        pin_source_promoted_names, pin_source_unresolved_labels = (
+            _pin_source_cell_net_names(
+                l2n, layout, top_cell, deck, poly, nwell, tap, metals, pin_source_cells
+            )
+        )
+
+        non_matching_pin_source = promoted_names - pin_source_promoted_names
+        demoted_by_pin_source = _reconcile_top_pins(
+            netlist, top_cell.name, non_matching_pin_source, demote=True
+        )
+        if demoted_by_pin_source:
+            joined = ", ".join(demoted_by_pin_source)
+            warnings.append(
+                f"kept {len(demoted_by_pin_source)} net(s) internal: no "
+                f"drawn label inside a --pin-source-cells cell resolves to "
+                f"this net ({joined}) -- issue #1513"
+            )
+
+        if pin_source_unresolved_labels:
+            joined = ", ".join(pin_source_unresolved_labels[:10])
+            more = len(pin_source_unresolved_labels) - 10
+            count = len(pin_source_unresolved_labels)
+            plural = "s" if count != 1 else ""
+            warnings.append(
+                f"{count} label{plural} drawn inside a --pin-source-cells "
+                f"cell resolved to no drawn conductor at its own position: "
+                f"{joined}" + (f", +{more} more" if more > 0 else "")
+            )
+
+        # A label in a declared cell that resolved to a real net, but that
+        # net was already demoted internal by an earlier `--top-cell-pins`/
+        # `--pins`/`--def-pins` pass, cannot be re-promoted here (this pass
+        # only ever further restricts, same as every declared-pin mechanism
+        # above) -- surfaced so a caller combining `--pin-source-cells` with
+        # an earlier demoting flag can see why a net it expected to survive
+        # did not.
+        already_demoted_by_earlier_pass = sorted(
+            pin_source_promoted_names - promoted_names
+        )
+        if already_demoted_by_earlier_pass:
+            joined = ", ".join(already_demoted_by_earlier_pass)
+            count = len(already_demoted_by_earlier_pass)
+            plural = "s" if count != 1 else ""
+            warnings.append(
+                f"{count} net{plural} named by a --pin-source-cells label "
+                f"{'was' if count == 1 else 'were'} already kept internal "
+                f"by an earlier --top-cell-pins/--pins/--def-pins pass, "
+                f"before --pin-source-cells ran: {joined} -- "
+                "--pin-source-cells can only further restrict the promoted "
+                "set, never re-promote a net an earlier pass already "
+                "demoted"
+            )
+
     # Issue #1385: the final, cause-agnostic check -- after every promotion
     # and demotion pass above (`make_top_level_pins()`, `--top-cell-pins`,
-    # `--pins`/`declared_pins`, `--def-pins`, issue #1390) has run, does the
-    # top circuit have *any* top-level pin left at all? A zero-pin top
+    # `--pins`/`declared_pins`, `--def-pins`, `--pin-source-cells`) has run,
+    # does the top circuit have *any* top-level pin left at all? A zero-pin
     # circuit means `klt lvs`'s `NetlistComparer` has no net/device anchor to
     # seed correspondence against a reference netlist and will report a full
     # mismatch even when the two sides' device populations genuinely agree
     # -- and that failure mode gives no hint the root cause is upstream in
     # pin promotion, not device extraction. This subsumes (but does not
     # replace) the label-layer-specific warning above: it also catches an
-    # otherwise-labelled layout that `--top-cell-pins`/`--pins`/`--def-pins`
-    # demoted down to nothing between them.
+    # otherwise-labelled layout that `--top-cell-pins`/`--pins`/`--def-pins`/
+    # `--pin-source-cells` demoted down to nothing between them.
     final_top_circuit = netlist.circuit_by_name(top_cell.name)
     if final_top_circuit is not None and final_top_circuit.pin_count() == 0:
         warnings.append(
