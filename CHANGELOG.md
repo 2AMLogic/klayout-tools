@@ -79,6 +79,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   bump — `compose`'s success-path payload shape is unchanged; the new failure
   mode reuses the existing `GenComposeError` application-error path.
 
+- **Fixed**: `klt gen` now writes its output GDS at the **resolved PDK's own
+  database unit**, read from that PDK's tech LEF `DATABASE MICRONS`
+  declaration, instead of a fixed `0.001um` regardless of PDK (issue #1496).
+  For gf180mcu (`DATABASE MICRONS 2000`) a generated cell is now written at
+  `0.0005um` — the same dbu `klt place-and-route`'s DEF→GDS merge already
+  derived from the same tech LEF — so `klt gen`-family blocks and
+  `klt place-and-route`-family macros built for the same PDK can finally be
+  placed in one `klt gen-compose` request, which requires a single shared dbu
+  across every block and previously refused the mix outright with
+  `has dbu=0.0005, which does not match the composed cell's dbu=0.001`. A PDK
+  whose tech LEF is missing, unreadable, or declares no `DATABASE MICRONS`
+  falls back to `0.001um`, so no request that previously succeeded can now
+  fail; sky130 (`DATABASE MICRONS 1000`) output is unchanged. A finer dbu
+  changes only the integer grid the shapes are stored on — every generator's
+  documented default `params` stays `klt drc --deck gf180mcu` clean at
+  `0.0005um` and its drawn micrometre geometry is identical. Composing blocks
+  built against genuinely *different* PDKs still raises the dbu-mismatch
+  error: that is a real composition mistake, not a tooling artefact.
+
+- **Added**: `klt gen` and `klt gen-compose` responses now carry `dbu_um`, the
+  database unit their output stream was written at, so a caller can confirm
+  two blocks agree before composing them without a separate `klt stats`
+  round-trip (issue #1496). Additive field on both commands — no
+  `schema_version` bump, per [`docs/json-contract.md`](docs/json-contract.md).
+
 - **Documented**: `klt gen diff_pair` places both legs at the **same x column
   per terminal** — the common-centroid checkerboard puts one `Q1` and one
   `Q2` sub-instance in every column at the same `x0`, so `Q1_<n>_S`/`_D`/`_G`

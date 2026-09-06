@@ -1219,6 +1219,45 @@ current-sharing an ESD pulse depends on avoiding.
 | `gate_contact`       | bool   | `false` | Draw a contact + local-metal pad on the gate landing pad and report `M1_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. |
 | `salicide_block`     | bool   | `false` | Draw the PDK's salicide-block layer over the finger array on families that curate one (gf180mcu only — see above). |
 
+## Output database unit (dbu)
+
+**Every generator writes its GDS at the resolved PDK's own database unit,
+read from that PDK's tech LEF `DATABASE MICRONS` declaration** — `0.001µm`
+for a PDK declaring `DATABASE MICRONS 1000` (sky130), `0.0005µm` for one
+declaring `DATABASE MICRONS 2000` (gf180mcu). The resolved value is reported
+as the response's `dbu_um`.
+
+This is the same tech-LEF-derived resolution
+[`klt place-and-route`](place-and-route.md)'s DEF→GDS merge already performs,
+so a `klt gen` block and a `klt place-and-route` macro **resolved against the
+same PDK agree on their dbu by construction** — which is what lets
+[`klt gen-compose`](gen-compose.md) place them in one composed cell (it
+requires a single shared dbu across every block and rejects a mismatch as an
+application error). Before this, `klt gen` wrote at a fixed `0.001µm`
+regardless of the PDK, so mixing the two verb families in one `gen-compose`
+request was impossible for any PDK whose tech LEF declares something other
+than `DATABASE MICRONS 1000` (issue #1496).
+
+Notes and guarantees:
+
+- **Fallback.** A resolved PDK that ships no readable tech LEF, or whose tech
+  LEF declares no `DATABASE MICRONS`, falls back to `0.001µm` — the value
+  `klt gen` always used. Resolution never fails a request that previously
+  succeeded.
+- **Multiple tech LEFs.** The lookup is family-wide (every
+  `libs.ref/<library>/techlef/*.tlef` under the resolved install). Real open
+  PDKs declare one value across the whole family; if they ever disagreed, the
+  **finest** declared dbu wins, so the answer does not depend on library
+  naming.
+- **Geometry is unchanged.** A finer dbu changes only the integer grid the
+  shapes are stored on, not the shapes: `bbox_um`, `ports[].x_um`/`y_um`, and
+  every drawn polygon are identical in micrometres, and every generator's
+  documented default `params` stay `klt drc --deck gf180mcu` clean at
+  `0.0005µm`. sky130 output is byte-identical to before.
+- **`dbu` is not a request parameter.** It is a property of the resolved PDK,
+  not a caller knob — there is no `options.dbu`. To compose blocks at a given
+  dbu, resolve them all against the same PDK.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -1272,6 +1311,7 @@ family/variant split the resolver doesn't have. The response's
   "cell_name": "res_strip_0",
   "gds_path": "res_strip_0.gds",
   "pdk": { "name": "sky130A", "variant": "sky130A", "version": "open_pdks 0fe599b" },
+  "dbu_um": 0.001,
   "bbox_um": { "x0": 0.0, "y0": 0.0, "x1": 9.68, "y1": 0.42 },
   "device_count": 4,
   "ports": [
@@ -1313,6 +1353,7 @@ family/variant split the resolver doesn't have. The response's
 | `cell_name` | string | Name of the top cell written into `gds_path`. |
 | `gds_path` | string | Resolved output path (echoes `options.output`, or the computed default). |
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields — see the request section's deviation note. |
+| `dbu_um` | number | Database unit (µm) the output stream was written at, resolved from the PDK's own tech LEF — see "Output database unit (dbu)" above. Every block handed to [`klt gen-compose`](gen-compose.md) must agree on this value. |
 | `bbox_um` | object | Bounding box of the generated cell in micrometres — `_um` suffix per this repo's units-in-field-name convention (`dbu_um` in `klt layers`). |
 | `device_count` | integer | Number of unit instances placed (`resistor_strip`'s `num`). |
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
@@ -1399,6 +1440,7 @@ generator: resistor_strip
 cell_name: resistor_strip_0
 gds_path: res_strip_0.gds
 pdk: sky130A (open_pdks 0fe599b)
+dbu_um: 0.001
 bbox_um: (0.0, 0.0) - (9.68, 0.42)
 device_count: 4
 

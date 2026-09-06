@@ -2733,3 +2733,105 @@ def test_cli_em_limits_no_install_error_envelope(tmp_path, capsys):
     assert captured.out == ""
     error = json.loads(captured.err)
     assert error["error"]["command"] == "pdk em-limits"
+
+
+# --------------------------------------------------------------------------- #
+# resolve_pdk_dbu (issue #1496) -- a resolved PDK's own database unit,
+# derived from its tech LEF's `DATABASE MICRONS` value, so `klt gen` can
+# agree with `klt place_and_route`'s already-correct dbu resolution (#1032)
+# for the same resolved PDK without either verb needing a `cell_library`.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_pdk_dbu_reads_database_microns_from_tech_lef(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        "nom",
+        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n" + _METAL5_MCU_LAYER,
+    )
+
+    info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) == pytest.approx(0.0005)
+
+
+def test_resolve_pdk_dbu_sky130_style_1000_microns(tmp_path):
+    """A tech LEF declaring `DATABASE MICRONS 1000` (sky130-shaped) resolves
+    to the same 0.001 dbu `klt gen` has always hardcoded -- the fix must be
+    invisible for a PDK whose tech LEF happens to already agree."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        "tt",
+        "UNITS\n  DATABASE MICRONS 1000 ;\nEND UNITS\n" + _METAL5_MCU_LAYER,
+    )
+
+    info = pdk.find_pdk(variant="sky130A", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) == pytest.approx(0.001)
+
+
+def test_resolve_pdk_dbu_no_libs_ref_returns_none(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD", assets=("ngspice",))  # no libs_ref at all
+
+    info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) is None
+
+
+def test_resolve_pdk_dbu_no_tech_lef_found_returns_none(tmp_path):
+    """`libs_ref` exists but no library ships a `techlef/` directory at all
+    (e.g. only primitive-device libraries installed) -- graceful `None`, not
+    an error."""
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD", assets=("libs_ref",))
+
+    info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) is None
+
+
+def test_resolve_pdk_dbu_tech_lef_without_database_microns_returns_none(tmp_path):
+    """A tech LEF that parses but never declares `DATABASE MICRONS` at all
+    (the regex-based parser's other "normal, expected" `None` case, per
+    `_merge_def_to_gds`'s own docstring) falls back to `None`, matching
+    `place_and_route`'s existing fallback-to-default posture."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(variant_dir, "gf180mcu_fd_sc_mcu9t5v0", "nom", _METAL5_MCU_LAYER)
+
+    info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) is None
+
+
+def test_resolve_pdk_dbu_picks_the_finest_of_disagreeing_tech_lefs(tmp_path):
+    """No real open PDK ships tech LEFs that disagree on `DATABASE MICRONS`,
+    but the enumeration is family-wide, so the tie-break must be
+    deterministic and independent of library naming: the **finest** declared
+    dbu wins (here 0.0005 from the alphabetically *later* library), never
+    "whichever sorted first"."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _write_tech_lef(
+        variant_dir,
+        "aaa_coarse_lib",
+        "nom",
+        "UNITS\n  DATABASE MICRONS 1000 ;\nEND UNITS\n" + _METAL5_MCU_LAYER,
+    )
+    _write_tech_lef(
+        variant_dir,
+        "zzz_fine_lib",
+        "nom",
+        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n" + _METAL5_MCU_LAYER,
+    )
+
+    info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) == pytest.approx(0.0005)

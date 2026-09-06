@@ -821,6 +821,54 @@ def _discover_tech_lefs(libs_ref: str) -> list[dict[str, str]]:
     return sources
 
 
+def resolve_pdk_dbu(pdk_info: dict[str, Any]) -> float | None:
+    """Resolve a resolved PDK's own database unit (dbu, in micrometres) from
+    its tech LEF's declared ``DATABASE MICRONS`` value -- e.g. ``0.0005`` for
+    a tech LEF declaring ``DATABASE MICRONS 2000`` (gf180mcu), ``0.001`` for
+    one declaring ``DATABASE MICRONS 1000`` (sky130).
+
+    Mirrors :func:`~klayout_tools.place_and_route._merge_def_to_gds`'s own
+    ``database_microns is not None: lefdef_config.dbu = 1.0 / database_microns``
+    pattern (issue #1032) so a caller with no single ``cell_library`` in hand
+    (unlike ``place_and_route``, which always resolves one) can still agree
+    with it by construction (issue #1496) -- built on
+    :func:`_discover_tech_lefs`'s existing family-wide tech LEF enumeration
+    (already used by :func:`em_limits`) rather than :func:`lef_files`, which
+    requires a ``cell_library`` argument this call site does not have.
+
+    Enumerates every tech LEF under ``pdk_info["assets"]["libs_ref"]`` (the
+    same family-wide set :func:`em_limits` reports) and returns the **finest**
+    dbu any of them declares -- ``1.0 / max(database_microns)``. Every real
+    open PDK's tech LEFs agree on one ``DATABASE MICRONS`` value across the
+    whole family, so "the finest" is normally just "the one value"; picking
+    the finest rather than whichever library happens to sort first makes the
+    answer independent of library naming, and keeps every library's own grid
+    exactly representable whenever the declared values divide each other (as
+    LEF's own permitted 100/200/1000/2000/10000/20000 set does).
+
+    Returns ``None`` -- never raises -- when ``libs_ref`` is unset, no tech
+    LEF is found, or no discovered tech LEF declares (or can have parsed) a
+    ``DATABASE MICRONS`` value; the caller is expected to fall back to its
+    own existing default in that case, exactly as
+    :func:`~klayout_tools.place_and_route._merge_def_to_gds` already does
+    when ``read_lef_header``'s own ``database_microns`` comes back ``None``.
+    """
+    libs_ref = (pdk_info.get("assets") or {}).get("libs_ref")
+    if not libs_ref:
+        return None
+    declared: list[int] = []
+    for source in _discover_tech_lefs(libs_ref):
+        text = _read_text(source["tech_lef"])
+        if text is None:
+            continue
+        database_microns = parse_lef_header(text)["database_microns"]
+        if database_microns:
+            declared.append(database_microns)
+    if not declared:
+        return None
+    return 1.0 / max(declared)
+
+
 def em_limits(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
     """Report electromigration current-density limits declared across every
     tech LEF a resolved PDK variant ships (issue #1215).

@@ -892,10 +892,25 @@ miter that fully fills the bend, so no separate bend-insertion pass is needed.
 block's *placement math* from its GDS stream (the spike's "one new guarantee
 specific to composition," section 2). Every block referenced by
 `blocks[].generator_report` must share the same `dbu` (design-rule grid
-resolution) — every `klt gen` generator uses `0.001` (see
-[`docs/cli/gen.md`](gen.md)), so this only matters for a hand-crafted
-`generator_report` with a different `dbu`; a mismatch is an application
-error (exit 1).
+resolution); a mismatch is an application error (exit 1), and the composed
+cell is written at that one shared value (echoed as the response's own
+`dbu_um`).
+
+Every block resolved against the **same PDK** agrees by construction: both
+[`klt gen`](gen.md) and [`klt place-and-route`](place-and-route.md) derive
+their output dbu from that PDK's own tech LEF `DATABASE MICRONS` declaration
+(`0.001` for sky130, `0.0005` for gf180mcu — see
+[`docs/cli/gen.md`](gen.md)'s "Output database unit (dbu)"). So a `klt gen`
+guard ring and a `klt place-and-route` macro built for the same PDK compose
+cleanly, including on a PDK whose tech LEF declares something other than
+`DATABASE MICRONS 1000` (issue #1496 — before that fix `klt gen` always wrote
+`0.001`, and such a mix was refused outright).
+
+A `dbu` mismatch therefore now means what it says: the blocks were **not**
+built against the same PDK (or a hand-crafted `generator_report`/`cell`
+stream carries its own `dbu`). That is a real composition mistake, not a
+tooling artefact, so it stays a hard error rather than being silently
+rescaled — rebuild the offending block against the PDK you are composing for.
 
 The one exception (#453/#469): for a **self-net**, `route_two_pin()`'s
 drawn-metal short check (above) reads the two ports' own block's GDS stream a
@@ -1011,6 +1026,7 @@ exit codes).
   "cell_name": "ota_top_0",
   "gds_path": "ota_top_0.gds",
   "pdk": { "name": "sky130A", "variant": "sky130A", "version": "open_pdks 0fe599b" },
+  "dbu_um": 0.001,
   "bbox_um": { "x0": -0.92, "y0": -0.92, "x1": 14.2, "y1": 2.16 },
   "ports": [
     {
@@ -1087,6 +1103,7 @@ exit codes).
 | `cell_name` | string | Name of the top cell written into `gds_path`, containing every placed block's cell as a translated sub-cell instance plus all routed metal. |
 | `gds_path` | string | Resolved output path (echoes `options.output`, or the computed default). |
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields. |
+| `dbu_um` | number | Database unit (µm) the composed cell was written at — the one value every block's own stream declared (a mismatch is an error, see above), matching [`klt gen`](gen.md)'s field of the same name. Reported so this response can be nested as a `blocks[].generator_report` one level up without re-reading the stream. |
 | `bbox_um` | object | Bounding box of the *composed* cell — the union of every placed block's own `bbox_um`, translated by its `offset_um` (computed arithmetically from each block's reported `bbox_um`, never re-derived from drawn geometry). |
 | `ports[]` | array\<object\> | The composed cell's **own** named terminals (#1189), in the composed (post-placement) coordinate frame — one per request `pins[]` entry, in request order. Same entry shape as [`klt gen`](gen.md)'s `ports[]` (`name`, `net`, `layer`, `x_um`, `y_um`, `width_um`, `direction_deg`) plus `block`/`port` recording which sub-block port it was promoted from. `name` **and** `net` are the `pins[]` entry's own `net` string — the same name written as the port's `kdb.Text` label — so the composed cell's port name, its drawn label, and the name `klt extract` recovers all agree, and the level above addresses it as `connectivity[].pins[].port`. Always present; **empty when the request supplied no `pins[]`** (backward compatible). Only `pins[]` is promoted: auto-exposing every sub-block port would both flood the parent with internal terminals and collide names across blocks (two `mos_array` blocks both report `U0_D`). A `pins[]` port with no reported `{x_um, y_um, layer}` geometry has no composed-frame position and is skipped (the same `drc_hints.notes[]` entry the label path emits explains why); two `pins[]` entries sharing one `net` name both appear, with a note that only the first is addressable by name one level up. |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
@@ -1150,6 +1167,7 @@ $ klt gen-compose request.json
 cell_name: ota_top_0
 gds_path: ota_top_0.gds
 pdk: sky130A (open_pdks 0fe599b)
+dbu_um: 0.001
 bbox_um: (-0.92, -0.92) - (14.2, 2.16)
 
 blocks:

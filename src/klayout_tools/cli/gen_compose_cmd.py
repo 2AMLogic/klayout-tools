@@ -66,6 +66,7 @@ def _print_text(report: dict) -> None:
     print(f"gds_path: {report['gds_path']}")
     pdk = report["pdk"]
     print(f"pdk: {pdk['variant']} ({pdk['version'] or '-'})")
+    print(f"dbu_um: {report['dbu_um']}")
     bbox = report["bbox_um"]
     print(f"bbox_um: ({bbox['x0']}, {bbox['y0']}) - ({bbox['x1']}, {bbox['y1']})")
 
