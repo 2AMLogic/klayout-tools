@@ -9129,10 +9129,14 @@ def test_parasitics_summary_block_shape(tmp_path):
     }
     # `substrate_dc_tie` (issue #1263): every synthesized substrate identity
     # this extraction produced, plus the shunt resistance used to give it a
-    # DC path to SPICE's global ground node `0`.
+    # DC path to SPICE's global ground node `0`. `node_scope` (issue #1503):
+    # a constant `"global"`, since that tied identity is also declared
+    # SPICE-global (a top-of-file `.GLOBAL` card) -- see "Substrate DC
+    # reference" in `docs/cli/extract.md`.
     assert para["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
+        "node_scope": "global",
     }
     # `mom_crosscheck` (issue #798) is `None` unless `--mom-net` was given --
     # additive, present but empty here (this test does not pass `mom_net`).
@@ -11703,12 +11707,18 @@ def _make_floating_substrate_layout() -> kdb.Layout:
 
 
 def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
-    """The structural half of issue #1263: `--parasitics` writes one large
-    shunt resistor from the deck's synthesized substrate net to SPICE's
-    global ground node `0`, **inside** the `.SUBCKT` body -- so the tie
-    travels with the extracted artifact itself and needs no cooperation from
-    whatever testbench includes it -- while leaving the subcircuit's declared
-    pin interface byte-identical to a non-parasitic extraction."""
+    """The structural half of issue #1263 (DC convergence) plus issue #1503
+    (node scope): `--parasitics` writes one large shunt resistor from the
+    deck's synthesized substrate net to SPICE's global ground node `0`,
+    **inside** the `.SUBCKT` body -- so the tie travels with the extracted
+    artifact itself and needs no cooperation from whatever testbench
+    includes it -- while leaving the subcircuit's declared pin interface
+    byte-identical to a non-parasitic extraction. It also declares that same
+    net name SPICE-**global** via a top-of-file `.GLOBAL` card (issue #1503),
+    so an `X`-instantiated testbench's own same-named node is the identical
+    physical node, not a disconnected per-instance one -- see
+    `test_parasitics_substrate_global_net_reaches_x_instantiated_testbench`
+    below for the end-to-end electrical proof."""
     path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
     plain = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
     para = run_extract(
@@ -11718,19 +11728,25 @@ def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
     plain_text = Path(plain["netlist_path"]).read_text()
     para_text = Path(para["netlist_path"]).read_text()
 
-    # No `--parasitics`: nothing synthesized a substrate net, nothing to tie.
+    # No `--parasitics`: nothing synthesized a substrate net, nothing to tie,
+    # nothing declared global.
     assert "_dctie" not in plain_text
+    assert ".GLOBAL" not in plain_text
 
-    # The tie sits between `.SUBCKT`/`.ENDS`, not at top level -- a
-    # `.global` card would have to be top-level, which an extracted
-    # subcircuit body is not allowed to emit (`klt sim` consumes it as an
-    # include, see "Verified compatible with klt sim's netlist convention").
+    # The `.GLOBAL` card is written once, before the first `.SUBCKT` -- a
+    # conventional top-level position (issue #1503) -- while the shunt
+    # resistor itself still sits between `.SUBCKT`/`.ENDS`.
+    global_lines = [ln for ln in para_text.splitlines() if ln.startswith(".GLOBAL")]
+    assert global_lines == [".GLOBAL vsubs"]
+    assert para_text.index(".GLOBAL vsubs") < para_text.index(".SUBCKT")
+
     body = para_text.split(".SUBCKT")[1].split(".ENDS")[0]
     assert "Rvsubs_dctie vsubs 0 1e+12" in body
 
     assert para["parasitics"]["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
+        "node_scope": "global",
     }
 
     # Purely additive: pin interface, pin count, and the schematic-equivalent
@@ -11794,10 +11810,20 @@ def test_parasitics_substrate_dc_tie_covers_isolated_region_variants(tmp_path):
     # parasitic ground capacitors themselves hang off.
     assert {"vsubs_iso0", "vsubs_iso1"}.issubset(tied)
     assert "vsubs" in tied
+    assert tie["node_scope"] == "global"
 
     body = Path(report["netlist_path"]).read_text()
     for entry in tie["nets"]:
         assert f"{entry['device']} {entry['net']} 0 1e+12" in body
+
+    # Issue #1503: every one of those identities -- not just the deck-wide
+    # default -- is also declared SPICE-global, once, before the first
+    # `.SUBCKT` -- so each isolated region's own substrate reference is
+    # equally reachable from an instantiating testbench, not just `vsubs`.
+    global_line = next(ln for ln in body.splitlines() if ln.startswith(".GLOBAL"))
+    global_names = set(global_line.split()[1:])
+    assert global_names == tied
+    assert body.index(global_line) < body.index(".SUBCKT")
 
 
 @_SKIP_NO_NGSPICE
@@ -11925,6 +11951,119 @@ def test_parasitics_substrate_dc_tie_is_harmless_where_nothing_floats(tmp_path):
         return {m["name"]: m["worst_case"]["value"] for m in result["measurements"]}
 
     assert _measure(with_tie) == _measure(without_tie)
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitics_substrate_global_net_reaches_x_instantiated_testbench(tmp_path):
+    """Issue #1503's own end-to-end proof: the top-level testbench's own
+    `vsubs` node is now the *same electrical node* as the `X`-instantiated
+    DUT's internal substrate reference -- not a disconnected per-instance
+    one -- verified via ngspice, not just netlist parsing.
+
+    `_make_floating_substrate_layout`'s fixture has no MOS body terminal
+    anywhere, so `vsubs` here is never a declared `.SUBCKT` pin (confirmed
+    by `test_parasitics_writes_substrate_dc_tie_inside_subckt_body`) -- it
+    is purely the internal node `_inject_parasitics` mints for the two nets'
+    ground capacitors. This is exactly the configuration the issue reports:
+    the *only* way a caller can reach it at all is the node-scoping this fix
+    adds, since it is neither a pin nor otherwise bindable at the call site.
+
+    Method: pulse the top-level `vsubs` node and measure the resulting
+    voltage at `AGR` a few hundred picoseconds later. `AGR` connects to
+    `vsubs` *only* through its own tiny ground capacitor (`CAGR`, ~0.3 fF)
+    in series with a negligible resistor (`RAGR`, 0.25 ohm) -- with no other
+    real DC path (`Ragr_hiz` below is a deliberately huge 1 Gohm bleed, not
+    a real return path) -- so a voltage step on `vsubs` shows up almost
+    immediately on `AGR` *only if the two `vsubs` references are truly the
+    same node*; a merely name-alike, electrically distinct pair of nodes
+    (the pre-#1503 defect) could not couple anything across them at all.
+
+    Three-way comparison, all from the *same* `--parasitics` extraction:
+    - **driven, as-shipped** (this fix): `AGR` follows the `vsubs` pulse.
+    - **undriven, as-shipped**: with no drive at all, `vsubs` and `AGR` both
+      stay at 0 V -- ruling out "any nonzero reading is a fluke" as an
+      explanation for the driven case above.
+    - **driven, `.GLOBAL` stripped** (the exact pre-#1503 defect,
+      reconstructed by deleting only that one line -- the same "strip one
+      card, keep everything else identical" technique
+      `test_parasitics_substrate_dc_tie_is_harmless_where_nothing_floats`
+      already uses for the DC-tie resistor): `AGR` stays at 0 V even though
+      the top-level `vsubs` is pulsed to 1 V, because the DUT's own internal
+      substrate reference is a disconnected, separately-tied-to-ground node
+      once `.GLOBAL` is gone -- i.e. exactly the silent-disconnection defect
+      issue #1503 reports.
+    """
+    from klayout_tools import sim
+
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with_global = tmp_path / "with_global.spice"
+    run_extract(path, "sky130", output=str(with_global), parasitics=True)
+
+    with_global_text = with_global.read_text()
+    assert ".GLOBAL vsubs" in with_global_text
+
+    # The A/B deck: byte-identical except the one `.GLOBAL vsubs` line is
+    # gone -- reconstructing exactly what `--parasitics` wrote before this
+    # issue's fix.
+    without_global = tmp_path / "without_global.spice"
+    without_global.write_text(
+        "\n".join(ln for ln in with_global_text.splitlines() if ln != ".GLOBAL vsubs")
+        + "\n"
+    )
+    assert ".GLOBAL" not in without_global.read_text()
+
+    def _measure(netlist_path, *, driven: bool):
+        testbench = tmp_path / f"tb_{netlist_path.stem}_{driven}.spice"
+        drive_line = "Vsubsdrv vsubs 0 PULSE(0 1 0 1p 1p 50n 100n)\n" if driven else ""
+        testbench.write_text(
+            f'.include "{netlist_path}"\n'
+            f"{drive_line}"
+            "Ragr_hiz AGR 0 1e9\n"
+            "Rvic_hiz VIC 0 1e9\n"
+            "Xdut AGR VIC TOP\n"
+        )
+        request = tmp_path / f"req_{netlist_path.stem}_{driven}.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "netlist": str(testbench),
+                    "analysis": {"kind": "tran", "args": "10p 200p"},
+                    "measurements": [
+                        {
+                            "name": "vagr",
+                            "spice": ".meas tran vagr FIND V(AGR) AT=100p",
+                        },
+                        {
+                            "name": "vsubs",
+                            "spice": ".meas tran vsubs FIND V(vsubs) AT=100p",
+                        },
+                    ],
+                }
+            )
+        )
+        result = sim.run_sim(str(request))
+        assert result["status"] == "pass"
+        return {m["name"]: m["worst_case"]["value"] for m in result["measurements"]}
+
+    driven_fixed = _measure(with_global, driven=True)
+    undriven_fixed = _measure(with_global, driven=False)
+    driven_broken = _measure(without_global, driven=True)
+
+    # As-shipped, driven: the top-level pulse on `vsubs` reaches all the way
+    # into the DUT's own internal substrate reference and couples onto AGR.
+    assert driven_fixed["vsubs"] == pytest.approx(1.0, abs=1e-3)
+    assert driven_fixed["vagr"] == pytest.approx(1.0, abs=1e-2)
+
+    # As-shipped, undriven: no spurious coupling -- both stay at 0 V.
+    assert undriven_fixed["vsubs"] == pytest.approx(0.0, abs=1e-9)
+    assert undriven_fixed["vagr"] == pytest.approx(0.0, abs=1e-9)
+
+    # Pre-#1503 reproduction (`.GLOBAL` stripped), driven: the top-level
+    # `vsubs` still reads the full 1 V pulse (it is a perfectly good node in
+    # its own right), but AGR never sees it -- the DUT's internal substrate
+    # reference is a different, disconnected node once the fix is removed.
+    assert driven_broken["vsubs"] == pytest.approx(1.0, abs=1e-3)
+    assert driven_broken["vagr"] == pytest.approx(0.0, abs=1e-9)
 
 
 # --------------------------------------------------------------------------- #

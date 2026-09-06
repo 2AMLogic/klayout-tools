@@ -16,6 +16,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract --parasitics`'s substrate DC-tie (issue #1263) now
+  also declares its tied net(s) SPICE-**global** (issue #1503), closing the
+  gap where an `X`-instantiated testbench's own `vsubs` (or `vsubs_iso<n>`)
+  node was electrically disconnected from the extracted subcircuit's
+  internal one -- the tie kept the instance's own node from floating (no
+  more singular-matrix error), but the parasitic ground-capacitance model it
+  anchors was silently computed against a node no testbench could reach or
+  drive. A `.GLOBAL <net> ...` card is now written once, before the first
+  `.SUBCKT`, for every synthesized substrate identity the extraction
+  produced (the deck-wide `substrate_net` and each `_iso<n>` variant, issue
+  #1128); the pin interface, `pin_count`, and every other `parasitics` count
+  stay byte-identical (`klt pex`'s `pin_count_mismatch`/`flat_dut_mismatch`
+  diagnostics, issue #1258, are unaffected). Additive JSON field:
+  `parasitics.substrate_dc_tie.node_scope` (always `"global"`), so a caller
+  can detect the node-scoping guarantee without reading the generated SPICE.
+  See `docs/cli/extract.md`'s "Substrate DC reference" section.
+
 - **Documented**: `klt gen diff_pair` places both legs at the **same x column
   per terminal** — the common-centroid checkerboard puts one `Q1` and one
   `Q2` sub-instance in every column at the same `x0`, so `Q1_<n>_S`/`_D`/`_G`
