@@ -9113,3 +9113,264 @@ def test_compose_routes_a_stub_widen_box_placed_clear_of_the_own_wire_leg(
 
     drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
     assert drc_report["violation_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Own-block escape check (issue #1527): a `blocks[].cell` port hand-declared
+# on a pre-existing stream's own internal wire has no obstacle model of the
+# block's own *interior* geometry once the leg leaves that port. Unlike a
+# same-block self-net (checks 3/4, #453/#469), which already compares its
+# backbone against its own block's other drawn shapes, an *inter*-block leg's
+# approach stub skipped that comparison entirely -- even though it draws real
+# metal inside the same block on its way out, and the whole-block bbox check
+# (#199) deliberately exempts exactly that stub (`_port_edge_margin_um`) with
+# no geometry check at all. `route_two_pin()` now also runs that comparison
+# for each endpoint whose own block is a `blocks[].cell` block (not a
+# `generator_report` one -- see that function's own "own-block escape check"
+# docstring for why the scope stops there).
+# --------------------------------------------------------------------------- #
+
+
+def _write_own_block_obstacle_gds(path, cell_name, obstacle_y0):
+    """Fabricate a library stream holding two *separate* li1 (67/20) shapes:
+    ``wire_a`` (a 1.5um-long horizontal leg at ``y=0.9-1.1``, the intended
+    net's own wire -- a port is later declared at its ``x=1.5`` end) and
+    ``obstacle`` (a short, *disconnected* 0.3um-wide box at ``x=1.7-2.0``,
+    ``y=obstacle_y0`` to ``obstacle_y0 + 0.2`` -- a different net's metal,
+    already drawn inside the same block, that no ``ports[]`` entry names).
+    ``obstacle_y0=0.9`` puts it directly in the path of an eastward escape
+    from ``wire_a``'s own port; a caller far enough away (e.g. ``y0=2.0``)
+    clears it entirely -- the two tests below use each.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    cell = layout.create_cell(cell_name)
+
+    def d(v):
+        return int(round(v / layout.dbu))
+
+    wire_a = kdb.Box(d(0.0), d(0.9), d(1.5), d(1.1))
+    obstacle = kdb.Box(d(1.7), d(obstacle_y0), d(2.0), d(obstacle_y0 + 0.2))
+    cell.shapes(li1).insert(wire_a)
+    cell.shapes(li1).insert(obstacle)
+    layout.write(str(path))
+    return str(path)
+
+
+def _own_block_escape_request(tmp_path, pdk_root, obstacle_y0, cell_name, output):
+    """A two-pin net, pin A a coordinate port on ``u1``'s own internal
+    ``wire_a`` (issue #1527's exact repro shape: a `blocks[].cell` block, no
+    generator ever ran over it), pin B a plain port on a *different* block
+    ``u2`` several microns east. Both ports face each other along the same
+    row (``y=1.0``), so ``manhattan_backbone()`` draws a single straight
+    east-west leg between them -- one that necessarily leaves ``u1`` through
+    whatever sits between ``wire_a``'s own end and ``u1``'s declared
+    ``bbox_um`` edge. ``u1``'s declared ``bbox_um`` (``x1=3.0``) is chosen so
+    the whole-block bbox check's own margin (#199,
+    ``_port_edge_margin_um``) already clears this leg on its own -- proving
+    any rejection below comes from the *new* geometry check, not the old one.
+    """
+    u1_gds = _write_own_block_obstacle_gds(tmp_path / "u1.gds", cell_name, obstacle_y0)
+    u2_gds = _write_library_gds(tmp_path / "u2.gds", {"pad": (0.4, 2.0)})
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "u1",
+                "cell": {
+                    "gds_path": u1_gds,
+                    "cell_name": cell_name,
+                    "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 3.0, "y1": 3.0},
+                    "ports": [
+                        {
+                            "name": "A",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 1.5,
+                            "y_um": 1.0,
+                            "width_um": 0.17,
+                            "direction_deg": 0,
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "u2",
+                "cell": {
+                    "gds_path": u2_gds,
+                    "cell_name": "pad",
+                    "ports": [
+                        {
+                            "name": "B",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 0.0,
+                            "y_um": 1.0,
+                            "width_um": 0.17,
+                            "direction_deg": 180,
+                        }
+                    ],
+                },
+            },
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["u1", "u2"],
+            "origins_um": {"u1": {"x": 0.0, "y": 0.0}, "u2": {"x": 5.0, "y": 0.0}},
+        },
+        "connectivity": [
+            {
+                "net": "N",
+                "pins": [{"block": "u1", "port": "A"}, {"block": "u2", "port": "B"}],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {"cell_name": cell_name + "_top", "output": str(output)},
+    }
+
+
+def test_compose_rejects_a_leg_whose_own_block_escape_crosses_its_own_other_net(
+    tmp_path, pdk_root
+):
+    # Issue #1527's exact repro shape: pin A is a coordinate-tapped port on
+    # `u1`'s own internal wire; the escape direction (east, toward `u2`)
+    # crosses a *different* net's metal already drawn inside `u1` -- metal no
+    # `ports[]` entry names, so nothing previously modelled it as an
+    # obstacle. The whole-block bbox check (#199) would have let this
+    # straight through: the crossing sits well inside the margin
+    # `_port_edge_margin_um` grants port A's own approach (`u1`'s declared
+    # `bbox_um` extends to x=3.0, well past the obstacle at x=1.7-2.0) -- see
+    # `_own_block_escape_request`'s own docstring.
+    output = tmp_path / "own_block_short.gds"
+    request = _own_block_escape_request(
+        tmp_path, pdk_root, 0.9, "own_block_short", output
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["N"]
+    assert report["nets"][0]["routed"] is False
+    reason = report["nets"][0]["legs"][0]["reason"]
+    assert "issue #1527" in reason
+    assert "u1" in reason
+    assert "silent short" in reason
+
+    # No violating metal was ever drawn into the composed output.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell(request["options"]["cell_name"])
+    li1 = layout.layer(67, 20)
+    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+
+
+def test_compose_routes_a_leg_whose_own_block_escape_clears_its_own_other_net(
+    tmp_path, pdk_root
+):
+    # Control case: the same two blocks, the same escape direction, but the
+    # obstacle sits at y=2.0-2.2 instead of y=0.9-1.1 -- well clear of the
+    # y=1.0 row the escape actually runs on. #1527's fix must not reject a
+    # legitimate inter-block leg, only the one that actually crosses real
+    # drawn metal.
+    output = tmp_path / "own_block_clear.gds"
+    request = _own_block_escape_request(
+        tmp_path, pdk_root, 2.0, "own_block_clear", output
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] == pytest.approx(3.5)
+    assert output.is_file()
+
+    drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
+    assert drc_report["violation_count"] == 0
+
+
+def test_route_two_pin_own_block_escape_check_needs_a_cell_sourced_block(
+    tmp_path, pdk_root
+):
+    # Scope guard: the same crossing shape, but on a `generator_report`
+    # block instead of a `blocks[].cell` one, must NOT be rejected by this
+    # check -- a generator can legitimately draw real, unreported geometry
+    # (e.g. `mos_array`'s own dummy matching columns) this check cannot tell
+    # apart from an actual obstacle, so it is scoped to `cell` blocks only
+    # (see route_two_pin()'s own docstring). Direct route_two_pin() call,
+    # mirroring test_route_two_pin_same_row_pair_needs_drawn_geometry_to_be_caught
+    # above -- hand-builds a block dict with source "generator_report" so the
+    # scope guard is exercised in isolation, without depending on any real
+    # generator's own dummy-column layout.
+    u1_gds = _write_own_block_obstacle_gds(tmp_path / "u1.gds", "gen_block", 0.9)
+    u2_gds = _write_library_gds(tmp_path / "u2.gds", {"pad": (0.4, 2.0)})
+    blocks = gen_compose._parse_blocks(
+        [
+            {
+                "id": "u1",
+                "cell": {
+                    "gds_path": u1_gds,
+                    "cell_name": "gen_block",
+                    "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 3.0, "y1": 3.0},
+                    "ports": [
+                        {
+                            "name": "A",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 1.5,
+                            "y_um": 1.0,
+                            "width_um": 0.17,
+                            "direction_deg": 0,
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "u2",
+                "cell": {
+                    "gds_path": u2_gds,
+                    "cell_name": "pad",
+                    "ports": [
+                        {
+                            "name": "B",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 0.0,
+                            "y_um": 1.0,
+                            "width_um": 0.17,
+                            "direction_deg": 180,
+                        }
+                    ],
+                },
+            },
+        ]
+    )
+    # Simulate a generator-produced block: only "source" differs from the
+    # `cell` block above.
+    blocks["u1"]["source"] = "generator_report"
+    offsets = {"u1": {"x": 0.0, "y": 0.0}, "u2": {"x": 5.0, "y": 0.0}}
+    bboxes = {
+        "u1": blocks["u1"]["bbox_um"],
+        "u2": blocks["u2"]["bbox_um"],
+    }
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+    geometry = {
+        "u1": gen_compose.read_block_layer_geometry(
+            "u1", blocks["u1"], offsets["u1"], route_layer
+        ),
+        "u2": gen_compose.read_block_layer_geometry(
+            "u2", blocks["u2"], offsets["u2"], route_layer
+        ),
+    }
+
+    result = gen_compose.route_two_pin(
+        {"block": "u1", "port": "A"},
+        {"block": "u2", "port": "B"},
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer,
+        block_geometry=geometry,
+    )
+    # Would be rejected ("issue #1527") if "u1" were still a `cell` block --
+    # see test_compose_rejects_a_leg_whose_own_block_escape_crosses_its_own_net
+    # above, whose fixture this mirrors exactly.
+    assert result["routed"] is True

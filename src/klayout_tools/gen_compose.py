@@ -2700,18 +2700,22 @@ def _self_net_drawn_short(
     own_ports: dict[str, Any],
     own_offset: dict[str, float],
 ) -> tuple[float, list[str]] | None:
-    """Whether a self-net's drawn metal lands on its own block's *other*
-    drawn shapes on the route layer.
+    """Whether a leg's drawn metal lands on a placed block's *other* drawn
+    shapes on the route layer.
 
     ``geometry`` is :func:`read_block_layer_geometry`'s result for the block
-    both pins sit on. Every merged shape of that block on the route layer is
-    an obstacle **except** the two the route is supposed to land on -- the
-    shapes holding the two endpoint ports themselves. Any remaining shape the
-    drawn metal actually overlaps (positive area; a mere edge touch is a
-    spacing question for ``klt drc``, not a short) is a silent short.
+    to check against -- both a same-block self-net's shared block (``a``/
+    ``b`` its two endpoints, check 4, #453/#469) and, since issue #1527, a
+    single inter-block leg endpoint's own block (``a``/``b`` both that one
+    endpoint's own landing point -- see the "own-block escape check" caller).
+    Every merged shape of ``geometry``'s block on the route layer is an
+    obstacle **except** whatever shape(s) ``a``/``b`` land on -- the route is
+    meant to terminate there. Any remaining shape the drawn metal actually
+    overlaps (positive area; a mere edge touch is a spacing question for
+    ``klt drc``, not a short) is a silent short.
 
     Returns ``(overlap_um2, crossed_port_names)`` for the first such shape
-    set, or ``None`` when the route only lands on its own two endpoints.
+    set, or ``None`` when the route only lands on shapes at ``a``/``b``.
     """
     import klayout.db as kdb
 
@@ -2824,6 +2828,31 @@ def route_two_pin(
        short. This check is independent of, and composes with, check 3 --
        it catches cases (different rows, wider routes) check 3's reported-
        geometry model cannot see.
+
+       **Own-block escape check** (issue #1527): checks 3/4 above only ever
+       ran for a same-block self-net (``pin_a``/``pin_b`` share a block) --
+       an inter-block leg (the far more common case) skipped both entirely,
+       even though it still draws an approach stub inside *each* endpoint's
+       own block on its way out, exactly the same as a self-net's backbone
+       does. Nothing checked that stub against the block's other drawn
+       geometry: check 5 below only ever modelled a pin's own block by its
+       bbox, with an unavoidable margin (:func:`_port_edge_margin_um`)
+       exempting the approach stub from being flagged at all, so a
+       coordinate-tapped ``blocks[].cell`` port whose escape direction
+       happened to run across a *different* net already drawn inside that
+       same block composed ``routed: true`` and DRC-clean while silently
+       shorting the two nets together. When ``block_geometry`` is supplied,
+       :func:`_self_net_drawn_short` is now also run once per endpoint whose
+       own block is a ``blocks[].cell`` block (independently of
+       ``same_block_self_net`` -- scoped to ``cell`` blocks only, not every
+       ``generator_report`` block too, since a generator can legitimately
+       draw real, unreported geometry this check cannot tell apart from an
+       obstacle, e.g. ``mos_array``'s own dummy matching columns, already
+       excluded from the netlist by ``klt extract``'s own dummy-suppression
+       convention), comparing that endpoint's drawn leg against its *own*
+       block's other drawn shapes on ``route_layer`` -- excluding only the
+       shape its own port lands on (not the far endpoint's port, which is
+       not on this block at all).
     5. **Obstacle-overlap check** (#199 case 1): after each port's own
        unavoidable "sit set back from my own block's edge" margin is
        excluded (:func:`_port_edge_margin_um`), the drawn backbone must not
@@ -2869,9 +2898,15 @@ def route_two_pin(
     only time a route is actually drawn. ``block_geometry`` (block ``id`` ->
     :func:`read_block_layer_geometry` result, ``None`` for a block that draws
     nothing on the route layer) is likewise optional and likewise always
-    supplied by ``compose()`` for the block a self-net lands on; without it
-    check 4 is skipped and only check 3's weaker reported-geometry pad model
-    applies. ``extraction_deck`` is likewise optional and only consulted
+    supplied by ``compose()`` -- for both endpoint blocks of every leg since
+    issue #1527, not only a same-block self-net's shared one; without it
+    check 4 and the own-block escape check above are both skipped and only
+    check 3's weaker reported-geometry pad model applies (same-block self-net
+    legs only -- an inter-block leg has no check 3 fallback, since that
+    check's reported-``width_um`` pad model only ever compared against
+    *other ports on the same block*, which an inter-block leg's own block
+    need not report at all). ``extraction_deck`` is likewise optional and
+    only consulted
     (check 6) when both it and ``route_layer`` are given -- omitting it (e.g.
     a pre-#454 caller) draws every pin directly on ``route_layer`` with no
     via-drop, exactly as before that issue. ``waypoints_um`` (#634) is
@@ -3492,6 +3527,83 @@ def route_two_pin(
                         "routing.cross_block_layer_role, issue #1168), or "
                         "wire this net externally"
                     )
+
+        # Own-block escape check (issue #1527): the two checks above only
+        # ever ran for a same-block self-net -- a leg whose two pins sit on
+        # *different* blocks skipped both entirely. But such a leg still
+        # draws an approach stub inside each endpoint's own block on its way
+        # out (the whole-block bbox check further below deliberately exempts
+        # exactly that stub, via each own-pin's `_port_edge_margin_um`
+        # allowance, so a normal approach is never rejected for "crossing my
+        # own block") -- and nothing checked whether that stub crosses a
+        # *different* net already drawn inside that same block. That is
+        # precisely the gap a coordinate-tapped `blocks[].cell` port opens:
+        # the tap sits on one of the block's own internal wires, so the one
+        # region a leg is guaranteed to cross is the one region no obstacle
+        # model covered.
+        #
+        # Scoped to a `blocks[].cell` endpoint only (`block.get("source") ==
+        # "cell"`), deliberately *not* every block. A `cell` block's every
+        # `ports[]` entry is hand-declared by the caller directly onto the
+        # stream's own geometry (`_parse_cell_block`) -- so, for that block
+        # kind, "every merged shape my own port does not land on is a
+        # genuinely different net" is a sound assumption. It is not sound for
+        # a `generator_report` block: e.g. `mos_array`'s own `dummy` columns
+        # (added by default) draw real, unreported metal pads flanking the
+        # array purely for layout matching, which `klt extract`'s own
+        # dummy-suppression convention (#295/#462) already excludes from the
+        # netlist -- this check cannot tell that apart from an actual
+        # obstacle, and a first attempt at this issue that ran unconditionally
+        # rejected several previously-`routed: true` fixtures that route
+        # straight over such dummy geometry (verified against this repo's own
+        # `mos_array`/`bjt_array` composition tests) for a "short" `klt
+        # extract` would never actually see. A generator that reports
+        # everything it draws as either a port or a suppressed dummy has no
+        # such gap to begin with, so it is left to the coarser whole-block
+        # bbox check (#199) below, unchanged. Compare each endpoint's own
+        # drawn leg against its *own* block's other drawn shapes on the route
+        # layer, excluding only the shape that endpoint's own port lands on
+        # -- unlike the same-block check above, the *other* endpoint is not
+        # on this block at all, so nothing else needs excluding here.
+        if not same_block_self_net and effective_block_geometry is not None:
+            for own_id, pin, point, block in (
+                (own_a, pin_a, a, block_a),
+                (own_b, pin_b, b, block_b),
+            ):
+                if block.get("source") != "cell":
+                    continue
+                geometry = effective_block_geometry.get(own_id)
+                if geometry is None:
+                    continue
+                drawn = _self_net_drawn_short(
+                    points,
+                    geometry,
+                    point,
+                    point,
+                    width_um,
+                    block.get("ports") or {},
+                    offsets_um[own_id],
+                )
+                if drawn is not None:
+                    overlap_um2, crossed_names = drawn
+                    if not crossed_names:
+                        where = "drawn geometry (no port of its own sits on it)"
+                    else:
+                        noun = "port" if len(crossed_names) == 1 else "ports"
+                        where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
+                    return (
+                        f"leg's drawn {width_um}um metal overlaps "
+                        f"{overlap_um2:.4g}um^2 of block '{own_id}''s own "
+                        f"drawn geometry on the route layer ({where}) near "
+                        f"its own port '{pin['port']}' -- the escape from "
+                        f"this port would draw a silent short to another net "
+                        f"already present inside block '{own_id}' (issue "
+                        "#1527); tap a different point on the intended net, "
+                        "supply waypoints_um that route the approach clear of "
+                        "the obstruction, or route to a layer_role with a "
+                        "metal2/via stack instead (or configure "
+                        "routing.cross_block_layer_role, issue #1168)"
+                    )
         return None
 
     # Drive the retry (#1168): try the primary route_layer first -- the
@@ -3868,9 +3980,17 @@ def route_bundle(
     ``block_geometry_for`` is an optional callable taking a block ``id`` and
     returning the ``{block_id: geometry}`` mapping :func:`route_two_pin`
     takes as ``block_geometry`` (``compose()`` passes its lazily-populated
-    per-block cache); it is consulted only for a leg whose two pins sit on the
-    same block, exactly as ``compose()`` did for a two-pin self-net before
-    this function existed. ``leg_conflict`` is an optional callable taking a
+    per-block cache); it is also consulted for an *inter*-block leg's own
+    ``blocks[].cell`` endpoint(s) (issue #1527, not only when both pins sit
+    on the same block) -- a leg whose two pins sit on different blocks still
+    draws its approach stub inside each endpoint's own block, so a ``cell``
+    endpoint (an existing GDS/OASIS stream this command did not generate,
+    whose ``ports[]`` are hand-declared directly on the stream's own
+    geometry) needs its own block's drawn geometry to check that stub
+    against (see :func:`route_two_pin`'s own "own-block escape check"). A
+    ``generator_report`` endpoint is deliberately left out of this fetch --
+    see that same docstring for why. ``leg_conflict`` is an optional callable
+    taking a
     candidate leg's drawn ``points_um``, ``via_drops``, ``stub_widen``, and
     (issue #1386) its effective ``route_layer`` (the same four fields
     :func:`route_two_pin` returns for it -- issue #1197 widened this from
@@ -3986,13 +4106,41 @@ def route_bundle(
         if _find(i) == _find(j):
             continue  # already connected through other legs -- no leg needed
 
+        # Own-block geometry (issue #1527): for an *inter*-block leg (unlike
+        # a same-block self-net, always fetched below), also fetched for
+        # whichever endpoint's own block is a `blocks[].cell` block -- an
+        # existing GDS/OASIS stream this command did not generate, whose
+        # `ports[]` are hand-declared by the caller directly on the stream's
+        # own internal geometry (see `_parse_cell_block`). That is the one
+        # block kind where "every merged shape not touching my own declared
+        # port is a genuinely different net" actually holds: a
+        # `generator_report` block can legitimately carry drawn geometry no
+        # `ports[]` entry names (e.g. `mos_array`'s own unreported dummy
+        # matching columns, deliberately excluded from `klt extract`'s
+        # netlist via its own dummy-suppression convention, #295/#462) that
+        # this check cannot tell apart from a real obstacle -- so it is
+        # scoped to `cell` blocks only, see route_two_pin()'s own "own-block
+        # escape check" docstring. block_geometry_for()/
+        # cross_block_geometry_for() each return the *same* growing
+        # {block_id: geometry} cache object regardless of which block id is
+        # requested (populating it lazily, once per block), so the two
+        # assignments below always end up pointing at one dict either way.
         geometry = None
         cross_geometry = None
-        if pins[i]["block"] == pins[j]["block"]:
-            if block_geometry_for is not None:
+        if block_geometry_for is not None:
+            if pins[i]["block"] == pins[j]["block"]:
                 geometry = block_geometry_for(pins[i]["block"])
-            if cross_block_geometry_for is not None:
+            else:
+                for pin in (pins[i], pins[j]):
+                    if blocks[pin["block"]].get("source") == "cell":
+                        geometry = block_geometry_for(pin["block"])
+        if cross_block_geometry_for is not None:
+            if pins[i]["block"] == pins[j]["block"]:
                 cross_geometry = cross_block_geometry_for(pins[i]["block"])
+            else:
+                for pin in (pins[i], pins[j]):
+                    if blocks[pin["block"]].get("source") == "cell":
+                        cross_geometry = cross_block_geometry_for(pin["block"])
         result = route_two_pin(
             pins[i],
             pins[j],
@@ -4536,12 +4684,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     "pin after extraction"
                 )
 
-    # Drawn-geometry obstacles for the self-net drawn-metal check (#453/#469),
-    # read lazily and cached per block: only a *self*-net needs them (every
-    # other net is already covered by the whole-block bbox check), and only
-    # once per block however many self-nets land on it. A second such cache,
-    # keyed the same way, covers cross_route_layer (#1168) for the same
-    # check retried on the cross-block layer.
+    # Drawn-geometry obstacles for the self-net drawn-metal check (#453/#469)
+    # and the own-block escape check (#1527), read lazily and cached per
+    # block, once per block however many legs land on it. Originally read
+    # only for a same-block self-net (every *inter*-block net was covered by
+    # the whole-block bbox check alone) -- but that bbox check only ever
+    # modelled each pin's own block by its bbox, with an unavoidable margin
+    # exempting the port's own approach stub from being flagged, and nothing
+    # else looked at what that stub might actually cross on its way out
+    # (#1527). So every leg's *own* endpoint block(s) are read here now, not
+    # only a same-block self-net's shared one -- see route_bundle()'s own
+    # updated docstring. A second such cache, keyed the same way, covers
+    # cross_route_layer (#1168) for the same checks retried on the
+    # cross-block layer.
     block_geometry_cache: dict[str, dict[str, Any] | None] = {}
     cross_block_geometry_cache: dict[str, dict[str, Any] | None] = {}
 
