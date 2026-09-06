@@ -2880,10 +2880,44 @@ def _stage_script_lines(
         ]
     elif stage == "cts":
         assert io_spec is not None
+        # Guaranteed non-None here: the request validator (`run_place_and_
+        # route`) already rejects `target_stage in {"place", "cts",
+        # "route"}` with `clock_port is None` before this generator ever
+        # runs -- see its own `stage_index >= STAGE_ORDER.index("place")`
+        # check.
+        assert clock_port is not None
         buf_cell = _CTS_BUFFER_CELLS[cell_library]
         lines += [
             f"set_wire_rc -layer {io_spec['layer_v']}",
             "estimate_parasitics -placement",
+            # Issue #1506: `clock_tree_synthesis` (TritonCTS) segfaults --
+            # confirmed live (a real `openroad/orfs:latest` container,
+            # `26Q3-1510-g6cb3f2b704`, against a real sky130A liberty/LEF
+            # pair) reproducing the reported `exit 139` byte-for-byte, stack
+            # trace bottoming out in `TritonCTS::separateMacroRegSinks` --
+            # when `constraints.clock_port` names a real net with **zero**
+            # fanout to any sequential (clocked) cell. This is a legitimate,
+            # schema-forced input this command must survive: every stage
+            # past `"floorplan"` requires `clock_port`/`clock_period_ns`
+            # unconditionally, so a genuinely clockless, all-combinational
+            # block still has to declare *some* clock net to reach `"cts"`/
+            # `"route"` at all. `all_registers -clock [get_clocks ...]` (a
+            # standard OpenSTA query -- already loaded by this stage's own
+            # `read_liberty`/`read_db`) answers "does this clock drive any
+            # sequential element" directly, without this module needing its
+            # own liberty/netlist parser to classify cells as sequential --
+            # OpenSTA already knows, from the same liberty this stage
+            # already reads (live-verified: 0 registers for the zero-
+            # fanout repro above, 2 for an otherwise-identical design with
+            # two real `dfxtp` sinks on the same clock). Zero registered
+            # sinks -> skip `clock_tree_synthesis` entirely as a clean
+            # no-op and continue -- matching this module's own existing
+            # precedent of leaning on OpenROAD/OpenSTA as the authority
+            # rather than re-deriving what it already knows (see this
+            # module's own docstring, "Macro-pin routability cross-check").
+            f"set _klt_cts_seq_sinks [llength [all_registers -clock "
+            f"[get_clocks {{{clock_port}}}]]]",
+            "if {$_klt_cts_seq_sinks > 0} {",
             # `-sink_clustering_enable -obstruction_aware` (P&R survey
             # section 3.4, issue #783): TritonCTS clusters nearby sinks
             # under a shared buffer instead of one buffer per sink, and
@@ -2910,6 +2944,17 @@ def _stage_script_lines(
             # CTS's own buffers -- one legalization pass covers both.
             "estimate_parasitics -placement",
             "repair_timing -hold",
+            "} else {",
+            f'puts "klt place-and-route: clock {clock_port} has no '
+            "sequential (registered) fanout -- skipping "
+            'clock_tree_synthesis (see issue #1506)"',
+            "}",
+            # `report_clock_skew_metric -setup` below (unconditional,
+            # `_metrics_report_lines(include_clock_skew=True)`) is safe to
+            # run either way -- live-verified: it does not error when no
+            # clock tree was built in the `else` branch above, it simply
+            # reports on the (unbuffered) ideal clock same as it would if
+            # this stage never ran at all.
             "detailed_placement",
         ]
     else:  # stage == "route"

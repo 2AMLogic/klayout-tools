@@ -4206,6 +4206,60 @@ def test_cts_stage_enables_sink_clustering_and_obstruction_awareness(
     assert not any("-balance_levels" in line for line in cts_lines)
 
 
+def test_cts_stage_guards_clock_tree_synthesis_against_zero_fanout_clock(
+    tmp_path, monkeypatch
+):
+    """Issue #1506: the `"cts"` stage's `clock_tree_synthesis` call must be
+    guarded by an `all_registers -clock [get_clocks ...]` check -- zero
+    registered (sequential) sinks on the declared clock skips the real
+    `clock_tree_synthesis` call as a clean no-op instead of invoking it (see
+    this same file's live `test_integration_real_openroad_clockless_netlist_
+    cts_does_not_segfault` for the real-`openroad` confirmation that the
+    unguarded call segfaults on exactly this input). `repair_timing -hold`
+    (only meaningful once a real clock tree exists) must live inside the
+    same guarded branch, and `detailed_placement` must remain unconditional
+    -- covering both a real design's own hold-buffer legalization pass and a
+    zero-fanout design's ordinary post-placement legalization."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+
+    guard_index = next(
+        i
+        for i, line in enumerate(cts_lines)
+        if line.startswith("set _klt_cts_seq_sinks [llength [all_registers")
+    )
+    assert "[get_clocks {clk}]]]" in cts_lines[guard_index]
+
+    if_index = cts_lines.index("if {$_klt_cts_seq_sinks > 0} {")
+    cts_call_index = next(
+        i for i, line in enumerate(cts_lines) if line.startswith("clock_tree_synthesis")
+    )
+    hold_index = cts_lines.index("repair_timing -hold")
+    else_index = cts_lines.index("} else {")
+    endif_index = cts_lines.index("}", else_index + 1)
+    placement_index = max(
+        i for i, line in enumerate(cts_lines) if line == "detailed_placement"
+    )
+
+    # `clock_tree_synthesis`/`repair_timing -hold` live strictly inside the
+    # `if`/`} else {` guard, and `detailed_placement` runs unconditionally,
+    # after the guard closes.
+    assert (
+        guard_index
+        < if_index
+        < cts_call_index
+        < hold_index
+        < else_index
+        < endif_index
+        < placement_index
+    )
+
+
 def test_cts_and_route_stages_report_clock_skew_metric(tmp_path, monkeypatch):
     """Issue #783: `report_clock_skew_metric -setup` (the response's new
     `clock_skew_ns` field) must run on the `"cts"` and `"route"` stages --
@@ -6129,6 +6183,84 @@ def test_integration_real_openroad_def_pins_extract_lvs_pipeline(tmp_path, monke
     lvs_report = run_lvs(lvs_request_path)
 
     assert lvs_report["status"] == "match"
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_integration_real_openroad_clockless_netlist_cts_does_not_segfault(
+    tmp_path, monkeypatch
+):
+    """Issue #1506: a purely combinational netlist -- no `dfrtp`/`dfxtp`/etc.
+    instances at all -- that still has to declare *some*
+    `constraints.clock_port`/`clock_period_ns` to reach `target_stage:
+    "route"` (this command's own schema requires both, unconditionally, past
+    `"floorplan"`) used to crash the `"cts"` stage's real `openroad`
+    subprocess with a native segfault (`exit 139`) the moment
+    `clock_port` named a real net -- any real net, since this design has no
+    sequential element to attach a clock to at all -- rather than the
+    misspelled/nonexistent-net workaround this issue's own repro found.
+
+    Confirmed live against this exact reproduction, `openroad
+    26Q3-1510-g6cb3f2b704` + this repo's own pinned volare `sky130A` install
+    (`open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b`, matching the
+    issue's own "Environment" section): the real `clock_tree_synthesis`
+    call segfaults with a stack trace bottoming out in
+    `cts::TritonCTS::separateMacroRegSinks` when built without this fix, and
+    exits cleanly (a real `openroad` process, `exit 0`, `RuntimeError`-free)
+    with it -- see `_stage_script_lines`'s own `"cts"` branch for the
+    `all_registers -clock [get_clocks ...]` guard this test exercises.
+
+    TDD: this test was run against the pre-fix `_stage_script_lines` (no
+    zero-fanout guard) first, live-reproducing the reported `exit 139` and
+    its `TritonCTS::separateMacroRegSinks` stack trace byte-for-byte, before
+    the guard was added.
+    """
+    root, variant = _REAL_SKY130_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    # A hand-written, already-mapped structural netlist -- no sequential
+    # element anywhere (mirrors the def_pins/LVS test above's precedent of
+    # feeding OpenROAD a pre-mapped netlist directly, bypassing `klt
+    # synthesize`/Yosys entirely). `a0` (an ordinary combinational input
+    # pin) is reused below as the placeholder clock -- exactly the repro
+    # this issue describes: "an ordinary combinational input pin, reused as
+    # a placeholder clock purely to satisfy the schema's required-field
+    # check".
+    netlist_path = tmp_path / "comb_bank.v"
+    netlist_path.write_text(
+        "module comb_bank (input a0, input a1, input a2, input a3,\n"
+        "                   output y0, output y1, output y2, output y3);\n"
+        "  sky130_fd_sc_hd__inv_1 u0 (.A(a0), .Y(y0));\n"
+        "  sky130_fd_sc_hd__inv_1 u1 (.A(a1), .Y(y1));\n"
+        "  sky130_fd_sc_hd__inv_1 u2 (.A(a2), .Y(y2));\n"
+        "  sky130_fd_sc_hd__inv_1 u3 (.A(a3), .Y(y3));\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(
+            netlist=str(netlist_path),
+            hdl_toplevel="comb_bank",
+            constraints={"clock_port": "a0", "clock_period_ns": 1000.0},
+        ),
+    )
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
 
 
 # Sanity: `subprocess` really is the module this file's stubs patch (guards
