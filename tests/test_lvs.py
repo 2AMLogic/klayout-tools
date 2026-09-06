@@ -1556,6 +1556,134 @@ R1 A B 1k
 
 
 # --------------------------------------------------------------------------- #
+# Issue #1533: merge/split classification is scoped to a weakly-connected
+# component, not to the whole compare run
+# --------------------------------------------------------------------------- #
+
+# Block A: a buffer whose *layout* carries one extra device driving a
+# deliberately-dangling net (`A_DANGLE`) the reference has no counterpart for.
+# On its own that is the unambiguous `net.unmatched` case -- there is no
+# renamed both-sided pairing anywhere to justify calling it a split.
+_ISLAND_A_REFERENCE = """M1 A_MID A_IN A_VGND A_VGND nfet W=0.65U L=0.15U
+M2 A_MID A_IN A_VPWR A_VPWR pfet W=1.0U L=0.15U
+M3 A_OUT A_MID A_VGND A_VGND nfet W=0.65U L=0.15U
+M4 A_OUT A_MID A_VPWR A_VPWR pfet W=1.0U L=0.15U
+"""
+_ISLAND_A_LAYOUT = (
+    _ISLAND_A_REFERENCE + "M9 A_DANGLE A_OUT A_VGND A_VGND nfet W=0.65U L=0.15U\n"
+)
+
+# Block B: an electrically unrelated resistor network -- no node, supply or
+# device is shared with block A -- carrying a *genuine* split (the reference's
+# single `B_MID` is two separate nets in the layout). It contributes the
+# renamed both-sided pairing (`B_MID1` <-> `B_MID`) that block A lacks.
+#
+# Note the two fragments `B_MID1`/`B_MID2` share no device on the layout side
+# at all: `B_MID1` reaches only `B_IN`/`B_AUX`, `B_MID2` only `B_OUT`. They are
+# one component only once the comparer's own net pairings glue the layout and
+# reference graphs together -- the case that keeps a real split classified as
+# `net.split` after this scoping change (see `_net_mismatch_pools`).
+_ISLAND_B_REFERENCE = """R5 B_IN B_MID 1k
+R6 B_MID B_OUT 2k
+R7 B_MID B_AUX 3k
+"""
+_ISLAND_B_LAYOUT = """R5 B_IN B_MID1 1k
+R6 B_MID2 B_OUT 2k
+R7 B_MID1 B_AUX 3k
+"""
+
+_ISLAND_A_PINS = "A_IN A_OUT A_VPWR A_VGND"
+_ISLAND_B_PINS = "B_IN B_OUT B_AUX"
+
+
+def _island_deck(pins: str, body: str) -> str:
+    return f".subckt chip {pins}\n{body}.ends\n"
+
+
+def _compare_islands(tmp_path, name: str, pins: str, layout: str, reference: str):
+    directory = tmp_path / name
+    directory.mkdir()
+    return run_lvs(
+        _write_request(
+            directory / "request.json",
+            {
+                "layout": {
+                    "netlist": _write(
+                        directory / "layout.spice", _island_deck(pins, layout)
+                    ),
+                    "top": "chip",
+                },
+                "reference": {
+                    "netlist": _write(
+                        directory / "ref.spice", _island_deck(pins, reference)
+                    ),
+                    "top": "chip",
+                },
+            },
+        )
+    )
+
+
+def test_composing_an_unrelated_block_does_not_reclassify_an_isolated_net(tmp_path):
+    """Issue #1533: block A's own already-reported `net.unmatched` finding must
+    not become a `net.split` just because an electrically unrelated block was
+    composed into the same top circuit.
+
+    Before this fix `_classify_net_mismatches` pooled every `net_mismatch`
+    event of a whole compare run: one leftover one-sided layout net anywhere
+    plus one differently-named both-sided pairing anywhere was enough to
+    reclassify *every* leftover as `net.split`. Block B contributes the renamed
+    pairing here, so composing it in silently rewrote block A's verdict without
+    block A's geometry or connectivity changing at all."""
+    alone = _compare_islands(
+        tmp_path, "alone", _ISLAND_A_PINS, _ISLAND_A_LAYOUT, _ISLAND_A_REFERENCE
+    )
+    (a_finding,) = [m for m in alone["mismatches"] if m["category"].startswith("net.")]
+    assert a_finding["category"] == "net.unmatched"
+    assert a_finding["net"] == {"layout": "A_DANGLE", "reference": None}
+
+    composed = _compare_islands(
+        tmp_path,
+        "composed",
+        f"{_ISLAND_A_PINS} {_ISLAND_B_PINS}",
+        _ISLAND_A_LAYOUT + _ISLAND_B_LAYOUT,
+        _ISLAND_A_REFERENCE + _ISLAND_B_REFERENCE,
+    )
+    composed_a = [
+        m
+        for m in composed["mismatches"]
+        if (m["net"] or {}).get("layout") == "A_DANGLE"
+    ]
+    assert composed_a == [a_finding], (
+        "composing an unrelated block changed block A's own net finding"
+    )
+    assert "net.split" in composed["category_counts"]  # block B's, not block A's
+
+
+def test_a_genuine_split_still_classifies_as_net_split_when_composed(tmp_path):
+    """The mirror guard for the test above (issue #1533's fourth acceptance
+    criterion): narrowing the pooling scope must not cost block B its real
+    `net.split` classification, standalone or composed."""
+    alone = _compare_islands(
+        tmp_path, "alone", _ISLAND_B_PINS, _ISLAND_B_LAYOUT, _ISLAND_B_REFERENCE
+    )
+    assert alone["category_counts"]["net.split"] == 1
+    (split,) = [m for m in alone["mismatches"] if m["category"] == "net.split"]
+    assert split["net"] == {"layout": "B_MID2", "reference": None}
+
+    composed = _compare_islands(
+        tmp_path,
+        "composed",
+        f"{_ISLAND_A_PINS} {_ISLAND_B_PINS}",
+        _ISLAND_A_LAYOUT + _ISLAND_B_LAYOUT,
+        _ISLAND_A_REFERENCE + _ISLAND_B_REFERENCE,
+    )
+    assert [m for m in composed["mismatches"] if m["category"] == "net.split"] == [
+        split
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # hints.same_nets / hints.equivalent_pins
 # --------------------------------------------------------------------------- #
 
@@ -5488,6 +5616,132 @@ def test_build_mismatches_param_diff_reports_only_differing_parameter():
 
 def test_build_mismatches_empty_logger_produces_no_entries():
     assert lvs._build_mismatches(_FakeLogger()) == []
+
+
+class _FakeTerminalDefinition:
+    def __init__(self, terminal_id: int) -> None:
+        self._id = terminal_id
+
+    def id(self) -> int:
+        return self._id
+
+
+class _FakeConnectedDeviceClass:
+    def __init__(self, arity: int) -> None:
+        self._terminals = [_FakeTerminalDefinition(i) for i in range(arity)]
+
+    def terminal_definitions(self) -> list[_FakeTerminalDefinition]:
+        return self._terminals
+
+
+class _FakeConnectedDevice:
+    """Stands in for a `klayout.db.Device` as `lvs._adjacent_nets` reads it:
+    `device_class().terminal_definitions()` + `net_for_terminal()`."""
+
+    def __init__(self, nets: list) -> None:
+        self._nets = list(nets)
+        self._device_class = _FakeConnectedDeviceClass(len(self._nets))
+
+    def device_class(self) -> _FakeConnectedDeviceClass:
+        return self._device_class
+
+    def net_for_terminal(self, terminal_id: int):
+        return self._nets[terminal_id]
+
+
+class _FakeTerminalRef:
+    def __init__(self, device: _FakeConnectedDevice) -> None:
+        self._device = device
+
+    def device(self) -> _FakeConnectedDevice:
+        return self._device
+
+
+class _FakeConnectedNet(_FakeNamed):
+    """Extends `_FakeNamed` with the two `kdb.Net` iterators
+    `lvs._adjacent_nets` walks to build the merge/split locality graph
+    (issue #1533). Wire nets together with `_wire_together`."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.terminals: list[_FakeTerminalRef] = []
+
+    def each_terminal(self) -> list[_FakeTerminalRef]:
+        return list(self.terminals)
+
+    def each_subcircuit_pin(self) -> list:
+        return []
+
+
+def _wire_together(*nets: _FakeConnectedNet) -> None:
+    """Attach one shared device to every net, making them mutually adjacent."""
+    ref = _FakeTerminalRef(_FakeConnectedDevice(list(nets)))
+    for net in nets:
+        net.terminals.append(ref)
+
+
+def test_isolated_leftover_net_keeps_its_tolerated_warning_when_pooled_apart():
+    """Issue #1533, the severity half: an already-tolerated
+    (`severity: "warning"`, issue #282-"explained") one-sided layout net must
+    not be re-reported as an `error`-severity `net.split` because an
+    unrelated, disconnected pairing exists elsewhere in the same compare run.
+
+    The `net.split` branch does not apply the `explained_layout_nets`
+    downgrade at all, so before this fix the mere presence of a renamed
+    both-sided pairing anywhere promoted the finding two ways at once --
+    category *and* severity."""
+    dangling = _FakeConnectedNet("A_DANGLE")
+    _wire_together(dangling, _FakeConnectedNet("A_BODY"))
+
+    # A renamed both-sided pairing that shares no device with island A.
+    renamed_layout = _FakeConnectedNet("B_X")
+    renamed_reference = _FakeConnectedNet("B_Y")
+    _wire_together(renamed_layout, _FakeConnectedNet("B_TAIL"))
+    _wire_together(renamed_reference, _FakeConnectedNet("B_TAIL"))
+
+    entries = lvs._classify_net_mismatches(
+        [(dangling, None), (renamed_layout, renamed_reference)],
+        event_keys=[((1, "A_DANGLE"), None), ((1, "B_X"), (1, "B_Y"))],
+        explained_layout_nets=frozenset({(1, "A_DANGLE")}),
+    )
+
+    by_layout_net = {entry["net"]["layout"]: entry for entry in entries}
+    assert by_layout_net["A_DANGLE"]["category"] == lvs.CATEGORY_NET_UNMATCHED
+    assert by_layout_net["A_DANGLE"]["severity"] == "warning"
+    # The renamed pairing is its own pool, with no leftover to absorb it.
+    assert by_layout_net["B_X"]["category"] == lvs.CATEGORY_TOPOLOGY
+
+
+def test_connected_leftover_and_renamed_pairing_still_pool_together():
+    """The same shape as above with the two islands actually wired together
+    stays a single pool -- and so still classifies as `net.split`. This is the
+    guard against over-narrowing the scope (issue #1533's fourth acceptance
+    criterion) at the classification level rather than end to end."""
+    dangling = _FakeConnectedNet("A_DANGLE")
+    renamed_layout = _FakeConnectedNet("B_X")
+    renamed_reference = _FakeConnectedNet("B_Y")
+    _wire_together(dangling, renamed_layout)
+    _wire_together(renamed_reference, _FakeConnectedNet("B_TAIL"))
+
+    entries = lvs._classify_net_mismatches(
+        [(dangling, None), (renamed_layout, renamed_reference)],
+        event_keys=[((1, "A_DANGLE"), None), ((1, "B_X"), (1, "B_Y"))],
+    )
+
+    assert [e["category"] for e in entries] == [lvs.CATEGORY_NET_SPLIT]
+    assert entries[0]["net"] == {"layout": "A_DANGLE", "reference": None}
+
+
+def test_net_mismatch_pools_fall_back_to_one_pool_without_connectivity():
+    """`_FakeNamed` exposes only `expanded_name()`. With no netlist graph to
+    walk, pooling degrades to the whole compare run -- the pre-issue-#1533
+    behaviour -- rather than failing or silently splitting events apart."""
+    tagged = [
+        ((_FakeNamed("A"), None), ((1, "A"), None)),
+        ((_FakeNamed("X"), _FakeNamed("Y")), ((1, "X"), (1, "Y"))),
+    ]
+    assert lvs._net_mismatch_pools(tagged) == [tagged]
+    assert lvs._net_mismatch_pools([]) == []
 
 
 def test_mismatches_sort_order():

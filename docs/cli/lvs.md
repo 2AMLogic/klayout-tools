@@ -1451,22 +1451,22 @@ narrower `net.*`/`device.*`/`pin.unmatched` categories: a whole circuit or
 subcircuit instance with no counterpart, a device class with no counterpart,
 an ambiguous net pairing the comparer resolved on its own, or two nets paired
 despite a name/identity conflict. Six classification sites inside
-`_build_mismatches`/`_classify_net_mismatches`
+`_build_mismatches`/`_classify_net_mismatch_pool`
 (`src/klayout_tools/lvs.py`) each map one `NetlistComparer` event kind to a
 `topology` entry:
 
-- **Circuit mismatch** (`lvs.py:1132-1141`, from `logger.circuit_mismatches`)
+- **Circuit mismatch** (`lvs.py:3726-3740`, from `logger.circuit_mismatches`)
   — a circuit (module) on one side has no counterpart on the other. Always
   `severity: "error"`. Names the circuit in `circuit` (issue #1132) —
   `instance`/`subcircuit` stay `null` (there is no instance; the whole
   circuit definition has no counterpart).
-- **Subcircuit mismatch** (`lvs.py:1143-1152`, from
+- **Subcircuit mismatch** (`lvs.py:3742-3768`, from
   `logger.subcircuit_mismatches`) — a subcircuit instance has no
   counterpart. Always `"error"`. Names the containing circuit (`circuit`),
   the instance itself (`instance`), and the circuit it instantiates
   (`subcircuit`) (issue #1132), so a macro-scale report attributes *which*
   instance failed to pair without a side-channel netlist diff.
-- **Device-class mismatch** (`lvs.py:1154-1192`, from
+- **Device-class mismatch** (`lvs.py:3770-3808`, from
   `logger.device_class_mismatches`) — a device class (e.g. `nfet`)
   registered on one side has no counterpart class on the other side.
   Downgraded to `"warning"` when that side's netlist has zero actual
@@ -1475,7 +1475,7 @@ despite a name/identity conflict. Six classification sites inside
   polarity, so an all-`nfet` layout compared against an all-`nfet`
   reference is not a real defect); `"error"` when the class has one or
   more real instances.
-- **Ambiguous net pairing** (`lvs.py:2191-2235`, from
+- **Ambiguous net pairing** (`lvs.py:3810-3855`, from
   `logger.ambiguous_net_matches`) — nets were paired ambiguously and the
   comparer resolved it structurally on its own (consider adding a
   `hints.same_nets` entry to pin the pairing down explicitly). Always
@@ -1492,8 +1492,8 @@ despite a name/identity conflict. Six classification sites inside
   `category: "topology"`, `severity: "warning"` — only `description`
   differs; a caller that needs to filter on this distinction programmatically
   should match the `description` text rather than `category`.
-- **Net identity conflict with no leftover** (`lvs.py:1539-1549`, inside
-  `_classify_net_mismatches`) — two nets were paired despite a name/identity
+- **Net identity conflict with no leftover** (`lvs.py:4738-4753`, inside
+  `_classify_net_mismatch_pool`) — two nets were paired despite a name/identity
   conflict, and neither side has an accompanying one-sided leftover net
   (the merge/split case documented below, which absorbs the same
   underlying event when a leftover is present). Always `"error"`. The
@@ -1525,7 +1525,7 @@ circuit instantiates a `fill_1` cell the reference does not:
 }
 ```
 
-A seventh entry (`lvs.py:377`) is a safety net, not a classification site: if
+A seventh entry (`lvs.py:1053-1061`) is a safety net, not a classification site: if
 `NetlistComparer.compare()` reports a mismatch but none of the sources above
 produced any structured entry (a gap in this module's own event coverage,
 not a clean run), `klt lvs` reports one generic `severity: "error"`,
@@ -1591,19 +1591,39 @@ correspondence there removes the ambiguity — and the warning — outright.
 
 `NetlistComparer`'s own event stream does not label a net mismatch as
 "merged" or "split" — it only reports individual net-pairing events. This
-command distinguishes the three net categories from the *pattern* of events
-in one compare run: an isolated, one-sided unmatched net (no counterpart on
+command distinguishes the three net categories from the *pattern* of
+co-occurring events: an isolated, one-sided unmatched net (no counterpart on
 the other side, and nothing else nearby) is `net.unmatched`. When a
 one-sided leftover net on the **layout** side co-occurs with a differently-
-named net pairing elsewhere in the same circuit, it is classified
-`net.split` (a reference net's role divided across more layout nets than
-expected); the mirror case (a leftover on the **reference** side) is
-`net.merged`. This heuristic is verified against synthetic single-defect
-merge/split fixtures in `tests/test_lvs.py`, but — like `klt extract`'s
-documented curated-deck connectivity limits — is not a formal proof for
-every possible multi-defect input; a compare run with several independent
-net defects at once may classify some of them generically (`topology`)
-rather than precisely.
+named net pairing, it is classified `net.split` (a reference net's role
+divided across more layout nets than expected); the mirror case (a leftover
+on the **reference** side) is `net.merged`. This heuristic is verified
+against synthetic single-defect merge/split fixtures in `tests/test_lvs.py`,
+but — like `klt extract`'s documented curated-deck connectivity limits — is
+not a formal proof for every possible multi-defect input; a compare run with
+several independent net defects at once may classify some of them
+generically (`topology`) rather than precisely.
+
+**"Co-occurring" means *in the same weakly-connected component*, not
+"anywhere in the same compare run"** (issue #1533). Composing a second,
+electrically unrelated block into the same top circuit — via `klt
+gen-compose` or otherwise — does not change how the first block's own nets
+are classified, as long as the two share no connectivity and no net the
+comparer pairs across them: each block's events are pooled and matched
+separately. Before this scoping, one unrelated block contributing a single
+renamed net pairing was enough to rewrite every isolated `net.unmatched`
+elsewhere in the run as `net.split` — and, since the merge/split branch does
+not apply the `device.property` collateral downgrade (see "Negative
+controls"), to promote an already-tolerated `severity: "warning"` finding to
+`"error"` with no change to that block's own geometry or connectivity.
+
+The components are taken over the layout and reference netlists' own
+device/subcircuit connectivity, *glued together along the pairings the
+comparer itself made*. That gluing is what keeps a genuine split classified
+as `net.split`: splitting a net severs its fragments' layout-side connection
+by construction (a broken series chain leaves two disconnected layout
+pieces), but both fragments still reach the single reference net they came
+from through the surrounding matched nets, so they stay in one pool.
 
 ## `--check` / `--rerun`
 

@@ -54,9 +54,9 @@ this issue's own acceptance criteria asked to be written up.
 Net-merge/net-split classification (a known simplification): KLayout's
 comparer log stream does not label a net mismatch as "merged" or "split" --
 it only reports individual net/device mismatch events. This module
-distinguishes them heuristically from the *pattern* of events within one
-compare run (see ``_classify_net_mismatches``): a leftover, one-sided net on
-the **layout** side (no reference counterpart) co-occurring with a
+distinguishes them heuristically from the *pattern* of co-occurring events
+(see ``_classify_net_mismatches``): a leftover, one-sided net on the
+**layout** side (no reference counterpart) co-occurring with a
 differently-named both-sided pairing is classified ``net.split`` (one
 reference net's role divided across more layout nets than expected); the
 mirror case on the **reference** side is ``net.merged``. A one-sided leftover
@@ -65,6 +65,21 @@ case. This heuristic is verified against synthetic merge/split fixtures in
 ``tests/test_lvs.py`` but is not a formal proof for arbitrary multi-defect
 inputs -- documented here as a known limitation, the same way ``extract.py``
 documents its own curated-deck connectivity-fidelity limits.
+
+"Co-occurring" is scoped to one **weakly-connected component** of the
+compared netlists, not to the whole compare run (issue #1533, see
+``_net_mismatch_pools``). Pooling every event of a run together made the
+pattern global: composing an electrically unrelated, galvanically isolated
+block into the same top circuit could turn another block's isolated
+``net.unmatched`` into a ``net.split`` -- and, because the ``net.split``
+branch does not apply the issue #282 ``explained_*_nets`` downgrade, an
+already-tolerated ``severity: "warning"`` into an ``"error"`` -- with no
+change to that block's own geometry or connectivity. The components are taken
+over the two netlists' own device/subcircuit connectivity *glued along the
+comparer's own net pairings*, which is what keeps a genuine split classified
+as one: splitting a net severs its fragments' layout-side connection by
+construction, but both fragments still reach the single reference net they
+came from through the surrounding matched nets.
 
 Minimal-cell parameter recovery (issue #282): the comparer pairs devices from
 the *surrounding* net structure and only then compares parameters, so on a
@@ -107,7 +122,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._paths import _load_request_json, _resolve_relative
@@ -3627,6 +3642,7 @@ def _build_mismatches(
                 degraded.explained_reference_nets if degraded else frozenset()
             ),
             hint_reported_pairs=hint_outcomes.refused_after_pairing,
+            matched_net_keys=getattr(logger, "matched_net_keys", ()) or (),
         )
     )
 
@@ -4423,6 +4439,171 @@ def _tolerance_disclosure(snap: _ToleratedParam, tolerance: float) -> dict[str, 
     )
 
 
+#: A node in the merge/split locality graph (issue #1533): which netlist the
+#: net came from, plus its :data:`_NetKey` (compare scope + expanded name).
+_NetNode = tuple[str, int, str]
+
+
+class _UnionFind:
+    """Minimal union-find over hashable nodes, for the merge/split locality
+    grouping in :func:`_net_mismatch_pools` (issue #1533)."""
+
+    def __init__(self) -> None:
+        self._parent: dict[Any, Any] = {}
+
+    def find(self, node: Any) -> Any:
+        parent = self._parent
+        if node not in parent:
+            parent[node] = node
+            return node
+        root = node
+        while parent[root] != root:
+            root = parent[root]
+        while parent[node] != root:
+            parent[node], node = root, parent[node]
+        return root
+
+    def union(self, a: Any, b: Any) -> None:
+        root_a, root_b = self.find(a), self.find(b)
+        if root_a != root_b:
+            self._parent[root_b] = root_a
+
+
+def _adjacent_nets(net: Any) -> list[Any]:
+    """Every net that shares a device terminal or a subcircuit-instance pin
+    with ``net`` -- one hop in the netlist's own connectivity graph.
+
+    Traversal never leaves ``net``'s circuit: a ``Device``/``SubCircuit`` a
+    net touches belongs to the same circuit the net does, and
+    ``SubCircuit.net_for_pin`` resolves to nets of that *parent* circuit, not
+    of the instantiated one. That is what lets :func:`_net_mismatch_pools`
+    key its nodes by the compare scope the event was logged in.
+    """
+    adjacent: list[Any] = []
+    for ref in net.each_terminal():
+        device = ref.device()
+        for terminal in device.device_class().terminal_definitions():
+            other = device.net_for_terminal(terminal.id())
+            if other is not None:
+                adjacent.append(other)
+    for ref in net.each_subcircuit_pin():
+        subcircuit = ref.subcircuit()
+        for pin in subcircuit.circuit_ref().each_pin():
+            other = subcircuit.net_for_pin(pin.id())
+            if other is not None:
+                adjacent.append(other)
+    return adjacent
+
+
+def _explore_net_component(
+    groups: _UnionFind, visited: set[_NetNode], side: str, scope: int, net: Any
+) -> None:
+    """Union every net reachable from ``net`` (within its own circuit and its
+    own side's netlist) into one component."""
+    node: _NetNode = (side, scope, net.expanded_name())
+    if node in visited:
+        return
+    stack = [(node, net)]
+    while stack:
+        current_node, current_net = stack.pop()
+        if current_node in visited:
+            continue
+        visited.add(current_node)
+        groups.find(current_node)
+        for other in _adjacent_nets(current_net):
+            other_node: _NetNode = (side, scope, other.expanded_name())
+            groups.union(current_node, other_node)
+            if other_node not in visited:
+                stack.append((other_node, other))
+
+
+def _net_mismatch_pools(
+    tagged: list[tuple[tuple[Any, Any], tuple[_NetKey | None, _NetKey | None]]],
+    matched_net_keys: Sequence[tuple[_NetKey, _NetKey]] = (),
+) -> list[list[tuple[tuple[Any, Any], tuple[_NetKey | None, _NetKey | None]]]]:
+    """Partition ``net_mismatch`` events into independently-classifiable
+    pools -- one per weakly-connected component of the compared netlists
+    (issue #1533).
+
+    The merge/split heuristic (see this module's docstring and
+    :func:`_classify_net_mismatches`) reads a *pattern* of co-occurring
+    events: a one-sided leftover net plus a differently-named both-sided
+    pairing. Pooling every event of a whole compare run together made that
+    pattern global -- composing an electrically unrelated block into the same
+    top circuit could turn an otherwise-isolated ``net.unmatched`` into a
+    ``net.split`` (and, via the ``explained_*_nets`` downgrade the
+    ``net.split`` branch does not apply, an already-tolerated
+    ``severity: "warning"`` into an ``"error"``) without any change to the
+    first block's own geometry or connectivity.
+
+    The pools are the components of the graph whose nodes are
+    ``(side, compare scope, expanded net name)`` and whose edges are:
+
+    * **within a side** -- two nets sharing a device terminal or a
+      subcircuit-instance pin (:func:`_adjacent_nets`), explored transitively
+      from every net named by an event;
+    * **across the sides** -- every net pairing the comparer itself made,
+      matched (``matched_net_keys``) or reported as a both-sided
+      ``net_mismatch``.
+
+    Gluing the two sides along the comparer's own pairings is what keeps a
+    *genuine* split classified as one: splitting a net severs the layout-side
+    connection between its fragments by construction (a series chain broken in
+    two leaves two layout components), but both fragments still reach the one
+    reference net they came from through the surrounding matched nets -- so
+    they land in the same pool, exactly as before. Only content with no
+    connectivity *and* no comparer-made pairing linking it to the rest -- an
+    independently-composed, galvanically isolated block -- separates out.
+
+    Falls back to a single pool (today's whole-run behaviour) whenever the
+    graph cannot be built: no compare-scope keys, net objects that do not
+    expose the netlist graph (the fake-logger classification unit tests), or
+    any error raised while walking it. Grouping is an accuracy refinement --
+    it must never be the reason a compare fails to produce a report.
+    """
+    if not tagged:
+        return []
+
+    # The pattern match below only reads pool membership when a one-sided
+    # leftover and a renamed both-sided pairing are both present -- with
+    # either missing, every pool reaches the same verdict a single pool would.
+    # Short-circuit there so a routine compare never pays for the graph walk.
+    if not any((a is None) != (b is None) for (a, b), _key in tagged) or not any(
+        a is not None and b is not None and a.expanded_name() != b.expanded_name()
+        for (a, b), _key in tagged
+    ):
+        return [tagged]
+
+    groups = _UnionFind()
+    visited: set[_NetNode] = set()
+    try:
+        for (a, b), key in tagged:
+            for side, index, net in (("layout", 0, a), ("reference", 1, b)):
+                if net is None:
+                    continue
+                net_key = key[index]
+                if net_key is None or not hasattr(net, "each_terminal"):
+                    return [tagged]
+                _explore_net_component(groups, visited, side, net_key[0], net)
+            if key[0] is not None and key[1] is not None:
+                groups.union(("layout", *key[0]), ("reference", *key[1]))
+        for layout_key, reference_key in matched_net_keys:
+            groups.union(("layout", *layout_key), ("reference", *reference_key))
+
+        pools: dict[Any, list[Any]] = {}
+        for event, key in tagged:
+            net_key = key[0] if key[0] is not None else key[1]
+            if net_key is None:
+                return [tagged]
+            side = "layout" if key[0] is not None else "reference"
+            root = groups.find((side, *net_key))
+            pools.setdefault(root, []).append((event, key))
+    except Exception:  # pragma: no cover - defensive, see docstring
+        return [tagged]
+
+    return list(pools.values())
+
+
 def _classify_net_mismatches(
     events: list[tuple[Any, Any]],
     *,
@@ -4430,6 +4611,7 @@ def _classify_net_mismatches(
     explained_layout_nets: frozenset[_NetKey] = frozenset(),
     explained_reference_nets: frozenset[_NetKey] = frozenset(),
     hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]] = frozenset(),
+    matched_net_keys: Sequence[tuple[_NetKey, _NetKey]] = (),
 ) -> list[dict[str, Any]]:
     """Classify raw ``net_mismatch`` events into ``net.unmatched``/
     ``net.merged``/``net.split``/``topology`` entries -- see this module's
@@ -4457,11 +4639,42 @@ def _classify_net_mismatches(
     this set still count as renamed pairings for the merge/split heuristic
     above -- suppressing a duplicate report does not make a leftover one-sided
     net stop being a split or a merge.
+
+    ``matched_net_keys`` (issue #1533) is the compare logger's list of net
+    pairings; it is only read to glue the two sides' connectivity graphs
+    together in :func:`_net_mismatch_pools`, which decides *which* events may
+    corroborate each other's merge/split classification. The pattern matching
+    below is unchanged -- it just runs once per weakly-connected component
+    instead of once per compare run, so an unrelated, galvanically isolated
+    block composed into the same top circuit cannot reclassify another
+    block's nets.
     """
     keys: list[tuple[_NetKey | None, _NetKey | None]] = (
         list(event_keys) if event_keys is not None else [(None, None)] * len(events)
     )
     tagged = list(zip(events, keys, strict=True))
+    entries: list[dict[str, Any]] = []
+    for pool in _net_mismatch_pools(tagged, matched_net_keys):
+        entries.extend(
+            _classify_net_mismatch_pool(
+                pool,
+                explained_layout_nets=explained_layout_nets,
+                explained_reference_nets=explained_reference_nets,
+                hint_reported_pairs=hint_reported_pairs,
+            )
+        )
+    return entries
+
+
+def _classify_net_mismatch_pool(
+    tagged: list[tuple[tuple[Any, Any], tuple[_NetKey | None, _NetKey | None]]],
+    *,
+    explained_layout_nets: frozenset[_NetKey],
+    explained_reference_nets: frozenset[_NetKey],
+    hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]],
+) -> list[dict[str, Any]]:
+    """Apply the merge/split pattern match to one pool of co-located
+    ``net_mismatch`` events (see :func:`_net_mismatch_pools`)."""
     one_sided_layout = [
         (a, key) for (a, b), key in tagged if a is not None and b is None
     ]
