@@ -14,7 +14,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.mom import MomError, run_mom
+from klayout_tools.mom import MomError, run_mom, write_touchstone_s2p
 
 pytest.importorskip(
     "klt_mom_native",
@@ -938,3 +938,200 @@ def test_cli_text_output_renders_ports_and_s_parameters(tmp_path, capsys):
     assert "reference_impedance_ohm=50" in out
     assert "S11=" in out
     assert "S21=" in out
+
+
+# --- Touchstone (.s2p) export (issue #1518) ----------------------------------
+
+
+def test_write_touchstone_s2p_known_good_output(tmp_path):
+    """A hand-built report with a single frequency point round-trips to a
+    known-good Touchstone body: the option line matches the shared
+    reference impedance, and the data line orders S11 S21 S12 S22 (the
+    Touchstone spec's 2-port-specific column-major order) with real/
+    imaginary values matching the JSON fields exactly (repr()'d, so the
+    decimal text round-trips the float bit-for-bit -- no lossy magnitude/
+    phase conversion)."""
+    report = {
+        "file": "plate.gds",
+        "spec": "plate.mom.json",
+        "ports": [
+            {"position_um": 0.0, "reference_impedance_ohm": 452.0},
+            {"position_um": 500.0, "reference_impedance_ohm": 452.0},
+        ],
+        "full_wave_sweep": [
+            {
+                "frequency_hz": 1.0e9,
+                "s_parameters": {
+                    "s11_real": 8.5e-13,
+                    "s11_imag": -9.6e-15,
+                    "s12_real": 0.999936,
+                    "s12_imag": -0.011323,
+                    "s21_real": 0.999936,
+                    "s21_imag": -0.011323,
+                    "s22_real": 8.5e-13,
+                    "s22_imag": -9.6e-15,
+                },
+            }
+        ],
+    }
+
+    text = write_touchstone_s2p(report)
+    lines = text.splitlines()
+
+    # Header comments (`!`) then exactly one option line (`#`) then exactly
+    # one data line for this single-frequency sweep.
+    comment_lines = [line for line in lines if line.startswith("!")]
+    assert comment_lines  # at least one, for provenance
+    assert "# HZ S RI R 452.0" in lines
+    data_lines = [line for line in lines if line and not line.startswith(("!", "#"))]
+    assert data_lines == [
+        "1000000000.0 8.5e-13 -9.6e-15 0.999936 -0.011323 0.999936 "
+        "-0.011323 8.5e-13 -9.6e-15"
+    ]
+    assert text.endswith("\n")
+
+
+def test_write_touchstone_s2p_single_frequency_sweep_is_one_data_line(tmp_path):
+    """Edge case: a one-point sweep produces exactly one data line (not an
+    off-by-one or an empty file)."""
+    report = {
+        "ports": [
+            {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+            {"position_um": 500.0, "reference_impedance_ohm": 50.0},
+        ],
+        "full_wave_sweep": [
+            {
+                "frequency_hz": 2.4e9,
+                "s_parameters": {
+                    "s11_real": 0.0,
+                    "s11_imag": 0.0,
+                    "s12_real": 1.0,
+                    "s12_imag": 0.0,
+                    "s21_real": 1.0,
+                    "s21_imag": 0.0,
+                    "s22_real": 0.0,
+                    "s22_imag": 0.0,
+                },
+            }
+        ],
+    }
+    text = write_touchstone_s2p(report)
+    data_lines = [
+        line for line in text.splitlines() if line and not line.startswith(("!", "#"))
+    ]
+    assert len(data_lines) == 1
+
+
+def test_write_touchstone_s2p_no_s_parameters_is_a_clear_error(tmp_path):
+    """`ports` unset in the originating spec -- no `s_parameters` in the
+    report -- must raise a clear MomError, not crash or write an invalid
+    file."""
+    report = {
+        "full_wave_sweep": [{"frequency_hz": 1.0e9}],
+    }
+    with pytest.raises(MomError, match="no S-parameters"):
+        write_touchstone_s2p(report)
+
+
+def test_write_touchstone_s2p_no_full_wave_sweep_is_a_clear_error(tmp_path):
+    """A report from a spec that never set `frequencies_hz`/`ports` at all
+    (no `full_wave_sweep` key whatsoever) is the same clear error, not a
+    KeyError."""
+    report = {}
+    with pytest.raises(MomError, match="no S-parameters"):
+        write_touchstone_s2p(report)
+
+
+def test_write_touchstone_s2p_mismatched_port_impedances_is_a_clear_error(tmp_path):
+    """Differing per-port reference impedances (the Design Note's
+    unsupported case) raise a clear MomError -- never silently averaged."""
+    report = {
+        "ports": [
+            {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+            {"position_um": 500.0, "reference_impedance_ohm": 75.0},
+        ],
+        "full_wave_sweep": [
+            {
+                "frequency_hz": 1.0e9,
+                "s_parameters": {
+                    "s11_real": 0.0,
+                    "s11_imag": 0.0,
+                    "s12_real": 1.0,
+                    "s12_imag": 0.0,
+                    "s21_real": 1.0,
+                    "s21_imag": 0.0,
+                    "s22_real": 0.0,
+                    "s22_imag": 0.0,
+                },
+            }
+        ],
+    }
+    with pytest.raises(MomError, match="differing"):
+        write_touchstone_s2p(report)
+
+
+def test_run_mom_full_wave_sweep_touchstone_round_trip(tmp_path):
+    """End-to-end: a real `run_mom` report's S-parameters, written to a
+    `.s2p` file and read back, must match the JSON fields exactly (not just
+    the hand-built-report unit tests above)."""
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    ports = [
+        {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+        {"position_um": 500.0, "reference_impedance_ohm": 50.0},
+    ]
+    _loop_spec(spec, frequencies_hz=[1.0e6, 1.0e9], ports=ports)
+
+    report = run_mom(str(gds), str(spec))
+    text = write_touchstone_s2p(report)
+    data_lines = [
+        line for line in text.splitlines() if line and not line.startswith(("!", "#"))
+    ]
+    assert len(data_lines) == 2
+    for point, line in zip(report["full_wave_sweep"], data_lines, strict=True):
+        fields = [float(f) for f in line.split()]
+        s = point["s_parameters"]
+        assert fields == pytest.approx(
+            [
+                point["frequency_hz"],
+                s["s11_real"],
+                s["s11_imag"],
+                s["s21_real"],
+                s["s21_imag"],
+                s["s12_real"],
+                s["s12_imag"],
+                s["s22_real"],
+                s["s22_imag"],
+            ]
+        )
+
+
+def test_cli_touchstone_flag_writes_file(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    ports = [
+        {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+        {"position_um": 500.0, "reference_impedance_ohm": 50.0},
+    ]
+    _loop_spec(spec, frequencies_hz=[1.0e9], ports=ports)
+    out = tmp_path / "loop.s2p"
+
+    assert main(["mom", str(gds), str(spec), "--touchstone", str(out)]) == 0
+    text = out.read_text()
+    assert text.startswith("!")
+    assert "# HZ S RI R 50.0" in text.splitlines()
+
+
+def test_cli_touchstone_flag_without_ports_is_a_clear_error(tmp_path, capsys):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[1.0e9])  # no ports -> no s_parameters
+    out = tmp_path / "loop.s2p"
+
+    assert main(["mom", str(gds), str(spec), "--touchstone", str(out)]) == 1
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "no S-parameters" in err

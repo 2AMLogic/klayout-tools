@@ -8,7 +8,9 @@ Exit codes (see ``docs/cli/mom.md`` for the full table):
     0 - solve succeeded, capacitance matrix returned
     1 - failed to run (bad file/spec, native extension not installed, a
         stackup entry matching no shapes, or a solver-level failure such as
-        a singular potential-coefficient matrix) -- returned by
+        a singular potential-coefficient matrix); also returned when
+        ``--touchstone`` is passed but the report has no S-parameters to
+        export, or the destination path cannot be written -- returned by
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
@@ -17,7 +19,7 @@ subcommand.)
 import argparse
 import cmath
 
-from ..mom import MomError, run_mom
+from ..mom import MomError, run_mom, write_touchstone_s2p
 from .output import emit_error, emit_success
 
 
@@ -27,7 +29,26 @@ def run(args: argparse.Namespace) -> int:
     except MomError as exc:
         return emit_error("mom", str(exc), args.format)
 
-    emit_success(report, args.format, _print_text)
+    # Optional Touchstone (.s2p) export (issue #1518) -- a courtesy side
+    # artifact independent of --format, same convention `klt trajectory`'s
+    # --plot uses. A missing-S-parameters report or a write failure is an
+    # application error, same exit code as any other MomError.
+    if args.touchstone is not None:
+        try:
+            touchstone_text = write_touchstone_s2p(report)
+        except MomError as exc:
+            return emit_error("mom", str(exc), args.format)
+        try:
+            with open(args.touchstone, "w", encoding="utf-8") as handle:
+                handle.write(touchstone_text)
+        except OSError as exc:
+            return emit_error(
+                "mom",
+                f"could not write Touchstone output to '{args.touchstone}': {exc}",
+                args.format,
+            )
+
+    emit_success(report, args.format, lambda payload: _print_text(payload, args))
     return 0
 
 
@@ -41,7 +62,7 @@ def _print_matrix(conductors: list, matrix: list, name_width: int, unit: str) ->
     print(f"({unit})")
 
 
-def _print_text(report: dict) -> None:
+def _print_text(report: dict, args: argparse.Namespace) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
     print(f"background_permittivity: {report['background_permittivity']}")
@@ -115,3 +136,7 @@ def _print_text(report: dict) -> None:
         print("warnings:")
         for warning in warnings:
             print(f"  {warning}")
+
+    if args.touchstone is not None:
+        print()
+        print(f"touchstone written to {args.touchstone}")

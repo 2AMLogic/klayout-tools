@@ -399,3 +399,103 @@ def run_mom(
         # `s_parameters` from the native response.
         result["ports"] = ports
     return result
+
+
+#: Touchstone spec version this writer targets when both ports share one
+#: reference impedance -- the common case (see ``write_touchstone_s2p``'s
+#: docstring). Cited so a reader can check this module against the spec:
+#: "Touchstone(R) File Format Specification", Rev 1.1, IBIS Open Forum
+#: (2002-04-24), section 4 ("Option Line") + section 8 (2-port data
+#: ordering).
+TOUCHSTONE_VERSION = "1.1"
+
+
+def _touchstone_float(value: float) -> str:
+    """Render ``value`` losslessly -- ``repr()`` is the shortest decimal
+    string that round-trips a Python ``float`` exactly, so this avoids the
+    magnitude/phase (``MA``) conversion's lossy trig round-trip the
+    acceptance criteria explicitly rule out, and any precision loss a fixed
+    ``%f``/``%e`` width could introduce."""
+    return repr(float(value))
+
+
+def write_touchstone_s2p(report: dict[str, Any]) -> str:
+    """Serialise ``run_mom``'s de-embedded two-port S-parameters (issue
+    #894 -- ``report["full_wave_sweep"][i]["s_parameters"]``, present only
+    when the spec set exactly two ``ports``) as Touchstone
+    :data:`TOUCHSTONE_VERSION` ``.s2p`` text (issue #1518).
+
+    Follows the Touchstone(R) File Format Specification, Rev 1.1 (IBIS Open
+    Forum, 2002-04-24):
+
+    - The option line (``# HZ S RI R <z0>``) selects frequency unit ``HZ``
+      (matching ``frequency_hz`` directly -- no unit conversion, hence no
+      rounding), parameter type ``S``, data format ``RI`` (real/imaginary --
+      matching the JSON's ``sJK_real``/``sJK_imag`` fields directly, per the
+      acceptance criteria's explicit "no lossy magnitude/phase round-trip"),
+      and reference resistance ``R <z0>``.
+    - Each data line is ``<freq> S11 S21 S12 S22`` (each ``S`` a `re im`
+      pair) -- the spec's 2-port-specific "down the first column, then
+      across" ordering (section 8), *not* the row-major ``S11 S12 / S21
+      S22`` order used for N > 2 ports.
+
+    Reference-impedance handling (see this issue's "Design Note"): v1.1's
+    option line has exactly one scalar ``R`` -- it cannot represent two
+    ports with genuinely *different* real reference impedances. Rather than
+    silently averaging the two (dropping precision) or emitting the
+    inconsistently-supported Touchstone v2.0 ``[Reference]`` keyword, a
+    mismatch raises :class:`MomError` -- the "raise a clear error" half of
+    the Design Note's two acceptable choices. The common case (``klt mom``'s
+    own worked example included, 452.0 ohm on both ports) has matching
+    per-port impedances and is unaffected.
+
+    Raises :class:`MomError` when ``report`` has no S-parameters to export
+    (``ports`` was not set in the spec file that produced it) or when the
+    two ports' ``reference_impedance_ohm`` differ.
+    """
+    full_wave_sweep = report.get("full_wave_sweep")
+    ports = report.get("ports")
+    if not full_wave_sweep or not ports:
+        raise MomError(
+            "cannot write Touchstone output: report has no S-parameters -- "
+            "set a two-entry 'ports' array (and a non-empty 'frequencies_hz') "
+            "in the spec file that produced this report (see docs/cli/mom.md's "
+            "'Port definition and de-embedding' section)"
+        )
+
+    z1 = ports[0]["reference_impedance_ohm"]
+    z2 = ports[1]["reference_impedance_ohm"]
+    if z1 != z2:
+        raise MomError(
+            "cannot write Touchstone output: ports have differing "
+            f"reference_impedance_ohm ({z1!r} vs {z2!r}) -- Touchstone v1.1's "
+            "single-scalar '# ... R <z0>' option line cannot represent two "
+            "different real reference impedances, and this writer does not "
+            "silently average them or emit the inconsistently-supported "
+            "Touchstone v2.0 per-port '[Reference]' syntax; see docs/cli/mom.md's "
+            "Touchstone export section"
+        )
+
+    lines = [
+        "! klt mom Touchstone (.s2p) export -- issue #1518",
+        f"! Touchstone Rev {TOUCHSTONE_VERSION} -- frequency unit Hz, "
+        "S-parameters, RI (real/imaginary) format",
+        f"! file: {report.get('file', '<unknown>')}",
+        f"! spec: {report.get('spec', '<unknown>')}",
+        f"# HZ S RI R {_touchstone_float(z1)}",
+    ]
+    for point in full_wave_sweep:
+        s = point["s_parameters"]
+        fields = [
+            point["frequency_hz"],
+            s["s11_real"],
+            s["s11_imag"],
+            s["s21_real"],
+            s["s21_imag"],
+            s["s12_real"],
+            s["s12_imag"],
+            s["s22_real"],
+            s["s22_imag"],
+        ]
+        lines.append(" ".join(_touchstone_float(f) for f in fields))
+    return "\n".join(lines) + "\n"

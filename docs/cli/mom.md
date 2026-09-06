@@ -42,7 +42,7 @@ of the same epic, delivered by
 definition and de-embedding" below.
 
 ```
-klt mom <file> <spec> [--top <cell>] [--format text|json]
+klt mom <file> <spec> [--top <cell>] [--format text|json] [--touchstone <path>]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) layout file.
@@ -54,6 +54,12 @@ klt mom <file> <spec> [--top <cell>] [--format text|json]
   summing across every top cell, `klt mom` needs exactly one root to
   discretise and errors otherwise).
 - `--format` — `text` (default, a human-readable matrix table) or `json`.
+- `--touchstone <path>` — additionally write a standard 2-port Touchstone
+  (`.s2p`) file to `<path>`, from the report's `full_wave_sweep`
+  S-parameters (issue #1518). A courtesy side artifact independent of
+  `--format`, same convention as `klt trajectory`'s `--plot`. Requires a
+  two-entry `ports` array (and non-empty `frequencies_hz`) in the spec
+  file — see "Exporting Touchstone (`.s2p`)" below.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI, **except** that it additionally requires the `klt_mom_native`
@@ -630,6 +636,53 @@ the same convention `impedance_matrix_real_ohm`/`impedance_matrix_imag_ohm`
 already use, rather than a nested `{real, imag}` object. For a reciprocal
 network (always true here, a passive linear structure) `S12 == S21`.
 
+### Exporting Touchstone (`.s2p`)
+
+`--touchstone <path>` writes the same S-parameters as a standard
+[Touchstone](https://ibis.org/touchstone_ver2.1/touchstone_ver2_1.pdf) `.s2p`
+file — the interchange format SPICE-family tools (ngspice, Xyce, ADS, …)
+expect for N-port network data (issue #1518). It follows the
+**Touchstone(R) File Format Specification, Rev 1.1** (IBIS Open Forum,
+2002-04-24):
+
+- The option line is `# HZ S RI R <z0>`: frequency unit `HZ` (matching
+  `frequency_hz` directly, no unit conversion), parameter type `S`, data
+  format `RI` (real/imaginary — matching `sJK_real`/`sJK_imag` directly,
+  with no lossy magnitude/phase round-trip), reference resistance `R <z0>`.
+- Each data line is `<freq> S11 S21 S12 S22` (each `S` an `re im` pair) —
+  Touchstone's 2-port-specific "down the first column, then across" data
+  order (**not** the row-major `S11 S12 / S21 S22` order N > 2-port files
+  use).
+
+**Reference impedance.** Touchstone v1.1's option line has exactly one
+scalar `R <z0>` — it cannot represent two ports with genuinely *different*
+real reference impedances. Touchstone v2.0 adds a per-port `[Reference]`
+keyword, but v2.0 support across downstream tools is inconsistent. `klt mom`
+therefore:
+
+- Emits the v1.1 `# HZ S RI R <z0>` form when both ports share one
+  `reference_impedance_ohm` — the common case (`klt mom`'s own worked
+  example below uses 452.0 Ω on both ports, not the RF-conventional 50 Ω,
+  but *matched* between the two ports).
+- Raises a clear `MomError` (exit code 1) when the two ports' impedances
+  differ, rather than silently averaging them (dropping precision) or
+  emitting the inconsistently-supported v2.0 `[Reference]` syntax.
+
+`--touchstone` also raises a clear `MomError` if the report has no
+S-parameters at all — i.e. the spec file did not set `ports`.
+
+```console
+$ klt mom loop.gds loop.mom.json --touchstone loop.s2p
+...
+$ cat loop.s2p
+! klt mom Touchstone (.s2p) export -- issue #1518
+! Touchstone Rev 1.1 -- frequency unit Hz, S-parameters, RI (real/imaginary) format
+! file: loop.gds
+! spec: loop.mom.json
+# HZ S RI R 452.0
+1000000000.0 1.0402674313387271e-07 9.186147696669642e-06 0.9999358872262514 -0.011323486695722784 0.9999358872262514 -0.011323486695722784 1.0402674313388333e-07 9.18614769667058e-06
+```
+
 ### Worked example: matched two-wire transmission line
 
 The same two-wire loop as the full-wave sweep's own worked example, with
@@ -876,7 +929,7 @@ analogous cap on the full-wave solve's axial mesh.
 | Exit code | Meaning                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
 | `0`       | Success — the capacitance matrix (and, if requested, the PEEC inductance/resistance, the full-wave sweep, and/or de-embedded S-parameters) was computed and returned. |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true`/full-wave conductor that does not satisfy the shared bar-shape scope, a missing `conductivity_S_per_m`, a non-positive `frequencies_hz` entry, the filament-count/segment-count guards above, or (see "Port-related error paths" above) a `ports` array with other than exactly two entries, a port position outside the modeled bar span, non-ascending port positions, `ports` set without `frequencies_hz`, or `ports` set on other than exactly two conductors). |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true`/full-wave conductor that does not satisfy the shared bar-shape scope, a missing `conductivity_S_per_m`, a non-positive `frequencies_hz` entry, the filament-count/segment-count guards above, or (see "Port-related error paths" above) a `ports` array with other than exactly two entries, a port position outside the modeled bar span, non-ascending port positions, `ports` set without `frequencies_hz`, or `ports` set on other than exactly two conductors); also `--touchstone` passed to a report with no S-parameters, differing per-port `reference_impedance_ohm` (see "Exporting Touchstone (`.s2p`)" above), or a `--touchstone` path that could not be written. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                        |
 
 ## See also
