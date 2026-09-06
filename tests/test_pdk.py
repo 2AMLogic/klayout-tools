@@ -572,7 +572,9 @@ def test_flat_layout_list_reports_single_variant(tmp_path):
     assert len(report["installs"]) == 1
     install = report["installs"][0]
     assert install["root"] == str(root)
-    assert install["variants"] == [{"name": "ihp-sg13g2", "version": None}]
+    assert install["variants"] == [
+        {"name": "ihp-sg13g2", "version": None, "has_pcell_library": False}
+    ]
 
 
 def test_cli_find_flat_layout_json(tmp_path, capsys):
@@ -648,7 +650,9 @@ def test_flat_layout_list_reports_ihp_sg13cmos5l(tmp_path):
     assert len(report["installs"]) == 1
     install = report["installs"][0]
     assert install["root"] == str(root)
-    assert install["variants"] == [{"name": "ihp-sg13cmos5l", "version": None}]
+    assert install["variants"] == [
+        {"name": "ihp-sg13cmos5l", "version": None, "has_pcell_library": False}
+    ]
 
 
 def test_cli_find_ihp_sg13cmos5l_json(tmp_path, capsys):

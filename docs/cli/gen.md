@@ -21,12 +21,23 @@ the phase-4 mechanism-choice decision behind `bjt_array`.
 
 ```
 klt gen --list [--format text|json]
+klt gen --list-pdk-pcells [--pdk <variant>] [--pdk-root <dir>]
+                     [--format text|json]
 klt gen <generator> [--params <path-or-inline>] [--pdk <variant>]
+                     [--pdk-root <dir>] [--cell-name <name>] [-o/--output <path>]
+                     [--format text|json]
+klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant>]
                      [--pdk-root <dir>] [--cell-name <name>] [-o/--output <path>]
                      [--format text|json]
 ```
 
 - `--list` — enumerate available generators and their `params` schema, then exit.
+- `--list-pdk-pcells` — enumerate the PCell libraries the **resolved PDK
+  itself** ships (issue #1535), then exit. See
+  [PDK-shipped PCells](#pdk-shipped-pcells-list-pdk-pcells--pdk-pcell).
+- `--pdk-pcell <library>/<cell>` — instantiate a PCell from the resolved PDK's
+  own library instead of a klt built-in generator. Mutually exclusive with
+  `--list`, `--list-pdk-pcells`, and a positional `<generator>`.
 - `<generator>` — which generator to run (e.g. `resistor_strip`).
 - `--params` — either a path to a JSON file, or an inline JSON object (e.g.
   `--params '{"num": 8}'`). Omit to use every parameter's default. A value
@@ -1428,6 +1439,145 @@ parameters a generator's PCell declares (e.g. `resistor_strip`'s drawing
 layer) are never listed — `params` documents exactly the fields a request's
 `params` object may set.
 
+## PDK-shipped PCells (`--list-pdk-pcells` / `--pdk-pcell`)
+
+Every generator documented above is one klt *authored* — a
+`pya.PCellDeclarationHelper` subclass living in `src/klayout_tools/gen.py`. A
+PDK also ships **its own** PCell library, the authoritative drawing of that
+PDK's devices, as importable Python packages under
+`libs.tech/klayout/python/<package>/`. These two flags (issue #1535) reach
+those directly, so a caller never has to hand-transcribe a vendor PCell's
+geometry into a klt generator — the exact drift-prone step this command exists
+to avoid.
+
+klt is a **thin passthrough** here, per
+[`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)'s "wrap the proven engine" rule:
+it puts the PDK's own `python/` directory on `sys.path`, imports the vendor
+package, lets the vendor's own `pya.Library` register itself under the
+vendor's own name, and drives KLayout's own `Layout.add_pcell_variant()`
+against the vendor's own declaration — the same sequence the PDK's own KLayout
+autoload macro performs. klt never re-executes, re-implements, or
+reinterprets vendor PCell code.
+
+`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean
+([`docs/cli/pdk.md`](pdk.md)) so a caller can discover PyCell availability
+without invoking this command at all.
+
+### Phase 1 scope: packages that import with no extra compat layer
+
+A PDK's PyCell package routinely imports third-party modules klt has no
+dependency on. klt does **not** vendor or reimplement those. Verified against
+the three real installs available when this landed:
+
+| Install | Ships `libs.tech/klayout/python/`? | Shape | Loadable with klt's own dependencies? |
+| --- | --- | --- | --- |
+| `sky130A` (volare) | yes — `cells`, `import_netlist` | **plain `pya`** (`class pfet(pya.PCellDeclarationHelper)`, registered by `class sky130(pya.Library)`) — *not* Cadence-DLO/`cni`-based | no — its `__init__` chain reaches `import gdsfactory` (and `kfactory`). The PDK's own `pymacros/sky130_pcells.lym` checks for exactly that import and disables the PCells when it is absent. |
+| `ihp-sg13g2` | yes — `sg13g2_native_pcell_lib`, `sg13g2_pycell_lib`, … | `sg13g2_native_pcell_lib` is plain `pya`, but transitively imports `sg13g2_pycell_lib`, whose first statement is `from cni.tech import Tech` | no — `cni` is the `pycell4klayout-api` compat layer, wired in as a git submodule |
+| `gf180mcuD` (volare) | **no** `python/` at all | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
+
+A package that cannot be imported here is reported, never guessed at:
+
+- `--list-pdk-pcells` lists it under `unavailable` with the missing module
+  **named**, and still reports every library that *did* load. One unloadable
+  package must not hide the rest, and "this PDK ships PCells but needs `X`
+  installed" is precisely what the enumeration exists to answer.
+- `--pdk-pcell` fails with an **application error** (exit `1`) naming the
+  missing module, since there it is fatal. Never a traceback.
+
+The fix is always to install the named module into the environment (per the
+PDK's own setup docs), not for klt to ship a copy of it. Full `cni` /
+`pycell4klayout-api` support is out of scope for this phase.
+
+### `--list-pdk-pcells` JSON
+
+```json
+{
+  "schema_version": 1,
+  "pdk": { "name": "ihp-sg13g2", "variant": "ihp-sg13g2", "version": null },
+  "pcell_lib_dir": "/…/ihp-sg13g2/libs.tech/klayout/python",
+  "libraries": [
+    {
+      "library": "SG13_native_pcell_lib",
+      "package": "sg13g2_native_pcell_lib",
+      "description": "SG13G2 Native PCells",
+      "cells": [
+        {
+          "name": "Via",
+          "params": [
+            { "name": "w", "type": "double", "default": 1.0, "description": "Width (um)", "hidden": false, "settable": true }
+          ]
+        }
+      ]
+    }
+  ],
+  "unavailable": [
+    { "package": "sg13g2_pycell_lib", "missing_dependency": "cni", "reason": "requires Python module 'cni', which is not importable in this environment" }
+  ]
+}
+```
+
+- `pcell_lib_dir` — the resolved `libs.tech/klayout/python` directory, or
+  `null` when the PDK ships none. A PDK with no such directory returns
+  `libraries: []`, `unavailable: []` and exit `0` — a successful "this PDK
+  ships none", never an error.
+- `library` — the name the vendor's own `pya.Library.register()` call used.
+  This, not the Python package name, is the `<library>` half of
+  `--pdk-pcell <library>/<cell>`. `package` reports which Python package it
+  came from.
+- `params[].type` — as for `--list` (`int`, `double`, `string`, `bool`,
+  `list`), plus `layer`, `shape`, `callback`, and `none` for the KLayout PCell
+  parameter types no klt built-in generator declares.
+- `params[].settable` — `false` for a `shape`/`callback`/`none` parameter,
+  which has no JSON spelling. Such a parameter cannot be set from `--params`
+  (the vendor's default is used); setting one anyway is an application error.
+- `params[].hidden` — the vendor's own `hidden` flag. Unlike `--list`, hidden
+  parameters are **reported** rather than filtered: they are the vendor's
+  implementation detail, not klt's, and a headless caller may still need to
+  see them.
+- `params[].default` — the vendor's default, rendered as JSON. A `layer`
+  default becomes KLayout's own `"<layer>/<datatype>"` string (e.g. `"67/20"`),
+  which is exactly the spelling `--params` accepts back.
+
+### `--pdk-pcell` response
+
+The response is the **same envelope** a built-in generator emits (so an
+existing [`klt gen-compose`](gen-compose.md) block consumer needs no change),
+plus one additive `pdk_pcell` object:
+
+```json
+{
+  "generator": "SG13_native_pcell_lib/Via",
+  "pdk_pcell": { "library": "SG13_native_pcell_lib", "cell": "Via", "package": "sg13g2_native_pcell_lib" },
+  "cell_name": "Via_0",
+  "…": "as documented under `Response` above"
+}
+```
+
+- `generator` is `"<library>/<cell>"`, and `cell_name` defaults to
+  `<cell>_0`.
+- `dbu_um` is resolved from the PDK's tech LEF exactly as for a built-in
+  generator, so a `--pdk-pcell` block and a built-in block resolved against
+  the same PDK agree by construction.
+- `device_count` is always `1` and `ports` is always `[]`: a vendor PCell is
+  instantiated as an **opaque** cell. klt does not interpret its geometry to
+  infer devices or pins — doing so would be exactly the "transcribe a vendor
+  artifact" step this feature removes. `drc_hints.notes` carries a line saying
+  so; `drc_hints.min_spacing_um` and `matched_group_id` are `null` and
+  `snapped_to_grid` is `false` for the same reason.
+- `--params` names the *vendor's* parameters, type-checked against the
+  vendor's own declaration. Every parameter the request does not name keeps
+  the vendor's default, resolved by KLayout itself — klt never restates a
+  vendor default.
+
+```bash
+# What does this PDK ship, and what do those cells take?
+$ klt gen --list-pdk-pcells --pdk ihp-sg13g2 --format json
+
+# Instantiate one of them.
+$ klt gen --pdk-pcell SG13_native_pcell_lib/Via --params '{"w": 1.5}' \
+    --pdk ihp-sg13g2 -o output/via.gds --format json
+```
+
 ## Text format
 
 The default `text` format prints a short summary. It is intended for human
@@ -1453,9 +1603,9 @@ ports:
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Generation succeeded (or `--list` succeeded); `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unknown generator name, unresolvable PDK, invalid/out-of-range `params`, or the `options.output` directory does not exist. |
-| `2` | Usage error — no generator name given and `--list` not passed, or a bad `--format` value (from argparse or this command's own usage check). |
+| `0` | Generation succeeded (or `--list`/`--list-pdk-pcells` succeeded); `gds_path` was written and the report above is on stdout. |
+| `1` | Application error — unknown generator name, a malformed (not `<library>/<cell>`) or unknown `--pdk-pcell` value, a PDK PCell package that cannot be imported in this environment, unresolvable PDK, invalid/out-of-range `params`, or the `options.output` directory does not exist. |
+| `2` | Usage error — no generator name given and no mode flag passed, two mode flags at once (`--list`/`--list-pdk-pcells`/`--pdk-pcell`), a positional generator name alongside `--pdk-pcell`, or a bad `--format` value (from argparse or this command's own usage check). |
 
 No third "partial success" code is defined at phase 1, unlike `klt drc`'s
 `3` — a generator either produces a cell or it doesn't (see the spike's

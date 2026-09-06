@@ -16,6 +16,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen --list-pdk-pcells` and `klt gen --pdk-pcell
+  <library>/<cell>` reach the PCell library a resolved PDK ships *itself*
+  under `libs.tech/klayout/python/`, instead of only klt's own built-in
+  generators (issue #1535). `--list-pdk-pcells` enumerates each vendor
+  library's registered name, source package, cells, and every cell's
+  parameter spec (name/type/default/description/`hidden`/`settable`);
+  `--pdk-pcell` instantiates one and writes GDS through the same response
+  envelope a built-in generator emits, plus an additive `pdk_pcell`
+  `{library, cell, package}` object. klt is a thin passthrough here per
+  `docs/ARCHITECTURE.md`'s "wrap the proven engine" rule: it puts the PDK's
+  own `python/` directory on `sys.path`, imports the vendor package, lets the
+  vendor's own `pya.Library` register itself under the vendor's own name, and
+  drives KLayout's own `Layout.add_pcell_variant()` against the vendor's own
+  declaration — the same sequence the PDK's own KLayout autoload macro
+  performs. A vendor PCell is instantiated as an **opaque** cell
+  (`device_count` is always 1, `ports` always `[]`), because interpreting
+  vendor geometry to infer devices or pins would be exactly the
+  hand-transcription step this feature removes. A package that needs a
+  third-party compat layer klt has no dependency on is *reported*, never
+  vendored or reimplemented: `--list-pdk-pcells` lists it under `unavailable`
+  with the missing module named (and still reports every library that did
+  load), while `--pdk-pcell` fails as an application error (exit 1) naming
+  the same module, never a traceback. Both real installs available at the
+  time this landed hit that path — sky130A's `cells` is a plain-`pya`
+  library (not Cadence-DLO/`cni`-based) but reaches `import gdsfactory`,
+  and ihp-sg13g2's chain reaches `from cni.tech import Tech`. See
+  `docs/cli/gen.md`'s "PDK-shipped PCells" section.
+
+- **Added**: `klt pdk find` and `klt pdk list` report a `has_pcell_library`
+  boolean per resolved variant (issue #1535), so a caller can discover that a
+  PDK ships its own KLayout PyCell library without invoking `klt gen
+  --list-pdk-pcells`. Additive field; it reports only that a Python package is
+  present under `libs.tech/klayout/python/`, never that it imports in the
+  current environment. See `docs/cli/pdk.md`.
+
 - **Added**: `klt gen-compose`'s `connectivity[].legs[]` field lets a caller
   hand-route individual legs of a bundle (>2-pin) net by name (issue #1529).
   `waypoints_um` steers a 2-pin net's single backbone but was rejected
