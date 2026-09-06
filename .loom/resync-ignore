@@ -5,6 +5,14 @@
 # "commands/loom/mine.md"); blank lines and `#` comments are ignored. See
 # resync-installed.sh's header comment ("Local-override convention") for the
 # full path-shape reference.
+#
+# NOTE: `scripts/tests/ci-wired.txt` (and its sibling `ci-excluded.txt`) does
+# NOT belong in this list, and never has — it is upstream Loom's own CI
+# manifest for upstream Loom's own test suite, has zero effect on this repo's
+# CI (no workflow here calls `run-ci-suites.sh`), and pinning it would freeze
+# it against upstream's own future additions. If you're here because a
+# locally-added `.loom/scripts/tests/test-*.sh` suite needs CI wiring, see
+# `.loom/docs/local-test-suite-wiring.md` instead (issue #1532).
 
 # #606: champion-epic.md carries a local-only "Re-approval Guard and Rejection
 # Idempotency" section (originally #532/#533) that stops duplicate Phase 1
