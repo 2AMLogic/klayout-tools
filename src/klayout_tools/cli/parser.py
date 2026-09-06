@@ -1263,6 +1263,35 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--pin-source-cells",
+        dest="pin_source_cells",
+        default=None,
+        metavar="CELL[,CELL...]",
+        help=(
+            "comma-separated cell name(s) whose own drawn pin-name labels "
+            "(anywhere in the hierarchy, at any depth) declare genuine "
+            "top-level pins -- issue #1513, a third, *positional* "
+            "declared-pin mechanism for a `klt gen-compose`d assembly of "
+            "several pre-labelled macros with no governing top-level DEF of "
+            "its own to anchor --def-pins on. Unlike --top-cell-pins (a "
+            "per-cell-depth filter that demotes a composition's own "
+            "hand-drawn interconnect labels, since they necessarily live in "
+            "an instanced sub-cell, not the new top cell) and --pins/"
+            "--def-pins (per-net string matching, which cannot tell two "
+            "distinct nets apart when they coincidentally share a joined "
+            "label component -- e.g. two independently-labelled macros that "
+            "each happen to use 'CLK' internally), this resolves each named "
+            "cell's own labels to their real net by probing that label's "
+            "own position, not by matching its text. Every currently-"
+            "promoted pin not reached this way is demoted, exactly as "
+            "--pins/--def-pins demote on a miss. Applied after --pins/"
+            "--def-pins's own reconciliation (when given), so it can only "
+            "further restrict. Off by default -- byte-identical to today's "
+            "behavior. See docs/cli/extract.md's 'Pin-source cells' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
         "--deck-option",
         dest="deck_options",
         action="append",

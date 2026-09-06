@@ -2680,6 +2680,66 @@ def test_declared_pins_wrong_type_raises(tmp_path):
         run_lvs(path)
 
 
+def test_pin_source_cells_request_field_keeps_only_named_cell_labels(tmp_path):
+    """Issue #1513: `layout.pin_source_cells` threads through inline
+    extraction the same way `layout.declared_pins`/`top_cell_pins` do, but
+    resolves each named cell's own drawn labels to their real net by
+    probing rather than matching a promoted net's string -- every promoted
+    pin whose net is not reached this way is demoted, regardless of
+    below-top-label status. Naming only `A_LABEL` (the sub-cell
+    `_write_hier_inverter_gds` draws the gate's `A` label into) keeps just
+    that one net promoted."""
+    gds = _write_hier_inverter_gds(tmp_path / "hier.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+
+    def _run(pin_source_cells: list[str] | None) -> dict:
+        request = {
+            "layout": {"file": gds, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        }
+        if pin_source_cells is not None:
+            request["layout"]["pin_source_cells"] = pin_source_cells
+        return run_lvs(_write_request(tmp_path / "request.json", request))
+
+    default = _run(None)
+    scoped = _run(["A_LABEL"])
+
+    assert scoped["counts"]["pins"]["layout"] == 1
+    assert default["counts"]["pins"]["layout"] > 1
+
+
+def test_pin_source_cells_empty_list_raises(tmp_path):
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": gds, "deck": "sky130", "pin_source_cells": []},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    with pytest.raises(LvsError, match="must not be empty"):
+        run_lvs(path)
+
+
+def test_pin_source_cells_wrong_type_raises(tmp_path):
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "file": gds,
+                "deck": "sky130",
+                "pin_source_cells": "A_LABEL",  # must be a list, not a string
+            },
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    with pytest.raises(LvsError, match="must be a list of cell name strings"):
+        run_lvs(path)
+
+
 def _write_series_resistor_gds(path: Path) -> str:
     """Two sky130 drawn poly resistors (`res_generic_po`) wired in series
     through one interior tap, labelled purely for documentation -- issue

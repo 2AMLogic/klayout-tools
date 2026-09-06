@@ -93,6 +93,28 @@ def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
     return names
 
 
+def _parse_pin_source_cells(raw: str | None) -> frozenset[str] | None:
+    """Parse the ``--pin-source-cells`` flag's comma-separated value (issue
+    #1513) into a ``frozenset`` of cell names, or ``None`` when the flag was
+    omitted entirely (skips the probe-based declared-pin reconciliation).
+
+    Mirrors :func:`_parse_declared_pins`'s own comma-separated convention
+    and blank-token rejection -- these are cell *names* rather than net
+    names, but the "flag given with nothing usable in it" mistake is the
+    same shape either way.
+    """
+    if raw is None:
+        return None
+    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    if not names:
+        raise ExtractError(
+            "--pin-source-cells was given but contains no non-empty name "
+            f"(got {raw!r}) -- pass a comma-separated list of cell names, "
+            "e.g. --pin-source-cells routing__interconnect_top"
+        )
+    return names
+
+
 def _parse_matched_groups(raw: list[str] | None) -> dict[str, tuple[str, ...]] | None:
     """Parse the ``--matched-group`` flag's ``NAME=INST1,INST2[,...]``
     entries (issue #1018, repeatable) into a ``dict``, or ``None`` when the
@@ -206,6 +228,7 @@ def run(args: argparse.Namespace) -> int:
             raise ExtractError("argument --deck is required")
         declared_pins = _parse_declared_pins(args.pins)
         def_pins = _parse_def_pins(args.def_pins)
+        pin_source_cells = _parse_pin_source_cells(args.pin_source_cells)
         deck_options = _parse_deck_options(args.deck_options)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
@@ -288,6 +311,14 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that
             # predates it.
             def_pins=def_pins,
+            # `--pin-source-cells` (issue #1513): the positional, probe-based
+            # declared-pin mechanism for a `klt gen-compose`d assembly with
+            # no governing top-level DEF -- derives the declared top-level
+            # port set from which specific labels physically live inside the
+            # named cell(s), instead of matching a promoted net's string.
+            # `None` when the flag was never given, unchanged from every
+            # call site that predates it.
+            pin_source_cells=pin_source_cells,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)

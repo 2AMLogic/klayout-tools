@@ -2059,6 +2059,361 @@ def test_cli_def_pins_flag_errors_on_unparseable_def(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# Pin-source cells (`--pin-source-cells`, issue #1513): a positional
+# declared-pin mechanism for a `klt gen-compose`d assembly of several
+# pre-labelled macros with no governing top-level DEF of its own -- neither
+# `--top-cell-pins` (a composition's own hand-drawn interconnect labels
+# necessarily live in an instanced sub-cell, not the new top cell) nor
+# `--pins`/`--def-pins` (string matching cannot tell two unrelated nets
+# apart when they coincidentally share a joined label component) can
+# express this cleanly.
+# --------------------------------------------------------------------------- #
+
+
+def _make_nmos_device_cell(
+    layout: kdb.Layout,
+    name: str,
+    x0: int,
+    gate_label: str,
+    drain_label: str | None = None,
+) -> int:
+    """One self-contained NMOS (diff outside any nwell) drawn directly into
+    a fresh cell named ``name`` -- source/drain contacted+labelled (when
+    ``drain_label`` is given) and the gate contacted+labelled with
+    ``gate_label`` -- mirroring `_make_inverter_layout`'s own single-
+    transistor geometry, but scoped to its own cell rather than the layout's
+    top cell, so it can be instanced as a `klt gen-compose`-style composed-in
+    block. Returns the new cell's index.
+    """
+    cell = layout.create_cell(name)
+
+    def draw(layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing (nmos active)
+    draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1200))  # poly.drawing (gate)
+    draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
+    draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D)
+    draw(67, 20, kdb.Box(x0 + 0, 200, x0 + 400, 800))  # li1 (S)
+    draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D)
+    if drain_label is not None:
+        label(67, 5, drain_label, x0 + 1800, 500)
+    draw(66, 44, kdb.Box(x0 + 900, 900, x0 + 1100, 1100))  # licon1 (gate contact)
+    draw(67, 20, kdb.Box(x0 + 850, 850, x0 + 1150, 1150))  # li1 (gate pad)
+    label(67, 5, gate_label, x0 + 1000, 1000)
+    return cell.cell_index()
+
+
+def _make_gen_compose_style_layout() -> kdb.Layout:
+    """A `klt gen-compose`-style composition (issue #1513, claim 2): the top
+    cell draws nothing of its own -- every device lives in an instanced
+    sub-cell, mirroring how `klt gen-compose` copies each composed block's
+    own top cell into a fresh named sub-cell
+    (``f"{block_id}__{src_cell_name}"``) of the new composed top. Two
+    sub-cells:
+
+    - ``macro__stdcell`` -- a stand-in placed-and-routed standard-cell macro
+      with its own generic internal pin labels (``A`` on its gate, ``X`` on
+      its drain) -- self-contained, touching nothing else.
+    - ``route__interconnect`` -- a stand-in hand-drawn interconnect step's
+      own routing cell, with its own device and its own genuine top-level
+      pin labels (``TOP_A`` on its gate, ``TOP_X`` on its drain).
+
+    `--top-cell-pins` would demote *every* label here (nothing is drawn
+    directly in the top cell at all) -- the exact over-demotion issue #1513
+    reports for a composition with no governing top-level DEF.
+    `--pin-source-cells route__interconnect` must promote only
+    ``TOP_A``/``TOP_X``, leaving the macro's own ``A``/``X`` internal.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    macro_index = _make_nmos_device_cell(layout, "macro__stdcell", 0, "A", "X")
+    route_index = _make_nmos_device_cell(
+        layout, "route__interconnect", 5000, "TOP_A", "TOP_X"
+    )
+    top.insert(kdb.CellInstArray(macro_index, kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(route_index, kdb.Trans(0, 0)))
+    return layout
+
+
+def _make_pin_source_cells_ambiguity_layout() -> kdb.Layout:
+    """Two independent NMOS devices (issue #1513, claim 4) whose gate nets
+    each carry a joined label containing the same component string
+    ``"CLK"``, only one of which is the genuine top-level port:
+
+    - ``dev1``'s own gate label is ``"A"``; a *second* label, ``"CLK"``,
+      lands on the exact same li1 gate pad but is drawn inside a separate
+      ``"route"`` cell instanced at the same coordinates (the same
+      same-position-different-cell overlay `_make_inverter_layout`'s own
+      ``a_label_in_subcell`` uses) -- the genuine top-level port, joined to
+      ``"A,CLK"``.
+    - ``dev2``'s own gate carries *both* ``"CLK"`` and ``"B"``, drawn
+      directly in its own cell (``"dev2"``, not ``"route"``) -- an
+      unrelated, purely internal net whose joined name (``"B,CLK"``) shares
+      the ``"CLK"`` component purely by coincidence (two independently-
+      labelled macros both choosing the same generic pin name).
+
+    ``--def-pins CLK`` promotes *both* nets (the over-permissive failure
+    this issue reports); ``--pin-source-cells route`` must promote only
+    ``dev1``'s net.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    dev1_index = _make_nmos_device_cell(layout, "dev1", 0, "A")
+    route = layout.create_cell("route")
+    route.shapes(layout.layer(67, 5)).insert(kdb.Text("CLK", kdb.Trans(1000, 1000)))
+
+    dev2_index = _make_nmos_device_cell(layout, "dev2", 5000, "CLK")
+    layout.cell(dev2_index).shapes(layout.layer(67, 5)).insert(
+        kdb.Text("B", kdb.Trans(6000, 1000))
+    )
+
+    top.insert(kdb.CellInstArray(dev1_index, kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(route.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(dev2_index, kdb.Trans(0, 0)))
+    return layout
+
+
+def test_pin_source_cells_none_default_is_unchanged(tmp_path):
+    """Omitted `pin_source_cells` (the default) is byte-for-byte identical
+    to today's behaviour, same invariant `declared_pins`/`def_pins`'s own
+    default preserves."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    explicit_none = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "none.spice"),
+        pin_source_cells=None,
+    )
+
+    base_pins = {n["name"] for n in base["nets"] if n["pin"]}
+    explicit_pins = {n["name"] for n in explicit_none["nets"] if n["pin"]}
+    assert base_pins == explicit_pins
+    assert base["pin_count"] == explicit_none["pin_count"]
+    assert not any("--pin-source-cells" in w for w in explicit_none["warnings"])
+
+
+def test_pin_source_cells_survives_top_cell_pins_hazard(tmp_path):
+    """Issue #1513, claim 2: a `gen-compose`-style composition whose only
+    top-level pin labels live in an instanced routing sub-cell, alongside a
+    placed-and-routed macro sub-cell with its own generic (`A`/`X`) pin
+    labels -- `--pin-source-cells` must promote only the genuine top-level
+    set (`TOP_A`/`TOP_X`), leaving the macro's own `A`/`X` internal, without
+    ever needing `--top-cell-pins` (which would demote everything here)."""
+    path = _write_gds(
+        _make_gen_compose_style_layout(), tmp_path / "gen_compose_style.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "gen_compose_style.spice"),
+        pin_source_cells=frozenset({"route__interconnect"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    assert {"TOP_A", "TOP_X"}.issubset(pins)
+    assert {"A", "X"}.issubset(net_names)
+    assert "A" not in pins
+    assert "X" not in pins
+
+    demote_warning = next(
+        (
+            w
+            for w in report["warnings"]
+            if "no drawn label inside a --pin-source-cells cell resolves" in w
+        ),
+        None,
+    )
+    assert demote_warning is not None
+    assert "A" in demote_warning
+    assert "X" in demote_warning
+
+
+def test_pin_source_cells_disambiguates_collided_labels(tmp_path):
+    """Issue #1513, claim 4: two distinct nets whose comma-joined names each
+    contain the same component string (`CLK`) -- only one of which is the
+    intended port. `--def-pins CLK` promotes both (the over-permissive
+    failure this issue reports); `--pin-source-cells route` promotes
+    exactly the intended one, since it identifies the genuine port by where
+    its `CLK` label was physically drawn, not by the string itself."""
+    path = _write_gds(
+        _make_pin_source_cells_ambiguity_layout(), tmp_path / "collision.gds"
+    )
+
+    # Baseline: `--def-pins`'s component match cannot tell the two nets
+    # apart -- both get promoted.
+    baseline = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "collision_baseline.spice"),
+        def_pins=frozenset({"CLK"}),
+    )
+    baseline_pins = {n["name"] for n in baseline["nets"] if n["pin"]}
+    assert "A|CLK" in baseline_pins
+    assert "B|CLK" in baseline_pins
+
+    # Fix: `--pin-source-cells route` resolves each label by its own
+    # physical position, so only the net whose `CLK` label was drawn in
+    # `route` survives.
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "collision_fixed.spice"),
+        pin_source_cells=frozenset({"route"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    assert "A|CLK" in net_names
+    assert "A|CLK" in pins
+    assert "B|CLK" in net_names
+    assert "B|CLK" not in pins
+
+    demote_warning = next(
+        (
+            w
+            for w in report["warnings"]
+            if "no drawn label inside a --pin-source-cells cell resolves" in w
+        ),
+        None,
+    )
+    assert demote_warning is not None
+    assert "B,CLK" in demote_warning
+
+
+def test_pin_source_cells_unresolved_label_warns(tmp_path):
+    """A label drawn in a declared `--pin-source-cells` cell that resolves
+    to no drawn conductor at its own position (no underlying shape at that
+    exact point) is reported in `warnings`, mirroring `--def-pins`'s own
+    "matched no promoted net" diagnostic."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    dev_index = _make_nmos_device_cell(layout, "dev", 0, "A")
+    route = layout.create_cell("route")
+    # A label drawn in `route`, but at a point with no drawn conductor
+    # underneath it at all -- resolves to no net.
+    route.shapes(layout.layer(67, 5)).insert(
+        kdb.Text("ORPHAN_LABEL", kdb.Trans(50000, 50000))
+    )
+    top.insert(kdb.CellInstArray(dev_index, kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(route.cell_index(), kdb.Trans(0, 0)))
+
+    path = _write_gds(layout, tmp_path / "unresolved.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "unresolved.spice"),
+        pin_source_cells=frozenset({"route"}),
+    )
+
+    warning = next(
+        (
+            w
+            for w in report["warnings"]
+            if "resolved to no drawn conductor at its own position" in w
+        ),
+        None,
+    )
+    assert warning is not None
+    assert "ORPHAN_LABEL" in warning
+
+
+def test_pin_source_cells_applied_after_declared_pins_and_def_pins(tmp_path):
+    """`pin_source_cells` is applied *after* `declared_pins`'s and
+    `def_pins`'s own reconciliations (when given), and can only further
+    restrict -- it never re-promotes a net either of those already kept
+    internal."""
+    path = _write_gds(
+        _make_gen_compose_style_layout(), tmp_path / "gen_compose_style.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "combined.spice"),
+        # `declared_pins` demotes "TOP_X" first (an exact-match miss)...
+        declared_pins=frozenset({"TOP_A", "A", "X"}),
+        # ...and `pin_source_cells` would otherwise keep "TOP_X" (its label
+        # lives in the declared cell), but it is already internal by the
+        # time this pass runs.
+        pin_source_cells=frozenset({"route__interconnect"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "TOP_X" in net_names
+    assert "TOP_X" not in pins
+    assert "TOP_A" in pins
+
+    already_demoted_warning = next(
+        (w for w in report["warnings"] if "already kept internal by an earlier" in w),
+        None,
+    )
+    assert already_demoted_warning is not None
+    assert "TOP_X" in already_demoted_warning
+
+
+def test_cli_pin_source_cells_flag_wires_through(tmp_path, capsys):
+    """The `--pin-source-cells` flag wires through the CLI, parsing a
+    comma-separated cell-name list."""
+    path = str(
+        _write_gds(_make_gen_compose_style_layout(), tmp_path / "gen_compose_style.gds")
+    )
+
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--pin-source-cells",
+            "route__interconnect",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    pins = {n["name"] for n in payload["nets"] if n["pin"]}
+    assert {"TOP_A", "TOP_X"}.issubset(pins)
+    assert "A" not in pins
+    assert "X" not in pins
+
+
+def test_cli_pin_source_cells_flag_rejects_blank_value(tmp_path, capsys):
+    """`--pin-source-cells ""` (or an all-blank comma list) is a clean error
+    -- a likely mistake, not a silent "declare zero cells" request that
+    would demote every promoted pin -- mirroring `--pins`'s own guard."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--pin-source-cells",
+            " , ,",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert "--pin-source-cells" in payload["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
 # Zero-promoted-pins diagnostics (issue #1385)
 # --------------------------------------------------------------------------- #
 
