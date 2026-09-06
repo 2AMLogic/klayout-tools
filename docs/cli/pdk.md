@@ -321,7 +321,8 @@ Resolves one install/variant.
     "netgen": "/usr/share/pdk/sky130A/libs.tech/netgen",
     "libs_ref": "/usr/share/pdk/sky130A/libs.ref"
   },
-  "broken_symlinks": []
+  "broken_symlinks": [],
+  "has_pcell_library": true
 }
 ```
 
@@ -334,6 +335,24 @@ Resolves one install/variant.
 | `resolved_via` | string | Which resolution step matched (see table above). |
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
+| `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
+
+### PCell libraries (`has_pcell_library`, issue #1535)
+
+`has_pcell_library` is `true` when the resolved variant ships at least one
+importable Python package under `assets["klayout"]/python/` — the directory a
+PDK stages its own KLayout PyCell (Python PCell) library in, and the one its
+own KLayout autoload macro puts on `sys.path`. Verified against three real
+installs: sky130A (`python/cells`, `python/import_netlist`) and ihp-sg13g2
+(`python/sg13g2_native_pcell_lib`, `python/sg13g2_pycell_lib`, …) are `true`;
+gf180mcuD, which ships no `python/` at all, is `false`.
+
+It reports only that a *package is present on disk*, never that it can be
+imported here — a PDK's PyCell package routinely needs a third-party module
+klt has no dependency on (sky130A's `cells` needs `gdsfactory`; ihp-sg13g2's
+chain reaches `cni`). Use [`klt gen --list-pdk-pcells`](gen.md#pdk-shipped-pcells-list-pdk-pcells--pdk-pcell)
+to find out which packages actually load and what cells/parameters they
+expose, and `klt gen --pdk-pcell <library>/<cell>` to instantiate one.
 
 **`assets` keys are always present.** Each of `ngspice`, `xschem`, `klayout`,
 `magic`, `netgen` (under `libs.tech/`) and `libs_ref` (`libs.ref/`) maps to its
@@ -416,13 +435,16 @@ result is **success (exit 0)**, not an error.
       "root": "/usr/share/pdk",
       "resolved_via": "PDK_ROOT environment variable",
       "variants": [
-        { "name": "sky130A", "version": "open_pdks 0fe599b" },
-        { "name": "sky130B", "version": null }
+        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true },
+        { "name": "sky130B", "version": null, "has_pcell_library": true }
       ]
     }
   ]
 }
 ```
+
+`has_pcell_library` carries the same meaning as
+[`klt pdk find`'s own field](#pcell-libraries-has_pcell_library-issue-1535).
 
 ## `klt pdk env`
 

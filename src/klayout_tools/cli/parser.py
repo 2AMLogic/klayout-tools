@@ -1931,7 +1931,9 @@ def create_parser() -> argparse.ArgumentParser:
             "generator except resistor_strip only supports the sky130/"
             "gf180mcu PDK families today (any other resolved family is an "
             "application error) -- see docs/cli/gen.md's 'PDK-family "
-            "support' section."
+            "support' section. --list-pdk-pcells/--pdk-pcell reach the "
+            "resolved PDK's *own* shipped PCell library instead of a klt "
+            "built-in generator."
         ),
     )
     gen_parser.add_argument(
@@ -1940,10 +1942,34 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="generator to run (see --list for available generators)",
     )
-    gen_parser.add_argument(
+    # `--list`, `--list-pdk-pcells` and `--pdk-pcell` each select a different
+    # mode for this one verb, so argparse rejects any pair of them itself
+    # (usage error, exit 2 -- see docs/cli/gen.md's exit-code table).
+    gen_mode = gen_parser.add_mutually_exclusive_group()
+    gen_mode.add_argument(
         "--list",
         action="store_true",
         help="list available generators and their params, then exit",
+    )
+    gen_mode.add_argument(
+        "--list-pdk-pcells",
+        dest="list_pdk_pcells",
+        action="store_true",
+        help=(
+            "list the PCell libraries the resolved PDK itself ships under "
+            "libs.tech/klayout/python/ (with each cell's params), then exit"
+        ),
+    )
+    gen_mode.add_argument(
+        "--pdk-pcell",
+        dest="pdk_pcell",
+        default=None,
+        metavar="LIBRARY/CELL",
+        help=(
+            "instantiate a PCell the resolved PDK itself ships, named "
+            "'<library>/<cell>' as reported by --list-pdk-pcells, instead of "
+            "a klt built-in generator"
+        ),
     )
     gen_parser.add_argument(
         "--params",
