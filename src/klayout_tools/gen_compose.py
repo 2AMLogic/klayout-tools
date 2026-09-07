@@ -1223,6 +1223,19 @@ def _parse_waypoints_um(
     return parsed
 
 
+#: Allowed keys in a ``connectivity[].legs[]`` entry (#1529). Any other key
+#: is an application error rather than a silently dropped no-op field --
+#: see #1548: a request written for a newer ``klt`` build (e.g. a
+#: not-yet-supported field name) would otherwise be accepted and simply
+#: ignored, with no indication the caller's intent was only partially
+#: honored.
+_LEG_ENTRY_KEYS = {"from_pin", "to_pin", "waypoints_um"}
+
+#: Allowed keys in a ``connectivity[].legs[]`` entry's ``from_pin``/``to_pin``
+#: endpoint object (#1529). Same rationale as :data:`_LEG_ENTRY_KEYS` (#1548).
+_ENDPOINT_KEYS = {"block", "port"}
+
+
 def _parse_legs(
     raw_legs: Any,
     *,
@@ -1279,6 +1292,13 @@ def _parse_legs(
         endpoint_where = f"{where}[{leg_index}].{field}"
         if not isinstance(raw_endpoint, dict):
             raise GenComposeError(f"{endpoint_where} must be a JSON object")
+        unknown_endpoint_keys = set(raw_endpoint) - _ENDPOINT_KEYS
+        if unknown_endpoint_keys:
+            raise GenComposeError(
+                f"{endpoint_where} has unrecognized key(s): "
+                f"{sorted(unknown_endpoint_keys)} -- allowed: "
+                f"{sorted(_ENDPOINT_KEYS)}"
+            )
         block_id = raw_endpoint.get("block")
         port = raw_endpoint.get("port")
         if not isinstance(block_id, str) or not isinstance(port, str):
@@ -1296,6 +1316,12 @@ def _parse_legs(
     for leg_index, raw_leg in enumerate(raw_legs):
         if not isinstance(raw_leg, dict):
             raise GenComposeError(f"{where}[{leg_index}] must be a JSON object")
+        unknown_leg_keys = set(raw_leg) - _LEG_ENTRY_KEYS
+        if unknown_leg_keys:
+            raise GenComposeError(
+                f"{where}[{leg_index}] has unrecognized key(s): "
+                f"{sorted(unknown_leg_keys)} -- allowed: {sorted(_LEG_ENTRY_KEYS)}"
+            )
         from_pin = _parse_endpoint(raw_leg.get("from_pin"), "from_pin", leg_index)
         to_pin = _parse_endpoint(raw_leg.get("to_pin"), "to_pin", leg_index)
         if from_pin == to_pin:
@@ -1314,6 +1340,15 @@ def _parse_legs(
     return legs
 
 
+#: Allowed keys in a ``connectivity[]`` entry. Any other key is an
+#: application error (exit 1) rather than a silently dropped no-op field --
+#: see #1548: a request written for a newer ``klt`` build (e.g.
+#: ``legs[]`` before #1529/#1536 added support for it) would otherwise
+#: compose "successfully" against a stale build while the field's own
+#: intent -- e.g. a caller-steered route -- was simply never read.
+_CONNECTIVITY_ENTRY_KEYS = {"net", "pins", "waypoints_um", "legs"}
+
+
 def _parse_connectivity(
     raw_connectivity: Any, blocks: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -1327,6 +1362,13 @@ def _parse_connectivity(
         if not isinstance(entry, dict):
             raise GenComposeError(
                 f"request.connectivity[{index}] must be a JSON object"
+            )
+        unknown_keys = set(entry) - _CONNECTIVITY_ENTRY_KEYS
+        if unknown_keys:
+            raise GenComposeError(
+                f"request.connectivity[{index}] has unrecognized key(s): "
+                f"{sorted(unknown_keys)} -- allowed: "
+                f"{sorted(_CONNECTIVITY_ENTRY_KEYS)}"
             )
 
         net = entry.get("net")

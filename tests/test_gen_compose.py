@@ -2778,6 +2778,68 @@ def test_compose_rejects_malformed_legs_entries(tmp_path, pdk_root, legs, match)
         compose(request)
 
 
+def test_compose_rejects_unrecognized_connectivity_entry_key(tmp_path, pdk_root):
+    # #1548: a request written for a newer klt build (a field the installed
+    # build's own parser doesn't recognize yet) must fail loudly at parse
+    # time -- not compose "successfully" while silently dropping the field
+    # and its intent, e.g. a caller-steered `legs[]` route.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 2)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": "b1", "port": "U0_G"}, {"block": "b2", "port": "U0_G"}],
+        tmp_path / "unknown_connectivity_key.gds",
+        "unknown_connectivity_key_0",
+    )
+    request["connectivity"][0]["bogus_field"] = True
+    with pytest.raises(GenComposeError, match="unrecognized key.*bogus_field"):
+        compose(request)
+
+
+def test_compose_rejects_unrecognized_leg_entry_key(tmp_path, pdk_root):
+    # Same #1548 gap, one level down: a legs[] entry's own unrecognized key
+    # must also fail fast rather than being silently dropped.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+        tmp_path / "unknown_leg_key.gds",
+        "unknown_leg_key_0",
+    )
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G"},
+            "to_pin": {"block": "b2", "port": "U0_G"},
+            "bogus_field": True,
+        }
+    ]
+    with pytest.raises(GenComposeError, match="unrecognized key.*bogus_field"):
+        compose(request)
+
+
+def test_compose_rejects_unrecognized_leg_endpoint_key(tmp_path, pdk_root):
+    # Same #1548 gap, one level further down: a from_pin/to_pin endpoint
+    # object's own unrecognized key (e.g. a typo, or a field only a newer
+    # klt build understands) must also fail fast.
+    reports = _gate_rail_blocks(tmp_path, pdk_root, 3)
+    request = _gate_rail_request(
+        pdk_root,
+        reports,
+        [{"block": f"b{i}", "port": "U0_G"} for i in (1, 2, 3)],
+        tmp_path / "unknown_endpoint_key.gds",
+        "unknown_endpoint_key_0",
+    )
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "b1", "port": "U0_G", "layer": "metal1"},
+            "to_pin": {"block": "b2", "port": "U0_G"},
+        }
+    ]
+    with pytest.raises(GenComposeError, match="unrecognized key.*layer"):
+        compose(request)
+
+
 def test_route_bundle_seeds_an_explicit_leg_then_completes_the_rest_automatically(
     tmp_path, pdk_root
 ):
