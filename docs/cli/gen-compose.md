@@ -175,13 +175,15 @@ cleanly.
   #454)"](#via-drop-routing-metal2via-454) for a worked request/response
   pair. sky130's curated deck exposes one level further still (#508):
   `"metal3"` (met2 `69/20`) plus its own connecting via role (`"via2"`, the
-  met1↔met2 via, `68/44`) — usable the same way, but only from a pin already
-  on `"metal2"` (met1, one via hop away); a pin still on the base `"metal"`
-  role (li1) is two hops from `"metal3"` and the via-drop's single-hop limit
-  (below) rejects it. gf180mcu's own deck exposes the same third level
-  (#1058): `"metal3"` (Metal3 `42/0`) plus its own connecting via role
-  (`"via2"`, the Metal2↔Metal3 via, `38/0`) — usable the same way, from a
-  pin already on `"metal2"` (Metal2, one via hop away) only. IHP-Open-PDK's
+  met1↔met2 via, `68/44`) — usable the same way, from a pin already on
+  `"metal2"` (met1, one via hop away) via `"via2"` directly, or from a pin
+  still on the base `"metal"` role (li1, two hops from `"metal3"`) via the
+  full two-hop via-drop *ladder* (below, issue #1567) — `"via1"` then
+  `"via2"`, with a landing pad on met1 in between. gf180mcu's own deck
+  exposes the same third level (#1058): `"metal3"` (Metal3 `42/0`) plus its
+  own connecting via role (`"via2"`, the Metal2↔Metal3 via, `38/0`) — usable
+  the same way, including the two-hop ladder down to the base `"metal"` role
+  (Metal1). IHP-Open-PDK's
   `sg13g2`/`sg13cmos5l` (issue #1474) expose the identical two-level shape:
   `"metal2"` (Metal2 `10/0`) plus `"via1"` (Via1 `19/0`, the Metal1↔Metal2
   via) and `"metal3"` (Metal3 `30/0`) plus `"via2"` (Via2 `29/0`, the
@@ -790,10 +792,12 @@ that connects it back to the base `"metal"` role (`"via1"`) — sourced
 directly from the deck's own `metals`/`vias` tuples in
 `klayout_tools.gen._PDK_ROLE_LAYERS`, never a second, private layer map.
 sky130's deck now declares a third level too (met2, issue #508): `"metal3"`
-plus `"via2"` (the met1↔met2 via) work the same way one level up, but only
-between `"metal2"` and `"metal3"` themselves — see the single-hop limit
-below for why `"metal3"` cannot via-drop straight down to a pin still on the
-base `"metal"` role.
+plus `"via2"` (the met1↔met2 via) work the same way one level up. Before
+issue #1567, a `"metal3"` backbone could only via-drop one level down (to a
+pin already on `"metal2"`); a pin still on the base `"metal"` role, two
+levels down, was rejected outright. Since #1567 the via-drop instead walks
+the *full* `metals`/`vias` ladder between the two layers, so a `"metal3"`
+backbone reaches a base-`"metal"` pin too — see "Multi-level via-drop" below.
 
 Selecting `"metal2"` changes what `route_two_pin()` draws, not the
 request/response shape: the Manhattan backbone still runs between the same
@@ -851,26 +855,33 @@ under the ring's own metal), is left exactly as before #454 — drawn directly
 on `routing.layer_role`, no via-drop attempted, since via-drop only ever
 applies between two declared routing-metal levels.
 
-Two cases are rejected instead, reporting the net unroutable rather than
-drawing something that does not connect:
+One case draws a multi-level *ladder* instead of a single via, and one case
+is rejected outright, reporting the net unroutable rather than drawing
+something that does not connect:
 
 - A pin whose layer is a *different* metals-stack level than
-  `routing.layer_role`, more than one via hop away — sky130's/gf180mcu's/
-  `sg13g2`'s/`sg13cmos5l`'s `"metal2"`/`"via1"` pair is always exactly one
-  hop from `"metal"`, so this case does not arise for any family's second
-  level. Every family's third level (`"metal3"`/`"via2"`, sky130 issue #508,
-  gf180mcu issue #1058, `sg13g2`/`sg13cmos5l` issue #1474) is
-  where it first becomes real: a `"metal3"` route to a pin still on the base
-  `"metal"` role (sky130 li1, gf180mcu Metal1, `sg13g2`/`sg13cmos5l` Metal1)
-  is two hops away and hits this rejection — only a pin already on
-  `"metal2"` (sky130 met1, gf180mcu Metal2, `sg13g2`/`sg13cmos5l` Metal2,
-  one hop from `"metal3"`) resolves. gf180mcu's Metal4-5 levels, and
+  `routing.layer_role`, more than one via hop away (issue #1567). Every
+  family's third level (`"metal3"`/`"via2"`, sky130 issue #508, gf180mcu
+  issue #1058, `sg13g2`/`sg13cmos5l` issue #1474) is where this first
+  becomes real: a `"metal3"` route to a pin still on the base `"metal"` role
+  (sky130 li1, gf180mcu Metal1, `sg13g2`/`sg13cmos5l` Metal1) is two via
+  hops away. `gen_compose` walks the resolved deck's `metals`/`vias` stack
+  one level at a time and draws the *full* ladder — a via plus a landing pad
+  at every intermediate level, all at the pin's own position, exactly as the
+  single-hop case already does per level (see "Multi-level via-drop" below)
+  — rather than rejecting it. The only way this still fails is a genuine gap
+  in the resolved deck itself: some hop along the way has no via declared in
+  `ExtractionDeck.vias` (not the case for any two `routing.layer_role`
+  values this table currently exposes on sky130, gf180mcu, `sg13g2`, or
+  `sg13cmos5l` — each family's `"metal"`→`"metal2"`→`"metal3"` prefix is a
+  fully-connected run of declared vias). gf180mcu's Metal4-5 levels, and
   `sg13g2`'s/`sg13cmos5l`'s own Metal4 and above (Metal4 through TopMetal2
   on `sg13g2`, Metal4/TopMetal1 on `sg13cmos5l`), remain unexposed as
   `routing.layer_role` roles at all (each curated `EXTRACTION_DECK` declares
   the full metals stack for extraction, but `klayout_tools.gen
-  ._PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so this case
-  stays unreachable for those levels on any family.
+  ._PDK_ROLE_LAYERS` stops at `"metal3"` for every family), so a route can
+  never be asked to reach them via `routing.layer_role`/via-drop in the
+  first place.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
   drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
   metals stack lands on poly, so the backbone would end as an uncontacted
@@ -904,6 +915,59 @@ drawing something that does not connect:
   self-net's own block. The two checks compose rather than replace each
   other: either can catch a short the other's information set cannot see.
 
+### Multi-level via-drop (#1567)
+
+Before issue #1567, `gen_compose`'s via-drop only ever resolved **one** via
+hop: a route on `routing.layer_role: "metal3"` whose `connectivity[]` pin sat
+on a `"metal"`-role pad (two via hops away in sky130's/gf180mcu's/
+`sg13g2`'s/`sg13cmos5l`'s own `metals`/`vias` stack) was rejected outright —
+correctly, rather than drawing a disconnected stub, but the only way to
+actually reach that pin was to hand-build one extra composition stage per
+intermediate metal level, each declaring two ports at the identical
+coordinate on adjacent layers and routing a zero-length net between them
+just to make `gen_compose` emit that level's via.
+
+Since #1567, `_resolve_via_drop_layer` instead walks the resolved deck's
+`metals`/`vias` stack one level at a time between `routing.layer_role` and
+the pin's own reported layer, and draws the **full ladder** — one via square
+per hop, plus a landing pad on every level in between (including each
+intermediate level, not just the two ends) — all centered at the pin's own
+position, exactly as the single-hop case already draws its one via and two
+landing pads. A `"metal3"` route reaching a base-`"metal"` pin two hops down
+now draws two vias (sky130: `"via1"` then `"via2"`) and three landing pads
+(one each on `"metal3"`, `"metal2"`, and `"metal"`), instead of failing:
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [{ "id": "cell", "cell": { "gds_path": "cell.gds", "cell_name": "CELL", "bbox_um": {"width": 4.0, "height": 4.0}, "ports": [
+    { "name": "IN", "x_um": 0.5, "y_um": 2.0, "direction_deg": 180, "layer": {"layer": 67, "datatype": 20} },
+    { "name": "OUT", "x_um": 3.5, "y_um": 2.0, "direction_deg": 0, "layer": {"layer": 69, "datatype": 20} }
+  ] } }],
+  "placement": { "strategy": "row", "order": ["cell"], "spacing_um": 1.0 },
+  "connectivity": [
+    {
+      "net": "SIG",
+      "pins": [
+        { "block": "cell", "port": "IN" },
+        { "block": "cell", "port": "OUT" }
+      ]
+    }
+  ],
+  "routing": { "layer_role": "metal3", "width_um": 0.17 },
+  "options": { "cell_name": "ladder_demo", "output": "ladder_demo.gds" }
+}
+```
+
+`IN` sits on li1 (`67/20`, the base `"metal"` role) and `OUT` sits on met2
+(`69/20`, `"metal3"`) — before #1567 this request's `SIG` net came back in
+`unrouted_nets[]` with the "more than one via hop"/"single-hop drop"
+rejection; since #1567 it routes, with `IN`'s end of the backbone dropping
+through the full li1→met1→met2 via ladder to reach it. The composed output
+is DRC-clean against `klt drc --deck sky130`, and `klt extract --deck
+sky130` recovers `SIG` as a single node spanning both pins — no
+hand-built intermediate composition stage required.
+
 ## Cross-block bus routing (`routing.cross_block_layer_role`, #1168)
 
 `routing.layer_role` resolves to exactly **one** `(layer, datatype)` pair for
@@ -922,11 +986,13 @@ on the same layer (not always geometrically possible).
 
 `routing.cross_block_layer_role` names a **second**, higher metal role —
 resolved through the same per-PDK-family table `routing.layer_role` is
-(`gen_compose._resolve_cross_block_route_layer`), and required to be exactly
-one via hop from `routing.layer_role` in the resolved PDK family's own
-`ExtractionDeck.metals`/`.vias` stack (an application error, exit 1,
-otherwise — the same single-hop limit "Via-drop routing" documents). It
-changes nothing by itself: only a same-block self-net leg whose backbone
+(`gen_compose._resolve_cross_block_route_layer`), and required to be
+connectable to `routing.layer_role` by some via-drop ladder in the resolved
+PDK family's own `ExtractionDeck.metals`/`.vias` stack (an application
+error, exit 1, otherwise — since issue #1567 this is the same multi-hop
+resolution "Multi-level via-drop" documents, not a single-hop-only
+restriction). It changes nothing by itself: only a same-block self-net leg
+whose backbone
 would draw a silent short on `routing.layer_role` (checks 3/4 above) is
 retried on `routing.cross_block_layer_role` instead of failing outright, for
 that leg's **entire** length (not just the segment crossing the pad) —
@@ -986,9 +1052,10 @@ time (exit 1, matching every other `routing.*` validation error):
 - `routing.cross_block_layer_role` resolving to the **same** layer as
   `routing.layer_role` — a cross-block bus layer must be a distinct metal.
 - `routing.cross_block_layer_role` and `routing.layer_role` not connectable
-  by a single via hop — the same non-adjacent-metals-stack and
-  no-declared-via cases "Via-drop routing" documents for a pin's own layer,
-  applied here to the two layer roles themselves.
+  by any via-drop ladder — the same "outside the metals stack entirely" and
+  no-declared-via-for-some-hop cases "Via-drop routing"/"Multi-level
+  via-drop" document for a pin's own layer, applied here to the two layer
+  roles themselves.
 
 ### More than one same-block self-net per block (#1393)
 
@@ -1244,7 +1311,7 @@ exit codes).
 | `routing` | object | Optional (#1188). **Absent or `{}`** with a non-empty `connectivity[]` is a **declare-only** request: every net's `pins[]` is still validated, but no metal is drawn — each net comes back in `nets[]` with `status: "unrouted"` and `reason: "routing not requested"`, and its label lands in `unrouted_nets[]` (partial-success exit code `3`; see "Response" below). Supplying **any** key of `routing` opts into routing instead, and both `routing.layer_role`/`routing.width_um` become required at that point (a `routing` object with only one of the two set is an application error, exit 1 — there is no unambiguous partial routing spec). A request with an empty `connectivity[]` ignores `routing` either way. |
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
-| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer exactly one via hop from `routing.layer_role` in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's — that retry can land the second leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
+| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's — that retry can land the second leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 
 ### Response

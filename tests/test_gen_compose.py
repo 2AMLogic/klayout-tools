@@ -9,6 +9,7 @@ search-space constants are pointed away from the host by default (the
 installed on the machine running the suite.
 """
 
+import dataclasses
 import json
 from itertools import pairwise
 
@@ -5613,8 +5614,8 @@ def test_compose_route_dbu_probe_wraps_bad_gds_path_in_gen_compose_error(
 
 def test_resolve_via_drop_layer_same_layer_needs_no_drop():
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), (67, 20))
-    assert via_layer is None
+    ladder, error = _resolve_via_drop_layer(deck, (67, 20), (67, 20))
+    assert ladder is None
     assert error is None
 
 
@@ -5625,8 +5626,8 @@ def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
     # "draw directly on route_layer" behavior rather than being treated as
     # "needs a drop but none found".
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), (65, 44))
-    assert via_layer is None
+    ladder, error = _resolve_via_drop_layer(deck, (67, 20), (65, 44))
+    assert ladder is None
     assert error is None
 
 
@@ -5637,8 +5638,8 @@ def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
     # do" branch and the net was drawn anyway: `routed: true`, no note, and a
     # metal stub sitting over the gate with no contact joining the two.
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), deck.poly)
-    assert via_layer is None
+    ladder, error = _resolve_via_drop_layer(deck, (67, 20), deck.poly)
+    assert ladder is None
     assert error is not None
     assert "bare-poly gate" in error
     assert "gate_contact" in error
@@ -5649,41 +5650,57 @@ def test_resolve_via_drop_layer_poly_route_layer_still_draws_directly():
     # route whose own layer_role resolves outside the metals stack (e.g.
     # "poly"/"tap") has no stack to walk and keeps drawing directly.
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
-    assert via_layer is None
+    ladder, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
+    assert ladder is None
     assert error is None
 
 
 def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():
     # sky130's metals=((67,20),(68,20)), vias=((67,44),) -- li1 (metals[0])
-    # to met1 (metals[1]) resolves to mcon.
+    # to met1 (metals[1]) resolves to a one-hop ladder through mcon.
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (68, 20), (67, 20))
-    assert via_layer == (67, 44)
+    ladder, error = _resolve_via_drop_layer(deck, (68, 20), (67, 20))
+    assert ladder == (((67, 44), (67, 20), (68, 20)),)
     assert error is None
 
 
-def test_resolve_via_drop_layer_non_adjacent_metals_is_unresolvable():
+def test_resolve_via_drop_layer_non_adjacent_metals_resolves_a_two_hop_ladder():
     # sky130's metals stack is now three levels deep (li1/met1/met2, issue
     # #508's third connectivity level) -- a route on met2 (metals[2],
     # "metal3") to a pin still on li1 (metals[0], the base "metal" role) is
-    # two via hops apart, exercising the >1-hop rejection path against the
-    # real deck (no synthetic three-level deck needed anymore, unlike before
-    # #508 extended the real one).
+    # two via hops apart. Before issue #1567 this was an unresolvable
+    # rejection; since #1567 it resolves to the full two-hop ladder (mcon,
+    # then the met1<->met2 via), each hop's own pair of landing-pad layers
+    # in ascending metals-stack order.
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (69, 20), (67, 20))
-    assert via_layer is None
+    ladder, error = _resolve_via_drop_layer(deck, (69, 20), (67, 20))
+    assert ladder == (
+        ((67, 44), (67, 20), (68, 20)),
+        ((68, 44), (68, 20), (69, 20)),
+    )
+    assert error is None
+
+
+def test_resolve_via_drop_layer_non_adjacent_metals_missing_via_is_unresolvable():
+    # A synthetic three-level deck whose middle hop has no declared via (the
+    # ``vias`` tuple is one entry short of ``metals``) still fails, naming
+    # the specific missing hop rather than silently drawing a partial ladder.
+    deck = get_extraction_deck("sky130")
+    truncated_deck = dataclasses.replace(deck, vias=deck.vias[:0])
+    ladder, error = _resolve_via_drop_layer(truncated_deck, (69, 20), (67, 20))
+    assert ladder is None
     assert error is not None
-    assert "single-hop" in error
+    assert "no via" in error
+    assert "metals[0]" in error and "metals[1]" in error
 
 
 def test_resolve_via_drop_layer_metal3_to_metal2_resolves_the_via():
     # A route on met2 (metals[2], "metal3") to a pin on met1 (metals[1],
-    # "metal2") is exactly one via hop apart -- resolves to the met1<->met2
-    # via (issue #508).
+    # "metal2") is exactly one via hop apart -- resolves to a one-hop
+    # ladder through the met1<->met2 via (issue #508).
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (69, 20), (68, 20))
-    assert via_layer == (68, 44)
+    ladder, error = _resolve_via_drop_layer(deck, (69, 20), (68, 20))
+    assert ladder == (((68, 44), (68, 20), (69, 20)),)
     assert error is None
 
 
@@ -5699,24 +5716,26 @@ def test_resolve_route_layer_metal3_and_via2_roles():
 def test_resolve_via_drop_layer_metal3_to_metal2_resolves_the_via_gf180mcu():
     # gf180mcu equivalent of the sky130 case above (issue #1058): a route on
     # Metal3 (metals[2], "metal3") to a pin on Metal2 (metals[1], "metal2")
-    # is exactly one via hop apart -- resolves to the Metal2<->Metal3 via
-    # (Via2, 38/0).
+    # is exactly one via hop apart -- resolves to a one-hop ladder through
+    # the Metal2<->Metal3 via (Via2, 38/0).
     deck = get_extraction_deck("gf180mcu")
-    via_layer, error = _resolve_via_drop_layer(deck, (42, 0), (36, 0))
-    assert via_layer == (38, 0)
+    ladder, error = _resolve_via_drop_layer(deck, (42, 0), (36, 0))
+    assert ladder == (((38, 0), (36, 0), (42, 0)),)
     assert error is None
 
 
-def test_resolve_via_drop_layer_non_adjacent_metals_is_unresolvable_gf180mcu():
-    # gf180mcu equivalent of the sky130 case above (issue #1058): a route on
+def test_resolve_via_drop_layer_two_hop_ladder_gf180mcu():
+    # gf180mcu equivalent of the sky130 case above (issue #1567): a route on
     # Metal3 (metals[2], "metal3") to a pin still on Metal1 (metals[0], the
-    # base "metal" role) is two via hops apart, exercising the >1-hop
-    # rejection path against the real gf180mcu deck.
+    # base "metal" role) is two via hops apart -- resolves to the full
+    # two-hop ladder (Via1, then Via2) against the real gf180mcu deck.
     deck = get_extraction_deck("gf180mcu")
-    via_layer, error = _resolve_via_drop_layer(deck, (42, 0), (34, 0))
-    assert via_layer is None
-    assert error is not None
-    assert "single-hop" in error
+    ladder, error = _resolve_via_drop_layer(deck, (42, 0), (34, 0))
+    assert ladder == (
+        ((35, 0), (34, 0), (36, 0)),
+        ((38, 0), (36, 0), (42, 0)),
+    )
+    assert error is None
 
 
 def test_resolve_route_layer_metal3_and_via2_roles_gf180mcu():
@@ -5828,6 +5847,107 @@ def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
     assert bussed_net not in base_nets
 
 
+def test_compose_via_drop_ladder_routes_two_hops_down_to_base_metal(tmp_path, pdk_root):
+    # Issue #1567's own reproducer sketch, built on the exact #433/#454
+    # fixture the single-hop test above already uses: an 8-unit bjt_array's
+    # emitter pads are drawn on li1 (metals[0]) -- routing on "metal3"
+    # (met2, metals[2]) is now *two* via hops from them, not one. Before
+    # #1567 this whole request came back in unrouted_nets[] with the
+    # "more than one via hop"/"single-hop drop" rejection; since #1567 it
+    # routes, walking the full li1<->met1<->met2 ladder at each endpoint.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_bus_via_drop_ladder.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                {
+                    "net": "EBUS2",
+                    "pins": [
+                        {"block": "arr", "port": "Q1_E"},
+                        {"block": "arr", "port": "Q2_E"},
+                    ],
+                },
+            ],
+            "routing": {"layer_role": "metal3", "width_um": 0.17},
+            "options": {"cell_name": "bjt_bus_via_drop_ladder", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+    assert report["nets"][1]["routed"] is True
+    assert report["nets"][1]["route_length_um"] > 0
+
+    # The backbone is drawn on met2 (69/20), not li1 or met1 -- and the full
+    # two-hop ladder (mcon 67/44, then via 68/44) plus landing pads on li1,
+    # met1, *and* met2 were dropped at each pin endpoint.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bjt_bus_via_drop_ladder")
+    li1 = layout.layer(67, 20)
+    met1 = layout.layer(68, 20)
+    met2 = layout.layer(69, 20)
+    mcon = layout.layer(67, 44)
+    via1 = layout.layer(68, 44)
+    assert [s for s in top.shapes(met2).each() if s.is_path()]
+    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+    assert [s for s in top.shapes(met1).each() if s.is_path()] == []
+    assert list(top.shapes(mcon).each())  # at least one li1<->met1 via drawn
+    assert list(top.shapes(via1).each())  # at least one met1<->met2 via drawn
+    # An intermediate landing pad on met1 (neither the backbone's own layer
+    # nor the pin's own layer) is exactly the multi-hop ladder's new shape --
+    # a single-hop drop never draws anything on met1 for this request.
+    assert list(top.shapes(met1).each())
+
+    # DRC-clean (acceptance criterion): the via-drop ladder's own drawn
+    # geometry (two vias + three landing pads per endpoint) must not violate
+    # any curated sky130 rule.
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Extraction still merges only the three targeted emitters into one node
+    # -- the ladder's intermediate met1 pad does not leak the net onto
+    # anything else.
+    result = extract.run_extract(str(output), "sky130", top="bjt_bus_via_drop_ladder")
+    bjt_devices = [d for d in result["devices"] if d["class"] == "pnp"]
+    assert len(bjt_devices) == 8
+    emitter_nets = {d["name"]: d["nets"]["e"] for d in bjt_devices}
+    bussed = {name: net for name, net in emitter_nets.items() if net is not None}
+    from collections import Counter
+
+    counts = Counter(bussed.values())
+    assert 3 in counts.values(), emitter_nets
+    bussed_net = next(net for net, n in counts.items() if n == 3)
+    bussed_devices = {name for name, net in emitter_nets.items() if net == bussed_net}
+    assert len(bussed_devices) == 3
+    base_nets = {d["nets"]["b"] for d in bjt_devices}
+    assert bussed_net not in base_nets
+
+
 # --------------------------------------------------------------------------- #
 # Cross-block bus routing (routing.cross_block_layer_role, #1168): unlike the
 # via-drop tests above -- which route the *whole composition* on "metal2" --
@@ -5842,11 +5962,11 @@ def test_resolve_cross_block_route_layer_resolves_adjacent_metals():
     # sky130's "metal" (li1, 67/20) and "metal2" (met1, 68/20) are exactly one
     # via hop apart (mcon, 67/44) -- the same pair the via-drop tests above
     # use, just resolved from the opposite direction.
-    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+    cross_layer, via_layers = gen_compose._resolve_cross_block_route_layer(
         "sky130A", "metal", "metal2"
     )
     assert cross_layer == (68, 20)
-    assert via_layer == (67, 44)
+    assert via_layers == ((67, 44),)
 
 
 def test_resolve_cross_block_route_layer_rejects_identical_roles():
@@ -5854,20 +5974,31 @@ def test_resolve_cross_block_route_layer_rejects_identical_roles():
         gen_compose._resolve_cross_block_route_layer("sky130A", "metal", "metal")
 
 
-def test_resolve_cross_block_route_layer_rejects_non_adjacent_metals():
+def test_resolve_cross_block_route_layer_resolves_a_two_hop_ladder():
     # "metal" (li1, metals[0]) and "metal3" (met2, metals[2]) are two via
-    # hops apart -- not resolvable by a single hop, mirroring
-    # _resolve_via_drop_layer's own non-adjacent rejection.
-    with pytest.raises(GenComposeError, match="single via"):
-        gen_compose._resolve_cross_block_route_layer("sky130A", "metal", "metal3")
+    # hops apart -- issue #1567 lifted the single-via-hop-only restriction
+    # here (mirroring _resolve_via_drop_layer's own generalization), so this
+    # now resolves to the full two-hop via ladder instead of rejecting.
+    cross_layer, via_layers = gen_compose._resolve_cross_block_route_layer(
+        "sky130A", "metal", "metal3"
+    )
+    assert cross_layer == (69, 20)
+    assert via_layers == ((67, 44), (68, 44))
+
+
+def test_resolve_cross_block_route_layer_rejects_unconnectable_roles():
+    # "metal" (li1) and "tap" (65/44) -- "tap" is not a member of the deck's
+    # metals stack at all, so no via-drop ladder can connect the two.
+    with pytest.raises(GenComposeError, match="via-drop ladder"):
+        gen_compose._resolve_cross_block_route_layer("sky130A", "metal", "tap")
 
 
 def test_resolve_cross_block_route_layer_gf180mcu():
-    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+    cross_layer, via_layers = gen_compose._resolve_cross_block_route_layer(
         "gf180mcuA", "metal2", "metal3"
     )
     assert cross_layer == (42, 0)
-    assert via_layer == (38, 0)
+    assert via_layers == ((38, 0),)
 
 
 def test_resolve_cross_block_route_layer_sg13g2():
@@ -5876,22 +6007,22 @@ def test_resolve_cross_block_route_layer_sg13g2():
     # request against "ihp-sg13g2" raised "not a known layer role" -- there
     # was no second plane to name at all. "metal" (Metal1, 8/0) and
     # "metal2" (Metal2, 10/0) are exactly one via hop apart (Via1, 19/0).
-    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+    cross_layer, via_layers = gen_compose._resolve_cross_block_route_layer(
         "ihp-sg13g2", "metal", "metal2"
     )
     assert cross_layer == (10, 0)
-    assert via_layer == (19, 0)
+    assert via_layers == ((19, 0),)
 
 
 def test_resolve_cross_block_route_layer_sg13cmos5l():
     # Same gap, same fix, on cmos5l (issue #1474) -- resolves to the
     # identical layer/datatype pairs as sg13g2's own entry above, since
     # cmos5l's Metal1-Metal3 prefix is byte-identical to sg13g2's.
-    cross_layer, via_layer = gen_compose._resolve_cross_block_route_layer(
+    cross_layer, via_layers = gen_compose._resolve_cross_block_route_layer(
         "ihp-sg13cmos5l", "metal", "metal2"
     )
     assert cross_layer == (10, 0)
-    assert via_layer == (19, 0)
+    assert via_layers == ((19, 0),)
 
 
 def test_compose_rejects_unknown_cross_block_layer_role(tmp_path, pdk_root):
