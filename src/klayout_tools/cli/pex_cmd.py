@@ -28,6 +28,7 @@ import argparse
 
 from ..env_provenance import render_path_field
 from ..pex import PexError, run_pex
+from ._parsing import parse_deck_options, parse_declared_pins
 from .output import emit_error, emit_success
 
 EXIT_PASS = 0
@@ -37,6 +38,12 @@ EXIT_ROW_ERRORED = 4
 
 def run(args: argparse.Namespace) -> int:
     try:
+        # `--deck-option`/`--pins` (issue #1558): parsed with the same shared
+        # helpers `klt extract` uses (`cli/_parsing.py`), bound to this
+        # command's own `PexError` so a malformed entry is this command's
+        # clean exit-1 error envelope rather than a traceback.
+        deck_options = parse_deck_options(args.deck_options, PexError)
+        declared_pins = parse_declared_pins(args.pins, PexError)
         report = run_pex(
             args.layout,
             args.testbenches,
@@ -47,6 +54,17 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             artifacts_dir=args.outdir,
             backend=args.backend,
+            # `--deck-option` (issue #1558): selects a caller-visible flavour
+            # of a shared-geometry device family (e.g. gf180mcu's
+            # `poly_res`/`mim_cap`), passed straight through to `klt extract
+            # --deck-option`. `None` when the flag was never given, unchanged
+            # from every call site that predates it.
+            deck_options=deck_options,
+            # `--pins` (issue #1558): the declared top-level pin set, passed
+            # straight through to `klt extract --pins`. `None` when the flag
+            # was never given, unchanged from every call site that predates
+            # it.
+            declared_pins=declared_pins,
             # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
             # lateral coupling pass onto these net names. `None` when the
             # flag was never given, unchanged from every call site that

@@ -2475,3 +2475,382 @@ def test_cli_pex_error_exit_code_and_stderr(tmp_path, resistor_layout, capsys):
     err = json.loads(capsys.readouterr().err)
     assert err["error"]["command"] == "pex"
     assert "extraction failed" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# `--deck-option`/`--pins` passthrough to `klt extract` (issue #1558, Gap 1)
+#
+# `klt pex` drives `klt extract --parasitics` internally but, until this
+# issue, exposed no way to reach either flag -- so a design committed to a
+# non-default deck flavour (gf180mcu's `poly_res`/`mim_cap` axes: one drawn
+# geometry, several PDK-offered interpretations) was silently extracted
+# against the *deck's* default flavour, and every `delta[]` row computed from
+# the wrong parasitics, with no warning.
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_mim_layout(top_name: str = "MIM") -> kdb.Layout:
+    """A minimal gf180mcu MiM-cap layout on the curated deck's Option-B
+    stack: a 10x10um `FuseTop` top plate (marked `CAP_MK`/`MIM_L_MK`) over a
+    larger `Metal4` bottom plate -- the same fixture shape
+    `tests/test_extract.py`'s `_make_gf180mcu_mim_layout` uses, kept
+    self-contained here as this module's own fixtures already are.
+
+    One drawn geometry, three selectable densities (`--deck-option
+    mim_cap=cap_mim_{1f0,1f5,2f0}_m4m5_noshield`): exactly the "the drawn
+    geometry alone cannot tell you which flavour this is" case Gap 1 is
+    about."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+    dbu = layout.dbu
+
+    def box_um(x0, y0, x1, y1):
+        return kdb.Box(
+            round(x0 / dbu), round(y0 / dbu), round(x1 / dbu), round(y1 / dbu)
+        )
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, box_um(-20, -20, 20, 20))  # Metal4 (bottom plate conductor)
+    draw(75, 0, box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    draw(117, 5, box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, box_um(-5, -5, 15, 15))  # MIM_L_MK
+    return layout
+
+
+# `C = 100um^2 * 9.87e-16 F/um^2 + 40um * 3.3e-16 F/um`, the `cap_mim_1f0`
+# flavour's own cited coefficients against this fixture's 10x10um plate --
+# distinct from the deck default's 2.08532e-13, which is the whole point.
+_MIM_1F0_C_F = 1.119e-13
+
+
+def _write_mim_dut(path: Path) -> Path:
+    """A schematic DUT whose `.SUBCKT` interface matches the extraction's:
+    `MIM` with no top-level pins (this fixture draws no labels, so no net
+    promotes to a pin), so no `pin_count_mismatch`/`flat_dut_mismatch`
+    stands between the run and its extracted side."""
+    path.write_text(".SUBCKT MIM\nC1 cp cm 208.532f\n.ENDS MIM\n")
+    return path
+
+
+def _write_mim_testbench(path: Path, dut_path: Path) -> Path:
+    path.write_text(
+        f'.include "{dut_path}"\nXdut MIM\nVdd n1 0 DC 1.8\nRload n1 0 1k\n'
+    )
+    return path
+
+
+def _mim_pex_inputs(tmp_path):
+    """`(layout, request)` for a gf180mcu MiM `klt pex` run."""
+    layout = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim.gds")
+    dut = _write_mim_dut(tmp_path / "mim_dut.spice")
+    tb = _write_mim_testbench(tmp_path / "mim_tb.spice", dut)
+    request = _write_request(tmp_path / "mim_request.json", tb, node="n1")
+    return layout, request
+
+
+def _install_two_call_fake_run_sim(monkeypatch):
+    """Monkeypatch `run_sim` with a fake that answers both the schematic-
+    and extracted-side calls, so a whole `run_pex` run completes without
+    `ngspice` (the same idiom the `pin_count_mismatch` tests above use).
+    Returns the call counter."""
+    import klayout_tools.pex as pex_module
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        return {
+            "corners": [
+                {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+            ],
+            "corner_count": 1,
+            "measurements": [{"name": "vout"}],
+        }
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    return calls
+
+
+def test_run_pex_deck_options_threaded_through_to_extraction(tmp_path, monkeypatch):
+    """Issue #1558, Gap 1: `deck_options` (`klt pex --deck-option`) reaches
+    `run_extract`, so the extraction selects the *requested* flavour rather
+    than the deck's default -- proven against the acceptance bar itself: the
+    netlist `klt pex` extracts is byte-for-byte the one a standalone `klt
+    extract --deck-option ... --parasitics` writes for the same layout
+    (`netlist_sha256`), and is *not* the default-flavour one."""
+    from klayout_tools.extract import run_extract
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    calls = _install_two_call_fake_run_sim(monkeypatch)
+
+    report = run_pex(
+        layout,
+        [str(request)],
+        "gf180mcu",
+        output=str(tmp_path / "pex_extracted.spice"),
+        deck_options={"mim_cap": "cap_mim_1f0_m4m5_noshield"},
+    )
+
+    assert calls["n"] == 2
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    # The resolved flavour is pinned in this run's own provenance echo.
+    assert report["provenance"]["deck"]["options"] == {
+        "mim_cap": "cap_mim_1f0_m4m5_noshield"
+    }
+
+    # ... and the extracted netlist is exactly `klt extract --deck-option`'s.
+    standalone = run_extract(
+        layout,
+        "gf180mcu",
+        output=str(tmp_path / "standalone.spice"),
+        parasitics=True,
+        deck_options={"mim_cap": "cap_mim_1f0_m4m5_noshield"},
+    )
+    assert report["extraction"]["netlist_sha256"] == standalone["netlist_sha256"]
+
+    default_flavour = run_extract(
+        layout,
+        "gf180mcu",
+        output=str(tmp_path / "default.spice"),
+        parasitics=True,
+    )
+    assert report["extraction"]["netlist_sha256"] != default_flavour["netlist_sha256"]
+    # The device card really did move to the requested density.
+    text = Path(str(tmp_path / "pex_extracted.spice")).read_text()
+    assert f"{_MIM_1F0_C_F:.12g}" in text
+
+
+def test_run_pex_without_deck_options_still_extracts_the_deck_default(
+    tmp_path, monkeypatch
+):
+    """Backward-compatibility guard: omitting `deck_options` entirely
+    reproduces the pre-#1558 run exactly -- the deck's own default flavour,
+    and no `provenance.deck.options` key at all."""
+    from klayout_tools.extract import run_extract
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    _install_two_call_fake_run_sim(monkeypatch)
+
+    report = run_pex(
+        layout,
+        [str(request)],
+        "gf180mcu",
+        output=str(tmp_path / "pex_extracted.spice"),
+    )
+
+    assert "options" not in report["provenance"]["deck"]
+    default_flavour = run_extract(
+        layout,
+        "gf180mcu",
+        output=str(tmp_path / "default.spice"),
+        parasitics=True,
+    )
+    assert report["extraction"]["netlist_sha256"] == default_flavour["netlist_sha256"]
+
+
+def test_run_pex_deck_option_invalid_value_is_a_clean_pex_error(tmp_path, monkeypatch):
+    """An unrecognised `--deck-option` value is `klt extract`'s own loud
+    validation error, surfaced through this command's `PexError` envelope --
+    not a silently-kept default (the failure mode Gap 1 reports)."""
+    layout, request = _mim_pex_inputs(tmp_path)
+    _install_two_call_fake_run_sim(monkeypatch)
+
+    with pytest.raises(PexError, match="mim_cap=cap_mim_3f0_m4m5_noshield"):
+        run_pex(
+            layout,
+            [str(request)],
+            "gf180mcu",
+            output=str(tmp_path / "bad.spice"),
+            deck_options={"mim_cap": "cap_mim_3f0_m4m5_noshield"},
+        )
+
+
+def test_run_pex_declared_pins_threaded_through_to_extraction(
+    tmp_path, resistor_layout_promoted_taps, monkeypatch
+):
+    """Issue #1558, Gap 1: `declared_pins` (`klt pex --pins`) reaches
+    `run_extract`, demoting the two labelled taps flat extraction would
+    otherwise promote to top-level pins.
+
+    The same layout *without* `--pins` is the `pin_count_mismatch` case
+    `test_run_pex_pin_count_mismatch_preflight_skips_extracted_side_entirely`
+    above locks in (extraction promotes `RA RB VSUB VNW`; the schematic DUT
+    declares only `RA RB`, so the extracted side is never even attempted).
+    Declaring the real port set reconciles the two, and the extracted side
+    runs -- an observable behavioral difference, not just a forwarded
+    kwarg."""
+    calls = _install_two_call_fake_run_sim(monkeypatch)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    without_pins = run_pex(
+        resistor_layout_promoted_taps,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "no_pins.spice"),
+    )
+    assert without_pins["pin_count_mismatch"] is not None
+    assert without_pins["pin_count_mismatch"]["extracted"]["pins"] == [
+        "RA",
+        "RB",
+        "VSUB",
+        "VNW",
+    ]
+    # Extracted side skipped: only the schematic-side call happened.
+    assert calls["n"] == 1
+
+    with_pins = run_pex(
+        resistor_layout_promoted_taps,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "with_pins.spice"),
+        declared_pins=frozenset({"RA", "RB"}),
+    )
+    assert with_pins["pin_count_mismatch"] is None
+    assert with_pins["status"] == "pass"
+    # Both sides ran this time (2 further calls on top of the 1 above).
+    assert calls["n"] == 3
+    assert ".SUBCKT RES RA RB\n" in Path(str(tmp_path / "with_pins.spice")).read_text()
+
+
+def test_cli_pex_deck_option_and_pins_reach_run_pex(tmp_path, monkeypatch):
+    """The CLI half of the passthrough: `klt pex --deck-option ... --pins
+    ...` parses both flags with the same shared helpers `klt extract` uses
+    (`cli/_parsing.py`) and hands them to `run_pex` in the parsed shapes it
+    declares."""
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    exit_code = main(
+        [
+            "pex",
+            str(layout),
+            str(request),
+            "--deck",
+            "gf180mcu",
+            "--deck-option",
+            "mim_cap=cap_mim_1f5_m4m5_noshield",
+            "--deck-option",
+            "poly_res=2k",
+            "--pins",
+            "RA, RB",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["deck_options"] == {
+        "mim_cap": "cap_mim_1f5_m4m5_noshield",
+        "poly_res": "2k",
+    }
+    assert captured["declared_pins"] == frozenset({"RA", "RB"})
+
+
+def test_cli_pex_omitting_the_new_flags_passes_none(tmp_path, monkeypatch):
+    """Omitting both flags forwards `None` for both -- the exact `run_pex`
+    call every caller made before issue #1558."""
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    exit_code = main(
+        ["pex", str(layout), str(request), "--deck", "gf180mcu", "--format", "json"]
+    )
+
+    assert exit_code == 0
+    assert captured["deck_options"] is None
+    assert captured["declared_pins"] is None
+
+
+def test_cli_pex_deck_option_malformed_entry_is_a_clean_error(tmp_path, capsys):
+    """A `--deck-option` entry with no `=` exits 1 with this command's own
+    JSON error envelope, not a traceback -- the same message `klt extract`
+    produces, because both go through the same shared parser."""
+    layout, request = _mim_pex_inputs(tmp_path)
+
+    exit_code = main(
+        [
+            "pex",
+            str(layout),
+            str(request),
+            "--deck",
+            "gf180mcu",
+            "--deck-option",
+            "mim_cap",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "KEY=VALUE" in err["error"]["message"]
+
+
+def test_cli_pex_blank_pins_is_a_clean_error(tmp_path, capsys):
+    """`--pins ,,` (nothing usable in it) is likewise a clean exit-1 error,
+    not a silent "declare zero pins"."""
+    layout, request = _mim_pex_inputs(tmp_path)
+
+    exit_code = main(
+        [
+            "pex",
+            str(layout),
+            str(request),
+            "--deck",
+            "gf180mcu",
+            "--pins",
+            ",,",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "no non-empty name" in err["error"]["message"]

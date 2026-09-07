@@ -58,6 +58,42 @@ not `klt --version`, if you need to detect this kind of drift. See
   never touched. Existing `mismatches[].category` values are reused
   (`device.combine_parameter_corrected`); no new category, no response
   field changes, no `schema_version` bump.
+- **Fixed**: `klt extract` no longer writes an unsimulatable `C` card for a
+  recognised **capacitor** device class (issue #1558). KLayout's default
+  primitive-card writer appends the device class's own name as a trailing
+  4th token (`C$1 a b 1.119e-13 cap_mim_1f0_m4m5_noshield`), which ngspice's
+  native `C` element parser reads as a required capacitor `.model`
+  reference — and no deck's capacitor class name is a real `.model` in any
+  PDK model library (gf180mcu's `cap_mim_*_m4m5_noshield`, sky130's
+  `sky130_fd_pr__model__cap_mim*`, sg13g2's `cap_cmim`/`rfcmim` are
+  `klt`-internal class labels or, at best, *subcircuit* names a `C` card
+  cannot reference), so the extracted netlist failed to elaborate at all
+  (`unknown parameter (…)` / `could not find a valid modelname`). Unbound
+  capacitor classes now write the bare, value-only card (`C$1 a b
+  1.119e-13`). Reachable both with `--pdk` (a recognised flavour with no
+  curated `pdk_models` table row — e.g. gf180mcu's non-default
+  `cap_mim_1f0_m4m5_noshield`/`cap_mim_1f5_m4m5_noshield` densities,
+  selected via `--deck-option mim_cap=…`) and without it. The flavour
+  identity is unchanged in `devices[].class` and in the netlist's own
+  `* device instance …` comment; `--parasitics`' ground/coupling capacitor
+  cards, `--pdk`-**bound** capacitor `X` cards, and the `R`/`Q`
+  bare-primitive carve-outs (whose trailing token *is* a usable
+  consumer-supplied-`.model` reference) are all byte-identical to before.
+- **Added**: `klt pex` now accepts `--deck-option <key>=<value>`
+  (repeatable) and `--pins <a,b,…>`, passed straight through to the
+  `klt extract --parasitics` run it drives internally (issue #1558). Before
+  this, a design committed to a non-default deck flavour (gf180mcu's
+  `poly_res`/`mim_cap` axes — one drawn geometry, several PDK-offered
+  interpretations) was silently extracted against the *deck's* default
+  flavour, with no warning, and every `delta[]` row was computed from the
+  wrong parasitics; `--pins` is likewise how a caller resolves a
+  `pin_count_mismatch` caused by flat extraction promoting more top-level
+  pins than the schematic DUT declares. Both are off by default —
+  byte-identical to before — and the resolved deck options are echoed in
+  the existing `provenance.deck.options` field (no JSON shape change). Both
+  flags share `klt extract`'s own parsing/validation helpers, so an
+  unrecognised key/value or a malformed entry is the same clean exit-1
+  error in either command.
 - **Added**: `klt lvs` now accepts `options.combine_devices_per_circuit`
   (issue #1552): a `{"<circuit-name-glob>": <boolean>}` map applied via
   `klayout.db.Circuit.combine_devices()` to each side's own matching

@@ -8,6 +8,14 @@ command module; this module is the single implementation they all delegate
 to, each supplying its own exception class and ``--flag`` name so error
 messages stay command-specific.
 
+The same applies to the extraction-flag pair ``--deck-option``/``--pins``
+(:func:`parse_deck_options`/:func:`parse_declared_pins`), which both
+``klt extract`` and ``klt pex`` accept and forward to the *same*
+``run_extract`` parameters -- issue #1558 added the ``klt pex`` half, and
+factored the parsing here rather than duplicating it, so the two commands
+cannot drift on what they accept or on the message a malformed entry
+produces.
+
 Private to the :mod:`klayout_tools.cli` package -- not part of the public
 ``klayout_tools`` API.
 """
@@ -145,3 +153,64 @@ def load_region(
         )
 
     return (left, bottom, right, top)
+
+
+def parse_deck_options(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--deck-option",
+) -> dict[str, str] | None:
+    """Parse the ``--deck-option`` flag's ``KEY=VALUE`` entries (issue #595,
+    repeatable) into a ``dict``, or ``None`` when the flag was never given.
+
+    Shared by ``klt extract`` and ``klt pex`` (issue #1558) -- both forward
+    the result to ``run_extract``'s own ``deck_options`` parameter, so the
+    accepted spelling must stay identical between them. ``flag`` and
+    ``error_cls`` behave as in :func:`load_json_path_or_inline`.
+
+    Raises ``error_cls`` for a malformed entry (no ``=``, or a blank key) --
+    a likely typo, not a meaningful "no options" request. A later ``KEY``
+    overrides an earlier one with the same key (last-one-wins, matching how
+    argparse's own ``append`` action preserves given order).
+    """
+    if raw is None:
+        return None
+    options: dict[str, str] = {}
+    for entry in raw:
+        key, sep, value = entry.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not KEY=VALUE -- e.g. {flag} poly_res=2k"
+            )
+        options[key] = value.strip()
+    return options
+
+
+def parse_declared_pins(
+    raw: str | None,
+    error_cls: ErrorFactory,
+    flag: str = "--pins",
+) -> frozenset[str] | None:
+    """Parse the ``--pins`` flag's comma-separated value (issue #514) into a
+    ``frozenset`` of declared pin names, or ``None`` when the flag was
+    omitted entirely (skips the declared-pin-set reconciliation).
+
+    Shared by ``klt extract`` and ``klt pex`` (issue #1558), like
+    :func:`parse_deck_options` above. ``flag`` and ``error_cls`` behave as in
+    :func:`load_json_path_or_inline`.
+
+    Raises ``error_cls`` if the flag was given but every comma-separated
+    token is blank (e.g. ``--pins ""`` or ``--pins ,,``) -- a likely
+    mistake, not a meaningful "declare zero pins" request.
+    """
+    if raw is None:
+        return None
+    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    if not names:
+        raise error_cls(
+            f"{flag} was given but contains no non-empty name "
+            f"(got {raw!r}) -- pass a comma-separated list of net names, "
+            f"e.g. {flag} A,B,VDD,VSS"
+        )
+    return names

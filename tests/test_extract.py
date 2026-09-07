@@ -5445,6 +5445,228 @@ def test_gf180mcu_mim_cap_deck_option_invalid_value_is_extract_error(tmp_path):
         )
 
 
+# --------------------------------------------------------------------------- #
+# Unbound capacitor classes write a bare, value-only `C` card (issue #1558)
+#
+# KLayout's own default primitive writer appends a non-empty device-class name
+# as a trailing 4th token on the `C` card, which ngspice's native `C` element
+# parser reads as a required capacitor `.model` reference -- and no deck's
+# capacitor class name is a real `.model` in any PDK model library, so the
+# extracted netlist could not be simulated at all. Reachable with `--pdk` (a
+# recognised flavour with no curated `_CAPACITOR_MODEL_TABLE` row, e.g.
+# gf180mcu's non-default `cap_mim_1f0`/`1f5` densities) and without it.
+# --------------------------------------------------------------------------- #
+
+
+def _capacitor_device_card(netlist_path: str) -> str:
+    """The one drawn-capacitor device card in a written netlist -- the `C`/`X`
+    card KLayout writes for the recognised MiM device, never one of
+    `--parasitics`' own ground/coupling capacitors (whose instance names
+    `extract.py` derives from a net, and whose device class is anonymous)."""
+    cards = [
+        line
+        for line in _device_cards(netlist_path)
+        if line[:1] in ("C", "X") and line.split()[0][1:].startswith("$")
+    ]
+    assert len(cards) == 1, cards
+    return cards[0]
+
+
+def _parasitic_cards(netlist_path: str) -> list[str]:
+    """Every `--parasitics`-synthesized R/C/L card (i.e. every device card
+    that is *not* the drawn device) -- the cards issue #1558 must leave
+    byte-identical."""
+    device_card = _capacitor_device_card(netlist_path)
+    return [line for line in _device_cards(netlist_path) if line != device_card]
+
+
+@pytest.mark.parametrize(
+    ("flavour", "expected_c_f"),
+    [
+        # C = 100um^2 * area_cap + 40um * perim_cap, per `decks/gf180mcu.py`'s
+        # own cited coefficients (same layout as
+        # `test_gf180mcu_mim_cap_deck_option_selects_flavour`).
+        ("cap_mim_1f0_m4m5_noshield", 100.0 * 9.87e-16 + 40.0 * 3.3e-16),
+        ("cap_mim_1f5_m4m5_noshield", 100.0 * 1.47e-15 + 40.0 * 3.79e-16),
+    ],
+)
+def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
+    tmp_path, flavour, expected_c_f
+):
+    """Issue #1558, Gap 2: `--pdk <variant> --parasitics` on a layout whose
+    MiM cap uses one of gf180mcu's non-default densities emits a bare,
+    value-only `C` card -- **no** trailing `cap_mim_1f0_m4m5_noshield`-style
+    token, which ngspice would reject as an unresolvable `.model` reference
+    (`unknown parameter (...)`/`could not find a valid modelname`).
+
+    Neither flavour has a `_CAPACITOR_MODEL_TABLE` row (only the default
+    `cap_mim_2f0_m4m5_noshield` does), so the device falls through to
+    KLayout's own default primitive-card writer -- the path that used to
+    append the class name. The flavour identity is still recorded, in the
+    writer's own preceding `* device instance ...` comment and in
+    `devices[].class`."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
+    out = str(tmp_path / f"{flavour}.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=True,
+        deck_options={"mim_cap": flavour},
+    )
+
+    # The JSON contract is untouched -- only the written card shape changes.
+    assert report["device_counts"] == {flavour: 1}
+
+    card = _capacitor_device_card(out)
+    tokens = card.split()
+    assert card.startswith("C"), card
+    # `C<name> <net+> <net-> <value>` and nothing else: exactly four tokens,
+    # the last of them a plain number ngspice reads as the capacitance.
+    assert len(tokens) == 4, card
+    assert float(tokens[3]) == pytest.approx(expected_c_f)
+
+    # The flavour name survives only as the writer's own device-instance
+    # comment -- never on a card ngspice has to parse.
+    for line in Path(out).read_text().splitlines():
+        if line.startswith("*"):
+            continue
+        assert flavour not in line, line
+    assert f"* device instance $1 r0 *1 5,5 {flavour}" in Path(out).read_text()
+
+
+def test_unbound_mim_capacitor_card_leaves_parasitic_cards_untouched(tmp_path):
+    """The ground/coupling capacitors `--parasitics` synthesizes are
+    unaffected by issue #1558's `C`-card change: their device class is
+    anonymous, so KLayout already wrote them bare. Locked here by diffing
+    every non-device card against the pre-existing (default-flavour,
+    no-`--pdk`) baseline, which this issue must not perturb."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim.gds")
+    baseline_out = str(tmp_path / "baseline.spice")
+    run_extract(path, "gf180mcu", output=baseline_out, parasitics=True)
+
+    flavoured_out = str(tmp_path / "flavoured.spice")
+    run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=flavoured_out,
+        parasitics=True,
+        deck_options={"mim_cap": "cap_mim_1f0_m4m5_noshield"},
+    )
+
+    assert _parasitic_cards(flavoured_out) == _parasitic_cards(baseline_out)
+    # Both parasitic capacitors and the drawn device now share the same bare
+    # card shape -- 4 whitespace tokens, last one numeric.
+    ground_cap = next(
+        card for card in _parasitic_cards(baseline_out) if card.startswith("C")
+    )
+    assert len(ground_cap.split()) == 4, ground_cap
+
+
+def test_pdk_bound_default_mim_flavour_still_writes_x_card(tmp_path):
+    """Counterpart guard: the *curated* default flavour still binds to its
+    real subcircuit under `--pdk` (an `X` card, not the new bare `C` card) --
+    issue #1558 narrows only the unbound fallback, and must not regress the
+    binding it exists to complement."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim_2f0.gds")
+    out = str(tmp_path / "mim_2f0.spice")
+    run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=True,
+        deck_options={"mim_cap": "cap_mim_2f0_m4m5_noshield"},
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert " cap_mim_2f0_m4m5_noshield " in card
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "layout_factory"),
+    [
+        ("gf180mcu", _make_gf180mcu_mim_layout),
+        ("sky130", _make_sky130_mim_layout),
+    ],
+)
+def test_mim_capacitor_card_is_bare_without_pdk(tmp_path, deck_name, layout_factory):
+    """The same fix covers the no-`--pdk` path, where *every* deck's
+    capacitor class is unbound: sky130's `sky130_fd_pr__model__cap_mim` is a
+    `klt`-internal class label (the real PDK ships
+    `.subckt sky130_fd_pr__cap_mim_m3_1`), and gf180mcu's
+    `cap_mim_2f0_m4m5_noshield` likewise -- neither is a `.model` a `C` card
+    could ever reference, so neither belongs on one."""
+    path = _write_gds(layout_factory(), tmp_path / f"{deck_name}_mim.gds")
+    out = str(tmp_path / f"{deck_name}_mim.spice")
+    run_extract(path, deck_name, output=out, parasitics=True)
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("C"), card
+    assert len(card.split()) == 4, card
+    assert float(card.split()[3]) > 0.0
+
+
+@_SKIP_NO_NGSPICE
+def test_unbound_mim_capacitor_netlist_simulates_in_ngspice(tmp_path):
+    """Issue #1558, Gap 2's acceptance bar: the extracted netlist is fed to
+    a real `ngspice -b` run, not merely inspected as text. The pre-fix card
+    (reconstructed here by appending the flavour token back onto it) is
+    rejected with ngspice's own `unknown parameter (...)` diagnostic; the
+    card `klt extract` writes today elaborates cleanly."""
+    import subprocess
+
+    flavour = "cap_mim_1f0_m4m5_noshield"
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim_sim.gds")
+    out = str(tmp_path / "mim_sim.spice")
+    run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=True,
+        deck_options={"mim_cap": flavour},
+    )
+    extracted = Path(out).read_text()
+
+    def simulate(netlist_text: str, name: str) -> str:
+        deck = tmp_path / f"{name}.spice"
+        # The extraction wraps its output in `.SUBCKT TOP` (no promoted pins
+        # on this unlabelled fixture), so instantiating it is the whole
+        # testbench -- this proves the deck *elaborates*, which is exactly
+        # what the trailing `.model` token used to break.
+        deck.write_text(
+            f"* {name}\n{netlist_text}\nXdut TOP\nV1 n1 0 DC 1\nR1 n1 0 1k\n.op\n.end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(deck)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return completed.stdout + completed.stderr
+
+    written = simulate(extracted, "as_written")
+    assert f"unknown parameter ({flavour})" not in written, written
+    assert "could not find a valid modelname" not in written, written
+    assert "Simulation interrupted due to error" not in written, written
+
+    # The pre-#1558 card shape, reconstructed: the same netlist with the
+    # class name appended back onto its one `C` device card.
+    device_card = _capacitor_device_card(out)
+    legacy = simulate(
+        extracted.replace(device_card, f"{device_card} {flavour}"), "legacy_token"
+    )
+    assert f"unknown parameter ({flavour})" in legacy, legacy
+
+
 def test_cli_deck_option_selects_mim_cap_flavour(tmp_path, capsys):
     """`klt extract --deck-option mim_cap=cap_mim_1f5_m4m5_noshield`
     end-to-end: parsed by the CLI, forwarded to `run_extract`, and echoed in
