@@ -78,13 +78,15 @@ Scope (phase 2, this module's current state):
   are left undrawn; ``nets[].status`` (``"routed"``/``"partial"``/
   ``"unrouted"``) tells the caller which case it is, since both a partial and
   a fully-unrouted net report ``routed: false``.
-* **Via-drop routing** (issue #454, re-raising #433's Ask options 1/2): a
-  family whose curated extraction deck declares a second routing-metal level
-  (e.g. sky130's ``"metal2"``/met1) can be selected as ``routing.layer_role``
-  even though every ``klt gen`` block's own pads are drawn on the base
-  ``"metal"`` role -- :func:`route_two_pin` drops the backbone back down to
-  each target pin's own layer via the connecting via (sky130's ``"via1"``/
-  mcon) exactly at that pin's position, so the backbone itself never runs
+* **Via-drop routing** (issue #454, re-raising #433's Ask options 1/2; a
+  multi-level ladder since issue #1567): a family whose curated extraction
+  deck declares a second (or third, ...) routing-metal level (e.g. sky130's
+  ``"metal2"``/met1) can be selected as ``routing.layer_role`` even though
+  every ``klt gen`` block's own pads are drawn on the base ``"metal"`` role
+  -- :func:`route_two_pin` drops the backbone back down to each target pin's
+  own layer via the connecting via (sky130's ``"via1"``/mcon), or the full
+  chain of connecting vias when the two are more than one metals-stack level
+  apart, exactly at that pin's position, so the backbone itself never runs
   across another pad on the pad layer. This is what makes a same-block bus
   (e.g. chaining a matched array's unit terminals) routable without either
   accepting a same-layer short or failing #433's self-net pad-crossing
@@ -1696,15 +1698,23 @@ def _endpoint_stub_widen_um(
     }
 
 
+#: One via-drop hop, as resolved by :func:`_resolve_via_drop_layer`:
+#: ``(via_layer, metal_a, metal_b)`` -- the via square's own layer, plus the
+#: two ``deck.metals`` levels it lands a pad on, in ascending stack order
+#: (issue #1567).
+_ViaDropHop = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+
+
 def _resolve_via_drop_layer(
     deck: ExtractionDeck,
     route_layer: tuple[int, int],
     port_layer: tuple[int, int],
-) -> tuple[tuple[int, int] | None, str | None]:
-    """Resolve whether a route drawn on ``route_layer`` needs a via-drop to
-    reach a target pin drawn on ``port_layer`` (issue #454, re-raising
-    #433's Ask options 1/2: a ``metal2``/via role pair plus router support
-    for actually using it).
+) -> tuple[tuple[_ViaDropHop, ...] | None, str | None]:
+    """Resolve whether a route drawn on ``route_layer`` needs a via-drop
+    *ladder* to reach a target pin drawn on ``port_layer`` (issue #454,
+    re-raising #433's Ask options 1/2: a ``metal2``/via role pair plus router
+    support for actually using it; generalized from a single hop to an
+    arbitrary number of them by issue #1567).
 
     Looks the two layers up in the resolved PDK family's own
     :class:`~klayout_tools.decks.ExtractionDeck` ``metals``/``vias`` stack
@@ -1713,20 +1723,31 @@ def _resolve_via_drop_layer(
     walks (``connect(metals[i], vias[i])`` / ``connect(vias[i],
     metals[i + 1])``), never a second, private via table.
 
-    Returns ``(via_layer, error)``:
+    Returns ``(ladder, error)``:
 
     * ``(None, None)`` -- no drop needed. Either ``port_layer`` already *is*
       ``route_layer`` (the pre-#454 single-metal routing path, unchanged), or
       ``route_layer`` itself is not a member of ``deck.metals`` (a
       ``"poly"``/``"tap"``-role backbone has no metals stack to walk, so it
       draws directly exactly as it always has).
-    * ``(via_pair, None)`` -- a drop is needed and resolved; draw a via on
-      ``via_pair`` at the pin's own position.
-    * ``(None, reason)`` -- a drop is needed but not resolvable (the two
-      metals-stack levels are more than one via hop apart, the deck declares
-      no via for the hop needed, or the pin sits on the deck's bare ``poly``
-      layer, which no via in the metals stack reaches) -- the caller reports
-      the net unroutable rather than drawing a disconnected short.
+    * ``(ladder, None)`` -- a drop is needed and fully resolved. ``ladder`` is
+      a non-empty, ordered tuple of :data:`_ViaDropHop` entries -- one per via
+      the backbone must drop through between ``route_layer`` and
+      ``port_layer``, walking ``deck.metals`` one level at a time (in
+      ascending stack order, regardless of which end is ``route_layer``/
+      ``port_layer``). Before issue #1567 this tuple could only ever have
+      exactly one entry -- any greater metals-stack distance was rejected
+      below instead. The caller draws a via square on each hop's own
+      ``via_layer`` plus a landing pad on each of that hop's ``metal_a``/
+      ``metal_b``, all at the pin's own position, exactly as the single-hop
+      case always has; consecutive hops share a landing pad at the
+      intermediate level they have in common (harmless redundancy, not a
+      second, larger pad).
+    * ``(None, reason)`` -- a drop is needed but not resolvable (the deck
+      declares no via for one of the hops the ladder needs, or the pin sits
+      on the deck's bare ``poly`` layer, which no via in the metals stack
+      reaches) -- the caller reports the net unroutable rather than drawing a
+      disconnected short.
 
     That last case is issue #492: before it, a metal-role backbone ending on
     a bare-poly gate port fell into the ``(None, None)`` "unrelated role,
@@ -1762,27 +1783,33 @@ def _resolve_via_drop_layer(
         # port, which the ring's own metal already covers at that position)
         # keeps the pre-#454 behavior: drawn directly on route_layer, no via.
         return None, None
-    if abs(route_idx - port_idx) != 1:
-        return None, (
-            f"routing.layer_role's metal (deck metals[{route_idx}]) is more "
-            f"than one via hop from this pin's own layer (deck "
-            f"metals[{port_idx}]) -- gen_compose's via-drop only supports a "
-            "single-hop drop"
+    lo, hi = (route_idx, port_idx) if route_idx < port_idx else (port_idx, route_idx)
+    ladder: list[_ViaDropHop] = []
+    for via_index in range(lo, hi):
+        if via_index >= len(deck.vias):
+            return None, (
+                "the resolved PDK's extraction deck declares no via "
+                f"connecting deck metals[{via_index}] and "
+                f"metals[{via_index + 1}] -- needed for a via-drop ladder "
+                f"between routing.layer_role's metal (deck "
+                f"metals[{route_idx}]) and this pin's own layer (deck "
+                f"metals[{port_idx}])"
+            )
+        ladder.append(
+            (
+                deck.vias[via_index],
+                deck.metals[via_index],
+                deck.metals[via_index + 1],
+            )
         )
-    via_index = min(route_idx, port_idx)
-    if via_index >= len(deck.vias):
-        return None, (
-            "the resolved PDK's extraction deck declares no via connecting "
-            f"deck metals[{route_idx}] and metals[{port_idx}]"
-        )
-    return deck.vias[via_index], None
+    return tuple(ladder), None
 
 
 def _resolve_cross_block_route_layer(
     variant: str, layer_role: str, cross_layer_role: str
-) -> tuple[tuple[int, int], tuple[int, int]]:
+) -> tuple[tuple[int, int], tuple[tuple[int, int], ...]]:
     """Resolve ``routing.cross_block_layer_role`` to ``(cross_route_layer,
-    via_layer)`` (issue #1168).
+    via_layers)`` (issue #1168).
 
     ``routing.layer_role`` resolves to exactly one ``(layer, datatype)`` pair
     for the whole composition (:func:`_resolve_route_layer`) -- a net whose
@@ -1798,19 +1825,25 @@ def _resolve_cross_block_route_layer(
     (never a second, private layer map).
 
     Reuses :func:`_resolve_via_drop_layer` verbatim to confirm the two
-    resolved layers are exactly one via hop apart in the resolved PDK
+    resolved layers are connectable by a via-drop ladder in the resolved PDK
     family's own ``ExtractionDeck.metals``/``.vias`` stack, and to resolve
-    which via connects them -- the identical hop-resolution logic
+    which via(s) connect them -- the identical hop-resolution logic
     :func:`route_two_pin`'s check 6 (via-drop) already relies on, called here
     with the roles reversed (``route_layer`` slot = the cross-block layer,
     ``port_layer`` slot = the primary ``layer_role``) rather than
-    reimplemented a second time.
+    reimplemented a second time. ``via_layers`` is returned for
+    completeness/testability only -- the actual via-drop(s) a leg falling
+    back to this cross layer needs are re-resolved per pin by check 6 itself
+    (:func:`route_two_pin`), since that is also where a pin's own reported
+    layer, not just the two routing layers, enters the picture.
 
     Raises :class:`GenComposeError` when either role does not resolve (the
     same errors :func:`_resolve_route_layer` raises), when the two roles
-    resolve to the identical layer, or when they are not connectable by a
-    single via hop (non-adjacent metals-stack levels, one/both roles outside
-    the metals stack entirely, or no via declared for that hop).
+    resolve to the identical layer, or when they are not connectable by any
+    via-drop ladder at all (one/both roles outside the metals stack
+    entirely, or the deck declares no via for one of the hops between them --
+    issue #1567 removed the earlier single-hop-only restriction here, the
+    same as it did for :func:`_resolve_via_drop_layer` itself).
     """
     route_layer = _resolve_route_layer(variant, layer_role)
     try:
@@ -1830,18 +1863,19 @@ def _resolve_cross_block_route_layer(
             "cross-block bus layer must be a distinct metal"
         )
     deck = get_extraction_deck(_pdk_family(variant))
-    via_layer, error = _resolve_via_drop_layer(deck, cross_layer, route_layer)
-    if via_layer is None:
+    ladder, error = _resolve_via_drop_layer(deck, cross_layer, route_layer)
+    if ladder is None:
         reason = error or (
             f"'{cross_layer_role}' and '{layer_role}' are not both members of "
             "the PDK's metals/via stack"
         )
         raise GenComposeError(
             f"routing.cross_block_layer_role '{cross_layer_role}' cannot be "
-            f"connected to routing.layer_role '{layer_role}' by a single via "
-            f"hop: {reason}"
+            f"connected to routing.layer_role '{layer_role}' by any via-drop "
+            f"ladder: {reason}"
         )
-    return cross_layer, via_layer
+    via_layers = tuple(hop[0] for hop in ladder)
+    return cross_layer, via_layers
 
 
 def _resolve_label_layer(
@@ -2726,11 +2760,25 @@ def _drawn_leg_footprint_region(
     via_drops: list[dict[str, Any]],
     stub_widen: list[dict[str, Any]],
     dbu: float,
+    route_layer: tuple[int, int] | None = None,
 ):
     """The full metal one routed leg draws on its own route layer, as a
     ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
     every via-drop landing pad and stub-widen box :func:`_write_composed_gds`
     *also* draws on that same layer (issue #1197).
+
+    ``route_layer`` (issue #1567) is the leg's own effective drawing layer --
+    the one the returned region represents. A single-hop via-drop's landing
+    pad always lands on that layer (one of its two ``landing_layers`` always
+    *is* the backbone's own layer, by construction), so this included every
+    resolved drop unconditionally before #1567. A multi-hop ladder's
+    intermediate/far hops land on layers *other* than ``route_layer`` --
+    those are excluded here (they are not part of this leg's footprint *on
+    route_layer*), leaving only the hop(s) whose ``landing_layers`` actually
+    include it. ``route_layer=None`` (a caller predating #1386/#1567, or one
+    that genuinely does not know the leg's layer) keeps every drop, exactly
+    the pre-#1567 behavior -- the conservative choice when the layer is
+    unknown.
 
     The route-vs-route collision check (#1057) originally built its
     comparison region from the bare backbone path alone. That misses two
@@ -2765,6 +2813,13 @@ def _drawn_leg_footprint_region(
 
     landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
+        landing_layers = drop.get("landing_layers")
+        if (
+            route_layer is not None
+            and landing_layers is not None
+            and route_layer not in landing_layers
+        ):
+            continue  # this hop's pads are on a different layer than route_layer
         cx = int(round(drop["x_um"] / dbu))
         cy = int(round(drop["y_um"] / dbu))
         region.insert(
@@ -3032,20 +3087,23 @@ def route_two_pin(
        the net is retried around them first -- see "Bounded detour search"
        below -- and reported unroutable only if no alternate lane clears
        them either.
-    6. **Via-drop resolution** (#454): when ``route_layer`` and a pin's own
-       reported layer differ, :func:`_resolve_via_drop_layer` looks up
-       whether ``extraction_deck`` connects the two with a single via hop
-       (e.g. ``routing.layer_role: "metal2"`` backbone reaching a
-       ``"metal"``-role li1 pad via sky130's ``mcon``). A pin whose own layer
-       *is* ``route_layer`` needs no drop; a pin on an unrelated role a
+    6. **Via-drop resolution** (#454; multi-hop ladder since #1567): when
+       ``route_layer`` and a pin's own reported layer differ,
+       :func:`_resolve_via_drop_layer` looks up whether ``extraction_deck``
+       connects the two -- via however many via hops the ``deck.metals``
+       stack puts between them (e.g. ``routing.layer_role: "metal2"``
+       backbone reaching a ``"metal"``-role li1 pad via sky130's ``mcon``, or
+       ``routing.layer_role: "metal3"`` reaching that same li1 pad via a
+       two-hop ``mcon`` + ``via`` ladder). A pin whose own layer *is*
+       ``route_layer`` needs no drop; a pin on an unrelated role a
        route-layer shape already covers (e.g. a guard ring's active/tap port)
        is left exactly as before #454 (drawn directly on ``route_layer``, no
        via). A pin whose layer is a *different* ``deck.metals`` level than
-       ``route_layer`` and more than one via hop away, **or** a pin on the
-       deck's bare ``poly`` layer (a gate drawn without
-       ``params.gate_contact``, issue #492), is rejected here -- reported
-       unroutable rather than drawing a disconnected short or an uncontacted
-       stub.
+       ``route_layer`` but the deck declares no via for one of the hops
+       between them, **or** a pin on the deck's bare ``poly`` layer (a gate
+       drawn without ``params.gate_contact``, issue #492), is rejected here
+       -- reported unroutable rather than drawing a disconnected short or an
+       uncontacted stub.
 
     Checks 1-5 report the net unroutable (spike section 2,
     ``unrouted_nets[]``) rather than silently drawing a short; check 6 does
@@ -3212,8 +3270,11 @@ def route_two_pin(
     "points_um": list | None, "via_drops": list, "stub_widen": list,
     "route_layer": tuple[int, int] | None, "reason": str | None}``.
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
-    "port_layer"}`` entries (empty unless a drop was resolved), consumed by
-    :func:`_write_composed_gds` to draw each drop's via + landing pads.
+    "landing_layers", "block_id"}`` entries (empty unless a drop was
+    resolved; issue #1567: one entry per via *hop* -- a multi-level drop
+    produces more than one entry at the identical ``(x_um, y_um)``, each with
+    its own ``via_layer``/``landing_layers`` pair), consumed by
+    :func:`_write_composed_gds` to draw each hop's via + landing pads.
     ``stub_widen`` (issue #496, see :func:`_endpoint_stub_widen_um`) is a list
     of ``{"x_um", "y_um", "direction_deg", "length_um", "width_um"}`` entries
     -- one per endpoint whose own reported pad is wider than ``width_um`` and
@@ -3898,25 +3959,27 @@ def route_two_pin(
             "reason": reason + detour_note,
         }
 
-    # Via-drop resolution (#454, check 5 -- see docstring): only consulted
-    # when both a route_layer and an extraction_deck are given (pre-#454
-    # callers that pass neither draw exactly as before, no via-drop). For
-    # each endpoint whose own reported layer differs from route_layer, either
-    # resolve the connecting via (drop needed and available), find nothing to
-    # do (not a metals-stack level -- an unrelated role, unchanged legacy
-    # behavior), or reject the whole net as unroutable (a drop is needed but
-    # not resolvable). Uses ``effective_route_layer`` (#1168): when the
-    # same-layer-short retry above switched this leg to
-    # ``cross_block_route_layer``, every endpoint whose own pad sits on the
-    # *primary* ``route_layer`` now needs exactly the drop this loop already
-    # knows how to resolve -- no separate cross-block via-drop mechanism.
+    # Via-drop resolution (#454, check 5 -- see docstring; generalized to a
+    # multi-hop ladder by issue #1567): only consulted when both a
+    # route_layer and an extraction_deck are given (pre-#454 callers that
+    # pass neither draw exactly as before, no via-drop). For each endpoint
+    # whose own reported layer differs from route_layer, either resolve the
+    # connecting via-drop ladder (drop needed and available -- possibly more
+    # than one via, issue #1567), find nothing to do (not a metals-stack
+    # level -- an unrelated role, unchanged legacy behavior), or reject the
+    # whole net as unroutable (a drop is needed but not resolvable). Uses
+    # ``effective_route_layer`` (#1168): when the same-layer-short retry
+    # above switched this leg to ``cross_block_route_layer``, every endpoint
+    # whose own pad sits on the *primary* ``route_layer`` now needs exactly
+    # the drop this loop already knows how to resolve -- no separate
+    # cross-block via-drop mechanism.
     via_drops: list[dict[str, Any]] = []
     if effective_route_layer is not None and extraction_deck is not None:
         for pin, port, pos in ((pin_a, port_a, a), (pin_b, port_b, b)):
             port_layer = _port_own_layer(port)
             if port_layer is None:
                 continue  # no reported layer -- draw directly, legacy behavior
-            via_layer, drop_error = _resolve_via_drop_layer(
+            ladder, drop_error = _resolve_via_drop_layer(
                 extraction_deck, effective_route_layer, port_layer
             )
             if drop_error is not None:
@@ -3930,21 +3993,31 @@ def route_two_pin(
                         f"{effective_route_layer} cannot reach: {drop_error}"
                     ),
                 }
-            if via_layer is not None:
-                via_drops.append(
-                    {
-                        "x_um": pos[0],
-                        "y_um": pos[1],
-                        "via_layer": via_layer,
-                        "port_layer": port_layer,
-                        # block_id (#1520): which endpoint's own block this
-                        # drop's landing pad lands on -- lets a caller-side
-                        # conflict check (compose()'s own _leg_conflict) test
-                        # the pad against *that* block's own drawn geometry,
-                        # not just against other already-accepted nets.
-                        "block_id": pin["block"],
-                    }
-                )
+            if ladder is not None:
+                # One via_drops entry per hop (issue #1567): a single-hop
+                # ladder (the pre-#1567 case) produces exactly the one entry
+                # it always did; a multi-hop ladder produces one entry per
+                # via, each with its own pair of landing-pad layers
+                # (``landing_layers``) -- :func:`_write_composed_gds` draws a
+                # via square plus a landing pad on each of those two layers
+                # per entry, so a multi-level drop is just N single-level
+                # drops stacked at the identical (x, y).
+                for via_layer, metal_a, metal_b in ladder:
+                    via_drops.append(
+                        {
+                            "x_um": pos[0],
+                            "y_um": pos[1],
+                            "via_layer": via_layer,
+                            "landing_layers": (metal_a, metal_b),
+                            # block_id (#1520): which endpoint's own block
+                            # this drop's landing pad lands on -- lets a
+                            # caller-side conflict check (compose()'s own
+                            # _leg_conflict) test the pad against *that*
+                            # block's own drawn geometry, not just against
+                            # other already-accepted nets.
+                            "block_id": pin["block"],
+                        }
+                    )
 
     # Stub-widen (#496): see _endpoint_stub_widen_um's own docstring. Computed
     # independently of the via-drop loop above (it needs no ExtractionDeck --
@@ -5181,7 +5254,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             other's backbones take. Leaving those out of both sides of this
             comparison (candidate and ``accepted_route_regions`` alike) is
             what let that pair compose ``routed: true`` while `klt extract`
-            silently merged them onto one node.
+            silently merged them onto one node. Scoped to ``layer`` (issue
+            #1567): a multi-hop via-drop ladder's intermediate/far landing
+            pads sit on layers *other* than this leg's own primary ``layer``
+            -- :func:`_drawn_leg_footprint_region` excludes them here, the
+            same as it always excluded a single-hop drop's *far* (port-side)
+            pad. Those intermediate pads are still checked against the
+            *same block's* own other drawn geometry by the own-block pad
+            self-notch check below (#1520) -- catching a cross-*net* short on
+            an intermediate level (two unrelated nets' ladders both landing
+            on, say, the same ``"metal2"`` role at overlapping points) is
+            left to `klt drc`, this module's own stated backstop for
+            anything beyond these heuristics (see :func:`route_two_pin`'s
+            docstring).
 
             A literal positive-area overlap is still always rejected first
             (mirrors check 4's "positive area only, not a mere edge touch"
@@ -5199,7 +5284,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             layer with no known ``"space"`` rule keeps the overlap-only test.
             """
             region = _drawn_leg_footprint_region(
-                points_um, width_um, via_drops, stub_widen, _route_dbu()
+                points_um, width_um, via_drops, stub_widen, _route_dbu(), layer
             )
             spacing = _min_spacing_um_for_layer(layer)
             inflated_region = None
@@ -5275,15 +5360,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     cx + landing_half_um,
                     cy + landing_half_um,
                 )
-                # The landing pad is drawn on *both* the pin's own layer and
-                # this leg's own effective route layer (see
-                # _write_composed_gds) -- dict.fromkeys dedupes the common
-                # case where both happen to be the same tuple.
-                for pad_layer in dict.fromkeys(
-                    layer_pair
-                    for layer_pair in (drop["port_layer"], layer)
-                    if layer_pair is not None
-                ):
+                # Each hop's landing pad is drawn on *both* of its own
+                # ``landing_layers`` (see _write_composed_gds) -- issue
+                # #1567 generalized this from a single hop's fixed
+                # (port_layer, this leg's own route layer) pair to whatever
+                # pair *that hop* actually lands on, so a multi-level
+                # ladder's intermediate pads are checked here too, not just
+                # the one nearest the backbone or the one nearest the pin.
+                # dict.fromkeys dedupes the common case where both layers of
+                # a hop happen to be identical.
+                for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
                     pad_boxes.append((pad_layer, block_id, box))
             for widen in stub_widen:
                 block_id = widen.get("block_id")
@@ -5402,6 +5488,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         leg["via_drops"],
                         leg["stub_widen"],
                         _route_dbu(),
+                        leg_route_layer,
                     ),
                 )
             )
@@ -5733,9 +5820,15 @@ def _write_composed_gds(
     ``.SUBCKT`` pin instead of an anonymous one (#200).
 
     Each entry's ``via_drops`` (resolved by :func:`route_two_pin`'s check 5,
-    issue #454) is a list of ``{x_um, y_um, via_layer, port_layer}`` -- one
-    per endpoint that needed to drop from ``route_layer`` down to its own
-    pin's layer. Each drop draws a via square on ``via_layer``, sized to
+    issue #454; generalized to a multi-hop ladder by issue #1567) is a list
+    of ``{x_um, y_um, via_layer, landing_layers, block_id}`` -- one per via
+    *hop* the backbone needs on its way from ``route_layer`` down to its own
+    pin's layer. A pin whose own layer is exactly one via hop from
+    ``route_layer`` (the pre-#1567 case) gets exactly one entry, with
+    ``landing_layers == (route_layer, pin's own layer)``; a pin further down
+    the metals stack gets one entry per hop, all at the identical ``(x_um,
+    y_um)``, chaining through every intermediate level in between. Each drop
+    draws a via square on ``via_layer``, sized to
     ``via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)`` (issue #1501: the
     caller -- :func:`compose` -- resolves this per distinct ``via_layer``
     against the same curated deck ``klt drc`` judges the drawn square with,
@@ -5745,11 +5838,13 @@ def _write_composed_gds(
     ``routed_geometry`` directly -- keeps exactly ``_VIA_DROP_SIZE_UM`` for
     every drop, unchanged), plus a landing-pad square (``_VIA_LANDING_SIZE_UM``, sized
     independently of the route's own trace width so the via's enclosure
-    requirement holds regardless) on *both* ``route_layer`` and the pin's own
-    layer, all centered on the pin's exact composed-frame position -- the
-    same position the backbone's own drawn ``kdb.Path`` already terminates
-    at, so the landing pad always overlaps (and merges with) both the
-    backbone and the block's own existing pad on that layer.
+    requirement holds regardless) on *both* of that hop's ``landing_layers``,
+    all centered on the pin's exact composed-frame position -- the same
+    position the backbone's own drawn ``kdb.Path`` already terminates at, so
+    the first hop's landing pad always overlaps (and merges with) both the
+    backbone and the block's own existing pad on that layer, and every
+    subsequent hop's landing pad merges with the one before it at the same
+    point, chaining the full stack down to the pin's own layer.
 
     Each entry's ``stub_widen`` (:func:`route_two_pin`'s own
     :func:`_endpoint_stub_widen_um`, issue #496) is a list of ``{x_um, y_um,
@@ -5942,17 +6037,27 @@ def _write_composed_gds(
                     kdb.Text(route["net"], kdb.Trans(label_point))
                 )
 
-            # Via-drops (#454): each entry drops the backbone (this entry's
-            # own effective layer) down to a target pin's own layer at
-            # exactly that pin's own position -- a via square on `via_layer`,
-            # plus a landing-pad square on *both* the backbone's own layer
-            # and the pin's own layer (_VIA_LANDING_SIZE_UM, independent of
-            # the route's own trace width) so the via's enclosure requirement
-            # holds regardless of how thin routing.width_um is. The
-            # backbone's own Path already terminates exactly at this same
-            # point (manhattan_backbone's endpoints are the raw pin
+            # Via-drops (#454; generalized to a multi-hop ladder by issue
+            # #1567): each entry drops one via hop at exactly the target
+            # pin's own position -- a via square on `via_layer`, plus a
+            # landing-pad square on *both* of that hop's own
+            # `landing_layers` (_VIA_LANDING_SIZE_UM, independent of the
+            # route's own trace width) so the via's enclosure requirement
+            # holds regardless of how thin routing.width_um is. A single-hop
+            # drop's two `landing_layers` are exactly (this leg's own
+            # effective layer, the pin's own layer) -- the pre-#1567 shape --
+            # and the backbone's own Path already terminates exactly at this
+            # same point (manhattan_backbone's endpoints are the raw pin
             # positions), so the landing pad always overlaps -- and merges
-            # with -- the trace.
+            # with -- the trace. A multi-hop ladder instead carries one
+            # `via_drops` entry per hop, all at the identical (x, y): drawing
+            # each one exactly the same way as the single-hop case builds
+            # the full stack -- the backbone's own landing pad from the first
+            # hop, the pin's own landing pad from the last hop, and one
+            # shared landing pad per intermediate level in between (drawn
+            # twice, once by each of its two neighbouring hops -- the same
+            # position and size both times, so the duplicate insert is
+            # harmless).
             #
             # The via square's own side (#1501) is looked up per `via_layer`
             # in `via_drop_size_um` -- resolved by `compose()` against the
@@ -5964,9 +6069,7 @@ def _write_composed_gds(
             landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
             for drop in route.get("via_drops", []):
                 via_pair = drop["via_layer"]
-                port_pair = drop["port_layer"]
                 via_layer_index = layout.layer(via_pair[0], via_pair[1])
-                port_layer_index = layout.layer(port_pair[0], port_pair[1])
                 cx = int(round(drop["x_um"] / dbu))
                 cy = int(round(drop["y_um"] / dbu))
                 via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
@@ -5985,8 +6088,10 @@ def _write_composed_gds(
                     cx + landing_half_dbu,
                     cy + landing_half_dbu,
                 )
-                top.shapes(layer_index).insert(landing_box)  # backbone's own side
-                top.shapes(port_layer_index).insert(landing_box)  # pin's own side
+                for landing_pair in drop.get("landing_layers", ()):
+                    top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
+                        landing_box
+                    )
 
             # Stub-widen (#496): each entry (route_two_pin's own
             # _endpoint_stub_widen_um) re-draws the backbone's own first
