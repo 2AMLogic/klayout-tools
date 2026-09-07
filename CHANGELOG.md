@@ -16,6 +16,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen res_array` no longer draws a 1dbu-short (219nm) end
+  contact when `length_um` puts the contact centre on an exact half-dbu grid
+  tie — e.g. `length_um=1.4965`, which tripped gf180mcu's 220nm
+  `contact.width.1` minimum with no signal to the caller (issue #1551). The
+  unit resistor's two end-contact boxes were built from raw `cx ±
+  CONTACT_SIZE_UM / 2` floats whose opposite edges were then rounded to the
+  dbu grid *independently*, so floating-point noise could resolve one edge up
+  and the other down (the same failure mode diagnosed for `guard_ring` in
+  issue #685). They now go through the existing `_snap_square_box_um` helper,
+  which snaps the centre to the grid before deriving the edges. No response
+  field changes and no `schema_version` bump; drawn geometry is unchanged at
+  every `length_um` that is not on a tie.
 - **Added**: `klt gen res_array` now exposes gf180mcu's high-sheet-rho
   poly-resistor flavours, not just the base `ppolyf_u` (issue #1550):
   `params.flavor` accepts `"1k"` / `"2k"` / `"3k"` alongside the existing
@@ -33,7 +45,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   parameter to fix it. gf180mcu's existing default `"generic"` flavour is
   byte-identical to before. No `schema_version` bump — no field changed
   shape, and no request field changed meaning.
-
 - **Added**: `klt extract`'s `nets[]` entries now carry `net_id`,
   `pin_index`, and `label_positions_um` (issue #1540) — all additive,
   no `schema_version` bump. A flat extraction of a block that instantiates
