@@ -298,6 +298,72 @@ jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"
 p="$("$TARGET_SCRIPT" operator-premise --refs "20 22" --repo owner/repo)"
 assert_eq "stale-premise" "$(field "$p" VERDICT)" "T13c: live operator-premise mode checks each --refs number's state"
 
+# --- T14/T15: FORMULA_VERSION (#1544) -- PIN THE EXACT OUTPUT ---------------
+#
+# Why exact-string pinning, not just "field is present": #1544 traced a
+# fleet-wide false-CHANGED incident to CONCLUSION_HASH's formula (what feeds
+# it, and how) drifting silently across a resync with nothing to flag it.
+# FORMULA_VERSION exists so a genuine formula change is distinguishable from
+# a routine CLI reshape by consumers — but that guarantee only holds if THIS
+# suite fails the instant a future edit changes the hash's inputs/encoding
+# without also bumping FORMULA_VERSION. A per-field assert_eq (as used
+# elsewhere in this file) would NOT catch that: it only checks the fields it
+# names, so a silently-added/reordered/re-encoded input to the hash would
+# still make every explicitly-checked field pass. Comparing the ENTIRE
+# KEY=VALUE / JSON block verbatim against a fixed fixture is the only way to
+# make "the formula's inputs or encoding changed" and "FORMULA_VERSION did
+# not change to match" mutually exclusive outcomes in CI.
+#
+# If this test fails after an intentional formula change: update
+# FORMULA_VERSION in dep-recheck-fingerprint.sh (see its header comment,
+# "FORMULA_VERSION — bump this on every formula change"), then re-pin the
+# expected values below to match the new, deliberately-versioned output.
+
+FIXTURE_PINNED='{"prs":[{"number":4743,"state":"OPEN","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+
+EXPECTED_PINNED_PLAIN='VERDICT=blocked
+BLOCKERS=4743:OPEN:loom:changes-requested
+BLOCK_REASON=
+ORTHOGONAL=
+CONCLUSION_HASH=3cd842bbfb73dbad
+FORMULA_VERSION=v1'
+out_pinned="$(echo "$FIXTURE_PINNED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$EXPECTED_PINNED_PLAIN" "$out_pinned" \
+    "T14a: dep-recheck KEY=VALUE output (including FORMULA_VERSION) is pinned exactly for a fixed fixture"
+
+EXPECTED_PINNED_JSON='{
+  "verdict": "blocked",
+  "blockers": "4743:OPEN:loom:changes-requested",
+  "block_reason": "",
+  "orthogonal": "",
+  "conclusion_hash": "3cd842bbfb73dbad",
+  "formula_version": "v1"
+}'
+out_pinned_json="$(echo "$FIXTURE_PINNED" | "$TARGET_SCRIPT" dep-recheck --stdin --json)"
+assert_eq "$EXPECTED_PINNED_JSON" "$out_pinned_json" \
+    "T14b: dep-recheck --json output (including formula_version) is pinned exactly for the same fixture"
+
+FIXTURE_PREMISE_PINNED='{"refs":[{"number":14,"state":"CLOSED"},{"number":22,"state":"OPEN"}]}'
+
+EXPECTED_PREMISE_PINNED_PLAIN='VERDICT=stale-premise
+REFS=14:CLOSED
+22:OPEN
+CONCLUSION_HASH=a70cb300d8bb3989
+FORMULA_VERSION=v1'
+out_premise_pinned="$(echo "$FIXTURE_PREMISE_PINNED" | "$TARGET_SCRIPT" operator-premise --stdin)"
+assert_eq "$EXPECTED_PREMISE_PINNED_PLAIN" "$out_premise_pinned" \
+    "T15a: operator-premise KEY=VALUE output (including FORMULA_VERSION) is pinned exactly for a fixed fixture"
+
+EXPECTED_PREMISE_PINNED_JSON='{
+  "verdict": "stale-premise",
+  "refs": "14:CLOSED\n22:OPEN",
+  "conclusion_hash": "a70cb300d8bb3989",
+  "formula_version": "v1"
+}'
+out_premise_pinned_json="$(echo "$FIXTURE_PREMISE_PINNED" | "$TARGET_SCRIPT" operator-premise --stdin --json)"
+assert_eq "$EXPECTED_PREMISE_PINNED_JSON" "$out_premise_pinned_json" \
+    "T15b: operator-premise --json output (including formula_version) is pinned exactly for the same fixture"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"
