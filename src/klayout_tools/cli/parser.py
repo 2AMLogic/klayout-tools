@@ -2251,6 +2251,46 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     pex_parser.add_argument(
+        "--deck-option",
+        dest="deck_options",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "select a caller-visible flavour of a deck's shared-geometry "
+            "device family (issue #1558), as KEY=VALUE; repeatable, passed "
+            "through verbatim to `klt extract --deck-option`. Today's "
+            "recognised keys are gf180mcu's `poly_res` (values `1k` "
+            "(default), `2k`, `3k`) and `mim_cap` (values "
+            "`cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, "
+            "`cap_mim_2f0_m4m5_noshield` (default)). Without this flag `klt "
+            "pex` extracts against whatever the deck's own default flavour "
+            "is, which is not necessarily the one the design uses -- and "
+            "reports a delta computed from the wrong parasitics. An "
+            "unrecognised key or value is an error, not a silently-kept "
+            "default. Omitted by default, which resolves every deck exactly "
+            "as before this flag existed. The resolved mapping is echoed in "
+            "the JSON response's `provenance.deck.options`. See "
+            "docs/cli/extract.md's 'Selecting a shared-geometry resistor "
+            "flavour' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--pins",
+        default=None,
+        help=(
+            "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), passed "
+            "through to `klt extract --pins` (issue #1558). Every named net "
+            "not in this set keeps its name but is demoted to an internal "
+            "node instead of being promoted to a top-level pin -- use it "
+            "when flat extraction would otherwise promote more pins than "
+            "the schematic DUT declares (the `pin_count_mismatch` shape "
+            "below). Off by default -- every named net still promotes to a "
+            "pin, byte-identical to today's behavior. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    pex_parser.add_argument(
         "--critical-net",
         dest="critical_nets",
         action="append",

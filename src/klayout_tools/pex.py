@@ -136,7 +136,7 @@ import copy
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance
@@ -880,6 +880,8 @@ def run_pex(
     pdk_root: str | None = None,
     artifacts_dir: str | None = None,
     backend: str | None = None,
+    deck_options: Mapping[str, str] | None = None,
+    declared_pins: frozenset[str] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
     mom_rlc_net: str | None = None,
@@ -895,7 +897,21 @@ def run_pex(
     ``deck_name``/``top``/``pdk_variant``/``pdk_root``/``output`` are passed
     through to :func:`~klayout_tools.extract.run_extract` (``parasitics``
     is always ``True`` here -- ``klt pex`` has no schematic-equivalent-only
-    mode; use `klt extract` directly for that). ``critical_nets`` (``klt
+    mode; use `klt extract` directly for that). ``deck_options`` (``klt pex
+    --deck-option <key>=<value>``, repeatable) and ``declared_pins`` (``klt
+    pex --pins <a,b,...>``), issue #1558, are likewise passed straight
+    through -- the two ``klt extract`` flags this command had no
+    passthrough for until then. Without ``deck_options`` a design that
+    commits to a non-default deck flavour (e.g. gf180mcu's ``poly_res``/
+    ``mim_cap`` axes, where one drawn geometry has several PDK-offered
+    interpretations) silently extracted against the *deck's* default
+    flavour instead, with no warning -- and every ``delta[]`` row was then
+    computed from the wrong parasitics. ``declared_pins`` is the same
+    per-net demotion ``klt extract --pins`` performs, which is also how a
+    caller resolves a ``pin_count_mismatch`` caused by flat extraction
+    promoting more top-level pins than the schematic DUT declares. ``None``
+    for both (the default) resolves the deck and promotes pins exactly as
+    before this feature existed. ``critical_nets`` (``klt
     pex --critical-net``, repeatable, issue #976, Epic #709 Phase 2a) is
     also passed straight through to :func:`~klayout_tools.extract.run_extract`
     -- extracts lateral (same-layer, sidewall) coupling capacitance for any
@@ -1023,6 +1039,11 @@ def run_pex(
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
             parasitics=True,
+            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
+            # both whenever the flags were never given, which is the exact
+            # `run_extract` call this module made before they existed.
+            deck_options=deck_options,
+            declared_pins=declared_pins,
             critical_nets=critical_nets,
             distributed_rc=distributed_rc,
             mom_rlc_net=mom_rlc_net,

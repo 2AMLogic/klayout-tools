@@ -1318,6 +1318,32 @@ def create_model_binding_delegate(
     recognised class, e.g. gf180mcu's ``bjt``, or a future deck's new class) to
     KLayout's default primitive-card behavior.
 
+    The one exception to "defers every other device" is an **unbound
+    capacitor** class (issue #1558): KLayout's own default writer appends a
+    non-empty device-class name to the primitive ``C`` card as a trailing
+    4th token (``C$1 a b 1.119e-13 cap_mim_1f0_m4m5_noshield``), and
+    ngspice's native ``C`` element parser reads any non-numeric trailing
+    token there as a required capacitor ``.model`` reference. No deck's
+    capacitor class name is a real ``.model`` in the PDK's own model
+    library -- gf180mcu's ``cap_mim_*_m4m5_noshield``, sky130's
+    ``sky130_fd_pr__model__cap_mim*`` and sg13g2's ``cap_cmim``/``rfcmim``
+    are all ``klt``-internal class labels (or, at best, a *subcircuit*
+    name, which a ``C`` card cannot reference either) -- so that card is
+    unsimulatable as written: ngspice fails with ``could not find a valid
+    modelname``. This delegate therefore writes the bare, value-only
+    ``C`` card (``C$1 a b 1.119e-13``) for such a class, byte-identical to
+    KLayout's own card minus that one token. Reachable both with ``--pdk``
+    (a recognised flavour with no curated ``_CAPACITOR_MODEL_TABLE`` row,
+    e.g. gf180mcu's non-default ``cap_mim_1f0``/``1f5`` densities) and
+    without it (no bindings at all). The flavour identity is not lost: the
+    writer's own preceding ``* device instance ... <class>`` comment still
+    records it, and ``devices[].class`` in the JSON report is unaffected.
+    Deliberately scoped to capacitors -- an unbound ``R`` card's trailing
+    token is a *documented, load-bearing* consumer-supplied-``.model``
+    reference for sg13g2's ``res_metal1``/``res_metal2`` (see
+    ``_RESISTOR_MODEL_TABLE``'s own carve-out note), and a bipolar ``Q``
+    card's is likewise the gf180mcu ``bjt`` carve-out's model name.
+
     ``global_nets`` (issue #1503) is an independent, additive concern: when
     non-empty, the delegate's ``write_header`` override emits one
     ``.GLOBAL <net> <net> ...`` card, once, before the first ``.SUBCKT`` --
@@ -1358,11 +1384,63 @@ def create_model_binding_delegate(
                     return device.parameter(param.id())
             return None
 
+        def _write_bare_capacitor_card(self, device: kdb.Device) -> bool:
+            """Write an unbound capacitor device as a bare, value-only ``C``
+            card and report ``True``; report ``False`` (writing nothing) for
+            any device this narrow rewrite does not own.
+
+            Issue #1558: KLayout's default primitive writer would append the
+            device class's own name as a trailing 4th token, which ngspice
+            reads as a capacitor ``.model`` reference no PDK model library
+            declares -- see :func:`create_model_binding_delegate`'s
+            docstring for why that is never resolvable and why this is
+            scoped to capacitors alone. The card is otherwise byte-identical
+            to KLayout's own: the same ``format_name``/``net_to_string``
+            spellings, the same terminal order, and the same ``%.12g``
+            value formatting ``tl::to_string`` produces (verified against
+            ``NetlistSpiceWriter``'s own output across magnitudes).
+            """
+            device_class = device.device_class()
+            # An anonymous class is already written bare by KLayout (nothing
+            # to strip) -- notably every `--parasitics` ground/coupling
+            # capacitor, which `extract.py` creates from an unnamed
+            # `kdb.DeviceClassCapacitor`. Leaving those to `super()` keeps
+            # them byte-identical, rather than round-tripping them through
+            # this branch.
+            if not device_class.name:
+                return False
+            if not isinstance(device_class, kdb.DeviceClassCapacitor):
+                return False
+
+            terminal_ids = [
+                terminal.id() for terminal in device_class.terminal_definitions()
+            ]
+            nets = [device.net_for_terminal(tid) for tid in terminal_ids]
+            if not terminal_ids or any(net is None for net in nets):
+                # A dangling terminal is not a shape this rewrite models;
+                # let KLayout's own writer decide what to do with it.
+                return False
+
+            capacitance = self._device_param(device, "C")
+            if capacitance is None:
+                return False
+
+            name = self.format_name(device.expanded_name())
+            pins = " ".join(self.net_to_string(net) for net in nets)
+            self.emit_line(f"C{name} {pins} {capacitance:.12g}")
+            return True
+
         def write_device(self, device: kdb.Device) -> None:
             device_class = device.device_class()
             binding = self._bindings.get(device_class.name)
             if binding is None:
-                super().write_device(device)
+                # Issue #1558: an unbound *capacitor* class gets a bare,
+                # value-only `C` card instead of KLayout's default one,
+                # whose trailing class-name token ngspice rejects as an
+                # unresolvable `.model` reference. Every other unbound class
+                # still defers to KLayout's default primitive-card writer.
+                if not self._write_bare_capacitor_card(device):
+                    super().write_device(device)
                 return
 
             # The target PDK family's geometry-literal convention (#1396):

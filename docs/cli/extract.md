@@ -2516,6 +2516,40 @@ future epic):
   bind; only the `bjt` stays a bare card). Any other recognised device class
   with no curated binding entry is likewise written as its bare primitive card
   rather than a guessed subcircuit call.
+- **An unbound *capacitor* class writes a bare, value-only `C` card**
+  (issue #1558) — `C$1 net1 net2 1.119e-13`, with **no** trailing
+  device-class token. This is the one place `klt extract` does not simply
+  defer to KLayout's own primitive-card writer, which would append the
+  class name as a 4th token (`… 1.119e-13 cap_mim_1f0_m4m5_noshield`).
+  ngspice's native `C` element parser reads any non-numeric 4th token as a
+  required capacitor `.model` reference, and no deck's capacitor class name
+  is a real `.model` in any PDK model library — gf180mcu's
+  `cap_mim_*_m4m5_noshield`, sky130's `sky130_fd_pr__model__cap_mim*` and
+  sg13g2's `cap_cmim`/`rfcmim` are `klt`-internal class labels or (at best)
+  *subcircuit* names, which a `C` card cannot reference either. The card was
+  therefore unsimulatable as written (`unknown parameter (…)` / `could not
+  find a valid modelname`), breaking the extracted-netlist → simulation leg
+  of the flow outright. Reachable both **with** `--pdk` (a recognised
+  flavour with no curated table row — e.g. gf180mcu's non-default
+  `cap_mim_1f0_m4m5_noshield`/`cap_mim_1f5_m4m5_noshield` densities, which
+  `--deck-option mim_cap=` selects) and **without** it (no bindings at all,
+  so every deck's capacitor class is unbound). Nothing is lost: the flavour
+  identity is still on the writer's own preceding
+  `* device instance … <class>` comment line and in `devices[].class`.
+  `--parasitics`' own ground/coupling capacitors are unaffected — their
+  device class is anonymous, so KLayout already wrote them bare. Unlike the
+  `R`/`Q` carve-outs above, whose trailing token *is* a usable
+  consumer-supplied-`.model` reference (see `res_metal1`/`res_metal2`
+  below), a capacitor's never was. One documented consequence: reading such
+  a netlist *back* through `kdb.NetlistSpiceReader` (e.g. as `klt lvs`'s
+  pre-extracted `layout.netlist`) now yields the reader's generic `CAP`
+  device class rather than the uppercased flavour name. That path was
+  already non-functional for capacitors either way — a written 2-terminal
+  `C`-value card and a `reference.netlist`-normalized 3-terminal
+  `A=…P=…` card are structurally different devices, and compared as
+  `device.unmatched` both before and after this change — so the identity a
+  compare needs comes from re-extracting (`layout.file` + `layout.deck`,
+  where the class name comes from the deck), not from the written card.
 - **`sg13g2`'s drawn metal resistors are a verified carve-out** (`res_metal1`/
   `res_metal2`, issue #1235's classes; the carve-out itself confirmed by
   issue #1457): a real fetched IHP-Open-PDK v0.3.0 install defines no

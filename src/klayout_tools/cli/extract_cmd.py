@@ -38,6 +38,7 @@ from ..extract import (
     rerun_extract_report,
     run_extract,
 )
+from ._parsing import parse_deck_options, parse_declared_pins
 from .output import emit_error, emit_success
 
 EXIT_OK = 0
@@ -49,48 +50,19 @@ EXIT_MATCH = EXIT_OK
 
 
 def _parse_deck_options(raw: list[str] | None) -> dict[str, str] | None:
-    """Parse the ``--deck-option`` flag's ``KEY=VALUE`` entries (issue #595,
-    repeatable) into a ``dict``, or ``None`` when the flag was never given.
-
-    Raises :class:`ExtractError` for a malformed entry (no ``=``, or a blank
-    key) -- a likely typo, not a meaningful "no options" request. A later
-    ``KEY`` overrides an earlier one with the same key (last-one-wins,
-    matching how argparse's own ``append`` action preserves given order).
-    """
-    if raw is None:
-        return None
-    options: dict[str, str] = {}
-    for entry in raw:
-        key, sep, value = entry.partition("=")
-        key = key.strip()
-        if not sep or not key:
-            raise ExtractError(
-                f"--deck-option entry {entry!r} is not KEY=VALUE -- "
-                "e.g. --deck-option poly_res=2k"
-            )
-        options[key] = value.strip()
-    return options
+    """``--deck-option`` (issue #595, repeatable) as a ``dict``, or ``None``
+    when the flag was never given -- this command's :class:`ExtractError`
+    binding of the shared :func:`.._parsing.parse_deck_options` helper
+    ``klt pex`` shares (issue #1558)."""
+    return parse_deck_options(raw, ExtractError)
 
 
 def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
-    """Parse the ``--pins`` flag's comma-separated value (issue #514) into a
-    ``frozenset`` of declared pin names, or ``None`` when the flag was
-    omitted entirely (skips the declared-pin-set reconciliation).
-
-    Raises :class:`ExtractError` if the flag was given but every
-    comma-separated token is blank (e.g. ``--pins ""`` or ``--pins ,,``) --
-    a likely mistake, not a meaningful "declare zero pins" request.
-    """
-    if raw is None:
-        return None
-    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
-    if not names:
-        raise ExtractError(
-            "--pins was given but contains no non-empty name "
-            f"(got {raw!r}) -- pass a comma-separated list of net names, "
-            "e.g. --pins A,B,VDD,VSS"
-        )
-    return names
+    """``--pins`` (issue #514) as a ``frozenset``, or ``None`` when the flag
+    was omitted entirely -- this command's :class:`ExtractError` binding of
+    the shared :func:`.._parsing.parse_declared_pins` helper ``klt pex``
+    shares (issue #1558)."""
+    return parse_declared_pins(raw, ExtractError)
 
 
 def _parse_pin_source_cells(raw: str | None) -> frozenset[str] | None:

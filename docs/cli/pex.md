@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
 ```
 
 - `<layout>` — path to a GDSII (`.gds`) or OASIS (`.oas`) routed layout
@@ -39,6 +39,32 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   (schematic and extracted side, every testbench). See
   [`sim.md`](sim.md#execution-backends). Defaults to `local`, or each
   testbench's own `backend` field.
+- `--deck-option` — repeatable `<key>=<value>`, passed through verbatim to
+  `klt extract --deck-option` (issue #1558); see
+  [`extract.md`](extract.md)'s "Selecting a shared-geometry resistor
+  flavour" / "Selecting a shared-geometry MiM capacitor density flavour"
+  sections. Selects a caller-visible flavour of a deck's
+  shared-geometry device family — today gf180mcu's `poly_res` (`1k`
+  (default) / `2k` / `3k`) and `mim_cap` (`cap_mim_1f0_m4m5_noshield` /
+  `cap_mim_1f5_m4m5_noshield` / `cap_mim_2f0_m4m5_noshield` (default)),
+  where one drawn geometry has several PDK-offered interpretations the
+  layout alone cannot distinguish. **Without it, a design that commits to a
+  non-default flavour is silently extracted against the deck's default
+  one** — no warning, and every `delta[]` row is then computed from the
+  wrong parasitics. An unrecognised key or value is a clean error (exit 1),
+  not a silently-kept default. Off by default — byte-identical to before
+  this flag existed. The resolved mapping is echoed in
+  `provenance.deck.options`, so a committed record pins exactly which
+  flavour a run selected.
+- `--pins` — comma-separated declared pin set (e.g. `'A,B,VDD,VSS'`),
+  passed through to `klt extract --pins` (issue #1558); see
+  [`extract.md`](extract.md). Every
+  named net not in this set keeps its name but is demoted to an internal
+  node instead of being promoted to a top-level pin. This is the flag that
+  resolves a `pin_count_mismatch` (below) caused by flat extraction
+  promoting more top-level pins — a body/substrate tap, say — than the
+  schematic DUT declares. Off by default — every named net still promotes
+  to a pin, byte-identical to before this flag existed.
 - `--critical-net` — repeatable, passed through to `klt extract
   --critical-net` (issue #976, Epic #709 Phase 2a). Scopes the lateral
   (same-layer, sidewall) coupling-capacitance pass onto these net names, on
