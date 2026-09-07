@@ -16,6 +16,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen cap_array` now supports the `gf180mcu` PDK family
+  (issue #1555 — the follow-on issue #1117 explicitly deferred when it
+  scoped this generator to sky130, and the gf180mcu counterpart of #1455's
+  sg13g2 support). It draws the *same* layer/datatype numbers
+  `klayout_tools.decks.gf180mcu`'s `EXTRACTION_DECK.capacitors[0]`
+  (`cap_mim_2f0_m4m5_noshield`) already declares — `FuseTop` top plate over a
+  `Metal4` bottom plate, `Via4`/`Metal5` top-plate via and landing pad — plus
+  the `CAP_MK`/`MIM_L_MK` masks that entry's own `top_plate_requires`
+  demands, so the output round-trips through `klt extract --deck gf180mcu`
+  to that device class (and to its `1f0`/`1f5` density siblings via
+  `--deck-option mim_cap=…`, issue #1151) instead of extracting as zero
+  capacitors. Three per-family geometry floors keep the default output
+  DRC-clean where the generator's generic values are too small for this
+  family's MiM rules: the bottom plate is drawn at the DRM's own 1.06µm
+  "virtual bottom plate" oversize (`CapacitorDevice.bottom_plate_oversize_um`,
+  vs. `mim.enclosing.fusetop.1`'s 0.6µm minimum), the top-plate via at
+  `via4.width.1`'s 0.26µm, and a requested `params.spacing_um` below
+  `mim.space.1`'s 1.2µm is **widened** to it rather than rejected —
+  `drc_hints.min_spacing_um` reports the spacing actually drawn, with a new
+  `drc_hints.notes` entry naming the widening. No other PDK family's drawn
+  geometry, ports, or hints change (every floor applies as `max(generic,
+  floor)` and only gf180mcu sets any). One related fix: `cap_array`'s
+  harness-computed `cap_top_via_metal_min_w_um` PCell parameter (added by
+  #1455) was missing from `gen.py`'s `_HIDDEN_PARAMS`, so it was advertised
+  as a request param by `klt gen --list` despite never being documented as
+  one; it and the three new floors are all hidden now.
 - **Fixed**: `options.combine_devices_per_circuit` (issue #1552) now carries
   the same two post-combine corrections the whole-netlist
   `options.combine_devices` path already applies (issue #1557): the
