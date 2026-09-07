@@ -47,7 +47,7 @@ through `run-ci-suites.sh`, which this repo never invokes.
 
 ## Current status
 
-As of issue #1532 (2026-09-06), two klayout-tools-local suites exist under
+As of issue #1541 (2026-09-07), three klayout-tools-local suites exist under
 `.loom/scripts/tests/` with no automated runner in this repo — **run them
 manually**:
 
@@ -55,9 +55,22 @@ manually**:
   `check-dep-recheck-idempotency.sh`, added by #1523/#1524)
 - `./.loom/scripts/tests/test-dep-recheck-fingerprint.sh` (tests
   `dep-recheck-fingerprint.sh`, added by #1528/#1534)
+- `./.loom/scripts/tests/test-curator-dep-recheck-recipe.sh` (executes
+  curator.md's own documented "Re-check Idempotency" bash recipe verbatim
+  against the deployed `dep-recheck-fingerprint.sh` /
+  `check-dep-recheck-idempotency.sh`, added by #1541 — the regression guard
+  against the doc/script coupling breaking silently again, as it did on
+  2026-09-06 when a same-day resync restructured the script's CLI without
+  curator.md's recipe following)
 
-Neither is listed in `ci-wired.txt` — a prior attempt to list them there
-(PR #1524, restored as a stopgap by PR #1534) had no effect on this repo's CI
-and was reverted by the next resync regardless (see issue #1532 for the full
-history). If either is ever upstreamed, remove it from this list once its
-`ci-wired.txt` entry starts surviving resyncs on its own.
+A prior attempt to list the first two in `ci-wired.txt` (PR #1524, restored
+as a stopgap by PR #1534) had no effect on this repo's CI either way (see
+issue #1532 for the full history) — do **not** add `test-curator-dep-recheck-
+recipe.sh` there either, for the same reason. Whether any given entry
+currently happens to survive a resync is incidental (verified 2026-09-07:
+`test-dep-recheck-fingerprint.sh` is present in the vendored `ci-wired.txt`,
+`test-check-dep-recheck-idempotency.sh` is not) — neither presence nor
+absence changes anything here, since no workflow in this repo consults that
+file at all. If any of these suites is ever upstreamed, remove it from this
+list once its own `ci-wired.txt` entry starts surviving resyncs *because*
+`run-ci-suites.sh` is genuinely exercising it, not by coincidence.
