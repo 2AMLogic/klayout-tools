@@ -16,6 +16,33 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt lvs` now accepts `options.combine_devices_per_circuit`
+  (issue #1552): a `{"<circuit-name-glob>": <boolean>}` map applied via
+  `klayout.db.Circuit.combine_devices()` to each side's own matching
+  circuits, before either side's optional `flatten_layout`/
+  `flatten_reference` structural flatten runs. It is a per-macro alternative
+  to the existing whole-request `options.combine_devices` boolean, for a
+  **composed** design (e.g. via `klt gen-compose`) whose own macros were
+  each already independently verified under their own — possibly opposite —
+  `combine_devices` setting: one already-verified macro needs folding of
+  split/interleaved device legs, another needs to stay a literal
+  device-for-device compare to avoid issue #1497's silent
+  parameter-corruption risk at scale, and no single whole-request boolean
+  can satisfy both once composed under a shared top-level rail. Keys are
+  `fnmatch`-style glob patterns matched case-sensitively against each side's
+  own circuit names (`NetlistSpiceReader` upper-cases names read back from
+  SPICE), applied in declaration order (first match wins); a pattern that
+  matches no circuit on a side is a new `severity: "warning"`
+  `mismatches[].category`, **`combine_devices_per_circuit.unmatched`** —
+  never an error, since a pattern legitimately naming a circuit that exists
+  on only one side is not itself a mistake. Mutually exclusive with a truthy
+  `options.combine_devices` (a clean application error, exit 1); an explicit
+  `combine_devices: false` alongside it is a harmless no-op. Echoed under
+  the new `options.combine_devices_per_circuit` response field (`null` when
+  omitted) and reconstructed by `--check --rerun`. No `schema_version` bump
+  — both the request field and the response field are additive. See
+  `docs/cli/lvs.md`'s "Composing macros with opposing `combine_devices`
+  needs" section for the full worked example.
 - **Fixed**: `klt gen res_array` no longer draws a 1dbu-short (219nm) end
   contact when `length_um` puts the contact centre on an exact half-dbu grid
   tie — e.g. `length_um=1.4965`, which tripped gf180mcu's 220nm
