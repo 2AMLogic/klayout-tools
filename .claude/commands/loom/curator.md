@@ -1257,39 +1257,93 @@ next pass can compare mechanically instead of re-reading prose:
 
 ```bash
 ISSUE_NUMBER=<number>
+VERDICT=blocked   # or "clear" — from the Primary/Secondary check above. Only
+                  # matters when BLOCKERS ends up empty (the secondary-
+                  # heuristic path, see BLOCKER_REF below) — a linked PR's
+                  # mechanically computed verdict wins otherwise, and this
+                  # value is a no-op.
+BLOCKER_REF=      # secondary-heuristic path ONLY (the primary check found no
+                  # linked PR at all): the blocker it cited, as a bare
+                  # in-repo number (528) or a cross-repo ref
+                  # (rjwalters/loom#5325). Leave empty whenever a linked PR
+                  # supplied the block.
 
-# FINGERPRINT: compute CONCLUSION_HASH with dep-recheck-fingerprint.sh — do not
-# hand-roll the sha256/jq pipeline, and above all do not hand-write
-# BLOCK_REASON. The script derives every component from live `gh` state and
-# REJECTS a `--reason-key` containing whitespace, so a sentence cannot re-enter
-# the hash. Flags:
-#   --verdict blocked|clear   the verdict, prefixed so blocked→clear and
-#                             clear→blocked can never collide
-#   --issue <n>               resolves this issue's linked PRs (the primary
-#                             superseding-block check) into BLOCKERS
-#   --blocker <ref>           ONLY when the primary check found no linked PR:
-#                             the blocker the secondary heuristic cited, as a
-#                             bare number (378) or a cross-repo ref
-#                             (rjwalters/loom#5325). Resolved live to
-#                             "<ref>:<STATE>:<sorted loom:-labels>".
-#   --reason-key <token>      ONLY for a blocker that is not a forge issue/PR
-#                             at all (e.g. release:rjwalters/loom:>v0.18.0).
-#                             Canonical token, never a sentence.
-# Passing --blocker/--reason-key when the primary check DID supply blockers is
-# a usage error (exit 2) — BLOCK_REASON exists only for the secondary heuristic.
-BLOCKER_REF=   # empty when a linked PR supplied the block; else e.g. 378 or rjwalters/loom#5325
+# FINGERPRINT: compute CONCLUSION_HASH with dep-recheck-fingerprint.sh's
+# `dep-recheck` subcommand — do not hand-roll the sha256/jq pipeline, and
+# above all do not hand-write BLOCK_REASON as a sentence. #7281's resync
+# restructured this script's CLI into subcommands; the flat
+# `--verdict/--issue/--blocker/--reason-key` interface this recipe used to
+# document no longer exists on the deployed script and exits 2 if invoked
+# (verify with `--help` if in doubt). Current shape:
+#   dep-recheck-fingerprint.sh dep-recheck --number <n> [--repo OWNER/NAME]
+#       [--verdict blocked|clear] [--block-reason TOKEN] [--orthogonal ID]
+#   --number <n>              (was `--issue`) resolves this issue's linked
+#                             PRs (the primary superseding-block check) into
+#                             BLOCKERS.
+#   --verdict blocked|clear   overrides the mechanically computed VERDICT;
+#                             REQUIRED when BLOCKERS is empty (the script
+#                             cannot infer a verdict from "no linked PR" on
+#                             its own) — otherwise a no-op, the mechanical
+#                             computation from BLOCKERS stands.
+#   --block-reason TOKEN      (replaces `--blocker`/`--reason-key`) ONLY when
+#                             BLOCKERS is empty: a canonical, whitespace-free
+#                             token, same "<ref>:<STATE>:<sorted
+#                             loom:-labels>" shape BLOCKERS itself uses — e.g.
+#                             `528:OPEN:loom:blocked`. NEVER hand-composed
+#                             prose: unlike the removed `--blocker` flag, the
+#                             script does NOT resolve a bare ref for you —
+#                             resolve it yourself first (below), then pass
+#                             the resulting token verbatim. A fingerprint
+#                             that folds in prose hashes differently every
+#                             time the wording drifts, which is the exact
+#                             problem #1524/#1534 closed — do not reopen it.
+#                             Note: unlike the removed `--reason-key`, the
+#                             current `--block-reason` does NOT itself reject
+#                             whitespace/prose — the script folds whatever
+#                             string it is given verbatim into the hash. The
+#                             canonical-token constraint is now enforced
+#                             procedurally, by this recipe only ever
+#                             constructing BLOCK_REASON from live JSON fields
+#                             below and never accepting free-form input.
+#   --orthogonal ID           the diagnosed-but-orthogonal condition's stable
+#                             identity (#6516) — empty by default, not used
+#                             by this recipe today.
+# Passing --block-reason/--orthogonal when BLOCKERS is non-empty is harmless
+# (folded into the hash) but meaningless — they only matter for the
+# secondary-heuristic path.
+BLOCK_REASON=
+if [ -n "$BLOCKER_REF" ]; then
+  case "$BLOCKER_REF" in
+    */*'#'*) # cross-repo ref, e.g. rjwalters/loom#5325 — labels aren't
+             # fetched here (would need a second --repo-scoped call); state
+             # alone still keeps the token canonical and sortable.
+      REF_REPO="${BLOCKER_REF%%#*}"
+      REF_NUM="${BLOCKER_REF##*#}"
+      REF_STATE=$(gh issue view "$REF_NUM" --repo "$REF_REPO" --json state --jq '.state') \
+        || { echo "could not resolve $BLOCKER_REF live — do NOT hand-type a state"; exit 2; }
+      BLOCK_REASON="${BLOCKER_REF}:${REF_STATE}:"
+      ;;
+    *) # bare in-repo issue/PR number, e.g. 528
+      REF_JSON=$(gh issue view "$BLOCKER_REF" --json state,labels) \
+        || { echo "could not resolve #$BLOCKER_REF live — do NOT hand-type a state"; exit 2; }
+      REF_STATE=$(printf '%s' "$REF_JSON" | jq -r '.state')
+      REF_LABELS=$(printf '%s' "$REF_JSON" | jq -r '[.labels[].name | select(startswith("loom:"))] | sort | join(",")')
+      BLOCK_REASON="${BLOCKER_REF}:${REF_STATE}:${REF_LABELS}"
+      ;;
+  esac
+fi
 # Build the argv as an ARRAY, not an unquoted `${VAR:+--flag "$VAR"}` expansion:
 # that idiom word-splits under bash but expands to a SINGLE argv entry under
-# zsh, so the flag arrives as the literal string `--blocker 378` and the script
-# exits 2 on an unknown argument. Arrays behave identically in both shells.
-FP_ARGS=(--verdict blocked --issue "$ISSUE_NUMBER")
-[ -n "$BLOCKER_REF" ] && FP_ARGS+=(--blocker "$BLOCKER_REF")
+# zsh, so the flag arrives as the literal string `--block-reason 528:OPEN:...`
+# and the script exits 2 on an unknown argument. Arrays behave identically in
+# both shells.
+FP_ARGS=(dep-recheck --number "$ISSUE_NUMBER" --verdict "$VERDICT")
+[ -n "$BLOCK_REASON" ] && FP_ARGS+=(--block-reason "$BLOCK_REASON")
 FP_OUT=$(./.loom/scripts/dep-recheck-fingerprint.sh "${FP_ARGS[@]}") \
   || { echo "fingerprint failed — do NOT post a comment"; exit 2; }
 # `printf '%s\n' "$VAR" | ...`, never `echo "$VAR" | ...` — zsh's `echo` builtin
 # reinterprets `\n`/`\t` escapes by default and corrupts captured output (#5094).
 CONCLUSION_HASH=$(printf '%s\n' "$FP_OUT" | sed -n 's/^CONCLUSION_HASH=//p')
-RECHECK_MARKER=$(printf '%s\n' "$FP_OUT" | sed -n 's/^RECHECK_MARKER=//p')
 
 # DECISION MODE: hand this exact CONCLUSION_HASH to check-dep-recheck-idempotency.sh
 # and act on ITS output — do not hand-derive PRIOR/age yourself. #1523 traced a
