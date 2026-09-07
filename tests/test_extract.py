@@ -1645,6 +1645,7 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
         _abstracted_cells,
         _dead_metal,
         _mom_crosscheck,
+        _net_label_positions,
     ) = _extract_netlist(layout, layout.top_cell(), disabled_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -4023,6 +4024,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _abstracted_cells,
         _dead_metal,
         _mom_crosscheck,
+        _net_label_positions,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -5747,6 +5749,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _abstracted_cells,
         _dead_metal,
         _mom_crosscheck,
+        _net_label_positions,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -6020,8 +6023,18 @@ def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
     # One continuous conductor with no device on it, but both heads are
     # labelled -- the merged net survives as a single named, device-less,
     # promoted-to-pin net (issue #539) instead of the whole circuit purging
-    # away.
-    assert report["nets"] == [{"name": "RA|RB", "pin": True, "device_count": 0}]
+    # away. `net_id`/`pin_index`/`label_positions_um` (issue #1540) are
+    # additive -- the exact-value collision scenario is covered by this
+    # file's "Net-name collisions from internally-repeated sub-cells"
+    # section; here just assert the expected shape is present.
+    assert len(report["nets"]) == 1
+    net = report["nets"][0]
+    assert net["name"] == "RA|RB"
+    assert net["pin"] is True
+    assert net["device_count"] == 0
+    assert isinstance(net["net_id"], int)
+    assert net["pin_index"] == 0
+    assert {lbl["text"] for lbl in net["label_positions_um"]} == {"RA", "RB"}
 
 
 def test_purge_preserving_named_nets_generalizes_to_hierarchical_circuits():
@@ -6094,6 +6107,46 @@ def test_purge_preserving_named_nets_generalizes_to_hierarchical_circuits():
     assert {net.name for net in child_after.each_net()} == {"X", "Y"}
 
 
+def test_purge_preserving_named_nets_keeps_distinct_nets_sharing_one_name():
+    """Issue #1540 regression: two distinct, device-free, pinned nets on the
+    *same* circuit that happen to share one ``name`` string must **both**
+    survive `_purge_preserving_named_nets` as two separate ``kdb.Net``
+    objects -- not collapse onto a single recreated net.
+
+    Before #1540's fix, the restore loop matched "does this net already
+    exist" by ``name`` -- so the second same-named survivor found the first
+    one already recreated and silently discarded its own ``cluster_id``,
+    merging two genuinely distinct nets (each with real, physically-separate
+    ``kdb.db`` geometry, mirrored here by giving them distinct non-zero
+    ``cluster_id``s) into one."""
+    netlist = kdb.Netlist()
+    top = kdb.Circuit()
+    top.name = "top"
+    netlist.add(top)
+
+    net_1 = top.create_net("N")
+    net_1.cluster_id = 11
+    pin_1 = top.create_pin("N")
+    top.connect_pin(pin_1, net_1)
+
+    net_2 = top.create_net("N")
+    net_2.cluster_id = 22
+    pin_2 = top.create_pin("N")
+    top.connect_pin(pin_2, net_2)
+
+    assert top.pin_count() == 2
+
+    _purge_preserving_named_nets(netlist)
+
+    top_after = netlist.circuit_by_name("top")
+    assert top_after is not None
+    assert top_after.pin_count() == 2
+
+    surviving_cluster_ids = sorted(net.cluster_id for net in top_after.each_net())
+    assert surviving_cluster_ids == [11, 22]
+    assert {net.name for net in top_after.each_net()} == {"N"}
+
+
 @pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
 def test_rescued_named_net_survives_parasitics_extraction(tmp_path, deck_name):
     """Issue #563: a net rescued by `_purge_preserving_named_nets` must stay
@@ -6123,9 +6176,19 @@ def test_rescued_named_net_survives_parasitics_extraction(tmp_path, deck_name):
         parasitics=True,
     )
 
-    # Same schematic-equivalent view as the non-parasitics run.
+    # Same schematic-equivalent view as the non-parasitics run. `net_id`/
+    # `pin_index`/`label_positions_um` (issue #1540) are additive -- see
+    # this file's "Net-name collisions from internally-repeated sub-cells"
+    # section for the exact-value collision scenario.
     assert report["device_count"] == 0
-    assert report["nets"] == [{"name": "RA|RB", "pin": True, "device_count": 0}]
+    assert len(report["nets"]) == 1
+    net = report["nets"][0]
+    assert net["name"] == "RA|RB"
+    assert net["pin"] is True
+    assert net["device_count"] == 0
+    assert isinstance(net["net_id"], int)
+    assert net["pin_index"] == 0
+    assert {lbl["text"] for lbl in net["label_positions_um"]} == {"RA", "RB"}
 
     # The rescued net's geometry is genuinely reachable, not merely
     # not-crashing: the poly bar's real R/C is reported for it.
@@ -6160,7 +6223,10 @@ def test_rescued_net_beside_real_device_survives_parasitics_extraction(tmp_path)
     )
 
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert {"name": "PAD", "pin": True, "device_count": 0} in report["nets"]
+    pad_nets = [n for n in report["nets"] if n["name"] == "PAD"]
+    assert len(pad_nets) == 1
+    assert pad_nets[0]["pin"] is True
+    assert pad_nets[0]["device_count"] == 0
 
     para = report["parasitics"]
     assert para is not None
@@ -12526,6 +12592,263 @@ def test_merged_net_label_spelling_matches_written_netlist(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Net-name collisions from internally-repeated sub-cells (issue #1540)
+# --------------------------------------------------------------------------- #
+
+
+def _make_repeated_stage_ring_layout(
+    num_stages: int = 4,
+    external_stage: int | None = 0,
+) -> tuple[kdb.Layout, dict[tuple[int, str], tuple[float, float]]]:
+    """A ring of ``num_stages`` identical 2-pad "stages" (device-free, like
+    ``_make_sky130_mim_layout_with_far_away_routing``'s far-away routing
+    stack, issue #539) reproducing this issue's exact motivating shape: each
+    stage's ``y`` pad touches the next stage's ``a`` pad (stage ``num_stages
+    - 1``'s ``y`` wraps back around to stage ``0``'s ``a``), so every one of
+    the ``num_stages`` junction nets carries *both* an ``a`` and a ``y``
+    label -- the identical collided name (``a|y``) at every position, exactly
+    as KLayout's ``Net.expanded_name()`` joins them (see
+    ``spice_safe_net_name``'s docstring).
+
+    Each stage occupies its own ``a``/``y`` li1 pad pair (non-touching within
+    a stage -- a real 2-input stage's input and output are distinct nodes),
+    3um apart on a row; the wraparound junction is routed through a separate
+    y-band above the row so it does not cross the interior pads. When
+    ``external_stage`` is given (default ``0``), that stage's ``y`` pad grows
+    an extra, unlabeled stub reaching further out (representing this issue's
+    "one true external output pin" wired further by a parent assembly) --
+    purely cosmetic for the new ``label_positions_um`` disclosure (which only
+    ever reports *label* positions, never general geometry), included so the
+    fixture matches the issue's own narrative; ``None`` omits it, producing
+    the "no true external pin among the collided names" edge case the issue's
+    test plan calls out.
+
+    Returns ``(layout, label_positions_um)`` where ``label_positions_um`` is
+    ``{(stage_index, "a" | "y"): (x_um, y_um), ...}`` -- the exact coordinate
+    this function placed each stage's own label at, in the same micrometre
+    frame ``klt extract``'s ``nets[].label_positions_um`` reports, so a test
+    can assert the new disclosure resolves a specific stage's pad back to the
+    correct positionally-unique ``nets[]`` entry without duplicating this
+    function's placement arithmetic.
+    """
+    if num_stages < 3:
+        raise ValueError("num_stages must be >= 3 to form a genuine ring")
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+
+    def draw(box):
+        top.shapes(li1).insert(box)
+
+    def label(text, x_um, y_um):
+        top.shapes(li1_label).insert(kdb.Text(text, _trans_um(x_um, y_um)))
+
+    stage_pitch_um = 3.0
+    pad_width_um = 0.3
+    pad_y0_um, pad_y1_um = 0.0, 0.6
+    a_offset_um = 0.0
+    y_offset_um = 2.0
+
+    label_positions: dict[tuple[int, str], tuple[float, float]] = {}
+    for stage in range(num_stages):
+        x0 = stage * stage_pitch_um
+        a_left = x0 + a_offset_um
+        y_left = x0 + y_offset_um
+        draw(_box_um(a_left, pad_y0_um, a_left + pad_width_um, pad_y1_um))
+        draw(_box_um(y_left, pad_y0_um, y_left + pad_width_um, pad_y1_um))
+        a_pos = (a_left + pad_width_um / 2, (pad_y0_um + pad_y1_um) / 2)
+        y_pos = (y_left + pad_width_um / 2, (pad_y0_um + pad_y1_um) / 2)
+        label("a", *a_pos)
+        label("y", *y_pos)
+        label_positions[(stage, "a")] = a_pos
+        label_positions[(stage, "y")] = y_pos
+
+        if stage == external_stage:
+            # The one true external pin (issue #1540's motivating case): an
+            # extra, unlabeled stub reaching further out from this stage's
+            # own `y` pad -- no new label, so `name`/`merged_net_labels[]`
+            # are unaffected; only this net's drawn geometry differs from
+            # every other collided junction's. Routed *downward* (negative
+            # y, below every pad/bridge/wrap-band shape, all of which sit at
+            # y >= 0) so it cannot cross and accidentally short the
+            # wraparound junction's own routing band (y in [1.0, 1.2] um,
+            # spanning the full row) the way an upward stub would.
+            draw(_box_um(y_left, pad_y0_um - 1.0, y_left + pad_width_um, pad_y0_um))
+
+    # Adjacent-stage junctions (stage i's `y` pad -> stage i+1's `a` pad),
+    # fully spanning both pads' x-ranges so they merge unambiguously.
+    for stage in range(num_stages - 1):
+        y_left = stage * stage_pitch_um + y_offset_um
+        next_a_left = (stage + 1) * stage_pitch_um + a_offset_um
+        draw(
+            _box_um(
+                y_left, pad_y0_um + 0.1, next_a_left + pad_width_um, pad_y1_um - 0.1
+            )
+        )
+
+    # Wraparound junction (last stage's `y` -> stage 0's `a`), routed through
+    # a separate y-band above the row so it cannot cross/short the interior
+    # pads it does not electrically belong to.
+    wrap_y0_um, wrap_y1_um = 1.0, 1.2
+    last_y_left = (num_stages - 1) * stage_pitch_um + y_offset_um
+    first_a_left = 0.0 + a_offset_um
+    draw(_box_um(last_y_left, pad_y0_um, last_y_left + pad_width_um, wrap_y1_um))
+    draw(_box_um(first_a_left, pad_y0_um, first_a_left + pad_width_um, wrap_y1_um))
+    draw(_box_um(first_a_left, wrap_y0_um, last_y_left + pad_width_um, wrap_y1_um))
+
+    return layout, label_positions
+
+
+def test_repeated_stage_ring_collides_names_but_discloses_position(tmp_path):
+    """Issue #1540's motivating scenario: a ring of 4 identical 2-input
+    stages collides every junction net onto the identical name `a|y` -- but
+    `nets[].net_id`/`pin_index`/`label_positions_um` disambiguate them
+    positionally, letting a caller resolve a specific known pad location
+    (here, stage 2's own `a`/`y` labels) back to a single, correct `nets[]`
+    entry without guessing from the name alone or running `klt lvs`."""
+    layout, label_positions = _make_repeated_stage_ring_layout(
+        num_stages=4, external_stage=0
+    )
+    path = _write_gds(layout, tmp_path / "ring.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "ring.spice"))
+
+    collided = [n for n in report["nets"] if n["name"] == "a|y"]
+    assert len(collided) == 4, report["nets"]
+
+    # Every collided entry is a promoted top-level pin with a distinct
+    # `net_id` and a distinct, valid `.SUBCKT` position.
+    net_ids = {n["net_id"] for n in collided}
+    pin_indices = {n["pin_index"] for n in collided}
+    assert len(net_ids) == 4
+    assert len(pin_indices) == 4
+    assert all(n["pin"] for n in collided)
+    assert all(isinstance(n["pin_index"], int) for n in collided)
+
+    # Stage 2's junction (between stage 2's `y` and stage 3's `a`) is
+    # identified purely by its known label position -- no name-based lookup
+    # is possible since all 4 entries share the name `a|y`.
+    stage2_y_x, stage2_y_y = label_positions[(2, "y")]
+
+    def _has_label_at(entry, text, x_um, y_um):
+        return any(
+            lbl["text"] == text
+            and lbl["x_um"] == pytest.approx(x_um)
+            and lbl["y_um"] == pytest.approx(y_um)
+            for lbl in entry["label_positions_um"]
+        )
+
+    matches = [n for n in collided if _has_label_at(n, "y", stage2_y_x, stage2_y_y)]
+    assert len(matches) == 1, collided
+    stage2_junction = matches[0]
+
+    # The same entry also carries stage 3's `a` label (the other half of the
+    # same junction net) -- confirming this is genuinely one joined net, not
+    # a coincidental position match.
+    stage3_a_x, stage3_a_y = label_positions[(3, "a")]
+    assert _has_label_at(stage2_junction, "a", stage3_a_x, stage3_a_y)
+
+    # And it is positionally distinct from every other collided entry.
+    other_entries = [n for n in collided if n is not stage2_junction]
+    assert all(other["net_id"] != stage2_junction["net_id"] for other in other_entries)
+    assert all(
+        other["pin_index"] != stage2_junction["pin_index"] for other in other_entries
+    )
+
+    # `.SUBCKT`'s actual header lists exactly `pin_index`-many positions
+    # before this net's own token -- the position `nets[]` reports is not
+    # merely internally consistent, it matches the written netlist too.
+    # KLayout's own `NetlistSpiceWriter` disambiguates the collided name at
+    # *write* time (`a|y`, `a|y$1`, `a|y$2`, ... -- this module does not
+    # control that renaming, see `spice_safe_net_name`'s docstring), so the
+    # token at this exact position always starts with the collided name.
+    netlist_text = (tmp_path / "ring.spice").read_text()
+    subckt_line = next(
+        ln for ln in netlist_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    subckt_pins = subckt_line.split()[2:]
+    assert subckt_pins[stage2_junction["pin_index"]] == "a|y" or subckt_pins[
+        stage2_junction["pin_index"]
+    ].startswith("a|y$")
+
+
+def test_repeated_stage_ring_resolves_two_independent_known_positions(tmp_path):
+    """Edge case (b) from issue #1540's test plan: two different, physically
+    known external positions both fall inside the same collided-name family
+    (`a|y`) -- each resolves to its own distinct `nets[]` entry, not to the
+    same one or to each other."""
+    layout, label_positions = _make_repeated_stage_ring_layout(
+        num_stages=4, external_stage=None
+    )
+    path = _write_gds(layout, tmp_path / "ring2.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "ring2.spice"))
+
+    collided = [n for n in report["nets"] if n["name"] == "a|y"]
+    assert len(collided) == 4, report["nets"]
+
+    def _find_by_label(text, x_um, y_um):
+        found = [
+            n
+            for n in collided
+            if any(
+                lbl["text"] == text
+                and lbl["x_um"] == pytest.approx(x_um)
+                and lbl["y_um"] == pytest.approx(y_um)
+                for lbl in n["label_positions_um"]
+            )
+        ]
+        assert len(found) == 1, (text, x_um, y_um, collided)
+        return found[0]
+
+    stage0_a_x, stage0_a_y = label_positions[(0, "a")]
+    stage1_a_x, stage1_a_y = label_positions[(1, "a")]
+    entry_a = _find_by_label("a", stage0_a_x, stage0_a_y)
+    entry_b = _find_by_label("a", stage1_a_x, stage1_a_y)
+
+    assert entry_a["net_id"] != entry_b["net_id"]
+    assert entry_a["pin_index"] != entry_b["pin_index"]
+
+
+def test_repeated_stage_ring_fully_internal_still_reports_all_collided_entries(
+    tmp_path,
+):
+    """Edge case (a) from issue #1540's test plan: a fully closed ring with
+    no true external pin at all -- every collided-name entry is still
+    reported (4 distinct `net_id`/`pin_index` pairs), nothing crashes, and
+    (since there is genuinely no distinguishing feature) the new fields
+    still let a caller enumerate every candidate position rather than
+    silently collapsing them."""
+    layout, label_positions = _make_repeated_stage_ring_layout(
+        num_stages=4, external_stage=None
+    )
+    path = _write_gds(layout, tmp_path / "ring3.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "ring3.spice"))
+
+    collided = [n for n in report["nets"] if n["name"] == "a|y"]
+    assert len(collided) == 4, report["nets"]
+    assert len({n["net_id"] for n in collided}) == 4
+    assert len({n["pin_index"] for n in collided}) == 4
+
+    # Every stage's own label position is accounted for somewhere in the
+    # collided set (nothing was silently dropped).
+    all_reported_positions = [
+        (lbl["text"], lbl["x_um"], lbl["y_um"])
+        for n in collided
+        for lbl in n["label_positions_um"]
+    ]
+
+    def _reported(kind, x_um, y_um):
+        return any(
+            k == kind and x == pytest.approx(x_um) and y == pytest.approx(y_um)
+            for k, x, y in all_reported_positions
+        )
+
+    for (_stage, kind), (x_um, y_um) in label_positions.items():
+        assert _reported(kind, x_um, y_um), (kind, x_um, y_um, all_reported_positions)
+
+
+# --------------------------------------------------------------------------- #
 # Dummy-device suppression (issue #295)
 # --------------------------------------------------------------------------- #
 
@@ -14731,10 +15054,18 @@ def test_declared_pins_restricts_spef_ports_on_the_routed_corpus(tmp_path_factor
     }
     assert declared == design_ports
 
-    # Unchanged by the restriction: the same 1376 `*D_NET` blocks the
+    # Unchanged by the restriction: the same 1380 `*D_NET` blocks the
     # unrestricted extraction writes (measured on this same fixture), so the
     # demotion moves nets out of `*PORTS` without dropping any parasitics.
-    assert len(re.findall(r"^\*D_NET ", spef_text, re.M)) == 1376
+    # (Count re-measured at 1380, up from 1376, after issue #1540's
+    # `_purge_preserving_named_nets` fix: this real routed design carries a
+    # handful of distinct, device-free power-rail islands -- the same
+    # un-strapped `VGND`/`VPWR` shape issue #765/#811 already document on
+    # this corpus -- that share a name with another such island. The pre-fix
+    # restore path matched by name and silently collapsed each such pair
+    # onto one recreated net; matching by `cluster_id` instead keeps every
+    # distinct island, adding the 4 previously-dropped `*D_NET` blocks.)
+    assert len(re.findall(r"^\*D_NET ", spef_text, re.M)) == 1380
 
 
 # --------------------------------------------------------------------------- #

@@ -1884,6 +1884,15 @@ for the underlying geometry/coefficient detail.
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 
+This section and the three after it (`--pins`, `--def-pins`,
+`--pin-source-cells`) all **reconcile** the promoted-pin set once you already
+know which net is the true interface — by name, by a DEF `PINS` list, or by
+cell nesting/physical label. None of them help *discover* that interface
+when the names themselves are ambiguous (e.g. several internally-repeated
+sub-cells collide onto one shared name) — see "Net-name collisions from
+internally-repeated sub-cells" below for `nets[].net_id`/`pin_index`/
+`label_positions_um`, which exist for exactly that discovery step.
+
 Extraction ends by turning named nets into the top circuit's `.SUBCKT` pins
 (KLayout's `Netlist.make_top_level_pins()`). Because extraction is flat, "named
 net" includes any net that is named only because a label sits inside an
@@ -2141,6 +2150,106 @@ reconciliation entirely, byte-for-byte identical to extraction before this
 flag existed. `klt lvs` exposes the same control as the
 `layout.pin_source_cells` request field (a JSON array of cell name strings
 — see [`docs/cli/lvs.md`](lvs.md)).
+
+## Net-name collisions from internally-repeated sub-cells (issue #1540)
+
+A flat extraction's net names come from KLayout's own `Net.expanded_name()`
+— the drawn text labels touching that net, joined with `\|` (see "Anonymous
+nets are backslash-escaped" / "Merged net labels" above). A block that
+instantiates the *same* leaf cell several times in a chain — e.g. a ring of
+N identical 2-input stages, each stage's `y` output pad touching the next
+stage's `a` input pad — produces N genuinely distinct junction nets that all
+carry the identical name (e.g. `a\|y`), because every junction is named from
+the same pair of pin labels. This is a structural consequence of flat
+extraction, not a bug: KLayout's own `NetlistSpiceWriter` disambiguates the
+collision at *write* time with a `$1`/`$2`/... suffix (`a\|y`, `a\|y$1`,
+`a\|y$2`, ...) that this tool does not control.
+
+The problem this creates: default flat extraction's `make_top_level_pins()`
+promotes **every** named net to a top-level pin, so all N of those
+identically-named junction nets — plus the block's one true externally-routed
+pin, if one of the junction nets happens to be it — show up as separate
+`.SUBCKT` port positions with no way to tell them apart by name. Worse, the
+JSON `nets[]` array is sorted by `name` (see above), so it cannot even be
+positionally correlated back to the `.SUBCKT` header's actual port order.
+**`--pins`/`--top-cell-pins`/`--def-pins`/`--pin-source-cells` do not help
+here** — all four *reconcile* an already-known interface (a name, a DEF
+`PINS` list, or a cell-depth/physical-label heuristic) after the fact; none
+of them help *discover* which position is the true external pin when the
+names themselves are the ambiguous part.
+
+`nets[].net_id`, `nets[].pin_index`, and `nets[].label_positions_um` (see
+the `nets[]` schema table above) close this gap:
+
+- `net_id` is that net's own `cluster_id` — unique per net *object*, so N
+  identically-named `nets[]` entries are still N distinct dictionary keys.
+- `pin_index` is that net's exact 0-based position in the written `.SUBCKT`
+  header (`null` for a non-pin net) — resolving a specific port index
+  straight back to a `nets[]` entry, positionally.
+- `label_positions_um` reports every drawn label's own `(x_um, y_um)`
+  position naming that net, so a caller with independent floorplan knowledge
+  (a known pin location from `klt place-and-route`'s DEF, or its own
+  generator's placement record) can positively identify *which* collided
+  entry is the one it means.
+
+Worked example — a small ring of 4 identical 2-input stages (`a`/`y`
+labelled li1 pads, each stage's `y` pad touching the next stage's `a` pad,
+wrapping around), reproducing
+`tests/test_extract.py::_make_repeated_stage_ring_layout(num_stages=4)`
+exactly (the fixture backing
+`test_repeated_stage_ring_collides_names_but_discloses_position`); output
+below is the actual `klt extract ring.gds --deck sky130 --format json`
+response for that fixture, unedited:
+
+```
+$ klt extract ring.gds --deck sky130 --format json
+```
+
+```json
+{
+  "nets": [
+    {"name": "a|y", "pin": true, "device_count": 0,
+     "net_id": 1, "pin_index": 0,
+     "label_positions_um": [{"text": "a", "x_um": 3.15, "y_um": 0.3},
+                             {"text": "y", "x_um": 2.15, "y_um": 0.3}]},
+    {"name": "a|y", "pin": true, "device_count": 0,
+     "net_id": 2, "pin_index": 1,
+     "label_positions_um": [{"text": "a", "x_um": 6.15, "y_um": 0.3},
+                             {"text": "y", "x_um": 5.15, "y_um": 0.3}]},
+    {"name": "a|y", "pin": true, "device_count": 0,
+     "net_id": 3, "pin_index": 2,
+     "label_positions_um": [{"text": "a", "x_um": 9.15, "y_um": 0.3},
+                             {"text": "y", "x_um": 8.15, "y_um": 0.3}]},
+    {"name": "a|y", "pin": true, "device_count": 0,
+     "net_id": 4, "pin_index": 3,
+     "label_positions_um": [{"text": "a", "x_um": 0.15, "y_um": 0.3},
+                             {"text": "y", "x_um": 11.15, "y_um": 0.3}]}
+  ]
+}
+```
+
+The written netlist's header (also unedited, same run) confirms `pin_index`
+matches the real `.SUBCKT` port order exactly:
+
+```
+.SUBCKT TOP a|y a|y$1 a|y$2 a|y$3
+```
+
+All four entries share `name: "a|y"` — indistinguishable by name alone,
+exactly as KLayout's own writer renders them (`a|y`, `a|y$1`, `a|y$2`,
+`a|y$3`) in the `.SUBCKT` line above. But each has its own `net_id` and
+`pin_index`, and a caller that already knows (from its own floorplan record)
+that the block's one true external connection is wired near, say, `(11.15,
+0.3)` can pick out the exact matching `nets[]` entry — here, `net_id: 4`,
+`pin_index: 3`, i.e. the fourth `.SUBCKT` port (`a|y$3`) — from
+`label_positions_um` alone, with no `klt lvs` run against a reference
+schematic required.
+
+This disclosure is purely diagnostic/positional — it does not change which
+nets get promoted to pins. Once a caller has used it to determine the true
+interface, `--pins`/`--def-pins`/`--top-cell-pins`/`--pin-source-cells` are
+still the right tools to *apply* that knowledge and demote the internal
+chain nodes back off the promoted-pin set.
 
 ## Matched-device geometry check (`--matched-group`, issue #1018)
 
@@ -4212,8 +4321,11 @@ consume.
 | `name`         | string  | The net's name, byte-identical to how the written netlist's `.SUBCKT`/instance lines reference it as a node — a labelled name, or an anonymous net's KLayout-synthesized `$N` placeholder backslash-escaped to `\$N` (issue #1162 — see "Anonymous nets are backslash-escaped" below) — a net two labels merged is `\|`-joined (e.g. `"Y\|Y2"`), not KLayout's own un-escaped, comma-joined `Net.expanded_name()` form (issue #696 — see "Merged net labels" below). |
 | `pin`          | boolean | Whether this net is promoted to a top-cell pin (a named net at the top level). |
 | `device_count` | integer | Number of device terminals connected to this net.                             |
+| `net_id`       | integer | Additive field (issue #1540). The net's KLayout `cluster_id` — unique across every net *object* in this circuit, unlike `name` (see "Net-name collisions from internally-repeated sub-cells" below). The same identity `parasitics.nets[].net_id` already reports for the identical "several distinct nets share one label" shape (issue #765/#811). |
+| `pin_index`    | integer \| `null` | Additive field (issue #1540). This net's 0-based position in the written `.SUBCKT`/instance-line port order (`Circuit.each_pin()`, the same sequence `NetlistSpiceWriter` iterates) when `pin` is `true`; `null` when it is not a promoted pin. Lets a caller resolve a specific `.SUBCKT` port index straight back to a `nets[]` entry, positionally, with no separate `klt lvs` run against a reference schematic. |
+| `label_positions_um` | array\<object\> | Additive field (issue #1540). Every drawn text-label shape naming this net, `[{"text": str, "x_um": number, "y_um": number}, ...]`, sorted by `(text, x_um, y_um)`; `[]` for a net with no drawn label. `(x_um, y_um)` is each label's anchor point in the top cell's own local coordinate frame — the mechanism a caller with independent floorplan knowledge (e.g. a known physical pin location from `klt place-and-route`'s DEF, or its own generator's placement record) uses to positively identify *which* of several identically-named entries it means, without guessing from `name` alone. |
 
-`nets` is sorted by `name` for deterministic, diff-clean output.
+`nets` is sorted by `name` for deterministic, diff-clean output — `net_id`/`pin_index` are what let a caller recover the unsorted, positional `.SUBCKT` order this sort otherwise discards. See "Net-name collisions from internally-repeated sub-cells" below for the worked example these three fields exist for.
 
 ## `--check` / `--rerun`
 

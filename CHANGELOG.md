@@ -16,6 +16,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt extract`'s `nets[]` entries now carry `net_id`,
+  `pin_index`, and `label_positions_um` (issue #1540) — all additive,
+  no `schema_version` bump. A flat extraction of a block that instantiates
+  the same leaf cell several times in a chain (e.g. a ring of identical
+  2-input stages) collides several genuinely distinct nets onto one shared
+  `name` (KLayout's own `NetlistSpiceWriter` disambiguates them at write
+  time with a `$1`/`$2`/... suffix this tool does not control), and neither
+  `name` nor the existing `pin` boolean can tell which collided entry is
+  which. `net_id` is the net's own KLayout `cluster_id` (unique per net
+  object, the same identity `parasitics.nets[].net_id` already uses for
+  issue #765/#811's identical "several distinct nets, one label" shape);
+  `pin_index` is that net's exact 0-based position in the written
+  `.SUBCKT`/instance-line port order when it is a promoted pin (`null`
+  otherwise), letting a caller resolve a specific `.SUBCKT` port index
+  straight back to a `nets[]` entry with no separate `klt lvs` run against a
+  reference schematic; `label_positions_um` reports every drawn label's own
+  `(x_um, y_um)` position naming that net, so a caller with independent
+  floorplan knowledge (a known pin location, e.g. from `klt
+  place-and-route`'s DEF) can positively identify which collided entry is
+  the one it means. Also fixes `_purge_preserving_named_nets` to restore a
+  device-free, pinned net by its own `cluster_id` rather than by `name`,
+  so two distinct same-named survivors on one circuit no longer silently
+  collapse onto a single recreated net (the identical collision shape at a
+  smaller scale). See `docs/cli/extract.md`'s "Net-name collisions from
+  internally-repeated sub-cells" section for a worked example.
+
 - **Added**: `klt gen --list-pdk-pcells` and `klt gen --pdk-pcell
   <library>/<cell>` reach the PCell library a resolved PDK ships *itself*
   under `libs.tech/klayout/python/`, instead of only klt's own built-in
