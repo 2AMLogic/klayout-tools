@@ -298,6 +298,81 @@ jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"
 p="$("$TARGET_SCRIPT" operator-premise --refs "20 22" --repo owner/repo)"
 assert_eq "stale-premise" "$(field "$p" VERDICT)" "T13c: live operator-premise mode checks each --refs number's state"
 
+# --- T13f-T13i: FORMULA_VERSION (#1544) -- PIN THE EXACT OUTPUT -------------
+#
+# Why exact-string pinning, not just "field is present": #1544 traced a
+# fleet-wide false-CHANGED incident to CONCLUSION_HASH's formula (what feeds
+# it, and how) drifting silently across a resync with nothing to flag it.
+# FORMULA_VERSION exists so a genuine formula change is distinguishable from
+# a routine CLI reshape by consumers — but that guarantee only holds if THIS
+# suite fails the instant a future edit changes the hash's inputs/encoding
+# without also bumping FORMULA_VERSION. A per-field assert_eq (as used
+# elsewhere in this file) would NOT catch that: it only checks the fields it
+# names, so a silently-added/reordered/re-encoded input to the hash would
+# still make every explicitly-checked field pass. Comparing the ENTIRE
+# KEY=VALUE / JSON block verbatim against a fixed fixture is the only way to
+# make "the formula's inputs or encoding changed" and "FORMULA_VERSION did
+# not change to match" mutually exclusive outcomes in CI.
+#
+# If this test fails after an intentional formula change: update
+# FORMULA_VERSION in dep-recheck-fingerprint.sh (see its header comment,
+# "FORMULA_VERSION — bump this on every formula change"), then re-pin the
+# expected values below to match the new, deliberately-versioned output.
+#
+# NOTE (#1546): this block was silently dropped by an unpinned Loom resync
+# (commit 090cd9c) less than an hour after #1544/#1545 first landed it, and a
+# second resync (fdc5018) compounded the damage by adding the named-dependency
+# subcommand on top without restoring it. It is re-added here, renumbered
+# T13f-T13i (rather than reusing T14/T15, now occupied by named-dependency
+# below) to avoid duplicate test-case labels. Both this file and
+# dep-recheck-fingerprint.sh are now pinned in `.loom/resync-ignore`
+# specifically to prevent a third occurrence.
+
+FIXTURE_PINNED='{"prs":[{"number":4743,"state":"OPEN","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+
+EXPECTED_PINNED_PLAIN='VERDICT=blocked
+BLOCKERS=4743:OPEN:loom:changes-requested
+BLOCK_REASON=
+ORTHOGONAL=
+CONCLUSION_HASH=3cd842bbfb73dbad
+FORMULA_VERSION=v1'
+out_pinned="$(echo "$FIXTURE_PINNED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$EXPECTED_PINNED_PLAIN" "$out_pinned" \
+    "T13f: dep-recheck KEY=VALUE output (including FORMULA_VERSION) is pinned exactly for a fixed fixture"
+
+EXPECTED_PINNED_JSON='{
+  "verdict": "blocked",
+  "blockers": "4743:OPEN:loom:changes-requested",
+  "block_reason": "",
+  "orthogonal": "",
+  "conclusion_hash": "3cd842bbfb73dbad",
+  "formula_version": "v1"
+}'
+out_pinned_json="$(echo "$FIXTURE_PINNED" | "$TARGET_SCRIPT" dep-recheck --stdin --json)"
+assert_eq "$EXPECTED_PINNED_JSON" "$out_pinned_json" \
+    "T13g: dep-recheck --json output (including formula_version) is pinned exactly for the same fixture"
+
+FIXTURE_PREMISE_PINNED='{"refs":[{"number":14,"state":"CLOSED"},{"number":22,"state":"OPEN"}]}'
+
+EXPECTED_PREMISE_PINNED_PLAIN='VERDICT=stale-premise
+REFS=14:CLOSED
+22:OPEN
+CONCLUSION_HASH=a70cb300d8bb3989
+FORMULA_VERSION=v1'
+out_premise_pinned="$(echo "$FIXTURE_PREMISE_PINNED" | "$TARGET_SCRIPT" operator-premise --stdin)"
+assert_eq "$EXPECTED_PREMISE_PINNED_PLAIN" "$out_premise_pinned" \
+    "T13h: operator-premise KEY=VALUE output (including FORMULA_VERSION) is pinned exactly for a fixed fixture"
+
+EXPECTED_PREMISE_PINNED_JSON='{
+  "verdict": "stale-premise",
+  "refs": "14:CLOSED\n22:OPEN",
+  "conclusion_hash": "a70cb300d8bb3989",
+  "formula_version": "v1"
+}'
+out_premise_pinned_json="$(echo "$FIXTURE_PREMISE_PINNED" | "$TARGET_SCRIPT" operator-premise --stdin --json)"
+assert_eq "$EXPECTED_PREMISE_PINNED_JSON" "$out_premise_pinned_json" \
+    "T13i: operator-premise --json output (including formula_version) is pinned exactly for the same fixture"
+
 # --- T14: named-dependency - a `## Dependencies` checklist item naming a
 # different, non-closing issue/PR as a prerequisite (#7314, the #6335/#6333
 # shape `dep-recheck` cannot see: #6333 never carries `Closes #6335`) --------

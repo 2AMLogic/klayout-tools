@@ -109,3 +109,25 @@ scripts/merge-pr.sh
 # files resynced normally.
 scripts/verdict-staleness-guard.sh
 scripts/tests/test-verdict-staleness-guard.sh
+
+# #1546: scripts/dep-recheck-fingerprint.sh's FORMULA_VERSION guard (originally
+# #1544/#1545, commit a6f9997) — a literal `FORMULA_VERSION="v1"` constant
+# folded into every `dep-recheck`/`operator-premise` marker alongside
+# CONCLUSION_HASH so a consumer (check-dep-recheck-idempotency.sh) can tell
+# "the hash formula changed under us" apart from "the dependency state
+# changed" and never misread the former as the latter — was reverted wholesale
+# by an unpinned resync (commit 090cd9c, ~51 minutes after #1545 merged), and
+# a second resync landed one minute later (commit fdc5018) compounding the
+# damage: it added a brand new `named-dependency` subcommand on top of the
+# already-reverted base without restoring the guard, so the file ended up with
+# MORE functionality than #1545 shipped but WITHOUT the fix #1545 added. This
+# guard was never upstreamed into rjwalters/loom's own dep-recheck-fingerprint.sh
+# template (klayout-tools is the only consumer of curator.md's versioned
+# `<!-- curator:dep-recheck:<version>:<hash> -->` marker format), so an
+# unpinned resync will keep reverting it indefinitely — the same reversion
+# pattern as #606/#662/#1292/#1316/#1356. These pins are what prevent a third
+# occurrence. If the upstream Loom project ever adopts an equivalent
+# formula-version guard, these pins can be dropped and the files resynced
+# normally.
+scripts/dep-recheck-fingerprint.sh
+scripts/tests/test-dep-recheck-fingerprint.sh
