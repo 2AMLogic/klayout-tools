@@ -723,21 +723,62 @@ def run_lvs(request: str) -> dict[str, Any]:
     # flat circuit (no boundary yet to scope against -- see #1085), so this
     # is a no-op there regardless of what the map names.
     combine_per_circuit_warnings: list[dict[str, Any]] = []
+    # Issue #1557: the whole-netlist `Netlist.dup()` snapshot taken *before*
+    # any per-circuit combining runs on this side -- the pre-combine input
+    # `_correct_capacitor_combine_parameters` needs below, mirroring the
+    # whole-netlist `combine_devices` path's own `layout_snapshot`/
+    # `reference_snapshot` (taken the same way, for the same reason, further
+    # down). `layout_combined_circuits` collects the subset of
+    # `layout_targets` that combined *cleanly* (see
+    # `_combine_circuit_devices_safely`'s return contract) -- both are
+    # populated below only when `combine_devices_per_circuit` is set, and
+    # consumed once both sides have finished combining (after the net purge
+    # below) and again once `layout_deck` is resolved further down (the
+    # deferred resistor `fixed_offset_ohm` correction, issue #559/#585).
+    layout_pre_combine_snapshot: kdb.Netlist | None = None
+    layout_combined_circuits: list[str] = []
     if combine_devices_per_circuit is not None:
         layout_targets, layout_unmatched = _resolve_combine_devices_per_circuit_targets(
             combine_devices_per_circuit, layout_netlist
         )
-        combine_per_circuit_warnings.extend(
-            _combine_circuit_devices_safely(
-                layout_netlist,
-                "layout",
-                layout_targets,
-                combine_devices_max_attempts,
-            )
+        layout_pre_combine_snapshot = layout_netlist.dup()
+        layout_warnings, layout_combined_circuits = _combine_circuit_devices_safely(
+            layout_netlist,
+            "layout",
+            layout_targets,
+            combine_devices_max_attempts,
         )
+        combine_per_circuit_warnings.extend(layout_warnings)
         combine_per_circuit_warnings.extend(
             _unmatched_combine_devices_per_circuit_warnings(layout_unmatched, "layout")
         )
+
+        # Issue #1497/#1557: the same capacitor `C` sum-conservation
+        # correction the whole-netlist `combine_devices` path applies
+        # (further down, gated on `combine_devices_enabled`), scoped here to
+        # just the circuit(s) this side actually combined *cleanly* -- a
+        # circuit left uncombined (named `False`, unmatched, or not named at
+        # all) or whose combine was reported `device.combine_incomplete` is
+        # never touched. Applied here, immediately, rather than deferred
+        # alongside the reference side's own correction below (where it
+        # would be more symmetric-looking): `flatten_layout` runs
+        # immediately after this block, and once it collapses this side's
+        # circuit boundaries away, `_capacitor_c_sums`'s per-circuit-name
+        # grouping key can no longer line up a post-combine device's
+        # (now-`layout_spec.get("top")`-named) circuit against the
+        # pre-combine snapshot's original circuit name -- silently matching
+        # nothing and leaving a corrupted `C` uncorrected (caught by this
+        # fix's own end-to-end test after initially placing this call after
+        # `flatten_layout`, alongside the reference side's).
+        if layout_combined_circuits:
+            layout_c_correction = _correct_capacitor_combine_parameters(
+                layout_pre_combine_snapshot,
+                layout_netlist,
+                "layout",
+                circuit_names=layout_combined_circuits,
+            )
+            if layout_c_correction is not None:
+                combine_per_circuit_warnings.append(layout_c_correction)
 
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
@@ -792,14 +833,22 @@ def run_lvs(request: str) -> dict[str, Any]:
                 combine_devices_per_circuit, reference_netlist
             )
         )
-        combine_per_circuit_warnings.extend(
-            _combine_circuit_devices_safely(
-                reference_netlist,
-                "reference",
-                reference_targets,
-                combine_devices_max_attempts,
-            )
+        # Issue #1557: mirrors `layout_pre_combine_snapshot`/
+        # `layout_combined_circuits` above, taken here (immediately before
+        # this side's own combine call) rather than up where the layout
+        # side's snapshot was taken, so it reflects *this* netlist's own
+        # pre-combine state.
+        reference_pre_combine_snapshot = reference_netlist.dup()
+        (
+            reference_warnings,
+            reference_combined_circuits,
+        ) = _combine_circuit_devices_safely(
+            reference_netlist,
+            "reference",
+            reference_targets,
+            combine_devices_max_attempts,
         )
+        combine_per_circuit_warnings.extend(reference_warnings)
         combine_per_circuit_warnings.extend(
             _unmatched_combine_devices_per_circuit_warnings(
                 reference_unmatched, "reference"
@@ -814,6 +863,23 @@ def run_lvs(request: str) -> dict[str, Any]:
         # `counts.nets.*` looking stale by comparison.
         _purge_emptied_nets(layout_netlist)
         _purge_emptied_nets(reference_netlist)
+
+        # Issue #1497/#1557: the reference side's own capacitor `C`
+        # sum-conservation correction -- the layout side's equivalent
+        # already ran, further up, before `flatten_layout` could collapse
+        # its circuit boundaries (see the comment there for why the two
+        # sides cannot share this same call site). The reference side has
+        # no such ordering hazard here: `flatten_reference` does not run
+        # until after this whole block, so this is still scoped correctly.
+        if reference_combined_circuits:
+            reference_c_correction = _correct_capacitor_combine_parameters(
+                reference_pre_combine_snapshot,
+                reference_netlist,
+                "reference",
+                circuit_names=reference_combined_circuits,
+            )
+            if reference_c_correction is not None:
+                combine_per_circuit_warnings.append(reference_c_correction)
 
     if flatten_reference:
         reference_flatten_warning = _flatten_netlist_safely(
@@ -859,6 +925,28 @@ def run_lvs(request: str) -> dict[str, Any]:
         )
     except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
         raise LvsError(str(exc)) from exc
+
+    if combine_devices_per_circuit is not None and layout_deck is not None:
+        # Issue #559/#585/#1557: the same deferred resistor
+        # `fixed_offset_ohm` correction the whole-netlist `combine_devices`
+        # block below applies (mutually exclusive with
+        # `combine_devices_per_circuit`, so only one of the two ever runs
+        # for a given request) -- reached only once `layout_deck` is
+        # resolved (immediately above), which is *after*
+        # `_combine_circuit_devices_safely` already folded each targeted
+        # circuit's devices further up. Applied netlist-wide, exactly like
+        # the whole-netlist block does, rather than restricted to
+        # `layout_combined_circuits`: the deferral this correction reverses
+        # (`--defer-resistor-fixed-offset` at pre-extraction time, issue
+        # #585) was applied once, globally, to the whole pre-extracted
+        # netlist -- not per named circuit -- so a circuit
+        # `combine_devices_per_circuit` left uncombined still carries
+        # raw-body-only resistor primitives that need this same offset
+        # added exactly once each, the same as a degraded
+        # `Netlist.combine_devices()` run's leftover individual devices do
+        # in the whole-netlist block below (see that block's own comment on
+        # why it is "still applied after a symmetric degrade").
+        apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
 
     combine_warnings: list[dict[str, Any]] = []
     combine_incomplete = False
@@ -2473,7 +2561,7 @@ def _combine_circuit_devices_safely(
     side: str,
     circuit_names: Sequence[str],
     max_attempts: int = _COMBINE_DEVICES_MAX_ATTEMPTS,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Like :func:`_combine_devices_safely`, but combines only the named
     circuits, one at a time, via ``Circuit.combine_devices()`` rather than
     the whole-netlist ``Netlist.combine_devices()`` -- issue #1552's
@@ -2510,11 +2598,21 @@ def _combine_circuit_devices_safely(
     is presumed to be this same KLayout-internal partial-match invariant,
     since nothing else in this narrowly-scoped call can raise one.
 
-    Returns the list of ``device.combine_incomplete`` warnings (one per
-    circuit that exhausted its retry budget) to append to ``mismatches[]``
-    -- empty when every named circuit combined cleanly (the common case).
+    Returns ``(warnings, combined_circuit_names)``: ``warnings`` is the list
+    of ``device.combine_incomplete`` warnings (one per circuit that
+    exhausted its retry budget) to append to ``mismatches[]`` -- empty when
+    every named circuit combined cleanly (the common case).
+    ``combined_circuit_names`` is the subset of ``circuit_names`` that
+    combined *cleanly* (no retry-budget exhaustion) -- issue #1557: this is
+    what ``run_lvs`` scopes its post-combine resistor
+    ``fixed_offset_ohm``/capacitor ``C`` sum-conservation corrections to, so
+    a circuit whose combine was reported incomplete is never "corrected"
+    against a fold that never actually completed, mirroring the
+    whole-netlist ``combine_devices`` path's own ``if not
+    combine_incomplete:`` gating (see ``run_lvs``).
     """
     warnings: list[dict[str, Any]] = []
+    combined_circuit_names: list[str] = []
     other_side = "reference" if side == "layout" else "layout"
     for name in circuit_names:
         for attempt in range(max_attempts):
@@ -2560,8 +2658,9 @@ def _combine_circuit_devices_safely(
             else:
                 if candidate is not netlist:
                     netlist.assign(candidate)
+                combined_circuit_names.append(name)
                 break
-    return warnings
+    return warnings, combined_circuit_names
 
 
 def _validate_combine_device_classes(
@@ -2940,7 +3039,11 @@ def _capacitor_c_sums(netlist: Any, kdb_module: Any) -> dict[tuple[Any, ...], fl
 
 
 def _correct_capacitor_combine_parameters(
-    pre_combine_netlist: Any, netlist: Any, side: str
+    pre_combine_netlist: Any,
+    netlist: Any,
+    side: str,
+    *,
+    circuit_names: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Repair a capacitor device's `C` parameter left inconsistent by
     `Netlist.combine_devices()` (issue #1497).
@@ -2974,6 +3077,19 @@ def _correct_capacitor_combine_parameters(
     failure this module has observed directly against its own synthetic
     netlists -- see this module's docstring / issue #1497 for the
     investigation).
+
+    ``circuit_names`` (issue #1557): restricts the post-combine scan to just
+    these circuit names -- ``options.combine_devices_per_circuit``'s own
+    per-circuit combine, unlike the whole-netlist ``options.combine_devices``
+    path (which always passes ``None``, the default, and scans every
+    circuit), only wants this check applied to the circuit(s) it actually
+    combined *cleanly*. A circuit this ran over unnecessarily would be a
+    no-op anyway (its post-combine `C` already equals its own pre-combine
+    sum, since nothing touched it), but the explicit restriction keeps a
+    circuit whose combine was reported incomplete untouched too, matching
+    this function's own docstring contract ("called only when ... reported
+    success") even though nothing here rolls an incomplete per-circuit
+    combine back the way the whole-netlist symmetric degrade does.
     """
     import klayout.db as kdb_module
 
@@ -2981,6 +3097,8 @@ def _correct_capacitor_combine_parameters(
     classes = _capacitor_device_classes(kdb_module)
     corrected: list[dict[str, Any]] = []
     for circuit in netlist.each_circuit():
+        if circuit_names is not None and circuit.name not in circuit_names:
+            continue
         for device in circuit.each_device():
             device_class = device.device_class()
             if not isinstance(device_class, classes):
