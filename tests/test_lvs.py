@@ -4577,6 +4577,326 @@ def test_combine_devices_per_circuit_no_op_on_flat_single_circuit_layout(tmp_pat
 
 
 # --------------------------------------------------------------------------- #
+# `options.combine_devices_per_circuit` carries the #559/#1497 resistor-
+# offset and capacitor-C corrections too (issue #1557): PR #1556 added the
+# per-circuit combine but did not carry over either correction the
+# whole-netlist `combine_devices` path already applies post-combine.
+# --------------------------------------------------------------------------- #
+
+
+def _build_two_circuit_capacitor_netlist_for_combine_scoping():
+    """Two independent circuits, ``"GOOD"`` and ``"BAD"``, each with two
+    parallel `kdb.DeviceClassCapacitor` devices on the same net/common shape
+    as `_build_parallel_capacitor_netlist` -- used to exercise
+    `_combine_circuit_devices_safely`'s per-circuit scoping directly (one
+    circuit combines cleanly, the other is forced to raise)."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    device_class = kdb.DeviceClassCapacitor()
+    device_class.name = "cap"
+    netlist.add(device_class)
+
+    for name in ("GOOD", "BAD"):
+        circuit = kdb.Circuit()
+        circuit.name = name
+        netlist.add(circuit)
+        common = circuit.create_net("COMMON")
+        circuit.connect_pin(circuit.create_pin("COMMON"), common)
+        net = circuit.create_net("G0")
+        circuit.connect_pin(circuit.create_pin("G0"), net)
+        for i in range(2):
+            device = circuit.create_device(device_class, f"G0_{i}")
+            device.connect_terminal("A", net)
+            device.connect_terminal("B", common)
+            device.set_parameter("C", 1e-15)
+            device.set_parameter("A", 1.0)
+            device.set_parameter("P", 2.0)
+
+    return netlist
+
+
+def test_combine_circuit_devices_safely_returns_only_cleanly_combined_names(
+    monkeypatch,
+):
+    """`_combine_circuit_devices_safely` (issue #1557) returns
+    ``(warnings, combined_circuit_names)``: the second element is the subset
+    of the named circuits that actually combined -- excluding one that
+    exhausted its retry budget -- so a caller (``run_lvs``) can scope its own
+    post-combine corrections to only the circuits that genuinely folded,
+    consistent with the whole-netlist path's own ``if not
+    combine_incomplete:`` gating."""
+    import klayout.db as kdb
+
+    netlist = _build_two_circuit_capacitor_netlist_for_combine_scoping()
+    real_combine_devices = kdb.Circuit.combine_devices
+
+    def _combine_or_raise(self):
+        if self.name == "BAD":
+            raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+        real_combine_devices(self)
+
+    monkeypatch.setattr(kdb.Circuit, "combine_devices", _combine_or_raise)
+
+    warnings, combined = lvs._combine_circuit_devices_safely(
+        netlist, "layout", ["GOOD", "BAD"], max_attempts=1
+    )
+
+    assert combined == ["GOOD"]
+    assert len(warnings) == 1
+    assert warnings[0]["category"] == lvs.CATEGORY_DEVICE_COMBINE_INCOMPLETE
+    assert warnings[0]["circuit"] == {"layout": "BAD", "reference": None}
+
+    good_circuit = netlist.circuit_by_name("GOOD")
+    assert sum(1 for _ in good_circuit.each_device()) == 1  # folded
+
+    bad_circuit = netlist.circuit_by_name("BAD")
+    assert sum(1 for _ in bad_circuit.each_device()) == 2  # left untouched
+
+
+def test_correct_capacitor_combine_parameters_circuit_names_restricts_scope():
+    """``circuit_names`` (issue #1557) restricts
+    `_correct_capacitor_combine_parameters` to just the named circuits --
+    `options.combine_devices_per_circuit`'s own per-circuit correction
+    scoping. A circuit excluded from ``circuit_names`` is left with its
+    inconsistent ``C`` uncorrected, even though the function would have
+    fixed it under the default (``None``, whole-netlist) scope the
+    whole-netlist ``combine_devices`` path always uses."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    device_class = kdb.DeviceClassCapacitor()
+    device_class.name = "cap"
+    netlist.add(device_class)
+
+    def _add_circuit(name):
+        circuit = kdb.Circuit()
+        circuit.name = name
+        netlist.add(circuit)
+        common = circuit.create_net("COMMON")
+        circuit.connect_pin(circuit.create_pin("COMMON"), common)
+        net = circuit.create_net("G0")
+        circuit.connect_pin(circuit.create_pin("G0"), net)
+        device = circuit.create_device(device_class, "C0")
+        device.connect_terminal("A", net)
+        device.connect_terminal("B", common)
+        device.set_parameter("C", 8e-15)  # the correct pre-combine sum
+        return circuit
+
+    _add_circuit("A")
+    _add_circuit("B")
+    pre_combine_snapshot = netlist.dup()
+
+    # Simulate `combine_devices()` leaving both circuits' `C` corrupted the
+    # same way (a single pre-combine instance's own value, not the summed
+    # total) -- only "A" is in scope for the correction below.
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            device.set_parameter("C", 1e-15)
+
+    warning = lvs._correct_capacitor_combine_parameters(
+        pre_combine_snapshot, netlist, "layout", circuit_names=["A"]
+    )
+
+    assert warning is not None
+    assert [entry["circuit"] for entry in warning["details"]["corrected"]] == ["A"]
+
+    circuit_a = netlist.circuit_by_name("A")
+    circuit_b = netlist.circuit_by_name("B")
+    assert next(circuit_a.each_device()).parameter("C") == pytest.approx(8e-15)
+    # "B" was excluded by `circuit_names` -- left uncorrected.
+    assert next(circuit_b.each_device()).parameter("C") == pytest.approx(1e-15)
+
+
+def test_combine_devices_per_circuit_applies_resistor_fixed_offset_once(tmp_path):
+    """Issue #1557 (following up on #559/#585): a `layout.netlist` +
+    `layout.deck` request using `options.combine_devices_per_circuit` gets
+    the same deferred resistor `fixed_offset_ohm` correction the
+    whole-netlist `options.combine_devices` path already applies --
+    `RESMACRO`'s two series `res_high_po` primitives fold into one device
+    and receive the offset exactly once, while `RESMACRO2`'s own single,
+    never-combined `res_high_po` primitive (left out of
+    `combine_devices_per_circuit`, so it never even attempts a fold) still
+    receives the offset exactly once too -- the deferral this correction
+    reverses was applied once, globally, at pre-extraction time, not
+    per-circuit. `MACROB`'s MOSFETs are combine_devices_per_circuit's
+    existing carrier for "an unrelated, untouched circuit is unaffected".
+    """
+    resmacro_raw_r_ohm = 100.0
+    resmacro2_raw_r_ohm = 150.0
+    correct_resmacro_r_ohm = 2 * resmacro_raw_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    correct_resmacro2_r_ohm = resmacro2_raw_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    # The pre-#1557 buggy behavior: `combine_devices_per_circuit` never ran
+    # this correction at all, so both resistors would still carry only their
+    # raw body `R` -- a negative control proving the fixture discriminates.
+    buggy_resmacro_r_ohm = 2 * resmacro_raw_r_ohm
+    buggy_resmacro2_r_ohm = resmacro2_raw_r_ohm
+
+    layout_spice = f"""
+.subckt resmacro RA RB VSUBS
+R1 RA N1 VSUBS {resmacro_raw_r_ohm:.5f} res_high_po
+R2 N1 RB VSUBS {resmacro_raw_r_ohm:.5f} res_high_po
+.ends
+.subckt resmacro2 RA RB VSUBS
+R1 RA RB VSUBS {resmacro2_raw_r_ohm:.5f} res_high_po
+.ends
+.subckt macrob A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+.subckt top RA RB VSUBS RA2 RB2 VSUBS2 A Y VPWR VGND
+X1 RA RB VSUBS resmacro
+X2 RA2 RB2 VSUBS2 resmacro2
+X3 A Y VPWR VGND macrob
+.ends
+"""
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+
+    def _run(resmacro_r_ohm: float, resmacro2_r_ohm: float) -> dict:
+        reference_spice = f"""
+.subckt resmacro RA RB VSUBS
+R1 RA RB VSUBS {resmacro_r_ohm:.5f} res_high_po
+.ends
+.subckt resmacro2 RA RB VSUBS
+R1 RA RB VSUBS {resmacro2_r_ohm:.5f} res_high_po
+.ends
+.subckt macrob A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+.subckt top RA RB VSUBS RA2 RB2 VSUBS2 A Y VPWR VGND
+X1 RA RB VSUBS resmacro
+X2 RA2 RB2 VSUBS2 resmacro2
+X3 A Y VPWR VGND macrob
+.ends
+"""
+        reference_path = _write(tmp_path / "ref.spice", reference_spice)
+        return run_lvs(
+            _write_request(
+                tmp_path / "request.json",
+                {
+                    "layout": {
+                        "netlist": layout_path,
+                        "deck": "sky130",
+                        "top": "top",
+                    },
+                    "reference": {"netlist": reference_path, "top": "top"},
+                    "options": {
+                        "combine_devices_per_circuit": {"RESMACRO": True},
+                        "flatten_layout": True,
+                        "flatten_reference": True,
+                    },
+                },
+            )
+        )
+
+    correct_report = _run(correct_resmacro_r_ohm, correct_resmacro2_r_ohm)
+    assert correct_report["counts"]["devices"] == {
+        "layout": 5,
+        "reference": 5,
+        "matched": 5,
+    }
+    assert correct_report["status"] == "match"
+
+    buggy_report = _run(buggy_resmacro_r_ohm, buggy_resmacro2_r_ohm)
+    assert buggy_report["status"] == "mismatch"
+
+
+def test_combine_devices_per_circuit_corrects_capacitor_c_from_simulated_combine_bug(
+    tmp_path, monkeypatch
+):
+    """Issue #1557 (following up on #1497): `options.combine_devices_per_
+    circuit` gets the same capacitor `C` sum-conservation correction the
+    whole-netlist `options.combine_devices` path already applies, scoped to
+    just the circuit it actually combined (`CAPMACRO`) -- a second circuit
+    (`UNTOUCHEDCAPS`) left out of `combine_devices_per_circuit` never even
+    calls `Circuit.combine_devices()`, so it can never be corrupted (or
+    "corrected") in the first place."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Circuit.combine_devices
+
+    def _combine_then_corrupt_c_if_merged(self):
+        pre_count = sum(1 for _ in self.each_device())
+        real_combine_devices(self)
+        post_count = sum(1 for _ in self.each_device())
+        if post_count < pre_count:
+            for device in self.each_device():
+                if isinstance(device.device_class(), kdb.DeviceClassCapacitor):
+                    device.set_parameter("C", 1e-15)
+
+    monkeypatch.setattr(
+        kdb.Circuit, "combine_devices", _combine_then_corrupt_c_if_merged
+    )
+
+    layout_spice = """
+.subckt capmacro G0 G1 COMMON
+C1 G0 COMMON 1e-15
+C2 G0 COMMON 1e-15
+C3 G1 COMMON 2e-15
+.ends
+.subckt untouchedcaps G2 G3 COMMON2
+C1 G2 COMMON2 5e-15
+C2 G3 COMMON2 5e-15
+.ends
+.subckt top G0 G1 COMMON G2 G3 COMMON2
+X1 G0 G1 COMMON capmacro
+X2 G2 G3 COMMON2 untouchedcaps
+.ends
+"""
+    reference_spice = """
+.subckt capmacro G0 G1 COMMON
+C1 G0 COMMON 2e-15
+C2 G1 COMMON 2e-15
+.ends
+.subckt untouchedcaps G2 G3 COMMON2
+C1 G2 COMMON2 5e-15
+C2 G3 COMMON2 5e-15
+.ends
+.subckt top G0 G1 COMMON G2 G3 COMMON2
+X1 G0 G1 COMMON capmacro
+X2 G2 G3 COMMON2 untouchedcaps
+.ends
+"""
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    reference_path = _write(tmp_path / "reference.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "top"},
+                "reference": {"netlist": reference_path, "top": "top"},
+                "options": {
+                    "combine_devices_per_circuit": {
+                        "CAPMACRO": True,
+                        "UNTOUCHEDCAPS": False,
+                    },
+                    "flatten_layout": True,
+                    "flatten_reference": True,
+                },
+            },
+        )
+    )
+
+    correction_warnings = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+    ]
+    assert len(correction_warnings) == 1
+    assert correction_warnings[0]["severity"] == "warning"
+    assert correction_warnings[0]["side"] == "layout"
+    assert {
+        entry["circuit"] for entry in correction_warnings[0]["details"]["corrected"]
+    } == {"CAPMACRO"}
+    assert report["counts"]["devices"]["layout"] == 4  # 2 (folded) + 2 (untouched)
+    assert report["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
 # combine_devices() partial-match RuntimeError (issue #466)
 # --------------------------------------------------------------------------- #
 

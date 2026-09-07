@@ -16,6 +16,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `options.combine_devices_per_circuit` (issue #1552) now carries
+  the same two post-combine corrections the whole-netlist
+  `options.combine_devices` path already applies (issue #1557): the
+  deferred resistor `fixed_offset_ohm` correction (issue #559/#585) and the
+  capacitor `C` sum-conservation check (issue #1497). Both were previously
+  gated only inside the `if combine_devices_enabled:` block, which never
+  runs for a `combine_devices_per_circuit`-only request (the two options
+  are mutually exclusive), so a matched circuit's folded `res_high_po`
+  resistors never received the deferred offset and a folded capacitor's `C`
+  could be left silently inconsistent with its pre-combine sum. Both
+  corrections are now applied per circuit, scoped to just the circuit(s)
+  `_combine_circuit_devices_safely` actually combined *cleanly* — a circuit
+  left uncombined, unmatched, or reported `device.combine_incomplete` is
+  never touched. Existing `mismatches[].category` values are reused
+  (`device.combine_parameter_corrected`); no new category, no response
+  field changes, no `schema_version` bump.
 - **Added**: `klt lvs` now accepts `options.combine_devices_per_circuit`
   (issue #1552): a `{"<circuit-name-glob>": <boolean>}` map applied via
   `klayout.db.Circuit.combine_devices()` to each side's own matching
