@@ -1066,7 +1066,24 @@ def run_extract(
                 },
                 ...
             ],
-            "nets": [{"name": str, "pin": bool, "device_count": int}, ...],
+            "nets": [
+                {
+                    "name": str, "pin": bool, "device_count": int,
+                    # Issue #1540: unique across every net *object* in this
+                    # circuit, unlike "name" (several distinct nets can
+                    # collide on one name -- see the "nets[]" schema note
+                    # below).
+                    "net_id": int,
+                    # 0-based `.SUBCKT` port position (`None` if not a
+                    # promoted pin) -- issue #1540.
+                    "pin_index": int | None,
+                    # Drawn-label geometry naming this net -- issue #1540.
+                    "label_positions_um": [
+                        {"text": str, "x_um": float, "y_um": float}, ...
+                    ],
+                },
+                ...
+            ],
             "warnings": [str, ...],
             "black_box_regions": [
                 {
@@ -1162,6 +1179,44 @@ def run_extract(
 
     ``devices``/``nets`` are sorted by name for deterministic, diff-clean
     output (same discipline as ``drc.py``'s ``violations`` sort).
+
+    ``nets[].net_id``/``pin_index``/``label_positions_um`` (issue #1540)
+    disclose, per net, what ``name`` alone cannot when a flat extraction of a
+    layout with internally-repeated sub-cells collides two or more genuinely
+    distinct nets onto one ``name`` string (e.g. a ring of identical 2-input
+    stages, each stage's output touching the next stage's input -- every
+    junction node, plus the block's one true external pin, reads as the same
+    joined ``a|y``-style name; KLayout's own ``NetlistSpiceWriter``
+    disambiguates them at *write* time with a ``$1``/``$2``-style suffix this
+    module does not control, see :func:`spice_safe_net_name`'s docstring).
+    ``net_id`` is ``net.cluster_id`` -- unique across every net *object* in
+    this circuit, the same convention ``parasitics.nets[].net_id`` already
+    uses for the identical "several distinct nets share one label" shape
+    (issue #765/#811). ``pin_index`` is that net's 0-based position in the
+    written ``.SUBCKT``/instance-line port order (``circuit.each_pin()``,
+    the exact sequence ``NetlistSpiceWriter`` iterates) when it is a promoted
+    pin, ``None`` otherwise -- resolving a specific ``.SUBCKT`` port index
+    straight back to a ``nets[]`` entry, positionally, with no separate
+    ``klt lvs`` run against a reference schematic needed.
+    ``label_positions_um`` is ``[{"text": str, "x_um": float, "y_um": float},
+    ...]`` -- every drawn text-label shape naming this net, in this circuit's
+    own local coordinate frame (same convention
+    ``black_box_regions[].bbox_um``/``unmodelled_poly[].bbox_um`` already
+    use) -- the mechanism a caller with independent floorplan knowledge (the
+    physical location it externally routed a wire to, e.g. from `klt
+    place-and-route`'s DEF or its own generator's placement record) uses to
+    positively identify *which* of several identically-named collided
+    entries is the one it means, without guessing from the name alone.
+    ``--pins``/``--top-cell-pins``/``--def-pins``/``--pin-source-cells`` all
+    still require the caller to already know the true interface (a name, a
+    DEF ``PINS`` list, or a cell-depth heuristic) -- none of them help
+    *discover* it when the names themselves are ambiguous, which is exactly
+    what these three fields are for. See ``docs/cli/extract.md``'s "Net-name
+    collisions from internally-repeated sub-cells" section for a worked
+    example (a small ring fixture) and :func:`_net_label_positions`'s own
+    docstring for the full rationale. Purely additive -- every existing
+    ``nets[]`` consumer that reads only ``name``/``pin``/``device_count`` is
+    unaffected.
 
     ``device_classes`` is what the *deck* is structurally capable of
     recognising (:attr:`klayout_tools.decks.ExtractionDeck.device_classes`)
@@ -1608,6 +1663,7 @@ def run_extract(
         abstracted_cells,
         dead_metal,
         mom_crosscheck,
+        net_label_positions,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -1679,7 +1735,7 @@ def run_extract(
         # writes the *same* corrected values into the SPICE file that
         # `devices[].params` reports.
         devices, device_counts = _describe_devices(circuit)
-        nets = _describe_nets(circuit)
+        nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
 
@@ -2483,12 +2539,15 @@ def extract_netlist_from_layout(
     list[dict[str, Any]],
     list[dict[str, Any]],
     dict[str, Any] | None,
+    dict[int, list[dict[str, Any]]],
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
-    voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck)``.
+    voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck,
+    net_label_positions)`` -- see :func:`_extract_netlist`'s own docstring
+    for ``net_label_positions`` (issue #1540).
 
     ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
     ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
@@ -2684,6 +2743,7 @@ def extract_netlist_from_layout(
         abstracted_cells,
         dead_metal,
         mom_crosscheck,
+        net_label_positions,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -2729,6 +2789,7 @@ def extract_netlist_from_layout(
         abstracted_cells,
         dead_metal,
         mom_crosscheck,
+        net_label_positions,
     )
 
 
@@ -3301,6 +3362,27 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
     before -- this function only ever *adds back* pinned nets ``purge()``
     would otherwise silently drop, never changes behaviour for the
     legitimate "nothing extracted" case.
+
+    **Restore-matching is by ``cluster_id``, not by ``name`` (issue #1540).**
+    Two or more distinct, device-free pinned nets on the *same* circuit can
+    legitimately share one ``name`` string -- the exact "flat extraction of a
+    layout with internally-repeated sub-cells" collision this issue reports
+    (e.g. a ring of identical stages, each junction node carrying no device
+    of its own). Matching the restore loop's "does this net already exist"
+    check by ``name`` (as this function did before #1540) collapses every
+    later same-named survivor onto the *first* one restored: the second
+    survivor's own ``cluster_id`` is silently discarded, the two distinct
+    islands merge into one recreated ``kdb.Net`` object, and one of the two
+    real, physically-separate nets vanishes from the response entirely --
+    not merely mis-labelled, genuinely gone. Verified directly against
+    ``klayout.db`` before this fix: a device-free two-net-one-name fixture
+    (mirroring this function's own bond-pad/seal-ring/RDL motivating case)
+    extracted only one of the two nets. Matching by ``cluster_id`` instead
+    -- unique across every net *object* on a circuit, the same identity
+    :func:`_compute_parasitics`'s ``net_id`` and this issue's own
+    ``nets[].net_id`` already rely on for this exact "several distinct nets,
+    one label" shape (issue #765/#811) -- restores each survivor to its own
+    distinct net regardless of how many others share its name.
     """
     import klayout.db as kdb
 
@@ -3332,7 +3414,32 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
             circuit.cell_index = cell_index
             netlist.add(circuit)
 
-        net = next((n for n in circuit.each_net() if n.name == net_name), None)
+        # Matched by `cluster_id` when it is a real (non-zero) identity,
+        # falling back to the pre-#1540 by-`name` match only for the
+        # `cluster_id == 0` sentinel (issue #1540) -- see this function's own
+        # docstring for why a name-keyed match silently collapses distinct
+        # same-named survivors onto one recreated net. `cluster_id == 0`
+        # means "never tied to a real `LayoutToNetlist` cluster" (see
+        # `_compute_parasitics`'s own `cluster_id == 0` guard) -- true for
+        # every net a hand-built `kdb.Netlist` creates directly (as opposed
+        # to one `l2n.extract_netlist()` produced), where several genuinely
+        # distinct nets can share that same `0` default; matching those by
+        # `cluster_id` alone would reintroduce the identical "several
+        # distinct nets collapse onto one" bug this fix exists to close, just
+        # keyed on `0` instead of on a name string.
+        if cluster_id != 0:
+            net = next(
+                (n for n in circuit.each_net() if n.cluster_id == cluster_id), None
+            )
+        else:
+            net = next(
+                (
+                    n
+                    for n in circuit.each_net()
+                    if n.name == net_name and n.cluster_id == 0
+                ),
+                None,
+            )
         if net is None:
             net = circuit.create_net(net_name)
             # Same rationale as `cell_index` above, for the other half of the
@@ -4579,6 +4686,7 @@ def _extract_netlist(
     list[dict[str, Any]],
     list[dict[str, Any]],
     dict[str, Any] | None,
+    dict[int, list[dict[str, Any]]],
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -4611,7 +4719,7 @@ def _extract_netlist(
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
     dummy_devices_dropped, unmodelled_poly, abstracted_cells, dead_metal,
-    mom_crosscheck)``.
+    mom_crosscheck, net_label_positions)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
@@ -4651,6 +4759,17 @@ def _extract_netlist(
     JSON response's field (issue #676) -- see :func:`_detect_dead_metal` --
     one entry per routing-stack cluster that joins no surviving net, empty
     on a layout whose every metal/via shape is netted.
+
+    ``net_label_positions`` (issue #1540) is ``{net.cluster_id: [{"text",
+    "x_um", "y_um"}, ...], ...}`` -- every drawn text-label shape (on any of
+    ``deck``'s ``well_label``/``poly_label``/``metal_labels`` layers) that
+    names each *surviving* net, keyed by that net's own ``cluster_id`` rather
+    than its (possibly collided) ``expanded_name()`` -- see
+    :func:`_net_label_positions`'s own docstring for why a name-keyed map
+    cannot do this job. Computed here, alongside ``parasitic_nets``/
+    ``mom_crosscheck`` above, while ``l2n`` is still alive; :func:`run_extract`
+    folds it into ``nets[].label_positions_um``/``nets[].net_id``/
+    ``nets[].pin_index`` (see :func:`_describe_nets`).
 
     ``def_net_names`` (issue #951): when ``True``, each routed net is renamed
     to the DEF net name its geometry carries as GDS shape property
@@ -5079,10 +5198,18 @@ def _extract_netlist(
     via_index: list[int] = []
     for index, region in enumerate(vias):
         via_index.append(l2n.register(region, f"via{index}"))
-    l2n.register(well_label, "well_label")
-    l2n.register(poly_label, "poly_label")
+    # `register` return values are captured here (unlike the geometry-role
+    # layers above where every caller reads back through `layer_index`/
+    # `metal_index`) so `net_label_positions` below (issue #1540) can read
+    # each net's own drawn-label shapes back via `l2n.texts_of_net()` while
+    # `l2n` is still alive, the same "read back before `l2n` dies" pattern
+    # `layer_index`/`metal_index` already follow for `polygons_of_net`.
+    label_layer_index: list[int] = [
+        l2n.register(well_label, "well_label"),
+        l2n.register(poly_label, "poly_label"),
+    ]
     for index, texts in enumerate(metal_labels):
-        l2n.register(texts, f"metal{index}_label")
+        label_layer_index.append(l2n.register(texts, f"metal{index}_label"))
 
     # NMOS body (issue #490). `nfet_body` itself stays a permanently empty
     # placeholder `Region` -- deliberately never touched by an ordinary
@@ -6323,6 +6450,26 @@ def _extract_netlist(
                         "other same-named net keeps its lumped-RC capacitance"
                     )
 
+    # Issue #1540: per-net drawn-label geometry, keyed by `net.cluster_id` --
+    # read back from `l2n` here, alongside `parasitic_nets`/`mom_crosscheck`
+    # above, for the identical reason: `texts_of_net` is a live
+    # `LayoutToNetlist` API, unusable once this function returns. Read from
+    # the *final* top circuit (after the purge and pin promotion/demotion
+    # passes above have already run), so `net_id`/`pin_index` in the JSON
+    # response line up with the exact net objects `nets[]`/the written
+    # `.SUBCKT` actually carry. The top circuit can be `None` here -- the
+    # legitimate "nothing extracted" case (no devices, no named/labelled
+    # nets, no subcircuits -- see `run_extract`'s own docstring comment on
+    # why `circuit` can be `None`) -- in which case there is nothing to map.
+    final_circuit_for_labels = netlist.circuit_by_name(top_cell.name)
+    net_label_positions = (
+        _net_label_positions(
+            l2n, final_circuit_for_labels, layout.dbu, label_layer_index
+        )
+        if final_circuit_for_labels is not None
+        else {}
+    )
+
     # `l2n` (and the Region/Texts objects it owns) would otherwise be
     # garbage-collected once this function returns, which invalidates the
     # netlist it produced (KLayout raises on subsequent use) -- `dup()`
@@ -6337,6 +6484,7 @@ def _extract_netlist(
         abstracted_cells,
         dead_metal,
         mom_crosscheck,
+        net_label_positions,
     )
 
 
@@ -8445,9 +8593,123 @@ def _describe_matched_device_groups(
     return groups, warnings
 
 
-def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
-    """Build the response's ``nets[]`` array."""
+def _net_label_positions(
+    l2n: kdb.LayoutToNetlist,
+    circuit: kdb.Circuit,
+    dbu: float,
+    label_layer_index: list[int],
+) -> dict[int, list[dict[str, Any]]]:
+    """Per-net drawn-label geometry, keyed by ``Net.cluster_id`` (issue #1540).
+
+    A flat extraction of a layout with internally-repeated sub-cells (e.g. a
+    ring of N identical 2-input stages, each stage's output touching the
+    next's input) can produce several genuinely distinct nets that all carry
+    the identical ``expanded_name()`` -- the collision is structural, not a
+    bug (see :func:`spice_safe_net_name`'s docstring and issue #765/#811,
+    which hit the same "several distinct nets, one shared label" shape for
+    parasitics ground islands). A name-keyed map cannot disambiguate them;
+    this one is keyed by ``net.cluster_id`` instead -- unique across every
+    net *object* in ``circuit``, exactly like ``net_id`` elsewhere in this
+    module -- so a caller with independent floorplan knowledge (e.g. the
+    physical (x, y) location it externally routed a wire to, in this
+    top cell's own local coordinate frame) can positively identify which of
+    several identically-named promoted pins is the one it means, without
+    guessing from the name alone or re-running ``klt lvs`` against a
+    reference schematic.
+
+    Returns ``{cluster_id: [{"text": str, "x_um": float, "y_um": float},
+    ...], ...}`` -- one entry per net that carries at least one drawn label
+    on any of ``label_layer_index``'s registered layers (``deck.well_label``/
+    ``poly_label``/``metal_labels``, via ``l2n.texts_of_net``); a net with no
+    drawn label (an internal, unnamed node) is simply absent from the map.
+    Each label's ``(x_um, y_um)`` is its anchor point (``kdb.Text.x``/``.y``),
+    converted to micrometres via ``dbu`` -- the same coordinate frame
+    ``black_box_regions[].bbox_um`` and ``unmodelled_poly[].bbox_um`` already
+    report in. Must be called while ``l2n`` is still alive (``texts_of_net``
+    is a live ``LayoutToNetlist`` API, unusable once the owning
+    :func:`_extract_netlist` call returns -- the same constraint
+    ``polygons_of_net`` has, see :func:`_compute_parasitics`'s docstring).
+
+    A net with ``cluster_id == 0`` (KLayout's sentinel for "not tied to a
+    layout cluster", see :func:`_compute_parasitics`'s own ``cluster_id ==
+    0`` guard) is skipped -- passing it to ``texts_of_net`` would fault the
+    same way it does for ``polygons_of_net``. In the rare case where more
+    than one such sentinel-id net carries a label (a synthesized global net,
+    e.g. a ``connect_global`` substrate tie with no drawn geometry of its
+    own), skipping all of them is the correct, crash-free answer: a
+    cluster-less net has no reliable single position to report by
+    definition.
+    """
+    positions: dict[int, list[dict[str, Any]]] = {}
+    for net in circuit.each_net():
+        if net.cluster_id == 0:
+            continue
+        entries: list[dict[str, Any]] = []
+        for layer_index in label_layer_index:
+            texts = l2n.texts_of_net(net, layer_index, False)
+            for text in texts.each():
+                entries.append(
+                    {
+                        "text": text.string,
+                        "x_um": round(text.x * dbu, 6),
+                        "y_um": round(text.y * dbu, 6),
+                    }
+                )
+        if entries:
+            entries.sort(
+                key=lambda entry: (entry["text"], entry["x_um"], entry["y_um"])
+            )
+            positions[net.cluster_id] = entries
+    return positions
+
+
+def _pin_index_by_net_id(circuit: kdb.Circuit) -> dict[int, int]:
+    """Map each promoted pin's underlying net's ``cluster_id`` to its 0-based
+    position in ``circuit.each_pin()`` order -- issue #1540.
+
+    This is the exact order ``kdb.NetlistSpiceWriter`` writes a circuit's
+    ``.SUBCKT`` header / instance-line port list in (both iterate the same
+    ``Circuit.each_pin()`` sequence), so a caller can resolve a specific
+    ``.SUBCKT`` port index straight back to a ``nets[]`` entry via
+    ``net_id`` -- positionally, without re-matching by (possibly collided)
+    name and without a separate ``klt lvs`` run against a reference
+    schematic. Keyed by ``cluster_id`` rather than net identity/index so it
+    composes directly with :func:`_net_label_positions`'s own keying and
+    with the pre-existing ``net_id`` convention (issue #765/#811). A pin
+    whose net has ``cluster_id == 0`` (see :func:`_net_label_positions`'s
+    docstring) collapses onto the same dict key as any other such pin --
+    an accepted, documented edge case, since a cluster-less net already has
+    no position to disambiguate by either.
+    """
+    result: dict[int, int] = {}
+    for index, pin in enumerate(circuit.each_pin()):
+        net = circuit.net_for_pin(pin.id())
+        if net is not None:
+            result[net.cluster_id] = index
+    return result
+
+
+def _describe_nets(
+    circuit: kdb.Circuit,
+    net_label_positions: Mapping[int, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the response's ``nets[]`` array.
+
+    ``net_id``/``pin_index``/``label_positions_um`` (issue #1540) are
+    additive fields disclosing, per net, the exact identity KLayout's own
+    ``cluster_id`` assigns it, its 0-based position in the written
+    ``.SUBCKT``'s port order (``None`` when the net is not a promoted pin),
+    and the drawn-label geometry that named it -- see
+    :func:`_net_label_positions`/:func:`_pin_index_by_net_id`'s docstrings
+    for why a caller needs these when several distinct nets collide on one
+    ``name`` (a flat extraction of a layout with internally-repeated
+    sub-cells, e.g. a ring of identical stages). ``net_label_positions``
+    defaults to an empty mapping -- a caller that has none to offer (or a
+    net with no drawn label) simply gets ``label_positions_um: []``.
+    """
     pin_nets = {pin.expanded_name() for pin in _each_pin_net(circuit)}
+    pin_index_by_net_id = _pin_index_by_net_id(circuit)
+    label_positions = net_label_positions or {}
 
     nets: list[dict[str, Any]] = []
     for net in circuit.each_net():
@@ -8457,6 +8719,9 @@ def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
                 "name": spice_safe_net_name(raw_name),
                 "pin": raw_name in pin_nets,
                 "device_count": net.terminal_count(),
+                "net_id": net.cluster_id,
+                "pin_index": pin_index_by_net_id.get(net.cluster_id),
+                "label_positions_um": label_positions.get(net.cluster_id, []),
             }
         )
 

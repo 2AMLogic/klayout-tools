@@ -1847,6 +1847,11 @@ def _resolve_layout(
             # 12th return (mom_crosscheck, #798) is `klt extract
             # --mom-net`'s own report; `klt lvs` never passes that flag (LVS
             # is topological, parasitics-free), so it is always `None` here.
+            # The 13th return (net_label_positions, #1540) feeds `klt
+            # extract`'s own `nets[].label_positions_um`; `klt lvs`'s
+            # `net_correspondence[]` disambiguates a collided-name net
+            # against the *reference* schematic's net name instead, so this
+            # per-label-position map has no use here.
             (
                 netlist,
                 top_cell_name,
@@ -1860,6 +1865,7 @@ def _resolve_layout(
                 _abstracted_cells,
                 _dead_metal,
                 _mom_crosscheck,
+                _net_label_positions,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

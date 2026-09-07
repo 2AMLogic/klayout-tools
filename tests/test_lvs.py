@@ -6060,10 +6060,20 @@ def test_pnr_gcd_fixture_self_compare_matches_cleanly(tmp_path):
     # placement/CTS/repair, which changes how many synthesis-numbered
     # internal nets survive into the routed layout (see the analogous
     # `tests/test_extract.py::test_def_net_names_recovers_...` docstring).
+    #
+    # Re-pinned again for #1540: `_purge_preserving_named_nets`'s restore
+    # step now matches by `cluster_id` instead of by `name` (see that
+    # function's own docstring), so 6 distinct, device-free power-rail
+    # islands that happen to share a name with another such island -- the
+    # same un-strapped `VGND`/`VPWR` shape issue #765/#811 already document
+    # on this exact corpus -- are no longer silently collapsed onto one
+    # recreated net per name. Both sides of this self-compare use the same
+    # extraction path, so `layout`/`reference`/`matched` move together and
+    # `status` stays `"match"`.
     nets = report["counts"]["nets"]
-    assert nets["layout"] == nets["reference"] == nets["matched"] == 2048
+    assert nets["layout"] == nets["reference"] == nets["matched"] == 2054
     pins = report["counts"]["pins"]
-    assert pins["layout"] == pins["reference"] == pins["matched"] == 541
+    assert pins["layout"] == pins["reference"] == pins["matched"] == 547
 
     # A clean self-compare carries only warnings -- the same deck-structural
     # signal the hand-drawn corpus round-trip tier above documents, never an
