@@ -2121,6 +2121,165 @@ def test_res_array_rows_folded_is_drc_clean(tmp_path, both_pdk_root, deck):
     assert report["device_count"] == 9
 
 
+# --- res_array end-contact half-dbu grid ties (issue #1551) ------------------- #
+
+#: `length_um` values that put a unit resistor's end-contact centre exactly on
+#: a half-dbu (0.5nm) grid tie. Pre-#1551 the two opposite edges of the
+#: contact box were rounded to the dbu grid *independently*, so ordinary
+#: floating-point noise resolved one edge up and the other down, silently
+#: drawing a 219nm (or 221nm) contact instead of `CONTACT_SIZE_UM` (220nm).
+#: 1.4965 is the value reported in issue #1551; the rest are other members of
+#: the same class, including both the under- and over-sized directions.
+_ISSUE_1551_TIE_LENGTHS_UM = (1.4965, 2.0035, 2.5035, 3.0035, 3.5035, 5.0035)
+
+#: Representative `length_um` values that do *not* land on a half-dbu tie --
+#: the fix must leave their drawn geometry untouched.
+_ISSUE_1551_NON_TIE_LENGTHS_UM = (0.7482, 1.4966, 2.0, 5.0, 11.9719)
+
+
+def _res_contact_boxes_dbu(gds_path, layer, datatype):
+    """Every drawn contact-layer box in `gds_path`, as `(x0, y0, x1, y1)`
+    integer-dbu tuples (the generator's cells are hierarchical, so this
+    flattens through instances)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(layer, datatype))
+    ).merged()
+    return sorted(
+        (p.bbox().left, p.bbox().bottom, p.bbox().right, p.bbox().top)
+        for p in region.each()
+    )
+
+
+def _unsnapped_contact_boxes_dbu(length_um, width_um):
+    """The pre-#1551 contact geometry: raw `cx +/- contact_half` floats, each
+    edge rounded to the dbu grid independently (exactly what `_insert_boxes`
+    used to receive). Used to pin down that the fix changes drawn output
+    *only* for the half-dbu-tie case."""
+    contact_region_um = gen.CONTACT_SIZE_UM + 2 * gen.ENCLOSURE_MARGIN_UM
+    total_len_um = 2 * contact_region_um + length_um
+    contact_half = gen.CONTACT_SIZE_UM / 2.0
+    boxes = []
+    for sx0, sx1 in (
+        (0.0, contact_region_um),
+        (total_len_um - contact_region_um, total_len_um),
+    ):
+        cx = (sx0 + sx1) / 2.0
+        cy = width_um / 2.0
+        boxes.append(
+            tuple(
+                int(round(v / gen._GRID_DBU_UM))
+                for v in (
+                    cx - contact_half,
+                    cy - contact_half,
+                    cx + contact_half,
+                    cy + contact_half,
+                )
+            )
+        )
+    return sorted(boxes)
+
+
+@pytest.mark.parametrize("length_um", _ISSUE_1551_TIE_LENGTHS_UM)
+def test_res_unit_contact_is_full_size_on_half_dbu_tie_lengths(length_um):
+    """Issue #1551: a `length_um` that lands the end-contact centre on an
+    exact half-dbu tie must still draw a full `CONTACT_SIZE_UM` square --
+    previously one edge rounded up and the other down, shrinking (or
+    growing) the contact by 1dbu with no signal to the caller."""
+    unit = gen._res_unit_layout(length_um, 2.0)
+    expected_dbu = int(round(gen.CONTACT_SIZE_UM / gen._GRID_DBU_UM))
+    assert unit["boxes_um"]["contact"], "expected two end contacts"
+    for x0, y0, x1, y1 in unit["boxes_um"]["contact"]:
+        width_dbu = int(round(x1 / gen._GRID_DBU_UM)) - int(
+            round(x0 / gen._GRID_DBU_UM)
+        )
+        height_dbu = int(round(y1 / gen._GRID_DBU_UM)) - int(
+            round(y0 / gen._GRID_DBU_UM)
+        )
+        assert (width_dbu, height_dbu) == (expected_dbu, expected_dbu)
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "layer", "datatype"),
+    [
+        ("sky130A", "sky130", 66, 44),  # licon1.drawing
+        ("gf180mcuD", "gf180mcu", 33, 0),  # Contact
+    ],
+)
+def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, layer, datatype
+):
+    """Issue #1551's exact repro: `res_array` at `length_um=1.4965` drew a
+    219nm end contact, tripping gf180mcu's 220nm `contact.width.1` minimum.
+    The same 1dbu-short box was drawn on sky130 too (the mechanism is
+    PDK-agnostic) -- assert the drawn size directly, not just DRC status,
+    since a looser deck rule can mask it."""
+    output = tmp_path / f"res_array_tie_{deck}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"length_um": 1.4965, "width_um": 2.0, "num": 1, "dummy": 0},
+            "options": {"cell_name": "r1", "output": str(output)},
+        }
+    )
+    expected_dbu = int(round(gen.CONTACT_SIZE_UM / gen._GRID_DBU_UM))
+    boxes = _res_contact_boxes_dbu(output, layer, datatype)
+    assert len(boxes) == 2
+    for x0, y0, x1, y1 in boxes:
+        assert (x1 - x0, y1 - y0) == (expected_dbu, expected_dbu)
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert drc_report["rule_counts"] == {}
+
+
+@pytest.mark.parametrize("length_um", _ISSUE_1551_NON_TIE_LENGTHS_UM)
+def test_res_unit_contact_geometry_unchanged_off_the_tie(length_um):
+    """The #1551 fix must be inert everywhere except the tie case: at any
+    `length_um` whose contact centre is not on a half-dbu boundary, the
+    snapped box must be identical (to the dbu) to the pre-fix raw-float
+    construction, so no existing caller's layout shifts."""
+    unit = gen._res_unit_layout(length_um, 2.0)
+    drawn = sorted(
+        tuple(int(round(v / gen._GRID_DBU_UM)) for v in box)
+        for box in unit["boxes_um"]["contact"]
+    )
+    assert drawn == _unsnapped_contact_boxes_dbu(length_um, 2.0)
+
+
+def test_res_array_off_tie_length_geometry_is_byte_identical_to_pre_fix(
+    tmp_path, pdk_root, monkeypatch
+):
+    """End-to-end counterpart of the unit assertion above: the full drawn
+    `res_array` GDS at a representative non-tie `length_um` must match a
+    layout whose contact boxes were placed at the pre-#1551 (raw-float)
+    coordinates -- i.e. the fix changed nothing off the tie. (`res_array`
+    draws only poly/contact/metal/marker boxes, so stubbing the shared
+    `_snap_square_box_um` helper here affects the end contacts and nothing
+    else.)"""
+    params = {"length_um": 5.0, "width_um": 2.0, "num": 3, "dummy": 1}
+    request = {
+        "generator": "res_array",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": params,
+    }
+    output = tmp_path / "res_array_off_tie.gds"
+    generate({**request, "options": {"output": str(output)}})
+
+    def _raw_box(cx_um, cy_um, half_um, dbu_um):
+        return (cx_um - half_um, cy_um - half_um, cx_um + half_um, cy_um + half_um)
+
+    monkeypatch.setattr(gen, "_snap_square_box_um", _raw_box)
+    baseline = tmp_path / "res_array_off_tie_baseline.gds"
+    generate({**request, "options": {"output": str(baseline)}})
+
+    _assert_gds_geometry_equal(output, baseline)
+
+
 # --- res_array resistor-ID marker layer (issue #369) -------------------------- #
 
 _SKY130_RES_MARK_LAYER = (66, 13)  # poly.res

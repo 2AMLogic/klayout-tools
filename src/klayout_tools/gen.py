@@ -2587,9 +2587,13 @@ def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
         boxes["metal"].append((sx0, 0.0, sx1, width_um))
         cx = (sx0 + sx1) / 2.0
         cy = width_um / 2.0
-        boxes["contact"].append(
-            (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
-        )
+        # Snap the centre to the dbu grid *before* deriving the edges -- an
+        # un-snapped `cx +/- contact_half` lets the two edges round in
+        # opposite directions when the centre lands on a half-dbu tie (e.g.
+        # length_um=1.4965), silently drawing a 219nm contact against
+        # gf180mcu's 220nm `contact.width.1` floor (issue #1551; same
+        # failure mode `_snap_square_box_um` was introduced for in #685).
+        boxes["contact"].append(_snap_square_box_um(cx, cy, contact_half, _GRID_DBU_UM))
 
     a_xy = ((seg_positions[0][0] + seg_positions[0][1]) / 2.0, width_um / 2.0)
     b_xy = ((seg_positions[-1][0] + seg_positions[-1][1]) / 2.0, width_um / 2.0)
