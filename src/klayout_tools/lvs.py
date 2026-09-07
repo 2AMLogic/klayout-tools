@@ -117,6 +117,7 @@ indistinguishable from one where the numbers actually agreed.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -232,6 +233,15 @@ CATEGORY_HINTS_REJECTED = "hints.rejected"
 #: structural flatten rather than the netlist's original hierarchy (see
 #: `_flatten_netlist_safely`).
 CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
+#: Issue #1552: one of `options.combine_devices_per_circuit`'s own glob
+#: patterns matched zero circuits on this side -- most often a typo'd
+#: circuit name, or one written in the request's own source-file case
+#: instead of the upper-cased form `NetlistSpiceReader` reads circuit names
+#: back as (see `_resolve_combine_devices_per_circuit_targets`). Never
+#: raised as an `LvsError`: a pattern legitimately naming a circuit that
+#: exists on only one side (e.g. a reference-only lumped macro with no
+#: layout-side counterpart yet) is not itself a mistake.
+CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.unmatched"
 
 #: Substring KLayout's own ``Netlist.combine_devices()`` internal-consistency
 #: ``RuntimeError`` always carries (issue #466) -- e.g. "Internal error:
@@ -573,6 +583,20 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``options.combine_devices`` is falsy. See ``docs/cli/lvs.md``'s
     ``options.combine_devices`` section for the documented exhaustion-rate
     caveat this knob exists to let a caller work around.
+
+    ``options.combine_devices_per_circuit`` (issue #1552) is a per-macro
+    alternative to the single, whole-request ``options.combine_devices``
+    above: a ``{<circuit-name-glob>: <bool>}`` mapping applied via
+    ``Circuit.combine_devices()`` to each side's own matching circuits,
+    *before* either side's optional ``flatten_layout``/``flatten_reference``
+    structural flatten runs -- so a composed design's own macros, each
+    already independently verified under its own (possibly opposite)
+    ``combine_devices`` setting, can keep that setting once composed into one
+    top-level design, instead of the two macros' needs colliding into a
+    single request-wide flag that cannot satisfy both. Mutually exclusive
+    with a truthy ``options.combine_devices`` (a clean :class:`LvsError`).
+    See :func:`_parse_combine_devices_per_circuit` and
+    :func:`_combine_circuit_devices_safely`.
     """
     request, request_dir = load_request_arg(request)
 
@@ -638,6 +662,27 @@ def run_lvs(request: str) -> dict[str, Any]:
     # clean request error even when `combine_devices` is off, but only
     # consulted below when combining actually runs.
     combine_devices_max_attempts = _parse_combine_devices_max_attempts(options)
+    # Issue #1552: per-subcircuit override of the whole-request
+    # `combine_devices` boolean above -- lets a composed design give each of
+    # its own macros its own combine_devices choice, honored simultaneously.
+    # Mutually exclusive with a truthy `combine_devices` (bool `true` or a
+    # non-empty device-class list): `combine_devices_per_circuit` already
+    # lets an unmatched circuit fall back to a chosen default (name it with a
+    # catch-all glob, e.g. `"*"`), so there is no combination of the two
+    # options that is not ambiguous about which setting wins for a matched
+    # circuit. An explicit `combine_devices: false` alongside it is a
+    # harmless no-op (that is already every unmatched circuit's default), so
+    # only a truthy value raises.
+    combine_devices_per_circuit = _parse_combine_devices_per_circuit(options)
+    if combine_devices_per_circuit is not None and combine_devices_enabled:
+        raise LvsError(
+            "request.options.combine_devices and "
+            "request.options.combine_devices_per_circuit are mutually "
+            "exclusive when combine_devices is truthy -- name every circuit "
+            "combine_devices_per_circuit should combine explicitly (a "
+            'catch-all `"*": true` glob included, if that is the intent) '
+            "instead of also setting the whole-request combine_devices"
+        )
     parameter_tolerance = _parse_parameter_tolerance(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -668,6 +713,32 @@ def run_lvs(request: str) -> dict[str, Any]:
     )
 
     flatten_warnings: list[dict[str, Any]] = []
+    # Issue #1552: `options.combine_devices_per_circuit`'s per-macro combine
+    # choices must run *before* either side's optional structural flatten
+    # (`options.flatten_layout`/`options.flatten_reference`, issue #1085)
+    # collapses the very circuit boundaries this option scopes against --
+    # see `_combine_circuit_devices_safely`'s docstring. Applies only to a
+    # `layout.netlist` (pre-extracted, possibly hierarchical) shape's own
+    # circuits; a `layout.file` inline extraction always produces a single
+    # flat circuit (no boundary yet to scope against -- see #1085), so this
+    # is a no-op there regardless of what the map names.
+    combine_per_circuit_warnings: list[dict[str, Any]] = []
+    if combine_devices_per_circuit is not None:
+        layout_targets, layout_unmatched = _resolve_combine_devices_per_circuit_targets(
+            combine_devices_per_circuit, layout_netlist
+        )
+        combine_per_circuit_warnings.extend(
+            _combine_circuit_devices_safely(
+                layout_netlist,
+                "layout",
+                layout_targets,
+                combine_devices_max_attempts,
+            )
+        )
+        combine_per_circuit_warnings.extend(
+            _unmatched_combine_devices_per_circuit_warnings(layout_unmatched, "layout")
+        )
+
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
@@ -714,6 +785,35 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_variant=reference_spec.get("pdk"),
         pdk_root=reference_spec.get("pdk_root"),
     )
+
+    if combine_devices_per_circuit is not None:
+        reference_targets, reference_unmatched = (
+            _resolve_combine_devices_per_circuit_targets(
+                combine_devices_per_circuit, reference_netlist
+            )
+        )
+        combine_per_circuit_warnings.extend(
+            _combine_circuit_devices_safely(
+                reference_netlist,
+                "reference",
+                reference_targets,
+                combine_devices_max_attempts,
+            )
+        )
+        combine_per_circuit_warnings.extend(
+            _unmatched_combine_devices_per_circuit_warnings(
+                reference_unmatched, "reference"
+            )
+        )
+        # Issue #500, scoped down from the whole-netlist combine's own purge
+        # (see `_purge_emptied_nets`'s docstring): a combined circuit's own
+        # interior nodes left with nothing attached after the fold are
+        # cleaned up on both sides here, once, after both sides' per-circuit
+        # combining has finished -- not per call above -- so a circuit
+        # touched only on one side does not leave the other side's
+        # `counts.nets.*` looking stale by comparison.
+        _purge_emptied_nets(layout_netlist)
+        _purge_emptied_nets(reference_netlist)
 
     if flatten_reference:
         reference_flatten_warning = _flatten_netlist_safely(
@@ -1205,6 +1305,13 @@ def run_lvs(request: str) -> dict[str, Any]:
         # the engine branch above.
         mismatches.extend(combine_warnings)
 
+    if combine_per_circuit_warnings:
+        # Issue #1552: same rationale as `combine_warnings` just above --
+        # `options.combine_devices_per_circuit` runs before `_select_circuit`
+        # even, so these are request-side transforms too, not
+        # `NetlistComparer` events.
+        mismatches.extend(combine_per_circuit_warnings)
+
     if bulk_warnings:
         # Issue #506: same rationale again -- a `reference.device_bulk`
         # disclosure records a *request-side* normalisation applied before the
@@ -1241,6 +1348,7 @@ def run_lvs(request: str) -> dict[str, Any]:
     if (
         layout_deck is not None
         or combine_warnings
+        or combine_per_circuit_warnings
         or bulk_warnings
         or tolerance_warnings
         or flatten_warnings
@@ -1332,6 +1440,13 @@ def run_lvs(request: str) -> dict[str, Any]:
         # every other key here follows.
         "options": {
             "combine_devices": combine_devices,
+            # Issue #1552: `null` when the option was omitted, else the
+            # resolved `{<circuit-name-glob>: <bool>}` mapping -- the same
+            # always-present-but-nullable convention `netgen_setup` already
+            # follows, since (unlike `combine_devices`) there is no
+            # meaningful default value to echo instead of the option being
+            # absent.
+            "combine_devices_per_circuit": combine_devices_per_circuit,
             "flatten_layout": flatten_layout,
             "flatten_reference": flatten_reference,
             "netgen_setup": netgen_setup_echo,
@@ -1580,6 +1695,14 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         # rather than an unrestricted one whose difference it would then
         # report as drift.
         options[flag] = list(value) if isinstance(value, list) else True
+    # Issue #1552: re-assert the per-circuit map verbatim, same rationale as
+    # the list-shaped `combine_devices` re-assertion just above -- a `null`/
+    # missing entry (the option was never set) is left out entirely, not
+    # reconstructed as `{}` (which `_parse_combine_devices_per_circuit` would
+    # itself reject as invalid).
+    combine_devices_per_circuit = echoed.get("combine_devices_per_circuit")
+    if isinstance(combine_devices_per_circuit, dict) and combine_devices_per_circuit:
+        options["combine_devices_per_circuit"] = dict(combine_devices_per_circuit)
     netgen_setup = echoed.get("netgen_setup")
     if netgen_setup is not None:
         options["netgen_setup"] = netgen_setup
@@ -2218,6 +2341,227 @@ def _parse_combine_devices_max_attempts(options: Mapping[str, Any]) -> int:
             f"options.combine_devices_max_attempts must be at least 1; got {value!r}"
         )
     return value
+
+
+def _parse_combine_devices_per_circuit(
+    options: Mapping[str, Any],
+) -> dict[str, bool] | None:
+    """Resolve ``options.combine_devices_per_circuit`` (issue #1552) into an
+    ordered ``{<circuit-name-glob>: <bool>}`` mapping, or ``None`` when the
+    key is absent.
+
+    Lets a composed design give each of its own subcircuits its own
+    ``combine_devices`` choice -- honored *simultaneously*, unlike the
+    single whole-request ``options.combine_devices`` boolean/list this
+    module has offered since issue #261, which cannot satisfy two macros
+    with opposing needs once they are composed into one top-level design:
+    one macro's drawn split/interleaved device legs must be re-lumped
+    (``true``) to match a lumped schematic reference, while another macro's
+    large group of nominally-identical parallel devices must stay
+    individually reported (``false``) to avoid issue #1497's silent
+    parameter-corruption risk at scale -- and a shared top-level rail
+    connecting the two once composed is enough to make whole-netlist
+    ``Netlist.combine_devices()`` treat devices from the *unrelated* macro
+    as combine candidates too (see :func:`_combine_circuit_devices_safely`).
+
+    Keys are ``fnmatch.fnmatchcase`` glob patterns matched against each
+    side's own ``Circuit.name`` (case-sensitive -- the same convention
+    ``extract_abstract.py``'s ``--abstract-cells`` glob matching uses).
+    Circuit names read back through ``NetlistSpiceReader`` are upper-cased
+    (e.g. a ``.subckt macroa`` declaration reads back as circuit name
+    ``"MACROA"``), so a glob written in the source SPICE's own lower/mixed
+    case will not match -- see
+    :func:`_resolve_combine_devices_per_circuit_targets`. Applied in
+    **declaration order** (Python/JSON object key order is preserved end to
+    end): the first pattern that matches a given circuit name wins, so a
+    caller can list specific circuit names ahead of a catch-all ``"*"`` to
+    get "combine everything except these", or list only the circuits that
+    need combining to get "combine nothing except these" (the default when
+    no pattern matches a circuit at all).
+
+    A wrong-shaped value is a clean request error, matching this module's
+    other option-parsing convention (see :func:`_parse_combine_devices`):
+    the value must be a non-empty JSON object whose keys are non-empty
+    strings and whose values are booleans -- no per-circuit device-class
+    restriction in this first increment. Mutually exclusive with a truthy
+    ``options.combine_devices`` (enforced by ``run_lvs`` itself, not here,
+    so the error names both option paths together).
+    """
+    if "combine_devices_per_circuit" not in options:
+        return None
+    value = options["combine_devices_per_circuit"]
+    if not isinstance(value, dict) or not value:
+        raise LvsError(
+            "options.combine_devices_per_circuit must be a non-empty JSON "
+            "object mapping a circuit-name glob (fnmatch pattern, matched "
+            "case-sensitively) to a boolean"
+        )
+    result: dict[str, bool] = {}
+    for key, entry in value.items():
+        if not isinstance(key, str) or not key:
+            raise LvsError(
+                "options.combine_devices_per_circuit keys must be "
+                "non-empty circuit-name glob strings"
+            )
+        if not isinstance(entry, bool):
+            raise LvsError(
+                f"options.combine_devices_per_circuit[{key!r}] must be a "
+                f"boolean; got {type(entry).__name__}"
+            )
+        result[key] = entry
+    return result
+
+
+def _resolve_combine_devices_per_circuit_targets(
+    per_circuit: Mapping[str, bool], netlist: kdb.Netlist
+) -> tuple[list[str], list[str]]:
+    """Resolve ``per_circuit``'s glob keys against ``netlist``'s own circuit
+    names (issue #1552), returning ``(to_combine, unmatched_patterns)``.
+
+    ``to_combine`` is the ordered list of this netlist's own circuit names
+    whose first matching glob (in ``per_circuit``'s own declaration order --
+    see :func:`_parse_combine_devices_per_circuit`) mapped to ``True``.
+    ``unmatched_patterns`` is every glob in ``per_circuit`` that matched zero
+    circuits on this netlist -- surfaced by the caller as a
+    ``combine_devices_per_circuit.unmatched`` warning so a typo'd circuit
+    name (most commonly: written in the request's own source-file case
+    instead of the upper-cased form ``NetlistSpiceReader`` reads circuit
+    names back as) silently restricting to nothing is visible, mirroring
+    :func:`_validate_combine_device_classes`'s equivalent guard for
+    ``options.combine_devices``'s list shape -- except a pattern legitimately
+    naming a circuit that exists on only one side (e.g. a reference-only
+    lumped macro with no layout-side counterpart yet) is not itself a
+    mistake, so this only warns, it never raises.
+    """
+    to_combine: list[str] = []
+    matched: dict[str, bool] = dict.fromkeys(per_circuit, False)
+    for circuit in netlist.each_circuit():
+        for pattern, enabled in per_circuit.items():
+            if fnmatch.fnmatchcase(circuit.name, pattern):
+                matched[pattern] = True
+                if enabled:
+                    to_combine.append(circuit.name)
+                break
+    unmatched_patterns = [pattern for pattern, hit in matched.items() if not hit]
+    return to_combine, unmatched_patterns
+
+
+def _unmatched_combine_devices_per_circuit_warnings(
+    unmatched_patterns: Sequence[str], side: str
+) -> list[dict[str, Any]]:
+    """Build the ``combine_devices_per_circuit.unmatched`` warning entries
+    for ``unmatched_patterns`` (issue #1552) -- see
+    :func:`_resolve_combine_devices_per_circuit_targets`."""
+    return [
+        _mismatch(
+            CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED,
+            "warning",
+            f"options.combine_devices_per_circuit pattern {pattern!r} "
+            f"matched no circuit on the {side} netlist -- check the pattern "
+            "against this side's own circuit names (NetlistSpiceReader "
+            "upper-cases circuit names read back from SPICE, e.g. "
+            '"macroa" -> "MACROA")',
+            side,
+            details={"pattern": pattern},
+        )
+        for pattern in unmatched_patterns
+    ]
+
+
+def _combine_circuit_devices_safely(
+    netlist: kdb.Netlist,
+    side: str,
+    circuit_names: Sequence[str],
+    max_attempts: int = _COMBINE_DEVICES_MAX_ATTEMPTS,
+) -> list[dict[str, Any]]:
+    """Like :func:`_combine_devices_safely`, but combines only the named
+    circuits, one at a time, via ``Circuit.combine_devices()`` rather than
+    the whole-netlist ``Netlist.combine_devices()`` -- issue #1552's
+    ``options.combine_devices_per_circuit``.
+
+    Combining one circuit at a time, each scoped to its own
+    ``Circuit.combine_devices()`` call, means devices in a circuit named
+    ``False`` (or not named at all) can never be treated as combine
+    candidates alongside devices in a *different* circuit just because a
+    shared top-level rail happens to connect them once both are wired into
+    one composed design -- the core failure mode #1552 reports against the
+    whole-netlist ``Netlist.combine_devices()`` once
+    ``options.flatten_layout``/``options.flatten_reference`` (issue #1085)
+    collapses circuit boundaries away. This is why ``run_lvs`` calls this
+    *before* either flatten runs, while circuit boundaries still exist to
+    scope against.
+
+    Each named circuit gets its own bounded retry against fresh
+    ``Netlist.dup()`` copies of the *whole* netlist (issue #1185's
+    nondeterminism mitigation, scoped down to run per-circuit instead of
+    once for the whole netlist): a ``RuntimeError`` combining one circuit
+    never discards another circuit's already-succeeded combine, and each
+    circuit's own retry budget is independent. Unlike
+    :func:`_combine_devices_safely`'s whole-netlist symmetric degrade
+    (issue #1370), a circuit that exhausts its retry budget here is simply
+    left uncombined and reported -- there is no "roll both sides back"
+    behaviour here, because each circuit's own combine choice is already an
+    independent, caller-declared decision, not a single request-wide flag
+    both sides must agree on. Unlike :func:`_combine_devices_safely`, the
+    caught ``RuntimeError`` is not narrowed to
+    :data:`_COMBINE_DEVICES_ERROR_MARKER` (that marker text is
+    ``Netlist.combine_devices()``'s own; whether ``Circuit.combine_devices()``
+    raises byte-identical text is unconfirmed) -- any ``RuntimeError`` here
+    is presumed to be this same KLayout-internal partial-match invariant,
+    since nothing else in this narrowly-scoped call can raise one.
+
+    Returns the list of ``device.combine_incomplete`` warnings (one per
+    circuit that exhausted its retry budget) to append to ``mismatches[]``
+    -- empty when every named circuit combined cleanly (the common case).
+    """
+    warnings: list[dict[str, Any]] = []
+    other_side = "reference" if side == "layout" else "layout"
+    for name in circuit_names:
+        for attempt in range(max_attempts):
+            is_last_attempt = attempt == max_attempts - 1
+            # Every attempt but the last runs against a fresh, independent
+            # whole-netlist copy -- `netlist` itself is never mutated until
+            # either a copy succeeds (assigned back below) or the last
+            # attempt runs directly against it, mirroring
+            # `_combine_devices_safely`'s own retry discipline.
+            candidate = netlist if is_last_attempt else netlist.dup()
+            circuit = candidate.circuit_by_name(name)
+            if circuit is None:  # pragma: no cover -- defensive, shouldn't happen
+                break
+            try:
+                circuit.combine_devices()
+            except RuntimeError as exc:
+                if not is_last_attempt:
+                    continue
+                attempts_disclosure = (
+                    f" after {max_attempts} attempts against independent "
+                    "netlist copies (issue #1185)"
+                    if max_attempts > 1
+                    else ""
+                )
+                warnings.append(
+                    _mismatch(
+                        CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+                        "warning",
+                        "options.combine_devices_per_circuit could not fully "
+                        f"combine devices in circuit {name!r} on the {side} "
+                        f"netlist{attempts_disclosure}: KLayout's "
+                        "Circuit.combine_devices() hit an internal-"
+                        "consistency error on a partial-match device group "
+                        "(instances sharing only some, not all, of their "
+                        "matching terminals) and stopped -- devices already "
+                        "combined in this circuit before the error remain "
+                        f"combined, the rest were left uncombined ({exc})",
+                        side,
+                        circuit={side: name, other_side: None},
+                        details={"klayout_error": str(exc)},
+                    )
+                )
+            else:
+                if candidate is not netlist:
+                    netlist.assign(candidate)
+                break
+    return warnings
 
 
 def _validate_combine_device_classes(

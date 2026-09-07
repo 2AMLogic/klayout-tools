@@ -4268,6 +4268,315 @@ def test_combine_devices_defaults_false(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# options.combine_devices_per_circuit (issue #1552): a composed design's own
+# macros, each already independently verified under its own -- possibly
+# opposite -- combine_devices setting, keep that setting simultaneously once
+# composed into one top-level design.
+# --------------------------------------------------------------------------- #
+
+# `top` instantiates two macros over a shared VPWR/VGND rail:
+# - MACROA (both sides): two parallel W=0.325U NMOS fingers -- needs
+#   `combine_devices: true` to fold into the lumped W=0.65U reference device
+#   (the same shape as `_MULTIFINGER_LAYOUT_SPICE`/`_INVERTER_SPICE`).
+# - MACROB: two parallel, *identical* W=0.325U NMOS fingers on the layout
+#   side too, but its own reference deliberately keeps them as two separate
+#   device-for-device cards (the #1497 large-parallel-device-array
+#   workaround this issue's own body describes) -- needs
+#   `combine_devices: false` so `Netlist.combine_devices()` never touches
+#   it. `NetlistSpiceReader` upper-cases `.subckt` names read back as
+#   circuit names (`macroa` -> `MACROA`), which is why the glob patterns in
+#   the tests below are upper-case.
+_COMPOSED_LAYOUT_OPPOSING_MACROS_SPICE = """
+.subckt macroa A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+.subckt macrob A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+.subckt top A1 Y1 A2 Y2 VPWR VGND
+X1 A1 Y1 VPWR VGND macroa
+X2 A2 Y2 VPWR VGND macrob
+.ends
+"""
+
+_COMPOSED_REFERENCE_OPPOSING_MACROS_SPICE = """
+.subckt macroa A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.65U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+.subckt macrob A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+.subckt top A1 Y1 A2 Y2 VPWR VGND
+X1 A1 Y1 VPWR VGND macroa
+X2 A2 Y2 VPWR VGND macrob
+.ends
+"""
+
+
+def _write_composed_opposing_macros(tmp_path):
+    layout_path = _write(
+        tmp_path / "layout.spice", _COMPOSED_LAYOUT_OPPOSING_MACROS_SPICE
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice", _COMPOSED_REFERENCE_OPPOSING_MACROS_SPICE
+    )
+    return layout_path, reference_path
+
+
+def test_neither_global_combine_devices_setting_satisfies_both_composed_macros(
+    tmp_path,
+):
+    """Bug-reproducing baseline (issue #1552): once MACROA and MACROB are
+    composed under a shared top-level rail and flattened for comparison,
+    neither `options.combine_devices: true` nor `false` gets the compare
+    right for *both* macros at once.
+
+    `false` never folds MACROA's split legs, so it mismatches against
+    MACROA's lumped reference. `true` folds MACROA correctly -- but also
+    folds MACROB's identical-looking legs on *both* sides (the whole-netlist
+    `Netlist.combine_devices()` is applied symmetrically to layout and
+    reference), silently collapsing MACROB's own already-verified
+    device-for-device reference down to one lumped device too. That
+    corruption happens to still "match" here (both sides were folded the
+    same way), but it destroys the very device-for-device resolution
+    MACROB's own reference was deliberately written to preserve -- visible
+    as `counts.devices` dropping from 6 (3 real devices per macro) to 4."""
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+
+    path_false = _write_request(
+        tmp_path / "request_false.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {"flatten_layout": True, "flatten_reference": True},
+        },
+    )
+    report_false = run_lvs(path_false)
+    assert report_false["status"] == "mismatch"
+    assert report_false["category_counts"].get("device.unmatched", 0) >= 1
+
+    path_true = _write_request(
+        tmp_path / "request_true.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {
+                "combine_devices": True,
+                "flatten_layout": True,
+                "flatten_reference": True,
+            },
+        },
+    )
+    report_true = run_lvs(path_true)
+    assert report_true["status"] == "match"
+    # MACROA correctly folds to 2 devices (1 NMOS + 1 PMOS), but MACROB's own
+    # 3 real devices were also silently folded down to 2 -- 4 total instead
+    # of the honest 5 (MACROA's 2 + MACROB's real 3).
+    assert report_true["counts"]["devices"] == {
+        "layout": 4,
+        "reference": 4,
+        "matched": 4,
+    }
+
+
+def test_combine_devices_per_circuit_satisfies_both_composed_macros_simultaneously(
+    tmp_path,
+):
+    """The fix: `options.combine_devices_per_circuit` gives MACROA and
+    MACROB their own, opposing settings, honored simultaneously -- MACROA
+    folds to its lumped reference, MACROB's real 3 devices are left
+    untouched on both sides, and the compare matches with the honest device
+    count (2 + 3 = 5), not `true`'s silently-corrupted 4."""
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {
+                "combine_devices_per_circuit": {"MACROA": True, "MACROB": False},
+                "flatten_layout": True,
+                "flatten_reference": True,
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 2  # the two topology.flattened disclosures
+    assert report["counts"]["devices"] == {"layout": 5, "reference": 5, "matched": 5}
+    assert report["category_counts"] == {"topology.flattened": 2}
+    assert report["options"]["combine_devices_per_circuit"] == {
+        "MACROA": True,
+        "MACROB": False,
+    }
+    # The whole-request `combine_devices` boolean is unaffected -- still
+    # echoes its own default.
+    assert report["options"]["combine_devices"] is False
+
+
+def test_combine_devices_per_circuit_matches_first_glob_in_declaration_order(
+    tmp_path,
+):
+    """A catch-all `"*"` pattern combined with a specific override
+    demonstrates declaration-order precedence: `"MACROB"` (listed first)
+    wins over the later `"*": true` catch-all for MACROB specifically, while
+    MACROA (which does not match `"MACROB"`) falls through to the
+    catch-all."""
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {
+                "combine_devices_per_circuit": {"MACROB": False, "*": True},
+                "flatten_layout": True,
+                "flatten_reference": True,
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 5, "reference": 5, "matched": 5}
+
+
+def test_combine_devices_per_circuit_rejects_truthy_global_combine_devices(tmp_path):
+    """`options.combine_devices_per_circuit` and a truthy
+    `options.combine_devices` are mutually exclusive -- a clean
+    `LvsError`, not silently letting one win over the other."""
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {
+                "combine_devices": True,
+                "combine_devices_per_circuit": {"MACROA": True},
+            },
+        },
+    )
+    with pytest.raises(LvsError, match="mutually exclusive"):
+        run_lvs(path)
+
+
+def test_combine_devices_per_circuit_allows_explicit_false_global_combine_devices(
+    tmp_path,
+):
+    """An explicit `options.combine_devices: false` alongside
+    `combine_devices_per_circuit` is a harmless no-op, not an error --
+    `false` is already every unmatched circuit's own default."""
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {
+                "combine_devices": False,
+                "combine_devices_per_circuit": {"MACROA": True, "MACROB": False},
+                "flatten_layout": True,
+                "flatten_reference": True,
+            },
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "match"
+
+
+def test_combine_devices_per_circuit_rejects_malformed_value(tmp_path):
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+    for bad_options in (
+        {"combine_devices_per_circuit": []},
+        {"combine_devices_per_circuit": {}},
+        {"combine_devices_per_circuit": {"MACROA": "true"}},
+        {"combine_devices_per_circuit": {"": True}},
+    ):
+        path = _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "top"},
+                "reference": {"netlist": reference_path, "top": "top"},
+                "options": bad_options,
+            },
+        )
+        with pytest.raises(LvsError, match="combine_devices_per_circuit"):
+            run_lvs(path)
+
+
+def test_combine_devices_per_circuit_unmatched_pattern_warns_not_raises(tmp_path):
+    """A pattern that matches no circuit on a side is a `warning`
+    (`combine_devices_per_circuit.unmatched`), not a request-shape error --
+    unlike `options.combine_devices`'s list-shape validation, since a
+    pattern naming a circuit that legitimately exists on only one side is
+    not itself a mistake."""
+    layout_path, reference_path = _write_composed_opposing_macros(tmp_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": {
+                "combine_devices_per_circuit": {
+                    "MACROA": True,
+                    "MACROB": False,
+                    "NOPE_TYPO": True,
+                },
+                "flatten_layout": True,
+                "flatten_reference": True,
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    unmatched = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "combine_devices_per_circuit.unmatched"
+    ]
+    # One per side: the pattern matched no circuit on either the layout or
+    # the reference netlist.
+    assert len(unmatched) == 2
+    assert {m["side"] for m in unmatched} == {"layout", "reference"}
+    assert all(m["severity"] == "warning" for m in unmatched)
+    assert all("NOPE_TYPO" in m["description"] for m in unmatched)
+
+
+def test_combine_devices_per_circuit_no_op_on_flat_single_circuit_layout(tmp_path):
+    """A `layout.file` inline extraction (always a single flat circuit --
+    #1085) has no subcircuit boundary for `combine_devices_per_circuit` to
+    scope against yet; naming a circuit that never existed on that side is
+    simply an unmatched-pattern warning, not a crash, and the option is a
+    no-op there. Exercised here with an already-flat `layout.netlist`
+    instead of a real `layout.file` extraction, for the same "single flat
+    circuit" shape without needing a real GDS fixture."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices_per_circuit": {"INV": True}},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # combine_devices() partial-match RuntimeError (issue #466)
 # --------------------------------------------------------------------------- #
 
@@ -9261,6 +9570,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     assert report["reference_top"] == "INV"
     assert report["options"] == {
         "combine_devices": True,
+        "combine_devices_per_circuit": None,
         "flatten_layout": False,
         "flatten_reference": False,
         "netgen_setup": None,
