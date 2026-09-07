@@ -16,6 +16,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen res_array` now exposes gf180mcu's high-sheet-rho
+  poly-resistor flavours, not just the base `ppolyf_u` (issue #1550):
+  `params.flavor` accepts `"1k"` / `"2k"` / `"3k"` alongside the existing
+  `"generic"` default. All three new names draw *identical* geometry — `SAB`
+  `(49, 0)` plus the `Resistor` high-sheet-rho marker `(62, 0)` over the
+  `RES_MK` body, with no `Pplus` — matching `ppolyf_u_1k`'s (and its `_2k`/
+  `_3k` siblings') own `requires` set in
+  `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.resistors` exactly; the three
+  device classes are distinguished only by which `poly_res` value `klt
+  extract --deck-option poly_res=<1k|2k|3k>` selects at extraction time
+  (1000/2000/3000 Ω/□ respectively), not by any drawn layer. Before this
+  change, a `res_array` cell meant to model a real design's `ppolyf_u_1k`
+  resistor extracted as the base `ppolyf_u` class at ~350 Ω/□ instead of
+  1000 Ω/□ — a >2.5x resistance-recognition error with no drawing-side
+  parameter to fix it. gf180mcu's existing default `"generic"` flavour is
+  byte-identical to before. No `schema_version` bump — no field changed
+  shape, and no request field changed meaning.
+
 - **Added**: `klt extract`'s `nets[]` entries now carry `net_id`,
   `pin_index`, and `label_positions_um` (issue #1540) — all additive,
   no `schema_version` bump. A flat extraction of a block that instantiates

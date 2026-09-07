@@ -610,10 +610,18 @@ ladder uses to spend far fewer squares per ohm. The layer/purpose numbers
 come straight from the same `klayout_tools.decks.sky130` extraction deck that
 recognises them, so a `flavor="high"`/`"xhigh"` array round-trips through
 `klt extract` to the matching device class rather than always reading
-`res_generic_po`. gf180mcu exposes only its single `"generic"` flavour
-(`ppolyf_u`). sg13g2 exposes all three of its recognised poly-resistor
-classes (issue #1451), each drawing that class's own `requires` set from
-`klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`:
+`res_generic_po`. On gf180mcu (issue #1550), `"1k"`/`"2k"`/`"3k"` each draw
+`SAB` `(49, 0)` plus the `Resistor` high-sheet-rho marker `(62, 0)` over the
+`RES_MK` body — no `Pplus`, since `ppolyf_u_1k`'s (and its `_2k`/`_3k`
+siblings') own `requires` set neither needs nor excludes it. All three names
+draw *identical* geometry, since `ppolyf_u_1k`/`_2k`/`_3k` are distinguished
+only by which `poly_res` value `klt extract --deck-option poly_res=<1k|2k|3k>`
+selects at extraction time (1000/2000/3000 Ω/□ respectively), not by any
+drawn layer — so a `res_array` built with `flavor="1k"` (or `"2k"`/`"3k"`)
+must be paired with the matching `--deck-option poly_res=` value to extract
+as that class rather than the default. sg13g2 exposes all three of its
+recognised poly-resistor classes (issue #1451), each drawing that class's own
+`requires` set from `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`:
 
 | `flavor` | sg13g2 device class | Sheet ρ | Masks drawn over each body |
 | -------- | ------------------- | ------- | -------------------------- |
@@ -645,7 +653,7 @@ resolving to the identical `EXTBlock` + `Res` mask set.
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
-| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on gf180mcu, `"1k"` / `"2k"` / `"3k"` (`ppolyf_u_1k`/`_2k`/`_3k`, 1000/2000/3000 Ω/□ — pair with `klt extract --deck-option poly_res=<value>`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. |
 
 ### `cap_array` (MiM capacitor array, issue #1117)
 

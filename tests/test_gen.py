@@ -2127,6 +2127,7 @@ _SKY130_RES_MARK_LAYER = (66, 13)  # poly.res
 _GF180_RES_MARK_LAYER = (110, 5)  # RES_MK
 _GF180_RES_IMPLANT_LAYER = (31, 0)  # Pplus
 _GF180_RES_BLOCK_LAYER = (49, 0)  # SAB (salicide block)
+_GF180_RES_HIGH_SHEET_RHO_LAYER = (62, 0)  # Resistor -- ppolyf_u_1k/_2k/_3k marker
 
 
 def test_res_array_sky130_draws_poly_res_marker(tmp_path, pdk_root):
@@ -2380,9 +2381,10 @@ def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):
 
 
 def test_res_array_sky130_only_flavor_unsupported_on_gf180mcu(tmp_path, both_pdk_root):
-    """gf180mcu exposes only its single `ppolyf_u` (`'generic'`) flavour, so a
-    sky130-only flavour like `'high'` is rejected there -- the error names the
-    family and the flavours it does support."""
+    """A sky130-only flavour name like `'high'` is meaningless on gf180mcu
+    (whose own higher-sheet-rho flavours are named `'1k'`/`'2k'`/`'3k'`), so
+    it is rejected there -- the error names the family and the flavours it
+    does support."""
     with pytest.raises(GenError, match="not a recognised poly-resistor flavour"):
         generate(
             {
@@ -2410,6 +2412,67 @@ def test_res_array_gf180_default_flavor_unchanged(tmp_path, both_pdk_root):
     assert _GF180_RES_MARK_LAYER in present
     assert _GF180_RES_IMPLANT_LAYER in present
     assert _GF180_RES_BLOCK_LAYER in present
+
+
+@pytest.mark.parametrize("flavor", ("1k", "2k", "3k"))
+def test_res_array_gf180_higher_sheet_rho_flavor_draws_its_requires_masks(
+    tmp_path, both_pdk_root, flavor
+):
+    """gf180mcu's `'1k'`/`'2k'`/`'3k'` flavours (issue #1550) must draw the
+    RES_MK marker, the SAB salicide-block layer, and the Resistor
+    high-sheet-rho marker (62/0) that `ppolyf_u_1k`/`_2k`/`_3k`'s own
+    `requires` set keys off -- and must *not* draw Pplus, which is neither
+    required nor excluded by that device class (unlike the base `'generic'`
+    flavour, which requires Pplus)."""
+    output = tmp_path / f"res_array_gf180_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _GF180_RES_MARK_LAYER in present
+    assert _GF180_RES_BLOCK_LAYER in present
+    assert _GF180_RES_HIGH_SHEET_RHO_LAYER in present
+    assert _GF180_RES_IMPLANT_LAYER not in present
+
+
+@pytest.mark.parametrize(
+    ("flavor", "deck_option", "device_class"),
+    [
+        ("1k", "1k", "ppolyf_u_1k"),
+        ("2k", "2k", "ppolyf_u_2k"),
+        ("3k", "3k", "ppolyf_u_3k"),
+    ],
+)
+def test_res_array_gf180_higher_sheet_rho_flavor_extracts_as_matching_class(
+    tmp_path, both_pdk_root, flavor, deck_option, device_class
+):
+    """The end-to-end acceptance bar from issue #1550: a `res_array` cell
+    built with gf180mcu's `'1k'`/`'2k'`/`'3k'` flavour, run through `klt
+    extract --deck-option poly_res=<value>`, must classify as the matching
+    `ppolyf_u_1k`/`_2k`/`_3k` device class -- not the base `ppolyf_u` -- so a
+    schematic reference to the PDK's high-sheet-rho poly resistor can reach
+    an LVS-clean layout through `klt gen`."""
+    gds_path = tmp_path / f"res_array_gf180_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 3, "dummy": 1, "flavor": flavor},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(
+        str(gds_path), "gf180mcu", deck_options={"poly_res": deck_option}
+    )
+
+    assert report["device_counts"].get(device_class, 0) > 0
+    assert report["device_counts"].get("ppolyf_u", 0) == 0
 
 
 @pytest.mark.parametrize(
