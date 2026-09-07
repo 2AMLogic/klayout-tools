@@ -134,13 +134,30 @@ def build_rerun_result(
     committed: dict[str, Any],
     fresh: dict[str, Any],
     exclude: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS,
+    committed_for_diff: dict[str, Any] | None = None,
+    fresh_for_diff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``--rerun`` (full mode) JSON payload: diff ``committed``
     against a freshly produced ``fresh`` report (from actually re-running the
     analysis), excluding ``exclude`` paths from causing ``status:
     "drifted"``. ``fresh`` is embedded verbatim so a consumer can inspect the
-    full up-to-date report without a second invocation."""
-    drift = diff_verdict_fields(committed, fresh, exclude=exclude)
+    full up-to-date report without a second invocation.
+
+    ``committed_for_diff``/``fresh_for_diff`` (issue #1559) let a caller
+    substitute a *normalized* view of ``committed``/``fresh`` for the diff
+    itself -- e.g. ``klt extract``'s bookkeeping-field canonicalization
+    (``net_id``, anonymous ``$N`` net-name spellings, ``parasitics.nets[]``
+    ordering; see ``extract.py``'s
+    ``_canonicalize_extract_report_for_rerun_diff``) -- without changing
+    what ``fresh`` this response embeds. Default to ``committed``/``fresh``
+    themselves, so an unmodified caller (``klt drc``/``klt lvs``) behaves
+    exactly as before this parameter existed.
+    """
+    drift = diff_verdict_fields(
+        committed if committed_for_diff is None else committed_for_diff,
+        fresh if fresh_for_diff is None else fresh_for_diff,
+        exclude=exclude,
+    )
     return {
         "schema_version": 1,
         "mode": "rerun",

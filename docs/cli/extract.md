@@ -389,6 +389,12 @@ the JSON `provenance.klayout_version` field — see "JSON schema (the
 contract)" below) on every environment that produces or compares extracted
 netlists.
 
+Rather than hand-rolling this normalization, `klt extract --check <report>
+--rerun` (issue #1559) already applies it — see "Field classes: content,
+bookkeeping, tool metadata" and "`--check` / `--rerun`" below, which also
+name `net_id` and `parasitics.nets[]` ordering as the same class of
+extractor-internal bookkeeping.
+
 ### Reserved annotation layer
 
 Recording a floorplan reservation, an out-of-scope region, or a black-box
@@ -4361,6 +4367,32 @@ consume.
 
 `nets` is sorted by `name` for deterministic, diff-clean output — `net_id`/`pin_index` are what let a caller recover the unsorted, positional `.SUBCKT` order this sort otherwise discards. See "Net-name collisions from internally-repeated sub-cells" below for the worked example these three fields exist for.
 
+### Field classes: content, bookkeeping, tool metadata (issue #1559)
+
+A consumer that commits a `klt extract --format json` report as evidence and
+later needs to verify a freshly-produced report against it (`--check
+--rerun` below, or a hand-rolled comparison) has to know which fields
+reproduce byte-for-byte from the same input on any build and which do not.
+Every field in this report falls into exactly one of three classes:
+
+| Class | Meaning | Examples |
+| ----- | ------- | -------- |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`, `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`, `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
+| **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
+
+`klt extract --check <report> --rerun` (below) normalizes every
+**bookkeeping** field before diffing (an anonymous net's committed and
+fresh spelling are resolved to the same net by that net's own sorted
+`<device>.<terminal>` attachment list, not by raw counter value — the same
+"resolve by structural identity, not the raw counter" convention this
+module's own `net_id`-keyed lookups already follow internally) and every
+**tool metadata** path is excluded outright, so `status: "drifted"` is
+reserved for genuine **content** drift. A hand-rolled comparison outside
+`--rerun` (e.g. `klt lvs` for connectivity-only equivalence, or a
+consumer's own diff over two committed reports) should apply the same three
+classes rather than rediscovering them field by field.
+
 ## `--check` / `--rerun`
 
 A `klt extract --format json` report is often committed as evidence
@@ -4433,12 +4465,24 @@ Actually re-runs the extraction (`run_extract`) against the `file`/`deck`/
 `top` the committed report itself names, plus `provenance.deck.options`
 (`--deck-option`) when present, writing the fresh netlist back to the same
 `netlist_path` the committed report recorded. Diffs the fresh report against
-the committed one, field by field. `provenance.klt_version`/
-`provenance.klayout_version`/`provenance.pdk.version` are excluded from the
-diff — these legitimately vary between two runs of identical inputs on
-different tool installs/PDK snapshots; every other field (including
-`device_count`, `devices`, `nets`, and the hashes cheap mode also checks) is
-load-bearing. Response shape:
+the committed one, field by field, after normalizing every **bookkeeping**
+field on both sides (issue #1559 — see "Field classes: content, bookkeeping,
+tool metadata" above): `net_id` is stripped, every anonymous `$N` net-name
+spelling is resolved to that net's own sorted `<device>.<terminal>`
+attachment list, and `parasitics.nets[]` is re-sorted by the resulting
+canonical name — so two builds that assign the identical net a *different*
+placeholder number, or a different `net_id`, no longer report `status:
+"drifted"` on that basis alone. `provenance.klt_version`/
+`provenance.klayout_version`/`provenance.pdk.version` (**tool metadata**)
+are likewise excluded from the diff — these legitimately vary between two
+runs of identical inputs on different tool installs/PDK snapshots. Every
+**content** field (including `device_count`, `devices`, `nets`, and the
+hashes cheap mode also checks) is still load-bearing: normalization is a
+pure relabeling for comparison purposes, never a value change, so a genuine
+`resistance_ohm`/`capacitance_ff`/device-count/pin-connection difference
+still surfaces as drift. The *embedded* `fresh` in the response below is
+always the real, un-normalized report `--rerun` just produced — only the
+diff computation itself uses the normalized view. Response shape:
 
 ```json
 {

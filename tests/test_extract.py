@@ -22,6 +22,7 @@ import json
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 import klayout.db as kdb
 import pytest
@@ -10005,6 +10006,26 @@ def test_extract_docs_document_anonymous_net_numbering_non_guarantee():
     assert "#1063" in text
 
 
+def test_extract_docs_document_field_classes_table():
+    """Doc-contract test for issue #1559: `docs/cli/extract.md` must carry a
+    field-class table partitioning the report schema into content /
+    bookkeeping / tool metadata, explicitly naming `net_id`, an anonymous
+    `$N` net-name spelling, and `parasitics.nets[]` ordering as bookkeeping
+    -- the machine-readable declaration a reproducibility-gate author would
+    otherwise have to rediscover by watching `--check --rerun` go red."""
+    docs_path = Path(__file__).parent.parent / "docs" / "cli" / "extract.md"
+    text = docs_path.read_text()
+    lowered = text.lower()
+
+    assert "content" in lowered
+    assert "bookkeeping" in lowered
+    assert "tool metadata" in lowered
+    assert "net_id" in text
+    assert "$n" in lowered  # the anonymous net-name spelling, e.g. "`$N`"/`\$N`
+    assert "parasitics.nets" in lowered and "order" in lowered
+    assert "#1559" in text
+
+
 def test_cli_parasitics_flag_json(tmp_path, capsys):
     path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
     exit_code = main(
@@ -15754,6 +15775,181 @@ def test_rerun_extract_report_excludes_volatile_provenance_fields(tmp_path):
 
     assert result["status"] == "match"
     assert result["drift"] == []
+
+
+def _mutate_bookkeeping_fields(
+    value: Any, *, old_name: str, new_name: str, net_id_offset: int
+) -> Any:
+    """Test-only fixture mutator (issue #1559): simulate a second build's
+    differently-numbered anonymous net (``old_name`` -> ``new_name``,
+    including every leg/hub/segment name minted *from* ``old_name``, e.g.
+    ``old_name + "__t0"``) and permuted ``net_id`` counter, applied
+    recursively to a real ``run_extract`` report -- everything else stays
+    byte-identical, so the only drift a diff can find is the bookkeeping
+    this issue's fix must stop reporting."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, val in value.items():
+            if key == "net_id" and isinstance(val, int):
+                result[key] = val + net_id_offset
+            else:
+                result[key] = _mutate_bookkeeping_fields(
+                    val,
+                    old_name=old_name,
+                    new_name=new_name,
+                    net_id_offset=net_id_offset,
+                )
+        return result
+    if isinstance(value, list):
+        return [
+            _mutate_bookkeeping_fields(
+                item, old_name=old_name, new_name=new_name, net_id_offset=net_id_offset
+            )
+            for item in value
+        ]
+    if isinstance(value, str):
+        if value == old_name:
+            return new_name
+        if value.startswith(old_name):
+            boundary = value[len(old_name) : len(old_name) + 1]
+            if not boundary.isalnum():
+                return new_name + value[len(old_name) :]
+    return value
+
+
+def test_rerun_extract_report_ignores_net_id_and_anonymous_name_drift(tmp_path):
+    """Issue #1559, end-to-end via the real CLI-visible entry point: a
+    permuted `net_id` and an anonymous net's `$N` spelling changing between
+    builds -- extractor-internal bookkeeping with no contract across builds,
+    `docs/cli/extract.md`'s field-class table -- must not surface as
+    `status: "drifted"` under `--check --rerun`, even though the raw
+    pre-fix diff (`_report_verify.diff_verdict_fields` with only
+    `VOLATILE_PROVENANCE_PATHS` excluded -- exactly what `--rerun` did
+    before this fix) DOES flag it as drift against an independently
+    re-extracted report -- proving this is a real regression test, not a
+    vacuous one. (No `--parasitics` here: `--rerun` does not replay that
+    flag at all -- a pre-existing, documented limitation this issue does
+    not touch -- so a `--parasitics` committed report always shows
+    unrelated drift under `--rerun`; the `parasitics.nets[]`-ordering class
+    is covered directly at the diff-engine level below instead.)"""
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(str(path), "gf180mcu", output=str(tmp_path / "inv.spice"))
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    anon_name = pfet["nets"]["b"]
+    assert anon_name.startswith("\\$")  # sanity: this fixture's PMOS body is anonymous
+
+    mutated = _mutate_bookkeeping_fields(
+        report, old_name=anon_name, new_name="\\$999", net_id_offset=1000
+    )
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(report_path, mutated)
+
+    # Prove this is genuinely bookkeeping-only drift, not a no-op mutation:
+    # the pre-fix diff (raw committed/fresh, no bookkeeping canonicalization)
+    # flags it against a second, independently re-run fresh report.
+    from klayout_tools._report_verify import (
+        VOLATILE_PROVENANCE_PATHS,
+        diff_verdict_fields,
+    )
+
+    fresh_for_proof = run_extract(
+        str(path), "gf180mcu", output=str(tmp_path / "proof.spice")
+    )
+    pre_fix_drift = diff_verdict_fields(
+        mutated, fresh_for_proof, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+    assert pre_fix_drift  # would have been reported drifted, pre-fix
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_canonicalize_extract_report_ignores_bookkeeping_only_drift(tmp_path):
+    """Issue #1559, at the diff-engine level (`_canonicalize_extract_report_
+    for_rerun_diff` + `_report_verify.diff_verdict_fields` -- the exact pair
+    `rerun_extract_report` itself calls): a `--parasitics` report's
+    `net_id` permutation, anonymous `$N` spelling swap, AND
+    `parasitics.nets[]` reordering together -- every bookkeeping class
+    `docs/cli/extract.md`'s field-class table names -- must not diff as
+    drifted, even though the pre-fix raw diff (only
+    `VOLATILE_PROVENANCE_PATHS` excluded) does. Exercised independently of
+    `rerun_extract_report`/`--rerun` because `--rerun` never replays
+    `--parasitics` at all (a separate, pre-existing, documented
+    limitation) -- so this is the only way to exercise the
+    `parasitics.nets[]`-ordering class against a report that actually has
+    one."""
+    from klayout_tools._report_verify import (
+        VOLATILE_PROVENANCE_PATHS,
+        diff_verdict_fields,
+    )
+    from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
+
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        str(path), "gf180mcu", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    anon_name = pfet["nets"]["b"]
+    assert anon_name.startswith("\\$")
+    # sanity: parasitics.nets[] is non-empty, so reordering it means something
+    assert report["parasitics"]["nets"]
+
+    mutated = _mutate_bookkeeping_fields(
+        report, old_name=anon_name, new_name="\\$999", net_id_offset=1000
+    )
+    mutated["parasitics"]["nets"] = list(reversed(mutated["parasitics"]["nets"]))
+
+    pre_fix_drift = diff_verdict_fields(
+        mutated, report, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+    assert pre_fix_drift  # would have been reported drifted, pre-fix
+
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    normalized_fresh = _canonicalize_extract_report_for_rerun_diff(report)
+    drift = diff_verdict_fields(
+        normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+
+    assert drift == []
+
+
+def test_canonicalize_extract_report_still_detects_content_drift(tmp_path):
+    """The bookkeeping canonicalization (issue #1559) must not over-exclude:
+    a genuine `resistance_ohm` change, alongside the same `net_id`/`$N`/
+    `parasitics.nets[]`-order churn the previous test proves is silenced,
+    still diffs as drifted, naming the real changed field."""
+    from klayout_tools._report_verify import (
+        VOLATILE_PROVENANCE_PATHS,
+        diff_verdict_fields,
+    )
+    from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
+
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        str(path), "gf180mcu", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    anon_name = pfet["nets"]["b"]
+    assert report["parasitics"]["nets"]
+
+    mutated = _mutate_bookkeeping_fields(
+        report, old_name=anon_name, new_name="\\$999", net_id_offset=1000
+    )
+    mutated["parasitics"]["nets"] = list(reversed(mutated["parasitics"]["nets"]))
+    # Genuine content drift: hand-edit one parasitics resistance value.
+    mutated["parasitics"]["nets"][0]["resistance_ohm"] += 1.0
+
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    normalized_fresh = _canonicalize_extract_report_for_rerun_diff(report)
+    drift = diff_verdict_fields(
+        normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+
+    assert drift  # not swallowed
+    drifted_fields = {entry["field"] for entry in drift}
+    assert any(field.endswith("resistance_ohm") for field in drifted_fields)
 
 
 def test_rerun_extract_report_missing_deck_field_raises(tmp_path):
