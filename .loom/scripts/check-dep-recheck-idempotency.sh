@@ -42,7 +42,8 @@
 #   check-dep-recheck-idempotency.sh --issue <n> [--hours <n>]
 #   check-dep-recheck-idempotency.sh --file <comments.json> [--hours <n>]
 #   check-dep-recheck-idempotency.sh (--issue <n> | --file <f>) \
-#       --assume-new-hash <hash> [--assume-new-at <iso8601>] [--hours <n>]
+#       --assume-new-hash <hash> [--assume-new-version <v>] \
+#       [--assume-new-at <iso8601>] [--hours <n>]
 #
 #   --issue <n>            Fetch comments live via REST with --paginate (never
 #                           GraphQL's `gh issue view --json comments`, whose
@@ -56,8 +57,34 @@
 #                           $LOOM_DEP_RECHECK_HEARTBEAT_HOURS, else 24 — same
 #                           env var and default as curator.md's rule.
 #   --assume-new-hash <h>   Switch to DECISION mode for candidate hash <h>.
+#   --assume-new-version <v>  The `FORMULA_VERSION` the candidate hash <h> was
+#                           computed under (see dep-recheck-fingerprint.sh's
+#                           `FORMULA_VERSION` output field). Defaults to `v0`
+#                           when omitted — matching the "unversioned" sentinel
+#                           used for markers with no version tag at all, so
+#                           callers that do not yet pass this flag keep the
+#                           pre-#1544 hash-only comparison behavior unchanged.
+#                           A marker with no version segment (every
+#                           `curator:dep-recheck` comment posted before #1544
+#                           shipped) is parsed as `v0` for this same reason.
+#                           A version MISMATCH between this and the prior
+#                           marker's version always yields DECISION=NONE,
+#                           regardless of whether the hashes happen to match —
+#                           see "#1544 version guard" below.
 #   --assume-new-at <t>     Timestamp (ISO-8601 UTC, e.g. 2026-09-06T12:48:22Z)
 #                           for the candidate entry. Defaults to now (UTC).
+#
+# #1544 version guard: a CLI-changing resync of dep-recheck-fingerprint.sh can
+# reshape what CONCLUSION_HASH means without any real dependency-state change
+# (the exact fleet-wide false-CHANGED incident on #528/#527/#56/#55,
+# 2026-09-06). `FORMULA_VERSION` lets this script tell that apart from a
+# genuine state change: when the candidate's version differs from the most
+# recent marker's version, this is "the first check under this formula
+# version" — always DECISION=NONE (comment once, unconditionally), never
+# CHANGED — so a version bump costs exactly one comment per affected issue,
+# attributed correctly to "recipe changed" rather than misread as new
+# dependency state. Only when the versions match does the ordinary
+# hash-comparison logic (CHANGED/SKIP/STALE) run.
 #
 # Output (stdout — one KEY=VALUE per line, machine-parseable):
 #   AUDIT mode:   MODE=AUDIT, DECISION=OK|VIOLATION, VIOLATIONS=<n>, then one
@@ -65,7 +92,7 @@
 #                 line per violation (sorted oldest-first).
 #   DECISION mode: MODE=DECISION, DECISION=NONE|CHANGED|SKIP|STALE,
 #                 PRIOR_HASH=<hash or empty>, PRIOR_AT=<timestamp or empty>,
-#                 AGE_HOURS=<n or empty>
+#                 PRIOR_VERSION=<version or empty>, AGE_HOURS=<n or empty>
 #
 # Exit codes:
 #   AUDIT mode:    0 = OK (no violation, including empty/no-marker history)
@@ -85,10 +112,11 @@ ISSUE=""
 FILE=""
 HOURS="${LOOM_DEP_RECHECK_HEARTBEAT_HOURS:-24}"
 NEW_HASH=""
+NEW_VERSION=""
 NEW_AT=""
 
 usage() {
-  echo "Usage: $0 (--issue <n> | --file <comments.json>) [--hours <n>] [--assume-new-hash <hash> [--assume-new-at <iso8601>]]" >&2
+  echo "Usage: $0 (--issue <n> | --file <comments.json>) [--hours <n>] [--assume-new-hash <hash> [--assume-new-version <v>] [--assume-new-at <iso8601>]]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -97,6 +125,7 @@ while [[ $# -gt 0 ]]; do
     --file) FILE="${2:-}"; shift 2 ;;
     --hours) HOURS="${2:-}"; shift 2 ;;
     --assume-new-hash) NEW_HASH="${2:-}"; shift 2 ;;
+    --assume-new-version) NEW_VERSION="${2:-}"; shift 2 ;;
     --assume-new-at) NEW_AT="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -152,18 +181,26 @@ else
   RAW_JSON="$(cat "$FILE")"
 fi
 
-# Normalize to a sorted array of {at, hash}, tolerating both REST
+# Normalize to a sorted array of {at, hash, version}, tolerating both REST
 # (created_at) and GraphQL (createdAt) field spellings, and both a bare
 # top-level array (REST / --file) and a `{"comments": [...]}` wrapper
 # (`gh issue view --json comments`-shaped fixtures), so callers can hand this
 # script either shape without pre-massaging it.
+#
+# The marker regex's `(?:v(?<v>[0-9]+):)?` group is OPTIONAL, so both the
+# versioned form (`<!-- curator:dep-recheck:v1:<hash> -->`, #1544) and every
+# legacy unversioned marker posted before #1544 shipped
+# (`<!-- curator:dep-recheck:<hash> -->`) match this same regex — a legacy
+# marker's `.v` capture is `null`, normalized to the `v0` sentinel below.
 ENTRIES_JSON="$(jq -c '
   ( if type == "object" and has("comments") then .comments else . end )
   | [ .[]
       | select(.body != null and (.body | test("<!--[ \t]*curator:dep-recheck:")))
+      | (.body | capture("<!--[ \t]*curator:dep-recheck:(?:v(?<v>[0-9]+):)?(?<h>[0-9a-fA-F]+)[ \t]*-->")) as $m
       | {
           at: (.created_at // .createdAt),
-          hash: (.body | capture("<!--[ \t]*curator:dep-recheck:(?<h>[0-9a-fA-F]+)[ \t]*-->").h)
+          hash: $m.h,
+          version: (if $m.v == null then "v0" else "v" + $m.v end)
         }
     ]
   | sort_by(.at)
@@ -183,6 +220,11 @@ if [[ -n "$NEW_HASH" ]]; then
   if [[ -z "$NEW_AT" ]]; then
     NEW_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
+  # See "#1544 version guard" above: omitting --assume-new-version preserves
+  # the pre-#1544 hash-only comparison for callers that have not yet been
+  # updated to pass it (defaults both sides of the comparison to the same
+  # `v0` sentinel legacy markers parse to, above).
+  [[ -n "$NEW_VERSION" ]] || NEW_VERSION="v0"
 
   # Most recent PRIOR entry, of ANY hash, strictly before the candidate.
   PRIOR="$(jq -c --arg at "$NEW_AT" '
@@ -195,12 +237,32 @@ if [[ -n "$NEW_HASH" ]]; then
     echo "DECISION=NONE"
     echo "PRIOR_HASH="
     echo "PRIOR_AT="
+    echo "PRIOR_VERSION="
     echo "AGE_HOURS="
     exit 0
   fi
 
   PRIOR_HASH="$(jq -r '.hash' <<<"$PRIOR")"
   PRIOR_AT="$(jq -r '.at' <<<"$PRIOR")"
+  PRIOR_VERSION="$(jq -r '.version' <<<"$PRIOR")"
+
+  # #1544 version guard: a version mismatch is ALWAYS "first-ever check under
+  # this formula version" -- never CHANGED, regardless of whether the hashes
+  # happen to match or differ. This must run before the hash comparison below
+  # so a formula-version bump never gets misread as a genuine dependency-state
+  # change (or, worse, a coincidental hash collision across versions gets
+  # misread as SKIP/STALE). Unlike the "no prior marker at all" NONE case
+  # above, PRIOR_* is still populated here (a prior marker DOES exist, just
+  # under a different formula version) -- useful for logging/debugging even
+  # though the caller's action for DECISION=NONE is identical either way.
+  if [[ "$PRIOR_VERSION" != "$NEW_VERSION" ]]; then
+    echo "DECISION=NONE"
+    echo "PRIOR_HASH=$PRIOR_HASH"
+    echo "PRIOR_AT=$PRIOR_AT"
+    echo "PRIOR_VERSION=$PRIOR_VERSION"
+    echo "AGE_HOURS="
+    exit 0
+  fi
 
   PRIOR_EPOCH="$(iso_to_epoch "$PRIOR_AT")"
   NEW_EPOCH="$(iso_to_epoch "$NEW_AT")"
@@ -219,6 +281,7 @@ if [[ -n "$NEW_HASH" ]]; then
     echo "DECISION=CHANGED"
     echo "PRIOR_HASH=$PRIOR_HASH"
     echo "PRIOR_AT=$PRIOR_AT"
+    echo "PRIOR_VERSION=$PRIOR_VERSION"
     echo "AGE_HOURS=$AGE_HOURS"
     exit 0
   fi
@@ -227,6 +290,7 @@ if [[ -n "$NEW_HASH" ]]; then
     echo "DECISION=SKIP"
     echo "PRIOR_HASH=$PRIOR_HASH"
     echo "PRIOR_AT=$PRIOR_AT"
+    echo "PRIOR_VERSION=$PRIOR_VERSION"
     echo "AGE_HOURS=$AGE_HOURS"
     exit 20
   fi
@@ -234,6 +298,7 @@ if [[ -n "$NEW_HASH" ]]; then
   echo "DECISION=STALE"
   echo "PRIOR_HASH=$PRIOR_HASH"
   echo "PRIOR_AT=$PRIOR_AT"
+  echo "PRIOR_VERSION=$PRIOR_VERSION"
   echo "AGE_HOURS=$AGE_HOURS"
   exit 0
 fi

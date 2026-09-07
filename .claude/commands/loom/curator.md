@@ -1344,22 +1344,31 @@ FP_OUT=$(./.loom/scripts/dep-recheck-fingerprint.sh "${FP_ARGS[@]}") \
 # `printf '%s\n' "$VAR" | ...`, never `echo "$VAR" | ...` — zsh's `echo` builtin
 # reinterprets `\n`/`\t` escapes by default and corrupts captured output (#5094).
 CONCLUSION_HASH=$(printf '%s\n' "$FP_OUT" | sed -n 's/^CONCLUSION_HASH=//p')
+# FORMULA_VERSION (#1544): the fingerprint formula's own version, NOT folded
+# into CONCLUSION_HASH itself — pass it straight through to
+# check-dep-recheck-idempotency.sh's --assume-new-version below so a
+# CLI-changing resync that reshapes what CONCLUSION_HASH means can never be
+# misread as a genuine dependency-state change (or, worse, misread as an
+# unchanged one via a coincidental hash collision across formula versions).
+FORMULA_VERSION=$(printf '%s\n' "$FP_OUT" | sed -n 's/^FORMULA_VERSION=//p')
 
-# DECISION MODE: hand this exact CONCLUSION_HASH to check-dep-recheck-idempotency.sh
-# and act on ITS output — do not hand-derive PRIOR/age yourself. #1523 traced a
-# live incident (three near-duplicate heartbeats on #528/#527/#56/#55 within an
-# 11.5h window, the last two sharing an identical hash only ~4.5h apart) to this
-# exact step being re-derived by hand on every pass instead of freshly computed:
-# the posted comment cited a multi-day-old baseline instead of the true
-# immediately-preceding comment, consistent with the decision having been
-# narrated from memory of a prior pass rather than recomputed live. The script
-# is the single deterministic implementation of "find PRIOR, compare hashes,
+# DECISION MODE: hand this exact CONCLUSION_HASH/FORMULA_VERSION pair to
+# check-dep-recheck-idempotency.sh and act on ITS output — do not hand-derive
+# PRIOR/age yourself. #1523 traced a live incident (three near-duplicate
+# heartbeats on #528/#527/#56/#55 within an 11.5h window, the last two sharing
+# an identical hash only ~4.5h apart) to this exact step being re-derived by
+# hand on every pass instead of freshly computed: the posted comment cited a
+# multi-day-old baseline instead of the true immediately-preceding comment,
+# consistent with the decision having been narrated from memory of a prior
+# pass rather than recomputed live. The script is the single deterministic
+# implementation of "find PRIOR, compare formula versions, compare hashes,
 # check the window" — run it, don't reimplement it in your head.
-DECISION_OUT=$(./.loom/scripts/check-dep-recheck-idempotency.sh --issue "$ISSUE_NUMBER" --assume-new-hash "$CONCLUSION_HASH")
+DECISION_OUT=$(./.loom/scripts/check-dep-recheck-idempotency.sh --issue "$ISSUE_NUMBER" --assume-new-hash "$CONCLUSION_HASH" --assume-new-version "$FORMULA_VERSION")
 DECISION_RC=$?
 DECISION=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^DECISION=//p')
 PRIOR_HASH=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^PRIOR_HASH=//p')
 PRIOR_AT=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^PRIOR_AT=//p')
+PRIOR_VERSION=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^PRIOR_VERSION=//p')
 PRIOR_AGE_H=$(printf '%s\n' "$DECISION_OUT" | sed -n 's/^AGE_HOURS=//p')
 ```
 
@@ -1369,10 +1378,10 @@ directly, never re-derive this table by hand:
 
 | `$DECISION` | `$DECISION_RC` | Action |
 |---|---|---|
-| `NONE` (first-ever check on this issue) | `0` | **Comment.** Always report the first conclusion — never skip a first pass. |
-| `CHANGED` (different `CONCLUSION_HASH` than `$PRIOR_HASH`) | `0` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. |
-| `SKIP` (same hash as `$PRIOR_HASH`, newer than the staleness window) | `20` | **Skip silently.** No comment, no label change, no claim. Leave the issue exactly as found. |
-| `STALE` (same hash as `$PRIOR_HASH`, older than the staleness window) | `0` | **Comment once** (heartbeat). Posting refreshes the marker's timestamp, so the next window starts over. |
+| `NONE` (first-ever check on this issue, **or** `$PRIOR_VERSION` differs from `$FORMULA_VERSION` — see "Formula version guard" below) | `0` | **Comment.** Always report the first conclusion under this formula version — never skip a first pass. |
+| `CHANGED` (same `$FORMULA_VERSION` as `$PRIOR_VERSION`, different `CONCLUSION_HASH` than `$PRIOR_HASH`) | `0` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. |
+| `SKIP` (same `$FORMULA_VERSION`, same hash as `$PRIOR_HASH`, newer than the staleness window) | `20` | **Skip silently.** No comment, no label change, no claim. Leave the issue exactly as found. |
+| `STALE` (same `$FORMULA_VERSION`, same hash as `$PRIOR_HASH`, older than the staleness window) | `0` | **Comment once** (heartbeat). Posting refreshes the marker's timestamp, so the next window starts over. |
 
 `check-dep-recheck-idempotency.sh` also has an AUDIT mode (omit
 `--assume-new-hash`) that scans an issue's *entire* `curator:dep-recheck`
@@ -1381,6 +1390,29 @@ sharing a hash less than the staleness window apart) — this is the regression
 guard #1523 added; run it against a suspect issue to confirm/refute a reported
 duplicate-heartbeat pattern before assuming the live decision logic above is
 at fault.
+
+**Formula version guard (#1544) — versioned markers.** Embed
+`dep-recheck-fingerprint.sh`'s `FORMULA_VERSION` output field alongside
+`CONCLUSION_HASH` in every marker, in the fixed, machine-parseable form
+`<!-- curator:dep-recheck:<FORMULA_VERSION>:<CONCLUSION_HASH> -->` (e.g.
+`<!-- curator:dep-recheck:v1:934b6f057745738b -->`) — the same convention
+applies to the sibling `curator:operator-premise-recheck` marker. This closes
+the exact failure `dep-recheck-fingerprint.sh`'s own CLI resync caused on
+2026-09-06 (a fleet-wide false-`CHANGED` spam on #528/#527/#56/#55): without a
+version tag, `CONCLUSION_HASH` cannot distinguish "the dependency's actual
+state changed" from "the fingerprint script's own formula changed under us"
+after a resync. `check-dep-recheck-idempotency.sh` parses this format via the
+`--assume-new-version` flag (pass `$FORMULA_VERSION` from the recipe above,
+verbatim — see the `FP_ARGS`/`DECISION_OUT` block) and treats a **version
+mismatch as `DECISION=NONE`**, unconditionally, regardless of whether the
+hashes happen to match or differ — never `CHANGED`. This means a
+`FORMULA_VERSION` bump costs exactly one comment per affected issue, correctly
+attributed to "the recipe changed" rather than misread as new dependency
+state. **Legacy markers with no version segment at all** (every
+`curator:dep-recheck` comment posted before this convention shipped) parse as
+the `v0` sentinel for comparison purposes — this preserves the pre-existing
+"one-time re-post, then stable" behavior documented below for pre-marker-era
+comments; there is no backfill and none is needed.
 
 Pre-existing "still blocked" comments written before this section landed carry
 no marker, so `PRIOR_HASH` is empty and the first pass after them counts as

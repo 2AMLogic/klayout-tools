@@ -320,11 +320,21 @@ assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(q2) DECISION=CHANGED on an 
 if [[ -x "$FP" ]]; then
     # (r) The fix: the same unchanged state, fingerprinted canonically by two
     #     independent invocations, is now SKIPped inside the window.
+    #
+    # canon_hash invokes the CURRENT `dep-recheck --stdin` subcommand shape
+    # (the flat `--verdict/--no-linked-prs/--reason-key/--hash-only` interface
+    # this suite used to call was replaced by #7281's subcommand restructuring
+    # — see test-curator-dep-recheck-recipe.sh's header for the incident this
+    # caused when a doc/recipe kept the old shape after a resync).
+    canon_hash() { # canon_hash <verdict> <block_reason>
+        echo '{"prs":[]}' | "$FP" dep-recheck --stdin --verdict "$1" --block-reason "$2" \
+            | sed -n 's/^CONCLUSION_HASH=//p'
+    }
     CANON_STATE='378:OPEN:loom:architect,loom:epic-phase,loom:operator-only'
-    CANON_A="$("$FP" --verdict blocked --no-linked-prs --reason-key "$CANON_STATE" --hash-only)"
-    CANON_B="$("$FP" --verdict blocked --no-linked-prs --reason-key "$CANON_STATE" --hash-only)"
+    CANON_A="$(canon_hash blocked "$CANON_STATE")"
+    CANON_B="$(canon_hash blocked "$CANON_STATE")"
     assert_eq "$CANON_A" "$CANON_B" "(r1) two independent canonical passes -> identical CONCLUSION_HASH"
-    assert_eq "7004d3c3258ab254" "$CANON_A" "(r1) equals the value #1528 hand-computed from the live forge"
+    assert_eq "934b6f057745738b" "$CANON_A" "(r1) pinned CONCLUSION_HASH for this state under the current dep-recheck-fingerprint.sh formula"
 
     printf '[{"created_at":"2026-09-06T08:00:00Z","body":"still blocked <!-- curator:dep-recheck:%s -->"}]\n' \
         "$CANON_A" > "$WORK_DIR/1528-canonical-prior.json"
@@ -346,26 +356,79 @@ if [[ -x "$FP" ]]; then
     assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(r4) DECISION=STALE (heartbeat still posts)"
 
     # (s) Sensitivity: the canonicalization must NOT swallow a real change.
-    CANON_CHANGED="$("$FP" --verdict blocked --no-linked-prs \
-        --reason-key "378:OPEN:loom:architect,loom:epic-phase,loom:operator-only,loom:urgent" --hash-only)"
+    CANON_CHANGED="$(canon_hash blocked "378:OPEN:loom:architect,loom:epic-phase,loom:operator-only,loom:urgent")"
     run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
         --assume-new-hash "$CANON_CHANGED" --assume-new-at "2026-09-06T12:00:00Z"
     assert_eq "0" "$RC" "(s1) a real label change 4h later -> exit 0"
     assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(s1) DECISION=CHANGED — genuine changes are still reported"
 
-    CANON_CLOSED="$("$FP" --verdict blocked --no-linked-prs \
-        --reason-key "378:CLOSED:loom:architect,loom:epic-phase,loom:operator-only" --hash-only)"
+    CANON_CLOSED="$(canon_hash blocked "378:CLOSED:loom:architect,loom:epic-phase,loom:operator-only")"
     run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
         --assume-new-hash "$CANON_CLOSED" --assume-new-at "2026-09-06T09:00:00Z"
     assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(s2) blocker closing 1h later is still CHANGED"
 
-    CANON_CLEAR="$("$FP" --verdict clear --no-linked-prs --hash-only)"
+    CANON_CLEAR="$(canon_hash clear "")"
     run_sut --file "$WORK_DIR/1528-canonical-prior.json" \
         --assume-new-hash "$CANON_CLEAR" --assume-new-at "2026-09-06T09:00:00Z"
     assert_eq "CHANGED" "$(get_field "$OUT" DECISION)" "(s3) blocked -> clear 1h later is still CHANGED"
 else
     echo "  SKIP: dep-recheck-fingerprint.sh not executable — canonical fixtures skipped"
 fi
+
+echo ""
+echo "--- Version guard (#1544) ---"
+
+# (t) A prior marker with NO version tag (v0 sentinel) and a candidate hash
+#     computed under the current formula (v1) always overrides via the
+#     versioned marker form when posted -- but the DECISION here must be
+#     NONE regardless of whether the hash also happens to differ, since the
+#     comparison is not even reached once versions mismatch.
+cat > "$WORK_DIR/legacy-unversioned.json" <<'EOF'
+[
+  {"created_at":"2026-09-06T08:00:00Z","body":"still blocked <!-- curator:dep-recheck:934b6f057745738b -->"}
+]
+EOF
+run_sut --file "$WORK_DIR/legacy-unversioned.json" \
+    --assume-new-hash "934b6f057745738b" --assume-new-version "v1" --assume-new-at "2026-09-06T09:00:00Z"
+assert_eq "0" "$RC" "(t1) v0 prior vs v1 candidate, SAME hash, 1h later -> exit 0 (never SKIP across a version bump)"
+assert_eq "NONE" "$(get_field "$OUT" DECISION)" "(t1) DECISION=NONE, not SKIP — a version mismatch is 'first check under this formula', even with an identical hash"
+assert_eq "v0" "$(get_field "$OUT" PRIOR_VERSION)" "(t1) PRIOR_VERSION reports the legacy v0 sentinel"
+
+# (t2) Same scenario but with a DIFFERENT hash too -- must still be NONE
+#      (not CHANGED): the version mismatch alone determines the decision.
+run_sut --file "$WORK_DIR/legacy-unversioned.json" \
+    --assume-new-hash "deadbeefdeadbeef" --assume-new-version "v1" --assume-new-at "2026-09-06T09:00:00Z"
+assert_eq "0" "$RC" "(t2) v0 prior vs v1 candidate, DIFFERENT hash -> exit 0"
+assert_eq "NONE" "$(get_field "$OUT" DECISION)" "(t2) DECISION=NONE, not CHANGED — version mismatch is checked before the hash comparison"
+
+# (t3) Two versioned (v1) markers, same version, same hash, inside the
+#      window -> ordinary SKIP still applies once versions agree.
+cat > "$WORK_DIR/versioned-prior.json" <<'EOF'
+[
+  {"created_at":"2026-09-06T08:00:00Z","body":"still blocked <!-- curator:dep-recheck:v1:934b6f057745738b -->"}
+]
+EOF
+run_sut --file "$WORK_DIR/versioned-prior.json" \
+    --assume-new-hash "934b6f057745738b" --assume-new-version "v1" --assume-new-at "2026-09-06T09:00:00Z"
+assert_eq "20" "$RC" "(t3) matching v1 versions, same hash, 1h later -> SKIP as before"
+assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(t3) DECISION=SKIP once versions agree"
+assert_eq "v1" "$(get_field "$OUT" PRIOR_VERSION)" "(t3) PRIOR_VERSION echoes the parsed v1 marker"
+
+# (t4) A v1 prior vs a v2 candidate (the NEXT future formula bump) is also
+#      NONE -- the rule is symmetric, not just "v0 vs v1".
+run_sut --file "$WORK_DIR/versioned-prior.json" \
+    --assume-new-hash "934b6f057745738b" --assume-new-version "v2" --assume-new-at "2026-09-06T09:00:00Z"
+assert_eq "0" "$RC" "(t4) v1 prior vs v2 candidate -> exit 0"
+assert_eq "NONE" "$(get_field "$OUT" DECISION)" "(t4) DECISION=NONE — the version guard is symmetric across any two differing versions, not v0-specific"
+
+# (t5) Backward compatibility: omitting --assume-new-version entirely
+#      defaults the candidate to v0, matching the legacy prior's v0 --
+#      preserving the exact pre-#1544 hash-only comparison for callers that
+#      have not yet been updated to pass the new flag.
+run_sut --file "$WORK_DIR/legacy-unversioned.json" \
+    --assume-new-hash "934b6f057745738b" --assume-new-at "2026-09-06T09:00:00Z"
+assert_eq "20" "$RC" "(t5) no --assume-new-version given, legacy v0 prior, same hash, 1h later -> SKIP (unchanged pre-#1544 behavior)"
+assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(t5) DECISION=SKIP — omitting the flag does not spuriously trigger the version guard"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
