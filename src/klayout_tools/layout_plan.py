@@ -10,7 +10,8 @@ geometry, never calls :func:`klayout_tools.gen.generate`/
 stream. Executing a plan (resolving a group's netlist-derived sizing,
 compiling ``rows``/``abutment`` onto ``gen_compose``'s ``"explicit"``
 placement, deriving ``connectivity[]`` from the netlist) is Phase C
-(the spike's §3/§4), a separate, not-yet-built follow-up. Everything here
+(the spike's §3/§4), implemented separately in
+:mod:`klayout_tools.layout_plan_execute` (issue #1155). Everything here
 answers one question: *is this plan document internally consistent and
 does every reference it makes actually resolve* -- nothing more.
 
@@ -136,15 +137,17 @@ value consistent with what it actually draws; every other generator this
 module recognises documents no ``topology`` concept at all, so any
 ``device_groups[].topology`` value declared against it is unsupported.
 
-**PDK resolution is deferred to Phase C.** ``request.pdk`` is validated
-for shape only (``variant``/``root``, the same
+**PDK resolution happens in Phase C, not here.** ``request.pdk`` is
+validated for shape only (``variant``/``root``, the same
 :data:`klayout_tools.gen_compose._ALLOWED_PDK_KEYS` allow-list every other
 ``klt gen``-family verb already uses) -- this module never calls
 :func:`klayout_tools.pdk.find_pdk`. A plan's PDK does not need to resolve
-on disk to be a structurally/referentially valid *plan*; it needs to
-resolve before Phase C actually calls ``klt gen``/``klt gen compose``,
-which is exactly where that check belongs, and keeps this module's own
-tests hermetic (no PDK install required to validate a plan document).
+on disk to be a structurally/referentially valid *plan*; it resolves once
+:mod:`klayout_tools.layout_plan_execute` (issue #1155) actually calls
+``klt gen``/``klt gen compose`` (``pdk_spec = validated["pdk"]`` at
+``layout_plan_execute.py:803``), which is exactly where that check
+belongs, and keeps this module's own tests hermetic (no PDK install
+required to validate a plan document).
 
 **No ``klt`` CLI subcommand is added.** Per this issue's own acceptance
 criteria, a library-level validator alone satisfies Phase B --
@@ -157,8 +160,9 @@ pre-built one) with no clear win over calling this module directly from
 Python -- there is no rendering/formatting value a CLI wrapper would add
 that a caller integrating this into a larger pipeline (the whole point of
 a "plan" sitting between ingestion and generation) actually needs today.
-Revisit this once Phase C exists and a caller wants to validate a plan
-from the shell before compiling it.
+Revisit this if a caller wants to validate a plan from the shell before
+handing it to :mod:`klayout_tools.layout_plan_execute` (issue #1155) to
+compile.
 """
 
 from __future__ import annotations
@@ -437,8 +441,12 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
         # compiles down to one gen-compose blocks[] entry (this module's own
         # docstring), so its own orientation carries through unchanged. An
         # enum-shape check only, exactly like topology/align/edge above --
-        # this module does not (yet) validate that a group's placement
-        # actually needs the mirror it declares (Phase C's concern).
+        # this module does not validate that a group's placement actually
+        # needs the mirror it declares, and neither does
+        # layout_plan_execute.py (issue #1155) today: it passes the
+        # declared orientation straight through to the compiled
+        # gen_compose block (groups_by_id[...]["orientation"]) unchanged,
+        # so this remains an open gap rather than a deferred-but-planned one.
         orientation = raw_group.get("orientation", "none")
         if orientation not in _ORIENTATIONS:
             allowed = ", ".join(sorted(_ORIENTATIONS))
