@@ -587,9 +587,10 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `ppolyf_u` keys off (issue #369). Unlike sky130, gf180mcu's
         # `ppolyf_u` also *requires* an implant (Pplus) and salicide-block
         # (SAB) layer to cover the same segment -- the marker alone recognises
-        # nothing there. gf180mcu exposes only that single flavour, so its
-        # implant/block pair lives in :data:`_PDK_RES_FLAVOR_LAYERS` below
-        # under the default `"generic"` flavour (issue #463).
+        # nothing there. gf180mcu's per-flavour implant/block mask sets (the
+        # default `"generic"` -> `ppolyf_u`, plus the high-sheet-rho
+        # `"1k"`/`"2k"`/`"3k"` -> `ppolyf_u_1k`/`_2k`/`_3k`, issue #1550) live
+        # in :data:`_PDK_RES_FLAVOR_LAYERS` below (issue #463).
         # Second routing-metal role + its connecting via (issue #454, same
         # rationale as sky130's pair above). gf180mcu's curated extraction
         # deck's `metals` stack already runs Metal1-Metal5 (#220); this only
@@ -1087,10 +1088,11 @@ def _reject_deferred_family(generator_name: str, family: str) -> None:
 #: curated *extraction* decks key each flavour off -- never a second, private
 #: map: sky130's ``res_high_po``/``res_xhigh_po`` from
 #: ``klayout_tools.decks.sky130.EXTRACTION_DECK.resistors`` (issue #222/#299),
-#: gf180mcu's single ``ppolyf_u`` (issue #369), and sg13g2's
-#: ``rsil``/``rppd``/``rhigh`` (issues #1448/#1451). The first-listed flavour
-#: per family is that family's default (``_DEFAULT_RES_FLAVOR``), chosen so a
-#: request that never mentions ``flavor`` reproduces the pre-#463 geometry
+#: gf180mcu's ``ppolyf_u``/``ppolyf_u_1k``/``_2k``/``_3k`` (issues #369/#1550),
+#: and sg13g2's ``rsil``/``rppd``/``rhigh`` (issues #1448/#1451). The
+#: first-listed flavour per family is that family's default
+#: (``_DEFAULT_RES_FLAVOR``), chosen so a request that never mentions
+#: ``flavor`` reproduces the pre-#463 geometry
 #: exactly (sky130 -> ``res_generic_po``, gf180mcu -> ``ppolyf_u``, sg13g2 ->
 #: ``rsil``).
 _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
@@ -1114,12 +1116,33 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
         ),
     },
     "gf180mcu": {
-        # ppolyf_u: gf180mcu exposes a single recognised drawn-poly-resistor
-        # flavour, which requires both Pplus (implant) and SAB (salicide
-        # block) over the RES_MK marker (issue #369).
+        # ppolyf_u: gf180mcu's base drawn-poly-resistor flavour, which
+        # requires both Pplus (implant) and SAB (salicide block) over the
+        # RES_MK marker (issue #369).
         "generic": (
             (31, 0),  # Pplus -- P+ implant
             (49, 0),  # SAB   -- salicide block
+        ),
+        # High-sheet-rho flavour (issue #1550): all three named values below
+        # draw identical geometry -- ppolyf_u_1k/_2k/_3k are distinguished
+        # only by `klt extract --deck-option poly_res=<value>`, not by any
+        # drawn layer (see `ResistorDevice(name="ppolyf_u_1k",
+        # flavour_option="poly_res", ...)` in
+        # `klayout_tools.decks.gf180mcu`). Each requires exactly SAB + the
+        # Resistor high-sheet-rho marker -- no Pplus, matching that device's
+        # own `requires` tuple precisely (Pplus is neither required nor
+        # excluded there, so omitting it keeps this entry minimal).
+        "1k": (
+            (49, 0),  # SAB      -- unsalicided, same as generic
+            (62, 0),  # Resistor -- high-sheet-rho marker
+        ),
+        "2k": (
+            (49, 0),  # SAB
+            (62, 0),  # Resistor
+        ),
+        "3k": (
+            (49, 0),  # SAB
+            (62, 0),  # Resistor
         ),
     },
     "sg13g2": {
@@ -4411,9 +4434,11 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "'generic' (default, the base sheet-rho flavour -- "
                 "res_generic_po on sky130, ppolyf_u on gf180mcu, rsil on "
                 "sg13g2), or, on sky130, 'high' (res_high_po) / 'xhigh' "
-                "(res_xhigh_po), or, on sg13g2, 'rppd' (260 ohm/sq) / "
-                "'rhigh' (1360 ohm/sq) for the higher-sheet-rho flavours "
-                "(issues #463/#1451)",
+                "(res_xhigh_po), or, on gf180mcu, '1k' / '2k' / '3k' "
+                "(ppolyf_u_1k/_2k/_3k, selected at extraction time via "
+                "'klt extract --deck-option poly_res='), or, on sg13g2, "
+                "'rppd' (260 ohm/sq) / 'rhigh' (1360 ohm/sq) for the "
+                "higher-sheet-rho flavours (issues #463/#1451/#1550)",
                 default=_DEFAULT_RES_FLAVOR,
             )
             self.param(
