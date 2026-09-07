@@ -56,20 +56,13 @@
 #   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
 #                       (blocked|clear), BLOCKERS (one "<pr#>:<state>:<sorted
 #                       loom: labels>" line per PR in `closedByPullRequestsReferences`,
-#                       sorted), CONCLUSION_HASH, and FORMULA_VERSION.
+#                       sorted), and CONCLUSION_HASH.
 #   operator-premise    The "Checking Operator-Only Premises" fingerprint:
 #                       VERDICT (stale-premise|open), REFS (one "<ref#>:<state>"
-#                       line per checked reference, sorted), CONCLUSION_HASH —
-#                       left EMPTY when VERDICT=open, per "no comment this
-#                       pass" (nothing to report, nothing to compare) — and
-#                       FORMULA_VERSION.
-#
-# FORMULA_VERSION: a literal constant (see "FORMULA_VERSION" in the footer
-# comment below) bumped only when CONCLUSION_HASH's inputs or their canonical
-# encoding change. Embed it alongside CONCLUSION_HASH in every marker (e.g.
-# `<!-- curator:dep-recheck:v1:<hash> -->`) so a consumer can tell "the
-# formula changed under us" apart from "the dependency state changed" instead
-# of misreading the former as the latter.
+#                       line per checked reference, sorted), and
+#                       CONCLUSION_HASH — left EMPTY when VERDICT=open, per
+#                       "no comment this pass" (nothing to report, nothing to
+#                       compare).
 #
 # Input modes (either one, mutually exclusive):
 #   --number N [--repo OWNER/NAME]   Live mode: fetch current PR/ref state via
@@ -123,44 +116,10 @@
 # `eval`-safe like `claim-staleness.sh`: KEY=VALUE output is built only from a
 # fixed enum, a hex hash and pre-sorted plain-text lines — never raw forge
 # text — so no comment/PR body content can reach your shell via `eval`.
-#
-# FORMULA_VERSION — bump this on every formula change, in the SAME commit (#1544)
-#
-#   `FORMULA_VERSION` below is folded into every marker
-#   (`<!-- curator:dep-recheck:<FORMULA_VERSION>:<CONCLUSION_HASH> -->`) but
-#   deliberately NOT into `CONCLUSION_HASH` itself — it exists precisely so a
-#   consumer (`check-dep-recheck-idempotency.sh`) can tell "the formula
-#   changed under us" apart from "the hash changed because dependency state
-#   changed" instead of conflating the two into a false CHANGED. Without a
-#   version guard, a CLI-changing resync (this file is the single most
-#   resync-churned script in this directory — two shape changes landed in one
-#   day, #7281/#7304) can silently reshape what CONCLUSION_HASH means for
-#   every open issue at once, and every deployed agent misreads "the recipe
-#   changed" as "the dependency changed" — the exact fleet-wide false-CHANGED
-#   incident (#1544) that on 2026-09-06 spammed #528/#527/#56/#55 with
-#   spurious comments.
-#
-#   YOU MUST BUMP `FORMULA_VERSION` (below) IN THE SAME COMMIT whenever you
-#   change what feeds `CONCLUSION_HASH` or how it is encoded — e.g. adding/
-#   removing/reordering a hashed field, changing the blocker-line shape, or
-#   changing the sort/join convention. Do NOT bump it for changes that leave
-#   the hash formula's inputs and encoding untouched — a CLI reshape (flag
-#   renames, subcommand restructuring), a bugfix, a comment, or a docs edit
-#   is not a formula change and must NOT bump the version; bumping on every
-#   edit defeats the whole point by making every routine resync look like a
-#   formula change and cost a needless re-post on every open issue.
-#
-#   This file is the single most likely file in this directory to be
-#   resynced from upstream Loom without a matching `curator.md` update
-#   landing in the same commit (upstream's copy has no reason to know about
-#   klayout-tools' own consumers) — if you are resyncing this file and the
-#   diff touches the CONCLUSION_HASH formula, bump FORMULA_VERSION yourself
-#   in the resync commit; do not assume upstream did it for you.
 
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-FORMULA_VERSION="v1"
 
 _usage() {
     # Keep this range in sync with the header comment block above.
@@ -341,15 +300,14 @@ _run_dep_recheck() {
 
     if [[ "$JSON_OUTPUT" == true ]]; then
         jq -n --arg verdict "$verdict" --arg blockers "$blockers" --arg reason "$BLOCK_REASON" \
-            --arg orthogonal "$ORTHOGONAL" --arg hash "$hash" --arg formula_version "$FORMULA_VERSION" \
-            '{verdict: $verdict, blockers: $blockers, block_reason: $reason, orthogonal: $orthogonal, conclusion_hash: $hash, formula_version: $formula_version}'
+            --arg orthogonal "$ORTHOGONAL" --arg hash "$hash" \
+            '{verdict: $verdict, blockers: $blockers, block_reason: $reason, orthogonal: $orthogonal, conclusion_hash: $hash}'
     else
         echo "VERDICT=$verdict"
         echo "BLOCKERS=$blockers"
         echo "BLOCK_REASON=$BLOCK_REASON"
         echo "ORTHOGONAL=$ORTHOGONAL"
         echo "CONCLUSION_HASH=$hash"
-        echo "FORMULA_VERSION=$FORMULA_VERSION"
     fi
 }
 
@@ -402,13 +360,12 @@ _run_operator_premise() {
     fi
 
     if [[ "$JSON_OUTPUT" == true ]]; then
-        jq -n --arg verdict "$verdict" --arg refs "$refs" --arg hash "$hash" --arg formula_version "$FORMULA_VERSION" \
-            '{verdict: $verdict, refs: $refs, conclusion_hash: $hash, formula_version: $formula_version}'
+        jq -n --arg verdict "$verdict" --arg refs "$refs" --arg hash "$hash" \
+            '{verdict: $verdict, refs: $refs, conclusion_hash: $hash}'
     else
         echo "VERDICT=$verdict"
         echo "REFS=$refs"
         echo "CONCLUSION_HASH=$hash"
-        echo "FORMULA_VERSION=$FORMULA_VERSION"
     fi
 }
 
