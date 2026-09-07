@@ -94,6 +94,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   flags share `klt extract`'s own parsing/validation helpers, so an
   unrecognised key/value or a malformed entry is the same clean exit-1
   error in either command.
+- **Fixed**: `klt extract --check <report> --rerun` (issue #1559) no longer
+  reports `status: "drifted"` for extractor-internal bookkeeping that is not
+  a stable contract across builds — a permuted `net_id`, an anonymous `$N`
+  net-name spelling changing, and/or `parasitics.nets[]` reordering. Both
+  the committed and freshly re-run reports are canonicalized before
+  diffing: `net_id` is stripped, an anonymous net's spelling is resolved to
+  a name derived from its own sorted `<device>.<terminal>` attachment list
+  (not the raw counter), and order-sensitive lists are re-sorted by the
+  resulting canonical identity. A genuine content change (an R/C value, a
+  device/pin count, a connectivity change) still reports `status:
+  "drifted"` exactly as before — the fix only normalizes bookkeeping, never
+  swallows real drift. `docs/cli/extract.md` gains a "Field classes:
+  content, bookkeeping, tool metadata" table naming which report fields
+  fall into each class, cross-referenced from `docs/json-contract.md`.
 - **Added**: `klt lvs` now accepts `options.combine_devices_per_circuit`
   (issue #1552): a `{"<circuit-name-glob>": <boolean>}` map applied via
   `klayout.db.Circuit.combine_devices()` to each side's own matching

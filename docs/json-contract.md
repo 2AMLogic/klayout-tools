@@ -104,6 +104,17 @@ capacitor-shaped device with no computed value at all. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section for the full
 derivation.
 
+**Not every field a verb reports is a cross-build contract at all** — some
+are extractor/engine-internal bookkeeping with no meaning outside the one
+run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`
+net-name spellings/`parasitics.nets[]` ordering, all assigned inside an
+opaque native KLayout call this repo does not control). `docs/cli/extract.md`'s
+"Field classes: content, bookkeeping, tool metadata" section (issue #1559)
+names this explicitly for `extract`'s own schema — a **content**/
+**bookkeeping**/**tool metadata** partition every `drc`/`lvs`/`extract`
+consumer of the `--check`/`--rerun` machinery below should apply, not just
+`extract`'s.
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
@@ -221,6 +232,13 @@ plain Python module, any byte change to it — cosmetic or
 device-recognition-affecting — changes `content_hash`, and `--check`/
 `--rerun` are what turn that into a caller-visible signal instead of a
 silent mismatch.
+
+`klt extract --check <report.json> --rerun` additionally normalizes every
+**bookkeeping** field (issue #1559 — see `docs/cli/extract.md`'s "Field
+classes: content, bookkeeping, tool metadata") before diffing, so a
+committed/fresh pair differing only in `net_id`, an anonymous `$N` net-name
+spelling, and/or `parasitics.nets[]` ordering no longer reports `status:
+"drifted"` — only genuine **content** drift does.
 
 ## Error shape
 
