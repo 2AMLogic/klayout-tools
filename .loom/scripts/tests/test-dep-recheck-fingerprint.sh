@@ -443,6 +443,33 @@ out_merged="$("$TARGET_SCRIPT" named-dependency --number 6335 --repo owner/repo)
 assert_eq "clear" "$(field "$out_merged" VERDICT)" \
     "T15c: live mode falls back to gh pr view when the reference is a PR (not an issue), and reports VERDICT=clear once merged"
 
+# --- T16: named-dependency - TWO Dependencies-shaped sections in one body
+# (#1569, the #528/#527 shape): a stale original `## Dependencies` (prose
+# only, no checklist) plus a later, corrected `### Dependencies (corrected)`
+# (a different heading level, the one carrying the real checklist). The
+# extractor must not lock onto the first (prose-only) match and must prefer
+# the LAST Dependencies-shaped section it finds.
+jq -n '{body: "## Dependencies\n\nBlocked by Phase 1 (#111, #112 -- all closed), specifically #111'\''s live fleet validation data.\n\n## Some Other Section\n\nUnrelated prose mentioning #999 which must never be picked up.\n\n### Dependencies (corrected)\n\n- [ ] #222: Live fleet validation, still OPEN as of this filing.\n\n### Duplicate / related-work check\n\nMore prose mentioning #888, also not a dependency.\n"}' \
+    >"$STUB_DIR/issue-6337.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-222.json"
+
+out_two_sections="$("$TARGET_SCRIPT" named-dependency --number 6337 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_two_sections" VERDICT)" \
+    "T16a: a stale prose-only '## Dependencies' section plus a later corrected '### Dependencies (corrected)' checklist reports VERDICT=blocked on the corrected section's still-open ref (#1569, the #528/#527 shape) -- not the false VERDICT=clear the prose-only first match used to produce"
+assert_eq "222:OPEN" "$(field "$out_two_sections" DEPS)" \
+    "T16b: DEPS reflects only the LAST Dependencies-shaped section's checklist (#222) -- not #111/#112 from the stale original prose (which has no checklist syntax anyway), and not #999/#888 from unrelated sections in between"
+
+# T16c: a body with only the standard single `## Dependencies` checklist
+# (today's common, single-section case) must still parse unchanged.
+jq -n '{body: "## Dependencies\n\n- [ ] #333: prerequisite feature\n\n## Other Section\n\n- [ ] #444: not a dependency, different section entirely\n"}' \
+    >"$STUB_DIR/issue-6338.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-333.json"
+out_single_section="$("$TARGET_SCRIPT" named-dependency --number 6338 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_single_section" VERDICT)" \
+    "T16c: a single, ordinary level-2 '## Dependencies' checklist still parses unchanged (no regression)"
+assert_eq "333:OPEN" "$(field "$out_single_section" DEPS)" \
+    "T16c: DEPS still excludes #444 from the unrelated following section"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"
