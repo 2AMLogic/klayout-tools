@@ -2669,6 +2669,18 @@ _SKY130_CAP_BOTTOM_PLATE_LAYER = (70, 20)  # met3.drawing
 _SKY130_CAP_TOP_VIA_LAYER = (70, 44)  # via3.drawing
 _SKY130_CAP_TOP_VIA_METAL_LAYER = (71, 20)  # met4.drawing
 
+#: gf180mcu's MiM stack (issue #1555) -- the *same* layer/datatype pairs
+#: `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.capacitors[0]`
+#: (`cap_mim_2f0_m4m5_noshield`) declares: `FuseTop` top plate over a
+#: `Metal4` (virtual) bottom plate, `Via4`/`Metal5` top-plate via + landing
+#: pad, and the `CAP_MK`/`MIM_L_MK` masks that entry's own
+#: `top_plate_requires` demands over the top plate.
+_GF180_CAP_TOP_PLATE_LAYER = (75, 0)  # FuseTop
+_GF180_CAP_BOTTOM_PLATE_LAYER = (46, 0)  # Metal4
+_GF180_CAP_TOP_VIA_LAYER = (41, 0)  # Via4
+_GF180_CAP_TOP_VIA_METAL_LAYER = (81, 0)  # Metal5
+_GF180_CAP_TOP_PLATE_REQUIRES = ((117, 5), (117, 10))  # CAP_MK, MIM_L_MK
+
 
 def test_cap_array_device_count_and_ports(tmp_path, pdk_root):
     output = tmp_path / "cap_array.gds"
@@ -2834,19 +2846,286 @@ def test_cap_array_top_port_is_clear_of_bottom_plate(tmp_path, pdk_root):
     assert not any("interior centre" in note for note in report["drc_hints"]["notes"])
 
 
-def test_cap_array_gf180mcu_is_not_yet_supported(tmp_path, both_pdk_root):
-    """gf180mcu's MiM stack (`FuseTop`/`Metal4`, with a "virtual bottom
-    plate" oversize derivation) is out of this generator's initial scope
-    (issue #1117) -- requesting it raises a clear, actionable error rather
-    than silently drawing sky130's layer numbers onto a gf180mcu cell."""
-    with pytest.raises(GenError, match="sky130"):
-        generate(
-            {
-                "generator": "cap_array",
-                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-                "options": {"output": str(tmp_path / "out.gds")},
-            }
+def test_cap_array_draws_gf180mcu_mim_stack_layers(tmp_path, both_pdk_root):
+    """The generator must draw gf180mcu's `FuseTop`/`Metal4` MiM plate pair,
+    the `Via4`/`Metal5` top-plate via + landing pad, *and* the
+    `CAP_MK`/`MIM_L_MK` recognition masks -- the same layer/datatype numbers
+    `klayout_tools.decks.gf180mcu`'s `EXTRACTION_DECK.capacitors[0]`
+    (`cap_mim_2f0_m4m5_noshield`) declares in its `top_plate`/
+    `bottom_plate`/`top_plate_via`/`top_plate_via_metal`/
+    `top_plate_requires` fields (issue #1555, the follow-on #1117
+    deferred)."""
+    output = tmp_path / "cap_array_gf180mcu_layers.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 2},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _GF180_CAP_TOP_PLATE_LAYER in present
+    assert _GF180_CAP_BOTTOM_PLATE_LAYER in present
+    assert _GF180_CAP_TOP_VIA_LAYER in present
+    assert _GF180_CAP_TOP_VIA_METAL_LAYER in present
+    for mask in _GF180_CAP_TOP_PLATE_REQUIRES:
+        assert mask in present
+
+
+def test_cap_array_gf180mcu_top_plate_masks_cover_the_whole_plate(
+    tmp_path, both_pdk_root
+):
+    """`extract.py` narrows the recognised top plate to `FuseTop` ∩ every
+    `top_plate_requires` mask (`_capacitor_plate_regions`), so a mask that
+    only partially covered the plate would silently shrink the extracted
+    capacitance. Both masks must therefore be drawn exactly coincident with
+    the drawn `FuseTop` plate -- neither smaller (issue #1555)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "cap_array_gf180mcu_masks.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 2},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top_cell = layout.top_cell()
+
+    def region(pair):
+        return kdb.Region(top_cell.begin_shapes_rec(layout.layer(*pair)))
+
+    plate = region(_GF180_CAP_TOP_PLATE_LAYER)
+    assert not plate.is_empty()
+    for mask in _GF180_CAP_TOP_PLATE_REQUIRES:
+        assert (plate - region(mask)).is_empty(), (
+            f"mask {mask} does not fully cover the drawn FuseTop plate -- "
+            "the extracted capacitor would be narrower than the plate drawn"
         )
+
+
+def test_cap_array_gf180mcu_extracts_as_mim_capacitor_device(tmp_path, both_pdk_root):
+    """The end-to-end acceptance bar from issue #1555: `cap_array`'s own
+    gf180mcu output, run through (unmodified) `klt extract`, must be
+    recognised as the `"cap_mim_2f0_m4m5_noshield"` `CapacitorDevice`
+    (`klayout_tools.decks.gf180mcu.EXTRACTION_DECK.capacitors[0]`) -- proving
+    the generator's plate/via/mask layer numbers agree with the extractor's,
+    not just that the geometry looks plausible."""
+    gds_path = tmp_path / "cap_array_gf180mcu_extract.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 3},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), "gf180mcu")
+
+    assert report["device_counts"].get("cap_mim_2f0_m4m5_noshield", 0) == 3
+    # Each unit's two terminals must land on *different* nets: the top-plate
+    # `Via4` sits directly over the bottom plate in plan view, so a missing
+    # top-via overlap exclusion (issue #364) would short every capacitor out.
+    devices = [
+        d for d in report["devices"] if d["class"] == "cap_mim_2f0_m4m5_noshield"
+    ]
+    nets = set()
+    for device in devices:
+        terminals = set(device["nets"].values())
+        assert len(terminals) == 2, device["nets"]
+        nets |= terminals
+    # ...and no two units share a net either (three independent capacitors).
+    assert len(nets) == 6
+
+
+def test_cap_array_gf180mcu_extracted_capacitance_matches_plate_area(
+    tmp_path, both_pdk_root
+):
+    """Device-class recognition and *capacitance-value* correctness are two
+    different bars (issue #1555). gf180mcu's bottom plate is the DRM's
+    oversized "virtual bottom plate" (`FuseTop.sized(1.06um) &
+    Metal4.interacting(FuseTop)`), so an under-drawn `Metal4` would still
+    extract as the right device class while silently under-reporting `C`.
+    Each extracted unit's own `area_um2`/`perimeter_um`/`c_f` must therefore
+    match the *geometric* top plate exactly."""
+    plate_w_um, plate_h_um = 6.0, 4.0
+    gds_path = tmp_path / "cap_array_gf180mcu_c.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "plate_w_um": plate_w_um,
+                "plate_h_um": plate_h_um,
+                "num": 2,
+            },
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), "gf180mcu")
+
+    devices = [
+        d for d in report["devices"] if d["class"] == "cap_mim_2f0_m4m5_noshield"
+    ]
+    assert len(devices) == 2
+    area_um2 = plate_w_um * plate_h_um
+    perimeter_um = 2 * (plate_w_um + plate_h_um)
+    # `area_cap_f_um2`/`perim_cap_f_um` from that deck entry's own
+    # sm141064.ngspice-sourced coefficients (2fF/um^2 MiM default).
+    expected_c_f = area_um2 * 1.99e-15 + perimeter_um * 2.383e-16
+    for device in devices:
+        assert device["params"]["area_um2"] == pytest.approx(area_um2)
+        assert device["params"]["perimeter_um"] == pytest.approx(perimeter_um)
+        assert device["params"]["c_f"] == pytest.approx(expected_c_f)
+
+
+def test_cap_array_gf180mcu_top_plate_masks_are_load_bearing(tmp_path, both_pdk_root):
+    """Direct evidence that `CAP_MK`/`MIM_L_MK` are what make the drawn stack
+    recognisable (issue #1555's own "adding only the four-key table entry
+    would produce geometry that extracts as zero capacitors" risk): deleting
+    either mask from the generated layout drops the extracted device count to
+    zero, while the plate/via geometry is untouched."""
+    import klayout.db as kdb
+
+    gds_path = tmp_path / "cap_array_gf180mcu_masked.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 2},
+            "options": {"output": str(gds_path)},
+        }
+    )
+    assert (
+        run_extract(str(gds_path), "gf180mcu")["device_counts"].get(
+            "cap_mim_2f0_m4m5_noshield", 0
+        )
+        == 2
+    )
+
+    for mask in _GF180_CAP_TOP_PLATE_REQUIRES:
+        # Copied shape-by-shape into a flat layout rather than cleared in
+        # place: the generated GDS's own cell is a PCell proxy, which simply
+        # regenerates its shapes (mask included) on the next write.
+        source = kdb.Layout()
+        source.read(str(gds_path))
+        source_top = source.top_cell()
+        stripped_layout = kdb.Layout()
+        stripped_layout.dbu = source.dbu
+        stripped_top = stripped_layout.create_cell("cap_array")
+        for index in source.layer_indexes():
+            info = source.get_info(index)
+            if (info.layer, info.datatype) == mask:
+                continue
+            stripped_top.shapes(stripped_layout.layer(info)).insert(
+                kdb.Region(source_top.begin_shapes_rec(index))
+            )
+        stripped = tmp_path / f"cap_array_no_{mask[0]}_{mask[1]}.gds"
+        stripped_layout.write(str(stripped))
+        assert _layers_present(stripped) == _layers_present(gds_path) - {mask}
+
+        report = run_extract(str(stripped), "gf180mcu")
+
+        assert report["device_counts"].get("cap_mim_2f0_m4m5_noshield", 0) == 0
+
+
+def test_cap_array_gf180mcu_default_params_are_drc_clean(tmp_path, both_pdk_root):
+    """`cap_array`'s documented default `params` must pass `klt drc --deck
+    gf180mcu` clean (issue #1555) -- the DRC-clean-by-construction bar every
+    other `cap_array` family already meets. This is the bar the per-family
+    floors in `_PDK_CAP_GEOMETRY_MIN_UM` exist for: the generic bottom-plate
+    margin (0.5um) misses `mim.enclosing.fusetop.1` (0.6um), the generic
+    contact size (0.22um) misses `via4.width.1` (0.26um), and the default
+    `spacing_um` (0.5um) misses `mim.space.1` (1.2um)."""
+    gds_path = tmp_path / "cap_array_gf180mcu_drc.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_drc(str(gds_path), "gf180mcu")
+
+    assert report["status"] == "clean", report["violations"]
+
+
+def test_cap_array_gf180mcu_spacing_is_floored_to_the_mim_space_rule(
+    tmp_path, both_pdk_root
+):
+    """A `spacing_um` below gf180mcu's `mim.space.1` (MIMTM.1, 1.2um between
+    adjacent virtual bottom plates) is widened to it rather than drawn as
+    asked -- reported honestly as the effective `drc_hints.min_spacing_um`
+    plus a note, and DRC-clean as a result (issue #1555). sky130, which has
+    no such floor, still draws exactly what was requested."""
+    gf180_out = tmp_path / "cap_array_gf180mcu_spacing.gds"
+    gf180_report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"spacing_um": 0.5, "num": 3},
+            "options": {"output": str(gf180_out)},
+        }
+    )
+    assert gf180_report["drc_hints"]["min_spacing_um"] == 1.2
+    assert any("widened" in note for note in gf180_report["drc_hints"]["notes"]), (
+        gf180_report["drc_hints"]["notes"]
+    )
+    assert run_drc(str(gf180_out), "gf180mcu")["status"] == "clean"
+
+    sky130_report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"spacing_um": 0.5, "num": 3},
+            "options": {"output": str(tmp_path / "cap_array_sky130_spacing.gds")},
+        }
+    )
+    assert sky130_report["drc_hints"]["min_spacing_um"] == 0.5
+    assert not any("widened" in note for note in sky130_report["drc_hints"]["notes"])
+
+
+def test_cap_array_gf180mcu_geometry_floors_leave_sky130_unchanged(
+    tmp_path, both_pdk_root
+):
+    """The per-family floors are applied as `max(generic, floor)` and
+    gf180mcu is the only family that sets any of the three #1555 adds, so
+    sky130's own drawn geometry must be byte-for-byte what it was before --
+    the same guarantee #1455 made when it widened sg13g2's landing pad."""
+    unit = gen._cap_unit_layout(5.0, 5.0)
+    assert unit == gen._cap_unit_layout(
+        5.0,
+        5.0,
+        top_via_metal_min_w_um=0.0,
+        top_via_min_w_um=0.0,
+        bottom_plate_margin_min_um=0.0,
+    )
+    # The generic bottom plate is still `CAP_BOTTOM_PLATE_MARGIN_UM` past the
+    # plate on every side, and the generic via is still `CONTACT_SIZE_UM`.
+    assert unit["total_w_um"] == 5.0 + 2 * gen.CAP_BOTTOM_PLATE_MARGIN_UM
+    via_box = unit["boxes_um"]["top_via"][0]
+    assert via_box[2] - via_box[0] == pytest.approx(gen.CONTACT_SIZE_UM)
+    assert unit["top_pad_w_um"] == pytest.approx(
+        gen.CONTACT_SIZE_UM + 2 * gen.ENCLOSURE_MARGIN_UM
+    )
+
+
+def test_cap_array_hidden_geometry_params_are_not_request_facing():
+    """The per-family floors and requires-mask slots are harness-computed
+    from the resolved PDK family, never request params -- `klt gen --list`
+    must not advertise any of them (issue #1555; `cap_top_via_metal_min_w_um`
+    leaked into this list when #1455 landed)."""
+    report = list_generators()
+    cap_array = next(g for g in report["generators"] if g["name"] == "cap_array")
+    param_names = {p["name"] for p in cap_array["params"]}
+    assert param_names == {"plate_w_um", "plate_h_um", "spacing_um", "num"}
 
 
 def test_cap_array_extracts_as_capacitor_device(tmp_path, pdk_root):

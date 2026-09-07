@@ -85,7 +85,9 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: whether its ``well_layer`` param is a real, DRC-checked layer for the
 #: resolved PDK family. ``res_array``'s own per-flavour ``res_flavor_<i>_*``
 #: mask slots are appended below :data:`_PDK_RES_FLAVOR_LAYERS`, since how
-#: many of them exist is derived from that table.
+#: many of them exist is derived from that table; ``cap_array``'s own
+#: ``cap_top_requires_<i>_*`` slots are appended the same way below
+#: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
     "layer",
     "active_layer",
@@ -121,6 +123,18 @@ _HIDDEN_PARAMS = {
     "cap_top_via_present",
     "cap_top_via_metal_layer",
     "cap_top_via_metal_present",
+    # `cap_array`'s per-family geometry floors (see
+    # :data:`_PDK_CAP_GEOMETRY_MIN_UM`) -- harness-computed from the resolved
+    # PDK family exactly like `gate_pad_clearance_um`/
+    # `well_margin_resolved_um` above, never part of the request schema.
+    # `cap_top_via_metal_min_w_um` (issue #1455) was omitted from this set
+    # when it landed, so it leaked into `klt gen --list`'s `cap_array`
+    # params despite being absent from `docs/cli/gen.md`'s own param table;
+    # listing all four together here keeps the mechanism consistent (#1555).
+    "cap_bottom_plate_margin_min_um",
+    "cap_top_via_min_w_um",
+    "cap_top_via_metal_min_w_um",
+    "cap_min_spacing_um",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -678,6 +692,46 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # fidelity, not process-exact cross-section" approximation
         # `_bjt_unit_layout` already documents) is not a new citation.
         "salicide_block": (49, 0),  # SAB
+        # MiM-capacitor plate roles (issue #1555, the follow-on #1117
+        # explicitly deferred when it scoped `cap_array` to sky130 only), for
+        # `cap_array`: the *same* layer/datatype pairs
+        # `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.capacitors[0]`
+        # (`"cap_mim_2f0_m4m5_noshield"`, the official LVS deck's own device
+        # name) declares -- not a second, private map, transcribed from that
+        # entry's own `top_plate`/`bottom_plate`/`top_plate_via`/
+        # `top_plate_via_metal` fields (and the module docstring's "10.4 MIM
+        # Capacitor" note), so a `cap_array` cell's output round-trips
+        # through `klt extract --deck gf180mcu` to that exact device class.
+        # `cap_top_plate` is `FuseTop` (75/0), the purpose-drawn MiM
+        # top-plate conductor; `cap_bottom_plate` is `Metal4` (46/0), the
+        # 5LM stack's `topmin1_metal`. `cap_top_via`/`cap_top_via_metal` are
+        # `Via4`/`Metal5` (41/0, 81/0) -- `main.drc`'s own `top_via = via4` /
+        # `top_metal = metal5`, the via that lands directly on `FuseTop` and
+        # the metal it connects up to (the same `Metal5` this table's
+        # `"top_metal"` bond-pad role already names; `_cap_family_layers`
+        # reads its own dedicated key rather than reusing that role, so the
+        # two stay independently citable).
+        #
+        # Unlike sky130/sg13g2, this stack needs three things beyond the four
+        # plate/via roles, all of them per-family data rather than new
+        # geometry code (see the tables immediately below
+        # :data:`_PDK_ROLE_LAYERS`):
+        #
+        # - the top plate is only *recognised* where `CAP_MK` (117/5) and
+        #   `MIM_L_MK` (117/10) also cover it (that entry's
+        #   `top_plate_requires`) -- :data:`_PDK_CAP_TOP_PLATE_REQUIRES`;
+        # - the bottom plate is the DRM's oversized "virtual bottom plate",
+        #   so `Metal4` must extend at least `mim.enclosing.fusetop.1`
+        #   (MIMTM.3, 0.6um) past `FuseTop` -- further than the generic
+        #   `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) draws it;
+        # - `Via4`'s own minimum size (`via4.width.1`, 0.26um) is coarser
+        #   than the generic `CONTACT_SIZE_UM` (0.22um), and adjacent virtual
+        #   bottom plates must stay `mim.space.1` (MIMTM.1, 1.2um) apart --
+        #   both floors live in :data:`_PDK_CAP_GEOMETRY_MIN_UM`.
+        "cap_top_plate": (75, 0),  # FuseTop
+        "cap_bottom_plate": (46, 0),  # Metal4 (the 5LM stack's topmin1_metal)
+        "cap_top_via": (41, 0),  # Via4.drawing (FuseTop<->Metal5)
+        "cap_top_via_metal": (81, 0),  # Metal5.drawing
     },
     # sg13g2 (IHP-Open-PDK), issue #1448 -- the third family this table
     # supports, following #1266's own "Adding a third PDK family" guide
@@ -806,9 +860,10 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `topmetal1.width.1`'s 1.64um minimum (far coarser than sky130's
         # `met4.width.1` 0.3um) is wider than this generator's generic
         # `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` landing-pad default
-        # (0.42um) -- see `_PDK_CAP_TOP_VIA_METAL_MIN_W_UM` below, which
-        # widens the drawn pad (and its reported `C<i>_TOP` port width) for
-        # this family only, leaving sky130/gf180mcu byte-for-byte unchanged.
+        # (0.42um) -- see this family's own `cap_top_via_metal_min_w_um`
+        # entry in `_PDK_CAP_GEOMETRY_MIN_UM` below, which widens the drawn
+        # pad (and its reported `C<i>_TOP` port width) for this family only,
+        # leaving every other family byte-for-byte unchanged.
         "cap_top_plate": (36, 0),  # MIM.drawing
         "cap_bottom_plate": (67, 0),  # Metal5.drawing
         "cap_top_via": (129, 0),  # Vmim.drawing (MIM <-> TopMetal1)
@@ -978,30 +1033,158 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     },
 }
 
-#: Per-PDK-family minimum drawn width (um) for `cap_array`'s top-plate via
-#: landing pad (`cap_top_via_metal`), keyed the same way
-#: :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` keys its own per-family
-#: geometry override. A family absent from this table draws the generic
-#: `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42um) pad every other
-#: generator role uses (see :func:`_cap_top_via_metal_min_w_um`).
+#: Per-PDK-family geometry **floors** (um) for `cap_array`'s drawn MiM stack,
+#: keyed the same way :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` keys its own
+#: per-family geometry override. Every value is applied as a ``max(generic,
+#: floor)``, never as a replacement, so a family absent from this table (or
+#: absent a given key) draws exactly the generic geometry
+#: :func:`_cap_unit_layout` computes from `CAP_BOTTOM_PLATE_MARGIN_UM`/
+#: `CONTACT_SIZE_UM`/`ENCLOSURE_MARGIN_UM` -- sky130's output is
+#: byte-for-byte unchanged by anything here.
 #:
-#: - ``sg13g2``: 1.64um -- `topmetal1.width.1`
-#:   (`klayout_tools.decks.sg13g2`'s `5_22_topmetal1.drc` rule "TM1.a", "Min.
-#:   TopMetal1 width"), far coarser than sky130's `met4.width.1` (0.3um) or
-#:   gf180mcu's own metal-width rules the generic pad size was originally
-#:   sized against. Without this override, `cap_array`'s default-sized
-#:   landing pad would violate `klt drc --deck sg13g2` on every request.
-_PDK_CAP_TOP_VIA_METAL_MIN_W_UM: dict[str, float] = {
-    "sg13g2": 1.64,  # topmetal1.width.1 (TM1.a)
+#: Keys (all optional per family, ``0.0`` when absent -- see
+#: :func:`_cap_geometry_min_um`):
+#:
+#: - ``cap_bottom_plate_margin_min_um`` -- how far the bottom-plate conductor
+#:   must extend past the top plate on every side.
+#: - ``cap_top_via_min_w_um`` -- minimum drawn side of the top-plate via.
+#: - ``cap_top_via_metal_min_w_um`` -- minimum drawn width of the top-plate
+#:   via's landing pad (and of the escape stub/pad drawn on the same layer).
+#: - ``cap_min_spacing_um`` -- minimum spacing between adjacent unit cells,
+#:   floored under `params.spacing_um`.
+#:
+#: Per-family provenance:
+#:
+#: - ``sg13g2`` (issue #1455): ``cap_top_via_metal_min_w_um`` 1.64um --
+#:   `topmetal1.width.1` (`klayout_tools.decks.sg13g2`'s `5_22_topmetal1.drc`
+#:   rule "TM1.a", "Min. TopMetal1 width"), far coarser than sky130's
+#:   `met4.width.1` (0.3um) or gf180mcu's own metal-width rules the generic
+#:   pad size was originally sized against. Without this floor, `cap_array`'s
+#:   default-sized landing pad would violate `klt drc --deck sg13g2` on every
+#:   request.
+#: - ``gf180mcu`` (issue #1555): three floors its MiM stack's own DRM rules
+#:   impose, all transcribed from `klayout_tools.decks.gf180mcu`'s curated
+#:   `DECK` (never re-derived here):
+#:
+#:   - ``cap_bottom_plate_margin_min_um`` 1.06um -- `mim.enclosing.fusetop.1`
+#:     (DRM 10.4.2 "MIMTM.3", "Minimum MiM bottom plate overlap of Top
+#:     plate") demands at least 0.6um, which the generic
+#:     `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) does not satisfy. The value used
+#:     is the *larger* 1.06um -- `CapacitorDevice.bottom_plate_oversize_um`,
+#:     the DRM's own "virtual bottom plate" oversize (10.4.2 footnote 1) --
+#:     so the drawn `Metal4` is exactly the virtual bottom plate both
+#:     `klt extract` (`FuseTop.sized(1.06) & Metal4.interacting(FuseTop)`)
+#:     and this deck's `mim.space.1`/`mim.enclosing.via4.1` `DerivedLayer`
+#:     construct, rather than an arbitrary rectangle that merely clears
+#:     MIMTM.3. Nothing drawn falls outside the derived plate, and nothing
+#:     inside it is left undrawn.
+#:   - ``cap_top_via_min_w_um`` 0.26um -- `via4.width.1` (DRM 7.14 "Vn.1",
+#:     min Via4 size). The generic `CONTACT_SIZE_UM` (0.22um) was sized
+#:     against gf180mcu's `contact.width.1`, which is a *contact* rule; the
+#:     top-plate via here is a `Via4`, whose own minimum is coarser.
+#:   - ``cap_min_spacing_um`` 1.2um -- `mim.space.1` (DRM 10.4.2 "MIMTM.1",
+#:     minimum MiM bottom-plate spacing to other bottom-plate-or-routing
+#:     Metal4), measured between the *virtual* bottom plates of adjacent
+#:     units. `cap_array`'s own `spacing_um` default (0.5um) and the generic
+#:     `MIN_SAME_LAYER_SPACING_UM` advisory (0.4um) are both well under it,
+#:     so without this floor every multi-unit gf180mcu request would violate
+#:     `klt drc --deck gf180mcu`.
+_PDK_CAP_GEOMETRY_MIN_UM: dict[str, dict[str, float]] = {
+    "sg13g2": {
+        "cap_top_via_metal_min_w_um": 1.64,  # topmetal1.width.1 (TM1.a)
+    },
+    "gf180mcu": {
+        # mim.enclosing.fusetop.1 (MIMTM.3, 0.6um), drawn at the DRM's own
+        # virtual-bottom-plate oversize (CapacitorDevice
+        # .bottom_plate_oversize_um) instead:
+        "cap_bottom_plate_margin_min_um": 1.06,
+        "cap_top_via_min_w_um": 0.26,  # via4.width.1 (Vn.1)
+        "cap_min_spacing_um": 1.2,  # mim.space.1 (MIMTM.1)
+    },
+}
+
+#: Every geometry-floor key :data:`_PDK_CAP_GEOMETRY_MIN_UM` may carry --
+#: also the exact set of hidden PCell params
+#: :func:`_cap_array_layer_params` resolves and `_CapArrayPCell` declares, so
+#: the two can never drift apart.
+_CAP_GEOMETRY_MIN_KEYS = (
+    "cap_bottom_plate_margin_min_um",
+    "cap_top_via_min_w_um",
+    "cap_top_via_metal_min_w_um",
+    "cap_min_spacing_um",
+)
+
+
+def _cap_geometry_min_um(family: str) -> dict[str, float]:
+    """Every :data:`_CAP_GEOMETRY_MIN_KEYS` geometry floor (um) resolved for
+    ``family`` (see :data:`_PDK_CAP_GEOMETRY_MIN_UM`), with ``0.0`` -- "no
+    floor, draw the generic geometry" -- for each key that family does not
+    override."""
+    floors = _PDK_CAP_GEOMETRY_MIN_UM.get(family, {})
+    return {key: floors.get(key, 0.0) for key in _CAP_GEOMETRY_MIN_KEYS}
+
+
+#: Per-PDK-family extra mask layers that must *also* cover `cap_array`'s
+#: top plate for the drawn stack to be recognised as that family's MiM
+#: capacitor -- the capacitor sibling of :data:`_PDK_RES_FLAVOR_LAYERS`'s
+#: per-flavour ``requires`` masks, and the generator-side counterpart of
+#: :class:`~klayout_tools.decks.CapacitorDevice`'s own ``top_plate_requires``
+#: field (which ``extract.py`` applies as a mandatory AND: every listed layer
+#: must also cover the top plate for the device to be recognised).
+#:
+#: Like that table, these are the *same* layer/datatype pairs the curated
+#: *extraction* deck keys recognition off, never a second private map. A
+#: family absent from this table (sky130's `cap_mim`, sg13g2's `cap_cmim` --
+#: neither sets `top_plate_requires`) draws no extra mask at all, exactly as
+#: before issue #1555.
+#:
+#: - ``gf180mcu``: `CAP_MK` (117/5) + `MIM_L_MK` (117/10), from
+#:   `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.capacitors[0]`
+#:   (`cap_mim_2f0_m4m5_noshield`)'s own ``top_plate_requires``, mirroring the
+#:   PDK's own official derivation (`mimcap_extraction.lvs`'s ``fuse_cap =
+#:   fusetop.interacting(cap_mk).interacting(mim_l_mk)``). Without them a
+#:   drawn `FuseTop`/`Metal4` stack is geometrically plausible but extracts as
+#:   *zero* capacitors. That deck's `top_plate_excludes` (`efuse_mk`/
+#:   `plfuse`) need no counterpart here: this generator simply never draws
+#:   either layer, so the exclusion is satisfied by construction. No curated
+#:   *DRC* rule in that deck checks 117/5 or 117/10, so drawing them never
+#:   affects `klt drc --deck gf180mcu` status -- the same "the layer is real,
+#:   just uncheckable for its own purpose" situation :data:`_PDK_ROLE_LAYERS`'
+#:   own `res_mark`/`bjt_mark` entries document.
+_PDK_CAP_TOP_PLATE_REQUIRES: dict[str, tuple[tuple[int, int], ...]] = {
+    "gf180mcu": (
+        (117, 5),  # CAP_MK
+        (117, 10),  # MIM_L_MK
+    ),
+}
+
+#: The widest entry in :data:`_PDK_CAP_TOP_PLATE_REQUIRES` -- how many
+#: ``cap_top_requires_<i>_*`` slots ``_CapArrayPCell`` declares. Derived from
+#: the table rather than hard-coded (mirrors :data:`_MAX_RES_FLAVOR_LAYERS`),
+#: so a future family needing more masks needs no PCell change: today ``2``
+#: (gf180mcu's `CAP_MK`/`MIM_L_MK`).
+_MAX_CAP_TOP_PLATE_REQUIRES = max(
+    (len(layers) for layers in _PDK_CAP_TOP_PLATE_REQUIRES.values()), default=0
+)
+
+#: ``cap_array``'s top-plate requires-mask slots are generated from
+#: :data:`_MAX_CAP_TOP_PLATE_REQUIRES` (which depends on the table above), so
+#: -- exactly like ``res_array``'s own ``res_flavor_<i>_*`` slots -- they join
+#: :data:`_HIDDEN_PARAMS` here rather than being listed literally at its own
+#: definition.
+_HIDDEN_PARAMS |= {
+    f"cap_top_requires_{i}_{suffix}"
+    for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
+    for suffix in ("layer", "present")
 }
 
 
-def _cap_top_via_metal_min_w_um(family: str) -> float:
-    """Per-family minimum drawn width (um) for `cap_array`'s top-plate via
-    landing pad (see :data:`_PDK_CAP_TOP_VIA_METAL_MIN_W_UM`), or ``0.0``
-    for a family with no override (the generic
-    ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` pad applies unchanged)."""
-    return _PDK_CAP_TOP_VIA_METAL_MIN_W_UM.get(family, 0.0)
+def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
+    """The ordered extra mask layers that must cover ``family``'s MiM top
+    plate for it to be recognised (see
+    :data:`_PDK_CAP_TOP_PLATE_REQUIRES`), or an empty tuple for a family
+    whose curated deck sets no ``top_plate_requires``."""
+    return _PDK_CAP_TOP_PLATE_REQUIRES.get(family, ())
 
 
 #: Generators whose current geometry is not wired up for a family that
@@ -1645,23 +1828,33 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
 
     Raises :class:`GenError` for a family with no ``cap_top_plate``/
     ``cap_bottom_plate`` configured -- mirrors :func:`_res_flavor_layers`'s
-    own unsupported-value error. ``sky130`` (issue #1117) and ``sg13g2``
-    (issue #1455, once #1454 populated that family's
-    ``EXTRACTION_DECK.capacitors``) are wired up; gf180mcu's own MiM stack
-    needs an additional "virtual bottom plate" oversize derivation (see
+    own unsupported-value error. ``sky130`` (issue #1117), ``sg13g2`` (issue
+    #1455, once #1454 populated that family's ``EXTRACTION_DECK.capacitors``)
+    and ``gf180mcu`` (issue #1555, the follow-on #1117 deferred) are wired up
+    today; a family missing these keys is a documented "not implemented yet"
+    state, not a deck-authoring bug the way an unresolvable family name in
+    :func:`_pdk_family` is.
+
+    gf180mcu's stack -- alone among the three -- needs the DRM's oversized
+    "virtual bottom plate" (see
     :class:`klayout_tools.decks.CapacitorDevice`'s ``bottom_plate_oversize_um``
-    docstring) that is out of this generator's scope -- a family missing
-    these keys is a documented "not implemented yet" state, not a
-    deck-authoring bug the way an unresolvable family name in
-    :func:`_pdk_family` is."""
+    docstring) and two extra top-plate recognition masks; both are per-family
+    *data* rather than per-family code, in :data:`_PDK_CAP_GEOMETRY_MIN_UM`
+    and :data:`_PDK_CAP_TOP_PLATE_REQUIRES` respectively."""
     roles = _PDK_ROLE_LAYERS[family]
     top = roles.get("cap_top_plate")
     bottom = roles.get("cap_bottom_plate")
     if top is None or bottom is None:
+        supported = ", ".join(
+            name
+            for name, entry in _PDK_ROLE_LAYERS.items()
+            if entry.get("cap_top_plate") is not None
+            and entry.get("cap_bottom_plate") is not None
+        )
         raise GenError(
             f"generator 'cap_array': PDK family '{family}' has no MiM "
             "capacitor plate layers configured -- supported families: "
-            "sky130, sg13g2"
+            f"{supported}"
         )
     return {
         "cap_top_plate": top,
@@ -1679,24 +1872,33 @@ def _cap_array_layer_params(
     pad) -- the capacitor sibling of :func:`_resistor_layer_params`.
 
     ``cap_top_via_present``/``cap_top_via_metal_present`` follow the
-    ``res_mark_present`` precedent even though both families
-    :func:`_cap_family_layers` resolves today (sky130, sg13g2) always set
-    both -- a future family that declares plates but not a top-plate via can
-    still resolve cleanly, matching
+    ``res_mark_present`` precedent even though all three families
+    :func:`_cap_family_layers` resolves today (sky130, sg13g2, gf180mcu)
+    always set both -- a future family that declares plates but not a
+    top-plate via can still resolve cleanly, matching
     :class:`~klayout_tools.decks.CapacitorDevice`'s own ``top_plate_via``/
     ``top_plate_via_metal`` being optional fields.
 
-    Also resolves ``cap_top_via_metal_min_w_um`` (issue #1455, see
-    :func:`_cap_top_via_metal_min_w_um`) -- the per-family minimum drawn
-    width for the top-plate via landing pad, ``0.0`` for every family but
-    sg13g2."""
+    Also resolves, all of them harness-computed from the resolved family and
+    never request-facing (see :data:`_HIDDEN_PARAMS`):
+
+    - the :data:`_CAP_GEOMETRY_MIN_KEYS` geometry floors (issues #1455/#1555,
+      see :func:`_cap_geometry_min_um`) -- ``0.0`` each for a family that
+      overrides nothing, leaving the generic geometry untouched;
+    - :data:`_MAX_CAP_TOP_PLATE_REQUIRES` ``cap_top_requires_<i>_layer``/
+      ``cap_top_requires_<i>_present`` slot pairs (issue #1555), the extra
+      masks that must cover the top plate for this family's own MiM device
+      class to be recognised -- positionally handed to the PCell exactly like
+      ``res_array``'s own ``res_flavor_<i>_*`` slots, with a family needing
+      fewer masks leaving its tail slots absent."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
     top_via = layers["cap_top_via"]
     top_via_metal = layers["cap_top_via_metal"]
-    return {
+    top_requires = _cap_top_plate_requires(family)
+    resolved: dict[str, Any] = {
         "cap_top_plate_layer": kdb.LayerInfo(*layers["cap_top_plate"]),
         "cap_bottom_plate_layer": kdb.LayerInfo(*layers["cap_bottom_plate"]),
         "cap_top_via_layer": (
@@ -1709,8 +1911,15 @@ def _cap_array_layer_params(
             else kdb.LayerInfo(0, 0)
         ),
         "cap_top_via_metal_present": top_via_metal is not None,
-        "cap_top_via_metal_min_w_um": _cap_top_via_metal_min_w_um(family),
+        **_cap_geometry_min_um(family),
     }
+    for i in range(_MAX_CAP_TOP_PLATE_REQUIRES):
+        pair = top_requires[i] if i < len(top_requires) else None
+        resolved[f"cap_top_requires_{i}_layer"] = (
+            kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
+        )
+        resolved[f"cap_top_requires_{i}_present"] = pair is not None
+    return resolved
 
 
 def _ring_layer_params(
@@ -2698,7 +2907,11 @@ def _res_array_layout(
 
 
 def _cap_unit_layout(
-    plate_w_um: float, plate_h_um: float, top_via_metal_min_w_um: float = 0.0
+    plate_w_um: float,
+    plate_h_um: float,
+    top_via_metal_min_w_um: float = 0.0,
+    top_via_min_w_um: float = 0.0,
+    bottom_plate_margin_min_um: float = 0.0,
 ) -> dict[str, Any]:
     """One unit MiM capacitor cell: a ``plate_w_um`` x ``plate_h_um``
     top-plate mark (sky130's ``capm``) centred over a larger bottom-plate
@@ -2709,13 +2922,27 @@ def _cap_unit_layout(
     keep a via clear of, so the via lands in the middle of the plate rather
     than at either end).
 
-    ``top_via_metal_min_w_um`` (issue #1455, resolved per PDK family by
-    :func:`_cap_top_via_metal_min_w_um`) widens the drawn landing pad past
-    the generic ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` default when a
-    family's own top-plate-via-metal layer carries a coarser minimum-width
-    DRC rule than that default satisfies (sg13g2's ``TopMetal1``, 1.64um vs.
-    sky130's ``met4``, 0.3um) -- the default ``0.0`` leaves sky130/gf180mcu
-    byte-for-byte unchanged.
+    The three ``*_min_*`` arguments are per-PDK-family geometry *floors*
+    (issues #1455/#1555, resolved by :func:`_cap_geometry_min_um` from
+    :data:`_PDK_CAP_GEOMETRY_MIN_UM`), each applied as ``max(generic,
+    floor)`` so the default ``0.0`` leaves a family that overrides nothing --
+    sky130 -- byte-for-byte unchanged:
+
+    - ``top_via_metal_min_w_um`` widens the drawn landing pad (and the escape
+      stub/pad drawn on the same layer) past the generic
+      ``CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`` when a family's own
+      top-plate-via-metal layer carries a coarser minimum-width rule
+      (sg13g2's ``TopMetal1``, 1.64um vs. sky130's ``met4``, 0.3um).
+    - ``top_via_min_w_um`` widens the drawn via past ``CONTACT_SIZE_UM`` when
+      the family's top-plate via has a coarser minimum size than the
+      *contact* rule that constant was sized against (gf180mcu's ``Via4``,
+      0.26um).
+    - ``bottom_plate_margin_min_um`` widens the bottom plate past
+      ``CAP_BOTTOM_PLATE_MARGIN_UM`` for a family whose bottom plate is the
+      DRM's oversized "virtual bottom plate" rather than an ordinary
+      conductor (gf180mcu's ``Metal4``, drawn at
+      ``CapacitorDevice.bottom_plate_oversize_um`` = 1.06um so the drawn
+      shape *is* the derived virtual plate).
 
     On top of the via-enclosing landing pad centred on the plate (which sits
     directly over the bottom plate -- unroutable in isolation, issue #1494),
@@ -2728,13 +2955,19 @@ def _cap_unit_layout(
     ever crossing the bottom plate's footprint, unlike the centred
     ``top_xy`` (kept for reference/backward compatibility) that a further
     via step would silently short to the bottom plate."""
-    margin = CAP_BOTTOM_PLATE_MARGIN_UM
+    margin = max(CAP_BOTTOM_PLATE_MARGIN_UM, bottom_plate_margin_min_um)
     bottom_w = plate_w_um + 2 * margin
     bottom_h = plate_h_um + 2 * margin
     cx, cy = bottom_w / 2.0, bottom_h / 2.0
 
-    via_half = CONTACT_SIZE_UM / 2.0
-    pad_side = max(CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
+    via_side = max(CONTACT_SIZE_UM, top_via_min_w_um)
+    via_half = via_side / 2.0
+    # The landing pad keeps its `ENCLOSURE_MARGIN_UM` clearance around
+    # whatever via was actually drawn -- so a family whose via floor widened
+    # the cut (gf180mcu's `Via4`) widens the pad with it, rather than
+    # silently eating into the enclosure. Identical to the pre-#1555
+    # expression on every family whose via is the generic `CONTACT_SIZE_UM`.
+    pad_side = max(via_side + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
     pad_half = pad_side / 2.0
     top_via_box = _snap_square_box_um(cx, cy, via_half, _GRID_DBU_UM)
     top_via_metal_box = _snap_square_box_um(cx, cy, pad_half, _GRID_DBU_UM)
@@ -2764,6 +2997,12 @@ def _cap_unit_layout(
         "total_w_um": bottom_w,
         "total_h_um": bottom_h,
         "boxes_um": boxes,
+        # The landing-pad side actually used above -- read back by
+        # `_cap_array_describe` for its `C<i>_TOP` port width instead of that
+        # function recomputing the sizing rule, so the reported width can
+        # never drift from the drawn pad as more per-family floors land
+        # (issue #1555; the value is unchanged for sky130/sg13g2).
+        "top_pad_w_um": pad_side,
         # Bottom-plate port: the conductor's own local-left edge, mirroring
         # `_res_unit_layout`'s `a_xy`. Legacy top-plate centre: the
         # via/landing-pad centre -- the same point `top_via`/the original
@@ -2783,6 +3022,9 @@ def _cap_array_layout(
     spacing_um: float,
     num: int,
     top_via_metal_min_w_um: float = 0.0,
+    top_via_min_w_um: float = 0.0,
+    bottom_plate_margin_min_um: float = 0.0,
+    min_spacing_um: float = 0.0,
 ) -> dict[str, Any]:
     """``num`` matched unit MiM capacitors (see :func:`_cap_unit_layout`) in
     a single row, spaced ``spacing_um`` apart -- the capacitor sibling of
@@ -2792,12 +3034,35 @@ def _cap_array_layout(
     natural `res_array`-parity follow-ups, not correctness gaps -- a MiM
     cap array with only a handful of matched units rarely needs either).
 
-    ``top_via_metal_min_w_um`` is forwarded to :func:`_cap_unit_layout`
-    unchanged (issue #1455)."""
-    unit = _cap_unit_layout(plate_w_um, plate_h_um, top_via_metal_min_w_um)
-    pitch = unit["total_w_um"] + spacing_um
+    ``top_via_metal_min_w_um``/``top_via_min_w_um``/
+    ``bottom_plate_margin_min_um`` are forwarded to :func:`_cap_unit_layout`
+    unchanged (issues #1455/#1555).
+
+    ``min_spacing_um`` (issue #1555) is this PDK family's own floor under the
+    requested ``spacing_um``: gf180mcu's ``mim.space.1`` (MIMTM.1) requires
+    1.2um between the virtual bottom plates of adjacent MiM capacitors, far
+    more than this generator's 0.5um default or its generic
+    ``MIN_SAME_LAYER_SPACING_UM`` advisory, so a request that would otherwise
+    draw a guaranteed violation is widened instead of rejected (the effective
+    spacing is what :func:`_cap_array_describe` reports as
+    ``drc_hints.min_spacing_um``, alongside a note). ``0.0`` -- every family
+    but gf180mcu -- leaves the requested spacing exactly as asked."""
+    unit = _cap_unit_layout(
+        plate_w_um,
+        plate_h_um,
+        top_via_metal_min_w_um,
+        top_via_min_w_um,
+        bottom_plate_margin_min_um,
+    )
+    effective_spacing_um = max(spacing_um, min_spacing_um)
+    pitch = unit["total_w_um"] + effective_spacing_um
     cells = [{"idx": i, "x0_um": i * pitch, "y0_um": 0.0} for i in range(num)]
-    return {"unit": unit, "pitch_um": pitch, "cells": cells}
+    return {
+        "unit": unit,
+        "pitch_um": pitch,
+        "cells": cells,
+        "spacing_um": effective_spacing_um,
+    }
 
 
 #: The four sides a ring gap (``ring_gap_side``) can be cut on, and the
@@ -4668,6 +4933,54 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "size unchanged",
                 default=0.0,
             )
+            self.param(
+                "cap_top_via_min_w_um",
+                self.TypeDouble,
+                "Minimum drawn side (um) for the top-plate via itself on the "
+                "resolved PDK family (issue #1555) -- 0.0 leaves the generic "
+                "CONTACT_SIZE_UM cut unchanged",
+                default=0.0,
+            )
+            self.param(
+                "cap_bottom_plate_margin_min_um",
+                self.TypeDouble,
+                "Minimum distance (um) the bottom plate extends past the top "
+                "plate on the resolved PDK family (issue #1555) -- 0.0 "
+                "leaves the generic CAP_BOTTOM_PLATE_MARGIN_UM unchanged",
+                default=0.0,
+            )
+            self.param(
+                "cap_min_spacing_um",
+                self.TypeDouble,
+                "Minimum spacing (um) between adjacent unit capacitors on "
+                "the resolved PDK family (issue #1555) -- 0.0 draws exactly "
+                "the requested spacing_um",
+                default=0.0,
+            )
+            # One static slot per mask the *widest* family in
+            # `_PDK_CAP_TOP_PLATE_REQUIRES` needs (issue #1555), mirroring
+            # `_ResArrayPCell`'s own `res_flavor_<i>_*` slots: a KLayout
+            # PCell's parameter list is fixed at declaration time, so the
+            # count comes from `_MAX_CAP_TOP_PLATE_REQUIRES` rather than the
+            # resolved family, and a family needing fewer (or no) masks
+            # simply leaves its tail slots absent.
+            for i in range(_MAX_CAP_TOP_PLATE_REQUIRES):
+                self.param(
+                    f"cap_top_requires_{i}_layer",
+                    self.TypeLayer,
+                    f"Top-plate requires-mask #{i} (e.g. gf180mcu's CAP_MK "
+                    "or MIM_L_MK) drawn over the top plate for device "
+                    f"recognition (only used when cap_top_requires_{i}_present)",
+                    default=kdb.LayerInfo(0, 0),
+                )
+                self.param(
+                    f"cap_top_requires_{i}_present",
+                    self.TypeBoolean,
+                    f"Whether cap_top_requires_{i}_layer is a real layer the "
+                    "resolved PDK family's own MiM device class requires over "
+                    "the top plate",
+                    default=False,
+                )
 
         def display_text_impl(self) -> str:
             return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
@@ -4682,8 +4995,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.spacing_um,
                 self.num,
                 self.cap_top_via_metal_min_w_um,
+                self.cap_top_via_min_w_um,
+                self.cap_bottom_plate_margin_min_um,
+                self.cap_min_spacing_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
+            # Every extra mask this family's own MiM device class requires
+            # over the top plate (issue #1555) -- drawn exactly coincident
+            # with the top plate, since `extract.py` intersects them with it
+            # (`_capacitor_plate_regions`) and any shortfall would narrow the
+            # recognised plate. Empty on sky130/sg13g2, whose curated decks
+            # set no `top_plate_requires`; `CAP_MK`/`MIM_L_MK` on gf180mcu.
+            top_requires_layers = [
+                getattr(self, f"cap_top_requires_{i}_layer")
+                for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
+                if getattr(self, f"cap_top_requires_{i}_present")
+            ]
             for c in info["cells"]:
                 _insert_boxes(
                     self.cell,
@@ -4701,6 +5028,15 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     c["x0_um"],
                     c["y0_um"],
                 )
+                for layer_param in top_requires_layers:
+                    _insert_boxes(
+                        self.cell,
+                        self.layout.layer(layer_param),
+                        dbu,
+                        unit_boxes["top_plate"],
+                        c["x0_um"],
+                        c["y0_um"],
+                    )
                 if self.cap_top_via_present:
                     li_via = self.layout.layer(self.cap_top_via_layer)
                     _insert_boxes(
@@ -6564,13 +6900,17 @@ def _cap_array_describe(
 ) -> dict[str, Any]:
     family = _pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
-    top_via_metal_min_w_um = _cap_top_via_metal_min_w_um(family)
+    floors = _cap_geometry_min_um(family)
+    top_via_metal_min_w_um = floors["cap_top_via_metal_min_w_um"]
     info = _cap_array_layout(
         params["plate_w_um"],
         params["plate_h_um"],
         params["spacing_um"],
         params["num"],
         top_via_metal_min_w_um,
+        floors["cap_top_via_min_w_um"],
+        floors["cap_bottom_plate_margin_min_um"],
+        floors["cap_min_spacing_um"],
     )
     unit = info["unit"]
     bottom_pair = layers["cap_bottom_plate"]
@@ -6586,15 +6926,14 @@ def _cap_array_describe(
         "datatype": top_via_metal_pair[1],
         "name": None,
     }
-    # Mirrors `_cap_unit_layout`'s own pad sizing (issue #1455): the wider of
-    # the generic landing-pad default and this family's minimum drawn width
-    # (`0.0` for every family but sg13g2), so a reported `C<i>_TOP` port
-    # width always matches the shape actually drawn.
+    # Read straight off the landing pad `_cap_unit_layout` actually sized
+    # (issues #1455/#1555) rather than recomputing its sizing rule here, so a
+    # reported `C<i>_TOP` port width can never drift from the shape on the
+    # layout as more per-family floors (via size, landing-pad width) are
+    # added to :data:`_PDK_CAP_GEOMETRY_MIN_UM`.
     has_top_via_metal = layers["cap_top_via_metal"] is not None
     top_port_width_um = (
-        max(CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
-        if has_top_via_metal
-        else params["plate_w_um"]
+        unit["top_pad_w_um"] if has_top_via_metal else params["plate_w_um"]
     )
 
     notes = []
@@ -6655,7 +6994,20 @@ def _cap_array_describe(
             }
         )
 
-    if 0 <= params["spacing_um"] < MIN_SAME_LAYER_SPACING_UM:
+    # The effective spacing actually drawn -- the requested `spacing_um`,
+    # floored under this family's own minimum (issue #1555; only gf180mcu
+    # sets one today, so every other family's effective spacing is exactly
+    # what was asked for).
+    effective_spacing_um = info["spacing_um"]
+    if effective_spacing_um > params["spacing_um"]:
+        notes.append(
+            f"spacing_um was widened from {params['spacing_um']}um to "
+            f"{effective_spacing_um}um -- this PDK family's own minimum MiM "
+            "capacitor spacing rule (gf180mcu's mim.space.1, between the "
+            "oversized virtual bottom plates of adjacent units) binds above "
+            "the requested value"
+        )
+    elif 0 <= effective_spacing_um < MIN_SAME_LAYER_SPACING_UM:
         notes.append(
             "spacing_um is below the recommended "
             f"{MIN_SAME_LAYER_SPACING_UM}um margin -- may violate the target "
@@ -6670,7 +7022,7 @@ def _cap_array_describe(
         "device_count": params["num"],
         "ports": ports,
         "drc_hints": {
-            "min_spacing_um": params["spacing_um"],
+            "min_spacing_um": effective_spacing_um,
             "matched_group_id": f"cap_array:{params['num']}",
             "snapped_to_grid": snapped,
             "notes": notes,

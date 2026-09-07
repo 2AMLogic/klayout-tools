@@ -109,7 +109,7 @@ generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 | --------- | :------: | :--------: | :------: | :----------: |
 | `mos_array` | yes | yes | yes | yes |
 | `res_array` | yes | yes | yes | yes |
-| `cap_array` | yes | no | yes | no |
+| `cap_array` | yes | yes | yes | no |
 | `guard_ring` | yes | yes | yes | no |
 | `well_island` | yes | yes | no | no |
 | `diff_pair` | yes | yes | yes | no |
@@ -660,14 +660,17 @@ resolving to the identical `EXTBlock` + `Res` mask set.
 A row of `num` matched unit MiM (Metal-Insulator-Metal) capacitor cells, each
 a top-plate-metal-over-bottom-plate-metal stack (sky130's `capm` top-plate
 mark over a `met3` bottom-plate conductor; sg13g2's `MIM` top-plate mark over
-a `Metal5` bottom-plate conductor, issue #1455) with a top-plate via and
-local-metal landing pad (sky130's `via3`/`met4`; sg13g2's `Vmim`/`TopMetal1`),
+a `Metal5` bottom-plate conductor, issue #1455; gf180mcu's `FuseTop` top
+plate over a `Metal4` bottom plate, issue #1555) with a top-plate via and
+local-metal landing pad (sky130's `via3`/`met4`; sg13g2's `Vmim`/`TopMetal1`;
+gf180mcu's `Via4`/`Metal5`),
 plus a same-layer escape stub and second landing pad (issue #1494) reaching
 past the unit cell's own bounding box — the capacitor sibling of `res_array`,
 drawing the *same* layer/datatype numbers each family's own curated
 `EXTRACTION_DECK.capacitors[0]` entry declares
 (`klayout_tools.decks.sky130`'s `sky130_fd_pr__model__cap_mim`;
-`klayout_tools.decks.sg13g2`'s `cap_cmim`), never a second, private layer map.
+`klayout_tools.decks.sg13g2`'s `cap_cmim`; `klayout_tools.decks.gf180mcu`'s
+`cap_mim_2f0_m4m5_noshield`), never a second, private layer map.
 Each unit gets two ports: `C<i>_BOT` on the bottom-plate conductor's
 local-left edge, and `C<i>_TOP` on the escape pad, due north of the unit cell
 and clear of the bottom plate's own footprint — unlike the via/landing-pad
@@ -681,30 +684,66 @@ centre with a fixed `direction_deg` and a `drc_hints.notes` warning, mirroring
 `mos_array`'s interior gate-contact port.) `device_count` is `num`.
 `drc_hints.matched_group_id` is `"cap_array:<num>"`.
 
-`sky130` and `sg13g2` are supported — gf180mcu's own MiM stack (`FuseTop` top
-plate over an oversized "virtual" `Metal4` bottom plate, per
-`CapacitorDevice.bottom_plate_oversize_um`) needs an additional sizing
-derivation this generator does not yet implement; requesting `cap_array` for
+`sky130`, `sg13g2` and `gf180mcu` are supported; requesting `cap_array` for
 any other PDK family raises a clear application error (exit code `1`) rather
 than silently drawing sky130's layer numbers onto the wrong stack. On
 sg13g2, `TopMetal1`'s own coarse minimum-width DRC rule (1.64µm, vs.
 sky130's `met4` at 0.3µm) widens the drawn top-plate landing pad (and its
 reported `C<i>_TOP` port width) past the generic default for that family
-only — sky130/gf180mcu geometry is byte-for-byte unchanged. Neither `rows`
-folding (`res_array`'s own boustrophedon fold, issue #415) nor `dummy`
-padding elements are implemented yet either — both are natural `res_array`-
+only — sky130 geometry is byte-for-byte unchanged.
+
+**gf180mcu (issue #1555 — the follow-on #1117 deferred).** This family's MiM
+stack needs three things beyond the four plate/via layer roles, all of them
+per-family data in `gen.py`'s own tables rather than special-cased geometry
+code — and every one of them is a hard DRC or device-recognition
+requirement, not a style choice:
+
+- **Recognition masks.** `cap_mim_2f0_m4m5_noshield` declares
+  `top_plate_requires=(CAP_MK, MIM_L_MK)`, which `klt extract` applies as a
+  mandatory AND, so the generator draws both masks exactly coincident with
+  the drawn `FuseTop` plate (`_PDK_CAP_TOP_PLATE_REQUIRES`). Without them the
+  drawn stack is geometrically plausible but extracts as **zero** capacitors.
+- **The oversized "virtual bottom plate."** The DRM derives this family's
+  bottom plate as `FuseTop.sized(1.06µm) & Metal4.interacting(FuseTop)` (per
+  `CapacitorDevice.bottom_plate_oversize_um`), and requires `Metal4` to
+  overlap `FuseTop` by at least 0.6µm (`mim.enclosing.fusetop.1`, MIMTM.3) —
+  more than the generic 0.5µm bottom-plate margin draws. The generator draws
+  `Metal4` at the full 1.06µm oversize, so the drawn shape *is* the derived
+  virtual plate, and each extracted unit's `area_um2`/`c_f` matches its
+  geometric top-plate area exactly.
+- **Two coarser floors.** `Via4`'s own minimum size (0.26µm,
+  `via4.width.1`) exceeds the generic contact size (0.22µm), and adjacent
+  virtual bottom plates must stay 1.2µm apart (`mim.space.1`, MIMTM.1) —
+  far more than this generator's 0.5µm default `spacing_um`. A `spacing_um`
+  below that floor is **widened** to it rather than rejected: the effective
+  value is what `drc_hints.min_spacing_um` reports, alongside a
+  `drc_hints.notes` entry naming the widening. Both floors live in
+  `_PDK_CAP_GEOMETRY_MIN_UM` and apply as `max(generic, floor)`, so no other
+  family's geometry moves.
+
+`cap_array`'s default output on this family is DRC-clean against `klt drc
+--deck gf180mcu` and round-trips through `klt extract --deck gf180mcu` to the
+`"cap_mim_2f0_m4m5_noshield"` device class (pair with `--deck-option
+mim_cap=cap_mim_1f0_m4m5_noshield`/`...1f5...`, issue #1151, to read the same
+drawn geometry at one of the PDK's other two MiM densities).
+
+Neither `rows` folding (`res_array`'s own boustrophedon fold, issue #415) nor
+`dummy` padding elements are implemented yet — both are natural `res_array`-
 parity follow-ups, not correctness gaps for a first `cap_array` `num`-only
 generator. There is also no `flavor` param (`res_array`'s own #463) — sky130's
 second MiM stack (`capm2`/`met4`) and sg13g2's RF variant (`rfcmim`) are out
 of this generator's initial scope; every family's drawn output classifies as
-its base flavour (`sky130_fd_pr__model__cap_mim`/`cap_cmim`), never the
-RF/second-stack variant.
+its base flavour (`sky130_fd_pr__model__cap_mim`/`cap_cmim`/
+`cap_mim_2f0_m4m5_noshield`), never the RF/second-stack variant.
+gf180mcu's own three MiM *densities* need no `flavor` param at all — all
+three are the identical drawn geometry, selected at extraction time with
+`klt extract --deck-option mim_cap=…` (issue #1151).
 
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
 | `plate_w_um`   | double | `5.0`   | Unit top-plate width (µm). Must be `>= 0.42`. |
 | `plate_h_um`   | double | `5.0`   | Unit top-plate height (µm). Must be `>= 0.42`. |
-| `spacing_um`   | double | `0.5`   | Spacing between unit capacitors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). |
+| `spacing_um`   | double | `0.5`   | Spacing between unit capacitors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). On a family with its own MiM-capacitor spacing rule (gf180mcu's `mim.space.1`, 1.2µm) a smaller value is widened to that rule instead — see the gf180mcu note above; `drc_hints.min_spacing_um` always reports the spacing actually drawn. |
 | `num`          | int    | `4`     | Number of matched unit capacitors. Must be `>= 1`. |
 
 ### `guard_ring` (family 3: substrate/well tap ring)
