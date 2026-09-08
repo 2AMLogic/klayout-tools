@@ -16,6 +16,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: documented and worked-example recipe for drawing a unit MOS
+  device narrower than `mos_array`/`diff_pair`'s `UNIT_MIN_W_UM` contact-fit
+  floor (`0.42` µm) — issue #1574, the follow-on #322's own triage comment
+  flagged as the trigger for revisiting the hard floor. Rather than adding a
+  generator-level override, `docs/cli/gen.md` now documents the standard
+  "dog-bone terminal" hand-drawn recipe (widen only the source/drain pads to
+  the generator's own contact-fit pad size, keep an unwidened shoulder
+  between each pad and the gate edge, draw the gate-crossing channel at the
+  requested narrow width) directly beneath both generators' `w_um` rows, and
+  `examples/dogbone-terminal/` is a new runnable, checked-in worked example
+  (`generate.py`) that hand-draws exactly this device with `klayout.db` on
+  the same PDK role layers `mos_array` itself resolves to, places it beside
+  a real `klt gen mos_array` unit device in one cell, and verifies the
+  composed result `klt drc`-clean on both `sky130` and `gf180mcu`
+  (`example_sky130.gds`/`example_gf180mcu.gds` with their `.drc.json`
+  reports checked in). No generator behavior changes — `mos_array`/
+  `diff_pair` still reject `w_um` below `UNIT_MIN_W_UM` outright, exactly as
+  before.
 - **Added**: `klt gen cap_array` now supports the `gf180mcu` PDK family
   (issue #1555 — the follow-on issue #1117 explicitly deferred when it
   scoped this generator to sky130, and the gf180mcu counterpart of #1455's

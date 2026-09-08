@@ -10,6 +10,8 @@ the suite.
 
 import itertools
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -7070,3 +7072,67 @@ def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
     assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
         f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
     )
+
+
+# --------------------------------------------------------------------------- #
+# `examples/dogbone-terminal/` (issue #1574) -- the documented, hand-drawn
+# recipe for a unit device below `UNIT_MIN_W_UM`, checked in as a worked
+# example rather than a generator param. See that directory's README and
+# `docs/cli/gen.md`'s "Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by
+# hand".
+# --------------------------------------------------------------------------- #
+
+_DOGBONE_EXAMPLE_DIR = (
+    Path(__file__).resolve().parents[1] / "examples" / "dogbone-terminal"
+)
+
+
+@pytest.mark.parametrize("family", ["sky130", "gf180mcu"])
+def test_dogbone_terminal_example_matches_committed_json(family):
+    """Drift guard (mirrors `test_drc.py`'s
+    `test_example_gds_matches_committed_json`): `run_drc` on the checked-in
+    `examples/dogbone-terminal/example_<family>.gds` still produces exactly
+    the committed `example_<family>.drc.json` -- both `"status": "clean"`.
+
+    `provenance` is stripped from both sides before comparing, matching that
+    example's own `klt_version`/`klayout_version`-are-environment-dependent
+    convention (see `examples/dogbone-terminal/generate.py`'s docstring). If
+    this fails, either the DRC output shape or a curated deck's rules
+    changed -- regenerate with `examples/dogbone-terminal/generate.py`.
+    """
+    gds_path = _DOGBONE_EXAMPLE_DIR / f"example_{family}.gds"
+    json_path = _DOGBONE_EXAMPLE_DIR / f"example_{family}.drc.json"
+
+    expected = json.loads(json_path.read_text())
+    gds_rel_path = os.path.relpath(gds_path)
+    actual = run_drc(gds_rel_path, family)
+    actual.pop("provenance", None)
+
+    assert actual["status"] == "clean"
+    assert actual == expected
+
+
+def test_dogbone_terminal_example_channel_narrower_than_pads():
+    """The example's dog-bone unit device actually draws a narrower
+    gate-crossing channel than its source/drain pads -- i.e. it is a real
+    dog-bone shape, not a uniform-width strip that merely happens to pass
+    DRC. Verified via drawn area: a uniform strip spanning the polygon's own
+    bounding box would draw strictly more area than the dog-bone shape does.
+    """
+    import klayout.db as kdb
+
+    gds_path = _DOGBONE_EXAMPLE_DIR / "example_sky130.gds"
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    top = layout.top_cell()
+    active = layout.find_layer(65, 20)  # diff.drawing
+    region = kdb.Region(top.begin_shapes_rec(active))
+    region.merge()
+
+    # The dog-bone device is placed at the cell origin (x0 == 0); the
+    # composed ordinary-width `klt gen mos_array` device sits to its right
+    # (see `generate.py`'s `build_example`) -- this is what distinguishes
+    # the two drawn `active` polygons.
+    polygons = list(region.each_merged())
+    dogbone = next(p for p in polygons if p.bbox().left == 0)
+    assert dogbone.area() < dogbone.bbox().area()
