@@ -532,6 +532,31 @@ same-block self-net — no `gen-compose`-level change was needed for this
 ring around a *separately*-generated block is an explicit non-goal, tracked
 as a future follow-up if still needed).
 
+**Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
+`w_um` below `0.42` µm is rejected outright, with no override — that floor is
+about the *contact*, not the target PDK's own diffusion-width minimum (sky130
+`diff.width.1`: 0.15 µm; gf180mcu `comp.width.1`: 0.22 µm, both well below
+`0.42`): at a uniform width that narrow, the enclosure margin a legally-placed
+source/drain contact needs on both long edges no longer fits. A real
+full-custom device below that floor — e.g. a narrow-and-long always-on weak
+pull-up (`W` far under `0.42` µm, `L` tens of µm, kept narrow deliberately for
+its channel resistance, not as a matched-array element) — still needs to be
+drawn, just not through `mos_array`/`diff_pair` directly: draw it by hand as a
+standard **dog-bone terminal** and place it in the same cell as your ordinary-
+width `mos_array`/`diff_pair` output. Widen only the source/drain pads (to
+`CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM`, `0.42` µm — the exact pad size
+`mos_array`'s own unit devices use) far enough to legally enclose a contact,
+keep an unwidened "shoulder" of diffusion between each pad and the gate edge
+so the width step lands clear of it, and draw the gate-crossing diffusion
+segment itself — the channel a downstream `klt extract` reads `W` from — at
+the requested narrow width, unchanged. `examples/dogbone-terminal/generate.py`
+is a runnable, checked-in worked example of exactly this: it hand-draws one
+such device with `klayout.db` on the same `active`/`poly`/`contact`/`metal`
+role layers `mos_array` itself resolves to, places it beside a real `klt gen
+mos_array` unit device in one cell, and verifies the result `klt drc`-clean on
+both `sky130` and `gf180mcu` (`example_sky130.gds`/`example_gf180mcu.gds`,
+with their `.drc.json` reports checked in alongside).
+
 | `params` field | Type   | Default            | Description |
 | -------------- | ------ | ------------------ | ----------- |
 | `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
@@ -1066,6 +1091,10 @@ thin-oxide class) — either echoes the selection in
 below); any other value on any family (including every value on `sky130`,
 which cites no such marker layer) draws nothing and is reported via
 `drc_hints.notes`, never silently dropped.
+
+`w_um` below `0.42` µm is rejected the same way `mos_array`'s own `w_um` is —
+see `mos_array`'s "Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand"
+above for why, and the hand-drawn-recipe workaround.
 
 | `params` field    | Type   | Default | Description |
 | ------------------ | ------ | ------- | ----------- |
