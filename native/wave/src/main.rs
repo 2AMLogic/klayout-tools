@@ -109,7 +109,7 @@ fn print_build_text(resp: &build::Response) {
     if let Some(reset) = &resp.reset {
         let release = reset
             .release
-            .map(|r| format!("{}ns (cycle {})", r.time_ns, r.cycle.map_or(0, |c| c)))
+            .map(|r| format!("{}ns (cycle {})", r.time_ns, r.cycle.unwrap_or(0)))
             .unwrap_or_else(|| "not observed".to_string());
         println!(
             "reset: {} ({}, release {release})",
