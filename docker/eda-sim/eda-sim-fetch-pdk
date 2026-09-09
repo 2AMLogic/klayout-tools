@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# eda-sim-fetch-pdk -- fetch a PDK into the container AT RUNTIME, at the commit
+# pinned in the image's baked manifest (/opt/eda/pdk-versions.json).
+#
+# This helper is the whole reason the PDK tree is not baked into the image
+# (issue #509's hard rule): a single family is 7-9 GB, which would blow the
+# image's ~2 GB ceiling and weld PDK versions to image releases. The image
+# ships ciel plus the pins; the tree lands under $HOME/.ciel at first use.
+#
+# Mount a volume at ~/.ciel to make the fetch survive container restarts:
+#
+#   docker run --rm -v eda-pdk-cache:/home/loom/.ciel ghcr.io/2amlogic/eda-sim \
+#       eda-sim-fetch-pdk gf180mcu
+#
+# Usage:
+#   eda-sim-fetch-pdk [<family>] [options]
+#
+#   <family>            sky130 | gf180mcu (default: sky130). Must exist in the
+#                       manifest's pdks.families map.
+#   --commit <sha>      override the manifest's pinned open_pdks commit.
+#   --library <name>    fetch this library instead of the manifest's list
+#                       (repeatable). ciel always fetches `common` too.
+#   --all-libraries     fetch the family's full default library set (~5 GB
+#                       extra of IO/SRAM/alt-cell libraries the audited
+#                       harnesses do not use).
+#   --manifest <path>   manifest to read (default: $EDA_SIM_MANIFEST, else
+#                       /opt/eda/pdk-versions.json).
+#   --print-plan        print the resolved fetch plan as JSON and exit 0
+#                       without downloading anything.
+#   --print-path        print the variant directory the fetch would/did land
+#                       in, and exit 0.
+#
+# PDK_ROOT is deliberately left unset by the image, and this script refuses to
+# run with it set: ciel installs into ~/.ciel/<variant> when it is unset, which
+# is the search root every audited fleet harness already probes. Set it and
+# ciel installs somewhere those harnesses will not look.
+#
+# Exit codes: 0 success, 2 usage/missing manifest/unknown family,
+# 3 PDK_ROOT is set, other -> whatever ciel returned.
+
+set -euo pipefail
+
+MANIFEST="${EDA_SIM_MANIFEST:-/opt/eda/pdk-versions.json}"
+FAMILY=""
+COMMIT=""
+LIBRARIES=()
+ALL_LIBRARIES=false
+PRINT_PLAN=false
+PRINT_PATH=false
+
+log() { echo "[eda-sim-fetch-pdk] $*" >&2; }
+die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
+
+usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --commit) COMMIT="$2"; shift 2 ;;
+        --library) LIBRARIES+=("$2"); shift 2 ;;
+        --all-libraries) ALL_LIBRARIES=true; shift ;;
+        --manifest) MANIFEST="$2"; shift 2 ;;
+        --print-plan) PRINT_PLAN=true; shift ;;
+        --print-path) PRINT_PATH=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -*) die 2 "unknown option: $1 (see --help)" ;;
+        *)
+            [[ -z "$FAMILY" ]] || die 2 "unexpected extra argument: $1"
+            FAMILY="$1"; shift ;;
+    esac
+done
+
+FAMILY="${FAMILY:-sky130}"
+
+command -v jq >/dev/null 2>&1 || die 2 "'jq' is required on PATH (manifest parsing)"
+[[ -f "$MANIFEST" ]] || die 2 "manifest not found: ${MANIFEST}"
+
+jq -e --arg f "$FAMILY" '.pdks.families | has($f)' "$MANIFEST" >/dev/null 2>&1 \
+    || die 2 "unknown PDK family '${FAMILY}'; manifest knows: $(jq -r '.pdks.families | keys | join(", ")' "$MANIFEST")"
+
+VARIANT="$(jq -er --arg f "$FAMILY" '.pdks.families[$f].variant' "$MANIFEST")"
+if [[ -z "$COMMIT" ]]; then
+    COMMIT="$(jq -er --arg f "$FAMILY" '.pdks.families[$f].open_pdks_commit' "$MANIFEST")"
+fi
+if [[ ${#LIBRARIES[@]} -eq 0 && "$ALL_LIBRARIES" != true ]]; then
+    mapfile -t LIBRARIES < <(jq -er --arg f "$FAMILY" '.pdks.families[$f].libraries[]' "$MANIFEST")
+fi
+
+CIEL_ROOT="${HOME}/.ciel"
+VARIANT_DIR="${CIEL_ROOT}/${VARIANT}"
+
+if [[ "$PRINT_PATH" == true ]]; then
+    printf '%s\n' "$VARIANT_DIR"
+    exit 0
+fi
+
+if [[ "$PRINT_PLAN" == true ]]; then
+    # JSON out, per this repo's "JSON is the contract" rule: the plan is
+    # machine-readable so a caller can assert on the pin it is about to fetch.
+    libraries_json="$(printf '%s\n' ${LIBRARIES[@]+"${LIBRARIES[@]}"} \
+        | jq -R 'select(length > 0)' | jq -s .)"
+    jq -n \
+        --arg family "$FAMILY" \
+        --arg variant "$VARIANT" \
+        --arg commit "$COMMIT" \
+        --arg path "$VARIANT_DIR" \
+        --argjson all_libraries "$ALL_LIBRARIES" \
+        --argjson libraries "$libraries_json" \
+        '{schema_version: 1, family: $family, variant: $variant,
+          open_pdks_commit: $commit, libraries: $libraries,
+          all_libraries: $all_libraries, install_path: $path, baked: false}'
+    exit 0
+fi
+
+# Load-bearing, not defensive: ciel honours PDK_ROOT and would install there
+# instead of ~/.ciel/<variant>, where the fleet's harnesses look.
+if [[ -n "${PDK_ROOT:-}" ]]; then
+    die 3 "PDK_ROOT is set (${PDK_ROOT}); unset it -- ciel installs there instead of ${CIEL_ROOT}"
+fi
+
+command -v ciel >/dev/null 2>&1 || die 2 "'ciel' is not on PATH (is this the eda-sim image?)"
+
+# `-l` takes exactly one library per flag (`ciel enable --help`).
+LIB_FLAGS=()
+for lib in ${LIBRARIES[@]+"${LIBRARIES[@]}"}; do
+    LIB_FLAGS+=(-l "$lib")
+done
+
+log "fetching ${FAMILY} (${VARIANT}) @ ${COMMIT} into ${CIEL_ROOT}"
+log "libraries: ${LIBRARIES[*]:-<family default set>} (plus ciel's always-fetched 'common')"
+ciel enable --pdk-family "$FAMILY" ${LIB_FLAGS[@]+"${LIB_FLAGS[@]}"} "$COMMIT"
+
+[[ -d "$VARIANT_DIR" ]] || die 4 "ciel reported success but ${VARIANT_DIR} does not exist"
+log "ready: ${VARIANT_DIR}"
