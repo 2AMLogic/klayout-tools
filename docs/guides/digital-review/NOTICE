@@ -1,0 +1,64 @@
+Digital review guides — ported content, Apache-2.0
+====================================================
+
+The RTL/testbench review-discipline documents in this directory
+(`rtl-bugs.md`, `rtl-protocol-cdc.md`, `rtl-code-style.md`,
+`rtl-optimization.md`, `rtl-security.md`, `rtl-spec.md`, `tb-review.md`,
+`cocotb-tb-review.md`, `rtl-style-guide.md`, `tb-style-guide.md`,
+`cocotb-tb-style-guide.md`) are ported, with attribution, from:
+
+    Repository: https://github.com/boldaxolotl/booley
+    Source path: src/booley/data/refs/ (code_review/rtl/, code_review/testbench/,
+                 rtl_style_guide.md, tb_style_guide.md, cocotb_tb_style_guide.md)
+    License: Apache License, Version 2.0
+             https://github.com/boldaxolotl/booley/blob/main/LICENSE
+    Pinned commit: 1fdc706e2c54c3b9f80ee4a9472e2889a83d722f
+    Fetched: 2026-09-09
+
+    Copyright the boldaxolotl/booley contributors.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        https://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+Booley itself ships no `NOTICE` file at the pinned commit (checked: no
+`NOTICE` file exists at the repository root), so this file is the
+attribution mechanism for the port, per Apache-2.0 section 4. Each ported
+file also carries its own provenance header naming this file and the pinned
+commit, following the same convention this repo already established for
+`docs/guides/rtl-mutation-testing.md` (issue #1593) and
+`site/scripts/sky130-models.NOTICE.txt`.
+
+What changed in the port
+-------------------------
+
+Every ported file has been reworded from booley's own internal vocabulary
+(Booley "Flows", "Targets", "Tickets", and "Specialist" review-agent
+plumbing; the strict JSON findings schema a Booley Specialist prompt
+appends; `.core` flow-option file fields; `tests.toml` test-selection
+files) into this repository's own vocabulary: `klt` verbs and their
+request/response JSON fields, GitHub issues/PRs in place of tickets, plain
+PR review comments in place of a machine-parsed findings schema, and this
+repo's own digital canaries (`sky130-modexp`, `sky130-usb2-phy`,
+`gf180-usb2-phy`, `sky130-fpga`, `sky130-gcedram`) in place of Booley
+projects. The severity contract (CRITICAL/MAJOR/MINOR) and confidence
+levels (HIGH/MEDIUM/LOW), the per-concern checklist content, and the
+scope-boundary split between guides carry over unchanged — that is the
+substance being ported. See `docs/guides/digital-review/README.md` for
+where each guide applies and which `klt` verb (if any) supplies the tool
+evidence its checklist items ask a reviewer to check.
+
+This repository's own original content (everything outside this directory,
+and the klt-specific rewording within it) remains licensed under this
+repository's MIT license (`LICENSE` at the repository root) — Apache-2.0
+permits incorporating licensed material into a differently-licensed larger
+work as long as the incorporated portion's own license terms and notices
+are retained, which this file and the per-file provenance headers do.
