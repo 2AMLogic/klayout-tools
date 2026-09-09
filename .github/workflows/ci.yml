@@ -371,6 +371,48 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  native-wave:
+    name: Native engines (Rust) — waveform query
+    # `native/wave/` (issue #1599, Epic #1585 Phase 2a) is a plain `cargo
+    # build`/`cargo test` binary crate -- no `pyo3` extension -- following
+    # `native/techmap/`'s and `native/statime/`'s own precedent (see that
+    # job's comment above), so this job only needs the Rust-only checks
+    # (fmt/clippy/test). `cargo test` covers the full `klt wave query` op
+    # vocabulary end to end against the committed FST fixtures under
+    # `native/wave/tests/fixtures/` -- no external tool/PDK dependency, so
+    # unlike `native-techmap` there is no companion Python-side job here
+    # (this issue does not wire `klt-wave` into the Python `klt` CLI).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: native/wave
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo --version
+        run: cargo --version && rustc --version
+
+      - name: Cache cargo registry + build output
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/wave/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/wave/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        # GATES, like the ruff steps above -- do not add continue-on-error.
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
   site:
     name: site/ (tsc + vitest)
     # `site/` is a self-contained Vite + React project (site/README.md) --
