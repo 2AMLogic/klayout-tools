@@ -420,11 +420,12 @@ def _load_libraries(
     loaded: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
     for package in _pcell_packages_in(memo_key):
+        package_dir = os.path.join(memo_key, package)
         before = set(kdb.Library.library_names())
         try:
             module = importlib.import_module(package)
         except Exception as exc:  # noqa: BLE001 - reported, never re-raised
-            unavailable.append(_unavailable_entry(package, exc))
+            unavailable.append(_unavailable_entry(package, exc, package_dir))
             continue
 
         new_names = set(kdb.Library.library_names()) - before
@@ -432,7 +433,7 @@ def _load_libraries(
             failure = _instantiate_library_classes(module, package, kdb)
             new_names = set(kdb.Library.library_names()) - before
             if not new_names and failure is not None:
-                unavailable.append(_unavailable_entry(package, failure))
+                unavailable.append(_unavailable_entry(package, failure, package_dir))
                 continue
 
         for name in sorted(new_names):
@@ -479,16 +480,41 @@ def _instantiate_library_classes(
     return failure
 
 
-def _unavailable_entry(package: str, exc: BaseException) -> dict[str, Any]:
+def _unavailable_entry(
+    package: str, exc: BaseException, package_dir: str
+) -> dict[str, Any]:
     """Turn a vendor-package load failure into the JSON ``unavailable`` shape.
 
     A :class:`ModuleNotFoundError` names the module it could not find, which
     is the actionable half of the answer ("install ``cni``"), so it gets a
     dedicated ``missing_dependency`` field and a message shaped around it.
+
+    Before falling back to that generic message, ``package_dir`` (the
+    package's own directory under ``lib_dir``) is checked for the signature
+    of an **uninitialized git submodule** (issue #1610): a directory that
+    exists but is completely empty, or whose only content is an empty/
+    near-empty ``__init__.py``-shaped stub -- exactly what a submodule mount
+    point looks like when a PDK was installed from a release tarball that
+    does not carry submodule contents (verified against ihp-sg13g2's
+    ``sg13g2_pycell_lib``, whose PyCell code reaches a nested,
+    submodule-vendored ``pycell4klayout-api`` compat layer). When found, the
+    reason names that specific, actionable cause instead of a bare
+    import-failure message.
+
     Anything else keeps its own text -- never a traceback.
     """
     missing = getattr(exc, "name", None) if isinstance(exc, ImportError) else None
-    if missing:
+    empty_subdir = _find_empty_vendor_subdir(package_dir)
+    if empty_subdir is not None:
+        where = package if empty_subdir == "." else f"{package}/{empty_subdir}"
+        reason = (
+            f"vendored submodule directory '{where}' appears empty -- PDK "
+            "was likely installed from a release tarball that does not "
+            "include git submodule contents"
+        )
+        if missing:
+            reason += f" (import failed looking for module '{missing}')"
+    elif missing:
         reason = (
             f"requires Python module '{missing}', which is not importable in "
             "this environment"
@@ -496,6 +522,55 @@ def _unavailable_entry(package: str, exc: BaseException) -> dict[str, Any]:
     else:
         reason = f"{type(exc).__name__}: {exc}"
     return {"package": package, "missing_dependency": missing, "reason": reason}
+
+
+def _find_empty_vendor_subdir(package_dir: str) -> str | None:
+    """Return the path (relative to ``package_dir``) of the first empty or
+    near-empty subdirectory found under it, or ``None``.
+
+    An uninitialized git submodule checks out as a **completely empty**
+    directory -- git creates the mount point but never populates it without
+    `git submodule update --init`, and a release tarball export of the
+    superproject (no `.gitmodules` processing at all) leaves the same empty
+    mount point behind. A directory containing nothing but a stub
+    ``__init__.py`` (empty, or only blank lines/comments) is treated the
+    same way, since a vendored package's own top-level ``__init__.py`` is
+    sometimes real (not submoduled) while a *nested* subdirectory is the
+    actual submodule -- walked depth-first so that nested case is found
+    without misclassifying a real top-level ``__init__.py`` that merely
+    re-exports from it.
+
+    Never walks above ``package_dir`` itself -- only *within* the package
+    directory this loader was about to import -- so this is a narrow,
+    bounded probe, not a filesystem scan.
+    """
+    for root, dirs, files in os.walk(package_dir):
+        entries = dirs + files
+        if not entries or (not dirs and _only_empty_stub_files(root, files)):
+            relative = os.path.relpath(root, package_dir)
+            return "." if relative == "." else relative
+    return None
+
+
+def _only_empty_stub_files(directory: str, files: list[str]) -> bool:
+    """``True`` when every file in ``files`` (under ``directory``) is empty
+    or contains nothing but blank lines/``#`` comments -- the shape of a
+    placeholder ``__init__.py`` left behind by an uninitialized submodule
+    mount, as opposed to a real (if small) vendor module."""
+    for name in files:
+        try:
+            with open(
+                os.path.join(directory, name), encoding="utf-8", errors="ignore"
+            ) as handle:
+                content = handle.read()
+        except OSError:  # pragma: no cover - unreadable file, be conservative
+            return False
+        if any(
+            line.strip() and not line.strip().startswith("#")
+            for line in content.splitlines()
+        ):
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------- #

@@ -1,6 +1,6 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Eight subcommands, all emitting through the shared envelope helpers in
+Nine subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
@@ -17,9 +17,18 @@ Eight subcommands, all emitting through the shared envelope helpers in
 - ``em-limits`` — per-layer electromigration current-density limits declared
   across every tech LEF the variant ships, flagging cross-file disagreements
   (issue #1215).
+- ``pcell-check`` — attempt to import every KLayout PyCell package the
+  resolved variant ships under ``libs.tech/klayout/python/`` and report
+  which ones loaded vs. which are unavailable and why (issue #1610). This is
+  the same importability probe ``klt gen --list-pdk-pcells`` already
+  computes (issue #1535), surfaced here so a caller checking PDK health does
+  not need to invoke ``klt gen`` at all.
 
 The discovery logic itself lives in :mod:`klayout_tools.pdk`; these handlers
-only translate flags into library calls and render the result.
+only translate flags into library calls and render the result. ``pcell-check``
+is the one exception: it defers to :func:`klayout_tools.pdk_pcell.list_pdk_pcells`
+since the PyCell-import probe lives alongside the rest of that module's
+vendor-PCell machinery, not in :mod:`klayout_tools.pdk`.
 """
 
 import argparse
@@ -35,6 +44,7 @@ from ..pdk import (
     list_hard_macro_libraries,
     list_pdks,
 )
+from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from .output import emit_error, emit_success, render_table
 
 #: Stable order for rendering the ``assets`` object in text output.
@@ -53,6 +63,16 @@ EXIT_NO_COMPATIBLE_LIBRARY = 3
 #: EXIT_NO_COMPATIBLE_LIBRARY) so a CI gate can tell "no PDK" apart from "a
 #: PDK, but a broken one" apart from "a supply mismatch". See docs/cli/pdk.md.
 EXIT_BROKEN_SYMLINKS = 4
+
+#: `klt pdk pcell-check` exit code when one or more of the resolved variant's
+#: KLayout PyCell packages could not be imported here (issue #1610) -- ran
+#: fine, resolved an install, but part of its PCell library is unusable in
+#: this environment. Distinct from every other `klt pdk` exit code so a CI
+#: gate can tell this apart from "no PDK"/"a broken symlink"/"a supply
+#: mismatch". A PDK shipping no PyCell library at all (`pcell_lib_dir` is
+#: `null`) is still exit `0` -- there is nothing to import, so nothing is
+#: unavailable. See docs/cli/pdk.md.
+EXIT_PCELL_UNAVAILABLE = 5
 
 
 def run_find(args: argparse.Namespace) -> int:
@@ -136,6 +156,19 @@ def run_em_limits(args: argparse.Namespace) -> int:
         return emit_error("pdk em-limits", str(exc), args.format)
 
     emit_success(report, args.format, _print_em_limits_text)
+    return 0
+
+
+def run_pcell_check(args: argparse.Namespace) -> int:
+    try:
+        report = list_pdk_pcells(variant=args.pdk, root=args.pdk_root)
+    except PdkPCellError as exc:
+        return emit_error("pdk pcell-check", str(exc), args.format)
+
+    emit_success(report, args.format, _print_pcell_check_text)
+
+    if report["unavailable"]:
+        return EXIT_PCELL_UNAVAILABLE
     return 0
 
 
@@ -303,6 +336,37 @@ def _print_em_limits_text(report: dict) -> None:
             "disagreements (conservative value shown above): "
             + ", ".join(report["disagreements"])
         )
+
+
+def _print_pcell_check_text(report: dict) -> None:
+    pdk = report["pdk"]
+    print(f"pdk: {pdk['variant']} ({pdk['version'] or '-'})")
+    print(f"pcell_lib_dir: {report['pcell_lib_dir'] or '-'}")
+
+    libraries = report["libraries"]
+    unavailable = report["unavailable"]
+
+    if not libraries and not unavailable:
+        print("no PDK PCell packages found")
+        return
+
+    if libraries:
+        print()
+        print("importable:")
+        for library in libraries:
+            print(
+                f"  {library['library']}  (package: {library['package']}, "
+                f"{len(library['cells'])} cell(s))"
+            )
+
+    if unavailable:
+        print()
+        print("unavailable:")
+        for item in unavailable:
+            missing = item["missing_dependency"]
+            suffix = f"  [missing: {missing}]" if missing else ""
+            print(f"  {item['package']}{suffix}")
+            print(f"    {item['reason']}")
 
 
 def _print_corners_text(report: dict) -> None:

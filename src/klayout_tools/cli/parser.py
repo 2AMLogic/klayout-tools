@@ -2967,7 +2967,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits`` subcommands.
+    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check`` subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
     verb (kicad-tools convention for multi-operation capabilities), so it uses
@@ -3159,6 +3159,34 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(em_limits_parser)
     em_limits_parser.set_defaults(func=pdk_cmd.run_em_limits)
+
+    pcell_check_parser = pdk_sub.add_parser(
+        "pcell-check",
+        help="probe whether the resolved variant's own KLayout PCell "
+        "packages are importable here",
+        description=(
+            "Attempt to import every KLayout PyCell package the resolved "
+            "variant ships under `libs.tech/klayout/python/` and report "
+            "which ones loaded (with their library/cell names) vs. which "
+            "are unavailable here and why -- naming the missing Python "
+            "module for a genuinely missing third-party dependency, and "
+            "flagging a vendored git-submodule directory that checked out "
+            "empty (a release tarball install that omits submodule "
+            "contents) with a dedicated, actionable reason. This is the "
+            "same probe `klt gen --list-pdk-pcells` already computes "
+            "(issue #1535), surfaced here so a caller checking PDK health "
+            "does not need to invoke `klt gen` at all. A PDK shipping no "
+            "PyCell library at all is still exit 0 -- there is nothing to "
+            "import."
+        ),
+    )
+    _add_pdk_args(
+        pcell_check_parser,
+        pdk_help="variant to resolve (e.g. ihp-sg13g2); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(pcell_check_parser)
+    pcell_check_parser.set_defaults(func=pdk_cmd.run_pcell_check)
 
 
 def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
