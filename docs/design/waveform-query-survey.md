@@ -568,11 +568,13 @@ compiled code entirely.
 Two honest, somewhat counter-intuitive findings from this table, both
 worth carrying into Phase 2 rather than smoothing over:
 
-1. **`pyvcd`'s pure-Python tokenizer is roughly 230× slower than
-   `pywellen`'s compiled VCD reader** on the exact same file (17.8 s vs.
-   ~0.16 s for a full scan). This is the single clearest number in this
-   survey for "why native-Rust-first, not Python-first" (already decided
-   in `waveform-query-contract-spike.md` §13 on different grounds —
+1. **`pyvcd`'s pure-Python tokenizer is roughly 114× slower than
+   `pywellen`'s compiled VCD reader** on the exact same file, comparing
+   the two full-file workloads in the table above: 17.809 s to tokenize
+   every token vs. 0.1560 s to load all 52 signals. This is the single
+   clearest number in this survey for "why native-Rust-first, not
+   Python-first" (already decided in
+   `waveform-query-contract-spike.md` §13 on different grounds —
    latency budget, no pure-Python precedent — this measurement is
    additional, concrete evidence for the same conclusion, not a new
    argument).
@@ -630,7 +632,7 @@ cross-check... not a second production code path").
   (matching the already-decided port target) over `wellen` for the native
   crate, and §8.2 recommends `pywellen` over `pyvcd` for the narrow
   cross-check role `waveform-query-contract-spike.md` §14 already scoped,
-  backed by the measured 230× pure-Python slowdown and the FST/VCD
+  backed by the measured 114× pure-Python slowdown and the FST/VCD
   access-pattern nuance in point 2 above.
 
 ## Related
