@@ -240,6 +240,29 @@ an error (a shared spec can list layers a particular fixture doesn't use);
 but every named `conductor` must end up with **at least one** matched shape,
 or the command fails with a clear "matched no shapes" error.
 
+### Deriving a `stackup` from an installed PDK
+
+The `stackup[]` entries above are hand-authored today, but they do not have
+to be invented: [`klt pdk stackup`](pdk.md#klt-pdk-stackup) (issue #1609)
+emits the same per-conductor shape — `gds_layer`, `z0_um`, `z1_um`,
+`conductivity_S_per_m` — derived from a resolved PDK install, so a real
+sky130 MoM-cap spec can be generated instead of transcribed:
+
+```bash
+klt pdk stackup --pdk sky130A --format json \
+  | jq '{background_permittivity: (.dielectrics[] | select(.name == "ild3") | .permittivity),
+         stackup: [.conductors[] | select(.kind == "conductor")
+                   | {layer: .gds_layer, conductor: .name,
+                      z0_um, z1_um, conductivity_S_per_m}]}'
+```
+
+Note that `klt mom`'s MVP solves a **single homogeneous medium**
+(`background_permittivity`), so a stackup whose slabs carry different ε_r
+values cannot be represented faithfully; picking the ε_r of the slab the
+conductors of interest sit in is the right approximation for now. sky130
+reports the same 3.9 for every interlayer dielectric, so this is not a
+practical limitation there.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for

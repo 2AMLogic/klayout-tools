@@ -369,9 +369,22 @@ epics gated on this spike's findings.
   bridges extruded sky130 solids to geode-fem's/openEMS's mesh formats, and
   how acute-angle polygon corners and thin dielectric slivers are handled
   without manual cleanup.
-- Where the sky130 stackup table itself lives as a `klt`-owned asset —
+- ~~Where the sky130 stackup table itself lives as a `klt`-owned asset —
   bundled data file, derived from open_pdks files at resolve time, or a new
-  `klt pdk stackup` subcommand alongside `klt pdk find`/`list`/`env`.
+  `klt pdk stackup` subcommand alongside `klt pdk find`/`list`/`env`.~~
+  **Settled** (issue #1609): `klt pdk stackup`, backed by a hybrid of both
+  other options rather than either alone. Real tech LEFs were verified to
+  carry thickness and sheet/per-cut resistance but **no elevation and no
+  dielectric constant at all**, so the z axis and ε_r come from a curated
+  per-family table checked in at `src/klayout_tools/pdk_stackup.py` (each
+  entry citing the open, non-NDA'd open_pdks file it was transcribed from),
+  while thickness and resistance are derived from the resolved install's own
+  tech LEFs at run time, per parasitic corner. See
+  [`docs/cli/pdk.md`](../cli/pdk.md)'s "`klt pdk stackup`" section for the
+  emitted schema — its `conductors[]` entries carry `z0_um`/`z1_um`/
+  `conductivity_S_per_m`/`gds_layer`, which is exactly the per-conductor
+  shape both this document's proposed `klt em` request and the existing
+  `klt mom` spec file consume.
 - Port definition convention: pin/net-name based (anchored to Phase 4's
   eventual LVS-extracted nets) versus raw geometric ports defined
   independently of extraction — the request shape above assumes the former

@@ -8,6 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
+from .. import pdk_stackup
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
@@ -3021,7 +3022,8 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check`` subcommands.
+    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check``/``stackup``
+    subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
     verb (kicad-tools convention for multi-operation capabilities), so it uses
@@ -3241,6 +3243,58 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(pcell_check_parser)
     pcell_check_parser.set_defaults(func=pdk_cmd.run_pcell_check)
+
+    stackup_parser = pdk_sub.add_parser(
+        "stackup",
+        help="report the variant's process cross-section (elevation, "
+        "thickness, permittivity, conductivity)",
+        description=(
+            "Emit the resolved variant's process stack-up as structured "
+            "data -- the z-axis information a GDSII/OASIS file does not "
+            "carry and an external E&M/field solver requires. Per "
+            "conductor/via layer: elevation (z0/z1), thickness, sheet "
+            "resistance (or per-cut resistance) and derived conductivity; "
+            "per dielectric: z-range and relative permittivity. Thickness "
+            "and resistance are parsed live out of the install's own tech "
+            "LEFs at the selected parasitic corner; elevation and "
+            "permittivity are not stated in any tech LEF and come from a "
+            "curated per-family table whose published, open sources each "
+            "entry cites (see `curated_source.references`). A variant whose "
+            "family has no curated entry is an explicit error, not a "
+            "partial stack."
+        ),
+    )
+    _add_pdk_args(
+        stackup_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    stackup_parser.add_argument(
+        "--corner",
+        default=pdk_stackup.DEFAULT_CORNER,
+        help=(
+            "tech-LEF parasitic corner to read thickness/resistance from "
+            f"(default: {pdk_stackup.DEFAULT_CORNER}); real sky130 installs "
+            "ship min/nom/max and their sheet resistances differ by corner"
+        ),
+    )
+    stackup_parser.add_argument(
+        "--thickness",
+        choices=pdk_stackup.THICKNESS_SOURCES,
+        default=pdk_stackup.DEFAULT_THICKNESS_SOURCE,
+        help=(
+            "which published film thickness drives the emitted geometry "
+            f"(default: {pdk_stackup.DEFAULT_THICKNESS_SOURCE}). `curated` "
+            "keeps the stack gap-free (each level's z1 is exactly the next "
+            "level's z0); `tech-lef` uses the install's own declared "
+            "THICKNESS, which in real sky130 installs is ~10 nm thinner and "
+            "so leaves each metal short of the via above it. Both readings "
+            "are reported either way (curated_thickness_um / "
+            "lef_thickness_um)"
+        ),
+    )
+    _add_format_arg(stackup_parser)
+    stackup_parser.set_defaults(func=pdk_cmd.run_stackup)
 
 
 def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:

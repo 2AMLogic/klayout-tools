@@ -104,6 +104,15 @@ _THICKNESS_RE = re.compile(r"\bTHICKNESS\s+([0-9.eE+-]+)\s*;")
 _DCCURRENTDENSITY_RE = re.compile(r"\bDCCURRENTDENSITY\s+AVERAGE\s+([0-9.eE+-]+)\s*;")
 _ACCURRENTDENSITY_RE = re.compile(r"\bACCURRENTDENSITY\s+AVERAGE\s+([0-9.eE+-]+)\s*;")
 _RESISTANCE_RPERSQ_RE = re.compile(r"\bRESISTANCE\s+RPERSQ\s+([0-9.eE+-]+)\s*;")
+#: A ``CUT`` layer's per-cut resistance -- LEF's ``RESISTANCE <ohms> ;``
+#: statement, which (unlike a ``ROUTING`` layer's ``RESISTANCE RPERSQ
+#: <ohms-per-square> ;``) states a flat ohms-per-via figure. Real sky130 tech
+#: LEFs declare it on every via layer (e.g. ``LAYER via`` ``RESISTANCE 4.50
+#: ;``); it is the only resistance a via layer states, so `klt pdk stackup`
+#: (issue #1609) has nothing else to report a via's electrical model from.
+#: The two spellings cannot be confused: this pattern requires a *number*
+#: immediately after ``RESISTANCE``, which the ``RPERSQ`` form never has.
+_RESISTANCE_OHMS_RE = re.compile(r"\bRESISTANCE\s+([0-9.eE+-]+)\s*;")
 
 _USE_RE = re.compile(r"\bUSE\s+(\S+)\s*;")
 
@@ -168,6 +177,7 @@ def _parse_layer(name: str, body: str) -> dict[str, Any]:
     dc_current_density_match = _DCCURRENTDENSITY_RE.search(body)
     ac_current_density_match = _ACCURRENTDENSITY_RE.search(body)
     resistance_match = _RESISTANCE_RPERSQ_RE.search(body)
+    resistance_ohms_match = _RESISTANCE_OHMS_RE.search(body)
 
     pitch_x = _float(pitch_match.group(1)) if pitch_match else None
     pitch_y = (
@@ -211,6 +221,13 @@ def _parse_layer(name: str, body: str) -> dict[str, Any]:
         ),
         "resistance_rpersq": (
             _float(resistance_match.group(1)) if resistance_match else None
+        ),
+        # Ohms per cut, ``CUT`` layers only (see ``_RESISTANCE_OHMS_RE``).
+        # ``None`` on a ``ROUTING`` layer, which states ``RESISTANCE RPERSQ``
+        # instead -- the two are never both present on one layer in any
+        # shipped install this reader has been verified against.
+        "resistance_ohms": (
+            _float(resistance_ohms_match.group(1)) if resistance_ohms_match else None
         ),
     }
 
@@ -269,7 +286,7 @@ def parse_lef_header(text: str) -> dict[str, Any]:
                 {"name", "type", "direction", "width_um",
                  "pitch_x_um", "pitch_y_um", "offset_x_um", "offset_y_um",
                  "thickness_um", "dc_current_density", "ac_current_density",
-                 "resistance_rpersq"},
+                 "resistance_rpersq", "resistance_ohms"},
                 ...
             ],
             "macros": [
