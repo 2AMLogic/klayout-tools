@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from klayout_tools.functional_verification import (
     load_request,
     parse_results_xml,
     run_functional_verification,
+    run_functional_verification_with_mutations,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -2708,3 +2710,616 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
 # (guards against a future refactor silently making them a no-op).
 def test_functional_verification_uses_stdlib_subprocess():
     assert fv.subprocess is subprocess
+
+
+# --------------------------------------------------------------------------- #
+# `--mutations` (issue #1592): proposals document loading/validation
+# --------------------------------------------------------------------------- #
+
+
+def _mutation_proposals_doc(**overrides) -> dict:
+    doc = {
+        "schema": "klt.functional_verification.mutation_proposals/1",
+        "scope": ["dut.v"],
+        "proposals": [
+            {
+                "index": 1,
+                "category": "constant",
+                "file": "dut.v",
+                "line": 2,
+                "original_code": "wire a = 1;",
+                "mutated_code": "wire a = 9;",
+                "detectability_argument": "flips a to an out-of-range value",
+            },
+            {
+                "index": 2,
+                "category": "constant",
+                "file": "dut.v",
+                "line": 3,
+                "original_code": "wire b = 2;",
+                "mutated_code": "wire b = 8;",
+            },
+        ],
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _write_proposals(path: Path, doc: dict) -> str:
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return str(path)
+
+
+def test_load_mutation_proposals_missing_file(tmp_path):
+    with pytest.raises(FunctionalVerificationError, match="file not found"):
+        fv.load_mutation_proposals(str(tmp_path / "nope.json"))
+
+
+def test_load_mutation_proposals_invalid_json(tmp_path):
+    path = _write(tmp_path / "proposals.json", "{not json")
+    with pytest.raises(FunctionalVerificationError, match="not valid JSON"):
+        fv.load_mutation_proposals(path)
+
+
+def test_load_mutation_proposals_not_an_object(tmp_path):
+    path = _write(tmp_path / "proposals.json", "[1, 2]")
+    with pytest.raises(FunctionalVerificationError, match="must contain a JSON object"):
+        fv.load_mutation_proposals(path)
+
+
+@pytest.mark.parametrize("field", ["scope", "proposals"])
+def test_load_mutation_proposals_missing_required_field(tmp_path, field):
+    doc = _mutation_proposals_doc()
+    del doc[field]
+    path = _write_proposals(tmp_path / "proposals.json", doc)
+    with pytest.raises(
+        FunctionalVerificationError, match=f"missing required field: {field}"
+    ):
+        fv.load_mutation_proposals(path)
+
+
+def test_load_mutation_proposals_scope_must_be_string_array(tmp_path):
+    path = _write_proposals(
+        tmp_path / "proposals.json", _mutation_proposals_doc(scope=[1])
+    )
+    with pytest.raises(FunctionalVerificationError, match="array of non-empty strings"):
+        fv.load_mutation_proposals(path)
+
+
+def test_load_mutation_proposals_empty_scope_is_allowed_with_no_proposals(tmp_path):
+    """An explicitly empty proposal set is not an error (spike "Exit codes"
+    table) -- `scope` may be empty right along with it."""
+    path = _write_proposals(
+        tmp_path / "proposals.json", _mutation_proposals_doc(scope=[], proposals=[])
+    )
+    scope, proposals = fv.load_mutation_proposals(path)
+    assert scope == []
+    assert proposals == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("index", "1"),
+        ("category", ""),
+        ("file", ""),
+        ("line", "2"),
+        ("original_code", 5),
+        ("mutated_code", None),
+    ],
+)
+def test_load_mutation_proposals_field_type_errors(tmp_path, field, value):
+    doc = _mutation_proposals_doc()
+    doc["proposals"][0][field] = value
+    path = _write_proposals(tmp_path / "proposals.json", doc)
+    with pytest.raises(FunctionalVerificationError):
+        fv.load_mutation_proposals(path)
+
+
+def test_load_mutation_proposals_detectability_argument_optional(tmp_path):
+    # `_mutation_proposals_doc()`'s own proposals[1] already omits
+    # `detectability_argument` -- confirming that is what this test exists
+    # to check.
+    doc = _mutation_proposals_doc()
+    path = _write_proposals(tmp_path / "proposals.json", doc)
+    _, proposals = fv.load_mutation_proposals(path)
+    assert proposals[1].detectability_argument is None
+    assert proposals[0].detectability_argument == "flips a to an out-of-range value"
+
+
+def test_validate_proposal_indices_rejects_duplicates():
+    proposals = [
+        fv._ProposalRecord(1, "c", "f.v", 1, "a", "b"),
+        fv._ProposalRecord(1, "c", "f.v", 2, "c", "d"),
+    ]
+    with pytest.raises(FunctionalVerificationError, match="unique and positive"):
+        fv._validate_proposal_indices(proposals)
+
+
+def test_validate_proposal_indices_rejects_non_positive():
+    proposals = [fv._ProposalRecord(0, "c", "f.v", 1, "a", "b")]
+    with pytest.raises(FunctionalVerificationError, match="unique and positive"):
+        fv._validate_proposal_indices(proposals)
+
+
+def test_validate_mutation_scope_rejects_entry_outside_sources():
+    with pytest.raises(FunctionalVerificationError, match="subset of request.sources"):
+        fv._validate_mutation_scope(["dut.v", "extra.v"], ["dut.v"])
+
+
+def test_validate_mutation_scope_accepts_subset():
+    fv._validate_mutation_scope(["dut.v"], ["dut.v", "cells.v"])  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# `--mutations` end to end: stubbed cocotb runner, real byte-exact mutation
+# --------------------------------------------------------------------------- #
+
+
+_MUTATION_DUT_RTL = "module dut();\n  wire a = 1;\n  wire b = 2;\nendmodule\n"
+
+_MUTATION_BASELINE_XML = """\
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1" />
+    <testcase name="test_a" time="0.01" sim_time_ns="10.0" />
+    <testcase name="test_b" time="0.01" sim_time_ns="10.0" />
+  </testsuite>
+</testsuites>
+"""
+
+_MUTATION_FAILING_BASELINE_XML = """\
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1" />
+    <testcase name="test_a" time="0.01" sim_time_ns="10.0">
+      <failure error_type="AssertionError" error_msg="broken before any mutation" />
+    </testcase>
+    <testcase name="test_b" time="0.01" sim_time_ns="10.0" />
+  </testsuite>
+</testsuites>
+"""
+
+_MUTATION_KILLED_XML = """\
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1" />
+    <testcase name="test_a" time="0.01" sim_time_ns="10.0">
+      <failure error_type="AssertionError" error_msg="a mutated" />
+    </testcase>
+    <testcase name="test_b" time="0.01" sim_time_ns="10.0" />
+  </testsuite>
+</testsuites>
+"""
+
+
+class _ContentAwareFakeRunner:
+    """A `Runner` test double whose `test()` verdict depends on whichever
+    source bytes are actually on disk at build time -- so a test can drive
+    real, byte-exact `plan.applied(index)` mutation and observe the fake
+    "simulator" reacting to it, the same way a real one would react to a
+    real behavioral change."""
+
+    def __init__(self, baseline_xml: str, killed_xml: str, killed_marker: str):
+        self.baseline_xml = baseline_xml
+        self.killed_xml = killed_xml
+        self.killed_marker = killed_marker
+        self._last_sources_text = ""
+
+    def build(self, **kwargs):
+        Path(kwargs["build_dir"]).mkdir(parents=True, exist_ok=True)
+        text = ""
+        for source in kwargs["sources"]:
+            try:
+                text += Path(source).read_text(encoding="utf-8")
+            except OSError:
+                pass
+        self._last_sources_text = text
+        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
+            handle.write("fake build log\n")
+
+    def test(self, **kwargs):
+        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
+            handle.write("fake test log\n")
+        xml = (
+            self.killed_xml
+            if self.killed_marker in self._last_sources_text
+            else self.baseline_xml
+        )
+        with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
+            handle.write(xml)
+
+
+class _HangingMutantRunner:
+    """`test()` blocks forever for a *mutant* build (`test_dir` under
+    `.../mutants/...`) and returns a clean baseline verdict otherwise --
+    isolates the `klt`-level subprocess timeout path from the baseline's
+    own (never-hanging) run."""
+
+    def __init__(self, baseline_xml: str):
+        self.baseline_xml = baseline_xml
+
+    def build(self, **kwargs):
+        Path(kwargs["build_dir"]).mkdir(parents=True, exist_ok=True)
+        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
+            handle.write("fake build log\n")
+
+    def test(self, **kwargs):
+        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
+            handle.write("fake test log\n")
+        if "mutants" in kwargs["test_dir"].replace(os.sep, "/"):
+            time.sleep(999)
+            return  # pragma: no cover - unreachable, killed first
+        with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
+            handle.write(self.baseline_xml)
+
+
+def _stub_mutation_runner(monkeypatch, runner, *, engines=("icarus", "verilator")):
+    def get_runner(name):
+        assert name in engines
+        return runner
+
+    monkeypatch.setattr(
+        fv, "_import_runner", lambda: types.SimpleNamespace(get_runner=get_runner)
+    )
+    monkeypatch.setattr(fv, "_engine_version", lambda engine: "13.0")
+    monkeypatch.setattr(fv, "_cocotb_version", lambda: "2.0.1")
+    return runner
+
+
+def _write_mutation_request(tmp_path: Path) -> str:
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    return _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            sources=["dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+        ),
+    )
+
+
+def _write_mutation_proposals(tmp_path: Path, *, indices=(1, 2)) -> str:
+    doc = _mutation_proposals_doc()
+    doc["proposals"] = [p for p in doc["proposals"] if p["index"] in indices]
+    return _write_proposals(tmp_path / "proposals.json", doc)
+
+
+def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+
+    assert report["status"] == "pass"
+    mutation_testing = report["mutation_testing"]
+    assert mutation_testing["schema_version"] == 1
+    assert mutation_testing["proposal_count"] == 2
+    assert mutation_testing["valid_count"] == 2
+    assert mutation_testing["rejected_count"] == 0
+    assert mutation_testing["killed_count"] == 1
+    assert mutation_testing["survived_count"] == 1
+    assert mutation_testing["mutation_score"] == 0.5
+
+    by_index = {entry["index"]: entry for entry in mutation_testing["results"]}
+    assert by_index[1]["status"] == "killed"
+    assert by_index[1]["first_killing_test"] == "test_a"
+    assert by_index[1]["category"] == "constant"
+    assert by_index[1]["file"] == "dut.v"
+    assert by_index[1]["line"] == 2
+    assert os.path.isfile(by_index[1]["log_path"])
+
+    assert by_index[2]["status"] == "survived"
+    assert by_index[2]["first_killing_test"] is None
+    assert os.path.isfile(by_index[2]["log_path"])
+
+    # The mutation seam always restores the pristine source, even though two
+    # sequential mutants were applied to the same file (issue #1592's own
+    # "no cross-contamination between sequential per-proposal builds" edge
+    # case from the issue's own Test Plan).
+    assert (tmp_path / "dut.v").read_text(encoding="utf-8") == _MUTATION_DUT_RTL
+
+
+def test_mutations_baseline_must_pass_gate(tmp_path, monkeypatch):
+    """spike section 3d: a failing baseline aborts before any proposal
+    runs, exit 1 -- never a `mutation_score` computed against a
+    already-broken baseline."""
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(monkeypatch, _FakeRunner(_MUTATION_FAILING_BASELINE_XML))
+
+    with pytest.raises(FunctionalVerificationError, match="baseline run itself failed"):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+    # No isolated per-mutant build should ever have started.
+    mutants_dir = tmp_path / ".klt" / "functional-verification" / "mutants"
+    assert not mutants_dir.exists() or not any(mutants_dir.iterdir())
+
+
+def test_mutations_timeout_is_classified_killed(tmp_path, monkeypatch):
+    """The `klt`-level per-mutant subprocess timeout (issue #1592) --
+    independent of whatever the testbench itself does -- fires and the
+    variant is classified `"killed"` per booley's own ported rule ("a
+    timed-out mutant counts as detected because the mutation can wedge the
+    design"), and the whole run still completes in bounded wall time despite
+    the fake simulator subprocess blocking forever."""
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path, indices=(1,))
+    _stub_mutation_runner(monkeypatch, _HangingMutantRunner(_MUTATION_BASELINE_XML))
+    monkeypatch.setattr(fv, "DEFAULT_MUTATION_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(fv, "_MUTATION_KILL_GRACE_S", 1.0)
+
+    started = time.monotonic()
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 30, "a wedged mutant must not hang the whole --mutations run"
+    mutation_testing = report["mutation_testing"]
+    assert mutation_testing["results"][0]["status"] == "killed"
+    assert mutation_testing["results"][0]["first_killing_test"] is None
+    assert mutation_testing["killed_count"] == 1
+    assert mutation_testing["survived_count"] == 0
+
+
+def test_mutations_out_of_scope_file_is_rejected_not_a_whole_document_failure(
+    tmp_path, monkeypatch
+):
+    """`proposals[].file` outside `scope` is that one proposal's own
+    `"rejected"` result (spike §3b's "one bad entry doesn't poison the
+    batch"), not a whole-document exit 1 -- distinct from `scope` itself
+    being outside `request.sources`, which *is* whole-document (see
+    `test_mutations_scope_outside_request_sources_is_exit_1`)."""
+    request_path = _write_mutation_request(tmp_path)
+    doc = _mutation_proposals_doc()
+    doc["scope"] = ["dut.v", "other.v"]
+    doc["proposals"][1]["file"] = "other.v"
+    doc["proposals"][1]["line"] = 1
+    doc["proposals"][1]["original_code"] = "anything"
+    doc["proposals"][1]["mutated_code"] = "anything else"
+    # `other.v` is not in `request.sources`, only in this document's own
+    # `scope` -- a request author error the request-level check does not
+    # catch (only `scope ⊆ request.sources` is checked at that level).
+    proposals_path = _write_proposals(tmp_path / "proposals.json", doc)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    with pytest.raises(FunctionalVerificationError, match="subset of request.sources"):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+
+def test_mutations_anchor_mismatch_is_rejected(tmp_path, monkeypatch):
+    """`original_code` that does not byte-exact-match the live source (issue
+    #1592's own Test Plan edge case) is a per-proposal `"rejected"` result,
+    not a whole-document failure -- the run still completes and classifies
+    the other, valid proposal normally."""
+    request_path = _write_mutation_request(tmp_path)
+    doc = _mutation_proposals_doc()
+    doc["proposals"][1]["original_code"] = "wire b = does not exist anywhere;"
+    proposals_path = _write_proposals(tmp_path / "proposals.json", doc)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+
+    mutation_testing = report["mutation_testing"]
+    assert mutation_testing["proposal_count"] == 2
+    assert mutation_testing["rejected_count"] == 1
+    assert mutation_testing["valid_count"] == 1
+    by_index = {entry["index"]: entry for entry in mutation_testing["results"]}
+    assert by_index[2]["status"] == "rejected"
+    assert "not found" in by_index[2]["reason"]
+    assert by_index[2]["log_path"] is None
+    assert by_index[1]["status"] == "killed"
+
+
+def test_mutations_every_proposal_rejected_is_exit_1(tmp_path, monkeypatch):
+    """spike "Exit codes": `valid_count == 0` with `proposal_count > 0` is
+    exit 1 -- a mutation run that tested nothing must never look like a
+    vacuous `mutation_score: null` success."""
+    request_path = _write_mutation_request(tmp_path)
+    doc = _mutation_proposals_doc()
+    doc["proposals"][0]["original_code"] = "does not exist"
+    doc["proposals"][1]["original_code"] = "also does not exist"
+    proposals_path = _write_proposals(tmp_path / "proposals.json", doc)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError, match="every mutation proposal was rejected"
+    ):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+
+def test_mutations_scope_outside_request_sources_is_exit_1(tmp_path, monkeypatch):
+    request_path = _write_mutation_request(tmp_path)
+    doc = _mutation_proposals_doc()
+    doc["scope"] = ["dut.v", "unrelated.v"]
+    proposals_path = _write_proposals(tmp_path / "proposals.json", doc)
+    # No runner stubbed at all: reaching cocotb import would be a distinct
+    # failure mode (proves the scope check runs before the baseline).
+    with pytest.raises(FunctionalVerificationError, match="subset of request.sources"):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+
+def test_mutations_coverage_option_is_rejected(tmp_path, monkeypatch):
+    """`options.coverage` + `--mutations` is explicitly out of scope (issue
+    #1592's own "Explicitly out of scope" list) -- a clean request error,
+    never a silent N+1-multiplied coverage run."""
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            engine="verilator",
+            sources=["dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+            options={"coverage": True},
+        ),
+    )
+    proposals_path = _write_mutation_proposals(tmp_path)
+
+    with pytest.raises(FunctionalVerificationError, match="options.coverage"):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+
+def test_mutations_sdf_option_is_rejected(tmp_path, monkeypatch):
+    """`options.sdf` + `--mutations` is also rejected (not explicitly listed
+    in the issue's own "Out of scope", but the same reasoning applies): the
+    SDF top-level-port workaround swaps in a generated wrapper module this
+    path's isolated per-mutant build does not replicate."""
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    _write(tmp_path / "route.sdf", '(DELAYFILE (SDFVERSION "3.0"))\n')
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            sources=["dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+            options={"coverage": False, "sdf": {"file": "route.sdf"}},
+        ),
+    )
+    proposals_path = _write_mutation_proposals(tmp_path)
+
+    with pytest.raises(FunctionalVerificationError, match="options.sdf"):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+
+def test_mutations_empty_proposal_set_is_a_clean_pass(tmp_path, monkeypatch):
+    """An explicitly empty proposal set is not an error (spike "Exit codes"
+    table) -- `mutation_score` is `null` (`valid_count == 0`), but the run
+    itself succeeds."""
+    request_path = _write_mutation_request(tmp_path)
+    doc = _mutation_proposals_doc(scope=[], proposals=[])
+    proposals_path = _write_proposals(tmp_path / "proposals.json", doc)
+    _stub_mutation_runner(monkeypatch, _FakeRunner(_MUTATION_BASELINE_XML))
+
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+
+    mutation_testing = report["mutation_testing"]
+    assert mutation_testing["proposal_count"] == 0
+    assert mutation_testing["valid_count"] == 0
+    assert mutation_testing["mutation_score"] is None
+    assert mutation_testing["results"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `--mutations` CLI wiring
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_mutations_survived_exits_three(tmp_path, monkeypatch, capsys):
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    exit_code = main(
+        [
+            "functional-verification",
+            request_path,
+            "--mutations",
+            proposals_path,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 3
+    out = json.loads(capsys.readouterr().out)
+    assert out["mutation_testing"]["survived_count"] == 1
+
+
+def test_cli_mutations_all_killed_exits_zero(tmp_path, monkeypatch, capsys):
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path, indices=(1,))
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    exit_code = main(
+        [
+            "functional-verification",
+            request_path,
+            "--mutations",
+            proposals_path,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["mutation_testing"]["survived_count"] == 0
+    assert out["mutation_testing"]["killed_count"] == 1
+
+
+def test_cli_mutations_baseline_failure_exits_one(tmp_path, monkeypatch, capsys):
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(monkeypatch, _FakeRunner(_MUTATION_FAILING_BASELINE_XML))
+
+    exit_code = main(
+        [
+            "functional-verification",
+            request_path,
+            "--mutations",
+            proposals_path,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    err = json.loads(captured.err)
+    assert "baseline run itself failed" in err["error"]["message"]
+
+
+def test_cli_mutations_text_format_includes_summary(tmp_path, monkeypatch, capsys):
+    request_path = _write_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    exit_code = main(
+        ["functional-verification", request_path, "--mutations", proposals_path]
+    )
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "mutations:" in out
+    assert "[killed] #1" in out
+    assert "[survived] #2" in out

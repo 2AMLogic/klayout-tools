@@ -1,0 +1,24 @@
+{
+  "schema": "klt.functional_verification.mutation_proposals/1",
+  "scope": ["modexp.v"],
+  "proposals": [
+    {
+      "index": 1,
+      "category": "boundary",
+      "file": "modexp.v",
+      "line": 75,
+      "original_code": "mm_sum >= mm_m2",
+      "mutated_code": "mm_sum > mm_m2",
+      "detectability_argument": "Skips the first modular subtraction exactly when the pre-reduction sum equals 2*mod, leaving the partial product unreduced by one modulus -- reachable (e.g. mm_p == mod_r - 1 with mm_add == 2) but rare under randomized stimulus."
+    },
+    {
+      "index": 2,
+      "category": "bit_select",
+      "file": "modexp.v",
+      "line": 134,
+      "original_code": "exp_r[WIDTH-1]",
+      "mutated_code": "exp_r[WIDTH-2]",
+      "detectability_argument": "Reads the wrong exponent bit when deciding whether to follow a square with a multiply-by-base, corrupting the result for essentially every exponent whose top two bits differ."
+    }
+  ]
+}

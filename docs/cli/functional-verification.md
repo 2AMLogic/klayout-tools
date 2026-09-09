@@ -9,7 +9,7 @@ flow"), and the hard gate behind
 [`klt eval`](eval.md)'s `valid` field (issue #387).
 
 ```
-klt functional-verification <request> [--format text|json]
+klt functional-verification <request> [--mutations <proposals>] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -37,6 +37,9 @@ args.
   against the **request file's own directory**; for the stdin/inline forms,
   against the current working directory.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `--mutations <proposals>` — optional, issue #1592: run mutation testing
+  against the same `<request>` — see "Mutation testing: `--mutations`"
+  below.
 
 ## Engines
 
@@ -367,6 +370,234 @@ diagnostic class was filtered out of the transcript scan (delays *and* every
 timing check applied cleanly). Both keys are additive, alongside the existing
 `file`/`corner`/`annotated`.
 
+## Mutation testing: `--mutations`
+
+```
+klt functional-verification <request> --mutations <proposals> [--format text|json]
+```
+
+Coverage measures what a testbench *executed*, not what it would *notice
+broken* — "all tests pass, coverage 95%" is exactly the verdict a weak
+testbench paired with a correct design produces, and also the verdict a weak
+testbench paired with a buggy design produces. `--mutations` closes that gap:
+it applies a set of hand- or agent-authored single-point RTL mutations, one
+at a time, to an isolated build+test of the same design, and reports how many
+the testbench actually caught. This is
+[docs/design/mutation-testing-spike.md](../design/mutation-testing-spike.md)'s
+own contract (issue #1592), ported from
+[`boldaxolotl/booley`](https://github.com/boldaxolotl/booley)'s (Apache-2.0)
+byte-exact mutation seam
+(`src/klayout_tools/_vendor/mutation_variants.py`) — no HDL parsing anywhere
+in this path; a proposal is a byte-exact source slice and its replacement,
+validated against the pristine source, never inferred from Verilog structure.
+
+**`<request>` is reused unchanged.** The exact same request document already
+used for an ordinary pass/fail run — see "Request" below — is the request
+used for a mutation run. No new field is added to that schema; `--mutations`
+is purely additive at the CLI-flag layer.
+
+**`options.coverage` and `options.sdf` cannot currently be combined with
+`--mutations`** — both are exit 1. Coverage-per-mutant multiplies an
+already-per-invocation-fixed Verilator cost by `N+1` (see "Engines" above)
+in a way that has not been measured yet; `options.sdf` swaps in a generated
+wrapper module as the elaboration root (see "SDF back-annotation" above)
+that this path's isolated per-mutant build does not replicate, so running it
+would silently produce a mutant build that diverges from the baseline's own.
+Neither is designed yet — see
+[docs/design/mutation-testing-spike.md](../design/mutation-testing-spike.md),
+"Open questions".
+
+### The baseline-must-pass gate
+
+Before any proposal runs, `--mutations` runs `<request>` exactly as an
+ordinary (non-mutation) invocation would. **If that baseline itself reports
+`status: "fail"`, the whole run aborts with exit 1 before touching any
+proposal.** Comparing mutant behavior against an already-broken baseline
+cannot distinguish "the mutation broke it" from "it was already broken", so
+a `mutation_score` computed there would be meaningless, not merely
+incomplete.
+
+### The `<proposals>` document
+
+A second, separate file — `scope` plus `proposals[]`, booley's own
+byte-exact shape:
+
+```json
+{
+  "schema": "klt.functional_verification.mutation_proposals/1",
+  "scope": ["modexp.v"],
+  "proposals": [
+    {
+      "index": 1,
+      "category": "boundary",
+      "file": "modexp.v",
+      "line": 75,
+      "original_code": "mm_sum >= mm_m2",
+      "mutated_code": "mm_sum > mm_m2",
+      "detectability_argument": "Skips the first modular subtraction exactly when the pre-reduction sum equals 2*mod, leaving the partial product unreduced by one modulus."
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema` | string | Contract identifier + major version, matching this repo's request-side convention. Not validated. |
+| `scope` | array\<string\> | Every RTL source file a proposal is allowed to name. **Must be a subset of `<request>.sources`** (the exact same strings `request.sources` uses) — a whole-document error (exit 1) if not, checked *before* the baseline ever runs. May be empty only alongside an empty `proposals[]`. |
+| `proposals[].index` | integer | 1-based, unique, positive. A duplicate or non-positive index is a whole-document error (exit 1), before any build runs — the same "fail the whole request, don't run half a plan" posture `options.sdf` validation already takes. |
+| `proposals[].category` | string | Free-text label (e.g. `operator_change`, `boundary`, `constant`, `polarity`, `bit_select`, `fsm_next_state`) or any caller-chosen value — echoed back in the response, never validated against a fixed enum. |
+| `proposals[].file` | string | Must be a member of `scope`. A proposal naming a file outside `scope` is `status: "rejected"` for **that one proposal only** — not a whole-document failure, the same "one bad entry doesn't poison the batch" posture `klt drc`'s per-violation reporting already takes. |
+| `proposals[].line` | integer | 1-based line `original_code` must anchor on. |
+| `proposals[].original_code` | string | The **exact** byte-for-byte source slice being replaced — not a pattern, not trimmed/normalized. Must occur **exactly once** on the declared `line`; zero or multiple occurrences is `status: "rejected"` for that proposal (`"not found"` / `"ambiguous"`). |
+| `proposals[].mutated_code` | string | The exact replacement text. Must be non-empty and byte-different from `original_code` — `status: "rejected"` otherwise. This catches a byte-identical no-op mutation, but **not** a semantically-equivalent-but-textually-different one (e.g. Verilog's `2'b1` and `1'b1` are both the integer `1`) — proposal authorship staying a semantically-aware task (human or agent), not a `klt`-internal generator, is exactly why automatic mutation generation is out of scope for this verb. |
+| `proposals[].detectability_argument` | string | Optional. Free-text rationale, echoed back unmodified — never validated or acted on programmatically. |
+
+### Response: the additive `mutation_testing` block
+
+The baseline run's own response fields (`status`, `test_count`, `tests[]`,
+`coverage`, `environment`, ...) are exactly as documented below in
+"Response", unmodified — plus one new top-level block:
+
+```json
+{
+  "mutation_testing": {
+    "schema_version": 1,
+    "proposal_count": 2,
+    "valid_count": 2,
+    "rejected_count": 0,
+    "killed_count": 1,
+    "survived_count": 1,
+    "mutation_score": 0.5,
+    "results": [
+      {
+        "index": 1,
+        "category": "boundary",
+        "file": "modexp.v",
+        "line": 75,
+        "status": "survived",
+        "first_killing_test": null,
+        "log_path": ".klt/functional-verification/mutants/mutant_1.log"
+      },
+      {
+        "index": 2,
+        "category": "bit_select",
+        "file": "modexp.v",
+        "line": 134,
+        "status": "killed",
+        "first_killing_test": "test_modexp_known_vectors",
+        "log_path": ".klt/functional-verification/mutants/mutant_2.log"
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `mutation_testing.schema_version` | integer | Versioned per *feature*, independent of the outer envelope's own `schema_version` — the same way `klt extract`'s `parasitics` sub-block could evolve independently of `devices[]`. |
+| `mutation_testing.proposal_count` | integer | Total entries in `<proposals>.proposals[]`, before validation. |
+| `mutation_testing.valid_count` | integer | `proposal_count - rejected_count`. The score's denominator. |
+| `mutation_testing.rejected_count` | integer | Proposals that failed anchor validation (bad `file`/duplicate anchor/`original_code` not found or ambiguous on `line`/empty or identical text) or failed to build in isolation (a syntax error the mutation itself introduced) — never run against the testbench at all. |
+| `mutation_testing.killed_count` / `survived_count` | integer | Of the `valid_count` proposals actually run: how many produced at least one test failure the baseline did not (`killed`) vs. reproduced the baseline's own all-passing structure exactly (`survived`). **A timed-out variant counts as `killed`** — ported verbatim from booley's own rule: "a timed-out mutant counts as detected because the mutation can wedge the design." |
+| `mutation_testing.mutation_score` | number \| null | `killed_count / valid_count`, or `null` when `valid_count == 0` (every proposal was rejected, or the proposal set was empty) — never silently reported as a perfect or zero score. |
+| `mutation_testing.results[]` | array\<object\> | One entry per proposal, in the order `<proposals>.proposals[]` declared them. `status` is `"killed"`/`"survived"`/`"rejected"`. `reason` (string) is present **only** on `"rejected"`, naming the validation/build failure verbatim. `first_killing_test` (string \| null) is the first `@cocotb.test()` name whose failure the baseline did not have, `null` on `"survived"`/`"rejected"`/a timed-out `"killed"`. `log_path` is the isolated variant's own captured build+test transcript (`null` for a proposal rejected before any build ran — an out-of-scope `file` or an anchor mismatch) — the same "artifacts are paths, kept, never deleted" convention this document's "Artifacts" section already establishes, extended per-mutant under `.klt/functional-verification/mutants/`. |
+
+### Isolation and the per-mutant subprocess timeout
+
+Each resolved proposal gets its **own build directory, from scratch** — no
+incremental compile, no shared state with the baseline or with any other
+mutant's build (each mutates the same source file path to different bytes in
+sequence, restoring the pristine bytes immediately after that one mutant's
+isolated build+test completes; the next mutant never sees a previous
+mutant's bytes). This is a genuine simplification relative to booley's own
+design: booley's `mutation_lock.py` caches per-mutant build directories
+across warm re-runs to amortize a *live LLM creator agent's* repeated
+proposal-generation cost, which does not apply here, since `klt` reads a
+fixed, already-authored `<proposals>` document and does not itself generate
+or cache anything — it was deliberately not ported (see the attribution
+header in `src/klayout_tools/_vendor/mutation_variants.py`).
+
+Every isolated build+test is bounded by a `klt`-level subprocess timeout
+(600 seconds), **independent of and in addition to** whatever cycle bound
+the testbench's own code has. cocotb 2.0.1's own `Runner.test()` has no
+timeout parameter at all — every simulator invocation is a bare, unbounded
+`subprocess.run(...)` — so a mutation that wedges the DUT's FSM, paired with
+a testbench that `await`s an event with no cycle bound, would otherwise hang
+the whole `--mutations` run forever. When this timeout fires, the variant is
+killed outright and classified `"killed"` (per the rule above), never
+`"rejected"`.
+
+Cost model: total wall time is `(N + 1) × per-run cost`, sequential (each
+isolated build is independent, so parallelizing them is a real, low-risk
+future optimization — not attempted here). See "Engines" above for
+per-engine per-run cost; `--mutations` defaults to `engine: "icarus"` the
+same way the base contract does, for exactly this reason.
+
+### Worked example: a real killed mutant and a real surviving mutant
+
+[`examples/functional-verification/proposals-modexp.json`](../../examples/functional-verification/proposals-modexp.json)
+reproduces `docs/design/mutation-testing-spike.md`'s own live-measured §2
+finding on the same `modexp.v` worked example this document's "Worked
+example" section below also uses — one mutation that survives the committed
+`test_modexp.py` unnoticed, one that is correctly killed:
+
+```console
+$ klt functional-verification examples/functional-verification/request-modexp.json \
+    --mutations examples/functional-verification/proposals-modexp.json
+engine: icarus 13.0
+hdl_toplevel: modexp
+testbench: test_modexp
+status: pass
+tests: 2  passed: 2  failed: 0  skipped: 0
+
+[passed] test_modexp_known_vectors  23750.0 ns
+[passed] test_modexp_random  180480.0 ns
+
+results_xml: .../.klt/functional-verification/results_icarus.xml
+random_seed: 1
+
+mutations: 2 proposed  2 valid  1 killed  1 survived  0 rejected  score: 0.50
+  [survived] #1 boundary modexp.v:75
+  [killed] #2 bit_select modexp.v:134  (killed by test_modexp_known_vectors)
+$ echo $?
+3
+```
+
+Mutation #1 (`mm_sum >= mm_m2` → `mm_sum > mm_m2`, the interleaved modular
+multiplier's reduction-step boundary) is a real, reachable weakening of the
+design that the committed testbench's randomized stimulus does not happen to
+exercise — exactly the "all tests pass, coverage looks fine, and a real
+correctness bug ships anyway" failure mode this feature exists to catch.
+Mutation #2 (`exp_r[WIDTH-1]` → `exp_r[WIDTH-2]`, a wrong exponent bit) is
+caught immediately by the directed known-vectors test. Both numbers were
+captured live, not assumed — running the command above reproduces them
+exactly.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The baseline passed **and** every valid proposal was killed (`survived_count == 0`), including `proposal_count == 0` (an explicitly empty proposal set is not an error). |
+| `1` | Any of the base contract's own exit-1 causes, **plus**: the `<proposals>` document is malformed/unparseable, a `<proposals>.scope` entry is outside `request.sources`, `options.coverage`/`options.sdf` combined with `--mutations`, the baseline itself failed (the baseline-must-pass gate), or every proposal ended up `"rejected"` (`valid_count == 0` with `proposal_count > 0`) — mirrors the base contract's own "a regression that registered zero tests is exit 1, not a vacuous pass": a mutation run that tested nothing must never look like a clean `mutation_score: null` success. |
+| `2` | Usage error — from argparse. |
+| `3` | Ran successfully; the baseline passed but at least one valid proposal `"survived"` (`survived_count > 0`) — the same "ran fine, found violations" convention [`klt drc`](drc.md) already uses. |
+
+### Out of scope
+
+- **Automatic mutation generation.** Proposal authorship stays outside
+  `klt`, by hand or by agent — a naive syntactic generator would produce
+  false-positive-looking noise (e.g. flipping `1'b1` to `2'b1`, both the
+  integer `1`) without taking on real HDL semantics.
+- **A named evidence-tier threshold.** `mutation_testing` ships as an
+  optional response field only; no change is made to
+  [docs/design-evidence-tiers.md](../design-evidence-tiers.md) T1 item 9's
+  wording. See
+  [docs/design/mutation-testing-spike.md](../design/mutation-testing-spike.md)
+  section 4 for the reasoning.
+- **Parallelizing the isolated per-mutant builds.** Each is already
+  independent — a real, low-risk future speedup, not attempted here.
+- **`options.coverage` + `--mutations` together.** See above.
+
 ## Request
 
 ```json
@@ -473,6 +704,9 @@ This is the same `0`/`1`/`2`/`3` trichotomy [`klt lvs`](lvs.md) and
 regression has no analogue of "this corner's simulator errored but the rest
 of the batch is still trustworthy": either the build+run pipeline produced a
 `results.xml` to report from, or it did not.
+
+`--mutations` extends this table additively — see "Mutation testing:
+`--mutations`" → "Exit codes" above.
 
 ## Composing into `klt eval`
 

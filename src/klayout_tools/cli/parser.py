@@ -1775,6 +1775,19 @@ def create_parser() -> argparse.ArgumentParser:
             "to read the request from stdin, or an inline JSON object string"
         ),
     )
+    functional_verification_parser.add_argument(
+        "--mutations",
+        metavar="PROPOSALS_PATH",
+        help=(
+            "run mutation testing (issue #1592): a path to a <proposals> "
+            "JSON document (schema "
+            "klt.functional_verification.mutation_proposals/1) naming "
+            "byte-exact source mutations to apply, one at a time, to an "
+            "isolated build+test of the same <request>. Aborts with exit 1 "
+            "if the request's own baseline run fails first -- see "
+            "docs/cli/functional-verification.md, '--mutations'"
+        ),
+    )
     _add_format_arg(functional_verification_parser)
     functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
 
