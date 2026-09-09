@@ -534,6 +534,25 @@ open_pdks build this repo already cites for gf180mcu's LVS-derived
 extraction deck), and each cites both its DRM rule id and the executable
 statement it was re-derived from.
 
+**"7.5 Comp"/"7.7 Poly2"/"7.12 Contact" are only partially transcribed, and
+the gap has a documented real-world cost (issue #1575).** This deck models
+`DF.1a`/`DF.3a`/`DF.4d` from "7.5 Comp", `PL.1`/`PL.3a` from "7.7 Poly2", and
+`CO.1`-`CO.4`/`CO.6` from "7.12 Contact" — but not `DF.6` ("COMP extend
+beyond gate", the source/drain overhang past the gate, 0.24 µm LV, 0.40 µm
+MV), `PL.4` (Poly2 extension beyond COMP, the gate endcap, 0.22 µm LV),
+`PL.5a`/`PL.5b` (field Poly2 to unrelated/related COMP spacing, 0.10 µm LV,
+0.30 µm MV), `CO.7` (COMP contact to Poly2-on-COMP spacing, 0.15 µm),
+or `DF.12` (COMP not covered by Nplus/Pplus is forbidden — a coverage rule,
+not a distance). Unlike most of this section's other gaps, this one is not
+merely theoretical: running gf180mcu's own official signoff deck
+(`libs.tech/klayout/drc/run_drc.py`, table `main`) against `klt gen
+mos_array`'s documented-default gf180mcu output finds real violations of all
+six omitted rule ids, scaling with device count — `klt drc --deck gf180mcu`
+reports that same output `status: "clean"` precisely because none of the six
+is checked. See [`klt gen`](gen.md)'s "PDK-family support" section (the
+"gf180mcu — `mos_array`'s default output is curated-deck-clean but not
+signoff-clean" note) for the full reproduction and rule-value table.
+
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
 both *below* the cut — and nothing above it, so a contact whose Metal1 strap
