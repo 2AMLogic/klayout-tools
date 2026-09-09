@@ -25,6 +25,19 @@ first; where this document and the code disagree with either, this document
   section 6 (#399) — the same contract restated alongside the
   synthesis/place-and-route ones, and the exit-code table.
 
+Reviewing a testbench this verb runs — or the RTL it verifies — for false
+positives, coverage gaps, or the bug classes a testbench should catch?
+See [`docs/guides/digital-review/`](../guides/digital-review/README.md),
+the per-concern digital review-bar guides (issue #1587): in particular
+[`cocotb-tb-review.md`](../guides/digital-review/cocotb-tb-review.md) and
+[`cocotb-tb-style-guide.md`](../guides/digital-review/cocotb-tb-style-guide.md)
+for the cocotb testbenches this verb drives, and
+[`rtl-bugs.md`](../guides/digital-review/rtl-bugs.md) /
+[`rtl-protocol-cdc.md`](../guides/digital-review/rtl-protocol-cdc.md) /
+[`rtl-spec.md`](../guides/digital-review/rtl-spec.md) for the RTL side. The
+index's evidence table maps each checklist item that depends on tool
+evidence to the response field on this page that supplies it.
+
 Like `klt lvs`/`klt sim`/`klt synthesize`, this verb takes a **request
 document** — RTL sources plus a testbench module plus engine/coverage
 options is richer than a flag line carries cleanly — not positional file
@@ -382,7 +395,12 @@ testbench paired with a correct design produces, and also the verdict a weak
 testbench paired with a buggy design produces. `--mutations` closes that gap:
 it applies a set of hand- or agent-authored single-point RTL mutations, one
 at a time, to an isolated build+test of the same design, and reports how many
-the testbench actually caught. This is
+the testbench actually caught. Whoever authors the `<proposals>` document
+should read
+[docs/guides/rtl-mutation-testing.md](../guides/rtl-mutation-testing.md)
+first (issue #1593) — the proposer-side companion to
+[`docs/guides/digital-review/`](../guides/digital-review/README.md)'s
+reviewer-side guides. This is
 [docs/design/mutation-testing-spike.md](../design/mutation-testing-spike.md)'s
 own contract (issue #1592), ported from
 [`boldaxolotl/booley`](https://github.com/boldaxolotl/booley)'s (Apache-2.0)
