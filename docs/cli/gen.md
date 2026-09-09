@@ -105,6 +105,20 @@ are chosen to pass `klt drc --deck <family>` clean on every family listed for
 it below; a non-default `params` set is not guaranteed to (see each
 generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 
+**"yes" means `klt drc --deck <family>` clean, not necessarily signoff-clean
+(issue #1575).** `klt drc --deck <family>` runs *this repo's own* curated
+deck for that family — a deliberately partial starter subset of the PDK's
+real design rule manual, not a drop-in replacement for the PDK's own
+foundry-authored signoff deck (e.g. open_pdks' `run_drc.py`); see
+[`klt drc`](drc.md)'s "Coverage" section for exactly which rule ids each
+curated deck does and does not transcribe. A "yes" cell below is therefore a
+narrower claim than "verified against the target PDK's own signoff tooling"
+— no generator/family pair in this table has been checked against a PDK's
+own official deck end to end, and the gap is not always benign: see the
+`gf180mcu`/`mos_array` note immediately after the table for a documented,
+concrete instance where curated-deck-clean output has real, reproducible
+violations under gf180mcu's own signoff deck.
+
 | Generator | `sky130` | `gf180mcu` | `sg13g2` | `sg13cmos5l` |
 | --------- | :------: | :--------: | :------: | :----------: |
 | `mos_array` | yes | yes | yes | yes |
@@ -116,6 +130,41 @@ generator's "advisory, not authoritative" `drc_hints.notes` behaviour below).
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | no | no |
+
+**gf180mcu — `mos_array`'s default output is curated-deck-clean but not
+signoff-clean (issue #1575).** `mos_array`'s documented default `params`
+pass `klt drc --deck gf180mcu` clean, but running gf180mcu's own official
+signoff DRC deck (open_pdks `gf180mcuD`, `libs.tech/klayout/drc/run_drc.py`,
+table `main`, via the standalone KLayout application binary) against that
+same default output finds real violations on the single simplest possible
+request (one unit device, `dummy: 0`, `gate_contact: false`): `DF.6_LV`
+("COMP extend beyond gate" / source-drain overhang, 0.24 µm minimum),
+`PL.4_LV` (Poly2 extension beyond COMP / gate endcap, 0.22 µm minimum),
+`PL.5a_LV`/`PL.5b_LV` (field Poly2 to unrelated/related COMP spacing, 0.10
+µm minimum each), `CO.7` (COMP contact to Poly2-on-COMP spacing, 0.15 µm
+minimum), and `DF.12` (COMP not covered by Nplus/Pplus is forbidden — a
+coverage rule, not a distance). All six rule ids are DRM rules this repo's
+curated `gf180mcu` deck (`klayout_tools/decks/gf180mcu.py`) does not
+transcribe at all — see [`klt drc`](drc.md)'s "Coverage" section, which
+lists exactly which `PL.*`/`DF.*`/`CO.*` rule ids from the DRM's "7.5 Comp",
+"7.7 Poly2", and "7.12 Contact" chapters *are* modeled (`PL.1`, `PL.3a`;
+`DF.1a`, `DF.3a`, `DF.4d`; `CO.1`-`CO.4`, `CO.6`) — so `klt drc --deck
+gf180mcu` reporting `status: "clean"` never exercised any of the six, and
+`mos_array`'s gf180mcu geometry was never actually margined against them.
+Violation count scales with device/finger count (27 items at the default
+`dummy: 1`), so this is a structural property of every drawn unit device,
+not an edge effect of `dummy: 0` or of the array's boundary; the same six
+rule ids reproduce on `flavor="nfet"` too, and (as their own larger
+`_MV`-class versions, plus the `Dualgate`-enclosure rules `DV.6`/`DV.8`)
+once `voltage_flavor: "medium_voltage"` is set — that param only adds the
+`Dualgate` marker layer over the existing footprint, it does not change any
+underlying device-geometry margin. A hand-drawn full-custom device
+generator elsewhere in this project, built directly against gf180mcu's own
+layer recipe with margins sized explicitly against this same signoff deck,
+passes all six rules with real margin on the same device class, so the
+minimums above are achievable — closing this gap in `mos_array`'s own
+geometry is tracked as a follow-on generator fix, not attempted by this
+disclosure note.
 
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
@@ -332,6 +381,13 @@ commitment that a fourth family or full `sg13g2` generator coverage is
 currently planned or in progress.
 
 ### `mos_array` (family 1: matched transistor array)
+
+> **gf180mcu note (issue #1575):** this generator's documented default
+> `gf180mcu` output is `klt drc --deck gf180mcu` clean but is **not**
+> verified clean against gf180mcu's own foundry signoff DRC deck — see the
+> "gf180mcu — `mos_array`'s default output is curated-deck-clean but not
+> signoff-clean" note in "PDK-family support" above for the six real,
+> reproducible rule violations found.
 
 A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
 strip + poly gate(s) + contact + local-metal source/drain pads), with
