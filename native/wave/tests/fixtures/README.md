@@ -37,3 +37,12 @@ Identical `tb.clk`/`tb.rst_n`/`tb.dut.data` timeline; `tb.dut.o_valid`
 instead asserts at tick 65 (cycle 4) and deasserts at tick 85 (cycle 6),
 staying low through the end of the trace -- used only by the `diff` op
 test as a second store that genuinely diverges from `gcd_like_a.fst`.
+
+## `pre_reset_glitch.fst`
+
+Same `tb.clk`/`tb.rst_n` timeline (cycle 0 anchor still tick 25); a single
+signal, `tb.dut.probe`, pulses to `1` at tick 8 and back to `0` at tick 9 --
+before reset release -- and never changes again. Used only by the
+`find_default_window_includes_pre_reset_activity` test to pin that an
+omitted `window` (contract section 5's "the whole trace") starts at the
+trace's true first tick, not the post-reset cycle-0 anchor.

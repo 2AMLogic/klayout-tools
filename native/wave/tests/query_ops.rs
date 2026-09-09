@@ -135,6 +135,30 @@ fn find_first_and_last_occurrence() {
 }
 
 #[test]
+fn find_default_window_includes_pre_reset_activity() {
+    // `pre_reset_glitch.fst`'s only `tb.dut.probe` pulse is at tick 8,
+    // before reset release (tick 22) and thus before the cycle-0 anchor
+    // (tick 25). An omitted `window` must default to the whole trace
+    // (contract section 5), not the post-reset cycle-0 anchor -- so this
+    // pre-reset pulse must still be found.
+    let req = serde_json::json!({
+        "schema": "klt.wave_query.request/1",
+        "store": fixture("pre_reset_glitch.fst"),
+        "ops": [
+            { "op": "find", "signal": "tb.dut.probe", "match": { "value": "1" }, "occurrence": "first" }
+        ],
+    });
+    let (code, resp, _) = run_query(&req);
+    assert_eq!(code, 0);
+    let r = &resp.unwrap()["results"][0];
+    assert_eq!(r["found"], true);
+    assert_eq!(r["at"]["time_ns"], 8.0);
+    // Tick 8 is before the cycle-0 anchor (tick 25), so it has no cycle
+    // number -- distinct from window.from defaulting to tick 0.
+    assert!(r["at"]["cycle"].is_null());
+}
+
+#[test]
 fn find_negative_result_not_found() {
     let req = store_req(serde_json::json!([
         {
@@ -322,6 +346,10 @@ fn wave_dumps_run_length_encoded_entries() {
     let r = &resp.unwrap()["results"][0];
     let entries = r["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 4);
+    // Default window starts at the trace's true first tick (0), not the
+    // post-reset cycle-0 anchor (25) -- no spurious zero-duration entry for
+    // the initial-value change recorded at tick 0.
+    assert_eq!(entries[0]["from"]["time_ns"], 0.0);
     assert_eq!(entries[0]["value"], "0");
     assert_eq!(entries[1]["value"], "1");
     assert_eq!(entries[2]["value"], "0");

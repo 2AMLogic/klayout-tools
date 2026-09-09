@@ -616,8 +616,13 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
 
     // sim range: end = last time in the file; start = first counted cycle
     // (first primary-clock rising edge with reset inactive after that tick),
-    // falling back to the header start time
+    // falling back to the header start time. `trace_start_tick` retains the
+    // header's true start separately -- it is the default `window.from`
+    // (contract section 5: an omitted window covers "the whole trace"),
+    // which `sim_start_tick` below no longer represents once it is rebased
+    // to the cycle-0 anchor.
     let sim_end_tick = header.end_time;
+    let trace_start_tick = header.start_time;
     let mut sim_start_tick = header.start_time;
     if let Some(&ci) = clock_candidates.first() {
         let mut prev = "x";
@@ -664,6 +669,7 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
     Some(ColumnCache::new_fst_backed(
         signals,
         sim_start_tick,
+        trace_start_tick,
         sim_end_tick,
         ticks_to_ns,
         clock_period_ticks,

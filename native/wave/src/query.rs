@@ -34,11 +34,12 @@ pub struct OpOutcome {
 /// Cycle `0` is `cache.sim_start_tick` -- the first active edge of the
 /// primary clock at or after reset release, exactly as re-derived at load
 /// time (`crate::fst::load_fst`); contract section 3's own definition of
-/// cycle `0`. A `to`/`from` window with no time-point given resolves to the
-/// same anchor (`from`) or the trace's last tick (`to`), matching
-/// `ColumnCache`'s own upstream convention of using `sim_start_tick`/
-/// `sim_end_tick` as "the meaningful start/end of the run" for both a
-/// window default and the cycle-0 anchor.
+/// cycle `0`. A `from`/`to` window with no time-point given instead
+/// defaults to `cache.trace_start_tick`/`cache.sim_end_tick` -- the true
+/// first/last tick in the trace -- since contract section 5 defines an
+/// omitted `window` as covering "the whole trace", a distinct concept from
+/// the post-reset cycle-0 anchor (pre-reset activity must still be visible
+/// to a query with no explicit window).
 fn resolve_tick(cache: &ColumnCache, point: &TimePointReq) -> Result<u64, String> {
     match (point.time_ns, point.cycle) {
         (Some(_), Some(_)) => Err("time-point carries both time_ns and cycle".to_string()),
@@ -90,7 +91,7 @@ fn point_response_json(cache: &ColumnCache, tick: u64) -> Value {
 fn resolve_window(cache: &ColumnCache, window: &WindowReq) -> Result<(u64, u64), String> {
     let from_tick = match &window.from {
         Some(p) => resolve_tick(cache, p)?,
-        None => cache.sim_start_tick,
+        None => cache.trace_start_tick,
     };
     let to_tick = match &window.to {
         Some(p) => resolve_tick(cache, p)?,
@@ -593,8 +594,14 @@ fn op_wave(
     let mut runs: Vec<(String, u64)> = Vec::new(); // (value, start_tick)
     runs.push((before.unwrap_or_else(|| "x".to_string()), from_tick));
     for (t, v) in &changes {
-        if runs.last().map(|(rv, _)| rv != v).unwrap_or(true) {
-            runs.push((v.clone(), *t));
+        match runs.last_mut() {
+            // A change recorded exactly at the current run's start tick
+            // (e.g. tick 0, when `before` is None because nothing precedes
+            // the trace) defines that run's value rather than a
+            // zero-duration transition into it.
+            Some((rv, rt)) if *rt == *t => *rv = v.clone(),
+            Some((rv, _)) if rv == v => {}
+            _ => runs.push((v.clone(), *t)),
         }
     }
 

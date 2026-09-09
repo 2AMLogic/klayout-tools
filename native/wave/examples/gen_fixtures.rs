@@ -107,8 +107,85 @@ fn build(path: &str, o_valid_first_assert: u64) {
     body.finish().unwrap();
 }
 
+/// Same `tb.clk`/`tb.rst_n` timeline as `build()` (reset deasserts at t=22,
+/// so cycle 0 still anchors at tick 25), plus a single `tb.dut.probe` pulse
+/// at t=8 -- before reset release -- that never recurs. Exercises the
+/// no-`window` default path: `window.from` must default to the trace's true
+/// start (tick 0), not the post-reset cycle-0 anchor, so this pre-reset
+/// pulse is still visible to a query with no explicit window.
+fn build_pre_reset_glitch(path: &str) {
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9, // 1ns
+        version: "klt-wave-native fixture generator 0.1.0".to_string(),
+        date: "2026-09-09".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut header = open_fst(path, &info).unwrap();
+    header.scope("tb", "tb", FstScopeType::Module).unwrap();
+    let clk = header
+        .var(
+            "clk",
+            FstSignalType::bit_vec(1),
+            FstVarType::Reg,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let rst_n = header
+        .var(
+            "rst_n",
+            FstSignalType::bit_vec(1),
+            FstVarType::Reg,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    header.scope("dut", "dut", FstScopeType::Module).unwrap();
+    let probe = header
+        .var(
+            "probe",
+            FstSignalType::bit_vec(1),
+            FstVarType::Reg,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    header.up_scope().unwrap(); // dut
+    header.up_scope().unwrap(); // tb
+
+    let mut body = header.finish().unwrap();
+
+    // t=0: initial values, reset asserted, clock low.
+    body.signal_change(clk, b"0").unwrap();
+    body.signal_change(rst_n, b"0").unwrap();
+    body.signal_change(probe, b"0").unwrap();
+
+    for t in 1..=100u64 {
+        body.time_change(t).unwrap();
+        if t % 5 == 0 {
+            let level = if (t / 5) % 2 == 0 { b"0" } else { b"1" };
+            body.signal_change(clk, level).unwrap();
+        }
+        if t == 22 {
+            body.signal_change(rst_n, b"1").unwrap();
+        }
+        if t == 8 {
+            body.signal_change(probe, b"1").unwrap();
+        } else if t == 9 {
+            body.signal_change(probe, b"0").unwrap();
+        }
+    }
+
+    body.finish().unwrap();
+}
+
 fn main() {
     build("tests/fixtures/gcd_like_a.fst", 45);
     build("tests/fixtures/gcd_like_b.fst", 65);
-    println!("wrote tests/fixtures/gcd_like_a.fst and tests/fixtures/gcd_like_b.fst");
+    build_pre_reset_glitch("tests/fixtures/pre_reset_glitch.fst");
+    println!(
+        "wrote tests/fixtures/gcd_like_a.fst, tests/fixtures/gcd_like_b.fst, \
+         and tests/fixtures/pre_reset_glitch.fst"
+    );
 }

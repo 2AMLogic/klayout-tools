@@ -107,6 +107,12 @@ pub struct CachedSignal {
 /// primitives, all backed by `crate::fst::FstBacking`.
 pub struct ColumnCache {
     pub sim_start_tick: u64,
+    /// The trace's true first tick (`FstInfo::start_time`, before the
+    /// cycle-0 rebase below). Distinct from `sim_start_tick`: contract
+    /// section 3 defines cycle `0` as the first active clock edge at or
+    /// after reset release, but an omitted `window.from` (section 5) must
+    /// default to the whole trace, which can include pre-reset activity.
+    pub trace_start_tick: u64,
     pub sim_end_tick: u64,
     pub ticks_to_ns: f64,
     pub clock_period_ticks: u64,
@@ -140,6 +146,7 @@ impl ColumnCache {
     pub(crate) fn new_fst_backed(
         signals: Vec<CachedSignal>,
         sim_start_tick: u64,
+        trace_start_tick: u64,
         sim_end_tick: u64,
         ticks_to_ns: f64,
         clock_period_ticks: u64,
@@ -152,6 +159,7 @@ impl ColumnCache {
     ) -> ColumnCache {
         ColumnCache {
             sim_start_tick,
+            trace_start_tick,
             sim_end_tick,
             ticks_to_ns,
             clock_period_ticks,
