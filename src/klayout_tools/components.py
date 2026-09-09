@@ -93,10 +93,18 @@ def run_components_report(
     components.
 
     ``label_layers`` (optional, default none) is a list of ``{"name": str,
-    "layer": [layer, datatype]}`` entries naming GDS text layers to scan for
-    names/labels/pins. Any text whose location touches a component's geometry
-    (on any of its conductor/via layers) is reported in that component's
-    ``labels`` list -- purely a spatial "does this text sit on this
+    "layer": [layer, datatype], "conductor": str}`` entries naming GDS text
+    layers to scan for names/labels/pins. ``conductor``, when given, must name
+    one of the already-declared ``conductors`` entries and scopes that label
+    layer's texts to *only* that conductor's shapes in a component -- a text
+    on a conductor's own pin/label layer is attributed to the component that
+    owns that conductor's geometry, never to a different conductor's
+    component whose geometry merely overlaps the text's XY location on
+    another layer with no via connecting them (issue #1579). ``conductor`` is
+    optional; when omitted, a label layer keeps the original any-layer
+    behaviour -- its texts are matched against the union of *every*
+    conductor/via layer present in a component, for backward compatibility.
+    Either way this is purely a spatial "does this text sit on this
     component" test, independent of the connectivity graph above (texts are
     never registered with the connectivity engine, so they can never
     themselves join two components together).
@@ -122,7 +130,9 @@ def run_components_report(
             "conductors": [{"name": str, "layer": [layer, datatype]}, ...],
             "vias": [{"name": str, "layer": [layer, datatype],
                        "between": [str, str]}, ...],
-            "label_layers": [{"name": str, "layer": [layer, datatype]}, ...],
+            "label_layers": [
+                {"name": str, "layer": [layer, datatype], "conductor": str | None}, ...
+            ],
             "region_um": [left, bottom, right, top] | None,
             "top": <str> | None,
             "dbu_um": <database unit in micrometres, float>,
@@ -141,7 +151,7 @@ def run_components_report(
                         {"name": str, "layer": [layer, datatype],
                          "shape_count": int, "area_um2": float}, ...
                     ],
-                    "labels": [str, ...],
+                    "labels": [str, ...],  # see the "labels" scoping note below
                     "touches_crop_boundary": bool,
                 },
                 ...
@@ -155,7 +165,13 @@ def run_components_report(
     documents). Only conductor/via layers that actually contribute at least
     one shape to a component are listed in that component's ``conductors``/
     ``vias`` entries -- an unconnected conductor with no geometry on it never
-    appears.
+    appears. Each ``labels`` entry's text is matched against only the
+    conductor its ``label_layers`` entry declares (or, absent a declared
+    ``conductor``, against every conductor/via layer present in the
+    component) -- a component's ``labels`` therefore never picks up a name
+    from an unrelated conductor's pin/label layer that a *scoped* label
+    layer's own conductor does not touch, even where that other conductor's
+    geometry happens to cross overhead in XY with no via joining them.
 
     Raises :class:`ComponentsError` if the file is missing/unreadable, the
     conductor/via/label-layer specs are malformed or reference an unknown
@@ -163,7 +179,7 @@ def run_components_report(
     """
     conductor_specs = _validate_conductors(conductors)
     via_specs = _validate_vias(vias or [], conductor_specs)
-    label_specs = _validate_label_layers(label_layers or [])
+    label_specs = _validate_label_layers(label_layers or [], conductor_specs)
 
     layout = load_layout(layout_path, ComponentsError)
 
@@ -221,7 +237,12 @@ def run_components_report(
             for spec in via_specs
         ],
         "label_layers": [
-            {"name": spec["name"], "layer": list(spec["layer"])} for spec in label_specs
+            {
+                "name": spec["name"],
+                "layer": list(spec["layer"]),
+                "conductor": spec["conductor"],
+            }
+            for spec in label_specs
         ],
         "region_um": list(region_um) if region_um is not None else None,
         "top": top,
@@ -307,6 +328,7 @@ def _components_for_cell(
             conductor_index,
             via_specs,
             via_index,
+            label_specs,
             label_texts,
             clip_box,
             dbu,
@@ -325,6 +347,7 @@ def _describe_net(
     conductor_index: dict[str, int],
     via_specs: list[dict[str, Any]],
     via_index: dict[str, int],
+    label_specs: list[dict[str, Any]],
     label_texts: dict[str, Any],
     clip_box: Any | None,
     dbu: float,
@@ -368,9 +391,22 @@ def _describe_net(
     if total_region.is_empty():
         return None
 
+    # Each label layer is scoped to its own declared `conductor` (issue
+    # #1579): only that conductor's shapes in this net are tested against the
+    # label's texts, so a text sitting on a lower conductor's pin/label layer
+    # is never pulled into a different, upper-layer component that merely
+    # crosses over it in XY with no via joining them. A label layer with no
+    # declared `conductor` keeps the original any-layer behaviour, matching
+    # against every conductor/via region present in this component.
     labels: set[str] = set()
-    for texts in label_texts.values():
-        for text in texts.interacting(total_region).each():
+    for spec in label_specs:
+        texts = label_texts[spec["name"]]
+        conductor_name = spec["conductor"]
+        if conductor_name is not None:
+            scope_region = l2n.polygons_of_net(net, conductor_index[conductor_name])
+        else:
+            scope_region = total_region
+        for text in texts.interacting(scope_region).each():
             labels.add(text.string)
 
     box = total_region.bbox()
@@ -467,7 +503,11 @@ def _validate_vias(
     return specs
 
 
-def _validate_label_layers(label_layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _validate_label_layers(
+    label_layers: list[dict[str, Any]], conductor_specs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    conductor_names = {spec["name"] for spec in conductor_specs}
+
     specs: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     for entry in label_layers:
@@ -476,7 +516,20 @@ def _validate_label_layers(label_layers: list[dict[str, Any]]) -> list[dict[str,
             raise ComponentsError(f"duplicate label layer name: {name!r}")
         seen_names.add(name)
         layer = _require_layer(entry, "label_layers", name)
-        specs.append({"name": name, "layer": layer})
+
+        conductor = entry.get("conductor")
+        if conductor is not None:
+            if not isinstance(conductor, str) or not conductor:
+                raise ComponentsError(
+                    f"label_layers entry {name!r} 'conductor' must be a "
+                    f"non-empty string, got {conductor!r}"
+                )
+            if conductor not in conductor_names:
+                raise ComponentsError(
+                    f"label_layers entry {name!r} 'conductor' references "
+                    f"unknown conductor {conductor!r}"
+                )
+        specs.append({"name": name, "layer": layer, "conductor": conductor})
     return specs
 
 

@@ -185,6 +185,112 @@ def test_label_text_not_touching_any_component_is_absent(tmp_path):
     assert component["labels"] == []
 
 
+# --- Label scoping to a declared conductor (issue #1579) ---------------------
+
+
+def test_scoped_label_not_attributed_to_crossing_upper_layer_component(tmp_path):
+    """A text on m1's own pin/label layer must not be pulled into an
+    unrelated m3 component whose geometry merely crosses over it in the same
+    XY footprint, with no via joining the two layers -- issue #1579's core
+    repro (a vertical stack, not the bounding-box-slop case already covered
+    by ``test_label_text_not_touching_any_component_is_absent``)."""
+    m3 = (71, 20)
+    path = tmp_path / "stacked.gds"
+    _write(
+        path,
+        {
+            _M1: [kdb.Box(0, 0, 10000, 10000)],
+            m3: [kdb.Box(0, 0, 10000, 10000)],  # same XY footprint, no via
+            _LABEL: [kdb.Text("M1NET", kdb.Trans(1000, 1000))],
+        },
+    )
+    conductors = [
+        {"name": "m1", "layer": [68, 20]},
+        {"name": "m3", "layer": [71, 20]},
+    ]
+    labels = [{"name": "m1pin", "layer": [68, 5], "conductor": "m1"}]
+
+    report = run_components_report(str(path), conductors, label_layers=labels)
+
+    assert report["component_count"] == 2
+    m1_component = next(
+        c
+        for c in report["components"]
+        if [x["name"] for x in c["conductors"]] == ["m1"]
+    )
+    m3_component = next(
+        c
+        for c in report["components"]
+        if [x["name"] for x in c["conductors"]] == ["m3"]
+    )
+    assert m1_component["labels"] == ["M1NET"]
+    assert m3_component["labels"] == []
+
+
+def test_unscoped_label_layer_keeps_any_layer_behavior(tmp_path):
+    """A `label_layers` entry with no declared `conductor` keeps the
+    pre-#1579 any-layer matching for backward compatibility: the identical
+    stacked geometry as the previous test, but without `conductor`, still
+    attributes the text to both crossing components."""
+    m3 = (71, 20)
+    path = tmp_path / "stacked_unscoped.gds"
+    _write(
+        path,
+        {
+            _M1: [kdb.Box(0, 0, 10000, 10000)],
+            m3: [kdb.Box(0, 0, 10000, 10000)],
+            _LABEL: [kdb.Text("M1NET", kdb.Trans(1000, 1000))],
+        },
+    )
+    conductors = [
+        {"name": "m1", "layer": [68, 20]},
+        {"name": "m3", "layer": [71, 20]},
+    ]
+    labels = [{"name": "m1pin", "layer": [68, 5]}]  # no "conductor"
+
+    report = run_components_report(str(path), conductors, label_layers=labels)
+
+    assert report["component_count"] == 2
+    for component in report["components"]:
+        assert component["labels"] == ["M1NET"]
+
+
+def test_scoped_label_attributes_to_its_own_conductor_in_a_joined_component(tmp_path):
+    """A scoped label still works normally on a component that legitimately
+    spans multiple conductors via a declared via: the label attaches because
+    its own conductor's geometry is present in that component, not via any
+    special-casing of the crossing scenario above."""
+    path = tmp_path / "with_via_and_label.gds"
+    _write(
+        path,
+        {
+            _M1: [_M1_STRIP],
+            _M2: [_M2_STRIP],
+            _VIA: [_VIA_AT_CROSSING],
+            # Sits on the m1 strip only (y in [4000, 6000]).
+            _LABEL: [kdb.Text("NET1", kdb.Trans(1000, 5000))],
+        },
+    )
+    labels = [{"name": "m1pin", "layer": [68, 5], "conductor": "m1"}]
+
+    report = run_components_report(
+        str(path), _CONDUCTORS, vias=_VIAS, label_layers=labels
+    )
+
+    joined = next(c for c in report["components"] if len(c["conductors"]) == 2)
+    assert joined["labels"] == ["NET1"]
+
+
+def test_label_layer_unknown_conductor_raises(tmp_path):
+    path = tmp_path / "labelled.gds"
+    _write(path, {_M1: [kdb.Box(0, 0, 10000, 10000)]})
+    conductors = [{"name": "m1", "layer": [68, 20]}]
+    labels = [{"name": "bad", "layer": [68, 5], "conductor": "nope"}]
+
+    with pytest.raises(ComponentsError):
+        run_components_report(str(path), conductors, label_layers=labels)
+
+
 # --- Crop boundary (--region) -------------------------------------------------
 
 
