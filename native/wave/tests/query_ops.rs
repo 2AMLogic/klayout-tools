@@ -376,6 +376,35 @@ fn cycle_addressing_without_clock_is_an_error() {
 }
 
 #[test]
+fn malformed_request_json_is_exit_1() {
+    let dir = fresh_temp_dir("malformed-json");
+    let req_path = dir.join("request.json");
+    std::fs::write(&req_path, "{ not valid json").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_klt-wave"))
+        .arg("query")
+        .arg(&req_path)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code().unwrap(), 1);
+}
+
+#[test]
+fn unreadable_request_file_is_exit_1() {
+    let dir = fresh_temp_dir("unreadable-request");
+    let req_path = dir.join("does_not_exist.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_klt-wave"))
+        .arg("query")
+        .arg(&req_path)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code().unwrap(), 1);
+}
+
+#[test]
 fn missing_request_argument_is_exit_2() {
     let output = Command::new(env!("CARGO_BIN_EXE_klt-wave"))
         .arg("query")

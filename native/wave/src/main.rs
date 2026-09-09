@@ -13,12 +13,12 @@
 //!
 //! Exit codes (contract section 5):
 //!   0 -- every op ran and every declared predicate (if any) is satisfied.
-//!   1 -- failed to run (bad request, unreadable/corrupt store, an op
-//!        naming a signal absent from the store, cycle addressing against a
-//!        store with no clock declared, a predicate on an op that does not
-//!        define one, or an empty `ops` array).
-//!   2 -- usage error (missing argument / unreadable request file / bad
-//!        `--format` value).
+//!   1 -- failed to run (unreadable/malformed request file, bad request,
+//!        unreadable/corrupt store, an op naming a signal absent from the
+//!        store, cycle addressing against a store with no clock declared, a
+//!        predicate on an op that does not define one, or an empty `ops`
+//!        array).
+//!   2 -- usage error (missing argument / bad `--format` value).
 //!   3 -- every op ran successfully, but at least one declared predicate
 //!        was not satisfied.
 
@@ -113,7 +113,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn run(args: &Args) -> Result<(QueryResponse, u8), (u8, String)> {
     let request_text = fs::read_to_string(&args.request_path).map_err(|e| {
         (
-            2,
+            1,
             format!(
                 "failed to read request '{}': {e}",
                 args.request_path.display()
@@ -121,7 +121,7 @@ fn run(args: &Args) -> Result<(QueryResponse, u8), (u8, String)> {
         )
     })?;
     let req: QueryRequest = serde_json::from_str(&request_text)
-        .map_err(|e| (2, format!("malformed request JSON: {e}")))?;
+        .map_err(|e| (1, format!("malformed request JSON: {e}")))?;
 
     if req.ops.is_empty() {
         return Err((1, "ops must be non-empty".to_string()));
