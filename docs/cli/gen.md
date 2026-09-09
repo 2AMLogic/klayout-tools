@@ -131,40 +131,55 @@ violations under gf180mcu's own signoff deck.
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | no | no |
 
-**gf180mcu — `mos_array`'s default output is curated-deck-clean but not
-signoff-clean (issue #1575).** `mos_array`'s documented default `params`
-pass `klt drc --deck gf180mcu` clean, but running gf180mcu's own official
-signoff DRC deck (open_pdks `gf180mcuD`, `libs.tech/klayout/drc/run_drc.py`,
-table `main`, via the standalone KLayout application binary) against that
-same default output finds real violations on the single simplest possible
-request (one unit device, `dummy: 0`, `gate_contact: false`): `DF.6_LV`
-("COMP extend beyond gate" / source-drain overhang, 0.24 µm minimum),
-`PL.4_LV` (Poly2 extension beyond COMP / gate endcap, 0.22 µm minimum),
-`PL.5a_LV`/`PL.5b_LV` (field Poly2 to unrelated/related COMP spacing, 0.10
-µm minimum each), `CO.7` (COMP contact to Poly2-on-COMP spacing, 0.15 µm
-minimum), and `DF.12` (COMP not covered by Nplus/Pplus is forbidden — a
-coverage rule, not a distance). All six rule ids are DRM rules this repo's
-curated `gf180mcu` deck (`klayout_tools/decks/gf180mcu.py`) does not
-transcribe at all — see [`klt drc`](drc.md)'s "Coverage" section, which
-lists exactly which `PL.*`/`DF.*`/`CO.*` rule ids from the DRM's "7.5 Comp",
-"7.7 Poly2", and "7.12 Contact" chapters *are* modeled (`PL.1`, `PL.3a`;
-`DF.1a`, `DF.3a`, `DF.4d`; `CO.1`-`CO.4`, `CO.6`) — so `klt drc --deck
-gf180mcu` reporting `status: "clean"` never exercised any of the six, and
-`mos_array`'s gf180mcu geometry was never actually margined against them.
-Violation count scales with device/finger count (27 items at the default
-`dummy: 1`), so this is a structural property of every drawn unit device,
-not an edge effect of `dummy: 0` or of the array's boundary; the same six
-rule ids reproduce on `flavor="nfet"` too, and (as their own larger
-`_MV`-class versions, plus the `Dualgate`-enclosure rules `DV.6`/`DV.8`)
-once `voltage_flavor: "medium_voltage"` is set — that param only adds the
-`Dualgate` marker layer over the existing footprint, it does not change any
-underlying device-geometry margin. A hand-drawn full-custom device
-generator elsewhere in this project, built directly against gf180mcu's own
-layer recipe with margins sized explicitly against this same signoff deck,
-passes all six rules with real margin on the same device class, so the
-minimums above are achievable — closing this gap in `mos_array`'s own
-geometry is tracked as a follow-on generator fix, not attempted by this
-disclosure note.
+**gf180mcu — `mos_array`'s unit-device geometry was margined against the
+six-rule signoff gap (issue #1577), but this remains an *unverified*
+best-effort fix (issue #1575's gap is not confirmed closed).** #1575
+originally found that `mos_array`'s documented default `params` pass `klt
+drc --deck gf180mcu` clean, but running gf180mcu's own official signoff DRC
+deck (open_pdks `gf180mcuD`, `libs.tech/klayout/drc/run_drc.py`, table
+`main`, via the standalone KLayout application binary) against that same
+default output found real violations of six rule ids: `DF.6_LV` ("COMP
+extend beyond gate" / source-drain overhang, 0.24 µm minimum), `PL.4_LV`
+(Poly2 extension beyond COMP / gate endcap, 0.22 µm minimum), `PL.5a_LV`/
+`PL.5b_LV` (field Poly2 to unrelated/related COMP spacing, 0.10 µm minimum
+each), `CO.7` (COMP contact to Poly2-on-COMP spacing, 0.15 µm minimum), and
+`DF.12` (COMP not covered by Nplus/Pplus is forbidden — a coverage rule, not
+a distance). All six rule ids are DRM rules this repo's curated `gf180mcu`
+deck (`klayout_tools/decks/gf180mcu.py`) does not transcribe at all — see
+[`klt drc`](drc.md)'s "Coverage" section, which lists exactly which
+`PL.*`/`DF.*`/`CO.*` rule ids from the DRM's "7.5 Comp", "7.7 Poly2", and
+"7.12 Contact" chapters *are* modeled (`PL.1`, `PL.3a`; `DF.1a`, `DF.3a`,
+`DF.4d`; `CO.1`-`CO.4`, `CO.6`) — so `klt drc --deck gf180mcu` reporting
+`status: "clean"` never exercised any of the six, and `mos_array`'s gf180mcu
+geometry was never actually margined against them.
+
+**What #1577 changed.** `mos_array`'s (and, since they compose the same
+unit-device drawing, `diff_pair`'s/`esd_device`'s) gf180mcu geometry now
+draws: a gate-pad clearance off the diffusion edge sized past
+`PL.5a_LV`/`PL.5b_LV` (mirroring `sg13g2`'s own #1450 fix); a symmetric
+bottom-edge gate endcap sized past `PL.4_LV`/`DF.6_LV` (the top edge already
+cleared both via the #461 landing pad — only the bottom edge sat flush);
+an extra S/D-contact-to-gate clearance floor sized past `CO.7`; a
+source/drain implant (`Nplus`/`Pplus`, selected by `flavor`) fully covering
+every drawn unit device's `Comp` body, closing `DF.12`'s unconditional
+coverage requirement; and (for `voltage_flavor: "medium_voltage"`) a wider
+`Dualgate` marker box sized past `DV.6`/`DV.8`. Each margin was sized from
+the DRM's own published rule values (the same values #1575's own
+reproduction cited above), not re-derived from a live signoff-deck run —
+**this sandbox has no real gf180mcu `run_drc.py` to verify the fix against**
+(the same limitation that made #1575 a documentation-only fix in the first
+place). `klt drc --deck gf180mcu` — this repo's own curated, partial-subset
+deck — stays clean, which was already true before this fix; that check
+alone cannot confirm or deny signoff-deck cleanliness either way, since it
+never transcribed any of the six rules to begin with.
+
+**Known residual gap, filed separately.** On gf180mcu, `guard_ring`'s tap
+shares the same physical `Comp` mask as `active` (no distinct tap layer in
+this curated deck) — composing any generator's `add_guard_ring: true` with
+gf180mcu draws a tap ring `Comp` shape this fix's own source/drain implant
+does not cover, so `DF.12` likely still fires there. #1577 did not attempt
+this (it is a `guard_ring`/tap-drawing gap, not a `mos_array` unit-device
+gap) — see the follow-up issue filed alongside it.
 
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
@@ -382,12 +397,14 @@ currently planned or in progress.
 
 ### `mos_array` (family 1: matched transistor array)
 
-> **gf180mcu note (issue #1575):** this generator's documented default
-> `gf180mcu` output is `klt drc --deck gf180mcu` clean but is **not**
-> verified clean against gf180mcu's own foundry signoff DRC deck — see the
-> "gf180mcu — `mos_array`'s default output is curated-deck-clean but not
-> signoff-clean" note in "PDK-family support" above for the six real,
-> reproducible rule violations found.
+> **gf180mcu note (issues #1575/#1577):** this generator's documented default
+> `gf180mcu` output was margined against six real gf180mcu signoff-DRC rule
+> ids `klt drc --deck gf180mcu` (this repo's own curated, partial-subset
+> deck) does not check at all — but that margining is an **unverified**
+> best-effort fix: this sandbox has no real gf180mcu `run_drc.py` to confirm
+> it against. See the "gf180mcu — `mos_array`'s unit-device geometry was
+> margined against the six-rule signoff gap" note in "PDK-family support"
+> above for exactly what changed and what remains unverified.
 
 A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
 strip + poly gate(s) + contact + local-metal source/drain pads), with

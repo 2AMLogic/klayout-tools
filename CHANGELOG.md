@@ -16,6 +16,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed**: `klt gen mos_array`'s (and, since they compose the same
+  unit-device drawing, `diff_pair`'s/`esd_device`'s) `gf180mcu` geometry now
+  margins against six real gf180mcu signoff-DRC rule ids
+  (`DF.6_LV`/`PL.4_LV`/`PL.5a_LV`/`PL.5b_LV`/`CO.7`/`DF.12`) that this repo's
+  own curated `gf180mcu` DRC deck never transcribed, and that #1575 found
+  and documented as real violations of the pre-existing default `gf180mcu`
+  output (issue #1577). The unit device now draws: a gate-pad clearance off
+  the diffusion edge; a symmetric bottom-edge gate endcap (the top edge
+  already cleared these rules via the #461 landing pad); an extra
+  S/D-contact-to-gate clearance floor; a source/drain implant
+  (`Nplus`/`Pplus`, selected by `flavor`) covering every unit device's
+  `Comp` body; and (for `voltage_flavor: "medium_voltage"`) a wider
+  `Dualgate` marker box. This is a real, deliberate geometry change on
+  `gf180mcu` only — the reported `U<i>_G` port and the array/pair's overall
+  footprint move — `sky130`/`sg13g2`/`sg13cmos5l` geometry is unaffected.
+  **Not verified against gf180mcu's own signoff DRC tooling** (this sandbox
+  has no real `run_drc.py` to check it against) — see
+  [`docs/cli/gen.md`](docs/cli/gen.md)'s updated gf180mcu note for exactly
+  what changed and what remains unverified.
 - **Added**: documented and worked-example recipe for drawing a unit MOS
   device narrower than `mos_array`/`diff_pair`'s `UNIT_MIN_W_UM` contact-fit
   floor (`0.42` µm) — issue #1574, the follow-on #322's own triage comment

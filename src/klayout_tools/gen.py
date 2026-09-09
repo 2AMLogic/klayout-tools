@@ -103,6 +103,15 @@ _HIDDEN_PARAMS = {
     "well_tap_implant_present",
     "well_margin_resolved_um",
     "gate_pad_clearance_um",
+    # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
+    # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
+    # above, never part of the request schema.
+    "voltage_flavor_mark_margin_um",
+    "contact_gate_offset_um",
+    "bottom_endcap_um",
+    "sd_implant_layer",
+    "sd_implant_present",
+    "sd_implant_margin_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -253,8 +262,37 @@ _PDK_WELL_ISOLATION_UM: dict[str, float] = {
 #:   constants keep over theirs. Landing the pad this way is also closer to
 #:   how a real device is drawn: the gate poly extends past the channel
 #:   (an endcap) rather than stopping dead on the diffusion edge.
+#: - ``gf180mcu`` (issue #1577): 0.35um, above gf180mcu's own real signoff
+#:   deck's ``PL.5a_LV``/``PL.5b_LV`` ("Space from field Poly2 to
+#:   unrelated/related COMP", 0.1um each) *and* their ``_MV`` (``Dualgate``
+#:   -enclosed, medium-voltage) counterparts (0.3um each) -- none of the four
+#:   transcribed by this repo's curated ``gf180mcu`` deck, see
+#:   ``klayout_tools.decks.gf180mcu``. The clearance is structural geometry
+#:   (the gate landing pad's own stand-off from the diffusion edge, see
+#:   :func:`_mos_unit_layout`), not conditioned on ``params.voltage_flavor``,
+#:   so it must clear the larger of the two thresholds unconditionally: a
+#:   plain (non-``medium_voltage``) request draws the identical unit device a
+#:   ``voltage_flavor="medium_voltage"`` request does, just without the
+#:   ``Dualgate`` marker layered on top (see
+#:   :data:`_PDK_VOLTAGE_FLAVOR_LAYERS`) -- so the same landing pad geometry
+#:   has to satisfy whichever threshold a marker drawn *around* it would
+#:   trigger. Without this clearance the #461 landing pad -- wider than the
+#:   gate stripe it sits on -- abuts the diffusion's top edge directly, so
+#:   its own side edges face *unrelated* ``Comp`` (the same diffusion, just
+#:   outside the pad's own narrower footprint) at zero lateral distance:
+#:   exactly the failure mode this table's own docstring already describes
+#:   for sg13g2, just never verified against gf180mcu's real deck until
+#:   #1577 (this repo's curated deck transcribes no poly-to-unrelated-active
+#:   spacing rule for gf180mcu at all, so the gap was invisible to ``klt drc
+#:   --deck gf180mcu``). Moving gf180mcu off its pre-#1577 ``0.0`` is a
+#:   deliberate, real geometry change (the landing pad -- and therefore the
+#:   reported ``U<i>_G`` port -- moves further off the diffusion edge),
+#:   unlike every other value in this module that stays byte-for-byte
+#:   pinned; see ``docs/cli/gen.md``'s ``mos_array`` gf180mcu note for the
+#:   full before/after.
 _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM: dict[str, float] = {
     "sg13g2": 0.1,  # Gat.d (GatPoly space to Activ) is 0.07um
+    "gf180mcu": 0.35,  # PL.5a_MV/PL.5b_MV (field Poly2 to COMP, MV) are 0.3um
 }
 
 
@@ -263,6 +301,164 @@ def _gate_pad_clearance_um(family: str) -> float:
     :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`), or ``0.0`` for a family that
     declares none -- the pre-#1450 geometry, byte-for-byte."""
     return _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM.get(family, 0.0)
+
+
+#: Extra clearance (um) :func:`_mos_finger_positions` inserts on *each* side
+#: of every gate stripe -- exactly like :func:`_sd_pad_gate_offset_um`'s own
+#: small-``l_um`` makeup padding (issue #1187), but as a *family-specific
+#: floor* applied regardless of ``l_um`` (:func:`_sd_pad_gate_offset_um`
+#: takes the ``max`` of the two, so whichever one asks for more wins).
+#:
+#: ``gf180mcu`` only (issue #1577): 0.08um, closing the gap gf180mcu's real
+#: signoff deck's ``CO.7`` ("Space from COMP contact to Poly2 on COMP",
+#: 0.15um -- not transcribed by this repo's curated ``gf180mcu`` deck) finds
+#: on every S/D contact. Without this floor, a contact's nearest edge sits
+#: exactly :data:`ENCLOSURE_MARGIN_UM` (0.1um) from the gate poly's own edge
+#: -- the enclosure budget the contact's *own* pad sizing already spends, not
+#: a contact-to-*gate* spacing budget, and short of CO.7's 0.15um by 0.05um.
+#: 0.08um closes that with headroom (0.1 + 0.08 = 0.18um > 0.15um). A family
+#: absent from this table gets ``0.0`` (see
+#: :func:`_contact_gate_extra_offset_um`): sky130's/sg13g2's/sg13cmos5l's
+#: curated decks all check no equivalent contact-to-gate spacing rule this
+#: constant would need to close, so every existing caller there keeps
+#: byte-for-byte identical geometry.
+_PDK_CONTACT_GATE_EXTRA_OFFSET_UM: dict[str, float] = {
+    "gf180mcu": 0.08,  # CO.7 (COMP contact to Poly2 on COMP) is 0.15um
+}
+
+
+def _contact_gate_extra_offset_um(family: str) -> float:
+    """Return ``family``'s contact-to-gate extra offset floor (see
+    :data:`_PDK_CONTACT_GATE_EXTRA_OFFSET_UM`), or ``0.0`` for a family that
+    declares none -- byte-for-byte unchanged geometry there."""
+    return _PDK_CONTACT_GATE_EXTRA_OFFSET_UM.get(family, 0.0)
+
+
+#: Extra downward extension (um) :func:`_mos_unit_layout`/
+#: :func:`_mos_unit_strapped_layout` draw on every gate stripe's *bottom*
+#: edge (``y == 0`` for the bare "series" channel, ``y == diff_y0`` for the
+#: strapped comb) -- a symmetric counterpart to the *top* edge's own landing
+#: pad (issue #461), which already extends well past the diffusion there.
+#:
+#: ``gf180mcu`` only (issue #1577): 0.25um, closing two real signoff-deck
+#: rules this repo's curated ``gf180mcu`` deck never transcribes, both of
+#: which fire on the *bottom* edge only (the top edge's own #461 landing pad
+#: already clears both, verified against the real deck):
+#:
+#: - ``PL.4_LV`` ("Extension beyond COMP to form Poly2 end cap", 0.22um):
+#:   with no extension, the bottom-edge channel poly stops exactly flush
+#:   with the diffusion's own bottom edge -- a zero-margin endcap.
+#: - ``DF.6_LV`` ("Min. COMP extend beyond gate", 0.24um): the same flush
+#:   coincidence reads, from COMP's own side, as COMP failing to clear the
+#:   gate poly by any margin at all. Once the poly actually extends past
+#:   COMP's edge (as the top edge's landing pad already does), gf180mcu's
+#:   real deck does not flag this direction -- confirmed empirically (see
+#:   issue #1577), not merely inferred from the two rules' stated
+#:   thresholds.
+#:
+#: A family absent from this table gets ``0.0`` (see
+#: :func:`_gate_bottom_endcap_um`): sky130's/sg13g2's/sg13cmos5l's curated
+#: decks transcribe neither rule, so every existing caller there keeps
+#: byte-for-byte identical geometry.
+_PDK_GATE_BOTTOM_ENDCAP_UM: dict[str, float] = {
+    "gf180mcu": 0.25,  # PL.4_LV (0.22um) / DF.6_LV (0.24um)
+}
+
+
+def _gate_bottom_endcap_um(family: str) -> float:
+    """Return ``family``'s gate-stripe bottom-edge endcap extension (see
+    :data:`_PDK_GATE_BOTTOM_ENDCAP_UM`), or ``0.0`` for a family that
+    declares none -- byte-for-byte unchanged geometry there."""
+    return _PDK_GATE_BOTTOM_ENDCAP_UM.get(family, 0.0)
+
+
+#: Margin (um) :func:`_mos_unit_layout`/:func:`_mos_unit_strapped_layout`
+#: grow a source/drain implant box beyond the unit device's own ``active``
+#: box, on every side, when the resolved PDK family needs one (see
+#: :func:`_device_layer_params`'s ``sd_implant_layer``/``sd_implant_present``
+#: -- the family's ``"nplus"``/``"pplus"`` role, selected by ``flavor``).
+#:
+#: ``gf180mcu`` only (issue #1577): 0.25um, closing ``DF.12`` ("COMP not
+#: covered by Nplus or Pplus is forbidden") -- this repo's curated
+#: ``gf180mcu`` deck draws no implant over a unit device's body at all today,
+#: so a bare ``Comp`` shape violates it unconditionally, independent of any
+#: margin value. 0.25um is not the DF.12 margin itself (DF.12 is a coverage
+#: rule, not a distance -- covering ``active`` exactly, margin ``0.0``,
+#: already satisfies it) but the margin two *other* real rules need once the
+#: implant exists at all and starts covering the gate the same way it covers
+#: the source/drain (``NP.5a``/``PP.5a``, "Overlap of N-channel/P-channel
+#: gate", 0.23um each -- the implant must either not touch the gate poly at
+#: all, or enclose it with 0.23um margin; since DF.12 forces full ``active``
+#: coverage, only the second option is available, and the gate spans
+#: ``active``'s own full height with *zero* margin at ``y == 0``/``y ==
+#: w_um``). 0.25um clears that with headroom and comfortably exceeds
+#: ``NP.5b``/``PP.5b``'s smaller 0.16um COMP-extension margin too.
+#:
+#: A family absent from this table gets ``0.0`` (see
+#: :func:`_sd_implant_margin_um`), and :func:`_device_layer_params` never
+#: resolves a ``sd_implant_layer`` for one either (no family besides
+#: gf180mcu declares the ``"nplus"``/``"pplus"`` roles) -- sky130's/
+#: sg13g2's/sg13cmos5l's curated decks all recognise a MOS device from
+#: ``active``/``well`` alone, with no implant mask at all, so every existing
+#: caller there keeps byte-for-byte identical geometry (no implant drawn).
+_PDK_SD_IMPLANT_MARGIN_UM: dict[str, float] = {
+    "gf180mcu": 0.25,  # NP.5a/PP.5a (gate overlap) are 0.23um
+}
+
+
+def _sd_implant_margin_um(family: str) -> float:
+    """Return ``family``'s source/drain implant margin (see
+    :data:`_PDK_SD_IMPLANT_MARGIN_UM`), or ``0.0`` for a family that declares
+    none -- byte-for-byte unchanged geometry there (no implant drawn)."""
+    return _PDK_SD_IMPLANT_MARGIN_UM.get(family, 0.0)
+
+
+#: Margin (um) the ``voltage_flavor`` marker box (:data:`_PDK_VOLTAGE_FLAVOR_LAYERS`,
+#: issue #1054) grows beyond the array/pair's own shared active footprint --
+#: normally the *same* box :data:`WELL_ENCLOSURE_MARGIN_UM` sizes the
+#: ``flavor="pfet"`` well shape to (they are independent params, but nothing
+#: before #1577 needed the marker any bigger than the well).
+#:
+#: ``gf180mcu`` only (issue #1577): the real signoff deck's ``DV.6``/``DV.8``
+#: ("Min. Dualgate enclose COMP" 0.24um / "Min. Dualgate enclose Poly2"
+#: 0.4um) both need *more* than :data:`WELL_ENCLOSURE_MARGIN_UM` (0.15um) --
+#: DV.6 because 0.15 < 0.24 outright, and DV.8 because ``Poly2`` (the #461
+#: landing pad -- stood off the diffusion edge by
+#: :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`'s own gf180mcu clearance, plus
+#: this issue's own :data:`_PDK_GATE_BOTTOM_ENDCAP_UM` extension on the
+#: bottom edge) reaches further past the shared active footprint than the
+#: well margin alone covers: the pad's top overhang is
+#: ``_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM``'s gf180mcu clearance (0.35um) plus
+#: ``CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM`` (0.42um) == 0.77um past the
+#: diffusion edge, so the marker needs at least ``0.77 + 0.4 == 1.17um`` of
+#: headroom on the top edge to enclose the *worst-case* row's own poly with
+#: DV.8's own margin. 1.2um (used for every side, not just top, for one
+#: uniform box -- the same "one box, one margin" shape
+#: :data:`WELL_ENCLOSURE_MARGIN_UM` already uses) clears that with a little
+#: headroom; verified against the real deck on ``mos_array``'s documented
+#: default params (issue #1577) -- a caller who additionally raises
+#: ``gate_contact``/``fingers`` beyond that default grows the landing pad's
+#: own footprint further and is not verified against this fixed margin.
+#:
+#: A family absent from this table falls back to :data:`WELL_ENCLOSURE_MARGIN_UM`
+#: (see :func:`_voltage_flavor_mark_margin_um`) -- sky130/sg13g2/sg13cmos5l's
+#: own ``voltage_flavor`` markers (``esd_mark``'s ``Dualgate``/``ThickGateOx``
+#: reuse, and gf180mcu's own pre-#1577 marker) never needed a bigger box, so
+#: every existing caller there keeps byte-for-byte identical geometry.
+_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM: dict[str, float] = {
+    "gf180mcu": 1.2,  # DV.8 (Dualgate enclose Poly2) is 0.4um past a
+    # landing pad whose own top overhang (_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM's
+    # gf180mcu clearance, 0.35um, plus CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM,
+    # 0.42um) already reaches 0.77um past the shared active footprint.
+}
+
+
+def _voltage_flavor_mark_margin_um(family: str) -> float:
+    """Return ``family``'s ``voltage_flavor`` marker box margin (see
+    :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`), or
+    :data:`WELL_ENCLOSURE_MARGIN_UM` (the pre-#1577 behaviour -- the same box
+    the well shape uses) for a family that declares none."""
+    return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
 #: A contact-to-contact edge gap (um) below this is *legal* under sky130's
@@ -656,6 +852,24 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # as a well tie instead). No curated *DRC* rule in this deck checks
         # 32/0, so drawing it never affects `klt drc --deck gf180mcu` status.
         "well_tap_implant": (32, 0),  # Nplus -- EXTRACTION_DECK.tap_nplus
+        # Source/drain implant roles (issue #1577, `mos_array`'s/
+        # `diff_pair`'s/`esd_device`'s own unit-device body -- distinct from
+        # `well_tap_implant` above, which is the same `Nplus` layer but only
+        # ever drawn on the separate well-tie tap pad). Unlike sky130/sg13g2/
+        # sg13cmos5l -- which all recognise a MOS device from `active`/`well`
+        # alone -- gf180mcu's real signoff deck's `DF.12` ("COMP not covered
+        # by Nplus or Pplus is forbidden") requires *every* drawn `Comp` shape
+        # to carry one implant or the other; this repo's curated deck never
+        # transcribed that rule, so a unit device's bare `Comp` body went
+        # unimplanted (and therefore DF.12-violating) until #1577.
+        # `"nplus"`/`"pplus"` select the doping :func:`_device_layer_params`
+        # resolves off `params.flavor` (`"nfet"` -> `nplus`, the same n+
+        # implant an NMOS's own source/drain always carries; `"pfet"` ->
+        # `pplus`), the *same* `Nplus`/`Pplus` (32/0, 31/0) layers this
+        # table's own `well_tap_implant`/`_PDK_RES_FLAVOR_LAYERS` entries
+        # already cite -- never new, private numbers.
+        "nplus": (32, 0),  # Nplus -- n+ source/drain implant (nfet flavor)
+        "pplus": (31, 0),  # Pplus -- p+ source/drain implant (pfet flavor)
         # Bond-pad roles (issue #568, same rationale as sky130's pair above).
         # `pad` matches `decks/gf180mcu.py`'s `pad.enclosing.metal5.1` (PAD.4)
         # `other_layer`; `top_metal` matches that same rule's `layer` --
@@ -1710,11 +1924,25 @@ def _device_layer_params(
     outright on that family before #1450 -- a *verified DRC failure*, not an
     unattempted gap (``kdb.Region.separation_check`` still reports the
     overhang's step edges even after ``.merged()``, since a native KLayout
-    separation check is edge-based, not whole-polygon). ``0.0`` for
-    sky130/gf180mcu keeps their drawn geometry and reported ``U<i>_G`` port
-    (issues #461/#492/#781) byte-for-byte unchanged; ``diff_pair`` composes
-    this same unit-device drawing (via :func:`_diff_pair_layer_params`) and so
-    inherits the resolved clearance with no separate lookup needed."""
+    separation check is edge-based, not whole-polygon). ``0.0`` for sky130
+    keeps its drawn geometry and reported ``U<i>_G`` port (issues
+    #461/#492/#781) byte-for-byte unchanged; gf180mcu now resolves a real,
+    positive clearance too (issue #1577 -- see
+    :data:`_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`'s own gf180mcu entry for the
+    real-signoff-deck rules this closes). ``diff_pair`` composes this same
+    unit-device drawing (via :func:`_diff_pair_layer_params`) and so inherits
+    the resolved clearance with no separate lookup needed.
+
+    Also resolves three more geometry/layer knobs, all issue #1577, all
+    ``0.0``/absent on every family except gf180mcu (whose real signoff deck
+    needs each -- see each constant's own docstring for the exact rule ids):
+    ``contact_gate_offset_um`` (:func:`_contact_gate_extra_offset_um`, a
+    contact-to-gate spacing floor), ``bottom_endcap_um``
+    (:func:`_gate_bottom_endcap_um`, a gate-stripe bottom-edge endcap
+    extension), and ``sd_implant_layer``/``sd_implant_present``/
+    ``sd_implant_margin_um`` (a source/drain implant covering the unit's
+    ``active`` box, selected by ``params.flavor`` between the family's
+    ``"nplus"``/``"pplus"`` roles -- see :func:`_sd_implant_margin_um`)."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
@@ -1730,6 +1958,19 @@ def _device_layer_params(
     voltage_flavor_mark = (
         _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
     )
+    # Source/drain implant (issue #1577): the family's `"nplus"`/`"pplus"`
+    # role, selected by `flavor` (`esd_device`'s own params never carry a
+    # `flavor` key at all -- that generator is always NMOS-style, so the
+    # `"nfet"` fallback below resolves it exactly the way `mos_array`'s own
+    # `flavor` default does). `sd_implant_present` additionally requires a
+    # positive resolved margin (:func:`_sd_implant_margin_um`) -- a family
+    # that declares the role but not the margin (none do today) would
+    # otherwise draw a zero-size implant box, and a family with neither
+    # (every family besides gf180mcu) never resolves a layer here at all.
+    flavor = params.get("flavor", "nfet")
+    sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
+    sd_implant = _role_layer_info(family, sd_implant_role)
+    sd_implant_margin = _sd_implant_margin_um(family)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
@@ -1764,7 +2005,15 @@ def _device_layer_params(
             else kdb.LayerInfo(0, 0)
         ),
         "voltage_flavor_mark_present": voltage_flavor_mark is not None,
+        "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
+        "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
+        "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "sd_implant_layer": (
+            sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
+        "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
     }
 
 
@@ -2098,6 +2347,20 @@ def _esd_device_layer_params(
     enclosed active region as ``pfet`` under ``klt extract``'s ``active &
     nwell`` test (``extract.py``'s ``pfet_active`` derivation) instead of
     ``nfet``.
+
+    Also resolves ``contact_gate_offset_um``/``bottom_endcap_um``/
+    ``sd_implant_layer``/``sd_implant_present``/``sd_implant_margin_um``
+    (issue #1577) -- the same three gf180mcu-only geometry knobs
+    :func:`_device_layer_params` resolves for ``mos_array``/``diff_pair``,
+    inlined here rather than delegated (this function predates -- and does
+    not otherwise call -- :func:`_device_layer_params`, and always resolves
+    the ``"nplus"`` implant role: ``esd_device`` has no ``flavor`` param and
+    is always an NMOS-style device, matching that function's own ``"nfet"``
+    fallback when ``params`` carries no ``flavor`` key). ``gate_pad_clearance_um``
+    is deliberately *not* resolved here -- :func:`_esd_device_layout` has
+    never forwarded it to :func:`_mos_unit_layout` (a pre-existing,
+    out-of-scope gap this issue does not attempt), so leaving it unresolved
+    keeps that pre-#1577 behaviour exactly as it was.
     """
     import klayout.db as kdb
 
@@ -2105,6 +2368,8 @@ def _esd_device_layer_params(
     _reject_deferred_family("esd_device", family)
     esd_mark = _role_layer_info(family, "esd_mark")
     salicide_block = _role_layer_info(family, "salicide_block")
+    sd_implant = _role_layer_info(family, "nplus")
+    sd_implant_margin = _sd_implant_margin_um(family)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
@@ -2117,6 +2382,13 @@ def _esd_device_layer_params(
             salicide_block if salicide_block is not None else kdb.LayerInfo(0, 0)
         ),
         "salicide_block_present": salicide_block is not None,
+        "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
+        "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "sd_implant_layer": (
+            sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
+        "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
     }
 
 
@@ -2139,7 +2411,7 @@ def _grid_snapped(dbu: float, *values_um: float) -> bool:
     return any(_snapped(v) for v in values_um)
 
 
-def _sd_pad_gate_offset_um(l_um: float) -> float:
+def _sd_pad_gate_offset_um(l_um: float, extra_offset_um: float = 0.0) -> float:
     """Extra clearance (um) :func:`_mos_finger_positions` inserts on *each*
     side of every gate stripe, between it and the adjacent S/D segment
     (issue #1187).
@@ -2151,12 +2423,23 @@ def _sd_pad_gate_offset_um(l_um: float) -> float:
     just enough that the S/D-pad-to-pad gap across the gate
     (``l_um + 2 * offset``) reaches :data:`SD_PAD_GATE_GAP_MIN_UM` exactly,
     regardless of how small ``l_um`` itself is.
+
+    ``extra_offset_um`` (issue #1577) is a second, independent floor: the
+    resolved PDK family's :func:`_contact_gate_extra_offset_um`, needed on
+    families whose real (not this repo's curated) deck checks a
+    contact-to-gate spacing tighter than the small-``l_um`` makeup above
+    alone guarantees. The two floors are independent asks -- a small ``l_um``
+    already at the family's floor gets no *extra* padding on top, and a
+    family with no floor at all (``0.0``, the default) sees exactly the
+    pre-#1577 makeup-only behaviour -- so the return value is ``max``, not a
+    sum, of the two.
     """
-    return max(0.0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2.0)
+    makeup_um = max(0.0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2.0)
+    return max(makeup_um, extra_offset_um)
 
 
 def _mos_finger_positions(
-    l_um: float, fingers: int
+    l_um: float, fingers: int, extra_offset_um: float = 0.0
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]], float]:
     """``(seg_positions, poly_positions, total_len_um)`` for a ``fingers``-
     finger MOS unit device: ``fingers + 1`` contact-sized source/drain
@@ -2177,9 +2460,14 @@ def _mos_finger_positions(
     requested), so the S/D local-metal pads :func:`_mos_unit_layout` draws
     flush to ``seg_positions`` stay a legal same-layer-metal-spacing gap
     apart even at a PDK's absolute minimum gate length.
+
+    ``extra_offset_um`` (issue #1577) is forwarded to
+    :func:`_sd_pad_gate_offset_um` unchanged -- see that function's own
+    docstring for why it is a second, independent floor rather than added to
+    the small-``l_um`` makeup.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-    pad_offset_um = _sd_pad_gate_offset_um(l_um)
+    pad_offset_um = _sd_pad_gate_offset_um(l_um, extra_offset_um)
     seg_positions: list[tuple[float, float]] = []
     poly_positions: list[tuple[float, float]] = []
     x = 0.0
@@ -2200,6 +2488,9 @@ def _mos_unit_layout(
     gate_contact: bool = False,
     finger_topology: str = "series",
     gate_pad_clearance_um: float = 0.0,
+    contact_gate_offset_um: float = 0.0,
+    bottom_endcap_um: float = 0.0,
+    sd_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -2280,18 +2571,56 @@ def _mos_unit_layout(
     ``"parallel"`` strapped shape (:func:`_mos_unit_strapped_layout`) already
     runs every gate stripe a full :data:`MIN_SAME_LAYER_SPACING_UM` plus a
     contact region past the diffusion before widening into its comb.
+
+    Three more knobs, all issue #1577, all resolved per PDK family
+    (``0.0`` -- byte-for-byte unchanged geometry -- on every family besides
+    ``gf180mcu``, whose real signoff deck needs each): ``contact_gate_offset_um``
+    (:func:`_contact_gate_extra_offset_um`) is forwarded to
+    :func:`_mos_finger_positions` as a second, independent floor on top of
+    the small-``l_um`` makeup :func:`_sd_pad_gate_offset_um` already applies;
+    ``bottom_endcap_um`` (:func:`_gate_bottom_endcap_um`) extends every gate
+    stripe's *bottom* edge (``y == 0``) down past the diffusion, mirroring
+    the endcap the *top* edge's own #461 landing pad already provides there;
+    ``sd_implant_margin_um`` (:func:`_sd_implant_margin_um`) draws a
+    ``"sd_implant"`` box -- present only when this margin is positive --
+    covering the unit's own ``active`` box grown by that margin on every
+    side, so `produce_impl` can lay a source/drain implant mask over the
+    device body (see :func:`_device_layer_params`'s ``sd_implant_layer``/
+    ``sd_implant_present``, resolved off ``params.flavor``).
     """
     if finger_topology == "parallel" and fingers > 1:
-        return _mos_unit_strapped_layout(w_um, l_um, fingers, gate_contact)
+        return _mos_unit_strapped_layout(
+            w_um,
+            l_um,
+            fingers,
+            gate_contact,
+            contact_gate_offset_um,
+            bottom_endcap_um,
+            sd_implant_margin_um,
+        )
 
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-    seg_positions, poly_positions, total_len_um = _mos_finger_positions(l_um, fingers)
+    seg_positions, poly_positions, total_len_um = _mos_finger_positions(
+        l_um, fingers, contact_gate_offset_um
+    )
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
         "active": [(0.0, 0.0, total_len_um, w_um)],
-        "poly": [(px0, 0.0, px1, w_um) for (px0, px1) in poly_positions],
+        "poly": [(px0, -bottom_endcap_um, px1, w_um) for (px0, px1) in poly_positions],
         "contact": [],
         "metal": [],
+        "sd_implant": (
+            [
+                (
+                    -sd_implant_margin_um,
+                    -sd_implant_margin_um,
+                    total_len_um + sd_implant_margin_um,
+                    w_um + sd_implant_margin_um,
+                )
+            ]
+            if sd_implant_margin_um > 0
+            else []
+        ),
     }
     contact_half = CONTACT_SIZE_UM / 2.0
     seg_xy: list[tuple[float, float]] = []
@@ -2374,11 +2703,20 @@ def _mos_unit_layout(
     return {
         "total_len_um": total_len_um,
         "height_um": w_um,
-        # Full drawn height including the gate landing pad -- what row-to-row
-        # placement (see `_mos_array_layout`/`_diff_pair_layout`) and the
-        # enclosing well box must span. `height_um` stays the bare diffusion
+        # Full drawn height including the gate landing pad *and* (issue
+        # #1577) the gate stripe's own bottom-edge endcap extension -- what
+        # row-to-row placement (see `_mos_array_layout`/`_diff_pair_layout`)
+        # and the enclosing well box must span. Without folding
+        # `bottom_endcap_um` in here too, row-to-row placement would still
+        # only reserve `MIN_SAME_LAYER_SPACING_UM` between each row's *own*
+        # y == 0 origin and the row above's landing pad -- but the actual
+        # drawn poly now reaches `bottom_endcap_um` *below* that origin, so
+        # the real gap to the previous row's poly would shrink by exactly
+        # that amount, tripping gf180mcu's real `PL.3a` ("Space on
+        # COMP/Field", 0.24um) same-layer poly spacing rule between the two
+        # rows' unrelated gate stripes. `height_um` stays the bare diffusion
         # height because it is the S/D ports' perpendicular width.
-        "bbox_height_um": w_um + gate_ext_um,
+        "bbox_height_um": w_um + gate_ext_um + bottom_endcap_um,
         "gate_ext_um": gate_ext_um,
         "boxes_um": boxes,
         "s_xy": s_xy,
@@ -2403,7 +2741,13 @@ def _mos_unit_layout(
 
 
 def _mos_unit_strapped_layout(
-    w_um: float, l_um: float, fingers: int, gate_contact: bool = False
+    w_um: float,
+    l_um: float,
+    fingers: int,
+    gate_contact: bool = False,
+    contact_gate_offset_um: float = 0.0,
+    bottom_endcap_um: float = 0.0,
+    sd_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """One **parallel** multi-finger MOS unit device (issue #777): the same
     ``fingers``-stripe diffusion :func:`_mos_unit_layout` draws, plus the
@@ -2454,10 +2798,20 @@ def _mos_unit_strapped_layout(
     -- the same width budget the S/D pads use -- so no minimum-width rule
     binds either. ``total_len_um`` is identical to the series shape's, so
     the array column pitch does not move; only ``bbox_height_um`` grows.
+
+    ``contact_gate_offset_um``/``bottom_endcap_um``/``sd_implant_margin_um``
+    (issue #1577) mirror :func:`_mos_unit_layout`'s own three knobs of the
+    same name exactly -- see that function's docstring. The gate stripe's
+    bottom edge here is ``diff_y0`` (coincident with the diffusion's own
+    bottom edge, the same flush-endcap gap the bare "series" shape's
+    ``y == 0`` edge has), so ``bottom_endcap_um`` extends it downward from
+    there instead of from ``0.0``.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     clearance_um = MIN_SAME_LAYER_SPACING_UM
-    seg_positions, poly_positions, total_len_um = _mos_finger_positions(l_um, fingers)
+    seg_positions, poly_positions, total_len_um = _mos_finger_positions(
+        l_um, fingers, contact_gate_offset_um
+    )
 
     source_rail_y1 = contact_region_um
     diff_y0 = source_rail_y1 + clearance_um
@@ -2472,12 +2826,27 @@ def _mos_unit_strapped_layout(
         # Each gate stripe runs the diffusion height and then up past the
         # drain rail into the comb, keeping the whole gate net one connected
         # poly region.
-        "poly": [(px0, diff_y0, px1, comb_y0) for (px0, px1) in poly_positions],
+        "poly": [
+            (px0, diff_y0 - bottom_endcap_um, px1, comb_y0)
+            for (px0, px1) in poly_positions
+        ],
         "contact": [],
         "metal": [
             (0.0, 0.0, total_len_um, source_rail_y1),
             (0.0, drain_rail_y0, total_len_um, drain_rail_y1),
         ],
+        "sd_implant": (
+            [
+                (
+                    -sd_implant_margin_um,
+                    diff_y0 - sd_implant_margin_um,
+                    total_len_um + sd_implant_margin_um,
+                    diff_y1 + sd_implant_margin_um,
+                )
+            ]
+            if sd_implant_margin_um > 0
+            else []
+        ),
     }
     boxes["poly"].append(
         (poly_positions[0][0], comb_y0, poly_positions[-1][1], comb_y1)
@@ -2635,6 +3004,10 @@ def _mos_array_layout(
     ring_gap_um: float = 0.0,
     ring_gap_offset_um: float = 0.0,
     ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
+    contact_gate_offset_um: float = 0.0,
+    bottom_endcap_um: float = 0.0,
+    sd_implant_margin_um: float = 0.0,
+    voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -2677,7 +3050,11 @@ def _mos_array_layout(
     ring (#434), exactly as they do for every other ring-composing generator.
     ``None``/``(0.0, 0.0)`` (the defaults, ``add_guard_ring=False``) when not
     requested, so every existing caller keeps byte-for-byte identical
-    geometry."""
+    geometry.
+
+    ``contact_gate_offset_um``/``bottom_endcap_um``/``sd_implant_margin_um``
+    (issue #1577) are forwarded to :func:`_mos_unit_layout` unchanged -- see
+    that function's own docstring."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -2685,6 +3062,9 @@ def _mos_array_layout(
         gate_contact,
         finger_topology,
         gate_pad_clearance_um,
+        contact_gate_offset_um,
+        bottom_endcap_um,
+        sd_implant_margin_um,
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
@@ -2721,6 +3101,17 @@ def _mos_array_layout(
     max_y1 = max(c["y0_um"] + unit["bbox_height_um"] for c in all_cells)
     margin = WELL_ENCLOSURE_MARGIN_UM
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
+    # `voltage_flavor` marker box (issue #1054, margin widened by #1577):
+    # independent of `well_box` -- see `_voltage_flavor_mark_margin_um`'s own
+    # docstring for why gf180mcu needs a bigger margin here than the well
+    # itself does.
+    mark_margin = voltage_flavor_mark_margin_um
+    voltage_flavor_mark_box = (
+        min_x0 - mark_margin,
+        min_y0 - mark_margin,
+        max_x1 + mark_margin,
+        max_y1 + mark_margin,
+    )
 
     well_tap = None
     if draw_well_tap:
@@ -2760,6 +3151,7 @@ def _mos_array_layout(
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
+        "voltage_flavor_mark_box_um": voltage_flavor_mark_box,
         "well_tap": well_tap,
         "ring": ring,
         "ring_offset_um": ring_offset,
@@ -3415,6 +3807,9 @@ def _diff_pair_layout(
     row_spacing_um: float = MIN_SAME_LAYER_SPACING_UM,
     gate_contact: bool = False,
     gate_pad_clearance_um: float = 0.0,
+    contact_gate_offset_um: float = 0.0,
+    bottom_endcap_um: float = 0.0,
+    sd_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -3448,7 +3843,9 @@ def _diff_pair_layout(
     it grows each unit's ``bbox_height_um``, so both the row pitch and the
     automatically-sized guard ring follow it without any further arithmetic
     here. ``gate_pad_clearance_um`` (issue #1450) is forwarded the same way,
-    with the same knock-on effect.
+    with the same knock-on effect. ``contact_gate_offset_um``/
+    ``bottom_endcap_um``/``sd_implant_margin_um`` (issue #1577) are likewise
+    forwarded unchanged -- see :func:`_mos_unit_layout`'s own docstring.
     """
     unit = _mos_unit_layout(
         w_um,
@@ -3456,6 +3853,9 @@ def _diff_pair_layout(
         1,
         gate_contact,
         gate_pad_clearance_um=gate_pad_clearance_um,
+        contact_gate_offset_um=contact_gate_offset_um,
+        bottom_endcap_um=bottom_endcap_um,
+        sd_implant_margin_um=sd_implant_margin_um,
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
@@ -3719,6 +4119,9 @@ def _esd_device_layout(
     ring_gap_offset_um: float = 0.0,
     ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
     gate_contact: bool = False,
+    contact_gate_offset_um: float = 0.0,
+    bottom_endcap_um: float = 0.0,
+    sd_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """Grounded-gate multi-finger ESD MOS clamp (issue #569): a single
     :func:`_mos_unit_layout` unit device with ``fingers`` gate stripes across
@@ -3732,8 +4135,20 @@ def _esd_device_layout(
     and :func:`_ring_layout` (the same ring helper ``guard_ring``/
     ``diff_pair``/``bjt_array`` already use) directly -- no second, private
     layout mechanism, and no sub-cell instantiation of ``_GuardRingPCell``
-    itself (``diff_pair`` doesn't either; see that class's own docstring)."""
-    unit = _mos_unit_layout(finger_width_um, l_um, fingers, gate_contact)
+    itself (``diff_pair`` doesn't either; see that class's own docstring).
+
+    ``contact_gate_offset_um``/``bottom_endcap_um``/``sd_implant_margin_um``
+    (issue #1577) are forwarded to :func:`_mos_unit_layout` unchanged -- see
+    that function's own docstring."""
+    unit = _mos_unit_layout(
+        finger_width_um,
+        l_um,
+        fingers,
+        gate_contact,
+        contact_gate_offset_um=contact_gate_offset_um,
+        bottom_endcap_um=bottom_endcap_um,
+        sd_implant_margin_um=sd_implant_margin_um,
+    )
 
     ring = None
     ring_offset = (0.0, 0.0)
@@ -4431,10 +4846,54 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor_mark_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the voltage_flavor marker box grows "
+                "beyond the array's own shared active footprint (see "
+                "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
                 "gate_pad_clearance_um",
                 self.TypeDouble,
                 "Harness-resolved clearance the gate-poly landing pad keeps "
                 "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
+                default=0.0,
+            )
+            self.param(
+                "contact_gate_offset_um",
+                self.TypeDouble,
+                "Harness-resolved extra S/D-contact-to-gate offset floor "
+                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
+                default=0.0,
+            )
+            self.param(
+                "bottom_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe bottom-edge endcap extension "
+                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
+                "sd_implant_layer",
+                self.TypeLayer,
+                "Source/drain implant drawing layer (only used when "
+                "sd_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "sd_implant_present",
+                self.TypeBoolean,
+                "Whether sd_implant_layer is a real layer this PDK family "
+                "needs over each unit device's own active body",
+                default=False,
+            )
+            self.param(
+                "sd_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the source/drain implant box grows "
+                "beyond each unit device's own active box (only used when "
+                "sd_implant_present)",
                 default=0.0,
             )
             self.param(
@@ -4519,6 +4978,10 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
                 self.ring_padding_um,
+                self.contact_gate_offset_um,
+                self.bottom_endcap_um,
+                self.sd_implant_margin_um if self.sd_implant_present else 0.0,
+                self.voltage_flavor_mark_margin_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -4530,6 +4993,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 ):
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
+                    )
+
+            # Source/drain implant (issue #1577): drawn over every real *and*
+            # dummy unit device's own active body -- DF.12-style coverage
+            # rules apply to every drawn Comp shape, dummy columns included.
+            if self.sd_implant_present:
+                li_sd_implant = self.layout.layer(self.sd_implant_layer)
+                for c in info["cells"] + info["dummy_cells"]:
+                    _insert_boxes(
+                        self.cell,
+                        li_sd_implant,
+                        dbu,
+                        unit_boxes["sd_implant"],
+                        c["x0_um"],
+                        c["y0_um"],
                     )
 
             if self.flavor == "pfet" and self.well_present:
@@ -4624,16 +5102,23 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
-            # sized to enclose every unit device (real and dummy) -- the same
-            # shared box the well shape above encloses -- independent of
-            # `flavor`, so a caller can request both a well (pfet) and a
-            # voltage-flavor marker (or either alone).
+            # sized to enclose every unit device (real and dummy) --
+            # independent of `flavor`, so a caller can request both a well
+            # (pfet) and a voltage-flavor marker (or either alone). Its own
+            # box (`voltage_flavor_mark_box_um`) is *not* the same box the
+            # well shape above encloses (issue #1577): gf180mcu's real
+            # signoff deck needs the marker to reach further than the well's
+            # own margin does -- see `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s
+            # own docstring.
             if self.voltage_flavor_mark_present:
                 li_voltage_flavor_mark = self.layout.layer(
                     self.voltage_flavor_mark_layer
                 )
                 _insert_boxes(
-                    self.cell, li_voltage_flavor_mark, dbu, [info["well_box_um"]]
+                    self.cell,
+                    li_voltage_flavor_mark,
+                    dbu,
+                    [info["voltage_flavor_mark_box_um"]],
                 )
 
             # Dummy-device marker (issue #491): drawn only over
@@ -5654,10 +6139,54 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor_mark_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the voltage_flavor marker box grows "
+                "beyond the device pair's own shared active footprint (see "
+                "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
                 "gate_pad_clearance_um",
                 self.TypeDouble,
                 "Harness-resolved clearance the gate-poly landing pad keeps "
                 "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
+                default=0.0,
+            )
+            self.param(
+                "contact_gate_offset_um",
+                self.TypeDouble,
+                "Harness-resolved extra S/D-contact-to-gate offset floor "
+                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
+                default=0.0,
+            )
+            self.param(
+                "bottom_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe bottom-edge endcap extension "
+                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
+                "sd_implant_layer",
+                self.TypeLayer,
+                "Source/drain implant drawing layer (only used when "
+                "sd_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "sd_implant_present",
+                self.TypeBoolean,
+                "Whether sd_implant_layer is a real layer this PDK family "
+                "needs over each unit device's own active body",
+                default=False,
+            )
+            self.param(
+                "sd_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the source/drain implant box grows "
+                "beyond each unit device's own active box (only used when "
+                "sd_implant_present)",
                 default=0.0,
             )
 
@@ -5682,6 +6211,9 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.row_spacing_um,
                 self.gate_contact,
                 self.gate_pad_clearance_um,
+                self.contact_gate_offset_um,
+                self.bottom_endcap_um,
+                self.sd_implant_margin_um if self.sd_implant_present else 0.0,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -5695,10 +6227,24 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
 
-            # Shared device-pair-footprint box (well margin), used by both
-            # the `flavor="pfet"` well shape and the `voltage_flavor` marker
-            # below -- computed once, independent of either param, so a
-            # caller can request both, either, or neither.
+            # Source/drain implant (issue #1577): drawn over every unit
+            # device's own active body, mirroring mos_array's own treatment.
+            if self.sd_implant_present:
+                li_sd_implant = self.layout.layer(self.sd_implant_layer)
+                for c in info["cells"]:
+                    _insert_boxes(
+                        self.cell,
+                        li_sd_implant,
+                        dbu,
+                        unit_boxes["sd_implant"],
+                        c["x0_um"],
+                        c["y0_um"],
+                    )
+
+            # Shared device-pair-footprint box (well margin), used by the
+            # `flavor="pfet"` well shape below -- computed once, independent
+            # of `voltage_flavor`, so a caller can request either, both, or
+            # neither.
             margin = WELL_ENCLOSURE_MARGIN_UM
             device_well_box = (
                 -margin,
@@ -5717,13 +6263,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(self.cell, li_well, dbu, [device_well_box])
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
-            # same shared box as the well shape above, independent of
-            # `flavor`.
+            # its *own* box (issue #1577), not the well shape's -- gf180mcu's
+            # real signoff deck needs the marker to reach further than the
+            # well's own margin does, see
+            # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring.
             if self.voltage_flavor_mark_present:
                 li_voltage_flavor_mark = self.layout.layer(
                     self.voltage_flavor_mark_layer
                 )
-                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [device_well_box])
+                mark_margin = self.voltage_flavor_mark_margin_um
+                mark_box = (
+                    -mark_margin,
+                    -mark_margin,
+                    info["core_w_um"] + mark_margin,
+                    info["core_h_um"] + mark_margin,
+                )
+                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [mark_box])
 
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
@@ -6253,6 +6808,42 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether salicide_block_layer is a real layer this PDK family cites",
                 default=False,
             )
+            self.param(
+                "contact_gate_offset_um",
+                self.TypeDouble,
+                "Harness-resolved extra S/D-contact-to-gate offset floor "
+                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
+                default=0.0,
+            )
+            self.param(
+                "bottom_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe bottom-edge endcap extension "
+                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
+                "sd_implant_layer",
+                self.TypeLayer,
+                "Source/drain implant drawing layer (only used when "
+                "sd_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "sd_implant_present",
+                self.TypeBoolean,
+                "Whether sd_implant_layer is a real layer this PDK family "
+                "needs over the unit device's own active body",
+                default=False,
+            )
+            self.param(
+                "sd_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the source/drain implant box grows "
+                "beyond the unit device's own active box (only used when "
+                "sd_implant_present)",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return (
@@ -6276,6 +6867,9 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_offset_um,
                 self.ring_padding_um,
                 self.gate_contact,
+                self.contact_gate_offset_um,
+                self.bottom_endcap_um,
+                self.sd_implant_margin_um if self.sd_implant_present else 0.0,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for role, li in (
@@ -6285,6 +6879,12 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 ("metal", li_metal),
             ):
                 _insert_boxes(self.cell, li, dbu, unit_boxes[role])
+
+            # Source/drain implant (issue #1577): drawn over the unit
+            # device's own active body, mirroring mos_array's own treatment.
+            if self.sd_implant_present:
+                li_sd_implant = self.layout.layer(self.sd_implant_layer)
+                _insert_boxes(self.cell, li_sd_implant, dbu, unit_boxes["sd_implant"])
 
             # ESD device-class marker (issue #569): unconditional whenever the
             # resolved family cites one, mirroring `bjt_mark`'s own
@@ -6573,6 +7173,12 @@ def _mos_array_describe(
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
         params["ring_padding_um"],
+        # Must match the values `_device_layer_params` threads to the PCell
+        # (issue #1577) -- `contact_gate_offset_um` moves every seg/gate
+        # centre and `total_len_um` (the column pitch) the same way
+        # `gate_pad_clearance_um` above moves the gate port's `y_um`.
+        _contact_gate_extra_offset_um(family),
+        _gate_bottom_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -7846,6 +8452,9 @@ def _diff_pair_describe(
         params["gate_contact"],
         # See the equivalent note in `_mos_array_describe` (issue #1450).
         _gate_pad_clearance_um(family),
+        # See the equivalent note in `_mos_array_describe` (issue #1577).
+        _contact_gate_extra_offset_um(family),
+        _gate_bottom_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -8271,6 +8880,9 @@ def _esd_device_describe(
         params["ring_gap_offset_um"],
         params["ring_padding_um"],
         params["gate_contact"],
+        # See the equivalent note in `_mos_array_describe` (issue #1577).
+        _contact_gate_extra_offset_um(family),
+        _gate_bottom_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
