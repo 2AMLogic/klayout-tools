@@ -30,6 +30,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   conductor is already validated. `"conductor"` is optional and omitting it
   keeps the original any-layer matching for backward compatibility — this is
   an additive JSON field, not a `schema_version` bump.
+- **Changed**: `klt gen guard_ring`'s (and, since they compose the same
+  ring-drawing code, `mos_array`'s/`diff_pair`'s/`bjt_array`'s/
+  `esd_device`'s) `gf180mcu` geometry now draws a second implant ring,
+  exactly coincident with the tap/collector ring itself, closing the same
+  `DF.12` ("COMP not covered by Nplus/Pplus is forbidden") coverage rule
+  #1577 closed for each unit device's own drawn `Comp` body but did not
+  reach the ring's `Comp` shape (issue #1580, a follow-up to #1577). The
+  doping matches whether the ring encloses a well: a well-tied ring
+  (`guard_ring`'s own `add_well` default, or a `flavor="pfet"` well on
+  `mos_array`/`diff_pair`) reuses the `"well_tap_implant"` role (Nplus)
+  `well_island` already reuses for its own ring (issue #1421's precedent);
+  a substrate-tied ring (no enclosing well, including `bjt_array`'s
+  collector ring) gets the opposite doping, `"pplus"` (the same p+ role
+  #1577 added for a `flavor="pfet"` unit device's own source/drain). This is
+  a real, deliberate geometry change on `gf180mcu` only, gated on a
+  `ring_implant_present`-style flag — `sky130`/`sg13g2`/`sg13cmos5l`
+  geometry is unaffected. **Not verified against gf180mcu's own signoff DRC
+  tooling** (this sandbox has no real `run_drc.py` to check it against) —
+  see [`docs/cli/gen.md`](docs/cli/gen.md)'s updated gf180mcu note.
 - **Changed**: `klt gen mos_array`'s (and, since they compose the same
   unit-device drawing, `diff_pair`'s/`esd_device`'s) `gf180mcu` geometry now
   margins against six real gf180mcu signoff-DRC rule ids

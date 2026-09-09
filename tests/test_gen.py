@@ -7364,3 +7364,349 @@ def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
 
     drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# gf180mcu guard/tap-ring implant coverage (issue #1580, follow-up to #1577's
+# unit-device-only `sd_implant_*` fix): the guard ring's own tap shape shares
+# gf180mcu's `Comp` mask (22/0) with `active` (no distinct tap layer, see
+# `_PDK_ROLE_LAYERS`'s own `"tap"` entry) -- so it needs `DF.12` ("COMP not
+# covered by Nplus or Pplus is forbidden") implant coverage too.
+# --------------------------------------------------------------------------- #
+
+
+def test_gf180mcu_guard_ring_default_tap_ring_covered_by_well_tie_implant(
+    tmp_path, both_pdk_root
+):
+    """`add_well` defaults to `True`: the ring is enclosed in an Nwell tie,
+    so its own `Comp` shape must be covered by the *same* `"well_tap_implant"`
+    role (`Nplus`, 32/0) `well_island` already reuses for its own ring
+    (issue #1421) -- exactly coincident, not a blanket over the enclosed
+    area."""
+    import klayout.db as kdb
+
+    output = tmp_path / "guard_ring_gf180mcu_well_tie_implant.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {},
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
+    ).merged()
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert not active_region.is_empty()
+    # Exact match -- the ring's own Comp shape and nothing else.
+    assert (active_region ^ nplus_region).is_empty()
+    assert (31, 0) not in present  # no Pplus drawn for a well-tied ring
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_gf180mcu_guard_ring_no_well_tap_ring_covered_by_pplus_implant(
+    tmp_path, both_pdk_root
+):
+    """`add_well=False`: the ring ties the p-type substrate directly (no
+    enclosing well), so its `Comp` shape needs the *opposite* doping
+    (`"pplus"`, 31/0, the same p+ role #1577 added for a pfet unit device's
+    own source/drain) -- reusing the well-tie implant here would
+    misrepresent a bare substrate contact as a well tie."""
+    import klayout.db as kdb
+
+    output = tmp_path / "guard_ring_gf180mcu_substrate_tie_implant.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"add_well": False},
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    pplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(31, 0))
+    ).merged()
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert not active_region.is_empty()
+    assert (active_region ^ pplus_region).is_empty()
+    assert (32, 0) not in present  # no Nplus drawn for a substrate-tied ring
+    assert (21, 0) not in present  # no Nwell drawn either (add_well=False)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_gf180mcu_guard_ring_gap_implant_ring_matches_gap_cut_tap_ring(
+    tmp_path, both_pdk_root
+):
+    """The C-shaped opening (issue #434, `ring_gap_side`) is cut out of the
+    implant ring too -- the implant tracks the same `outer_box_um`/
+    `inner_box_um`/`gap_box_um` triple as the tap ring itself, never left as
+    a full closed ring that would overlap a routing opening meant to land
+    there."""
+    import klayout.db as kdb
+
+    output = tmp_path / "guard_ring_gf180mcu_gap_implant.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "E",
+                "ring_gap_um": 1.0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
+    ).merged()
+    assert active_region.count() == 1  # still one connected C-shaped polygon
+    assert (active_region ^ nplus_region).is_empty()
+
+
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("mos_array", {"rows": 1, "cols": 1, "dummy": 0, "add_guard_ring": True}),
+        (
+            "mos_array",
+            {
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+                "flavor": "pfet",
+                "add_guard_ring": True,
+            },
+        ),
+        ("diff_pair", {"splits": 1, "add_guard_ring": True}),
+        ("diff_pair", {"splits": 1, "flavor": "pfet", "add_guard_ring": True}),
+        ("esd_device", {}),  # add_guard_ring defaults to True
+    ],
+)
+def test_gf180mcu_ring_implant_completes_comp_coverage_with_guard_ring_enabled(
+    tmp_path, both_pdk_root, generator, params
+):
+    """The follow-up to `test_gf180mcu_sd_implant_covers_every_drawn_comp_shape`
+    (which deliberately set `add_guard_ring=False`/`add_guard_ring=False` on
+    `esd_device` to isolate #1577's unit-device-only fix from this exact
+    gap): with the ring now enabled, the *union* of both possible implants
+    (Nplus 32/0 -- a well tie or an nfet unit's own source/drain; Pplus 31/0
+    -- a bare substrate tie or a pfet unit's own source/drain) must still
+    fully cover every drawn `Comp` shape, ring included, with no unimplanted
+    residue -- and the result must stay `klt drc --deck gf180mcu` clean."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_gf180mcu_ring_implant_coverage.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
+    ).merged()
+    pplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(31, 0))
+    ).merged()
+    assert not active_region.is_empty()
+    assert (active_region - (nplus_region + pplus_region)).is_empty()
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
+    tmp_path, both_pdk_root
+):
+    """`bjt_array`'s collector ring draws directly on `active_layer` (no
+    separate `tap`-role ring, unlike `guard_ring`/`mos_array`/`diff_pair`/
+    `esd_device`) -- but it is the same physical `Comp` mask, so it needs
+    the same `DF.12` coverage. The collector ring is always composed
+    *outside* the shared base well's own footprint (see
+    `_bjt_array_layout`'s docstring), so it always ties the p-type substrate
+    directly -- the real, physical collector terminal of a vertical PNP (P+
+    emitter / N+ base tie inside an Nwell / P+ collector = substrate, per
+    `docs/design/gen-bjt-array-spike.md`) -- and must be covered by Pplus
+    (31/0), never Nplus.
+
+    This deliberately does **not** assert full-`Comp` coverage the way the
+    parametrized test above does: `bjt_array`'s own emitter/base-tie unit
+    body has no implant at all, a separate, pre-existing, documented
+    limitation (`docs/design/gen-bjt-array-spike.md`: "curated decks check
+    no implant layer ... a process-exact device would distinguish P+
+    emitter, N+ base tie, and P+ collector by implant") predating both
+    #1577 and this issue -- out of #1580's own scope, which is the
+    collector *ring* only. This test isolates the ring's own contribution
+    to the drawn `Comp` region (by diffing against the same request with
+    `add_collector_ring=False`) so it verifies only that shape, not the
+    unit body's own pre-existing gap."""
+    import klayout.db as kdb
+
+    def _active_region(add_ring):
+        output = tmp_path / f"bjt_array_gf180mcu_ring_{add_ring}.gds"
+        generate(
+            {
+                "generator": "bjt_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {
+                    "rows": 1,
+                    "cols": 1,
+                    "dummy": 0,
+                    "add_collector_ring": add_ring,
+                },
+                "options": {"output": str(output)},
+            }
+        )
+        layout = kdb.Layout()
+        layout.read(str(output))
+        region = kdb.Region(
+            layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+        ).merged()
+        return region, output
+
+    body_only_region, _ = _active_region(False)
+    with_ring_region, with_ring_output = _active_region(True)
+    ring_region = with_ring_region - body_only_region
+    assert not ring_region.is_empty()
+
+    layout = kdb.Layout()
+    layout.read(str(with_ring_output))
+    pplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(31, 0))
+    ).merged()
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
+    ).merged()
+    assert (ring_region - pplus_region).is_empty()
+    assert nplus_region.is_empty()  # never the well-tie doping for this ring
+
+    drc_report = run_drc(str(with_ring_output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("guard_ring", {}),
+        ("guard_ring", {"add_well": False}),
+        (
+            "mos_array",
+            {
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+                "flavor": "pfet",
+                "add_guard_ring": True,
+            },
+        ),
+        ("diff_pair", {"splits": 1, "add_guard_ring": True}),
+        ("bjt_array", {"rows": 1, "cols": 1, "dummy": 0}),
+        ("esd_device", {}),
+    ],
+)
+def test_sky130_ring_draws_no_implant_geometry_unaffected(
+    tmp_path, pdk_root, generator, params
+):
+    """sky130 declares a real, distinct `"tap"` layer (65/44), so `Comp`-
+    style implant coverage is never needed there -- verify no gf180mcu-only
+    implant layer (Nplus 32/0 / Pplus 31/0, this repo's curated sky130 deck
+    declares neither role at all) appears in the output, exactly like every
+    other `*_present`-gated role #1577 added stays absent on this family."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_sky130_no_ring_implant.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (31, 0) not in present
+    assert (32, 0) not in present
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_sg13g2_guard_ring_draws_no_ring_implant_despite_tap_active_collision(
+    tmp_path, sg13g2_pdk_root
+):
+    """sg13g2's own `"tap"` role *does* collide with `"active"` (both
+    `(1, 0)`, "no distinct tap mask ... derives well ties from the same
+    Activ layer", see `_PDK_ROLE_LAYERS`'s own `"tap"` entry for this
+    family) -- the same physical-layer-sharing shape gf180mcu's does. Unlike
+    gf180mcu, though, this family declares neither a `"well_tap_implant"`
+    nor a `"pplus"` role at all (no known `DF.12`-equivalent implant-
+    coverage rule in its curated deck to close -- this family's own tie is
+    recognised from bare `Activ ∩ nwell`, no implant mask needed), so
+    :func:`_ring_tap_implant_layer` must still resolve `None` here --
+    verify no unexpected implant-shaped layer is introduced and the request
+    keeps behaving exactly as it did before #1580."""
+    import klayout.db as kdb
+
+    output = tmp_path / "guard_ring_sg13g2_no_ring_implant.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "ihp-sg13g2", "root": str(sg13g2_pdk_root)},
+            "params": {},
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    # Exactly the pre-#1580 layer set: active/tap (1/0, shared), contact
+    # (6/0), metal (8/0), well (31/0, add_well defaults True) -- no implant.
+    assert present == {(1, 0), (6, 0), (8, 0), (31, 0)}

@@ -173,13 +173,33 @@ deck — stays clean, which was already true before this fix; that check
 alone cannot confirm or deny signoff-deck cleanliness either way, since it
 never transcribed any of the six rules to begin with.
 
-**Known residual gap, filed separately.** On gf180mcu, `guard_ring`'s tap
-shares the same physical `Comp` mask as `active` (no distinct tap layer in
-this curated deck) — composing any generator's `add_guard_ring: true` with
-gf180mcu draws a tap ring `Comp` shape this fix's own source/drain implant
-does not cover, so `DF.12` likely still fires there. #1577 did not attempt
-this (it is a `guard_ring`/tap-drawing gap, not a `mos_array` unit-device
-gap) — see the follow-up issue filed alongside it.
+**What #1580 changed (guard/tap/collector-ring `Comp` coverage).** #1577's
+source/drain implant only covers each unit device's own drawn `active` body
+— it does not reach `guard_ring`'s (and, since they compose the same
+ring-drawing code, `mos_array`'s/`diff_pair`'s/`bjt_array`'s/`esd_device`'s)
+own guard/tap/collector ring, which on gf180mcu shares the identical `Comp`
+mask (no distinct tap layer in this curated deck) and so needs the same
+`DF.12` coverage. Issue #1580 closes that gap: every one of those
+generators now draws a second implant ring exactly coincident with the
+tap/collector ring itself (never a blanket over the enclosed array/pair/
+well, which would re-dope whatever a caller places inside it), gated on a
+`ring_implant_present`-style flag that resolves `None` — byte-for-byte
+unchanged geometry — on every other family. The doping selected depends on
+whether the ring encloses a well: a ring drawn inside an enclosing Nwell
+(`guard_ring`'s own `add_well` default, or a `flavor="pfet"` well on
+`mos_array`/`diff_pair`) reuses the same `"well_tap_implant"` role (Nplus)
+`well_island` already reuses for its own ring (issue #1421's precedent); a
+ring with no enclosing well (a bare substrate tie, or `bjt_array`'s
+collector ring, which is always composed outside the shared base well's own
+footprint) instead gets the opposite doping, a `"pplus"` role (the same p+
+implant #1577 added for a `flavor="pfet"` unit device's own source/drain) —
+reusing the well-tie implant there would misrepresent a bare substrate
+contact as a well tie. Like #1577, this margin was sized from the DRM's own
+published `DF.12` rule text, not re-derived from a live signoff-deck run —
+**this sandbox has no real gf180mcu `run_drc.py` to verify the fix
+against**, the same limitation #1575/#1577 both carry. `klt drc --deck
+gf180mcu` stays clean, which cannot itself confirm or deny signoff-deck
+cleanliness either way.
 
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
