@@ -11,6 +11,7 @@ import sys
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
+    clip_cmd,
     components_cmd,
     deck_cmd,
     design_centering_cmd,
@@ -352,6 +353,59 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(cells_parser)
     cells_parser.set_defaults(func=cells_cmd.run)
+
+    clip_parser = subparsers.add_parser(
+        "clip",
+        help="write a bbox region or a named cell's subtree out as its own stream",
+        description=(
+            "Write a subset of a GDSII or OASIS layout file back out as its "
+            "own top-cell stream: either a micrometre bounding-box region "
+            "(--region, flattened per layer) or a named cell's full subtree "
+            "(--cell, via kdb.Cell.copy_tree -- hierarchy preserved). Useful "
+            "for handing a single device or region to an external tool (EM "
+            "extraction, third-party meshing) or isolating it for review."
+        ),
+    )
+    clip_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    clip_mode = clip_parser.add_mutually_exclusive_group(required=True)
+    clip_mode.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "bbox region to clip out, as an inline JSON array of four "
+            "micrometre coordinates [left, bottom, right, top] (e.g. "
+            "'[0, 0, 100, 100]') -- the same shape `klt ring-check`/`klt "
+            "components` accept for their own --region. Every layer of the "
+            "resolved top cell (see --top) is flattened and intersected "
+            "with this window; mutually exclusive with --cell."
+        ),
+    )
+    clip_mode.add_argument(
+        "--cell",
+        default=None,
+        help=(
+            "name of a cell anywhere in the stream (top-level or nested) "
+            "whose full subtree is copied verbatim into the output's fresh "
+            "top cell of the same name; mutually exclusive with --region"
+        ),
+    )
+    clip_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to clip --region against when the stream has more "
+            "than one; omit to require exactly one top cell. Ignored (and "
+            "should be left unset) with --cell."
+        ),
+    )
+    clip_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="output GDS/OASIS path for the clipped/extracted stream",
+    )
+    _add_format_arg(clip_parser)
+    clip_parser.set_defaults(func=clip_cmd.run)
 
     components_parser = subparsers.add_parser(
         "components",

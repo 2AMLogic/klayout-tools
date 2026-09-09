@@ -103,6 +103,7 @@ klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
+klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
 klt economy design.gds                   # utilization, whitespace map, bbox tightness, area-budget check
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
