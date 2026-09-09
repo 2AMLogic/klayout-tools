@@ -27,10 +27,18 @@ klt components <file> --conductors <json> [--vias <json>] [--label-layers <json>
   ["Overlap vs. connection"](#overlap-vs-connection-what-this-engine-actually-asserts)
   below. Omit for a purely same-layer connectivity report.
 - `--label-layers` -- optional. GDS text layers to scan for names/labels/pins,
-  same `{"name": str, "layer": [layer, datatype]}` shape as `--conductors`
-  (no `between`). Any text whose location touches a component's geometry (on
-  any of its conductor/via layers) is reported in that component's `labels`
-  list. Omit to skip name/label/pin detection.
+  as `{"name": str, "layer": [layer, datatype], "conductor": str}` objects.
+  `conductor` is optional and, when given, must name one of the
+  `--conductors` entries: that label layer's texts are then matched *only*
+  against that conductor's own shapes in a component, so a text sitting on a
+  lower conductor's pin/label layer is never attributed to a different,
+  upper-layer component whose geometry merely crosses over it in XY with no
+  via joining them (issue #1579). Omitting `conductor` keeps the original
+  any-layer behaviour for that label layer: its texts are matched against
+  every conductor/via layer present in a component -- this is the
+  backward-compatible default and is unaffected by this scoping. A matched
+  text is reported in that component's `labels` list. Omit `--label-layers`
+  entirely to skip name/label/pin detection.
 - `--region` -- optional. A crop window as an inline JSON array of four
   micrometre coordinates `[left, bottom, right, top]` (e.g. `'[0, 0, 100,
   100]'`). Every conductor/via/label-layer shape is clipped to this window
@@ -95,7 +103,9 @@ exit codes).
   "vias": [
     { "name": "via1", "layer": [70, 20], "between": ["m1", "m2"] }
   ],
-  "label_layers": [],
+  "label_layers": [
+    { "name": "m1pin", "layer": [68, 5], "conductor": "m1" }
+  ],
   "region_um": null,
   "top": null,
   "dbu_um": 0.005,
@@ -127,7 +137,7 @@ exit codes).
 | `file`            | string                   | The input layout path exactly as provided on the command line.                                  |
 | `conductors`      | array\<object\>          | The `--conductors` set echoed back, as `{name, layer}`.                                          |
 | `vias`            | array\<object\>          | The `--vias` set echoed back, as `{name, layer, between}`; `[]` when `--vias` was omitted.       |
-| `label_layers`    | array\<object\>          | The `--label-layers` set echoed back, as `{name, layer}`; `[]` when omitted.                     |
+| `label_layers`    | array\<object\>          | The `--label-layers` set echoed back, as `{name, layer, conductor}` (`conductor` is `null` when that entry didn't declare one); `[]` when omitted.  |
 | `region_um`       | array\<number\> \| null  | The `--region` crop window `[left, bottom, right, top]` in micrometres, or `null` when omitted.  |
 | `top`             | string \| null           | The `--top` cell name, or `null` when every top cell was reported.                               |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`.                 |
@@ -143,7 +153,7 @@ exit codes).
 | `bbox_um`               | object            | `{left, bottom, right, top}` in micrometres -- the component's physical bounding box.                    |
 | `conductors`            | array\<object\>   | `{name, layer, shape_count, area_um2}` for every conductor that contributes at least one shape to this component. A conductor with zero shapes here never appears. |
 | `vias`                  | array\<object\>   | Same shape as `conductors`, for every via present in this component. `[]` when no via landed on it.       |
-| `labels`                | array\<string\>   | Sorted, de-duplicated text strings from any `--label-layers` entry whose text touches this component's geometry. `[]` when no `--label-layers` were given or none touched. |
+| `labels`                | array\<string\>   | Sorted, de-duplicated text strings from any `--label-layers` entry whose text touches this component's geometry. When a `--label-layers` entry declares `conductor`, only that conductor's own shapes in this component are considered (a text on a different conductor's layer that merely overlaps in XY, with no via joining them, is never attributed here); a `--label-layers` entry with no `conductor` matches against every conductor/via layer present in the component. `[]` when no `--label-layers` were given or none touched. |
 | `touches_crop_boundary` | boolean           | `true` when this component's (clipped) bounding box touches the `--region` crop window's edge -- it may continue outside the cropped view. Always `false` when `--region` was omitted. |
 
 ## Exit codes
@@ -151,7 +161,7 @@ exit codes).
 | Code | Meaning                                                                                                    |
 | ---- | ------------------------------------------------------------------------------------------------------------ |
 | `0`  | Ran successfully -- the components report was produced (even an empty one; this is a report, not a pass/fail check). |
-| `1`  | Failed to run -- bad layout file, malformed `--conductors`/`--vias`/`--label-layers`, an unknown conductor name referenced by a via, unknown `--top` cell, or malformed `--region`. |
+| `1`  | Failed to run -- bad layout file, malformed `--conductors`/`--vias`/`--label-layers`, an unknown conductor name referenced by a via or by a `--label-layers` entry's `conductor` field, unknown `--top` cell, or malformed `--region`. |
 | `2`  | Usage error (missing argument, bad `--format` value) -- from argparse.                                        |
 
 On error (exit `1`), a concise message is written to **stderr** and nothing is

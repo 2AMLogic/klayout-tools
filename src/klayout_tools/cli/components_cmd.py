@@ -9,8 +9,8 @@ Exit codes (see ``docs/cli/components.md`` for the full table):
         empty -- this is a report, not a pass/fail check)
     1 - failed to run (bad file, malformed --conductors/--vias/--label-layers,
         unknown --top, malformed --region, or an unknown conductor name
-        referenced by a via) -- returned by ``emit_error`` as
-        ``output.ERROR_EXIT_CODE``
+        referenced by a via or by a --label-layers entry's "conductor" field)
+        -- returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 """
 

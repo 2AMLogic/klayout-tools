@@ -16,6 +16,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt components`'s `--label-layers` entries can now declare an
+  optional `"conductor"` name (e.g. `{"name": "m1pin", "layer": [34, 10],
+  "conductor": "m1"}`), scoping that label layer's texts to only that
+  conductor's own shapes in a component. Previously every label layer's texts
+  were matched against the union of *every* conductor/via layer present in a
+  component, so a text on a lower conductor's pin/label layer was wrongly
+  attributed to an unrelated, upper-layer component whose geometry merely
+  crossed over it in XY with no via joining them — on any real multi-layer
+  block with a power stitch or long route, this made `labels` an unreliable
+  net-name/short detector (issue #1579). An unknown `"conductor"` name now
+  raises `ComponentsError` (exit `1`), matching how an unknown via `"between"`
+  conductor is already validated. `"conductor"` is optional and omitting it
+  keeps the original any-layer matching for backward compatibility — this is
+  an additive JSON field, not a `schema_version` bump.
 - **Changed**: `klt gen mos_array`'s (and, since they compose the same
   unit-device drawing, `diff_pair`'s/`esd_device`'s) `gf180mcu` geometry now
   margins against six real gf180mcu signoff-DRC rule ids

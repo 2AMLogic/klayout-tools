@@ -404,9 +404,17 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "optional GDS text layers to scan for names/labels/pins, as a "
             'path to a JSON file or an inline JSON array of {"name": str, '
-            '"layer": [layer, datatype]} objects. Any text whose location '
-            "touches a component's geometry is reported in that component's "
-            "'labels' list. Omit to skip name/label/pin detection."
+            '"layer": [layer, datatype], "conductor": str} objects. When '
+            "'conductor' names one of the --conductors entries, that label "
+            "layer's texts are only matched against that conductor's own "
+            "shapes, so a text sitting on a lower conductor's pin/label "
+            "layer is never attributed to a different, upper-layer "
+            "component whose geometry merely crosses over it in XY with no "
+            "via joining them. 'conductor' is optional; omit it to keep the "
+            "original any-layer behaviour, matching a text against every "
+            "conductor/via layer present in a component. A matched text is "
+            "reported in that component's 'labels' list. Omit --label-layers "
+            "entirely to skip name/label/pin detection."
         ),
     )
     components_parser.add_argument(
