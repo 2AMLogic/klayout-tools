@@ -550,8 +550,13 @@ mos_array`'s documented-default gf180mcu output finds real violations of all
 six omitted rule ids, scaling with device count — `klt drc --deck gf180mcu`
 reports that same output `status: "clean"` precisely because none of the six
 is checked. See [`klt gen`](gen.md)'s "PDK-family support" section (the
-"gf180mcu — `mos_array`'s default output is curated-deck-clean but not
-signoff-clean" note) for the full reproduction and rule-value table.
+"gf180mcu — `mos_array`'s unit-device geometry was margined against the
+six-rule signoff gap" note) for the full reproduction, rule-value table, and
+the follow-on generator geometry fix (issue #1577) — margined against these
+six rules' own DRM values but **not verified** against a real signoff-deck
+run, since this sandbox has none; this deck itself still transcribes none of
+the six, so `klt drc --deck gf180mcu` staying clean neither confirms nor
+denies that fix either.
 
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —

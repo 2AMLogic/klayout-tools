@@ -4981,12 +4981,18 @@ def test_sg13g2_gate_pad_clearance_lifts_pad_off_diffusion(tmp_path, sg13g2_pdk_
     assert gate["width_um"] == pytest.approx(pad_um)
 
 
-@pytest.mark.parametrize("family", ("sky130", "gf180mcu"))
+@pytest.mark.parametrize("family", ("sky130",))
 def test_families_without_gate_pad_clearance_are_unchanged(family):
-    """#1450 must not move a single dbu on the two families that shipped
-    before it: neither declares a gate-pad clearance, so
+    """#1450 must not move a single dbu on the family that shipped before it
+    (and never needed one): sky130 declares no gate-pad clearance, so
     `_gate_pad_clearance_um` resolves to exactly `0.0` and the unit-device
-    layout is byte-for-byte identical to the no-clearance call."""
+    layout is byte-for-byte identical to the no-clearance call.
+
+    ``gf180mcu`` is deliberately **not** parametrized here any more (issue
+    #1577): it now resolves a real, positive clearance too (see
+    :data:`gen._PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`'s own gf180mcu entry) --
+    see ``test_gf180mcu_gate_pad_clearance_lifts_pad_off_diffusion`` for its
+    own, non-zero-clearance coverage."""
     assert gen._gate_pad_clearance_um(family) == 0.0
     assert gen._mos_unit_layout(
         0.42, 0.28, 2, finger_topology="series"
@@ -7136,3 +7142,225 @@ def test_dogbone_terminal_example_channel_narrower_than_pads():
     polygons = list(region.each_merged())
     dogbone = next(p for p in polygons if p.bbox().left == 0)
     assert dogbone.area() < dogbone.bbox().area()
+
+
+# --------------------------------------------------------------------------- #
+# gf180mcu real-signoff-DRC gap (issue #1577): `mos_array`'s gf180mcu unit
+# device closes the `DF.6_LV`/`PL.4_LV`/`PL.5a_LV`/`PL.5b_LV`/`CO.7`/`DF.12`
+# gap #1575 found and documented (`klt drc --deck gf180mcu` -- this repo's
+# own curated, partial-subset deck -- never transcribed any of the six, so it
+# could not catch them). These tests exercise the new geometry against this
+# repo's curated deck (the only DRC tooling available in this sandbox -- see
+# each constant's own docstring in `gen.py` for the exact real-signoff-deck
+# rule ids/values the geometry is sized against) and assert the *mechanism*
+# (an actual endcap extension / implant coverage / extra clearance is drawn),
+# not merely that a curated-deck run stays clean (which was already true
+# before this fix, since the curated deck never checked these rules at all).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("family", ("sky130", "sg13g2", "sg13cmos5l"))
+def test_families_without_the_1577_gf180mcu_knobs_are_unchanged(family):
+    """None of sky130/sg13g2/sg13cmos5l's curated decks check a contact-to-
+    gate spacing, a bottom-edge gate endcap, or a source/drain-implant
+    coverage rule this issue's four new per-family knobs would need to
+    close -- every one of them must resolve to the pre-#1577 no-op value on
+    these three families, so their existing `mos_array`/`diff_pair`/
+    `esd_device` geometry stays byte-for-byte identical."""
+    assert gen._contact_gate_extra_offset_um(family) == 0.0
+    assert gen._gate_bottom_endcap_um(family) == 0.0
+    assert gen._sd_implant_margin_um(family) == 0.0
+    assert gen._voltage_flavor_mark_margin_um(family) == gen.WELL_ENCLOSURE_MARGIN_UM
+
+
+def test_gf180mcu_1577_knobs_are_all_positive():
+    """gf180mcu is the only family whose real signoff deck needs all four
+    #1577 knobs -- each must resolve to a real, positive value (or, for the
+    `voltage_flavor` marker margin, a value strictly larger than the shared
+    well margin every other family's marker still uses)."""
+    assert gen._contact_gate_extra_offset_um("gf180mcu") > 0.0
+    assert gen._gate_bottom_endcap_um("gf180mcu") > 0.0
+    assert gen._sd_implant_margin_um("gf180mcu") > 0.0
+    assert gen._voltage_flavor_mark_margin_um("gf180mcu") > gen.WELL_ENCLOSURE_MARGIN_UM
+
+
+def test_sd_pad_gate_offset_extra_floor_is_independent_of_the_l_um_makeup():
+    """`_sd_pad_gate_offset_um`'s new `extra_offset_um` parameter (issue
+    #1577) is a second, independent floor: `max`, not a sum, with the
+    pre-existing small-`l_um` makeup (issue #1187). At a small `l_um` whose
+    own makeup already exceeds the extra floor, the extra floor changes
+    nothing; at (or above) the gate-length default, where the makeup is
+    exactly zero, the extra floor is the entire result."""
+    small_l_um = 0.05
+    makeup_only = gen._sd_pad_gate_offset_um(small_l_um)
+    assert gen._sd_pad_gate_offset_um(
+        small_l_um, extra_offset_um=0.02
+    ) == pytest.approx(makeup_only)
+    assert gen._sd_pad_gate_offset_um(
+        gen.GATE_LENGTH_SAFE_MIN_UM, extra_offset_um=0.08
+    ) == pytest.approx(0.08)
+
+
+def test_gf180mcu_mos_array_bottom_edge_gate_endcap_matches_top_edge_pad_clearance(
+    tmp_path, both_pdk_root
+):
+    """PL.4_LV ("Poly2 extension beyond COMP", 0.22um)/DF.6_LV ("COMP extend
+    beyond gate", 0.24um): pre-#1577 the bottom (`y == 0`) gate-stripe edge
+    sat exactly flush with the diffusion's own bottom edge (a zero-margin
+    endcap), while the top edge already cleared both rules via the #461
+    landing pad. Verify the drawn poly (Poly2, 30/0) now extends past the
+    active (Comp, 22/0) bottom edge by
+    `_PDK_GATE_BOTTOM_ENDCAP_UM['gf180mcu']`, and that the whole unit device
+    stays `klt drc --deck gf180mcu` clean."""
+    output = tmp_path / "mos_array_gf180mcu_bottom_endcap.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"rows": 1, "cols": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+
+    endcap_um = gen._gate_bottom_endcap_um("gf180mcu")
+    assert endcap_um > 0
+    poly_bbox = _layer_bbox(output, 30, 0)  # Poly2.drawing
+    active_bbox = _layer_bbox(output, 22, 0)  # Comp.drawing
+    assert poly_bbox["bottom"] == pytest.approx(active_bbox["bottom"] - endcap_um)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("mos_array", {"rows": 2, "cols": 2, "dummy": 1}),
+        ("diff_pair", {"splits": 1, "add_guard_ring": False}),
+        ("esd_device", {"add_guard_ring": False}),
+    ],
+)
+def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
+    tmp_path, both_pdk_root, generator, params
+):
+    """DF.12 ("COMP not covered by Nplus or Pplus is forbidden") is a
+    coverage rule, not a distance: pre-#1577 `mos_array`/`diff_pair`/
+    `esd_device` drew bare Comp (22/0) with no implant at all, an
+    unconditional violation independent of any margin value. Verify the
+    drawn Nplus (32/0, the default `flavor='nfet'`/no-`flavor`-param
+    implant) fully covers the drawn Comp on all three generators -- no
+    unimplanted residue -- and that the result stays `klt drc --deck
+    gf180mcu` clean.
+
+    `add_guard_ring=False` on `esd_device` (whose default is `True`) keeps
+    this test scoped to the unit device's own body: on gf180mcu the guard
+    ring's tap shares the same physical Comp mask as `active`
+    (`_PDK_ROLE_LAYERS["gf180mcu"]["tap"] == (22, 0)`, "no separate tap layer
+    in the curated deck") and is a pre-existing, separate gap this issue does
+    not attempt -- see the follow-up issue filed alongside this PR."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_gf180mcu_sd_implant.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    implant_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
+    ).merged()
+    assert not active_region.is_empty()
+    assert (active_region - implant_region).is_empty()
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
+    tmp_path, both_pdk_root
+):
+    """The source/drain implant role is selected by `params.flavor` (issue
+    #1577): `flavor='pfet'` must cover Comp with Pplus (31/0), not Nplus
+    (32/0), and stay `klt drc --deck gf180mcu` clean."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_gf180mcu_pfet_implant.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": "pfet", "rows": 1, "cols": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (31, 0) in present  # Pplus
+    assert (32, 0) not in present  # no Nplus drawn for a pfet unit
+
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    implant_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(31, 0))
+    ).merged()
+    assert (active_region - implant_region).is_empty()
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
+    tmp_path, both_pdk_root
+):
+    """`DV.6`/`DV.8` ("Min. Dualgate enclose COMP"/"...enclose Poly2", 0.24um/
+    0.4um): both need more headroom past the shared active footprint than
+    `WELL_ENCLOSURE_MARGIN_UM` (0.15um, the pre-#1577 marker box) provides,
+    once the #1577 bottom-edge endcap and the (already-landed, #1450) gf180mcu
+    gate-pad clearance are folded in. Verify the drawn `Dualgate` marker
+    (55/0) actually reaches further past the array's active (Comp, 22/0)
+    footprint than `WELL_ENCLOSURE_MARGIN_UM` alone would, on all four sides,
+    and that the whole thing stays `klt drc --deck gf180mcu` clean."""
+    output = tmp_path / "mos_array_gf180mcu_voltage_flavor_margin.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "voltage_flavor": "medium_voltage",
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    mark_bbox = _layer_bbox(output, *_GF180_VOLTAGE_FLAVOR_MARK_LAYER)
+    active_bbox = _layer_bbox(output, 22, 0)
+    well_margin = gen.WELL_ENCLOSURE_MARGIN_UM
+    for side, mark_edge, active_edge, sign in (
+        ("left", mark_bbox["left"], active_bbox["left"], -1),
+        ("right", mark_bbox["right"], active_bbox["right"], 1),
+        ("bottom", mark_bbox["bottom"], active_bbox["bottom"], -1),
+        ("top", mark_bbox["top"], active_bbox["top"], 1),
+    ):
+        reach_um = sign * (mark_edge - active_edge)
+        assert reach_um > well_margin, side
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
