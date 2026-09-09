@@ -34,6 +34,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   that rounds to zero width/height at the input's own database unit, and a
   `--region` that matches no geometry. See
   [`docs/cli/clip.md`](docs/cli/clip.md).
+- **Added**: `klt pdk stackup` (issue #1609) — the resolved PDK variant's
+  process cross-section as structured data: per conductor/via layer its
+  elevation (`z0_um`/`z1_um`), thickness, sheet (or per-cut) resistance and
+  derived `conductivity_S_per_m`; per dielectric its z-range and relative
+  permittivity. This is the z-axis information a GDSII/OASIS file does not
+  carry and an external E&M/field solver requires, and it closes the open
+  question `docs/design/em-field-sim-spike.md` deferred ("where the sky130
+  stackup table itself lives as a `klt`-owned asset"). Unlike `klt pdk
+  em-limits`, this is **not** a pure live parse: real tech LEFs carry no
+  elevation and no dielectric constant, so those come from a curated
+  per-family table (`src/klayout_tools/pdk_stackup.py`) whose every entry
+  cites the open, non-NDA'd published source it was transcribed from
+  (open_pdks' own `sky130A.tech` `height` stanza / `defaultareacap`
+  coefficients, `sky130.xs`, `sky130A.map`), while thickness and resistance
+  are derived live from the install's tech LEFs at the selected `--corner`.
+  A variant whose family has no curated entry is an explicit exit-1 error,
+  not a partial stack. `--thickness curated|tech-lef` selects which of the
+  two published film thicknesses drives the emitted geometry (default keeps
+  the stack gap-free). Curated today: `sky130`. See
+  [`docs/cli/pdk.md`](docs/cli/pdk.md).
+- **Added**: `klayout_tools.lef_header.parse_lef_header()` now also reports a
+  `CUT` layer's per-cut `RESISTANCE` as `layers[].resistance_ohms` (additive;
+  `null` on `ROUTING` layers, which state `RESISTANCE RPERSQ` instead) —
+  the only resistance a via layer declares, needed by `klt pdk stackup`.
 - **Added**: `klt functional-verification --mutations <proposals>` (issue
   #1592) — mutation testing as a test-quality gate: applies a set of
   hand- or agent-authored byte-exact single-point RTL mutations, one at a

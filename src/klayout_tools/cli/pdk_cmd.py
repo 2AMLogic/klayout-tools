@@ -1,6 +1,6 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Nine subcommands, all emitting through the shared envelope helpers in
+Ten subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
@@ -24,11 +24,20 @@ Nine subcommands, all emitting through the shared envelope helpers in
   computes (issue #1535), surfaced here so a caller checking PDK health does
   not need to invoke ``klt gen`` at all.
 
+- ``stackup`` — the variant's process cross-section: per conductor/via layer
+  its elevation, thickness and sheet resistance/conductivity, and per
+  dielectric its z-range and relative permittivity (issue #1609). Unlike
+  ``em-limits``, this is not a pure live parse — real tech LEFs carry no
+  elevation and no permittivity, so those come from a curated per-family
+  table (:mod:`klayout_tools.pdk_stackup`) and the rest is derived live.
+
 The discovery logic itself lives in :mod:`klayout_tools.pdk`; these handlers
 only translate flags into library calls and render the result. ``pcell-check``
-is the one exception: it defers to :func:`klayout_tools.pdk_pcell.list_pdk_pcells`
-since the PyCell-import probe lives alongside the rest of that module's
-vendor-PCell machinery, not in :mod:`klayout_tools.pdk`.
+and ``stackup`` are the exceptions: they defer to
+:func:`klayout_tools.pdk_pcell.list_pdk_pcells` and
+:func:`klayout_tools.pdk_stackup.stackup` respectively, since the PyCell-import
+probe and the curated stackup table each live alongside their own module's
+machinery, not in :mod:`klayout_tools.pdk`.
 """
 
 import argparse
@@ -45,6 +54,7 @@ from ..pdk import (
     list_pdks,
 )
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
+from ..pdk_stackup import PdkStackupError, stackup
 from .output import emit_error, emit_success, render_table
 
 #: Stable order for rendering the ``assets`` object in text output.
@@ -156,6 +166,21 @@ def run_em_limits(args: argparse.Namespace) -> int:
         return emit_error("pdk em-limits", str(exc), args.format)
 
     emit_success(report, args.format, _print_em_limits_text)
+    return 0
+
+
+def run_stackup(args: argparse.Namespace) -> int:
+    try:
+        report = stackup(
+            variant=args.pdk,
+            root=args.pdk_root,
+            corner=args.corner,
+            thickness=args.thickness,
+        )
+    except (PdkNotFoundError, PdkStackupError) as exc:
+        return emit_error("pdk stackup", str(exc), args.format)
+
+    emit_success(report, args.format, _print_stackup_text)
     return 0
 
 
@@ -336,6 +361,96 @@ def _print_em_limits_text(report: dict) -> None:
             "disagreements (conservative value shown above): "
             + ", ".join(report["disagreements"])
         )
+
+
+def _num(value, spec: str = "g") -> str:
+    """Render an optional number for a text table: ``-`` when ``None``."""
+    return "-" if value is None else format(value, spec)
+
+
+def _print_stackup_text(report: dict) -> None:
+    """Render the stackup top-down (descending z), the way a process
+    cross-section is drawn. Not part of the JSON contract."""
+    print(f"pdk: {report['pdk']} ({report['family']})")
+    print(f"corner: {report['corner']}")
+    print(f"thickness_source: {report['thickness_source']}")
+    print(f"tech_lef_count: {len(report['sources'])}")
+
+    render_table(
+        (
+            "layer",
+            "kind",
+            "gds",
+            "z0_um",
+            "z1_um",
+            "t_um",
+            "src",
+            "Rs_ohm_sq",
+            "S_per_m",
+        ),
+        [
+            (
+                layer["name"],
+                layer["kind"],
+                layer["gds_layer"] or "-",
+                _num(layer["z0_um"], ".4f"),
+                _num(layer["z1_um"], ".4f"),
+                _num(layer["thickness_um"]),
+                layer["thickness_source"],
+                (
+                    _num(layer["sheet_resistance_ohm_per_sq"])
+                    if layer["kind"] != "via"
+                    else f"{_num(layer['via_resistance_ohm'])}/cut"
+                ),
+                _num(layer["conductivity_S_per_m"], ".4g"),
+            )
+            for layer in reversed(report["conductors"])
+        ],
+        left_aligned={0, 1, 2, 6},
+    )
+
+    render_table(
+        ("dielectric", "material", "z0_um", "z1_um", "t_um", "epsilon_r"),
+        [
+            (
+                layer["name"],
+                layer["material"] or "-",
+                _num(layer["z0_um"], ".4f"),
+                _num(layer["z1_um"], ".4f"),
+                _num(layer["thickness_um"], ".4f"),
+                _num(layer["permittivity"]),
+            )
+            for layer in reversed(report["dielectrics"])
+        ],
+        left_aligned={0, 1},
+    )
+
+    notes = [
+        (layer["name"], layer["note"])
+        for layer in report["dielectrics"]
+        if layer["note"]
+    ]
+    for name, note in notes:
+        print(f"  note ({name}): {note}")
+
+    substrate = report["substrate"]
+    print()
+    print(
+        f"substrate: {substrate['name']} ({substrate['material']}), top at"
+        f" z = {substrate['z1_um']:g} um, epsilon_r ="
+        f" {_num(substrate['permittivity'])}"
+    )
+
+    print()
+    print("curated fields (elevation, permittivity) transcribed from:")
+    for reference in report["curated_source"]["references"]:
+        print(f"  - {reference}")
+
+    if report["warnings"]:
+        print()
+        print("warnings:")
+        for warning in report["warnings"]:
+            print(f"  {warning}")
 
 
 def _print_pcell_check_text(report: dict) -> None:

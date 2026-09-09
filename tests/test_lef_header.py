@@ -109,6 +109,7 @@ END li1
             "dc_current_density": None,
             "ac_current_density": None,
             "resistance_rpersq": None,
+            "resistance_ohms": None,
         }
     ]
 

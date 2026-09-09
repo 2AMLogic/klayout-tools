@@ -15,6 +15,7 @@ klt pdk macros      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk corners     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk em-limits   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk pcell-check [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--thickness curated|tech-lef] [--format text|json]
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
@@ -40,6 +41,11 @@ klt pdk pcell-check [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
   ones loaded vs. which are unavailable here and why (issue #1610) — the
   same probe `klt gen --list-pdk-pcells` computes, surfaced here so a
   caller checking PDK health does not need to invoke `klt gen` at all.
+- `stackup` — the variant's process cross-section (issue #1609): per
+  conductor/via layer its elevation, thickness, sheet (or per-cut)
+  resistance and derived conductivity; per dielectric its z-range and
+  relative permittivity. This is the z-axis information a GDSII/OASIS file
+  does not carry and an external E&M/field solver requires.
 
 The command is fully headless and safe to run in CI. Every subcommand except
 `pcell-check` is pure filesystem probing (it does not load the KLayout
@@ -1146,6 +1152,231 @@ failure with the same generic import-error text (issue #1610):
 
 Anything else keeps its own exception text (never a traceback).
 
+## `klt pdk stackup`
+
+A GDSII/OASIS file is 2D: `(layer, datatype)` polygons and no z axis at all.
+Handing a layout to an external E&M/field solver therefore always needs a
+second input — the process **stack-up**: each conductor's elevation above the
+substrate and thickness, each dielectric's z-range and relative permittivity
+(ε_r), and each metal's sheet resistance/conductivity. `klt pdk stackup`
+emits that, keyed by resolved PDK variant. It closes the open question
+[`docs/design/em-field-sim-spike.md`](../design/em-field-sim-spike.md) left
+for a follow-up ("where the sky130 stackup table itself lives as a
+`klt`-owned asset … or a new `klt pdk stackup` subcommand"), and its
+`conductors[]` entries are a natural source for the hand-authored stackup
+spec [`klt mom`](mom.md#spec-file) already consumes (`z0_um`/`z1_um`/
+`conductivity_S_per_m`, plus the `gds_layer` to read shapes from).
+
+```
+$ klt pdk stackup --pdk sky130A
+pdk: sky130A (sky130)
+corner: nom
+thickness_source: curated
+tech_lef_count: 2
+
+layer  kind       gds     z0_um   z1_um   t_um  src      Rs_ohm_sq    S_per_m
+-----  ---------  -----  ------  ------  -----  -------  ---------  ---------
+met5   conductor  72/20  5.3711  6.6311   1.26  curated     0.0285  2.785e+07
+via4   via        71/44  4.8661  5.3711  0.505  curated   0.38/cut          -
+met4   conductor  71/20  4.0211  4.8661  0.845  curated      0.047  2.518e+07
+via3   via        70/44  3.6311  4.0211   0.39  curated   3.41/cut          -
+met3   conductor  70/20  2.7861  3.6311  0.845  curated      0.047  2.518e+07
+via2   via        69/44  2.3661  2.7861   0.42  curated   3.41/cut          -
+met2   conductor  69/20  2.0061  2.3661   0.36  curated      0.125  2.222e+07
+via    via        68/44  1.7361  2.0061   0.27  curated    4.5/cut          -
+met1   conductor  68/20  1.3761  1.7361   0.36  curated      0.125  2.222e+07
+mcon   via        67/44  1.0361  1.3761   0.34  curated    9.3/cut          -
+li1    conductor  67/20  0.9361  1.0361    0.1  curated       12.8  7.812e+05
+
+dielectric   material                           z0_um   z1_um    t_um  epsilon_r
+-----------  --------------------------------  ------  ------  ------  ---------
+passivation  silicon nitride                   5.3711  7.2311  1.8600          -
+ild6         silicon dioxide                   4.0211  5.3711  1.3500        3.9
+…
+pmd          borophosphosilicate glass (BPSG)  0.0000  0.9361  0.9361        3.9
+
+substrate: substrate (silicon), top at z = 0 um, epsilon_r = 11.9
+```
+
+The stack is emitted top-down in text (the way a cross-section is drawn) and
+**bottom-up (ascending z) in JSON**, which is the contract.
+
+### Curated vs. derived: why this is not a pure live parse
+
+`klt pdk em-limits` (above) is a pure live parse and deliberately owns no
+table — the install's own files are the only place its data is stated. That
+is **not** true here. Verified against a real volare-fetched `sky130A`
+(`open_pdks c6d73a3`): the tech LEFs carry `THICKNESS`, `RESISTANCE RPERSQ`
+and (on cut layers) a per-cut `RESISTANCE`, but carry **no elevation and no
+dielectric constant at all**. The `CAPACITANCE CPERSQDIST`/`EDGECAPACITANCE`
+values they do carry already bake geometry and permittivity together into
+per-unit-area/edge coefficients, which a field solver cannot consume as an
+ε_r. So this command layers two sources and says, per field, which is which:
+
+| Field | Source |
+| --- | --- |
+| `conductors[].lef_thickness_um` | **Derived live** from the install's tech LEFs (`THICKNESS`) at the selected `--corner`. |
+| `conductors[].sheet_resistance_ohm_per_sq` | **Derived live** (`RESISTANCE RPERSQ`, routing layers). Corner-dependent — sky130's `met1` is 0.105/0.125/0.145 Ω/□ at min/nom/max. |
+| `conductors[].via_resistance_ohm` | **Derived live** (`RESISTANCE`, cut layers — ohms per cut, the only resistance a via layer states). |
+| `conductors[].conductivity_S_per_m` | **Derived**, `1 / (R_s · thickness)` against the *emitted* thickness, so a solver meshing the emitted geometry recovers the PDK's own `RESISTANCE RPERSQ` exactly. |
+| `conductors[].z0_um`, `curated_thickness_um`, `gds_layer` | **Curated** — no tech LEF states an elevation. |
+| `dielectrics[]`, `substrate` | **Curated** — no tech LEF states a dielectric at all. |
+
+Every curated value is transcribed from a file the open PDK itself ships, and
+`curated_source.references` names those files in the output. For sky130 they
+are open_pdks' own `libs.tech/magic/sky130A.tech` (its `height <types> <z0>
+<thickness>` stanza — the elevation table magic uses for 3D extraction — and
+its `defaultareacap` coefficients), `libs.tech/klayout/tech/xsect/sky130.xs`
+(dielectric film names/order/thicknesses), and
+`libs.tech/klayout/tech/sky130A.map` (GDS layer/datatype). Nothing is NDA'd
+and nothing is guessed; the per-entry provenance, including the arithmetic
+corroborating ε_r = 3.9 against the same install's own area-capacitance
+coefficients, is documented on `_SKY130_STACKUP` in
+`src/klayout_tools/pdk_stackup.py` and re-derived in
+`tests/test_pdk_stackup.py`. Where no open source states a value — the
+passivation nitride's ε_r, every dielectric's loss tangent — the field is
+`null`, never a guess.
+
+**An uncurated variant is an explicit error, not a partial stack** (exit
+`1`): a stackup missing its z axis is not a usable field-solver input, so
+`klt pdk stackup --pdk gf180mcuD` fails with a message naming which families
+*are* curated rather than emitting the electrical half alone. Curated today:
+`sky130` (matched by variant prefix, so a future `sky130C` is covered).
+
+### `--corner` and `--thickness`
+
+`--corner` (default `nom`) selects which parasitic corner's tech LEFs the
+live-derived fields are read from; `available_corners` reports every corner
+the install actually ships. A corner no tech LEF provides is **not** an error
+— the curated geometry is still emitted, the derived fields are `null`, and a
+warning names the available corners.
+
+`--thickness` selects which of two published film thicknesses drives the
+emitted geometry (`thickness_um`, and therefore `z1_um`). open_pdks states
+sky130's `met1` as **0.36 µm** in its magic elevation table (the
+3D-extraction geometry) and **0.35 µm** in its tech LEFs (the P&R
+RC-estimation value):
+
+- `curated` (default) — the elevation table's value. The stack is **gap-free**:
+  each level's `z1_um` is exactly the next level's `z0_um`.
+- `tech-lef` — the install's own declared `THICKNESS`. ~10 nm thinner per
+  metal, which leaves each metal short of the via above it; a solver would
+  mesh that as an open circuit, which is why it is not the default.
+
+Both readings are always reported (`curated_thickness_um` /
+`lef_thickness_um`) whichever is selected, and any disagreement between them
+is always listed in `warnings`. A layer no tech LEF declares a `THICKNESS`
+for (every cut layer) falls back to its curated value per-layer rather than
+emitting a null-thickness slab.
+
+### JSON schema
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "sky130A",
+  "root": "/home/u/.volare",
+  "family": "sky130",
+  "corner": "nom",
+  "thickness_source": "curated",
+  "available_corners": ["max", "min", "nom"],
+  "curated_source": {
+    "description": "sky130 BEOL stack-up (local interconnect through met5)",
+    "references": ["open_pdks …/libs.tech/magic/<variant>.tech -- `height` stanza …"]
+  },
+  "sources": [
+    {
+      "cell_library": "sky130_fd_sc_hd",
+      "corner": "nom",
+      "tech_lef": "/…/sky130_fd_sc_hd__nom.tlef"
+    }
+  ],
+  "substrate": {
+    "name": "substrate",
+    "material": "silicon",
+    "z1_um": 0.0,
+    "permittivity": 11.9,
+    "loss_tangent": null,
+    "source": "relative permittivity of crystalline silicon at 300 K …"
+  },
+  "conductors": [
+    {
+      "name": "met1",
+      "kind": "conductor",
+      "material": "aluminium",
+      "lef_layer": "met1",
+      "gds_layer": "68/20",
+      "z0_um": 1.3761,
+      "z1_um": 1.7361,
+      "thickness_um": 0.36,
+      "thickness_source": "curated",
+      "curated_thickness_um": 0.36,
+      "lef_thickness_um": 0.35,
+      "sheet_resistance_ohm_per_sq": 0.125,
+      "via_resistance_ohm": null,
+      "conductivity_S_per_m": 22222222.22,
+      "agrees": {
+        "thickness_um": true,
+        "sheet_resistance_ohm_per_sq": true,
+        "via_resistance_ohm": null
+      }
+    }
+  ],
+  "dielectrics": [
+    {
+      "name": "ild3",
+      "material": "silicon dioxide",
+      "z0_um": 1.3761,
+      "z1_um": 2.0061,
+      "thickness_um": 0.63,
+      "permittivity": 3.9,
+      "loss_tangent": null,
+      "note": null
+    }
+  ],
+  "warnings": ["met1: tech LEF THICKNESS 0.35 um differs from …"]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | integer | `1`. Versioned per command (see [`docs/json-contract.md`](../json-contract.md)). |
+| `pdk`, `root` | string | The resolved variant and install root, exactly as `klt pdk find` reports them. |
+| `family` | string | The curated family this variant matched (`"sky130"`). |
+| `corner` | string | The parasitic corner requested via `--corner`. |
+| `thickness_source` | string | The `--thickness` mode requested (`"curated"` \| `"tech-lef"`). Per-layer effective source is `conductors[].thickness_source`. |
+| `available_corners` | array of string | Every corner suffix found across the install's tech LEFs, sorted. |
+| `curated_source` | object | `{description, references}` — the published, open sources the curated fields were transcribed from. |
+| `sources` | array of object | `{cell_library, corner, tech_lef}` per tech LEF actually parsed (same shape as `em-limits`). Empty when the install ships none. |
+| `substrate` | object | `{name, material, z1_um, permittivity, loss_tangent, source}`. `z1_um` is the elevation origin (`0.0`); the substrate is modelled as semi-infinite below it, so it has no `z0_um`. |
+| `conductors` | array of object | Every conductor/via level, **ascending z**. |
+| `conductors[].kind` | string | `"conductor"` (routing metal) or `"via"` (cut layer). |
+| `conductors[].gds_layer` | string \| null | `"<layer>/<datatype>"` — the GDS layer this level's shapes live on, so the entry can be turned straight into a [`klt mom`](mom.md#spec-file) `stackup[]` entry. |
+| `conductors[].z0_um`, `z1_um`, `thickness_um` | float | The emitted geometry. `z1_um == z0_um + thickness_um` always. |
+| `conductors[].thickness_source` | string | Which reading `thickness_um` used for **this** layer (`"curated"` \| `"tech-lef"`). |
+| `conductors[].curated_thickness_um`, `lef_thickness_um` | float \| null | The two published readings. `lef_thickness_um` is `null` when no tech LEF at the selected corner declares one (always the case for cut layers). |
+| `conductors[].sheet_resistance_ohm_per_sq` | float \| null | Live-derived `RESISTANCE RPERSQ`. `null` on cut layers and when no tech LEF was read. |
+| `conductors[].via_resistance_ohm` | float \| null | Live-derived per-cut `RESISTANCE`. `null` on routing layers. |
+| `conductors[].conductivity_S_per_m` | float \| null | `1 / (R_s · thickness_um · 1e-6)`. `null` whenever `sheet_resistance_ohm_per_sq` is. Spelled the same way [`klt mom`](mom.md#spec-file)'s `conductivity_S_per_m` is, deliberately. |
+| `conductors[].agrees` | object | `{thickness_um, sheet_resistance_ohm_per_sq, via_resistance_ohm}`, each `true`/`false`/`null` — whether every tech LEF at this corner that declared the field agreed. `null` means no source declared it. On a disagreement the **more resistive** reading is reported (min thickness, max resistance) and a warning is emitted, so a disagreement never silently flatters the electrical model. |
+| `dielectrics` | array of object | A contiguous z partition from the substrate surface to the top of the passivation, **ascending z**. Conductors are *embedded in* these slabs — the slab states what fills the space laterally between wires on that level, not only between levels. |
+| `dielectrics[].permittivity` | float \| null | Relative permittivity (ε_r). `null` where no open PDK source states one. |
+| `dielectrics[].loss_tangent` | float \| null | Always `null` today: no sky130 loss tangent is published in any open, non-NDA source. |
+| `dielectrics[].note` | string \| null | A caveat about this slab's model where one applies (e.g. sky130's passivation is deposited conformally over the top metal, so treating the whole level as one uniform slab is an approximation). |
+| `warnings` | array of string | Non-fatal findings: curated/tech-LEF thickness disagreement, cross-library disagreement, no tech LEF found, requested corner not shipped. Never affects the exit code. |
+
+### Scope: BEOL only
+
+The emitted stack covers the **BEOL** — local interconnect (`li1`) through
+the top metal (`met5`) — plus the pre-metal dielectric and passivation, over
+a substrate reference plane at `z = 0`. FEOL conductors (poly and below) are
+deliberately excluded: open_pdks' `height` stanza states its FEOL entries in
+an origin that is not consistent with its own BEOL entries, so transcribing
+them into one coordinate system would emit a stack that is *wrong* rather
+than merely incomplete. sky130's redistribution layer (magic `mrdl`) is
+likewise omitted — it appears in neither the tech LEFs nor `sky130A.map`, so
+neither its electrical model nor its GDS layer could be stated.
+
 ## Library API
 
 The importable half lives in `src/klayout_tools/pdk.py` — block repos import
@@ -1201,6 +1432,31 @@ except PdkPCellError as exc:
     ...  # exc carries the actionable message; PdkPCellError subclasses GenError
 ```
 
+`stackup`'s library function is likewise its own module — it is `stackup`, in
+`klayout_tools.pdk_stackup`, alongside the curated per-family cross-section
+table it reads (see "Curated vs. derived" above):
+
+```python
+from klayout_tools.pdk_stackup import PdkStackupError, stackup, supported_families
+
+# same dict `klt pdk stackup` emits
+report = stackup(variant="sky130A", corner="nom")  # PdkNotFoundError if no install
+report = stackup(variant="sky130A", thickness="tech-lef")  # install's own THICKNESS
+
+try:
+    stackup(variant="gf180mcuD")
+except PdkStackupError as exc:
+    ...  # "no curated stackup for PDK variant 'gf180mcuD' … Curated families: sky130"
+
+supported_families()  # ["sky130"]
+```
+
+`PdkStackupError` is deliberately distinct from `PdkNotFoundError`: "there is
+no PDK here" and "there is a PDK here, but this repo has not curated its
+cross-section" are different problems with different fixes, even though both
+surface as the same exit-code-`1` error envelope. An unknown `thickness`
+argument raises `ValueError` (the CLI rejects it at argparse, exit `2`).
+
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
 payload dicts the CLI emits (the `layers_report()` pattern), and `find_pdk`
 raises `PdkNotFoundError` — carrying the actionable message — when nothing
@@ -1229,8 +1485,8 @@ libraries ship no `techlef/` directory at all, returns an empty
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`; `check` on a resolved install with no dangling symlinks is `0`; `pcell-check` on a variant shipping no PyCell library, or whose PyCell packages all imported cleanly, is `0`. |
-| `1` | `find`/`env`/`check`/`cells`/`macros`/`corners`/`em-limits`/`pcell-check` resolved no PDK install. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`; `check` on a resolved install with no dangling symlinks is `0`; `pcell-check` on a variant shipping no PyCell library, or whose PyCell packages all imported cleanly, is `0`; `stackup` on a curated family is `0` even when the install ships no tech LEF to derive the electrical fields from (curated geometry plus a warning). |
+| `1` | `find`/`env`/`check`/`cells`/`macros`/`corners`/`em-limits`/`pcell-check`/`stackup` resolved no PDK install — **or** `stackup` resolved one whose family has no curated cross-section table (see "`klt pdk stackup`" above). Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
@@ -1292,4 +1548,19 @@ $ klt pdk check --pdk ihp-sg13cmos5l || echo "PDK install is broken"
 # compat layer or an empty (uninitialized) vendored git submodule directory
 # without having to invoke `klt gen`:
 $ klt pdk pcell-check --pdk ihp-sg13g2 || echo "PDK PyCell library is unusable here"
+
+# Hand a field solver the z axis a GDS file does not carry -- every metal's
+# elevation, thickness and conductivity at the worst-case parasitic corner:
+$ klt pdk stackup --pdk sky130A --corner max --format json \
+    | jq -r '.conductors[] | select(.kind == "conductor")
+             | "\(.name) \(.z0_um)..\(.z1_um) um  \(.conductivity_S_per_m) S/m"'
+li1 0.9361..1.0361 um  588235.2941176471 S/m
+met1 1.3761..1.7361 um  19157088.12260537 S/m
+…
+
+# Turn the same report into a `klt mom` spec's `stackup[]` entries:
+$ klt pdk stackup --pdk sky130A --format json \
+    | jq '[.conductors[] | select(.kind == "conductor")
+           | {layer: .gds_layer, conductor: .name,
+              z0_um, z1_um, conductivity_S_per_m}]'
 ```
