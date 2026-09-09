@@ -16,6 +16,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt functional-verification --mutations <proposals>` (issue
+  #1592) — mutation testing as a test-quality gate: applies a set of
+  hand- or agent-authored byte-exact single-point RTL mutations, one at a
+  time, to an isolated from-scratch build+test of the same request, and
+  reports how many the testbench actually caught. Ported (Apache-2.0
+  attribution header, `src/klayout_tools/_vendor/mutation_variants.py`) from
+  [`boldaxolotl/booley`](https://github.com/boldaxolotl/booley)'s
+  no-HDL-parsing mutation seam, per
+  [`docs/design/mutation-testing-spike.md`](docs/design/mutation-testing-spike.md)
+  (issue #1586). The baseline run is reused unchanged from the existing
+  request/response contract; a baseline that itself fails aborts the whole
+  run before any proposal is attempted (exit 1 — comparing a mutant against
+  an already-broken baseline is meaningless). Each isolated per-mutant
+  build+test is bounded by a `klt`-level subprocess timeout, independent of
+  whatever cycle bound the testbench's own code has — a mutation that
+  wedges the DUT's FSM is classified `"killed"` on timeout, per booley's own
+  rule, rather than hanging the whole run. Adds an additive
+  `mutation_testing` response block (`proposal_count`, `valid_count`,
+  `killed_count`, `survived_count`, `rejected_count`, `mutation_score`,
+  `results[]`) and extends the exit-code table: exit 3 when the baseline
+  passed but at least one valid proposal survived, matching `klt drc`'s
+  "ran fine, found violations" convention. See
+  [`docs/cli/functional-verification.md`](docs/cli/functional-verification.md)'s
+  new "Mutation testing: `--mutations`" section, and
+  [`examples/functional-verification/proposals-modexp.json`](examples/functional-verification/proposals-modexp.json)
+  for a worked example reproducing the spike's own live finding: one
+  comparison-boundary mutation on `modexp.v`'s modular reduction step that
+  survives the committed testbench unnoticed, alongside one bit-select
+  mutation that is correctly killed.
 - **Fixed**: `klt components`'s `--label-layers` entries can now declare an
   optional `"conductor"` name (e.g. `{"name": "m1pin", "layer": [34, 10],
   "conductor": "m1"}`), scoping that label layer's texts to only that

@@ -187,7 +187,16 @@ src = ["src", "tests"]
 # that this repo does not own and re-syncs from upstream — formatting them
 # would churn on every upstream bump. No tree contains any first-party Python;
 # scope the formatter to code we own so `ruff format --check .` can gate CI.
-exclude = [".loom/**", ".claude/**", ".agents/**"]
+# `_vendor/mutation_variants.py` is a byte-exact third-party port (see the
+# matching `per-file-ignores` entry below) -- excluded here too, so
+# `ruff format` never reflows it away from the origin file it must stay
+# diffable against.
+exclude = [
+    ".loom/**",
+    ".claude/**",
+    ".agents/**",
+    "src/klayout_tools/_vendor/mutation_variants.py",
+]
 
 [tool.ruff.lint]
 select = [
@@ -198,3 +207,11 @@ select = [
     "UP",  # pyupgrade
     "B",   # flake8-bugbear
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Byte-exact ports of third-party source (docs/design/mutation-testing-spike.md,
+# "Attribution mechanics"; `src/klayout_tools/_vendor/__init__.py`'s own "port,
+# don't fork silently" rule) keep the upstream file's own line breaks so a
+# reviewer can diff against the origin unmodified -- reflowing them to satisfy
+# this repo's 88-column style would itself be an undisclosed change.
+"src/klayout_tools/_vendor/mutation_variants.py" = ["E501"]
