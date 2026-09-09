@@ -220,7 +220,7 @@ plus optional constraints is richer than a flag line carries cleanly.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`-equivalent). |
 | `hdl_toplevel` | string | Echo of the request. |
-| `status` | string | `"ok"` — synthesis has no pass/fail concept of its own (see "Exit codes" below); a failed run never emits this envelope. |
+| `status` | string | *(Superseded by issue #1588: `status` itself is unaffected and stays `"ok"` on every successful run, but this row's own reasoning — "synthesis has no pass/fail concept of its own" — no longer holds. Issue #1588 adds exactly one, in the response's additive `structural.has_critical` field/exit code `3`; see `docs/cli/synthesize.md`'s "Exit codes" for the current contract.)* `"ok"` — synthesis has no pass/fail concept of its own (see "Exit codes" below); a failed run never emits this envelope. |
 | `instance_count` | integer | `stat -json`'s `num_cells` (Yosys survey §2/§4) — total standard-cell instances after liberty mapping. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy (from `klt cells`), a different concept from a post-synthesis instance tally. Reusing `cell_count` here would silently collide two different meanings under one name across two `klt` verbs — `instance_count` matches `layout-metrics`'s own `instance_count` field's semantics instead (`layout-metrics`'s "sum of every cell's `instances`"), which is the correct precedent to reuse. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit, Yosys survey §2/§4). |
 | `sequential_area_um2` | number | `stat -json`'s `sequential_area` — a free additive field per the Yosys survey's own recommendation, useful as a P&R floorplan hint. |
@@ -246,6 +246,21 @@ threshold on them composes this contract into `klt eval`'s descriptor
 (`layout-metrics`'s `cell_count` threshold in `docs/cli/eval.md`'s own
 example is the precedent), rather than this contract inventing its own
 threshold/pass-fail concept.
+
+**Superseded by issue #1588.** The reasoning above held only because
+synthesis, as scoped by this spike, had no pass/fail concept of its own to
+report — `instance_count`/`area_um2` genuinely are not a pass/fail gate, and
+still are not. But Yosys's own `synth`/`stat`/`check` passes *do* already
+know about three unambiguously-wrong synchronous-design conditions this
+spike did not surface at all: inferred latches, combinational loops, and
+multiply-driven nets. Issue #1588 adds an always-present `structural` verdict
+over exactly those three, and exit code `3` when `structural.has_critical` is
+`true` — additive per `docs/json-contract.md`'s own rule that a command may
+define codes above `2` for an outcome that is neither success nor tool
+failure. `0`/`1`/`2` keep the meanings above unchanged; `status` stays `"ok"`
+either way (see this section's `status` row above). See `docs/cli/
+synthesize.md`'s "Exit codes" and "`structural`" sections for the shipped
+contract this spike's own reasoning no longer describes.
 
 ### Build/wrap decision
 

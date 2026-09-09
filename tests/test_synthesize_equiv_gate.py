@@ -238,11 +238,12 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
 
     original_run_yosys = synthesize._run_yosys
 
-    def _seed_mismatch_after_synthesis(script_path: str) -> None:
-        original_run_yosys(script_path)
+    def _seed_mismatch_after_synthesis(script_path: str) -> str:
+        log_text = original_run_yosys(script_path)
         netlist_path = _netlist_path_from_script(script_path)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write(broken_netlist_text)
+        return log_text
 
     monkeypatch.setattr(synthesize, "_run_yosys", _seed_mismatch_after_synthesis)
 
