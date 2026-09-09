@@ -6,14 +6,15 @@ simulation, DRC, LVS, symbol lookup — imports (Python) or evaluates (shell/Tcl
 instead of re-implementing the lookup, usually twice, per repo.
 
 ```
-klt pdk find      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk list      [--pdk-root <dir>] [--format text|json]
-klt pdk env       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk check     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk cells     [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
-klt pdk macros    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk corners   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk em-limits [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk find        [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk list        [--pdk-root <dir>] [--format text|json]
+klt pdk env         [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk check       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk cells       [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
+klt pdk macros      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk corners     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk em-limits   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk pcell-check [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
@@ -34,9 +35,19 @@ klt pdk em-limits [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 - `em-limits` — per routing/cut layer, the electromigration current-density
   limits declared across every tech LEF the variant ships, flagging any
   layer where the shipped tech LEFs disagree.
+- `pcell-check` — attempt to import every KLayout PyCell package the
+  resolved variant ships under `libs.tech/klayout/python/` and report which
+  ones loaded vs. which are unavailable here and why (issue #1610) — the
+  same probe `klt gen --list-pdk-pcells` computes, surfaced here so a
+  caller checking PDK health does not need to invoke `klt gen` at all.
 
-The command is fully headless (pure filesystem probing — it does not load the
-KLayout database module) and safe to run in CI.
+The command is fully headless and safe to run in CI. Every subcommand except
+`pcell-check` is pure filesystem probing (it does not load the KLayout
+database module at all); `pcell-check` is the one exception — it does load
+`klayout.db` and imports the resolved variant's own Python PyCell packages,
+the same way `klt gen --list-pdk-pcells`/`--pdk-pcell` already do, in order
+to answer "does this actually import here" rather than merely inspecting
+paths on disk.
 
 ## Scope
 
@@ -1049,6 +1060,92 @@ upstream — see `src/klayout_tools/lef_header.py`'s `_parse_layer` docstring
 for the parser side, and issue #1215's own "Suggested handling" for why
 resolving *which* tech LEF is stale is left to the operator, not this tool.
 
+## `klt pdk pcell-check`
+
+A PDK also ships **its own** KLayout PyCell (Python PCell) library — the
+authoritative drawing of that PDK's devices — as importable Python packages
+under `libs.tech/klayout/python/<package>/`. Whether that library actually
+*imports* in the current environment depends on things `find`/`list` cannot
+see from the filesystem alone: a third-party compat layer klt does not ship
+(the real sky130A `cells` → `gdsfactory`/`kfactory` case), or a git-submodule
+directory that checked out empty because the install came from a release
+tarball that does not carry submodule contents (the real ihp-sg13g2
+`sg13g2_pycell_lib` → `cni`/`pycell4klayout-api` case). Before issue #1610,
+the only way to see this was `klt gen --list-pdk-pcells` — a generation
+command, not a PDK-inspection one. `pcell-check` is the same probe, reachable
+from `klt pdk` directly, so checking PDK health never requires invoking `klt
+gen`.
+
+```
+$ klt pdk pcell-check --pdk ihp-sg13g2
+pdk: ihp-sg13g2 (-)
+pcell_lib_dir: /…/ihp-sg13g2/libs.tech/klayout/python
+
+importable:
+  SG13_native_pcell_lib  (package: sg13g2_native_pcell_lib, 12 cell(s))
+
+unavailable:
+  sg13g2_pycell_lib
+    vendored submodule directory 'sg13g2_pycell_lib/cni' appears empty -- PDK was likely installed from a release tarball that does not include git submodule contents
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": { "name": "ihp-sg13g2", "variant": "ihp-sg13g2", "version": null },
+  "pcell_lib_dir": "/…/ihp-sg13g2/libs.tech/klayout/python",
+  "libraries": [
+    {
+      "library": "SG13_native_pcell_lib",
+      "package": "sg13g2_native_pcell_lib",
+      "description": "SG13G2 Native PCells",
+      "cells": ["..."]
+    }
+  ],
+  "unavailable": [
+    {
+      "package": "sg13g2_pycell_lib",
+      "missing_dependency": null,
+      "reason": "vendored submodule directory 'sg13g2_pycell_lib/cni' appears empty -- PDK was likely installed from a release tarball that does not include git submodule contents"
+    }
+  ]
+}
+```
+
+This is the exact JSON shape `klt gen --list-pdk-pcells` emits (see
+[`docs/cli/gen.md`](gen.md#pdk-shipped-pcells---list-pdk-pcells---pdk-pcell))
+— `pcell-check` is a thin `klt pdk` alias onto the same library function
+(`list_pdk_pcells`), not a second implementation. `pcell_lib_dir` is `null`
+with both `libraries`/`unavailable` empty, and exit `0`, for a PDK shipping
+no `libs.tech/klayout/python/` at all (a real gf180mcuD install) — a
+successful "this PDK ships no PyCell library", not an error.
+
+### The `reason` string: missing dependency vs. empty vendored directory
+
+`unavailable[].reason` distinguishes two causes, rather than reporting every
+failure with the same generic import-error text (issue #1610):
+
+- **A genuinely missing third-party dependency** (`missing_dependency` is
+  non-`null`): `"requires Python module '<name>', which is not importable in
+  this environment"` — the fix is installing that module per the PDK's own
+  setup docs; klt does not vendor or reimplement it (see
+  [`docs/cli/gen.md`](gen.md#phase-1-scope-packages-that-import-with-no-extra-compat-layer)).
+- **An empty or near-empty vendored (git-submodule) directory** — the
+  package's own directory tree contains a subdirectory that exists but has
+  no files, or whose only file is an empty/comment-only `__init__.py`-shaped
+  stub, exactly what an uninitialized git submodule mount point looks like
+  on disk: `"vendored submodule directory '<package>[/<subpath>]' appears
+  empty -- PDK was likely installed from a release tarball that does not
+  include git submodule contents"`. The fix here is a different one from the
+  missing-dependency case: re-fetch the PDK with its submodules initialized
+  (`git submodule update --init --recursive`, or use a checksum-verified
+  clone script like [`scripts/fetch-ihp-sg13g2.sh`](../../pdks/README.md)
+  rather than a plain release-tarball download), not `pip install` anything.
+  When the failure also names a missing Python module, both facts are
+  reported together.
+
+Anything else keeps its own exception text (never a traceback).
+
 ## Library API
 
 The importable half lives in `src/klayout_tools/pdk.py` — block repos import
@@ -1089,6 +1186,21 @@ corners = list_corners(variant="gf180mcuD")  # same dict `klt pdk corners` emits
 em = em_limits(variant="gf180mcuD")  # same dict `klt pdk em-limits` emits
 ```
 
+`pcell-check`'s library function is the one exception to "everything lives in
+`klayout_tools.pdk`": it is `list_pdk_pcells`, in `klayout_tools.pdk_pcell`
+alongside the rest of that module's vendor-PCell machinery (`--pdk-pcell`'s
+`generate_pdk_pcell`, issue #1535):
+
+```python
+from klayout_tools.pdk_pcell import PdkPCellError, list_pdk_pcells
+
+# same dict `klt pdk pcell-check` emits
+try:
+    report = list_pdk_pcells(variant="ihp-sg13g2")
+except PdkPCellError as exc:
+    ...  # exc carries the actionable message; PdkPCellError subclasses GenError
+```
+
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
 payload dicts the CLI emits (the `layers_report()` pattern), and `find_pdk`
 raises `PdkNotFoundError` — carrying the actionable message — when nothing
@@ -1117,11 +1229,12 @@ libraries ship no `techlef/` directory at all, returns an empty
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`; `check` on a resolved install with no dangling symlinks is `0`. |
-| `1` | `find`/`env`/`check`/`cells`/`macros`/`corners`/`em-limits` resolved no PDK install. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells`/`em-limits` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`; `check` on a resolved install with no dangling symlinks is `0`; `pcell-check` on a variant shipping no PyCell library, or whose PyCell packages all imported cleanly, is `0`. |
+| `1` | `find`/`env`/`check`/`cells`/`macros`/`corners`/`em-limits`/`pcell-check` resolved no PDK install. Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
+| `5` | `pcell-check` resolved an install, but one or more of its KLayout PyCell packages could not be imported here (see "`klt pdk pcell-check`" above). |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
@@ -1173,4 +1286,10 @@ sf
 # symlink (e.g. a standalone `ihp-sg13cmos5l` clone missing its sibling
 # `ihp-sg13g2` checkout, issue #1406):
 $ klt pdk check --pdk ihp-sg13cmos5l || echo "PDK install is broken"
+
+# CI gate: fail the build if the resolved install's own KLayout PCell
+# packages don't actually import here -- surfaces a missing third-party
+# compat layer or an empty (uninitialized) vendored git submodule directory
+# without having to invoke `klt gen`:
+$ klt pdk pcell-check --pdk ihp-sg13g2 || echo "PDK PyCell library is unusable here"
 ```

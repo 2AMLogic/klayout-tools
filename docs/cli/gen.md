@@ -1630,7 +1630,12 @@ reinterprets vendor PCell code.
 
 `klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean
 ([`docs/cli/pdk.md`](pdk.md)) so a caller can discover PyCell availability
-without invoking this command at all.
+without invoking this command at all. As of issue #1610,
+[`klt pdk pcell-check`](pdk.md#klt-pdk-pcell-check) goes one step further and
+surfaces this very importability probe (the same `unavailable`/`libraries`
+result `--list-pdk-pcells` computes below) directly from `klt pdk`, so
+checking whether a PDK's own PyCell library actually *imports* here never
+requires invoking `klt gen` at all.
 
 ### Phase 1 scope: packages that import with no extra compat layer
 
@@ -1706,6 +1711,19 @@ PDK's own setup docs), not for klt to ship a copy of it. Full `cni` /
 - `params[].default` — the vendor's default, rendered as JSON. A `layer`
   default becomes KLayout's own `"<layer>/<datatype>"` string (e.g. `"67/20"`),
   which is exactly the spelling `--params` accepts back.
+- `unavailable[].reason` — as of issue #1610, distinguishes a genuinely
+  missing third-party dependency (`missing_dependency` non-`null`, message
+  above) from an **empty or near-empty vendored git-submodule directory**
+  (the package's own directory tree contains a subdirectory that exists but
+  has no files, or whose only file is an empty/comment-only
+  `__init__.py`-shaped stub — the on-disk signature of an uninitialized git
+  submodule): `"vendored submodule directory '<package>[/<subpath>]' appears
+  empty -- PDK was likely installed from a release tarball that does not
+  include git submodule contents"`. See
+  [`klt pdk pcell-check`'s "The `reason` string" section](pdk.md#the-reason-string-missing-dependency-vs-empty-vendored-directory)
+  for the full breakdown and the fix for each case; both `--list-pdk-pcells`
+  and `klt pdk pcell-check` render the identical `reason` text since they
+  share the same underlying `list_pdk_pcells` function.
 
 ### `--pdk-pcell` response
 
