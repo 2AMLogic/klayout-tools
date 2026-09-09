@@ -21,6 +21,7 @@ docs/
   design-evidence-tiers.md  # four-tier evidence ladder (T1–T4) and per-tier artifact checklist
   cli/                   # per-verb CLI reference
     cells.md
+    clip.md
     components.md
     deck.md
     design-centering.md

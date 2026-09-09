@@ -16,6 +16,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: new verb `klt clip` (issue #1608): writes a subset of an
+  existing GDSII/OASIS stream back out as its own top-cell stream, either a
+  micrometre bounding-box region (`--region`, the same inline-JSON shape
+  `klt ring-check`/`klt components` already accept) or a named cell's full
+  subtree (`--cell`, any cell in the stream, not just a top cell). Fills a
+  gap identified by #1603: handing a single device or region to an external
+  tool (EM extraction, third-party meshing, or just isolating it for review)
+  previously had no `klt` path — `--region` on `klt ring-check`/`klt
+  components` only ever *restricted analysis*, it never wrote the clipped
+  subset back out. Region-clip mode flattens every layer of the resolved top
+  cell (`clip_box()` + `region()`/`texts()`) and intersects it with the
+  window; cell-extraction mode copies the named cell's subtree verbatim
+  (`kdb.Cell.copy_tree()`), preserving nested hierarchy exactly. Output is
+  written via the existing shared `write_layout()` (deterministic, no
+  embedded timestamp). Errors clearly on a nonexistent `--cell`, a `--region`
+  that rounds to zero width/height at the input's own database unit, and a
+  `--region` that matches no geometry. See
+  [`docs/cli/clip.md`](docs/cli/clip.md).
 - **Added**: `klt functional-verification --mutations <proposals>` (issue
   #1592) — mutation testing as a test-quality gate: applies a set of
   hand- or agent-authored byte-exact single-point RTL mutations, one at a
