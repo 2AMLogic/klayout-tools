@@ -144,6 +144,13 @@ _HIDDEN_PARAMS = {
     "cap_top_via_min_w_um",
     "cap_top_via_metal_min_w_um",
     "cap_min_spacing_um",
+    # `guard_ring`/`mos_array`/`diff_pair`/`bjt_array`/`esd_device`'s own
+    # tap/collector-ring implant (issue #1580, follow-up to #1577's
+    # unit-device-only `sd_implant_*` fix) -- harness-computed exactly like
+    # `sd_implant_layer`/`sd_implant_present` above, never part of the
+    # request schema. See :func:`_ring_tap_implant_layer`.
+    "ring_implant_layer",
+    "ring_implant_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -2173,27 +2180,111 @@ def _cap_array_layer_params(
     return resolved
 
 
+def _ring_tap_implant_layer(family: str, well_tie: bool) -> Any:
+    """The implant ``kdb.LayerInfo`` (or ``None``) that must cover a ring's
+    own tap/collector ``Comp`` shape (issue #1580, follow-up to #1577's
+    unit-device-only ``sd_implant_*`` fix -- see that constant's own
+    docstring for the ``DF.12`` rule this closes).
+
+    Only resolves a real layer wherever the family's own ``"tap"`` role is
+    the *same* physical layer/datatype pair as its ``"active"`` role --
+    a necessary, but (re-verified against the current tree, correcting
+    #1580's own curation) *not sufficient* condition. ``gf180mcu`` is the
+    only family that satisfies both this collision *and* declares an
+    implant role (``"well_tap_implant"``/``"pplus"``) to resolve here at all
+    -- its curated deck declares no dedicated tap mask
+    (``_PDK_ROLE_LAYERS["gf180mcu"]["tap"] == (22, 0)``, the same pair as
+    ``"active"``). ``sky130``/``sg13cmos5l`` both declare a distinct
+    ``"tap"`` layer, so the collision check alone already returns ``None``
+    for them. ``sg13g2`` is the corrected case: its own ``"tap"`` role
+    *does* collide with ``"active"`` (both ``(1, 0)``, "no distinct tap mask
+    ... derives well ties from the same Activ layer", see this family's own
+    ``_PDK_ROLE_LAYERS`` entry) -- #1580's curation asserted otherwise,
+    which does not hold against this tree. It still resolves ``None`` here,
+    for an independent reason: this family declares neither a
+    ``"well_tap_implant"`` nor a ``"pplus"`` role at all (no known
+    ``DF.12``-equivalent implant-coverage rule in its curated deck to close
+    -- see the ``"tap"`` role's own comment: sg13g2 recognises a tie from
+    bare ``Activ ∩ nwell``, no implant mask needed), so
+    :func:`_role_layer_info` already returns ``None`` for either lookup
+    below regardless of the collision check. The net behaviour every
+    non-gf180mcu family needs (``None``, byte-for-byte-unchanged geometry,
+    exactly like every other ``*_present``-gated role #1577 added) holds for
+    all three, just via two different mechanisms.
+
+    ``well_tie`` selects which doping the ring's own tie needs -- this is
+    the open design question #1580's curation left for the Builder to
+    settle, with rationale, rather than treating either option as settled
+    fact:
+
+    - ``True`` (the ring is drawn *inside* an enclosing well, e.g.
+      ``guard_ring``'s own ``add_well``-gated well, or ``mos_array``'s/
+      ``diff_pair``'s ``flavor='pfet'`` well): reuses the *same*
+      ``"well_tap_implant"`` role ``well_island`` already reuses for its own
+      ring (Nplus on gf180mcu, ``_PDK_ROLE_LAYERS``'s own
+      ``"well_tap_implant"`` entry) -- an n+ tie recognised as biasing the
+      Nwell it sits inside, the identical precedent issue #1421 established
+      and this issue's curation names as the template to follow.
+    - ``False`` (no enclosing well -- the ring ties the p-type substrate
+      directly): the *opposite* doping is needed instead, so this resolves
+      the ``"pplus"`` role instead (the same p+ implant #1577 added for a
+      ``flavor='pfet'`` unit device's own source/drain) -- reusing
+      ``"well_tap_implant"`` (Nplus) here would misrepresent a bare
+      substrate contact as a well tie, which a real signoff extraction deck
+      would read as biasing a well that is not actually drawn.
+
+    Neither choice is independently verified against a real gf180mcu
+    signoff deck -- the same not-independently-verified caveat #1575/#1577/
+    #1580 all carry (this sandbox has no such deck to check against)."""
+    roles = _PDK_ROLE_LAYERS[family]
+    tap_pair = roles.get("tap")
+    active_pair = roles.get("active")
+    if tap_pair is None or active_pair is None or tap_pair != active_pair:
+        return None
+    role = "well_tap_implant" if well_tie else "pplus"
+    return _role_layer_info(family, role)
+
+
 def _ring_layer_params(
     pdk_info: dict[str, Any],
     params: dict[str, Any],
     generator_name: str = "guard_ring",
 ) -> dict[str, Any]:
     """Hidden layer params for a generator drawing a guard ring
-    (``guard_ring``, and the optional ring half of ``diff_pair``, which
-    passes its own ``generator_name`` so a deferred family's error names the
-    generator actually invoked rather than always ``'guard_ring'`` -- see
-    :data:`_GENERATOR_FAMILY_DEFERRED`'s ``sg13cmos5l`` entries)."""
+    (``guard_ring``, and the optional ring half of ``diff_pair``/
+    ``mos_array``, both of which pass their own ``generator_name`` so a
+    deferred family's error names the generator actually invoked rather than
+    always ``'guard_ring'`` -- see :data:`_GENERATOR_FAMILY_DEFERRED`'s
+    ``sg13cmos5l`` entries).
+
+    Also resolves ``ring_implant_layer``/``ring_implant_present`` (issue
+    #1580) -- the tap-ring implant :func:`_ring_tap_implant_layer` selects,
+    gated on whether *this* ring is drawn inside an enclosing well:
+    ``guard_ring``'s own ``params.add_well`` (default ``True``, mirroring
+    ``_GuardRingPCell``'s own default) for ``generator_name == "guard_ring"``;
+    otherwise (``diff_pair``/``mos_array``) the same ``params.flavor ==
+    "pfet"`` condition those generators' own ``produce_impl`` already uses to
+    decide whether their ring gets a well tie at all."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
     _reject_deferred_family(generator_name, family)
     well = _role_layer_info(family, "well")
+    if generator_name == "guard_ring":
+        well_tie = bool(params.get("add_well", True)) and well is not None
+    else:
+        well_tie = well is not None and params.get("flavor") == "pfet"
+    ring_implant = _ring_tap_implant_layer(family, well_tie)
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        "ring_implant_layer": (
+            ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "ring_implant_present": ring_implant is not None,
     }
 
 
@@ -2268,6 +2359,25 @@ def _bjt_layer_params(
     Also resolves ``dummy_layer``/``dummy_present`` (issue #491), the same
     optional PDK dummy-device marker :func:`_device_layer_params` resolves --
     see that function's docstring.
+
+    Also resolves ``ring_implant_layer``/``ring_implant_present`` (issue
+    #1580, :func:`_ring_tap_implant_layer`) for the collector ring's own
+    ``Comp`` shape (drawn on ``active_layer`` directly -- see
+    ``_BjtArrayPCell.produce_impl``, not a separate ``tap``-role ring the way
+    ``guard_ring``/``mos_array``/``diff_pair``/``esd_device`` draw theirs).
+    Always resolved with ``well_tie=False``: the collector ring is composed
+    *outside* the shared base well's own footprint (``well_box_um`` plus
+    ``BJT_COLLECTOR_GAP_UM``, see :func:`_bjt_array_layout`'s docstring), so
+    it always ties the p-type substrate directly -- the real, physical
+    collector terminal of a vertical PNP (P+ emitter / N+ base tie inside an
+    Nwell / P+ collector = substrate, per ``docs/design/gen-bjt-array-spike.md``),
+    never a well tie. This intentionally does **not** extend implant coverage
+    to the emitter/base-tie unit body itself, a separate, pre-existing,
+    documented limitation (that same design doc: "curated decks check no
+    implant layer ... a process-exact device would distinguish P+ emitter, N+
+    base tie, and P+ collector by implant") predating both #1577 and this
+    issue -- out of #1580's own scope, which is the tap/collector *ring*
+    only.
     """
     import klayout.db as kdb
 
@@ -2276,6 +2386,7 @@ def _bjt_layer_params(
     well = _role_layer_info(family, "well")
     mark = _role_layer_info(family, "bjt_mark")
     dummy = _role_layer_info(family, "dummy")
+    ring_implant = _ring_tap_implant_layer(family, well_tie=False)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -2285,6 +2396,10 @@ def _bjt_layer_params(
         "well_present": well is not None,
         "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "bjt_mark_present": mark is not None,
+        "ring_implant_layer": (
+            ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "ring_implant_present": ring_implant is not None,
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
     }
@@ -2361,6 +2476,12 @@ def _esd_device_layer_params(
     never forwarded it to :func:`_mos_unit_layout` (a pre-existing,
     out-of-scope gap this issue does not attempt), so leaving it unresolved
     keeps that pre-#1577 behaviour exactly as it was.
+
+    Also resolves ``ring_implant_layer``/``ring_implant_present`` (issue
+    #1580, :func:`_ring_tap_implant_layer`) for the ring's own tap shape --
+    always with ``well_tie=False``, since (per this function's own docstring
+    above) ``esd_device`` never draws an enclosing well at all, so its ring
+    always ties the substrate directly.
     """
     import klayout.db as kdb
 
@@ -2370,6 +2491,7 @@ def _esd_device_layer_params(
     salicide_block = _role_layer_info(family, "salicide_block")
     sd_implant = _role_layer_info(family, "nplus")
     sd_implant_margin = _sd_implant_margin_um(family)
+    ring_implant = _ring_tap_implant_layer(family, well_tie=False)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
@@ -2389,6 +2511,10 @@ def _esd_device_layer_params(
         ),
         "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
         "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
+        "ring_implant_layer": (
+            ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "ring_implant_present": ring_implant is not None,
     }
 
 
@@ -4938,6 +5064,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Guard ring tap drawing layer (only used when add_guard_ring is set)",
                 default=kdb.LayerInfo(0, 0),
             )
+            self.param(
+                "ring_implant_layer",
+                self.TypeLayer,
+                "Guard-ring implant drawing layer, exactly coincident with "
+                "the tap ring (only used when add_guard_ring and "
+                "ring_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "ring_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "the guard ring's own shape (see _ring_tap_implant_layer)",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -5099,6 +5240,18 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     )
                     _insert_boxes(
                         self.cell, li_well, dbu, [_shift_box(ring_well_box, ox, oy)]
+                    )
+                if self.ring_implant_present:
+                    # Exactly coincident with the tap ring (issue #1580,
+                    # mirrors `well_island`'s own `well_tap_implant` ring
+                    # precedent) -- never a blanket over the enclosed array.
+                    _insert_ring(
+                        self.cell,
+                        self.layout.layer(self.ring_implant_layer),
+                        dbu,
+                        _shift_box(ring["outer_box_um"], ox, oy),
+                        _shift_box(ring["inner_box_um"], ox, oy),
+                        gap_box,
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
@@ -5651,6 +5804,20 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
                 default=False,
             )
+            self.param(
+                "ring_implant_layer",
+                self.TypeLayer,
+                "Tap-ring implant drawing layer, exactly coincident with the "
+                "tap ring (only used when ring_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "ring_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "the tap ring's own shape (see _ring_tap_implant_layer)",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"guard_ring({self.inner_width_um}x{self.inner_height_um})"
@@ -5693,6 +5860,19 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 li_well = self.layout.layer(self.well_layer)
                 well_box = _well_box_um(info, WELL_ENCLOSURE_MARGIN_UM)
                 _insert_boxes(self.cell, li_well, dbu, [well_box])
+            if self.ring_implant_present:
+                # Exactly coincident with the tap ring -- never a blanket
+                # over the enclosed area, which would re-dope whatever a
+                # caller later places inside the ring (issue #1580, mirrors
+                # `well_island`'s own `well_tap_implant` ring precedent).
+                _insert_ring(
+                    self.cell,
+                    self.layout.layer(self.ring_implant_layer),
+                    dbu,
+                    info["outer_box_um"],
+                    info["inner_box_um"],
+                    gap_box,
+                )
 
     class _WellIslandPCell(kdb.PCellDeclarationHelper):
         """Named-net, isolated well/tap island (issue #1421).
@@ -6124,6 +6304,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "ring_implant_layer",
+                self.TypeLayer,
+                "Guard-ring implant drawing layer, exactly coincident with "
+                "the tap ring (only used when add_guard_ring and "
+                "ring_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "ring_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "the guard ring's own shape (see _ring_tap_implant_layer)",
+                default=False,
+            )
+            self.param(
                 "voltage_flavor_mark_layer",
                 self.TypeLayer,
                 "Medium-voltage/thick-oxide device-class marker drawing "
@@ -6320,6 +6515,18 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li_well, dbu, [_shift_box(well_box, ox, oy)]
                     )
+                if self.ring_implant_present:
+                    # Exactly coincident with the tap ring (issue #1580,
+                    # mirrors `well_island`'s own `well_tap_implant` ring
+                    # precedent) -- never a blanket over the enclosed pair.
+                    _insert_ring(
+                        self.cell,
+                        self.layout.layer(self.ring_implant_layer),
+                        dbu,
+                        _shift_box(ring["outer_box_um"], ox, oy),
+                        _shift_box(ring["inner_box_um"], ox, oy),
+                        gap_box,
+                    )
 
     class _BjtArrayPCell(kdb.PCellDeclarationHelper):
         """Matched vertical-bipolar (PNP/BJT) array (Epic #152 phase 4): a
@@ -6435,6 +6642,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "ring_implant_layer",
+                self.TypeLayer,
+                "Collector-ring implant drawing layer, exactly coincident "
+                "with the collector ring (only used when add_collector_ring "
+                "and ring_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "ring_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "the collector ring's own shape (see _ring_tap_implant_layer)",
+                default=False,
+            )
+            self.param(
                 "bjt_mark_layer",
                 self.TypeLayer,
                 "Per-unit bipolar device-mark drawing layer, enclosing only "
@@ -6528,6 +6750,19 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
                 )
+                if self.ring_implant_present:
+                    # Exactly coincident with the collector ring's own
+                    # active-layer shape (issue #1580, mirrors
+                    # `well_island`'s own `well_tap_implant` ring precedent)
+                    # -- never a blanket over the enclosed base well/array.
+                    _insert_ring(
+                        self.cell,
+                        self.layout.layer(self.ring_implant_layer),
+                        dbu,
+                        _shift_box(ring["outer_box_um"], ox, oy),
+                        _shift_box(ring["inner_box_um"], ox, oy),
+                        gap_box,
+                    )
 
             # Per-unit bipolar device-mark, drawn on every unit (dummies
             # included -- they are structurally real unit devices too,
@@ -6844,6 +7079,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "sd_implant_present)",
                 default=0.0,
             )
+            self.param(
+                "ring_implant_layer",
+                self.TypeLayer,
+                "Tap-ring implant drawing layer, exactly coincident with the "
+                "tap ring (only used when add_guard_ring and "
+                "ring_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "ring_implant_present",
+                self.TypeBoolean,
+                "Whether the resolved PDK needs an implant mask to recognise "
+                "the tap ring's own shape (see _ring_tap_implant_layer)",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return (
@@ -6933,6 +7183,20 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # docstring and `_esd_device_layer_params`'s for why: it
                 # would enclose this always-NMOS device in an Nwell and
                 # misclassify it as `pfet` under `klt extract`.
+                if self.ring_implant_present:
+                    # Exactly coincident with the tap ring (issue #1580,
+                    # mirrors `well_island`'s own `well_tap_implant` ring
+                    # precedent) -- always the substrate-tie doping (never
+                    # the well-tie one), since this ring never encloses a
+                    # well (see the no-well-tie note directly above).
+                    _insert_ring(
+                        self.cell,
+                        self.layout.layer(self.ring_implant_layer),
+                        dbu,
+                        _shift_box(ring["outer_box_um"], ox, oy),
+                        _shift_box(ring["inner_box_um"], ox, oy),
+                        gap_box,
+                    )
 
     return {
         "resistor_strip": _ResistorStripPCell,
