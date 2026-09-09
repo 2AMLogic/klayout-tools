@@ -1,0 +1,60 @@
+[package]
+name = "klt-wave-native"
+version = "0.1.0"
+edition = "2021"
+description = "Native-Rust waveform build/query engine for `klt wave` (2AMLogic/klayout-tools, issue #1600 -- Epic #1585 Phase 2b), against the contract docs/design/waveform-query-contract-spike.md defines"
+license = "MIT"
+publish = false
+
+# Deliberately a plain `cargo build`/`cargo test` binary crate -- no
+# `pyo3`/`maturin` wiring -- following `native/techmap/`'s and
+# `native/statime/`'s precedent (issues #874/#809) rather than
+# `native/mom/`'s production `pyo3`-extension shape. Per
+# `docs/design/waveform-query-contract-spike.md` section 13 (the
+# port-vs-build decision record): `klt wave build <request.json>` / `klt
+# wave query <request.json>` is request-document-in, response-document-out,
+# the same shape `klt-techmap <request.json>` already uses as a subprocess
+# invocation from `klayout_tools/techmap.py` -- the plain-binary-plus-
+# subprocess pattern is a direct fit, not a stretch. Folding this into a
+# `pyo3` extension module remains open, deferred until a later issue
+# actually needs the in-process latency a subprocess boundary costs.
+
+[[bin]]
+name = "klt-wave"
+path = "src/main.rs"
+
+[lib]
+name = "klt_wave_native"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memchr = "2"
+rustc-hash = "2"
+sha2 = "0.10"
+
+# Stock, unmodified crates.io releases -- NOT booley's vendored, modified
+# `fst-writer` fork (parallel per-signal block packing, path-dependency in
+# `crates/bwave/Cargo.toml`). Decision record section 11: depend on stock
+# `fst-writer` first; revisit only if a documented Phase 2 throughput
+# measurement on `klt wave build` shows it is the bottleneck. No such
+# measurement exists yet, so no such revisit has happened.
+#
+# `fst-reader` is a normal (not dev-only) dependency here too: an
+# FST-format input trace (Verilator's native `--trace-fst` output, per
+# the issue body and docs/design/waveform-query-survey.md section 6.4)
+# builds directly with no VCD-parse step (`build_fst.rs`), which means
+# *reading* an already-FST trace is part of `build`'s own production
+# path, not just a round-trip test helper -- issue #1599 (Phase 2a, the
+# query engine) also depends on it for its own, separate read path; the
+# two are independent normal dependencies on the same stock crate, not a
+# duplication of vendored code.
+fst-writer = "0.3"
+fst-reader = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
