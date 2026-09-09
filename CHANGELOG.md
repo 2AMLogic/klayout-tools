@@ -45,6 +45,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   comparison-boundary mutation on `modexp.v`'s modular reduction step that
   survives the committed testbench unnoticed, alongside one bit-select
   mutation that is correctly killed.
+- **Added**: `klt synthesize`'s response gains three additive fields (issue
+  #1588): an always-present `structural` verdict (`{latches,
+  expected_latches, unexpected_latches, comb_loops, multi_driven,
+  has_critical}`) over inferred latches, combinational loops, and
+  multiply-driven nets — all three drawn from the same Yosys `synth`/`stat`
+  run this command already performs, no extra invocation; an always-present
+  bounded, deterministic `warnings` summary (`{total, by_category,
+  representatives}`) of the captured Yosys run log; and an optional
+  `baseline` comparison (`{ref, instance_count, area_um2, critical_path_ns,
+  delta_pct}`) against a prior run named by the request's new
+  `baseline.response_path`/`baseline.netlist_path`. The CLI now exits `3`
+  when `structural.has_critical` is `true` (`status` stays `"ok"`),
+  reversing this command's own prior "no exit code 3" decision — additive
+  per `docs/json-contract.md`'s rule that a command may define codes above
+  `2`; no `schema_version` bump (every new field is additive). See
+  `docs/cli/synthesize.md`'s "`structural`"/"`warnings`"/"`baseline`"/"Exit
+  codes" sections.
 - **Fixed**: `klt components`'s `--label-layers` entries can now declare an
   optional `"conductor"` name (e.g. `{"name": "m1pin", "layer": [34, 10],
   "conductor": "m1"}`), scoping that label layer's texts to only that

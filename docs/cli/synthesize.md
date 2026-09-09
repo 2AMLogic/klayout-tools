@@ -577,6 +577,9 @@ section and Out of scope below.
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
+| `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
+| `baseline.response_path` \| `baseline.netlist_path` | string | Optional; names a prior run to compare this one against — see "`baseline`" below. Set **exactly one**, resolved relative to the request file's own directory (like `sources`). |
+| `baseline.ref` | string \| omitted | A label identifying the baseline (e.g. a git ref or `"main"`), echoed verbatim into the response's `baseline.ref`. Defaults to the literal `response_path`/`netlist_path` string when omitted. |
 
 **`clock_period_ns: null` (or omitted) is a defined state, not a fallback.**
 The run still passes `-constr`, so ABC's `buffer`/`upsize`/`dnsize` sizing
@@ -624,6 +627,19 @@ caller decision rather than something this command should pick.
     "worst_path": { "startpoint": "_640_/Q", "endpoint": "_035_", "delay_ns": 4.4642972825718, "hops": ["..."] },
     "worst_reg_to_reg_path": { "...": "same shape" }
   },
+  "structural": {
+    "latches": 0,
+    "expected_latches": 0,
+    "unexpected_latches": 0,
+    "comb_loops": 0,
+    "multi_driven": 0,
+    "has_critical": false
+  },
+  "warnings": {
+    "total": 0,
+    "by_category": {},
+    "representatives": []
+  },
   "netlist_path": "/abs/path/.klt/synthesize/gcd_synth.v",
   "script_path": "/abs/path/.klt/synthesize/synth_gcd.ys",
   "provenance": {
@@ -634,7 +650,8 @@ caller decision rather than something this command should pick.
     "input": { "content_hash": "sha256:<hex>" }
   },
   "equivalence": null,
-  "restructuring": null
+  "restructuring": null,
+  "baseline": null
 }
 ```
 
@@ -643,33 +660,131 @@ caller decision rather than something this command should pick.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`'s own version token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
-| `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own; a failed run never emits this envelope. |
+| `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
-| `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). |
+| `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
+| `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
+| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log, never the raw log itself: `{total, by_category, representatives}`. `total` is a raw line count (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
 | `netlist_path` | string | The mapped gate-level netlist (`write_verilog -noattr`'s output), an absolute path. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | string | The generated `.ys` script, an absolute path — kept as a debuggable artifact. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 | `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
+| `baseline` | object \| null | `null` unless `request.baseline` was given (issue #1588) — a comparison against a prior run: `{ref, instance_count, area_um2, critical_path_ns, delta_pct}`. `ref` identifies what was compared against — `request.baseline.ref` when given, else the literal `response_path`/`netlist_path` string. `area_um2`/`critical_path_ns` (and their `delta_pct` siblings) are present only when both this run and the baseline produced a number; `instance_count` is always present. `delta_pct` is `(current - baseline) / baseline * 100` per metric — see "`baseline`" below. |
+
+## `structural`: latches, combinational loops, multiply-driven nets
+
+[Issue #1588](https://github.com/2AMLogic/klayout-tools/issues/1588) adds an
+**always-present** verdict over three synchronous-design conditions Yosys's
+own `synth`/`stat` already surface, from the same run this command already
+performs — no extra Yosys invocation, no change to the default synthesis
+script:
+
+- **Inferred latches** — a missing `else`/default branch in a combinational
+  `always` block. `stat -json`'s `num_cells_by_type` (already parsed for
+  `instance_count`/`instance_counts_by_type`) is scanned for any cell-type
+  name containing `"dlatch"` (case-insensitive): `dfflibmap` maps only
+  flip-flops (verified against `yosys -p 'help dfflibmap'`), never latches,
+  so an inferred latch survives, unmapped, all the way to this command's own
+  final `stat`/`write_verilog` step as a bare gate-level primitive
+  (`$_DLATCH_P_` and siblings). `structural.expected_latches`
+  (`request.structural.expected_latches`, default `0`) is subtracted, floored
+  at `0`, to produce `structural.unexpected_latches` — a design that
+  deliberately infers `N` latches sets `expected_latches: N` so they do not
+  trip `has_critical`.
+- **Combinational loops** and **multiply-driven nets** — parsed from the
+  captured Yosys run log. `synth -top <top>`'s own internal `check`
+  sub-stages (`yosys -p 'help synth'`'s documented `coarse`/`check` stages)
+  run unconditionally and print one `Warning: found logic loop` /
+  `Warning: multiple conflicting drivers` line per distinct problem —
+  verified live that this must be read from `synth`'s *own* internal check,
+  which runs **before** ABC's own loop-breaking heuristic can silently sever
+  a real combinational loop: an *additional* `check` step run by this
+  command *after* `synth` completes finds zero problems on a design
+  `synth`'s own internal check already flagged. Each is counted as the
+  number of **distinct** matching lines — a persisting problem's identical
+  warning text can be reprinted at more than one of `synth`'s internal
+  `check` calls (verified live: a real multi-driver conflict prints twice
+  for one problem), so a naive line count would double-count.
+
+`structural.has_critical` is `true` iff `comb_loops > 0 || multi_driven > 0
+|| unexpected_latches > 0` — see "Exit codes" below. A design with a comb
+loop or multi-driven net still synthesizes to completion (netlist written,
+`status: "ok"`) rather than failing the run: ABC's own loop-breaking
+heuristic and Yosys's own optimization already resolve these structurally
+(the loop no longer exists in the mapped netlist by the time `write_verilog`
+runs) — `structural` only *reports* that the design carried the condition,
+it does not gate netlist production.
+
+## `warnings`: a bounded summary of the Yosys run log
+
+A bounded, deterministic summary of every `Warning: ` line in the captured
+Yosys run log — never the raw log itself, which is typically thousands of
+lines of interleaved pass output. `total` is a raw line count (deliberately
+not deduplicated the way `structural.comb_loops`/`multi_driven` are — this
+answers "how noisy was this run"); `by_category`/`representatives` group
+into a small, sorted taxonomy (`latch_inferred`, `logic_loop`,
+`multiple_drivers`, `undriven_wire`, `other`), capped at 10 representative
+entries.
+
+## `baseline`: optional QoR delta against a prior run
+
+[Issue #1588](https://github.com/2AMLogic/klayout-tools/issues/1588):
+comparing a synthesis run against a prior one — "did this RTL change make
+the design bigger or slower?" — without diffing two JSON files by hand.
+`null` unless `request.baseline` names a prior run via **exactly one** of:
+
+- `baseline.response_path` — a previously captured `klt synthesize --format
+  json` response file (the common case: compare against a committed report
+  from an earlier run, e.g. from `main`).
+- `baseline.netlist_path` — a bare prior netlist, for a caller that saved
+  only the mapped netlist, not a full response. Re-`stat`s it against this
+  run's own resolved liberty (`read_liberty -lib <liberty>` first, so the
+  netlist's standard-cell instances resolve rather than erroring `hierarchy
+  -check`) to recover `instance_count`/`area_um2`, and re-times it via the
+  same `klt_statime_native` engine `sta` uses for `critical_path_ns` (`null`
+  when that optional extension is not installed, mirroring `sta`'s own
+  degradation).
+
+`baseline.ref` labels what was compared against (e.g. a git ref) — defaults
+to the literal `response_path`/`netlist_path` string when omitted, so
+`baseline.ref` is never `null`. `critical_path_ns` (both this run's own and
+the baseline's) prefers the real `sta` stage's `worst_path.delay_ns`
+(already nanoseconds); falls back to `timing`'s ABC `stime -p` estimate,
+converted, when `sta` is unavailable on either side. `delta_pct` is `(current
+- baseline) / baseline * 100` per metric, `0.0` when both sides are `0`
+(no change), and omitted for a metric where the baseline value is `0` but
+the current value is not (an undefined percentage change from a zero base,
+never fabricated as an infinite or arbitrary number).
+
+Running the exact same design twice against its own prior response produces
+a `delta_pct` of `0.0` on every metric — see `tests/test_synthesize.py`'s
+`test_run_synthesize_baseline_response_path_zero_delta`.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Synthesis succeeded, netlist written (and, with `--verify-equivalence` and/or `--restructure-timing`, proven equivalent to its source RTL). |
+| `0` | Synthesis succeeded, netlist written (and, with `--verify-equivalence` and/or `--restructure-timing`, proven equivalent to its source RTL), and `structural.has_critical` is `false`. |
 | `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), a Yosys/ABC engine error — or, with `--verify-equivalence`, a non-equivalent (`"counterexample"`) or inconclusive (timeout) `klt equiv` verdict against the produced netlist — or, with `--restructure-timing`, a missing `constraints.clock_period_ns`/`sta` stage, or a non-equivalent verdict against a netlist it actually resized. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `3` | Synthesis succeeded (netlist written, `status` stays `"ok"`), but `structural.has_critical` is `true` — an inferred latch beyond `structural.expected_latches`, a combinational loop, and/or a multiply-driven net (issue #1588). Follows `klt drc`'s own convention of a nonzero exit on findings from an otherwise successful run — `status`/exit `0`/`1`/`2` are unaffected. |
 
-**No exit code `3`.** Matching `klt extract`'s reasoning exactly — there is
-no "ran but found problems" outcome for synthesis: it either produces a
-netlist or it fails. `instance_count`/`area_um2` are not a pass/fail gate
-themselves — a caller wanting a threshold on them composes this contract
-into `klt eval`'s descriptor, the same way `docs/cli/eval.md`'s own example
-already thresholds `layout-metrics`'s `cell_count`.
+`instance_count`/`area_um2` are still not a pass/fail gate themselves — a
+caller wanting a threshold on them composes this contract into `klt eval`'s
+descriptor, the same way `docs/cli/eval.md`'s own example already thresholds
+`layout-metrics`'s `cell_count`. This reverses this command's own prior "no
+exit code 3" decision (recorded in `docs/design/
+digital-flow-contracts-spike.md` section 4): that decision held while
+synthesis had no structural pass/fail concept of its own to report: issue
+#1588 gives it exactly one, in `structural.has_critical`, following the
+`docs/json-contract.md` rule that a command may define additional exit codes
+above `2` for outcomes that are neither success nor tool failure — `0`/`1`/`2`
+keep their shared meaning.
 
 ## Worked example
 
@@ -693,6 +808,15 @@ $ klt synthesize request.json --format json
     "critical_path_ps": 2485.93,
     "delay_target_ps": null
   },
+  "structural": {
+    "latches": 0,
+    "expected_latches": 0,
+    "unexpected_latches": 0,
+    "comb_loops": 0,
+    "multi_driven": 0,
+    "has_critical": false
+  },
+  "warnings": { "total": 0, "by_category": {}, "representatives": [] },
   ...
 }
 ```
@@ -703,7 +827,9 @@ cells — measured live on Yosys 0.67+post, CI's own pinned, from-source
 build (`scripts/install-yosys.sh`, run in CI's Linux/x86_64/gcc
 environment), against a volare `sky130A` install. Note this particular
 design is **sequential** (it has a clocked `always` block) — see
-"Equivalence gate" above, `--verify-equivalence` is not usable on it.
+"Equivalence gate" above, `--verify-equivalence` is not usable on it. GCD
+carries no latches/comb loops/multi-driven nets, so `structural.has_critical`
+is `false` and the exit code is `0`.
 
 **Build-platform sensitivity (issue #967):** ABC's greedy sizing
 heuristics are sensitive to the compiler/OS a given Yosys build was
@@ -777,6 +903,73 @@ corrupted/mis-synthesized output) makes the gate fail hard instead —
 `klt synthesize` exits `1` with a message naming the diverging outputs,
 never a `status: "ok"` response — see `tests/test_synthesize_equiv_gate.py`
 for the full seeded-mismatch demonstration.
+
+A design with a missing `else` branch (an inferred latch) — `structural`
+(issue #1588) still lets the run succeed, but reports the finding and exits
+`3`:
+
+```console
+$ klt synthesize latch_request.json --format json
+{
+  "schema_version": 1,
+  "engine": "yosys",
+  "hdl_toplevel": "latch_bad",
+  "status": "ok",
+  "instance_count": 1,
+  "area_um2": 0.0,
+  "instance_counts_by_type": { "$_DLATCH_P_": 1 },
+  "structural": {
+    "latches": 1,
+    "expected_latches": 0,
+    "unexpected_latches": 1,
+    "comb_loops": 0,
+    "multi_driven": 0,
+    "has_critical": true
+  },
+  "warnings": {
+    "total": 1,
+    "by_category": { "latch_inferred": 1 },
+    "representatives": [
+      { "category": "latch_inferred", "count": 1, "text": "Latch inferred for signal `\\latch_bad.\\q' from process ..." }
+    ]
+  },
+  ...
+}
+$ echo $?
+3
+```
+
+`status` stays `"ok"` (a netlist really was produced), but exit `3` signals
+the finding. A design that intentionally infers this one latch sets
+`request.structural.expected_latches: 1`, which drops `unexpected_latches`
+to `0` and `has_critical` to `false` — exit `0`, same response otherwise.
+
+Comparing against a prior run via `baseline.response_path` (issue #1588):
+
+```console
+$ klt synthesize request.json --format json > baseline.json
+$ # ... modify the RTL, e.g. relax constraints.clock_period_ns ...
+$ klt synthesize request2.json --format json
+...
+  "baseline": {
+    "ref": "baseline.json",
+    "instance_count": 335,
+    "area_um2": 2951.5808,
+    "critical_path_ns": 2.48593,
+    "delta_pct": {
+      "instance_count": 3.5820895522388063,
+      "area_um2": 9.699442071583754,
+      "critical_path_ns": -19.4834...
+    }
+  }
+```
+
+`request2.json`'s own `baseline.response_path` names `baseline.json`
+(resolved relative to `request2.json`'s own directory); running the exact
+same request against its own just-produced response instead (`baseline.json
+== <this run's own output>`) produces `delta_pct: {instance_count: 0.0,
+area_um2: 0.0, critical_path_ns: 0.0}` — see
+`tests/test_synthesize.py::test_run_synthesize_baseline_response_path_zero_delta`.
 
 ## Out of scope
 

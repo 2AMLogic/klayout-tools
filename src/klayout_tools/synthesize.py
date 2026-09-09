@@ -122,6 +122,41 @@ working ``sta`` stage (the optional ``klt_statime_native`` extension) -- see
 validated by ``klt equiv`` against the same source RTL before it is ever
 handed back -- a restructured netlist that cannot be proven equivalent is a
 hard failure, never a silent "trust me" (acceptance criterion 3).
+
+``structural`` (issue #1588) is an **always-present** additive verdict built
+from the same Yosys ``synth``/``stat`` run this module already performs --
+no extra Yosys invocation. ``latches``/``unexpected_latches`` come from
+counting ``stat -json``'s own ``num_cells_by_type`` entries whose cell-type
+name contains ``"dlatch"`` (case-insensitive): ``dfflibmap`` maps only
+flip-flops (verified against ``yosys -p 'help dfflibmap'``), never latches,
+so an inferred latch survives, unmapped, all the way to this module's own
+final ``stat``/``write_verilog`` step, as a bare gate-level primitive
+(``$_DLATCH_P_`` and siblings). ``comb_loops``/``multi_driven`` come from
+parsing the captured Yosys run log for the ``Warning: found logic loop`` /
+``Warning: multiple conflicting drivers`` lines ``synth -top <top>``'s own
+internal ``check`` sub-stages already emit -- verified live that these must
+be read from ``synth``'s *own* internal check (which runs before ABC's
+loop-breaking heuristic silently severs a real combinational loop): an
+*additional* ``check`` step run by this module *after* ``synth`` completes
+finds zero problems on a design ``synth``'s own internal check already
+flagged. See :func:`_compute_structural`. This reverses this module's own
+prior "no exit code 3" design decision (`docs/design/
+digital-flow-contracts-spike.md` section 4) -- see ``docs/cli/
+synthesize.md``'s "Exit codes" section for the current contract.
+
+``warnings`` (issue #1588) is a bounded, deterministic summary of every
+``Warning: `` line in the same captured log -- grouped into a small,
+sorted category taxonomy (never the raw log itself), so a caller gets a
+signal without wading through interleaved Yosys pass output. See
+:func:`_summarize_warnings`.
+
+``baseline`` (issue #1588, optional) compares this run's own
+``instance_count``/``area_um2``/critical-path number against a prior run,
+named by ``request.baseline.response_path`` (a previously captured ``klt
+synthesize --format json`` response file) or ``request.baseline.
+netlist_path`` (a bare prior netlist, re-``stat``/re-timed against this
+run's own resolved liberty). ``None`` unless one of those two request
+fields is given. See :func:`_compute_baseline`.
 """
 
 from __future__ import annotations
@@ -329,6 +364,45 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     ),
 }
 
+#: Matches every gate-level latch primitive/cell-type name Yosys or a
+#: liberty leaves behind (``$_DLATCH_P_``, ``$_DLATCHSR_PPP_``, ``$dlatch``,
+#: a liberty cell like ``sky130_fd_sc_hd__dlrtp_1``'s underlying
+#: ``dlatch``-family class name if ever surfaced) -- case-insensitive since
+#: Yosys's own internal primitives are all-caps and liberty cell names are
+#: typically lowercase. Used by :func:`_compute_structural` to total
+#: ``structural.latches`` from ``stat -json``'s ``num_cells_by_type``,
+#: issue #1588.
+_LATCH_CELL_TYPE_RE = re.compile(r"dlatch", re.IGNORECASE)
+
+#: The exact header lines Yosys's own ``check`` pass prints for the two
+#: structural problems ``structural.comb_loops``/``multi_driven`` report --
+#: verified live (Yosys 0.68, issue #1588): ``check`` (run unconditionally,
+#: twice, inside every ``synth -top <top>`` invocation's own ``coarse``/
+#: ``check`` sub-stages -- ``yosys -p 'help synth'``) prints one such line
+#: per distinct problem, each followed by non-``Warning:``-prefixed detail
+#: lines this module does not need to parse.
+_COMB_LOOP_WARNING_RE = re.compile(r"^Warning: found logic loop in module\b")
+_MULTI_DRIVEN_WARNING_RE = re.compile(r"^Warning: multiple conflicting drivers for\b")
+
+#: ``(category, pattern)`` taxonomy :func:`_summarize_warnings` groups every
+#: ``Warning: `` line in the captured Yosys run log into -- a small,
+#: hand-picked set of the messages this module's own docstring already
+#: names as structurally meaningful, plus a catch-all ``"other"`` bucket for
+#: everything else. Patterns are matched against the warning text with the
+#: leading ``"Warning: "`` prefix already stripped.
+_WARNING_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("latch_inferred", re.compile(r"^Latch inferred\b", re.IGNORECASE)),
+    ("logic_loop", re.compile(r"^found logic loop\b", re.IGNORECASE)),
+    ("multiple_drivers", re.compile(r"^multiple conflicting drivers\b", re.IGNORECASE)),
+    ("undriven_wire", re.compile(r"\bis used but has no driver\b", re.IGNORECASE)),
+)
+
+#: Bound on ``warnings.representatives`` -- one entry per category, capped
+#: so a design with a large, varied warning taxonomy never turns this field
+#: into an unbounded list (issue #1588's "bounded ... never the raw log"
+#: requirement).
+_MAX_WARNING_REPRESENTATIVES = 10
+
 
 class SynthesizeError(Exception):
     """Raised when a synthesis run cannot even be attempted: a missing/
@@ -338,9 +412,13 @@ class SynthesizeError(Exception):
     error.
 
     The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- synthesis has no "ran but found problems" outcome of its
-    own (contract spike section 4, "Exit codes"): it either produces a
-    netlist or it fails.
+    traceback -- either a netlist is produced, or this is raised; there is
+    no third "ran but the request itself was unusable" outcome. This is
+    unaffected by issue #1588's additive ``structural`` verdict: a run that
+    *does* produce a netlist but finds an inferred latch, a combinational
+    loop, or a multiply-driven net still returns normally (``status: "ok"``)
+    with ``structural.has_critical: true`` and exit code ``3`` -- never this
+    exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
     """
 
 
@@ -472,6 +550,7 @@ def run_synthesize(
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
     delay_target_ps = _resolve_delay_target_ps(constraints)
+    expected_latches = _resolve_expected_latches(request)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -515,7 +594,7 @@ def run_synthesize(
         tie_cells=_TIE_CELLS.get(cell_library),
     )
 
-    _run_yosys(script_path)
+    yosys_log = _run_yosys(script_path)
 
     if not os.path.isfile(netlist_path):
         raise SynthesizeError(
@@ -524,6 +603,8 @@ def run_synthesize(
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
     engine_version = _yosys_version()
+    structural = _compute_structural(module_stats, yosys_log, expected_latches)
+    warnings_summary = _summarize_warnings(yosys_log)
 
     deck_name = f"{cell_library}__{corner}"
     provenance = build_provenance(
@@ -562,7 +643,7 @@ def run_synthesize(
             equiv_timeout_s=equiv_timeout_s,
         )
 
-    return {
+    response: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -580,12 +661,24 @@ def run_synthesize(
         ),
         "timing": _read_abc_timing(abc_log_path, delay_target_ps),
         "sta": sta,
+        "structural": structural,
+        "warnings": warnings_summary,
         "netlist_path": netlist_path,
         "script_path": script_path,
         "provenance": provenance,
         "equivalence": equivalence,
         "restructuring": restructuring,
+        "baseline": None,
     }
+    response["baseline"] = _compute_baseline(
+        request,
+        request_dir=request_dir,
+        response=response,
+        liberty_path=liberty_path,
+        hdl_toplevel=hdl_toplevel,
+        output_dir=output_dir,
+    )
+    return response
 
 
 def _verify_synthesis_equivalence(
@@ -1051,12 +1144,18 @@ def _write_script(
         ) from exc
 
 
-def _run_yosys(script_path: str) -> None:
+def _run_yosys(script_path: str) -> str:
     """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
     on any failure to run (missing binary, timeout-free run exits nonzero).
 
     Never raises on a *successful* (exit 0) run -- the caller is responsible
-    for validating the declared output files actually appeared.
+    for validating the declared output files actually appeared. Returns the
+    captured ``stdout`` log text on success -- Yosys's own ``Warning: ``
+    lines land on stdout, never stderr (verified live; matches
+    :func:`_synthesis_error_message`'s own stream-preference note for
+    ``ERROR:`` lines) -- so :func:`_compute_structural`/
+    :func:`_summarize_warnings` (issue #1588) can parse it without a second
+    Yosys invocation.
     """
     try:
         completed = subprocess.run(
@@ -1069,6 +1168,8 @@ def _run_yosys(script_path: str) -> None:
 
     if completed.returncode != 0:
         raise SynthesizeError(_synthesis_error_message(completed))
+
+    return completed.stdout or ""
 
 
 _WASI_SANDBOX_SCRIPT_NOT_FOUND_RE = re.compile(
@@ -1299,6 +1400,21 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
         design_stats = data.get("design") if isinstance(data, dict) else None
         if isinstance(design_stats, dict) and "area" in design_stats:
             result["area"] = design_stats["area"]
+        else:
+            # Neither the module nor the `design` rollup carries an `area`
+            # key at all -- verified live (issue #1588): a design whose only
+            # cell is an internal, non-liberty primitive (e.g. an inferred
+            # latch left as `$_DLATCH_P_` -- `dfflibmap` maps only flip-
+            # flops, so a latch is never liberty-mapped) contributes zero
+            # liberty-recognized area, and Yosys's own `stat -liberty ...
+            # -json` omits the `area` key entirely rather than reporting
+            # `0.0` explicitly in that case. `0.0` is the semantically
+            # correct value (no standard-cell area to report), not a guess
+            # -- degrade to it rather than a raw `KeyError` on the caller's
+            # `module_stats["area"]` access, the same "never crash on a
+            # legitimately-absent field" discipline `sequential_area_um2`
+            # already follows (#560).
+            result["area"] = 0.0
     if used_module_lookup and isinstance(modules, dict):
         total_cells, cells_by_type = _aggregate_cell_counts(modules, module_key)
         result["num_cells"] = total_cells
@@ -1404,3 +1520,392 @@ def _read_sta_timing(
         return compute_critical_path(netlist_path, liberty_path, hdl_toplevel)
     except StaError:
         return None
+
+
+def _resolve_expected_latches(request: dict[str, Any]) -> int:
+    """``request.structural.expected_latches`` (issue #1588; default ``0``
+    when ``request.structural`` is omitted entirely) -- the number of
+    latches a caller declares intentional, subtracted from the response's
+    ``structural.latches`` to produce ``structural.unexpected_latches``.
+
+    Raises :class:`SynthesizeError` for a non-integer or negative value,
+    matching this module's existing request-validation discipline (e.g.
+    :func:`_resolve_delay_target_ps`) -- a request that means to declare an
+    expected count but expresses it wrongly must not be silently treated as
+    "expect zero".
+    """
+    structural_request = request.get("structural")
+    if structural_request is None:
+        return 0
+    if not isinstance(structural_request, dict):
+        raise SynthesizeError("request.structural must be a JSON object")
+    expected = structural_request.get("expected_latches", 0)
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        raise SynthesizeError(
+            "request.structural.expected_latches must be a non-negative integer"
+        )
+    return expected
+
+
+def _compute_structural(
+    module_stats: dict[str, Any], log_text: str, expected_latches: int
+) -> dict[str, Any]:
+    """Build the response's ``structural`` field (issue #1588) -- an
+    always-present verdict over the three unambiguously-wrong synchronous-
+    design conditions Yosys's own ``synth``/``stat`` already surface, from
+    the same run this module already performs (no extra Yosys invocation):
+
+    - **Inferred latches.** ``stat -json``'s ``num_cells_by_type`` (already
+      parsed by :func:`_read_stats` into ``module_stats``) is scanned for
+      any cell-type name matching :data:`_LATCH_CELL_TYPE_RE` (``"dlatch"``,
+      case-insensitive) -- ``dfflibmap`` maps only flip-flops (verified
+      against ``yosys -p 'help dfflibmap'``), never latches, so an inferred
+      latch survives unmapped all the way to this module's own final
+      ``stat``/``write_verilog`` step as a bare gate-level primitive
+      (``$_DLATCH_P_`` and siblings) -- no separate Yosys pass is needed to
+      find it. ``expected_latches`` (``request.structural.expected_latches``,
+      via :func:`_resolve_expected_latches`) is subtracted, floored at
+      ``0``, to produce ``unexpected_latches``.
+    - **Combinational loops / multiply-driven nets.** Parsed from
+      ``log_text`` (the captured Yosys run log :func:`_run_yosys` returns) --
+      ``synth -top <top>``'s own internal ``check`` sub-stages (``yosys -p
+      'help synth'``'s documented ``coarse``/``check`` stages) run
+      unconditionally and print one ``Warning: found logic loop`` /
+      ``Warning: multiple conflicting drivers`` line per distinct problem
+      **before** ABC's own loop-breaking heuristic can silently sever a real
+      combinational loop -- verified live that an *additional* ``check``
+      step run by this module *after* ``synth`` completes finds zero
+      problems on a design ``synth``'s own internal check already flagged,
+      because by then the loop no longer structurally exists. Counted as
+      the number of **distinct** matching lines (a `set`, not a raw line
+      count): a persisting problem's identical warning text is reprinted at
+      more than one of ``synth``'s internal ``check`` calls -- verified
+      live, a real multi-driver conflict prints twice for one problem -- so
+      a naive line count would double-count.
+
+    ``has_critical`` is ``true`` iff ``comb_loops > 0 or multi_driven > 0 or
+    unexpected_latches > 0`` -- the response-level, exit-code-3 verdict (see
+    ``docs/cli/synthesize.md``'s "Exit codes" section).
+    """
+    counts_by_type = module_stats.get("num_cells_by_type") or {}
+    latches = sum(
+        count
+        for cell_type, count in counts_by_type.items()
+        if isinstance(count, int) and _LATCH_CELL_TYPE_RE.search(cell_type)
+    )
+    unexpected_latches = max(0, latches - expected_latches)
+
+    warning_lines = {
+        line for line in log_text.splitlines() if line.startswith("Warning: ")
+    }
+    comb_loops = sum(1 for line in warning_lines if _COMB_LOOP_WARNING_RE.match(line))
+    multi_driven = sum(
+        1 for line in warning_lines if _MULTI_DRIVEN_WARNING_RE.match(line)
+    )
+
+    return {
+        "latches": latches,
+        "expected_latches": expected_latches,
+        "unexpected_latches": unexpected_latches,
+        "comb_loops": comb_loops,
+        "multi_driven": multi_driven,
+        "has_critical": comb_loops > 0 or multi_driven > 0 or unexpected_latches > 0,
+    }
+
+
+def _categorize_warning(message: str) -> str:
+    """The :data:`_WARNING_CATEGORY_PATTERNS` category name matching
+    ``message`` (the warning text with the leading ``"Warning: "`` prefix
+    already stripped), or ``"other"`` when none match."""
+    for category, pattern in _WARNING_CATEGORY_PATTERNS:
+        if pattern.search(message):
+            return category
+    return "other"
+
+
+def _summarize_warnings(log_text: str) -> dict[str, Any]:
+    """Build the response's ``warnings`` field (issue #1588): a bounded,
+    deterministic summary of every ``Warning: `` line in ``log_text`` --
+    never the raw log itself.
+
+    ``total`` is a raw line count (deliberately **not** deduplicated the
+    way :func:`_compute_structural`'s own ``comb_loops``/``multi_driven``
+    counts are -- ``synth``'s internal ``check`` calls can reprint an
+    unresolved problem's identical text more than once, so this answers
+    "how noisy was this run", not "how many distinct problems").
+    ``by_category``/``representatives`` are sorted by category name for
+    determinism; ``representatives`` is capped at
+    :data:`_MAX_WARNING_REPRESENTATIVES` entries, one per category, each the
+    first message text seen for that category (bounded, per issue #1588).
+    """
+    total = 0
+    by_category: dict[str, int] = {}
+    first_seen: dict[str, str] = {}
+    for line in log_text.splitlines():
+        if not line.startswith("Warning: "):
+            continue
+        message = line[len("Warning: ") :].strip()
+        if not message:
+            continue
+        total += 1
+        category = _categorize_warning(message)
+        by_category[category] = by_category.get(category, 0) + 1
+        first_seen.setdefault(category, message)
+
+    sorted_categories = sorted(by_category)
+    representatives = [
+        {
+            "category": category,
+            "count": by_category[category],
+            "text": first_seen[category],
+        }
+        for category in sorted_categories[:_MAX_WARNING_REPRESENTATIVES]
+    ]
+    return {
+        "total": total,
+        "by_category": {
+            category: by_category[category] for category in sorted_categories
+        },
+        "representatives": representatives,
+    }
+
+
+def _critical_path_ns(response: dict[str, Any]) -> float | None:
+    """The response's own whole-netlist critical-path number, in
+    nanoseconds, for ``baseline`` delta comparison (issue #1588) -- prefers
+    the real ``sta`` stage's ``worst_path.delay_ns`` (already nanoseconds);
+    falls back to ``timing``'s ABC ``stime -p`` estimate
+    (``critical_path_ps``, converted) when ``sta`` is unavailable. ``None``
+    when neither stage produced a number, mirroring both fields' own "no
+    number to report" discipline.
+    """
+    sta = response.get("sta")
+    if isinstance(sta, dict):
+        worst_path = sta.get("worst_path")
+        if isinstance(worst_path, dict):
+            delay_ns = worst_path.get("delay_ns")
+            if isinstance(delay_ns, (int, float)):
+                return float(delay_ns)
+    timing = response.get("timing")
+    if isinstance(timing, dict):
+        critical_path_ps = timing.get("critical_path_ps")
+        if isinstance(critical_path_ps, (int, float)):
+            return float(critical_path_ps) / 1000.0
+    return None
+
+
+def _pct_delta(current: float, baseline: float) -> float | None:
+    """``(current - baseline) / baseline * 100`` -- ``0.0`` when both are
+    ``0`` (no change); ``None`` when ``baseline`` is ``0`` but ``current``
+    is not (an undefined percentage change from a zero base, never
+    fabricated as an infinite or arbitrary number)."""
+    if baseline == 0:
+        return 0.0 if current == 0 else None
+    return (current - baseline) / baseline * 100.0
+
+
+def _baseline_metrics_from_response_file(path: str) -> dict[str, Any]:
+    """``{instance_count, area_um2, critical_path_ns}`` extracted from a
+    prior ``klt synthesize --format json`` response file at ``path`` --
+    ``request.baseline.response_path``'s resolution (issue #1588): compare
+    against a committed report from an earlier run.
+
+    Raises :class:`SynthesizeError` for a missing/unreadable/malformed
+    file, or one that does not look like a ``klt synthesize`` response at
+    all (no ``instance_count``).
+    """
+    if not os.path.isfile(path):
+        raise SynthesizeError(f"request.baseline.response_path not found: {path}")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SynthesizeError(
+            f"could not read request.baseline.response_path '{path}': {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise SynthesizeError(
+            f"request.baseline.response_path '{path}' is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or "instance_count" not in data:
+        raise SynthesizeError(
+            f"request.baseline.response_path '{path}' does not look like a "
+            "`klt synthesize` response (missing instance_count)"
+        )
+    return {
+        "instance_count": data.get("instance_count"),
+        "area_um2": data.get("area_um2"),
+        "critical_path_ns": _critical_path_ns(data),
+    }
+
+
+def _baseline_metrics_from_netlist(
+    netlist_path: str,
+    liberty_path: str,
+    hdl_toplevel: str,
+    output_dir: str,
+) -> dict[str, Any]:
+    """``{instance_count, area_um2, critical_path_ns}`` re-derived from a
+    bare prior netlist file -- ``request.baseline.netlist_path``'s
+    resolution (issue #1588), for a caller that saved only the netlist, not
+    a full response JSON.
+
+    A minimal ``<top>_baseline.ys`` script is written to ``output_dir``
+    alongside this run's other artifacts and kept, matching this module's
+    "generated deck is never deleted" discipline. ``read_liberty -lib
+    <liberty_path>`` runs **before** ``read_verilog``/``hierarchy -check``
+    -- verified live: without it, ``hierarchy -check`` fails on a mapped
+    netlist's standard-cell instances (``Module '\\<cell>' ... is not part
+    of the design``), since a bare gate-level netlist references liberty
+    cells that were never elaborated as blackboxes.
+    """
+    if not os.path.isfile(netlist_path):
+        raise SynthesizeError(
+            f"request.baseline.netlist_path not found: {netlist_path}"
+        )
+
+    script_path = os.path.join(output_dir, f"{hdl_toplevel}_baseline.ys")
+    stats_path = os.path.join(output_dir, f"{hdl_toplevel}_baseline_stats.json")
+    script_lines = [
+        f"read_liberty -lib {liberty_path}",
+        f"read_verilog {netlist_path}",
+        f"hierarchy -check -top {hdl_toplevel}",
+        f"tee -q -o {stats_path} "
+        f"stat -liberty {liberty_path} -json -top {hdl_toplevel}",
+    ]
+    try:
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(script_lines) + "\n")
+    except OSError as exc:
+        raise SynthesizeError(
+            f"could not write baseline script '{script_path}': {exc}"
+        ) from exc
+
+    _run_yosys(script_path)
+    module_stats = _read_stats(stats_path, hdl_toplevel)
+
+    critical_path_ns = None
+    try:
+        sta_result = compute_critical_path(netlist_path, liberty_path, hdl_toplevel)
+    except StaError:
+        sta_result = None
+    if sta_result is not None:
+        worst_path = sta_result.get("worst_path")
+        if isinstance(worst_path, dict):
+            delay_ns = worst_path.get("delay_ns")
+            if isinstance(delay_ns, (int, float)):
+                critical_path_ns = float(delay_ns)
+
+    return {
+        "instance_count": module_stats["num_cells"],
+        "area_um2": module_stats.get("area"),
+        "critical_path_ns": critical_path_ns,
+    }
+
+
+def _compute_baseline(
+    request: dict[str, Any],
+    *,
+    request_dir: str,
+    response: dict[str, Any],
+    liberty_path: str,
+    hdl_toplevel: str,
+    output_dir: str,
+) -> dict[str, Any] | None:
+    """Build the response's optional ``baseline`` field (issue #1588) --
+    ``None`` unless ``request.baseline`` names a prior run to compare
+    against, via exactly one of ``response_path`` (a previously captured
+    ``klt synthesize --format json`` response file) or ``netlist_path`` (a
+    bare mapped netlist, re-``stat``/re-timed against this run's own
+    resolved liberty).
+
+    ``ref`` identifies what was compared against: ``request.baseline.ref``
+    when given, else the literal ``response_path``/``netlist_path`` string
+    -- always present, never ``null``, so a caller can always tell what a
+    ``baseline`` object was measured against even without an explicit
+    label.
+
+    ``area_um2``/``critical_path_ns`` (and their ``delta_pct`` siblings) are
+    included only when both this run and the baseline produced a number --
+    ``instance_count`` is always present (every ``klt synthesize`` response
+    has one). ``delta_pct`` values are ``(current - baseline) / baseline *
+    100`` via :func:`_pct_delta`.
+    """
+    baseline_request = request.get("baseline")
+    if baseline_request is None:
+        return None
+    if not isinstance(baseline_request, dict):
+        raise SynthesizeError("request.baseline must be a JSON object")
+
+    response_path = baseline_request.get("response_path")
+    netlist_path = baseline_request.get("netlist_path")
+    if response_path is not None and not (
+        isinstance(response_path, str) and response_path
+    ):
+        raise SynthesizeError(
+            "request.baseline.response_path must be a non-empty string"
+        )
+    if netlist_path is not None and not (
+        isinstance(netlist_path, str) and netlist_path
+    ):
+        raise SynthesizeError(
+            "request.baseline.netlist_path must be a non-empty string"
+        )
+    if response_path is None and netlist_path is None:
+        raise SynthesizeError("request.baseline must set response_path or netlist_path")
+    if response_path is not None and netlist_path is not None:
+        raise SynthesizeError(
+            "request.baseline must set only one of response_path/netlist_path, not both"
+        )
+
+    ref = baseline_request.get("ref")
+    if ref is not None and not (isinstance(ref, str) and ref):
+        raise SynthesizeError(
+            "request.baseline.ref must be a non-empty string when given"
+        )
+
+    if response_path is not None:
+        resolved = (
+            response_path
+            if os.path.isabs(response_path)
+            else os.path.join(request_dir, response_path)
+        )
+        baseline_metrics = _baseline_metrics_from_response_file(resolved)
+        ref = ref or response_path
+    else:
+        resolved = (
+            netlist_path
+            if os.path.isabs(netlist_path)
+            else os.path.join(request_dir, netlist_path)
+        )
+        baseline_metrics = _baseline_metrics_from_netlist(
+            resolved, liberty_path, hdl_toplevel, output_dir
+        )
+        ref = ref or netlist_path
+
+    current_critical_path_ns = _critical_path_ns(response)
+
+    result: dict[str, Any] = {
+        "ref": ref,
+        "instance_count": baseline_metrics["instance_count"],
+    }
+    delta_pct: dict[str, float | None] = {
+        "instance_count": _pct_delta(
+            response["instance_count"], baseline_metrics["instance_count"]
+        )
+    }
+    if baseline_metrics.get("area_um2") is not None:
+        result["area_um2"] = baseline_metrics["area_um2"]
+        delta_pct["area_um2"] = _pct_delta(
+            response["area_um2"], baseline_metrics["area_um2"]
+        )
+    if (
+        baseline_metrics.get("critical_path_ns") is not None
+        and current_critical_path_ns is not None
+    ):
+        result["critical_path_ns"] = baseline_metrics["critical_path_ns"]
+        delta_pct["critical_path_ns"] = _pct_delta(
+            current_critical_path_ns, baseline_metrics["critical_path_ns"]
+        )
+    result["delta_pct"] = delta_pct
+    return result
