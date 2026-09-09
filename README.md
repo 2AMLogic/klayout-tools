@@ -81,6 +81,19 @@ uv tool install git+https://github.com/2AMLogic/klayout-tools
 > from-source gap for their own Rust extensions; every other verb works
 > from the commands above alone.
 
+### Container image (`klt` + the analog sim toolchain)
+
+For CI or a worker node that needs the whole analog flow — `klt` plus
+`ngspice`, `xschem` and a PDK — this repo also publishes an overlay image:
+
+```bash
+docker run --rm ghcr.io/2amlogic/eda-sim klt --version
+```
+
+The toolchain is baked; the PDK is **fetched at runtime** (`eda-sim-fetch-pdk
+sky130`), never baked. See [`docker/eda-sim/README.md`](docker/eda-sim/README.md)
+for the version pins and the full contract.
+
 ## Quick start
 
 ```bash

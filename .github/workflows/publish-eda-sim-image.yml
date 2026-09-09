@@ -1,0 +1,255 @@
+name: Publish eda-sim image
+
+# Builds (and, on a release tag or manual dispatch, publishes) the `eda-sim`
+# overlay image defined in docker/eda-sim/ -- issue #509.
+#
+#   ghcr.io/rjwalters/loom-worker:<pin>   the orchestration base (owned by
+#                                         rjwalters/loom)
+#   + ngspice, xschem, ciel, klt          the domain toolchain (owned here)
+#
+# Every version this workflow bakes comes from docker/eda-sim/pdk-versions.json
+# via `docker/eda-sim/build.sh --print-args`; nothing is duplicated as a literal
+# in this file, and tests/test_eda_sim_image.py fails if a future edit
+# reintroduces one. Bumping a pin is an edit to that manifest, nothing else.
+#
+# Why per-architecture native runners instead of one buildx job with QEMU:
+# stage 1 of the Dockerfile compiles ngspice and xschem from source. Under
+# arm64 emulation on an amd64 runner that is a ~30-minute-plus proposition that
+# routinely trips job timeouts. GitHub's free `ubuntu-24.04-arm` runners (public
+# repos) build natively in minutes, so each arch is built + smoke-tested on its
+# own hardware and the two are joined into one multi-arch manifest afterwards.
+#
+# The PDK tree is never baked (issue #509's hard rule) -- the `pdk-sim` job
+# below proves the runtime `ciel` fetch works instead, on a schedule rather
+# than on every PR because it downloads ~1 GB.
+
+on:
+  pull_request:
+    paths:
+      - "docker/eda-sim/**"
+      - ".github/workflows/publish-eda-sim-image.yml"
+      - "tests/test_eda_sim_image.py"
+  push:
+    # Tags only, and deliberately no `paths:` filter here. A `paths:` filter on
+    # a tag push is evaluated against the tagged commit's own diff, so a release
+    # tag cut from a commit that did not touch docker/eda-sim/ would silently
+    # not publish. Post-merge verification of main is covered by the
+    # pull_request path above plus the weekly schedule below.
+    tags:
+      - "v*"
+  schedule:
+    # Mondays 05:11 UTC, off the hour (the shared scheduler is congested on it).
+    # A drift detector, not a publisher: it rebuilds against whatever the base
+    # image, PyPI and the ciel release feed currently hold, and it is the only
+    # trigger that runs the ~1 GB PDK-backed simulation stage.
+    - cron: "11 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push the built image to GHCR"
+        type: boolean
+        default: false
+      run-pdk-sim:
+        description: "Run the PDK-backed simulation stage (~1 GB download)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eda-sim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pins:
+    name: Resolve pins from pdk-versions.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.read.outputs.image }}
+      version: ${{ steps.read.outputs.version }}
+      max_size_bytes: ${{ steps.read.outputs.max_size_bytes }}
+      publish: ${{ steps.decide.outputs.publish }}
+      pdk_sim: ${{ steps.decide.outputs.pdk_sim }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the manifest
+        id: read
+        run: |
+          set -euo pipefail
+          manifest=docker/eda-sim/pdk-versions.json
+          {
+            echo "image=$(jq -er '.image.name' "$manifest")"
+            echo "version=$(jq -er '.image.version' "$manifest")"
+            echo "max_size_bytes=$(jq -er '.image.max_size_bytes' "$manifest")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Echo the pins this run will bake
+        # Printed, not hardcoded: the log names every version the image is
+        # about to contain, so a surprising bump is visible in the run itself.
+        run: docker/eda-sim/build.sh --print-args
+
+      - name: Decide publish / PDK-sim gates
+        id: decide
+        run: |
+          set -euo pipefail
+          publish=false
+          pdk_sim=false
+          case "${{ github.event_name }}" in
+            push)
+              # The only `push` trigger is a `v*` tag, i.e. a release cut.
+              if [[ "${{ github.ref }}" == refs/tags/v* ]]; then publish=true; fi
+              ;;
+            schedule)
+              pdk_sim=true
+              ;;
+            workflow_dispatch)
+              publish='${{ inputs.publish }}'
+              pdk_sim='${{ inputs.run-pdk-sim }}'
+              ;;
+          esac
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "pdk_sim=${pdk_sim}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build + smoke (${{ matrix.arch }})
+    needs: pins
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Needed even when not publishing: the base image is a GHCR package,
+        # and anonymous pulls there are rate-limited.
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ${{ matrix.platform }}
+        # Single source of truth: build.sh reads every pin out of
+        # pdk-versions.json and passes it through as a --build-arg.
+        run: |
+          docker/eda-sim/build.sh \
+            --platform "${{ matrix.platform }}" \
+            --tag "eda-sim:ci-${{ matrix.arch }}"
+
+      - name: Assert the image stays under the size ceiling
+        # Issue #509's hard rule, made mechanical: the PDK tree is never baked,
+        # and the ceiling is what proves nobody quietly started baking one.
+        run: |
+          set -euo pipefail
+          limit='${{ needs.pins.outputs.max_size_bytes }}'
+          size="$(docker image inspect --format '{{.Size}}' "eda-sim:ci-${{ matrix.arch }}")"
+          printf 'image size: %s bytes (%.2f GB); ceiling: %s bytes (%.2f GB)\n' \
+            "$size" "$(echo "$size" | awk '{print $1/1e9}')" \
+            "$limit" "$(echo "$limit" | awk '{print $1/1e9}')"
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::eda-sim image is ${size} bytes, over the ${limit}-byte ceiling in docker/eda-sim/pdk-versions.json"
+            exit 1
+          fi
+
+      - name: Smoke test inside the built image
+        # Runs the same /opt/eda/smoke.sh that is baked into the published
+        # image, so what CI verifies is exactly what a fleet node can re-verify.
+        run: docker run --rm "eda-sim:ci-${{ matrix.arch }}" /opt/eda/smoke.sh
+
+      - name: Push the per-arch tag
+        if: needs.pins.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          ref='${{ needs.pins.outputs.image }}:${{ needs.pins.outputs.version }}-${{ matrix.arch }}'
+          docker tag "eda-sim:ci-${{ matrix.arch }}" "$ref"
+          docker push "$ref"
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: [pins, build]
+    if: needs.pins.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Join the per-arch images into one multi-arch manifest
+        # Mirrors the base image's own shape: ghcr.io/rjwalters/loom-worker is
+        # published as an amd64 + arm64 OCI index, so this overlay is too.
+        run: |
+          set -euo pipefail
+          image='${{ needs.pins.outputs.image }}'
+          version='${{ needs.pins.outputs.version }}'
+          docker buildx imagetools create \
+            --tag "${image}:${version}" \
+            --tag "${image}:latest" \
+            --tag "${image}:sha-${GITHUB_SHA::12}" \
+            "${image}:${version}-amd64" \
+            "${image}:${version}-arm64"
+          docker buildx imagetools inspect "${image}:${version}"
+
+  pdk-sim:
+    name: PDK-backed simulation (${{ matrix.family }})
+    needs: [pins, build]
+    if: needs.pins.outputs.pdk_sim == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [gf180mcu, sky130]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (amd64, local)
+        run: docker/eda-sim/build.sh --tag eda-sim:ci-amd64
+
+      - name: Fetch the pinned PDK at runtime and simulate against it
+        # The acceptance test for issue #509's hard rule: nothing PDK-shaped is
+        # in the image, so this stage has to fetch ~1 GB with ciel before it can
+        # simulate. That is why it is not on the pull_request path.
+        env:
+          # Rate-limit headroom for the GitHub API calls ciel makes. httpx drops
+          # the Authorization header on the cross-host redirect to the release
+          # asset CDN, so the token never leaves github.com.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker run --rm -e GITHUB_TOKEN eda-sim:ci-amd64 \
+            /opt/eda/smoke.sh --with-pdk '${{ matrix.family }}'

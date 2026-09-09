@@ -1,0 +1,186 @@
+{
+  "_comment": [
+    "Pinned tool/PDK manifest for the `eda-sim` overlay image (issue #509).",
+    "",
+    "THIS FILE IS THE SINGLE SOURCE OF TRUTH for every version the image bakes",
+    "or fetches. Nothing here is duplicated as a literal in the Dockerfile or in",
+    ".github/workflows/publish-eda-sim-image.yml: `docker/eda-sim/build.sh` reads",
+    "this file with jq and passes each pin as a --build-arg, and the Dockerfile's",
+    "ARGs are declared without defaults so a missing pin fails the build loudly",
+    "instead of silently baking a stale one. tests/test_eda_sim_image.py enforces",
+    "that no-duplicate-literals property so a future edit cannot reintroduce",
+    "drift. Bumping a version means editing THIS FILE (and bumping image.version).",
+    "",
+    "Field guide:",
+    "  image.*            identity + tag scheme of the published overlay, and the",
+    "                     size ceiling CI asserts (the PDK tree is NEVER baked --",
+    "                     see pdks.baked below).",
+    "  base.*             the loom-worker base this image layers on. Owned by",
+    "                     rjwalters/loom, published to GHCR by its release",
+    "                     workflow; multi-arch (amd64 + arm64).",
+    "  tools.ngspice      built from source, not apt: Ubuntu's package is older",
+    "                     than the `ngspice_min_major: 46` floor that",
+    "                     2AMLogic/gf180-sar-adc's and gf180-trng's sim harnesses",
+    "                     enforce. `min_major` is the floor the image asserts at",
+    "                     build time; `version` is what it actually builds.",
+    "                     `sha256` is checked before the tarball is unpacked.",
+    "  tools.xschem       the schematic netlister. `commit` is the exact SHA",
+    "                     `tag` must resolve to -- the build fails if it does",
+    "                     not, so a re-pointed upstream tag cannot silently",
+    "                     change what is baked.",
+    "  tools.ciel         the PDK version manager. ciel, NOT volare: ciel is the",
+    "                     maintained successor (same open_pdks build format and",
+    "                     CLI shape) and volare's PDK release feed stopped in",
+    "                     Aug 2025.",
+    "  tools.klayout_tools this repo's own `klt`, baked as the DRC/LVS driver the",
+    "                     block repos' layout-verification stages invoke. Must be",
+    "                     a version published to PyPI.",
+    "  pdks.*             what `eda-sim-fetch-pdk` fetches AT RUNTIME. Never",
+    "                     baked into the image."
+  ],
+  "schema_version": 1,
+
+  "image": {
+    "registry": "ghcr.io",
+    "name": "ghcr.io/2amlogic/eda-sim",
+    "version": "0.1.0",
+    "_version_comment": [
+      "Semver for the overlay itself, independent of klayout-tools' own release",
+      "version. Bump it in the same commit as any pin change below; the publish",
+      "workflow tags the pushed image with this value plus `latest` and",
+      "`sha-<git-sha>`."
+    ],
+    "max_size_bytes": 2147483648,
+    "_max_size_comment": [
+      "~2 GB ceiling from issue #509's hard rule, asserted by the publish",
+      "workflow against `docker image inspect --format '{{.Size}}'` of the",
+      "single-arch build. Excludes the PDK tree by construction."
+    ]
+  },
+
+  "base": {
+    "image": "ghcr.io/rjwalters/loom-worker",
+    "version": "0.19.0",
+    "_comment": [
+      "Verified live against the GHCR registry API on 2026-09-09: tags",
+      "[\"0.19.0\", \"latest\"], and 0.19.0 is an OCI image index carrying both",
+      "linux/amd64 and linux/arm64 manifests. Ubuntu 24.04 userland; default",
+      "user `loom` (uid 1000); already ships build-essential, git, curl, jq, gh."
+    ]
+  },
+
+  "tools": {
+    "ngspice": {
+      "version": "47",
+      "min_major": 46,
+      "sha256": "894e649651f1838a14095e5a5439e7d3aa63e87ede14d283173fda4fcdef675f",
+      "url_template": "https://downloads.sourceforge.net/project/ngspice/ng-spice-rework/{version}/ngspice-{version}.tar.gz",
+      "configure_flags": [
+        "--with-x=no",
+        "--with-readline=no",
+        "--enable-xspice",
+        "--disable-debug"
+      ],
+      "_comment": [
+        "Configure flags and the `min_major: 46` floor come from",
+        "2AMLogic/gf180-trng's `.github/workflows/pdk-nightly.yml` and",
+        "gf180-sar-adc's sim/toolchain.json. Batch-mode simulator only: no X11,",
+        "no readline. XSPICE is enabled because open_pdks device models may use",
+        "its extensions.",
+        "",
+        "The VERSION deliberately does NOT match gf180-trng's `NGSPICE_VERSION:",
+        "46`. Re-verified live 2026-09-09: upstream has moved 46 into",
+        "`ng-spice-rework/old-releases/46/`, so the URL that workflow pins",
+        "(`ng-spice-rework/46/ngspice-46.tar.gz`) now 404s -- its nightly is",
+        "presumably surviving on an actions/cache hit and would fail cold. 47 is",
+        "the current release at the stable path, and it clears the same floor.",
+        "The sha256 above was computed from the real 13,105,136-byte tarball",
+        "downloaded on 2026-09-09, not copied from another repo.",
+        "",
+        "Bumping means updating `version` AND `sha256` together here. If a",
+        "future bump 404s the same way, the tarball has almost certainly moved",
+        "to `ng-spice-rework/old-releases/<version>/` -- adjust `url_template`."
+      ]
+    },
+    "xschem": {
+      "tag": "3.4.7",
+      "commit": "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0",
+      "repo": "https://github.com/StefanSchippers/xschem",
+      "_comment": [
+        "Same pin 2AMLogic/gf180-sar-adc's sim/toolchain.json carries. Tag ->",
+        "commit re-verified live against the upstream GitHub API on 2026-09-09:",
+        "refs/tags/3.4.7 is an annotated tag (3851bc5a...) dereferencing to",
+        "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0."
+      ]
+    },
+    "ciel": {
+      "version": "2.6.1",
+      "_comment": [
+        "Same pin gf180-trng's pdk-nightly.yml uses (CIEL_VERSION). Latest on",
+        "PyPI as of 2026-09-09."
+      ]
+    },
+    "klayout_tools": {
+      "version": "0.4.0",
+      "_comment": [
+        "This repo's own CLI (`klt`), installed from PyPI. It brings the KLayout",
+        "Python module headless -- no GUI, no Qt, no apt package. 0.4.0 is the",
+        "latest published release as of 2026-09-09."
+      ]
+    }
+  },
+
+  "pdks": {
+    "baked": false,
+    "_baked_comment": [
+      "HARD RULE (issue #509): the PDK tree is never baked into the image. A",
+      "single family is 7-9 GB, which would blow the size ceiling and couple PDK",
+      "versions to image releases. The image carries the FETCH MECHANISM (ciel +",
+      "these pins + the `eda-sim-fetch-pdk` helper); the tree lands in",
+      "$CIEL_HOME (default ~/.ciel), which callers should back with a volume or",
+      "cache mount so it survives container restarts."
+    ],
+    "install_root": "~/.ciel",
+    "_install_root_comment": [
+      "ciel installs to ~/.ciel/<variant> when PDK_ROOT is unset. Leaving",
+      "PDK_ROOT unset is load-bearing -- ciel installs THERE instead if it is",
+      "set -- so the image deliberately does not export PDK_ROOT."
+    ],
+    "families": {
+      "sky130": {
+        "open_pdks_commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
+        "variant": "sky130A",
+        "libraries": ["sky130_fd_pr", "sky130_fd_sc_hd"]
+      },
+      "gf180mcu": {
+        "open_pdks_commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
+        "variant": "gf180mcuD",
+        "libraries": ["gf180mcu_fd_pr", "gf180mcu_fd_sc_mcu9t5v0"]
+      }
+    },
+    "_families_comment": [
+      "Both families pin the same open_pdks commit, which is what gf180-trng",
+      "already uses (PDK_VERSION in its pdk-nightly.yml).",
+      "",
+      "DRIFT NOTE, verified live 2026-09-09 against the fossi-foundation/",
+      "ciel-releases API: the older `c6d73a35f524070e85faff4a6a9eef49553ebc2b`",
+      "commit that the still-on-volare repos pin (sky130-bandgap's sim/pdk.json,",
+      "gf180-sar-adc/gf180-pll/gf180-temp-por/gf180-ldo's sim/toolchain.json) has",
+      "NO ciel release -- both `sky130-c6d73a35...` and `gf180mcu-c6d73a35...`",
+      "404. `f6eeac7d...` resolves for BOTH families (200). So this is not a",
+      "free swap of fetch tool: a repo moving from volare to ciel also moves its",
+      "open_pdks pin, exactly as gf180-trng did. Callers that must have the old",
+      "commit can still override the pin per-invocation (`eda-sim-fetch-pdk",
+      "--commit <sha>`) or install volare into the image's writable venv.",
+      "",
+      "`libraries` is the minimum set the fleet's audited harnesses actually",
+      "need: the primitive library (device models, needed for every ngspice run)",
+      "plus the one digital standard-cell library `klt synthesize` /",
+      "`klt place-and-route` map onto. The `common` tarball (device models under",
+      "<variant>/libs.tech/ngspice, and the xschem symbol library under",
+      "<variant>/libs.tech/xschem) is always fetched by ciel regardless. Fetching",
+      "the full default set instead would pull ~5 GB of unused IO/SRAM/alt-cell",
+      "libraries; `eda-sim-fetch-pdk --all-libraries` opts into that."
+    ]
+  }
+}
