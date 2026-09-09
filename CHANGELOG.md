@@ -52,8 +52,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   A variant whose family has no curated entry is an explicit exit-1 error,
   not a partial stack. `--thickness curated|tech-lef` selects which of the
   two published film thicknesses drives the emitted geometry (default keeps
-  the stack gap-free). Curated today: `sky130`. See
+  the stack gap-free). Curated today: `gf180mcu`, `sky130`. See
   [`docs/cli/pdk.md`](docs/cli/pdk.md).
+- **Added**: `klt pdk stackup --pdk gf180mcuD` (issue #1616) — a second
+  curated family, `gf180mcu`, alongside `sky130`
+  (`supported_families()` now `["gf180mcu", "sky130"]`). Verified against a
+  real `volare`-fetched `gf180mcuD`: elevation/thickness come from
+  `libs.tech/magic/gf180mcuD.tech`'s `height` stanza (five metal levels of
+  uniform 0.55 µm, `met5` at 1.0025 µm, and **no local-interconnect layer**
+  — `met1` is the first conductor, unlike sky130's `li1`/`mcon`), GDS
+  layer/datatype from `libs.tech/magic/gf180mcuD-GDS.tech`'s `calma`
+  statements, and permittivity (ε_r = 4.0, distinct from sky130's 3.9)
+  corroborated the same arithmetic way against this install's own
+  `defaultareacap` coefficients. gf180mcu ships no KLayout XSection script
+  analogous to sky130's `xsect/sky130.xs`, so dielectric slab boundaries are
+  induced purely from the `height` stanza's contiguity and film *material*
+  names are a disclosed generic assumption rather than an install-specific
+  citation (see `_GF180MCU_STACKUP`'s provenance note in
+  `src/klayout_tools/pdk_stackup.py`). `ihp-sg13g2` remains an uncurated
+  variant and continues to error clearly, naming both curated families.
 - **Added**: `klayout_tools.lef_header.parse_lef_header()` now also reports a
   `CUT` layer's per-cut `RESISTANCE` as `layers[].resistance_ohms` (additive;
   `null` on `ROUTING` layers, which state `RESISTANCE RPERSQ` instead) —

@@ -1,21 +1,25 @@
-"""Tests for `klt pdk stackup` (`klayout_tools.pdk_stackup`, issue #1609).
+"""Tests for `klt pdk stackup` (`klayout_tools.pdk_stackup`, issue #1609;
+gf180mcu curation, issue #1616).
 
 Two independently-checkable halves, matching the command's own curated-vs-
-derived split:
+derived split, for each curated family:
 
-1. **The curated table** (``_SKY130_STACKUP``) is checked against the
-   known-good sky130 figures published in the files its own provenance block
-   cites — open_pdks' ``sky130A.tech`` ``height`` stanza and ``sky130.xs``
-   process section — including the internal-consistency properties those
-   figures imply (a gap-free conductor stack, a dielectric partition that
-   covers it) and an arithmetic re-derivation of the ε_r = 3.9 claim from the
-   same file's ``defaultareacap`` coefficients. These tests read no install
-   at all.
+1. **The curated table** (``_SKY130_STACKUP``/``_GF180MCU_STACKUP``) is
+   checked against the known-good figures published in the files its own
+   provenance block cites — open_pdks' ``<variant>.tech`` ``height`` stanza,
+   sky130's ``sky130.xs`` process section, gf180mcu's ``<variant>-GDS.tech``
+   ``calma`` statements — including the internal-consistency properties
+   those figures imply (a gap-free conductor stack, a dielectric partition
+   that covers it) and an arithmetic re-derivation of the curated ε_r claim
+   from the same file's ``defaultareacap`` coefficients. These tests read no
+   install at all.
 2. **The live tech-LEF derivation** is checked against fabricated installs
    under ``tmp_path`` whose tech LEF content mirrors a real sky130A's
    (``met1`` ``THICKNESS 0.35``/``RESISTANCE RPERSQ 0.105|0.125|0.145`` at
-   min/nom/max, ``via`` ``RESISTANCE 4.50`` per cut) — CI never downloads a
-   real PDK.
+   min/nom/max, ``via`` ``RESISTANCE 4.50`` per cut) or a real gf180mcuD's
+   (mixed-case ``Metal1``/``Via1`` layer names, ``THICKNESS 0.54``/
+   ``RESISTANCE RPERSQ 0.090``, ``Via1`` ``RESISTANCE 4.5`` per cut) — CI
+   never downloads a real PDK.
 """
 
 import json
@@ -244,8 +248,154 @@ def test_curated_entries_without_a_published_value_are_null_not_guessed():
     assert passivation[5]  # ... but the reason is documented as a note
 
 
-def test_supported_families_lists_sky130():
-    assert pdk_stackup.supported_families() == ["sky130"]
+def test_supported_families_lists_sky130_and_gf180mcu():
+    assert pdk_stackup.supported_families() == ["gf180mcu", "sky130"]
+
+
+# --------------------------------------------------------------------------- #
+# 1b. The curated gf180mcu table, checked against its own cited sources
+# (issue #1616).
+# --------------------------------------------------------------------------- #
+
+#: The open_pdks ``gf180mcuD.tech`` ``height <types> <z0_um> <thickness_um>``
+#: stanza, transcribed independently of the module under test: magic type
+#: name -> (z0_um, thickness_um).
+_GF180MCU_HEIGHT_STANZA = {
+    "allm1": (1.23, 0.55),
+    "via": (1.78, 0.60),
+    "allm2": (2.38, 0.55),
+    "via2": (2.93, 0.60),
+    "allm3": (3.53, 0.55),
+    "via3": (4.08, 0.60),
+    "allm4": (4.68, 0.55),
+    "via4": (5.23, 0.60),
+    "allm5": (5.83, 1.0025),
+}
+
+#: magic type name -> the LEF/GDS layer name this repo reports it under.
+_GF180MCU_MAGIC_TO_LAYER = {
+    "allm1": "met1",
+    "via": "via1",
+    "allm2": "met2",
+    "via2": "via2",
+    "allm3": "met3",
+    "via3": "via3",
+    "allm4": "met4",
+    "via4": "via4",
+    "allm5": "met5",
+}
+
+
+def test_curated_gf180mcu_matches_published_magic_height_stanza():
+    """Every curated conductor's elevation and thickness equals the figure
+    open_pdks' own ``gf180mcuD.tech`` publishes for it."""
+    curated = {
+        name: (z0, thickness)
+        for name, _kind, _lef, _gds, _material, z0, thickness in (
+            pdk_stackup._GF180MCU_STACKUP["conductors"]
+        )
+    }
+    expected = {
+        _GF180MCU_MAGIC_TO_LAYER[magic]: values
+        for magic, values in _GF180MCU_HEIGHT_STANZA.items()
+    }
+    assert curated == expected
+
+
+def test_curated_gf180mcu_conductor_stack_is_gap_free():
+    conductors = pdk_stackup._GF180MCU_STACKUP["conductors"]
+    for (_n0, _k0, _l0, _g0, _m0, z0, thickness), nxt in zip(
+        conductors, conductors[1:], strict=False
+    ):
+        assert z0 + thickness == pytest.approx(nxt[5], abs=1e-9)
+
+
+def test_curated_gf180mcu_dielectrics_partition_the_stack():
+    dielectrics = pdk_stackup._GF180MCU_STACKUP["dielectrics"]
+    assert dielectrics[0][2] == 0.0
+    for current, nxt in zip(dielectrics, dielectrics[1:], strict=False):
+        assert current[3] == pytest.approx(nxt[2], abs=1e-9)
+
+    for _n, _k, _l, _g, _m, z0, thickness in pdk_stackup._GF180MCU_STACKUP[
+        "conductors"
+    ]:
+        containing = [
+            name
+            for name, _material, d0, d1, _eps, _note in dielectrics
+            if d0 <= z0 and z0 + thickness <= d1 + 1e-9
+        ]
+        assert len(containing) == 1, (z0, containing)
+
+
+def test_curated_gf180mcu_has_no_local_interconnect_layer():
+    """gf180mcu's first conductor is met1 itself -- no li1/mcon equivalent,
+    unlike sky130 (see the curated table's provenance note)."""
+    names = [entry[0] for entry in pdk_stackup._GF180MCU_STACKUP["conductors"]]
+    assert names[0] == "met1"
+    assert "li1" not in names
+    assert "mcon" not in names
+
+
+@pytest.mark.parametrize(
+    ("area_cap_af_per_um2", "z0_um"),
+    [
+        # `defaultareacap <types> <plane> <value>` lines from the same
+        # open_pdks gf180mcuD.tech the elevations come from (the first,
+        # unconditioned `variants ()` "Nominal capacitances" block), paired
+        # with the `height` z0 of the same conductor.
+        (29.304, 1.23),  # defaultareacap allm1 metal1 29.304
+        (15.016, 2.38),  # defaultareacap allm2 metal2 15.016
+        (10.094, 3.53),  # defaultareacap allm3 metal3 10.094
+        (7.602, 4.68),  # defaultareacap allm4 metal4 7.602
+        (5.798, 5.83),  # defaultareacap allm5 metal5 5.798
+    ],
+)
+def test_curated_gf180mcu_permittivity_is_corroborated_by_the_install(
+    area_cap_af_per_um2, z0_um
+):
+    """The curated ε_r = 4.0 is not a bare assertion: it is what the same
+    install's own area-capacitance coefficients imply, to within 10%."""
+    derived = area_cap_af_per_um2 * z0_um / pdk_stackup.VACUUM_PERMITTIVITY_AF_PER_UM
+    assert derived == pytest.approx(4.0, rel=0.1)
+
+
+def test_curated_gf180mcu_ild_permittivity_is_reported_as_4_0():
+    for name in ("pmd", "ild2", "ild3", "ild4", "ild5", "ild6"):
+        entry = next(
+            e for e in pdk_stackup._GF180MCU_STACKUP["dielectrics"] if e[0] == name
+        )
+        assert entry[4] == 4.0
+
+
+def test_curated_gf180mcu_top_dielectric_stops_at_met5_top_not_a_guessed_overcoat():
+    """No open gf180mcu source states a passivation/overglass thickness above
+    met5, so the top slab's upper boundary is met5's own top -- never an
+    invented elevation."""
+    met5 = next(
+        e for e in pdk_stackup._GF180MCU_STACKUP["conductors"] if e[0] == "met5"
+    )
+    met5_top = met5[5] + met5[6]
+    ild6 = next(
+        e for e in pdk_stackup._GF180MCU_STACKUP["dielectrics"] if e[0] == "ild6"
+    )
+    assert ild6[3] == pytest.approx(met5_top)
+
+
+def test_gf180mcu_stackup_json_reports_the_curated_stack(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD")
+
+    report = pdk_stackup.stackup(root=str(root))
+
+    assert report["family"] == "gf180mcu"
+    assert report["pdk"] == "gf180mcuD"
+    assert len(report["conductors"]) == 9
+    met1 = _conductor(report, "met1")
+    assert met1["gds_layer"] == "34/0"
+    assert met1["z0_um"] == 1.23
+    ild6 = _dielectric(report, "ild6")
+    assert ild6["permittivity"] == 4.0
+    assert ild6["z1_um"] == pytest.approx(6.8325)
 
 
 # --------------------------------------------------------------------------- #
@@ -355,6 +505,71 @@ def test_disagreeing_tech_lefs_report_agrees_false_and_the_resistive_pick(tmp_pa
 
 
 # --------------------------------------------------------------------------- #
+# 2b. Live tech-LEF derivation for gf180mcu -- exercises the mixed-case
+# ``Metal1``/``Via1`` layer names a real gf180mcu tech LEF uses (issue
+# #1616), which sky130's lowercase ``met1``/``via`` fixtures never do.
+# --------------------------------------------------------------------------- #
+
+
+def _gf180mcu_layers():
+    """A gf180mcu-shaped tech LEF body, verbatim field values from a real
+    ``volare``-fetched ``gf180mcu_fd_sc_mcu9t5v0__nom.tlef``: mixed-case
+    ``Metal1``/``Via1`` layer names (unlike sky130's lowercase ``met1``),
+    one ROUTING layer stating THICKNESS + RESISTANCE RPERSQ, one CUT layer
+    stating a per-cut RESISTANCE."""
+    return """\
+LAYER Metal1
+  TYPE ROUTING ;
+  THICKNESS 0.54 ;
+  RESISTANCE RPERSQ 0.090 ;
+END Metal1
+
+LAYER Via1
+  TYPE CUT ;
+  RESISTANCE 4.5 ;
+END Via1
+"""
+
+
+def _gf180mcu_install(root, cell_library="gf180mcu_fd_sc_mcu9t5v0"):
+    variant_dir = _make_install(root, "gf180mcuD")
+    _write_tech_lef(variant_dir, cell_library, "nom", _gf180mcu_layers())
+    return variant_dir
+
+
+def test_gf180mcu_tech_lef_layer_names_are_matched_case_sensitively(tmp_path):
+    """gf180mcu's tech LEF names its layers ``Metal1``/``Via1`` (mixed case);
+    the curated table's ``lef_layer`` must match that exactly for the live
+    derivation to find them at all."""
+    root = tmp_path / "install"
+    _gf180mcu_install(root)
+
+    report = pdk_stackup.stackup(root=str(root))
+
+    met1 = _conductor(report, "met1")
+    assert met1["sheet_resistance_ohm_per_sq"] == 0.090
+    assert met1["lef_thickness_um"] == 0.54
+    assert met1["curated_thickness_um"] == 0.55  # curated vs. tech-LEF differ
+
+    via1 = _conductor(report, "via1")
+    assert via1["kind"] == "via"
+    assert via1["via_resistance_ohm"] == 4.5
+    assert via1["sheet_resistance_ohm_per_sq"] is None
+
+
+def test_gf180mcu_install_with_no_tech_lef_still_emits_the_curated_stack(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD")
+
+    report = pdk_stackup.stackup(root=str(root))
+
+    assert report["sources"] == []
+    assert len(report["conductors"]) == 9
+    assert _conductor(report, "met1")["z0_um"] == 1.23
+    assert any("no tech LEF found" in warning for warning in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
 # thickness source selection
 # --------------------------------------------------------------------------- #
 
@@ -417,13 +632,14 @@ def test_unknown_thickness_source_raises(tmp_path):
 
 def test_uncurated_variant_raises_rather_than_emitting_a_partial_stack(tmp_path):
     root = tmp_path / "install"
-    _make_install(root, "gf180mcuD")
+    _make_install(root, "ihp-sg13g2")
 
     with pytest.raises(pdk_stackup.PdkStackupError) as excinfo:
         pdk_stackup.stackup(root=str(root))
 
     message = str(excinfo.value)
-    assert "gf180mcuD" in message
+    assert "ihp-sg13g2" in message
+    assert "gf180mcu" in message  # names what *is* curated
     assert "sky130" in message  # names what *is* curated
 
 
@@ -466,6 +682,48 @@ def test_cli_json_payload_on_stdout(tmp_path, capsys):
     assert {d["name"] for d in payload["dielectrics"]} >= {"pmd", "ild2", "ild6"}
 
 
+def test_cli_json_payload_for_gf180mcu(tmp_path, capsys):
+    """Acceptance criterion: `klt pdk stackup --pdk gf180mcuD --format json`
+    succeeds and reports a complete conductor + dielectric stack (issue
+    #1616)."""
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD")
+
+    exit_code = main(
+        [
+            "pdk",
+            "stackup",
+            "--pdk-root",
+            str(root),
+            "--pdk",
+            "gf180mcuD",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["schema_version"] == 1
+    assert payload["pdk"] == "gf180mcuD"
+    assert payload["family"] == "gf180mcu"
+    assert payload["curated_source"]["references"]
+    met1 = next(c for c in payload["conductors"] if c["name"] == "met1")
+    assert met1["gds_layer"] == "34/0"
+    assert met1["z0_um"] == 1.23
+    assert "li1" not in {c["name"] for c in payload["conductors"]}
+    assert {d["name"] for d in payload["dielectrics"]} == {
+        "pmd",
+        "ild2",
+        "ild3",
+        "ild4",
+        "ild5",
+        "ild6",
+    }
+
+
 def test_cli_corner_flag_is_threaded_through(tmp_path, capsys):
     root = tmp_path / "install"
     _sky130_install(root)
@@ -506,7 +764,7 @@ def test_cli_text_renders_both_tables(tmp_path, capsys):
 
 def test_cli_uncurated_variant_emits_the_error_envelope(tmp_path, capsys):
     root = tmp_path / "install"
-    _make_install(root, "gf180mcuD")
+    _make_install(root, "ihp-sg13g2")
 
     exit_code = main(["pdk", "stackup", "--pdk-root", str(root), "--format", "json"])
 

@@ -256,9 +256,186 @@ _SKY130_STACKUP: dict[str, Any] = {
     ],
 }
 
+#: gf180mcu BEOL stack-up (issue #1616).
+#:
+#: **Elevation/thickness source** — ``libs.tech/magic/gf180mcuD.tech``
+#: (verified against a real ``volare``-fetched ``gf180mcuD``; the same
+#: filename pattern and ``height`` stanza is present, byte-for-byte on the
+#: BEOL entries, in every open_pdks gf180mcuA/B/C/D build). This is
+#: GlobalFoundries/Google's own published, Apache-2.0, non-NDA gf180mcu
+#: distribution -- the same open_pdks tree ``_SKY130_STACKUP`` cites -- and
+#: this is the elevation table magic itself uses for 3D extraction, so it is
+#: the authoritative open statement of the gf180mcu z axis. Transcribed
+#: verbatim (lines 2982-2990 of the ``open_pdks`` build volare fetched
+#: 2026-09-09):
+#:
+#:     height allm1  1.23  0.55      height allm4  4.68  0.55
+#:     height via    1.78  0.60      height via4   5.23  0.60
+#:     height allm2  2.38  0.55      height allm5  5.83  1.0025
+#:     height via2   2.93  0.60
+#:     height allm3  3.53  0.55
+#:     height via3   4.08  0.60
+#:
+#: Contiguous by construction, exactly like sky130's stanza (asserted in
+#: ``tests/test_pdk_stackup.py``). Unlike sky130, gf180mcu has **no
+#: local-interconnect layer** (no ``li1``/``mcon`` equivalent -- the FEOL
+#: contact ``pc`` lands directly on poly/diffusion, not on a separate
+#: interconnect level) and its five metal levels are a uniform 0.55 um
+#: (met5 excepted, at 1.0025 um) rather than sky130's thin/thick split, so
+#: this is a different stack shape, not a mechanical renumbering of
+#: sky130's.
+#:
+#: **Dielectric names/materials source** -- **not independently confirmed**.
+#: This install ships no KLayout XSection script analogous to sky130's
+#: ``libs.tech/klayout/tech/xsect/sky130.xs`` (searched the full
+#: ``libs.tech`` tree of a real volare-fetched gf180mcuD: no ``.xs``, no
+#: ``.lyt``/``.lyp`` naming interlayer dielectric films). The slab
+#: boundaries below are therefore induced purely from the ``height``
+#: stanza's own contiguity (each conductor's z-range sits inside exactly
+#: one slab, asserted in ``tests/test_pdk_stackup.py``, same as sky130),
+#: but the film *material* name is a generic "silicon dioxide" BEOL
+#: interlayer dielectric assumption for a conventional (non-low-k) 180 nm
+#: process -- not a name transcribed from a gf180mcu-specific published
+#: source, unlike sky130's xs-script-cited "borophosphosilicate glass"/
+#: "silicon nitride". No open gf180mcu source states a passivation/overglass
+#: thickness above met5 either (the ``height`` stanza's last BEOL entry is
+#: met5 itself), so -- unlike sky130's ``passivation`` slab -- the top
+#: dielectric here (``ild6``) stops at the top of met5 rather than
+#: extending over an unstated overcoat.
+#:
+#: **GDS layer/datatype source** -- ``libs.tech/magic/gf180mcuD-GDS.tech``
+#: (the ``calma <LAYER> <layer> <datatype>`` statements of open_pdks' own
+#: magic-to-GDS layer map; gf180mcu ships no ``klayout/`` layer map
+#: analogous to sky130's ``sky130A.map``, so this is the closest open,
+#: non-NDA'd, install-native source): ``METAL1 34/0``, ``VIA1 35/0``,
+#: ``METAL2 36/0``, ``VIA2 38/0``, ``METAL3 42/0``, ``VIA3 40/0``,
+#: ``METAL4 46/0``, ``VIA4 41/0``, ``METAL5 81/0``.
+#:
+#: **Tech-LEF layer names** -- ``libs.ref/<cell_library>/techlef/*.tlef``
+#: names its routing/cut layers ``Metal1``..``Metal5``/``Via1``..``Via4``
+#: (mixed case, verified against a real ``gf180mcu_fd_sc_mcu9t5v0__nom.tlef``)
+#: -- the ``lef_layer`` values below match that case exactly, since
+#: :func:`_measure_tech_lefs` keys on the tech LEF's own layer name
+#: verbatim.
+#:
+#: **Permittivity source** -- corroborated the same way ``_SKY130_STACKUP``'s
+#: 3.9 is: against this same install's own ``gf180mcuD.tech``
+#: ``defaultareacap`` coefficients (the first, unconditioned ``variants ()``
+#: "Nominal capacitances" block, not the ``(hrhc),(lrhc)``/``(hrlc),(lrlc)``
+#: corner-specific blocks later in the same file), which are stated in
+#: aF/um^2 to the substrate/well plane and therefore satisfy
+#: ``C_area = ε0·ε_r / z0``:
+#:
+#:     defaultareacap allm1 metal1 29.304  @ z0 1.23  ->  ε_r = 4.07
+#:     defaultareacap allm2 metal2 15.016  @ z0 2.38  ->  ε_r = 4.04
+#:     defaultareacap allm3 metal3 10.094  @ z0 3.53  ->  ε_r = 4.02
+#:     defaultareacap allm4 metal4  7.602  @ z0 4.68  ->  ε_r = 4.02
+#:     defaultareacap allm5 metal5  5.798  @ z0 5.83  ->  ε_r = 3.82
+#:
+#: (``ε_r = C_area · z0 / ε0`` with ε0 = 8.854 aF/um, re-derived in
+#: ``tests/test_pdk_stackup.py``.) All five agree to within 7% of 4.0, the
+#: nominal relative permittivity of a conventional (non-low-k) SiO2-based
+#: BEOL interlayer dielectric -- gf180mcu is a different, older process node
+#: than sky130 and this is a different (higher) nominal ε_r than sky130's
+#: 3.9, not a copy of it. No open gf180mcu source states the loss tangent of
+#: any dielectric, so ``loss_tangent`` is ``null`` throughout, same as
+#: sky130.
+#:
+#: **Deliberately out of scope** -- FEOL conductors (poly and below): the
+#: magic ``height`` stanza's FEOL entries (``dnwell``/``nwell,pwell``/
+#: ``alldiff``/``allpoly``/``alldiffcont``/``pc``) share the same
+#: origin-inconsistency problem sky130's FEOL entries have (see
+#: ``_SKY130_STACKUP``'s own "Deliberately out of scope" note) -- they are
+#: not transcribed here.
+_GF180MCU_STACKUP: dict[str, Any] = {
+    "family": "gf180mcu",
+    "description": (
+        "gf180mcu BEOL stack-up (metal1 through metal5, no local interconnect)"
+    ),
+    "variant_prefixes": ("gf180mcu",),
+    "references": [
+        "open_pdks <PDK_ROOT>/<variant>/libs.tech/magic/<variant>.tech"
+        " -- `height <types> <z0_um> <thickness_um>` stanza (elevation,"
+        " thickness) and the first (unconditioned) `variants ()`"
+        " `defaultareacap` block (permittivity corroboration)",
+        "open_pdks <PDK_ROOT>/<variant>/libs.tech/magic/<variant>-GDS.tech"
+        " -- `calma <LAYER> <layer> <datatype>` statements (GDS"
+        " layer/datatype per routing and cut layer); gf180mcu ships no"
+        " KLayout XSection script analogous to sky130's `xsect/sky130.xs`,"
+        " so dielectric film material names are a generic BEOL-oxide"
+        " assumption, not independently confirmed per layer (see the"
+        " per-entry dielectric notes)",
+    ],
+    # z = 0 is the top of the silicon substrate; every elevation below is in
+    # micrometres above it -- the same origin convention _SKY130_STACKUP
+    # uses, and the one open_pdks' magic `height` stanza itself uses.
+    "substrate": {
+        "name": "substrate",
+        "material": "silicon",
+        "z1_um": 0.0,
+        "permittivity": 11.9,
+        "loss_tangent": None,
+        "source": (
+            "relative permittivity of crystalline silicon at 300 K (textbook"
+            " value, not gf180mcu-specific); z = 0 is this module's elevation"
+            " origin, the top of the substrate, matching the origin"
+            " open_pdks' magic tech file uses for its BEOL `height` entries"
+        ),
+    },
+    # (name, kind, lef_layer, gds_layer, material, z0_um, thickness_um)
+    "conductors": [
+        ("met1", "conductor", "Metal1", "34/0", "aluminium", 1.23, 0.55),
+        ("via1", "via", "Via1", "35/0", "tungsten", 1.78, 0.60),
+        ("met2", "conductor", "Metal2", "36/0", "aluminium", 2.38, 0.55),
+        ("via2", "via", "Via2", "38/0", "tungsten", 2.93, 0.60),
+        ("met3", "conductor", "Metal3", "42/0", "aluminium", 3.53, 0.55),
+        ("via3", "via", "Via3", "40/0", "tungsten", 4.08, 0.60),
+        ("met4", "conductor", "Metal4", "46/0", "aluminium", 4.68, 0.55),
+        ("via4", "via", "Via4", "41/0", "tungsten", 5.23, 0.60),
+        ("met5", "conductor", "Metal5", "81/0", "aluminium", 5.83, 1.0025),
+    ],
+    # (name, material, z0_um, z1_um, permittivity, note)
+    #
+    # A contiguous z partition from the substrate surface to the top of
+    # met5. Conductors are *embedded in* these slabs, same invariant
+    # _SKY130_STACKUP's dielectrics satisfy (asserted in
+    # tests/test_pdk_stackup.py).
+    "dielectrics": [
+        (
+            "pmd",
+            "silicon dioxide",
+            0.0,
+            1.23,
+            4.0,
+            "material name is a generic pre-metal-dielectric assumption --"
+            " no XSection script or comparable open gf180mcu source states"
+            " it (see the curated-table provenance note)",
+        ),
+        ("ild2", "silicon dioxide", 1.23, 2.38, 4.0, None),
+        ("ild3", "silicon dioxide", 2.38, 3.53, 4.0, None),
+        ("ild4", "silicon dioxide", 3.53, 4.68, 4.0, None),
+        ("ild5", "silicon dioxide", 4.68, 5.83, 4.0, None),
+        (
+            "ild6",
+            "silicon dioxide",
+            5.83,
+            6.8325,
+            4.0,
+            "spans only the met5 level (5.83-6.8325); unlike"
+            " _SKY130_STACKUP's top `passivation` slab, this does not"
+            " extend over a passivation/overglass overcoat -- no open"
+            " gf180mcu source states one's thickness, and this module never"
+            " invents an unstated elevation",
+        ),
+    ],
+}
+
 #: Every curated family, keyed by family name. Adding a family is a pure data
 #: change plus its own provenance block -- no logic below is family-specific.
-_STACKUPS: dict[str, dict[str, Any]] = {"sky130": _SKY130_STACKUP}
+_STACKUPS: dict[str, dict[str, Any]] = {
+    "gf180mcu": _GF180MCU_STACKUP,
+    "sky130": _SKY130_STACKUP,
+}
 
 
 class PdkStackupError(Exception):

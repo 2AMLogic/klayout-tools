@@ -1239,9 +1239,27 @@ passivation nitride's ε_r, every dielectric's loss tangent — the field is
 
 **An uncurated variant is an explicit error, not a partial stack** (exit
 `1`): a stackup missing its z axis is not a usable field-solver input, so
-`klt pdk stackup --pdk gf180mcuD` fails with a message naming which families
+`klt pdk stackup --pdk ihp-sg13g2` fails with a message naming which families
 *are* curated rather than emitting the electrical half alone. Curated today:
-`sky130` (matched by variant prefix, so a future `sky130C` is covered).
+`gf180mcu` (issue #1616) and `sky130` (each matched by variant prefix, so a
+future `sky130C`/`gf180mcuE` is covered without a code change).
+
+gf180mcu's curated table (`_GF180MCU_STACKUP`) is a different stack shape,
+not a renumbered copy of sky130's: it has **no local-interconnect layer** (no
+`li1`/`mcon` equivalent — `met1` is the first conductor) and five metal
+levels of uniform 0.55 µm (`met5` at 1.0025 µm) rather than sky130's
+thin/thick split. It also ships no KLayout XSection script analogous to
+sky130's `xsect/sky130.xs`, so its dielectric slab boundaries are induced
+purely from `libs.tech/magic/<variant>.tech`'s `height` stanza contiguity,
+and its film *material* names (`silicon dioxide` throughout) are a generic
+BEOL-interlayer-dielectric assumption rather than a name transcribed from a
+gf180mcu-specific published source — the per-entry provenance note on
+`_GF180MCU_STACKUP` says so explicitly. Its curated ε_r is **4.0**, not
+sky130's 3.9 — corroborated the same way, against this install's own
+`libs.tech/magic/<variant>.tech` `defaultareacap` coefficients (the first,
+unconditioned "Nominal capacitances" `variants ()` block) — because gf180mcu
+is a different, older process node with a different BEOL, not because 3.9
+was assumed to transfer.
 
 ### `--corner` and `--thickness`
 
@@ -1444,11 +1462,11 @@ report = stackup(variant="sky130A", corner="nom")  # PdkNotFoundError if no inst
 report = stackup(variant="sky130A", thickness="tech-lef")  # install's own THICKNESS
 
 try:
-    stackup(variant="gf180mcuD")
+    stackup(variant="ihp-sg13g2")
 except PdkStackupError as exc:
-    ...  # "no curated stackup for PDK variant 'gf180mcuD' … Curated families: sky130"
+    ...  # "no curated stackup for PDK variant 'ihp-sg13g2' … Curated families: gf180mcu, sky130"
 
-supported_families()  # ["sky130"]
+supported_families()  # ["gf180mcu", "sky130"]
 ```
 
 `PdkStackupError` is deliberately distinct from `PdkNotFoundError`: "there is
