@@ -18,22 +18,22 @@ proposal in this repo.
 **Relationship to the other two Phase 1 sub-items.** Epic #1585 splits
 Phase 1 into three issues: #1589 (survey the query surface and trace
 formats against `boldaxolotl/booley`'s `bwave` crate and the FST/VCD reader
-landscape), #1590 (this document — propose the contract), and #1591 (the
-port-vs-build decision record). This document does not depend on #1589
-having merged: the query vocabulary it contracts is taken directly from
-Epic #1585's own body, which already names `bwave`'s command set (`build`,
-`signal`, `wave`, `value`, `find`, `sample`, `diff`, `distance`, `stats`,
-`stuck`) and its `ExtractConfig` design (clock/reset-pattern awareness,
-cycle-vs-time addressing, first/last match, `find_stuck`, `sample_at`,
-`diff_points`) as the candidate vocabulary to cover. A byte-exact
-comparison of `bwave`'s actual CLI output, and the FST-vs-VCD-vs-reader
-size/speed measurements, are #1589's job, not this one's — if that survey
-later needs a field this document did not anticipate, it is an additive
-change to the request/response shapes below (per
-[docs/json-contract.md](../json-contract.md)'s additive-envelope
-convention), not a rewrite of the contract itself. Equally, this document
-does not decide what gets ported from `bwave` vs. written fresh, or the
-native-Rust-vs-Python posture — that is #1591's job. The op names below are
+landscape), #1590 (§§1–8 below — propose the contract), and #1591 (§§9–16
+below — the port-vs-build decision record; drafted in parallel as its own
+document and folded into this file once both landed, per the epic body's
+own instruction that both share this single path). §§1–8 do not depend on
+#1589 having merged: the query vocabulary they contract is taken directly
+from Epic #1585's own body, which already names `bwave`'s command set
+(`build`, `signal`, `wave`, `value`, `find`, `sample`, `diff`, `distance`,
+`stats`, `stuck`) and its `ExtractConfig` design (clock/reset-pattern
+awareness, cycle-vs-time addressing, first/last match, `find_stuck`,
+`sample_at`, `diff_points`) as the candidate vocabulary to cover. A
+byte-exact comparison of `bwave`'s actual CLI output, and the
+FST-vs-VCD-vs-reader size/speed measurements, are #1589's job, not this
+one's — if that survey later needs a field this document did not
+anticipate, it is an additive change to the request/response shapes below
+(per [docs/json-contract.md](../json-contract.md)'s additive-envelope
+convention), not a rewrite of the contract itself. The op names below are
 deliberately `klt`-native (following this repo's own field-naming
 conventions, e.g. `snake_case`, no verb named after a `bwave` Rust module),
 not verbatim ports of `bwave`'s own subcommand names.
@@ -485,50 +485,16 @@ Acceptance Criterion #4.
   versa — that finding does not change this contract's request/response
   shape either way, only Phase 2's implementation plan.
 
-## Related
-
-- #1585 parent epic (`klt wave` — waveform query surface)
-- #1589 survey issue (query surface + trace format survey, feeds this
-  document's vocabulary and will re-verify its size/speed claims)
-- #1591 port-vs-build decision record (Phase 1, sub-item C)
-- [docs/json-contract.md](../json-contract.md) — the shared envelope this
-  document conforms to
-- [docs/cli/functional-verification.md](../cli/functional-verification.md)
-  → "Out of scope" — the waveform-inspection gap this epic closes
-- [docs/cli/drc.md](../cli/drc.md) → "Exit codes" — the `0`/`1`/`2`/`3`
-  convention this contract reuses for `klt wave query`
-- [docs/design/digital-flow-contracts-spike.md](digital-flow-contracts-spike.md)
-  — the sibling multi-verb JSON-contract spike this document's structure
-  follows
-- Source of the borrowed design: https://github.com/boldaxolotl/booley
-  (`crates/bwave`, Apache-2.0) — attribution and porting decisions are
-  #1591's job, not this document's.
-
----
-
-# `klt wave` — port-vs-build decision record (Epic #1585, Phase 1C)
-
-**Status:** decision record / spike. Nothing here authorises implementation —
-no dependency was added, no `klt` subcommand or native crate was written, and
-no code outside this document changed. This is
-[Epic #1585](https://github.com/2AMLogic/klayout-tools/issues/1585)
-("`klt wave` — waveform query surface for functional-verification traces")
-Phase 1, issue #1591: *"Decide what to port from bwave ... what to write
+**Port-vs-build decision record (Epic #1585, Phase 1C, §§9–16 below).** The
+sections that follow were drafted as a separate document per the epic
+body's own suggestion, then folded into this file once both this contract
+(§§1–8 above) and the decision record had landed. They record issue
+#1591's decision: *"Decide what to port from bwave ... what to write
 fresh, and how attribution is carried (NOTICE + file headers). Decide
-native-Rust-first vs Python-first."*
-
-**Filename note (reconciliation flag for whoever merges Phase 1):** the epic
-body names this file (`waveform-query-contract-spike.md`) as the natural home
-for **both** the Phase 1B JSON contract (issue #1590) and this Phase 1C
-decision record, and issue #1591's own Dependencies section says the two may
-be "drafted in parallel and reconciled before Phase 1 closes." At the time
-this document was written, #1590's contract content had not yet landed on
-`main`. This file therefore currently contains **only** the Phase 1C
-decision-record content below. If #1590 lands a version of this same file
-with the request/response contract, the two need a merge pass that keeps
-both — this section's own content is self-contained under the `##` headers
-below specifically so that merge is mechanical (append, don't rewrite).
-Companion document: [`docs/design/waveform-query-survey.md`](waveform-query-survey.md)
+native-Rust-first vs Python-first."* Nothing here authorises
+implementation — no dependency was added, no `klt` subcommand or native
+crate was written, and no code outside this document changed. Companion
+document: [`docs/design/waveform-query-survey.md`](waveform-query-survey.md)
 (issue #1589, survey of the query surface and trace formats — read alongside
 this one; not re-derived here except where the port/build call needs a fact
 the survey would otherwise duplicate).
@@ -543,7 +509,7 @@ vendored `fst-writer`'s `Cargo.toml`/`LICENSE`, and the `fst-reader`/
 + raw content, crates.io API) on 2026-09-09, the date in the fetch citations
 below.
 
-## 1. Source repository, verified
+## 9. Source repository, verified
 
 [boldaxolotl/booley](https://github.com/boldaxolotl/booley) ("The
 open-source agentic RTL IDE"):
@@ -565,7 +531,7 @@ code (bwave is under active development — `pushed_at: 2026-09-09T06:34:36Z`
 at fetch time, hours before this decision was written) and use the SHA that
 was actually current at copy time, updating the table above in the same PR.
 
-## 2. Port-vs-build decision, module by module
+## 10. Port-vs-build decision, module by module
 
 `crates/bwave/src/` (fetched via `GET /repos/.../contents/crates/bwave/src`,
 sizes in bytes as reported by that listing):
@@ -577,8 +543,8 @@ sizes in bytes as reported by that listing):
 | `signal.rs` | 12,210 | Signal metadata, glob matching, scope-prefix utilities | **Port, largely as-is.** Small, self-contained, no CLI coupling; every query needs signal-name matching against a request's pattern list. |
 | `format.rs` | 42,522 | Value formatting (bin→hex) + typed time-token parsing (`100c`/`100ns`/bare cycle) | **Port, adapted.** The typed-time-token design (cycle vs. simulation-time addressing, resolved once the store header is loaded) is exactly the dual time-addressing #1590's contract independently requires ("Time addressing in both simulation time and clock cycles", epic body Phase 1B). Reusing this rather than re-deriving it from scratch is a direct, low-risk win. |
 | `virtual_signal.rs` | 74,842 | Boolean/derived-signal expressions (`name = expr` over a Verilog-literal subset) | **Defer to Phase 2 scoping, not decided here.** A real feature (letting a query reference a derived condition, e.g. `handshake = i_ready & o_valid`), but it is the single largest, most self-contained optional module in the crate and is not named in any of Epic #1585's Phase 1/2/3 success criteria. Recommendation for the Phase 2 issue: land without it first (every `*_from_cache` query still works against raw signals), port this module in a follow-on once the base verb has shipped and a real query has actually needed it — mirrors how `docs/design/mutation-testing-spike.md` §4 deferred the T1-threshold question until the base capability had real-world data. |
-| `index.rs` | 8,663 | Cycle-based `.idx` sidecar for **fast seeking into large VCD files** (its own header: *"Cycle-based index for fast seeking into large VCD files"*) | **Not ported.** This indexes the *streaming VCD ingest* path, not the FST query path — `fst.rs`'s own header states the FST-backed cache needs "no sidecars." Since `klt wave build` converts to FST once and every subsequent `klt wave query` reads the FST store directly (§3 below), there is no repeated large-VCD-seek workload this index would speed up in the contracted `build`/`query` split. Revisit only if a future mode queries a raw VCD without first building a store — not in scope per the epic's own Phase 1B contract shape (`build` then `query`, two separate verbs). |
-| `extract.rs` | 77,875 | *"Extraction state machine — all modes. Implements `VcdHandler` trait for streaming VCD event processing."* | **Not decided here — genuinely contingent on #1589's survey.** This is bwave's streaming-VCD-parse path, relevant only to the `klt wave build` (VCD→FST conversion) step, not to querying. Whether `klt wave build` needs its own VCD parser at all depends on a fact #1589 is explicitly tasked with measuring (its own Phase 1A description: "Survey FST vs VCD as the contracted artifact"): whether the simulators `klt functional-verification` already drives (Verilator, Icarus) can emit FST natively, making a VCD→FST conversion step unnecessary for those engines. If a from-scratch VCD parse is still needed for some engine/host combination, `parser.rs` (34,308 B) + `vcd_chunk.rs` (13,344 B) + the streaming parts of `extract.rs` are the port candidates for that path; if not, none of the three are needed and `klt wave build` becomes a thin wrapper around whatever native FST dump the engine already produces. **This decision record does not resolve it** — flagged as an explicit open item in §7 for #1589/#1590 to close before Phase 2 is scoped. |
+| `index.rs` | 8,663 | Cycle-based `.idx` sidecar for **fast seeking into large VCD files** (its own header: *"Cycle-based index for fast seeking into large VCD files"*) | **Not ported.** This indexes the *streaming VCD ingest* path, not the FST query path — `fst.rs`'s own header states the FST-backed cache needs "no sidecars." Since `klt wave build` converts to FST once and every subsequent `klt wave query` reads the FST store directly (the build/query split, §§4–5 above), there is no repeated large-VCD-seek workload this index would speed up in the contracted `build`/`query` split. Revisit only if a future mode queries a raw VCD without first building a store — not in scope per the epic's own Phase 1B contract shape (`build` then `query`, two separate verbs). |
+| `extract.rs` | 77,875 | *"Extraction state machine — all modes. Implements `VcdHandler` trait for streaming VCD event processing."* | **Not decided here — genuinely contingent on #1589's survey.** This is bwave's streaming-VCD-parse path, relevant only to the `klt wave build` (VCD→FST conversion) step, not to querying. Whether `klt wave build` needs its own VCD parser at all depends on a fact #1589 is explicitly tasked with measuring (its own Phase 1A description: "Survey FST vs VCD as the contracted artifact"): whether the simulators `klt functional-verification` already drives (Verilator, Icarus) can emit FST natively, making a VCD→FST conversion step unnecessary for those engines. If a from-scratch VCD parse is still needed for some engine/host combination, `parser.rs` (34,308 B) + `vcd_chunk.rs` (13,344 B) + the streaming parts of `extract.rs` are the port candidates for that path; if not, none of the three are needed and `klt wave build` becomes a thin wrapper around whatever native FST dump the engine already produces. **This decision record does not resolve it** — flagged as an explicit open item in §15 for #1589/#1590 to close before Phase 2 is scoped. |
 | `main.rs` | 41,551 | `clap`-based CLI argument parsing, bwave's own flag surface (`--find`, `--stuck`, `--wave`, ...) | **Written fresh.** `klt wave`'s interface is JSON request/response documents (`klt wave build <request.json>`, `klt wave query <request.json>`, per the epic body's Phase 1B description and mirroring `klt techmap`/`klt lvs`), not a flag-per-query-mode CLI. bwave's flag vocabulary is still useful as a **naming reference** for the JSON field names #1590's contract should use, but the parsing code itself does not transfer. |
 | `output.rs` | 5,785 | bwave's own JSON envelope (`{$schema, command, data, warnings}`, `$schema` pinned to a `boldaxolotl/booley` release tag URL) | **Written fresh.** `klt`'s envelope (`docs/json-contract.md`: `schema_version`, `provenance`, additive-only fields, the `0`/`1`/`2`/`3` exit-code convention) is a different, already-established shape every other `klt` verb uses — adopting bwave's own envelope here would fork `klt`'s own contract for one verb. Nothing in this module ports; the *idea* it embodies ("every emission goes through one envelope function") is already `klt`'s own convention, independently arrived at. |
 | `docs.rs` | 3,751 | Embeds a narrative doc corpus (`docs/public/*.md`) into the binary, served by `bwave docs`/`bwave skill` | **Not ported as code; the idea is worth reusing.** `klt` has its own doc convention (`docs/cli/*.md`, referenced from `--help` text, not baked into the binary via `include_dir!`). The epic's own Phase 2 description ("`klt wave docs` (or the cli doc) carries the agent-facing 'which query answers which question' table, ported from bwave's embedded docs where useful") already scopes this correctly: port *content* (the query-to-question mapping table) into `docs/cli/wave.md`, not this embedding mechanism. |
@@ -599,7 +565,7 @@ mutation-testing seam (ported the ~200-line validation seam verbatim in
 spirit, explicitly declined to port the co-located `mutation_lock.py` caching
 machinery because it solved a problem `klt`'s own design does not have).
 
-## 3. The `fst-writer` vendoring nuance — a second attribution chain
+## 11. The `fst-writer` vendoring nuance — a second attribution chain
 
 `crates/bwave/Cargo.toml` declares `fst-writer = { path = "vendor/fst-writer" }`,
 not the crates.io release. Fetched directly:
@@ -649,14 +615,14 @@ commit — not decided further here, since it is contingent on a measurement
 this document does not have.
 
 **This does not change the Apache-2.0 attribution obligation for the ported
-`bwave` query-engine modules in §2** — `fst-writer`/`fst-reader` are a
+`bwave` query-engine modules in §10** — `fst-writer`/`fst-reader` are a
 separate, independent BSD-3-Clause dependency relationship (normal
 crates.io deps, like any other Rust crate `native/mom`/`native/statime`
 already pull in), not code copied from `booley`.
 
-## 4. Attribution plan
+## 12. Attribution plan
 
-### 4a. `NOTICE` file — new, at repository root
+### 12a. `NOTICE` file — new, at repository root
 
 **Decision: add a `NOTICE` file at the repository root (alongside `LICENSE`),
 distinct from `docs/design/mutation-testing-spike.md`'s own "Open questions"
@@ -669,7 +635,7 @@ smaller port. This decision diverges for `klt wave` specifically because:
    headers**: *"Ported code carries Apache-2.0 attribution to booley/bwave in
    `NOTICE` and file headers"* (Epic #1585 body, "Success Criteria" — both
    nouns named, not either/or).
-2. **Scale.** §2 above ports roughly 300 KB of source across four modules
+2. **Scale.** §10 above ports roughly 300 KB of source across four modules
    (`fst.rs` + `cache.rs` + `signal.rs` + `format.rs`), the FST-format
    read/query engine `klt-wave-native`'s entire query surface will be built
    on — a structurally different scale of incorporation than a single
@@ -678,7 +644,7 @@ smaller port. This decision diverges for `klt wave` specifically because:
    incorporated Apache-licensed works at the distribution root), and it
    gives one place a downstream redistributor of this repo checks, rather
    than requiring them to grep every source file for a header comment.
-3. **A second upstream license is now in the chain** (§3 above,
+3. **A second upstream license is now in the chain** (§11 above,
    BSD-3-Clause). A repo-root `NOTICE` file is also where BSD-3-Clause's own
    "retain the above copyright notice" obligation is conventionally
    satisfied for a *dependency* (as opposed to a *file-header* obligation,
@@ -691,7 +657,7 @@ smaller port. This decision diverges for `klt wave` specifically because:
 
 Proposed root `NOTICE` content (drafted here as the concrete shape Phase 2
 should land verbatim, updated with the real commit SHA re-fetched at port
-time per §1):
+time per §9):
 
 ```
 klayout-tools
@@ -725,7 +691,7 @@ code copied):
   Copyright (c) 2024, Cornell University (Kevin Laeufer)
 ```
 
-### 4b. File-header convention (applies to every file with ported content)
+### 12b. File-header convention (applies to every file with ported content)
 
 Every ported/adapted source file under `native/wave/src/` carries a header
 comment block, in Rust doc-comment form, placed above the module's own
@@ -741,22 +707,22 @@ existing doc comment (not replacing it):
 // at port time" — kept current as the file diverges>.
 ```
 
-A file written fresh (§2's "written fresh" rows — the CLI/contract layer,
+A file written fresh (§10's "written fresh" rows — the CLI/contract layer,
 envelope, docs) carries **no** such header; only files whose content
 originates in `booley` do. This mirrors the precedent
 `docs/design/mutation-testing-spike.md`'s "Open questions" section already
 set for the ported Python seam ("a short attribution header comment (origin
 repo, file, license, fetch date)") — same per-file mechanism, applied here in
-Rust doc-comment form, now paired with the `NOTICE` file per §4a's scale
+Rust doc-comment form, now paired with the `NOTICE` file per §12a's scale
 argument.
 
-### 4c. Compatibility check
+### 12c. Compatibility check
 
 An MIT-licensed project (this repo, per its own `LICENSE`) may incorporate
 Apache-2.0-licensed and BSD-3-Clause-licensed components — both are
 permissive licenses compatible with MIT redistribution — **as long as the
 incorporated portions' own license terms and notices are retained**, which
-§4a (`NOTICE`) and §4b (file headers) together accomplish. No code in this
+§12a (`NOTICE`) and §12b (file headers) together accomplish. No code in this
 repo outside `native/wave/`'s ported files changes license; the repository
 as a whole remains MIT, with `NOTICE` documenting the specific
 Apache-2.0/BSD-3-Clause components it carries — the same structure any Rust
@@ -765,7 +731,7 @@ made explicit rather than left implicit because this repo, for the first
 time, also **copies and adapts source** rather than only depending on
 published crates.
 
-## 5. Native-Rust-first vs. Python-first
+## 13. Native-Rust-first vs. Python-first
 
 **Decision: native-Rust-first**, following exactly the pattern
 `native/techmap/` (issue #874) and `native/statime/` (issue #809, before its
@@ -791,7 +757,7 @@ issue #925 pyo3 promotion) established, verified against both crates'
   already uses as a subprocess invocation from
   `klayout_tools/techmap.py` — so the plain-binary-plus-subprocess pattern
   is a direct fit, not a stretch.
-- **Why not Python-first**: the core of what's being ported (§2) is binary
+- **Why not Python-first**: the core of what's being ported (§10) is binary
   FST decoding (block-level random access, `lz4`/`miniz_oxide`-compressed
   value-change data per `fst-writer`'s own dependency list) and streaming
   VCD line parsing over multi-hundred-megabyte files with a sub-second
@@ -810,9 +776,9 @@ issue #925 pyo3 promotion) established, verified against both crates'
 - **Why not `pywellen`/`pyvcd` as an alternative Python-first path**: named
   in the epic body as "a pure-Python fallback ... for hosts without the
   native binary" — evaluated as exactly that (a *fallback*, not the primary
-  implementation) in §6 below, not as a replacement for the native engine.
+  implementation) in §14 below, not as a replacement for the native engine.
 
-## 6. Python fallback — not required, following established repo precedent
+## 14. Python fallback — not required, following established repo precedent
 
 The epic's own "Risks & Considerations" section poses this directly: *"the
 decision record must say whether a Python fallback is required for the verb
@@ -861,25 +827,25 @@ like `klt-statime-native`."* Two corrections and a decision:
   oracle, not as a shipped fallback engine) — not as a second production
   code path.
 
-## 7. Open items carried to #1589/#1590 and the Phase 2 issue
+## 15. Open items carried to #1589/#1590 and the Phase 2 issue
 
 - **`index.rs`/`extract.rs`/`parser.rs`/`vcd_chunk.rs` (VCD ingest path,
-  §2):** port-or-not is contingent on #1589's own survey measuring whether
+  §10):** port-or-not is contingent on #1589's own survey measuring whether
   Verilator/Icarus can emit FST natively for the traces `klt
   functional-verification` produces. Not resolved by this document.
-- **`virtual_signal.rs` (derived/boolean signals, §2):** deferred to a
+- **`virtual_signal.rs` (derived/boolean signals, §10):** deferred to a
   Phase 2 follow-on rather than the first `klt wave` landing. Not resolved
   further here.
-- **`fst-writer` vendored-vs-stock (§3):** depend on stock `fst-writer` from
+- **`fst-writer` vendored-vs-stock (§11):** depend on stock `fst-writer` from
   crates.io first; revisit only if a real Phase 2 throughput measurement on
   `klt wave build` shows it is the bottleneck.
-- **Exact `NOTICE` wording and the real source commit SHA** (§4a): the SHA
+- **Exact `NOTICE` wording and the real source commit SHA** (§12a): the SHA
   in this document (`a5b8909fb611cefc6913321f89d604256baba3f6`) is
   `main`'s HEAD as of 2026-09-09; whoever files the Phase 2 port issue must
   re-fetch it at the moment code is actually copied and use that value, not
   this one, if bwave has moved on by then.
 
-## 8. Curator-checkable checklist for Phase 2
+## 16. Curator-checkable checklist for Phase 2
 
 A checklist a Curator (or any reviewer) can verify against repo state
 without needing Rust expertise — each item is a yes/no check against a
@@ -890,10 +856,10 @@ specific path or string, not a judgment call:
       commit SHA (not a version string like `0.2.15`).
 - [ ] `NOTICE` also lists `fst-reader` and `fst-writer` (BSD-3-Clause,
       Kevin Laeufer / `ekiwi`) as ordinary dependencies, even though no code
-      from them is copied (§4a).
+      from them is copied (§12a).
 - [ ] Every file under `native/wave/src/` that contains code adapted from
       `crates/bwave/src/{fst,cache,signal,format}.rs` carries the header
-      block from §4b, naming the same commit SHA as `NOTICE`.
+      block from §12b, naming the same commit SHA as `NOTICE`.
 - [ ] No file under `native/wave/src/` that was written fresh (the
       CLI/contract-parsing layer, the JSON envelope, doc-generation code)
       carries a `booley` attribution header — headers should exactly track
@@ -905,7 +871,7 @@ specific path or string, not a judgment call:
       Apache-2.0/BSD-3-Clause terms, they do not relicense the crate).
 - [ ] `native/wave/Cargo.toml`'s `fst-reader`/`fst-writer` dependencies
       (if used) point at crates.io releases, not a vendored/path copy of
-      either — unless §7's "vendored-vs-stock" open item was explicitly
+      either — unless §15's "vendored-vs-stock" open item was explicitly
       revisited and the vendored choice was justified with a measurement in
       the Phase 2 PR description.
 - [ ] `docs/cli/wave.md` exists and does not embed bwave's own
@@ -914,7 +880,7 @@ specific path or string, not a judgment call:
 - [ ] `pyproject.toml` does **not** add `klt-wave-native` as a required
       (non-optional) dependency of the base `klayout-tools` package — it
       should follow the same optional dependency-group *or* plain-subprocess
-      pattern §5/§6 establish, so a Rust-less host is not broken by
+      pattern §13/§14 establish, so a Rust-less host is not broken by
       installing `klayout-tools`.
 - [ ] Whatever Python-facing entry point calls the `klt-wave` binary
       degrades with a clear, actionable error (naming the exact build
@@ -924,25 +890,36 @@ specific path or string, not a judgment call:
 
 ## Related
 
-- Epic #1585 — `klt wave` epic, this decision record's parent (Phase 1C).
-- Issue #1589 — survey of the query surface and trace formats (companion
-  Phase 1A document, `docs/design/waveform-query-survey.md`); several items
-  in §7 above are explicitly deferred to it.
-- Issue #1590 — the `klt wave` JSON contract (companion Phase 1B document,
-  shares this file's name per the epic body — see the reconciliation note at
-  the top of this document).
-- [`docs/design/mutation-testing-spike.md`](mutation-testing-spike.md) —
-  the sibling `boldaxolotl/booley` port-vs-build decision for the mutation-
-  testing seam (issue #1586); §4a above explains why this document's
-  `NOTICE`-file conclusion diverges from that one's, with reasons.
-- [`docs/design/synth-techmap-stage-contract.md`](synth-techmap-stage-contract.md)
+- #1585 parent epic (`klt wave` — waveform query surface for
+  functional-verification traces)
+- #1589 survey issue (query surface + trace format survey,
+  `docs/design/waveform-query-survey.md`) — feeds §§1–8's vocabulary and
+  will re-verify its size/speed claims; several items in §15 above are
+  explicitly deferred to it
+- #1590 — the `klt wave` JSON contract (§§1–8 above)
+- #1591 — the port-vs-build decision record (§§9–16 above)
+- [docs/json-contract.md](../json-contract.md) — the shared envelope §§1–8
+  conform to
+- [docs/cli/functional-verification.md](../cli/functional-verification.md)
+  → "Out of scope" — the waveform-inspection gap this epic closes
+- [docs/cli/drc.md](../cli/drc.md) → "Exit codes" — the `0`/`1`/`2`/`3`
+  convention §5 reuses for `klt wave query`
+- [docs/design/digital-flow-contracts-spike.md](digital-flow-contracts-spike.md)
+  — the sibling multi-verb JSON-contract spike §§1–8's structure follows
+- [docs/design/mutation-testing-spike.md](mutation-testing-spike.md) — the
+  sibling `boldaxolotl/booley` port-vs-build decision for the
+  mutation-testing seam (issue #1586); §12a above explains why this
+  document's `NOTICE`-file conclusion diverges from that one's, with
+  reasons.
+- [docs/design/synth-techmap-stage-contract.md](synth-techmap-stage-contract.md)
   and `native/techmap/Cargo.toml`, `native/statime/Cargo.toml` — the
-  native-Rust-first, plain-binary-crate precedent §5 follows.
+  native-Rust-first, plain-binary-crate precedent §13 follows.
 - `pyproject.toml` `[dependency-groups]` / `[tool.uv.sources]` — the
-  optional, checkout-local, degrade-cleanly pattern §6 follows.
-- [boldaxolotl/booley](https://github.com/boldaxolotl/booley) — source of
-  the ported design (Apache-2.0), specifically
-  `crates/bwave/src/{fst,cache,signal,format}.rs`.
+  optional, checkout-local, degrade-cleanly pattern §14 follows.
+- Source of the borrowed design: https://github.com/boldaxolotl/booley
+  (`crates/bwave`, Apache-2.0), specifically
+  `crates/bwave/src/{fst,cache,signal,format}.rs` — attribution and
+  porting decisions are §§9–16's job.
 - [ekiwi/fst-reader](https://github.com/ekiwi/fst-reader) and
   [ekiwi/fst-writer](https://github.com/ekiwi/fst-writer) — BSD-3-Clause,
-  Kevin Laeufer; ordinary crates.io dependencies, not ported code (§3).
+  Kevin Laeufer; ordinary crates.io dependencies, not ported code (§11).
