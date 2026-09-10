@@ -1645,8 +1645,8 @@ the three real installs available when this landed:
 
 | Install | Ships `libs.tech/klayout/python/`? | Shape | Loadable with klt's own dependencies? |
 | --- | --- | --- | --- |
-| `sky130A` (volare) | yes — `cells`, `import_netlist` | **plain `pya`** (`class pfet(pya.PCellDeclarationHelper)`, registered by `class sky130(pya.Library)`) — *not* Cadence-DLO/`cni`-based | no — its `__init__` chain reaches `import gdsfactory` (and `kfactory`). The PDK's own `pymacros/sky130_pcells.lym` checks for exactly that import and disables the PCells when it is absent. |
-| `ihp-sg13g2` | yes — `sg13g2_native_pcell_lib`, `sg13g2_pycell_lib`, … | `sg13g2_native_pcell_lib` is plain `pya`, but transitively imports `sg13g2_pycell_lib`, whose first statement is `from cni.tech import Tech` | no — `cni` is the `pycell4klayout-api` compat layer, wired in as a git submodule |
+| `sky130A` (volare) | yes — `cells`, `import_netlist` | **plain `pya`** (`class pfet(pya.PCellDeclarationHelper)`, registered by `class sky130(pya.Library)`) — *not* Cadence-DLO/`cni`-based | no — its `__init__` chain reaches `import gdsfactory` (and `kfactory`), a genuine third-party PyPI dependency klt has no relationship to. The PDK's own `pymacros/sky130_pcells.lym` checks for exactly that import and disables the PCells when it is absent. |
+| `ihp-sg13g2` | yes — `sg13g2_native_pcell_lib`, `sg13g2_pycell_lib`, … | `sg13g2_native_pcell_lib` is plain `pya`, but transitively imports `sg13g2_pycell_lib`, whose first statement is `from cni.tech import Tech` | **yes, on a fully-provisioned install** (issue #1630) — `cni` is not a third-party PyPI package but the `pycell4klayout-api` compat layer *the PDK itself vendors*, at `pycell4klayout-api/source/python/cni`, one level deeper than the `sys.path` entry klt adds for every other package. klt adds that extra, PDK-relative directory to `sys.path` for this specific package before importing it (see `_VENDOR_COMPAT_SHIMS` in `src/klayout_tools/pdk_pcell.py`), and works around an unrelated `tkinter`-presence crash inside that same shim's PCell-instantiation path. Still reported `unavailable` when `pycell4klayout-api` itself checked out empty (an uninitialized git submodule) — see the `reason` breakdown below. |
 | `gf180mcuD` (volare) | **no** `python/` at all | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
 
 A package that cannot be imported here is reported, never guessed at:
@@ -1658,9 +1658,15 @@ A package that cannot be imported here is reported, never guessed at:
 - `--pdk-pcell` fails with an **application error** (exit `1`) naming the
   missing module, since there it is fatal. Never a traceback.
 
-The fix is always to install the named module into the environment (per the
-PDK's own setup docs), not for klt to ship a copy of it. Full `cni` /
-`pycell4klayout-api` support is out of scope for this phase.
+For a genuine third-party PyPI dependency (sky130A's `gdsfactory`), the fix is
+always to install the named module into the environment (per the PDK's own
+setup docs), not for klt to ship a copy of it — klt does not vendor or
+reimplement arbitrary vendor dependencies as a matter of course. A PDK-bundled
+compat shim klt already knows how to reach (ihp-sg13g2's `cni`, above) is a
+narrow, deliberate exception to that rule: it is a small, per-package-name
+`sys.path` hint table, not a vendored copy of the shim itself. See
+[`unavailable[].reason`](#--list-pdk-pcells-json) below for how the two cases
+are told apart when a package still fails to load.
 
 ### `--list-pdk-pcells` JSON
 
@@ -1685,10 +1691,19 @@ PDK's own setup docs), not for klt to ship a copy of it. Full `cni` /
     }
   ],
   "unavailable": [
-    { "package": "sg13g2_pycell_lib", "missing_dependency": "cni", "reason": "requires Python module 'cni', which is not importable in this environment" }
+    { "package": "sg13g2_pycell_lib", "missing_dependency": "cni", "reason": "requires the PDK's own bundled compat shim 'cni' (normally vendored at 'pycell4klayout-api', next to 'sg13g2_pycell_lib'), but that directory is missing or appears empty in this install -- likely an uninitialized git submodule. This is a compat shim the PDK itself vendors, not a third-party PyPI dependency klt would need to add." }
   ]
 }
 ```
+
+The example above is the specific `ihp-sg13g2` case where `pycell4klayout-api`
+checked out empty (a release tarball, or an uninitialized git submodule). On a
+fully-provisioned install (`git submodule update --init --recursive`) `cni`
+imports and `sg13g2_pycell_lib` loads instead — see the table above (issue
+#1630). A genuinely missing third-party dependency (sky130A's `cells` needing
+`gdsfactory`) keeps the original, simpler message:
+`{ "package": "cells", "missing_dependency": "gdsfactory", "reason": "requires
+Python module 'gdsfactory', which is not importable in this environment" }`.
 
 - `pcell_lib_dir` — the resolved `libs.tech/klayout/python` directory, or
   `null` when the PDK ships none. A PDK with no such directory returns
@@ -1711,15 +1726,31 @@ PDK's own setup docs), not for klt to ship a copy of it. Full `cni` /
 - `params[].default` — the vendor's default, rendered as JSON. A `layer`
   default becomes KLayout's own `"<layer>/<datatype>"` string (e.g. `"67/20"`),
   which is exactly the spelling `--params` accepts back.
-- `unavailable[].reason` — as of issue #1610, distinguishes a genuinely
-  missing third-party dependency (`missing_dependency` non-`null`, message
-  above) from an **empty or near-empty vendored git-submodule directory**
-  (the package's own directory tree contains a subdirectory that exists but
-  has no files, or whose only file is an empty/comment-only
-  `__init__.py`-shaped stub — the on-disk signature of an uninitialized git
-  submodule): `"vendored submodule directory '<package>[/<subpath>]' appears
-  empty -- PDK was likely installed from a release tarball that does not
-  include git submodule contents"`. See
+- `unavailable[].reason` — distinguishes three causes, never the same generic
+  import-error text:
+  - a genuinely **missing third-party PyPI dependency** (issue #1535,
+    `missing_dependency` non-`null`): `"requires Python module '<name>', which
+    is not importable in this environment"` — klt does not vendor or
+    reimplement it; install it per the PDK's own setup docs.
+  - an **empty or near-empty vendored git-submodule directory** (issue
+    #1610) nested inside the failing package's own directory tree (a
+    subdirectory that exists but has no files, or whose only file is an
+    empty/comment-only `__init__.py`-shaped stub — the on-disk signature of
+    an uninitialized git submodule): `"vendored submodule directory
+    '<package>[/<subpath>]' appears empty -- PDK was likely installed from a
+    release tarball that does not include git submodule contents"`.
+  - a **PDK-bundled compat shim that is missing or empty at its own,
+    separate expected location** (issue #1630 — e.g. `sg13g2_pycell_lib`'s
+    `pycell4klayout-api`, which sits *beside* the package rather than nested
+    inside it): `"requires the PDK's own bundled compat shim '<module>'
+    (normally vendored at '<path>', next to '<package>'), but that directory
+    is missing or appears empty in this install -- likely an uninitialized
+    git submodule. This is a compat shim the PDK itself vendors, not a
+    third-party PyPI dependency klt would need to add."` — the fix here is
+    the same re-fetch-with-submodules fix as the previous case, never a
+    third-party `pip install`.
+
+  See
   [`klt pdk pcell-check`'s "The `reason` string" section](pdk.md#the-reason-string-missing-dependency-vs-empty-vendored-directory)
   for the full breakdown and the fix for each case; both `--list-pdk-pcells`
   and `klt pdk pcell-check` render the identical `reason` text since they

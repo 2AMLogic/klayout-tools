@@ -17,6 +17,13 @@ the three gaps issue #1610 closed against that machinery:
    issue #1603 named) when checked out somewhere other than its canonical
    in-PDK path.
 
+It also covers the `_VENDOR_COMPAT_SHIMS` mechanism issue #1630 added: a
+per-package-name table of PDK-relative `sys.path` hints for a compat shim
+the PDK itself vendors (ihp-sg13g2's `cni`, via `pycell4klayout-api`), and
+the diagnostic split between "this shim is vendored by the PDK, just not
+populated where expected" and "this is a genuine third-party PyPI
+dependency" once one of those packages still fails to import.
+
 Every PDK here is fabricated under `tmp_path`, mirroring
 `test_gen_pdk_pcell.py`'s fixtures -- CI never downloads a real PDK.
 Registering a `pya.Library` and importing a Python package are both
@@ -318,6 +325,262 @@ class {libklass}(pya.Library):
     # docstring), never the shim's collapsed guess.
     assert sys.path[0] == os.path.abspath(str(lib_dir))
     assert os.path.abspath(str(lib_dir)) in sys.path
+
+
+# --------------------------------------------------------------------------- #
+# `_VENDOR_COMPAT_SHIMS` -- PDK-relative sys.path hint for a compat shim the
+# PDK itself vendors (issue #1630), distinguished from a third-party PyPI
+# dependency klt will never vendor.
+# --------------------------------------------------------------------------- #
+
+#: A toy vendor PyCell package whose first statement imports a PDK-bundled
+#: compat shim module -- mirrors ihp-sg13g2's `sg13g2_pycell_lib`, whose
+#: first statement is `from cni.tech import Tech`.
+_SHIM_DEPENDENT_PACKAGE = """\
+import {module_name}
+import pya
+
+
+class {klass}(pya.PCellDeclarationHelper):
+    def __init__(self):
+        super().__init__()
+
+    def display_text_impl(self):
+        return "{cell}"
+
+    def produce_impl(self):
+        pass
+
+
+class {libklass}(pya.Library):
+    def __init__(self):
+        super().__init__()
+        self.description = "toy shim-dependent vendor PCell library"
+        self.layout().register_pcell("{cell}", {klass}())
+        self.register("{library}")
+
+
+{libklass}()
+"""
+
+
+def test_production_compat_shim_table_entry_for_sg13g2_pycell_lib():
+    """Regression guard for the concrete, issue-verified table entry: a
+    change here without updating this test is a change to real ihp-sg13g2
+    behaviour, not just internal refactoring."""
+    shim = pdk_pcell._VENDOR_COMPAT_SHIMS["sg13g2_pycell_lib"]
+    assert shim.sys_path_hint == ("pycell4klayout-api", "source", "python")
+    assert shim.shim_root == ("pycell4klayout-api",)
+    assert shim.provides_module == "cni"
+    assert shim.needs_tkinter_workaround is True
+
+
+def _write_shim_dependent_package(variant_dir, package, module_name):
+    return _write_package(
+        variant_dir,
+        package,
+        _SHIM_DEPENDENT_PACKAGE.format(
+            module_name=module_name,
+            klass=_unique("ShimBox"),
+            libklass=_unique("ShimLibrary"),
+            library=_unique("shim_vendor_lib"),
+            cell="ShimBox",
+        ),
+    )
+
+
+def test_apply_sys_path_hint_makes_shim_based_package_importable(tmp_path, monkeypatch):
+    """A package listed in `_VENDOR_COMPAT_SHIMS` gets its PDK-bundled
+    compat-shim directory added to `sys.path` before import is attempted --
+    turning an otherwise-unavailable `cni`-shaped dependency into a loadable
+    one, without a real ihp-sg13g2 install."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    package = _unique("shimpkg")
+    module_name = _unique("compat_module")
+    shim_dirname = _unique("compat_shim_root")
+
+    # The PDK-bundled compat shim, nested one level deeper than the
+    # package's own directory -- mirrors ihp-sg13g2's
+    # `pycell4klayout-api/source/python/cni`.
+    shim_dir = (
+        variant_dir
+        / "libs.tech"
+        / "klayout"
+        / "python"
+        / shim_dirname
+        / "source"
+        / "python"
+    )
+    shim_dir.mkdir(parents=True)
+    (shim_dir / f"{module_name}.py").write_text("VALUE = 1\n")
+
+    _write_shim_dependent_package(variant_dir, package, module_name)
+    monkeypatch.setitem(
+        pdk_pcell._VENDOR_COMPAT_SHIMS,
+        package,
+        pdk_pcell._VendorCompatShim(
+            sys_path_hint=(shim_dirname, "source", "python"),
+            shim_root=(shim_dirname,),
+            provides_module=module_name,
+            needs_tkinter_workaround=False,
+        ),
+    )
+
+    report = list_pdk_pcells(variant="ihp-sg13g2", root=str(root))
+
+    assert report["unavailable"] == []
+    assert [lib["package"] for lib in report["libraries"]] == [package]
+
+
+def test_missing_compat_shim_directory_reports_pdk_vendored_reason(
+    tmp_path, monkeypatch
+):
+    """The shim's own top-level directory does not exist at all in this
+    install -- reported as a compat shim the PDK vendors, not a third-party
+    dependency klt would need to add."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    package = _unique("shimpkg")
+    module_name = _unique("compat_module")
+    shim_dirname = _unique("compat_shim_root")
+
+    _write_shim_dependent_package(variant_dir, package, module_name)
+    monkeypatch.setitem(
+        pdk_pcell._VENDOR_COMPAT_SHIMS,
+        package,
+        pdk_pcell._VendorCompatShim(
+            sys_path_hint=(shim_dirname, "source", "python"),
+            shim_root=(shim_dirname,),
+            provides_module=module_name,
+            needs_tkinter_workaround=False,
+        ),
+    )
+
+    report = list_pdk_pcells(variant="ihp-sg13g2", root=str(root))
+
+    assert report["libraries"] == []
+    entry = report["unavailable"][0]
+    assert entry["package"] == package
+    assert entry["missing_dependency"] == module_name
+    assert "compat shim the PDK itself vendors" in entry["reason"]
+    assert "not a third-party PyPI dependency" in entry["reason"]
+    assert "Traceback" not in entry["reason"]
+
+
+def test_empty_compat_shim_directory_reports_pdk_vendored_reason(tmp_path, monkeypatch):
+    """The shim's top-level directory exists but is completely empty -- the
+    uninitialized-git-submodule signature -- classified the same way as the
+    missing-entirely case above."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    package = _unique("shimpkg")
+    module_name = _unique("compat_module")
+    shim_dirname = _unique("compat_shim_root")
+
+    (variant_dir / "libs.tech" / "klayout" / "python" / shim_dirname).mkdir(
+        parents=True
+    )
+
+    _write_shim_dependent_package(variant_dir, package, module_name)
+    monkeypatch.setitem(
+        pdk_pcell._VENDOR_COMPAT_SHIMS,
+        package,
+        pdk_pcell._VendorCompatShim(
+            sys_path_hint=(shim_dirname, "source", "python"),
+            shim_root=(shim_dirname,),
+            provides_module=module_name,
+            needs_tkinter_workaround=False,
+        ),
+    )
+
+    report = list_pdk_pcells(variant="ihp-sg13g2", root=str(root))
+
+    entry = report["unavailable"][0]
+    assert "compat shim the PDK itself vendors" in entry["reason"]
+
+
+def test_compat_shim_present_but_module_missing_reports_vendor_bug(
+    tmp_path, monkeypatch
+):
+    """The shim's own directory exists and is genuinely populated (not the
+    empty-submodule signature), yet the specific module the package needs
+    still fails to import -- a bug in the vendor shim itself, reported as
+    neither the empty-submodule case nor the generic third-party-dependency
+    message."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    package = _unique("shimpkg")
+    module_name = _unique("compat_module")
+    shim_dirname = _unique("compat_shim_root")
+
+    shim_dir = (
+        variant_dir
+        / "libs.tech"
+        / "klayout"
+        / "python"
+        / shim_dirname
+        / "source"
+        / "python"
+    )
+    shim_dir.mkdir(parents=True)
+    # Real, non-stub content -- but not the module the package actually
+    # imports, so the empty-vendored-directory heuristic must not fire.
+    (shim_dir / "other_file.py").write_text("PRESENT = True\n")
+
+    _write_shim_dependent_package(variant_dir, package, module_name)
+    monkeypatch.setitem(
+        pdk_pcell._VENDOR_COMPAT_SHIMS,
+        package,
+        pdk_pcell._VendorCompatShim(
+            sys_path_hint=(shim_dirname, "source", "python"),
+            shim_root=(shim_dirname,),
+            provides_module=module_name,
+            needs_tkinter_workaround=False,
+        ),
+    )
+
+    report = list_pdk_pcells(variant="ihp-sg13g2", root=str(root))
+
+    entry = report["unavailable"][0]
+    assert entry["missing_dependency"] == module_name
+    assert "bug in the vendor shim itself" in entry["reason"]
+    assert "compat shim the PDK itself vendors" not in entry["reason"]
+
+
+def test_missing_dependency_not_matching_shim_module_stays_generic(
+    tmp_path, monkeypatch
+):
+    """A package listed in `_VENDOR_COMPAT_SHIMS` that fails on a *different*,
+    genuinely third-party missing module (not the one the shim provides)
+    must keep the original generic message -- regression guard against
+    over-triggering the new classification."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    package = _unique("shimpkg")
+    unrelated_missing = _unique("unrelated_third_party_dep")
+    shim_module = _unique("compat_module")
+
+    _write_package(variant_dir, package, f"import {unrelated_missing}\n")
+    monkeypatch.setitem(
+        pdk_pcell._VENDOR_COMPAT_SHIMS,
+        package,
+        pdk_pcell._VendorCompatShim(
+            sys_path_hint=(_unique("shim_root"),),
+            shim_root=(_unique("shim_root"),),
+            provides_module=shim_module,
+            needs_tkinter_workaround=False,
+        ),
+    )
+
+    report = list_pdk_pcells(variant="ihp-sg13g2", root=str(root))
+
+    entry = report["unavailable"][0]
+    assert entry["missing_dependency"] == unrelated_missing
+    assert entry["reason"] == (
+        f"requires Python module '{unrelated_missing}', which is not "
+        "importable in this environment"
+    )
 
 
 # --------------------------------------------------------------------------- #
