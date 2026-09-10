@@ -509,6 +509,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ._layout import write_layout
+from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
@@ -885,8 +886,6 @@ _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
 #: example (docstring above).
 _GLOBAL_PLACEMENT_DENSITY = 0.6
 
-_OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
-
 #: Matches `check_antennas`'s own stdout summary line, e.g.
 #: ``"[INFO ANT-0002] Found 3 net violations."`` -- see
 #: :func:`_count_antenna_violations`.
@@ -1250,7 +1249,9 @@ def run_place_and_route(
         )
         _write_script(script_path, lines)
 
-        completed = _run_openroad(script_path, metrics_path)
+        completed = _run_openroad(
+            script_path, metrics_path, error_cls=PlaceAndRouteError
+        )
         if completed.returncode != 0:
             raise PlaceAndRouteError(_engine_error_message(stage, completed))
 
@@ -3739,7 +3740,7 @@ def _post_route_spef_metrics(
     )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path)
+    completed = _run_openroad(script_path, metrics_path, error_cls=PlaceAndRouteError)
     if completed.returncode != 0:
         raise PlaceAndRouteError(_engine_error_message("route_spef_sta", completed))
 
@@ -3811,22 +3812,6 @@ def _post_route_spef_metrics(
         "annotation_complete": annotation_complete,
         "annotation_warning": annotation_warning,
     }
-
-
-# --------------------------------------------------------------------------- #
-# OpenROAD subprocess invocation
-# --------------------------------------------------------------------------- #
-
-
-def _run_openroad(script_path: str, metrics_path: str) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(
-            ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
-            capture_output=True,
-            text=True,
-        )
-    except OSError as exc:
-        raise PlaceAndRouteError(f"could not launch openroad: {exc}") from exc
 
 
 def _run_corner_sweep(
@@ -3910,7 +3895,7 @@ def _run_corner_sweep(
     )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path)
+    completed = _run_openroad(script_path, metrics_path, error_cls=PlaceAndRouteError)
     if completed.returncode != 0:
         raise PlaceAndRouteError(
             _engine_error_message("route (corner sweep)", completed)
@@ -3953,7 +3938,9 @@ def _run_corner_sweep(
         _write_script(corner_script_path, corner_lines)
 
         corner_stage_name = f"route (corner sweep: {corner_name})"
-        corner_completed = _run_openroad(corner_script_path, corner_metrics_path)
+        corner_completed = _run_openroad(
+            corner_script_path, corner_metrics_path, error_cls=PlaceAndRouteError
+        )
         if corner_completed.returncode != 0:
             raise PlaceAndRouteError(
                 _engine_error_message(corner_stage_name, corner_completed)
@@ -4057,49 +4044,6 @@ def _constant_tie_diagnosis(
         f"tie-cell table -- or hand-edit the netlist to instantiate tie-high/"
         f"tie-low cells before place-and-route.",
     )
-
-
-def _openroad_version() -> str | None:
-    """The resolved OpenROAD build string, or ``None`` if unresolvable --
-    never raises.
-
-    ``openroad -version`` prints a **bare** version token on its own stdout
-    line (e.g. ``26Q3-771-g7cfb2105c9``) -- confirmed live for issue #425's
-    own worked example against a real OpenROAD build, distinct from the
-    ``OpenROAD <version>`` banner a no-flag/`-no_init` script invocation
-    prints before running. The banner form is matched first (defensively,
-    in case a future build changes `-version`'s own output shape); the bare
-    first-token form is the fallback that matches today's real behavior.
-    """
-    try:
-        completed = subprocess.run(
-            ["openroad", "-version"], capture_output=True, text=True
-        )
-    except OSError:
-        return None
-    stdout = completed.stdout.strip()
-    if not stdout:
-        return None
-    banner_match = _OPENROAD_VERSION_RE.search(stdout)
-    if banner_match:
-        return banner_match.group(1)
-    return stdout.split()[0]
-
-
-def _count_violations(stdout: str, begin: str, end: str) -> int:
-    """Count ``"(VIOLATED)"`` lines between ``begin``/``end`` markers in a
-    stage's captured stdout -- OpenROAD has no ``*_metric`` proc for
-    setup/hold *violation counts* (only the scalar WNS/TNS), so this is the
-    documented ``report_*`` stdout-scrape fallback (contract spike section
-    5's build/wrap section). Returns ``0`` when the markers aren't found
-    (defensive; should not happen for a successful run) or when the report
-    found no violating paths."""
-    try:
-        start_idx = stdout.index(begin) + len(begin)
-        stop_idx = stdout.index(end, start_idx)
-    except ValueError:
-        return 0
-    return stdout[start_idx:stop_idx].count("(VIOLATED)")
 
 
 def _count_antenna_violations(stdout: str) -> int | None:

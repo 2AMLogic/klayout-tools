@@ -34,14 +34,23 @@ already carries. It never places, routes, or runs CTS -- there is no
 ``target_stage``, no netlist, no ``link_design``; the DEF handed in is the
 one and only geometry analysed.
 
-Deliberately duplicates several small helpers already defined in
-``place_and_route.py`` (``_clock_lines``, ``_run_openroad``, ``_read_metrics``,
-``_count_violations``, the SPEF net-name-correlation Tcl) rather than
-importing them -- this repo's own stated convention (see
-``place_and_route.py``'s ``_resolve_liberty`` docstring) is that each verb
-module stays self-contained; every existing cross-module import between verb
-modules in this repo is of a *public* name (``run_place_and_route``,
-``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
+Deliberately duplicates a couple of small helpers already defined in
+``place_and_route.py`` (``_clock_lines``, ``_read_metrics``, the SPEF
+net-name-correlation Tcl) rather than importing them -- this repo's own
+stated convention (see ``place_and_route.py``'s ``_resolve_liberty``
+docstring) is that each verb module stays self-contained; every existing
+cross-module import between verb modules in this repo is of a *public* name
+(``run_place_and_route``, ``PlaceAndRouteError``, ``run_extract``, ...),
+never a private one. ``_run_openroad``, ``_count_violations``, and
+``_openroad_version`` are the exception: those three were byte-identical
+(modulo exception class/docstring length) between this module and
+``place_and_route.py`` with no caller-visible behavioral difference worth
+preserving per-copy, so they were consolidated into the shared
+``_openroad_engine`` internal utility module both import from (issue
+#1637) -- following the same precedent as ``_paths.py`` (issue #642).
+``_openroad_engine`` is a shared utility module, not a verb module, so
+importing its (underscore-prefixed, ``_paths.py``-style) helpers by name
+does not violate the convention above.
 
 Scope deliberately excluded from this first version (tracked as follow-up,
 not required for this issue): a ``propagated_clock`` request option (the
@@ -58,6 +67,7 @@ import re
 import subprocess
 from typing import Any
 
+from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
@@ -96,8 +106,6 @@ _SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 #: diagnostic sample, not an exhaustive list, so a design with thousands of
 #: misnamed nets doesn't balloon the OpenSTA stdout this module parses.
 _SPEF_MISSING_NETS_SAMPLE_LIMIT = 20
-
-_OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
 
 
 class PostRouteStaError(Exception):
@@ -212,7 +220,7 @@ def run_sta(
     )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path)
+    completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
     if completed.returncode != 0:
         raise PostRouteStaError(_engine_error_message(completed))
 
@@ -622,17 +630,6 @@ def _spef_net_names(spef_path: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _run_openroad(script_path: str, metrics_path: str) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(
-            ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
-            capture_output=True,
-            text=True,
-        )
-    except OSError as exc:
-        raise PostRouteStaError(f"could not launch openroad: {exc}") from exc
-
-
 def _engine_error_message(completed: subprocess.CompletedProcess) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
@@ -685,15 +682,6 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
     return data
 
 
-def _count_violations(stdout: str, begin: str, end: str) -> int:
-    try:
-        start_idx = stdout.index(begin) + len(begin)
-        stop_idx = stdout.index(end, start_idx)
-    except ValueError:
-        return 0
-    return stdout[start_idx:stop_idx].count("(VIOLATED)")
-
-
 def _count_spef_nets_annotated(stdout: str) -> tuple[int, int, int, int] | None:
     """``(nets_annotated, nets_total, design_nets_annotated,
     design_nets_total)`` parsed from :func:`_spef_net_check_lines`'s own
@@ -734,21 +722,3 @@ def _parse_spef_missing_nets(stdout: str) -> list[str]:
         return []
     block = stdout[start_idx:stop_idx]
     return [line.strip() for line in block.splitlines() if line.strip()]
-
-
-def _openroad_version() -> str | None:
-    """The resolved OpenROAD build string, or ``None`` if unresolvable --
-    never raises. Mirrors ``place_and_route.py``'s own ``_openroad_version``."""
-    try:
-        completed = subprocess.run(
-            ["openroad", "-version"], capture_output=True, text=True
-        )
-    except OSError:
-        return None
-    stdout = completed.stdout.strip()
-    if not stdout:
-        return None
-    banner_match = _OPENROAD_VERSION_RE.search(stdout)
-    if banner_match:
-        return banner_match.group(1)
-    return stdout.split()[0]
