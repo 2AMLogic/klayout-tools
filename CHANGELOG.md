@@ -32,6 +32,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   one number). Additive; `schema_version` stays `1`. See
   [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
   "`leakage_power_nw`/`leakage_by_type_nw`" section.
+- **Fixed**: `klt lef-abstract` (issue #1613) no longer crashes with an
+  unhandled `AttributeError: 'SimplePolygon' object has no attribute
+  'each_point_hull'` when a routing layer's merged obstruction region
+  contains a non-rectangular polygon. The OBS formatter called
+  `each_point_hull()` — a method that exists only on `kdb.Polygon`, not on
+  the `kdb.SimplePolygon` it was calling it on — so the command always
+  succeeded on a purely rectangular layout and always failed on any design
+  with L-shaped/T-shaped metal, or whose pin ports only partially overlap a
+  metal run. Such shapes now emit as the LEF `POLYGON` they always should
+  have; rectangular geometry still emits as `RECT`, and no JSON field
+  changed.
 - **Fixed**: `klt extract --parasitics --spef` (issue #1627) no longer
   stamps the SPEF header's `*DATE` line with the write's own wall-clock
   time. `*DATE` is optional and informational-only per the IEEE 1481-1999

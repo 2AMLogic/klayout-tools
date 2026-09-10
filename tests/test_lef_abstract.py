@@ -20,6 +20,7 @@ from klayout_tools import pdk as pdk_module
 from klayout_tools.cli import main
 from klayout_tools.lef_abstract import (
     LefAbstractError,
+    _polygon_to_um_shape,
     _resolve_layer_map,
     run_lef_abstract,
 )
@@ -272,6 +273,90 @@ def test_obs_skips_non_routing_layers():
 def test_non_routing_layer_shape_does_not_appear_in_obs(tmp_path, monkeypatch):
     report = _run(tmp_path, monkeypatch)
     assert all(entry["layer"] != "nwell" for entry in report["obs"])
+
+
+# --------------------------------------------------------------------------- #
+# non-rectangular OBS geometry (issue #1613)
+# --------------------------------------------------------------------------- #
+
+
+def _l_shaped_layout() -> kdb.Layout:
+    """Two overlapping met1 boxes that merge into a single L-shaped (non-box)
+    obstruction polygon -- the minimal reproduction from issue #1613, where
+    formatting it crashed with ``AttributeError: 'SimplePolygon' object has
+    no attribute 'each_point_hull'``."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+
+    met1 = layout.layer(*MET1_NET)
+    top.shapes(met1).insert(_box_um(0.0, 0.0, 5.0, 1.0))
+    top.shapes(met1).insert(_box_um(0.0, 0.0, 1.0, 5.0))
+
+    return layout
+
+
+def test_non_rectangular_obs_does_not_raise_and_emits_polygon(tmp_path, monkeypatch):
+    """Regression for issue #1613: a merged, non-box OBS polygon used to
+    raise ``AttributeError`` instead of emitting a LEF ``POLYGON``."""
+    report = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_l_shaped_layout(),
+        descriptor=_basic_descriptor(pins=[]),
+    )
+
+    met1_obs = next(entry for entry in report["obs"] if entry["layer"] == "met1")
+    assert met1_obs["shape_count"] == 1
+
+    text = Path(report["output"]).read_text(encoding="utf-8")
+    polygon_lines = [
+        line.strip() for line in text.splitlines() if line.strip().startswith("POLYGON")
+    ]
+    assert len(polygon_lines) == 1
+    assert "RECT" not in text.split("  OBS")[1]
+    # The L-shape's six corners, in the order `SimplePolygon.each_point()`
+    # yields them (counter-clockwise from the origin).
+    assert polygon_lines[0] == (
+        "POLYGON "
+        "0.0000 0.0000 "
+        "0.0000 5.0000 "
+        "1.0000 5.0000 "
+        "1.0000 1.0000 "
+        "5.0000 1.0000 "
+        "5.0000 0.0000 ;"
+    )
+
+
+def test_polygon_shape_points_match_simple_polygon_each_point():
+    """`_polygon_to_um_shape` must reproduce `each_point()`'s own sequence --
+    no silent point-order or winding change (issue #1613)."""
+    region = kdb.Region()
+    region.insert(_box_um(0.0, 0.0, 5.0, 1.0))
+    region.insert(_box_um(0.0, 0.0, 1.0, 5.0))
+    region.merge()
+    (polygon,) = list(region.each_merged())
+    assert not polygon.is_box()
+
+    shape = _polygon_to_um_shape(polygon, DBU_UM)
+    expected = [
+        [round(pt.x * DBU_UM, 6), round(pt.y * DBU_UM, 6)]
+        for pt in polygon.to_simple_polygon().each_point()
+    ]
+    assert shape == {"kind": "polygon", "points_um": expected}
+
+
+def test_box_shape_still_emits_rect():
+    """The `is_box()` fast path is untouched by the issue #1613 fix."""
+    region = kdb.Region()
+    region.insert(_box_um(1.0, 2.0, 3.0, 4.0))
+    region.merge()
+    (polygon,) = list(region.each_merged())
+
+    assert _polygon_to_um_shape(polygon, DBU_UM) == {
+        "kind": "rect",
+        "rect_um": [1.0, 2.0, 3.0, 4.0],
+    }
 
 
 # --------------------------------------------------------------------------- #
