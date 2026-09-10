@@ -5247,6 +5247,124 @@ def test_gf180mcu_resistor_bulk_terminal_ties_to_substrate_global(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# sky130 drawn metal resistors (`res_generic_m1`..`res_generic_m5`, issue
+# #1621) -- the metal-body analogue of `_make_poly_resistor_layout` above,
+# following the same shape sg13g2's own `_make_metal_resistor_layout`
+# (`tests/test_sg13g2_deck.py`) already established for `res_metal1`/
+# `res_metal2`.
+# --------------------------------------------------------------------------- #
+
+_METAL_RES_SQUARES = 6.0  # 6um marked segment / 1um drawn width
+
+
+def _make_sky130_metal_resistor_layout(
+    metal_gds_layer: int, *, marked: bool = True
+) -> kdb.Layout:
+    """A 12x1um bar on `(metal_gds_layer, 20)` (sky130's `metN.drawing`) with
+    a 6um-long `(metal_gds_layer, 13)`-marked segment (sky130's `metN.res`)
+    and a labelled, contact-free head at each end -- a metal resistor's own
+    two heads are just the unmarked remainder of the same metal shape (no
+    separate contact/via layer the way a poly resistor's heads need
+    `licon1` down to `li1`), matching sky130.lvs's own `metN_con =
+    metN.not(metN_res)...` derivation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: int, y: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(metal_gds_layer, 20, kdb.Box(0, 0, 12000, 1000))  # metN.drawing
+    if marked:
+        draw(metal_gds_layer, 13, kdb.Box(3000, 0, 9000, 1000))  # metN.res
+    label(metal_gds_layer, 5, "RA", 1500, 500)  # metN.pin
+    label(metal_gds_layer, 5, "RB", 10500, 500)  # metN.pin
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("name", "metal_gds_layer", "sheet_rho"),
+    [
+        ("res_generic_m1", 68, 0.120),
+        ("res_generic_m2", 69, 0.120),
+        ("res_generic_m3", 70, 0.047),
+        ("res_generic_m4", 71, 0.047),
+        ("res_generic_m5", 72, 0.029),
+    ],
+)
+def test_sky130_drawn_metal_resistor_extracts_with_expected_value(
+    tmp_path, name, metal_gds_layer, sheet_rho
+):
+    """A marked sky130 metal bar (`res_generic_m1`..`res_generic_m5`, issue
+    #1621) extracts as that device class with `R = L / W * sheet_rho` --
+    not as a short through the metal, and not left unrecognised the way
+    ingesting a netlist that references one used to fail entirely."""
+    path = _write_gds(
+        _make_sky130_metal_resistor_layout(metal_gds_layer), tmp_path / f"{name}.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(_METAL_RES_SQUARES * sheet_rho)
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+    assert report["device_classes"] == list(
+        get_extraction_deck("sky130").device_classes
+    )
+
+
+def test_sky130_unmarked_metal1_bar_is_not_a_resistor(tmp_path):
+    """A Metal1 bar with no `met1.res` marker stays ordinary routing metal --
+    same "known-unmodelled beats silently wrong" discipline the poly
+    resistors already follow."""
+    path = _write_gds(
+        _make_sky130_metal_resistor_layout(68, marked=False), tmp_path / "bare.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "bare.spice"))
+
+    assert report["device_counts"] == {}
+
+
+def test_pdk_resolved_leaves_sky130_metal_resistor_as_bare_r_card(tmp_path):
+    """Regression/carve-out guard (issue #1621): `res_generic_m1` has no
+    curated resistor-model table entry (sky130's own
+    `sky130_fd_pr__model__r+c.model.spice` defines no `.subckt` for it,
+    only a bare `.model sky130_fd_pr__res_generic_m1 r ...` card -- see
+    `decks/sky130.py`'s provenance comment), so it stays the bare `R`-card
+    form under `--pdk`, exactly like without `--pdk` -- never a guessed
+    subcircuit call. Mirrors sg13g2's
+    `test_pdk_resolved_leaves_res_metal1_as_bare_r_card`."""
+    path = _write_gds(
+        _make_sky130_metal_resistor_layout(68), tmp_path / "res_generic_m1.gds"
+    )
+    out = str(tmp_path / "res_generic_m1.spice")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+    )
+
+    assert report["device_counts"] == {"res_generic_m1": 1}
+    text = Path(out).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X", "R")
+    ]
+    (card,) = device_lines
+    assert card.startswith("R")
+    assert card.endswith("res_generic_m1")
+
+
+# --------------------------------------------------------------------------- #
 # A deck's other selectable sheet-rho poly-resistor flavours (issue #299):
 # gf180mcu's `Resistor`-marked high-sheet-rho poly and sky130's `rpm`/`urpm`
 # precision-implant poly resistors, previously pure exclusions on the base

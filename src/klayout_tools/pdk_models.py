@@ -46,7 +46,12 @@ of issue #1231 -- ``sg13g2``; MOS only, as of issue #1400 -- ``sg13cmos5l``):
   reference CDL netlists instantiate them as a bare
   semiconductor-resistor-with-model-reference card that a consumer's own
   simulation deck must supply the ``.model`` for) -- the same documented
-  bare-primitive carve-out gf180mcu's bipolar gets below.
+  bare-primitive carve-out gf180mcu's bipolar gets below. sky130's five
+  drawn *metal* resistors (``res_generic_m1``..``res_generic_m5``, issue
+  #1621) are the identical carve-out: sky130's own
+  ``sky130_fd_pr__model__r+c.model.spice`` wraps a ``.subckt`` around
+  ``res_generic_po`` (its poly flavour) but only a bare ``.model ... r``
+  card for every metal flavour -- no ``.subckt`` to bind to there either.
 - **Capacitor** (sky130/gf180mcu, plus -- issue #1470 -- sg13g2's two MIM
   capacitors) -- every ``CapacitorDevice`` class each deck declares, with
   plate ``L``/``W`` derived from the extracted plate area and perimeter via
@@ -826,7 +831,8 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
       merely on the individual class being absent. A pair that *does* have a
       curated entry was hand-verified against a real fetched PDK install --
       including which declared classes deliberately have **no** subcircuit to
-      bind to (``sg13g2``'s ``res_metal1``/``res_metal2``, see
+      bind to (``sg13g2``'s ``res_metal1``/``res_metal2``; ``sky130``'s
+      ``res_generic_m1``..``res_generic_m5``, issue #1621; see
       :data:`_RESISTOR_MODEL_TABLE`). Deriving identity for those would
       fabricate exactly the bindings that verification ruled out.
     - Every insertion is a :meth:`dict.setdefault`, so a curated entry always
@@ -1048,6 +1054,17 @@ class DeviceBinding:
 #: See the module docstring's verified-provenance section for the real fetched
 #: install each subcircuit name and parameter convention was read from.
 _RESISTOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
+    # `res_generic_m1`..`res_generic_m5` (the drawn metal-resistor family,
+    # issue #1621) are deliberately **not** in this table: unlike
+    # `res_generic_po` below, sky130's own
+    # `sky130_fd_pr__model__r+c.model.spice` wraps no `.subckt` around the
+    # metal flavours' `.model sky130_fd_pr__res_generic_mN r ...` cards, so
+    # there is no real subcircuit name to bind to -- a real netlist
+    # instantiates one as a bare primitive `R` element carrying that
+    # model-name token instead. This mirrors sg13g2's `res_metal1`/
+    # `res_metal2` carve-out below (also `.model`-only, no `.subckt`) --
+    # see `decks/sky130.py`'s own provenance comment on these five entries
+    # for the full verification.
     ("sky130", "sky130"): {
         "res_generic_po": "sky130_fd_pr__res_generic_po",
         "res_high_po": "sky130_fd_pr__res_high_po",

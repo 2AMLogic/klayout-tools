@@ -983,8 +983,20 @@ passes LVS silently.
 | `sky130`   | `res_generic_po` | `sky130_fd_pr__res_generic_po` | `poly.drawing` 66/20 | `poly.res` 66/13 | — | **48.2 Ω/□** | — |
 | `sky130`   | `res_high_po` | `sky130_fd_pr__res_high_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `rpm` 86/20 | **324.827244 Ω/□** | **379.705147 Ω** |
 | `sky130`   | `res_xhigh_po` | `sky130_fd_pr__res_xhigh_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `urpm` 79/20 | **2000 Ω/□** | — |
+| `sky130`   | `res_generic_m1` | `sky130_fd_pr__res_generic_m1` (drawn Metal1 resistor, issue #1621) | `met1.drawing` 68/20 | `met1.res` 68/13 | — | **0.120 Ω/□** | — |
+| `sky130`   | `res_generic_m2` | `sky130_fd_pr__res_generic_m2` | `met2.drawing` 69/20 | `met2.res` 69/13 | — | **0.120 Ω/□** | — |
+| `sky130`   | `res_generic_m3` | `sky130_fd_pr__res_generic_m3` | `met3.drawing` 70/20 | `met3.res` 70/13 | — | **0.047 Ω/□** | — |
+| `sky130`   | `res_generic_m4` | `sky130_fd_pr__res_generic_m4` | `met4.drawing` 71/20 | `met4.res` 71/13 | — | **0.047 Ω/□** | — |
+| `sky130`   | `res_generic_m5` | `sky130_fd_pr__res_generic_m5` | `met5.drawing` 72/20 | `met5.res` 72/13 | — | **0.029 Ω/□** | — |
 | `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** | — |
 | `gf180mcu` | `ppolyf_u_1k`/`_2k`/`_3k` | `gf180mcu_fd_pr__ppolyf_u_{1k,2k,3k}` (`POLY_RES` default `1k`, caller-selectable via `--deck-option poly_res=`) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000/2000/3000 Ω/□** | — |
+
+sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) have no `.subckt`
+in the real sky130 device library — only a bare `.model
+sky130_fd_pr__res_generic_mN r ...` card — so `--pdk` leaves them as the
+bare `R`-card form, never a guessed `X` subcircuit call; see "SPICE model
+binding" below and the "no gen generator yet" note under "Resistor
+flavours beyond what's wired".
 
 KLayout computes `R = L / W * sheet_rho` from the recognised segment's own
 geometry, corrected by `klt extract` itself (issue #518) to
@@ -2439,7 +2451,7 @@ recognised analog device classes):
 | Device class | sky130 | gf180mcu | sg13g2 | Geometry on the `X` card |
 |---|---|---|---|---|
 | MOS (`nfet`/`pfet`) | ✅ (plus `hvi`-scoped `g5v0d10v5` flavour, issue #1369) | ✅ (plus `Dualgate`-scoped `06v0` flavour, issue #1111) | ✅ `sg13_lv_*` (plus `ThickGateOx`-scoped `sg13_hv_*` flavour, issue #1231) | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
-| Resistor | ✅ | ✅ (all flavours) | ✅ `rsil`/`rppd`/`rhigh` (issue #1457); ❌ `res_metal1`/`res_metal2` (verified carve-out — no real subcircuit exists) | `l`/`w` (sky130 or sg13g2) or `r_length`/`r_width` (gf180mcu), read off the device |
+| Resistor | ✅ poly flavours; ❌ `res_generic_m1`..`res_generic_m5` (verified carve-out, issue #1621 — no real subcircuit exists) | ✅ (all flavours) | ✅ `rsil`/`rppd`/`rhigh` (issue #1457); ❌ `res_metal1`/`res_metal2` (verified carve-out — no real subcircuit exists) | `l`/`w` (sky130 or sg13g2) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | ✅ `cap_cmim`/`rfcmim` (issue #1470) | `l`/`w` (sky130 or sg13g2) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Capacitor (MoM) | — (no MoM recognition in that deck) | — (no MoM recognition in that deck) | ❌ (bare, unmodelled-value card — `cap_cmomi`/`cap_cmomf` are recognised as of issue #1466, on `sg13g2` **and** `sg13cmos5l`, with no `C` at all to bind; a curated `--pdk` model table is out of scope until this device gets a real compact model to bind against) | n/a |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
@@ -2568,6 +2580,17 @@ future epic):
   drawn *poly* resistors (`rsil`/`rppd`/`rhigh`, issues #1231/#1235) **do**
   bind, as of issue #1457 — see the "Coverage" table and "sg13g2 resistor
   note" above.
+- **sky130's drawn metal resistors are the same verified carve-out**
+  (`res_generic_m1`..`res_generic_m5`, issue #1621): sky130's own
+  `sky130_fd_pr__model__r+c.model.spice` wraps a `.subckt` around
+  `res_generic_po` (its base poly flavour) but defines **only** a bare
+  `.model sky130_fd_pr__res_generic_mN r ...` card for every metal flavour
+  — no `.subckt` at all — so there is no real subcircuit for this binding to
+  call. They stay bare `R` cards under `--pdk`, the same discipline as
+  sg13g2's `res_metal1`/`res_metal2` immediately above; see
+  `decks/sky130.py`'s provenance comment on these five entries for the full
+  verification (including the milliohm/ohm unit-convention mismatch between
+  `sky130.lvs`'s metal- and poly-resistor blocks).
 - **Three curated decks** (`sky130`, `gf180mcu`, `sg13g2` — the last as of
   issue #1231, resolved from the `ihp-sg13g2` variant name IHP-Open-PDK
   installs use); a resolved PDK whose
@@ -4601,13 +4624,21 @@ above, issue #217). The following remain out of scope:
   generic, `rpm`, and `urpm` poly resistors (each with a *single* flat
   sheet-rho, not the official deck's five-way per-length device-class split
   — see the `res_high_po`/`res_xhigh_po` provenance note in
-  `decks/sky130.py`), but not its diffusion or metal resistors; gf180mcu
-  models its unsalicided p+ poly resistor at both its base sheet-rho and its
-  PDK-default `POLY_RES='1k'` high-sheet-rho variant (the `_2k`/`_3k`
-  siblings are geometrically indistinguishable from `_1k` in a drawn
-  layout — see `decks/gf180mcu.py`), but not its salicided, N+ poly,
-  diffusion, well, or metal resistors. These remaining flavours are
+  `decks/sky130.py`) and, since issue #1621, its full `met1`..`met5` drawn
+  metal-resistor family (`res_generic_m1`..`res_generic_m5`), but not its
+  local-interconnect (`res_generic_l1`) or diffusion (`res_generic_nd`/
+  `res_generic_pd`) resistors; gf180mcu models its unsalicided p+ poly
+  resistor at both its base sheet-rho and its PDK-default `POLY_RES='1k'`
+  high-sheet-rho variant (the `_2k`/`_3k` siblings are geometrically
+  indistinguishable from `_1k` in a drawn layout — see `decks/gf180mcu.py`),
+  but not its salicided, N+ poly, diffusion, well, or metal resistors
+  (`rm1`/`rm2`/`rm3`/`tm*` — a real, LVS-extractable family the same way
+  sky130's is, left for a dedicated follow-up). These remaining flavours are
   deliberately excluded rather than approximated — see "Drawn resistors".
+  `klt gen` has no generator for sky130's new metal-resistor family yet
+  either (issue #222/#299's `res_array` PCell is poly-body-only) — a layout
+  containing one is now correctly extracted/LVS-comparable, but must be
+  drawn by a means other than `klt gen` until that follow-up lands.
 - **Gate-level Verilog output.** `--abstract-cells` (issue #620) emits a
   hierarchical **SPICE subcircuit** netlist only. A gate-level Verilog
   netlist (module instantiations, port-connected by name) is a deliberately
