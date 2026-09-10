@@ -34,13 +34,23 @@ Translation from socket descriptor to LEF ``MACRO``
   ``direction``/``use`` come from the descriptor when given, else a small
   documented heuristic (:func:`_classify_pin`) -- LEF has no way to *derive*
   signal direction from geometry alone. Port geometry is **real** drawn
-  shapes when the layout actually has metal at the declared position
-  (searched on the pin's own declared ``layer``, mirroring how ``klt
-  socket-check`` already reads text labels off that same layer), falling
-  back to a **synthesized** box (``width_um``/``height_um`` if declared,
-  else the resolved tech LEF routing layer's own ``WIDTH``) when it does
-  not -- each pin's response entry says which (``geometry_source``), never
-  silently fabricating precision the layout doesn't actually have.
+  shapes when the layout actually has metal at the declared position,
+  searched across **every** GDS ``(layer, datatype)`` pair that the
+  resolved layer map maps to the same LEF layer *name* as the pin's own
+  declared ``layer`` -- not just that single declared datatype. This
+  matters because ``klt socket-check`` reads text labels off the *exact*
+  declared ``layer`` (a PDK-specific pin/label datatype, e.g. gf180mcu's
+  ``(34, 10)``), which on some PDKs is a different datatype than the one
+  the actual metal is drawn on (e.g. gf180mcu's ``(34, 0)``) -- both
+  resolve to the same LEF layer (e.g. ``Metal1``), so searching every
+  sibling datatype (mirroring :func:`_resolve_obs`'s existing per-LEF-layer
+  union across datatypes) finds the real geometry a single-datatype search
+  would silently miss (issue #1614). Falls back to a **synthesized** box
+  (``width_um``/``height_um`` if declared, else the resolved tech LEF
+  routing layer's own ``WIDTH``) only when no datatype sharing that LEF
+  layer name has drawn geometry at the declared position -- each pin's
+  response entry says which (``geometry_source``), never silently
+  fabricating precision the layout doesn't actually have.
 - Everything else drawn on a *routing-type* tech-LEF layer (per
   :mod:`klayout_tools.lef_header`) becomes ``OBS`` -- unioned per LEF layer,
   clipped to the outline, and with the declared pin ports subtracted back out
@@ -407,6 +417,29 @@ def _load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
     return mapping
 
 
+def _invert_gds_to_lef(
+    gds_to_lef: dict[tuple[int, int], str],
+) -> dict[str, list[tuple[int, int]]]:
+    """Invert ``gds_to_lef`` into ``{lef_layer_name: [(gds_layer,
+    gds_datatype), ...]}``, sorted for deterministic search order.
+
+    Used by :func:`_resolve_pins` to search every GDS datatype that shares a
+    pin's resolved LEF layer *name* for drawn geometry -- not just the
+    single ``(layer, datatype)`` the socket descriptor's ``pins[].layer``
+    happens to declare -- mirroring :func:`_resolve_obs`'s existing
+    per-LEF-layer union across every GDS datatype. Necessary because a PDK
+    can (and open_pdks' own gf180mcu convention does) put a routing layer's
+    drawn metal and its pin/net text label on two different datatypes of
+    the same LEF layer; see issue #1614.
+    """
+    result: dict[str, list[tuple[int, int]]] = {}
+    for gds_pair, lef_layer in gds_to_lef.items():
+        result.setdefault(lef_layer, []).append(gds_pair)
+    for pairs in result.values():
+        pairs.sort()
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # pins
 # --------------------------------------------------------------------------- #
@@ -434,6 +467,7 @@ def _resolve_pins(
 
     pins_report: list[dict[str, Any]] = []
     pin_boxes_by_layer: dict[str, list[tuple[int, int, int, int]]] = {}
+    lef_layer_to_gds = _invert_gds_to_lef(gds_to_lef)
 
     for pin in pins:
         layer_tuple = pin["layer"]
@@ -458,13 +492,27 @@ def _resolve_pins(
             )
             continue
 
-        layer_index = layout.find_layer(*layer_tuple)
+        # Search every GDS datatype that resolves to this same LEF layer
+        # name, not just the single one the descriptor declared -- a PDK
+        # (e.g. gf180mcu) can put a routing layer's drawn metal and its
+        # pin/net text label on two different datatypes of the same LEF
+        # layer (issue #1614). The declared datatype is always searched
+        # first, so single-datatype PDK conventions (sky130) are unaffected.
+        search_layers = [layer_tuple] + [
+            candidate
+            for candidate in lef_layer_to_gds.get(lef_layer, ())
+            if candidate != layer_tuple
+        ]
+
         x_dbu = round(pin["x"] / dbu_um)
         y_dbu = round(pin["y"] / dbu_um)
+        point = kdb.Point(x_dbu, y_dbu)
 
         drawn_boxes: list[tuple[int, int, int, int]] = []
-        if layer_index is not None:
-            point = kdb.Point(x_dbu, y_dbu)
+        for search_layer in search_layers:
+            layer_index = layout.find_layer(*search_layer)
+            if layer_index is None:
+                continue
             iterator = top_cell.begin_shapes_rec(layer_index)
             while not iterator.at_end():
                 shape = iterator.shape()
@@ -487,10 +535,22 @@ def _resolve_pins(
                     pin, lef_layer, routing_layers, x_dbu, y_dbu, dbu_um
                 )
             ]
+            if len(search_layers) > 1:
+                sibling_desc = ", ".join(
+                    f"{layer}/{datatype}"
+                    for layer, datatype in search_layers[1:]
+                )
+                searched_desc = (
+                    f"declared layer {layer_tuple[0]}/{layer_tuple[1]} or any "
+                    f"sibling datatype resolving to LEF layer '{lef_layer}' "
+                    f"({sibling_desc})"
+                )
+            else:
+                searched_desc = f"layer {layer_tuple[0]}/{layer_tuple[1]}"
             warnings.append(
-                f"pin '{pin['name']}': no drawn geometry found on layer "
-                f"{layer_tuple[0]}/{layer_tuple[1]} at ({pin['x']}, {pin['y']}) um -- "
-                "synthesized a placeholder PORT rectangle"
+                f"pin '{pin['name']}': no drawn geometry found on {searched_desc} "
+                f"at ({pin['x']}, {pin['y']}) um -- synthesized a placeholder PORT "
+                "rectangle"
             )
 
         local_boxes = [
