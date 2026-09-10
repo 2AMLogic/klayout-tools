@@ -45,11 +45,12 @@ the compiled deck in isolation).
 ## Results (verified 2026-08-12 against a real, volare-fetched sky130A
 install, ``open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b`` -- the same
 commit `sky130.py`'s own provenance notes cite -- and a real KLayout 0.28.16
-binary)
+binary; the five drawn-metal-resistor rows re-verified 2026-09-10 for issue
+#1621 against the same install/binary)
 
-**7 of 8 provenanced device rules cross-checked; 4 agree exactly, 3 disagree
-for a documented, already-known reason; 1 deferred (investigated, not
-executed -- see below).**
+**12 of 13 provenanced device rules cross-checked; 4 agree exactly, 8
+disagree for a documented, already-known reason; 1 deferred (investigated,
+not executed -- see below).**
 
 - `nfet`/`pfet`: **exact** (L, W). Straightforward MOS4 recognition; native
   needs an explicit `nsdm`/`psdm` implant layer this deck doesn't model, but
@@ -63,6 +64,13 @@ executed -- see below).**
   refined two-term fit vs. `sky130.lvs`'s own raw single-term coefficient.
   See
   `test_res_high_po_r_disagrees_with_native_deck_by_a_documented_refinement`.
+- `res_generic_m1`..`res_generic_m5`: **documented disagreement, exactly
+  1000x** (issue #1621). `sky130.lvs`'s own `resistor(...)` call feeds its
+  literal (120/120/47/47/29) directly to KLayout's builtin as ohms/sq, with
+  no conversion -- this deck deliberately divides by 1000 on the strength of
+  an independent second source (`sky130A.tech`'s own milliohm-denominated
+  `resist` figures, see `decks/sky130.py`'s provenance comment). See
+  `test_res_generic_mN_r_disagrees_with_native_deck_by_a_documented_unit_convention`.
 - `cap_mim`/`cap_mim_m4`: **documented disagreement**. This deck's
   `perim_cap_f_um` (issue #512) adds a perimeter term `sky130.lvs`'s own
   built-in `capacitor(...)` primitive never had. See
@@ -73,9 +81,9 @@ executed -- see below).**
 
 Every non-exact-agreement rule's disagreement is a *deliberate, previously
 documented* refinement this deck already carries a code-comment citation
-for (issue #518, #512) -- discovered independently by this cross-check, not
-introduced by it. No *undocumented* disagreement was found on the 7 rules
-actually run.
+for (issue #518, #512, #1621) -- discovered independently by this
+cross-check, not introduced by it. No *undocumented* disagreement was found
+on the 12 rules actually run.
 """
 
 from __future__ import annotations
@@ -442,6 +450,91 @@ def test_res_high_po_r_disagrees_with_native_deck_by_a_documented_refinement(
 
 
 # --------------------------------------------------------------------------- #
+# Drawn metal resistors (issue #1621) -- documented disagreement, same
+# discipline as `res_high_po` above, but for a *unit-convention* refinement
+# rather than a measured-model one.
+# --------------------------------------------------------------------------- #
+
+
+def _make_metal_resistor_layout(metal_gds_layer: int) -> kdb.Layout:
+    """`tests/test_lvs_device_provenance.py`'s own `_make_metal_resistor_
+    layout` fixture, duplicated per this module's own "some duplication is
+    acceptable" convention (see this module's docstring)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: int, y: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(metal_gds_layer, 20, kdb.Box(0, 0, 12000, 1000))  # metN.drawing
+    draw(metal_gds_layer, 13, kdb.Box(3000, 0, 9000, 1000))  # metN.res
+    label(metal_gds_layer, 5, "RA", 1500, 500)  # metN.pin
+    label(metal_gds_layer, 5, "RB", 10500, 500)  # metN.pin
+
+    return layout
+
+
+_SKY130_METAL_RESISTOR_FLAVOURS = (
+    ("res_generic_m1", 68),
+    ("res_generic_m2", 69),
+    ("res_generic_m3", 70),
+    ("res_generic_m4", 71),
+    ("res_generic_m5", 72),
+)
+
+
+@_SKIP_NO_SKY130_LVS_CROSS_CHECK
+@pytest.mark.parametrize(("name", "metal_gds_layer"), _SKY130_METAL_RESISTOR_FLAVOURS)
+def test_res_generic_mN_r_disagrees_with_native_deck_by_a_documented_unit_convention(
+    tmp_path: Path, name: str, metal_gds_layer: int
+) -> None:
+    """`res_generic_m1`..`res_generic_m5` (issue #1621) **genuinely, and
+    expectedly, disagree** in `R` between the two engines, by exactly a
+    factor of 1000 -- verified live against a real `sky130.lvs` run (not
+    merely inferred from documentation): `sky130.lvs`'s own
+    `extract_devices(resistor("sky130_fd_pr__res_generic_mN", <literal>,
+    NResistor), ...)` call feeds `<literal>` (120/120/47/47/29) directly to
+    KLayout's `resistor()` builtin as ohms/sq, with no unit conversion --
+    the same way this deck's own `res_generic_po`/`res_xhigh_po` literals
+    are used directly and agree exactly with native (see those tests
+    above). This deck's own `sheet_rho_ohm_sq` for the metal flavours
+    (`decks/sky130.py`) is deliberately the *raw literal divided by 1000*,
+    on the strength of an independent second source
+    (`sky130A.tech`'s own `resist (allmN)/metalN` figures, which
+    `decks/sky130.py`'s provenance comment documents as milliohm/sq-denominated
+    and which the deck's own already-curated `metals[]` routing sheet
+    resistance table -- unrelated to this resistor-device recognition --
+    was derived from under that exact same convention). This is the
+    metal-resistor sibling of `res_high_po`'s documented refinement above:
+    a deliberate, cross-referenced choice, not a bug -- confirmed exactly
+    (not merely tolerated) by asserting native's raw value equals the
+    compiled deck's value times 1000."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
+    assert resistor.provenance is not None
+    assert resistor.provenance.rule_id == f"sky130_fd_pr__{name}"
+
+    path = _write_gds(
+        _make_metal_resistor_layout(metal_gds_layer), tmp_path / f"{name}.gds"
+    )
+
+    compiled = run_extract(path, "sky130", output=str(tmp_path / f"{name}.spice"))
+    assert compiled["device_counts"] == {name: 1}
+    compiled_r_ohm = compiled["devices"][0]["params"]["r_ohm"]
+
+    native_device = _one_native_device(_run_native(path))
+    assert native_device["class"].lower() == f"sky130_fd_pr__{name}"
+    native_r_ohm = native_device["params"]["R"]
+
+    assert native_r_ohm == pytest.approx(compiled_r_ohm * 1000.0, rel=1e-6)
+    assert compiled_r_ohm != pytest.approx(native_r_ohm, rel=0.01)
+
+
+# --------------------------------------------------------------------------- #
 # MiM capacitors
 # --------------------------------------------------------------------------- #
 
@@ -624,6 +717,11 @@ _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
         "sky130_fd_pr__res_generic_po",  # agrees
         "sky130_fd_pr__res_xhigh_po_0p35",  # agrees (at native's fixed width)
         "sky130_fd_pr__res_high_po_0p35",  # documented disagreement (#518)
+        "sky130_fd_pr__res_generic_m1",  # documented disagreement, 1000x (#1621)
+        "sky130_fd_pr__res_generic_m2",  # documented disagreement, 1000x (#1621)
+        "sky130_fd_pr__res_generic_m3",  # documented disagreement, 1000x (#1621)
+        "sky130_fd_pr__res_generic_m4",  # documented disagreement, 1000x (#1621)
+        "sky130_fd_pr__res_generic_m5",  # documented disagreement, 1000x (#1621)
         "sky130_fd_pr__model__cap_mim",  # documented disagreement (#512)
         "sky130_fd_pr__model__cap_mim_m4",  # documented disagreement (#512)
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",  # deferred (investigated)

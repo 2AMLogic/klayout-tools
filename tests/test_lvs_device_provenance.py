@@ -113,11 +113,22 @@ def test_sky130_mos_provenance_cites_sky130_lvs():
 
 
 def test_sky130_resistor_provenance_cites_sky130_lvs():
-    """Every one of sky130's three curated resistor entries carries a
+    """Every one of sky130's eight curated resistor entries carries a
     `provenance` citing the real `sky130.lvs` device-class name its
-    `sheet_rho_ohm_sq` was transcribed from/measured against."""
+    `sheet_rho_ohm_sq` was transcribed from/measured against -- the three
+    poly flavours (issue #868) plus the five drawn-metal flavours
+    (`res_generic_m1`..`res_generic_m5`, issue #1621)."""
     by_name = {r.name: r for r in EXTRACTION_DECK.resistors}
-    assert set(by_name) == {"res_generic_po", "res_high_po", "res_xhigh_po"}
+    assert set(by_name) == {
+        "res_generic_po",
+        "res_high_po",
+        "res_xhigh_po",
+        "res_generic_m1",
+        "res_generic_m2",
+        "res_generic_m3",
+        "res_generic_m4",
+        "res_generic_m5",
+    }
 
     for resistor in EXTRACTION_DECK.resistors:
         assert resistor.provenance is not None
@@ -131,6 +142,11 @@ def test_sky130_resistor_provenance_cites_sky130_lvs():
     assert (
         by_name["res_xhigh_po"].provenance.rule_id == "sky130_fd_pr__res_xhigh_po_0p35"
     )
+    for n in range(1, 6):
+        assert (
+            by_name[f"res_generic_m{n}"].provenance.rule_id
+            == f"sky130_fd_pr__res_generic_m{n}"
+        )
 
 
 def test_sky130_capacitor_provenance_cites_sky130_lvs():
@@ -514,6 +530,79 @@ def test_golden_pair_sky130_res_xhigh_po_r_ohm_matches_provenance_coefficient(
     assert device["class"] == "res_xhigh_po"
     assert device["params"]["r_ohm"] == pytest.approx(
         _RES_SQUARES * resistor.sheet_rho_ohm_sq + resistor.fixed_offset_ohm
+    )
+
+
+def _make_metal_resistor_layout(metal_gds_layer: int) -> kdb.Layout:
+    """A drawn sky130 metal resistor bar (`res_generic_m1`..`res_generic_m5`,
+    issue #1621): a 12x1um bar on `(metal_gds_layer, 20)` (`metN.drawing`)
+    with a 6um-long `(metal_gds_layer, 13)`-marked segment (`metN.res`) and
+    a labelled, contact-free head at each end -- unlike the poly-resistor
+    fixtures above, a metal resistor's heads are just the unmarked remainder
+    of the same metal shape (no separate `licon1`/`li1` contact stack is
+    needed, matching `sky130.lvs`'s own `metN_con = metN.not(metN_res)...`
+    derivation). Duplicated from `tests/test_extract.py`'s own
+    `_make_sky130_metal_resistor_layout` -- this module's "some duplication
+    is acceptable" convention, same as
+    `tests/test_lvs_native_extraction_cross_check.py`'s own docstring notes
+    for its `_provenanced_device_rule_ids` helper."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: int, y: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(metal_gds_layer, 20, kdb.Box(0, 0, 12000, 1000))  # metN.drawing
+    draw(metal_gds_layer, 13, kdb.Box(3000, 0, 9000, 1000))  # metN.res
+    label(metal_gds_layer, 5, "RA", 1500, 500)  # metN.pin
+    label(metal_gds_layer, 5, "RB", 10500, 500)  # metN.pin
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("name", "metal_gds_layer"),
+    [
+        ("res_generic_m1", 68),
+        ("res_generic_m2", 69),
+        ("res_generic_m3", 70),
+        ("res_generic_m4", 71),
+        ("res_generic_m5", 72),
+    ],
+)
+def test_golden_pair_sky130_res_generic_mN_r_ohm_matches_provenance_coefficient(
+    tmp_path: Path, name: str, metal_gds_layer: int
+):
+    """A drawn 6-square metal resistor (`res_generic_m1`..`res_generic_m5`,
+    issue #1621) extracts with `R = squares * sheet_rho_ohm_sq`, computed
+    directly from the deck's own provenance-cited entry -- the metal-body
+    analogue of `test_golden_pair_sky130_resistor_r_ohm_matches_provenance_
+    coefficient` above, one golden pair per flavour so this module's own
+    coverage-discipline test
+    (`test_golden_pairs_cover_every_provenanced_device_rule`) sees all five
+    new rule_ids exercised."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
+    assert resistor.provenance is not None
+    assert resistor.provenance.rule_id == f"sky130_fd_pr__{name}"
+
+    path = _write_gds(
+        _make_metal_resistor_layout(metal_gds_layer), tmp_path / f"{name}.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    squares = 6.0  # 6um marked segment / 1um width
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(
+        squares * resistor.sheet_rho_ohm_sq
     )
 
 
@@ -1074,7 +1163,8 @@ def _provenanced_device_rule_ids(deck) -> set[str]:
 #: corresponding test above, or a golden-pair test above whose rule_id is
 #: missing here, is caught by `_provenanced_device_rule_ids` not matching
 #: this set, not by silent under-coverage. Keyed by deck name (issue #904
-#: adds the gf180mcu entry, mirroring sky130's own 8-rule set).
+#: adds the gf180mcu entry, mirroring sky130's own 8-rule set; issue #1621
+#: extends sky130's own set to 13 with the five drawn-metal resistors).
 _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
     "sky130": frozenset(
         {
@@ -1083,6 +1173,11 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "sky130_fd_pr__res_generic_po",
             "sky130_fd_pr__res_high_po_0p35",
             "sky130_fd_pr__res_xhigh_po_0p35",
+            "sky130_fd_pr__res_generic_m1",
+            "sky130_fd_pr__res_generic_m2",
+            "sky130_fd_pr__res_generic_m3",
+            "sky130_fd_pr__res_generic_m4",
+            "sky130_fd_pr__res_generic_m5",
             "sky130_fd_pr__model__cap_mim",
             "sky130_fd_pr__model__cap_mim_m4",
             "sky130_fd_pr__pnp_05v5_W0p68L0p68",
