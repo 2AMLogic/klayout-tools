@@ -40,6 +40,8 @@ def _print_text(report: dict) -> None:
     print()
     print(f"worst_slack_ns: {report['worst_slack_ns']}")
     print(f"total_negative_slack_ns: {report['total_negative_slack_ns']}")
+    print(f"worst_hold_slack_ns: {report['worst_hold_slack_ns']}")
+    print(f"total_negative_hold_slack_ns: {report['total_negative_hold_slack_ns']}")
     print(f"fmax_mhz: {report['fmax_mhz']}")
     print(f"setup_violation_count: {report['setup_violation_count']}")
     print(f"hold_violation_count: {report['hold_violation_count']}")
