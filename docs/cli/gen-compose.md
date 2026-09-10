@@ -77,16 +77,31 @@ cleanly.
   - **`routing.width_um` is floored by the resolved PDK deck's own
     minimum-width rule (issue #1501).** The floor is looked up in the same
     `ExtractionDeck`/`DrcRule` set `klt drc --deck <family>` judges the
-    composed layout with — never a second, private threshold — for both the
-    requested `routing.layer_role` and any `cross_block_layer_role` fallback
-    layer a leg draws on. A `width_um` narrower than that floor is an
-    application error (exit `1`) naming the violated rule id and its
+    composed layout with — never a second, private threshold — against the
+    requested `routing.layer_role`. A `width_um` narrower than that floor is
+    an application error (exit `1`) naming the violated rule id and its
     threshold in µm, rather than silently drawing sub-minimum metal (e.g.
     gf180mcu's `metal1.width.1` = `0.23um` rejects the documented `0.17um`
     default). Each via-drop's own square (`_VIA_DROP_SIZE_UM` by default) is
     floored the same way against the drop's `via_layer`, so a family whose
     via-width minimum exceeds that constant (e.g. gf180mcu's `via1.width.1` =
     `0.26um`) still draws a DRC-clean via.
+  - **`routing.cross_block_width_um` is the cross-block plane's own width
+    knob, independent of `routing.width_um` (issue #1620).** Before this,
+    `routing.width_um` was validated against *both* `routing.layer_role`'s
+    floor and (whenever `routing.cross_block_layer_role` was configured) that
+    second layer's own floor — so naming a cross-block layer with a stricter
+    deck minimum silently forced every net's *primary*-plane routing wider
+    too, on a knob the caller never asked to change. `routing.width_um` is
+    now validated against `routing.layer_role`'s own floor only, and a leg
+    that actually falls back to `routing.cross_block_layer_role` draws at
+    `routing.cross_block_width_um` instead — defaulting to that layer's own
+    deck minimum when omitted (so a caller wanting "minimum pitch on each
+    plane" need not spell either width out), and floored against that
+    layer's own minimum-width rule the same way `routing.width_um` is, with
+    the identical error shape (naming `routing.cross_block_width_um`, the
+    violated rule id, and its threshold). Meaningless, and ignored, without
+    `routing.cross_block_layer_role` also configured.
 - **Declare-only connectivity (no `routing`, #1188)** — `routing` is
   optional: omitting it (or passing `{}`) with a non-empty `connectivity[]`
   still validates every net's `{block, port}` pins against the referenced
@@ -1007,6 +1022,14 @@ that never crosses another same-layer pad in the first place — is completely
 unaffected and keeps drawing on `routing.layer_role`, exactly as before this
 issue.
 
+A leg that falls back here draws at `routing.cross_block_width_um` (issue
+#1620), not `routing.width_um` — the two width knobs are independent, so
+naming `routing.cross_block_layer_role` never forces `routing.width_um` up
+to satisfy the cross layer's own (possibly stricter) deck minimum, and it
+never widens a net that stays on `routing.layer_role`. Omit
+`routing.cross_block_width_um` to get the cross layer's own deck minimum
+automatically.
+
 ```json
 {
   "pdk": { "variant": "sky130A" },
@@ -1312,6 +1335,7 @@ exit codes).
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
 | `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's — that retry can land the second leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
+| `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 
 ### Response
