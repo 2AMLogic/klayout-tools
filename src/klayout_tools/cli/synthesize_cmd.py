@@ -67,6 +67,7 @@ def _print_text(report: dict) -> None:
     print(f"instance_count: {report['instance_count']}")
     print(f"area_um2: {report['area_um2']}")
     print(f"sequential_area_um2: {report['sequential_area_um2']}")
+    print(f"leakage_power_nw: {report.get('leakage_power_nw')}")
 
     timing = report["timing"]
     if timing:
@@ -99,6 +100,13 @@ def _print_text(report: dict) -> None:
         print("instance_counts_by_type:")
         for cell_type in sorted(instance_counts_by_type):
             print(f"  {cell_type}: {instance_counts_by_type[cell_type]}")
+
+    leakage_by_type_nw = report.get("leakage_by_type_nw")
+    if leakage_by_type_nw:
+        print()
+        print("leakage_by_type_nw:")
+        for cell_type in sorted(leakage_by_type_nw):
+            print(f"  {cell_type}: {leakage_by_type_nw[cell_type]}")
 
     structural = report["structural"]
     print()

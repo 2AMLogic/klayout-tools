@@ -611,6 +611,11 @@ caller decision rather than something this command should pick.
     "sky130_fd_sc_hd__a211o_1": 1,
     "sky130_fd_sc_hd__dfrtp_1": 50
   },
+  "leakage_power_nw": 5.7321,
+  "leakage_by_type_nw": {
+    "sky130_fd_sc_hd__a211o_1": 0.00199315,
+    "sky130_fd_sc_hd__dfrtp_1": 0.00914859
+  },
   "timing": {
     "source": "abc_stime",
     "wire_load": null,
@@ -665,6 +670,8 @@ caller decision rather than something this command should pick.
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
+| `leakage_power_nw` | number \| null | Static leakage power, in nanowatts — issue #1626. `sum(cell_leakage_power[cell_type] * instance_count[cell_type])` over `instance_counts_by_type`, read from the same resolved liberty already loaded for `dfflibmap`/`abc -liberty` (no second liberty fetch). **Not** switching/dynamic power — that needs an activity factor this command has no vectors to supply, and is out of scope. `null` when the resolved liberty reports no `cell_leakage_power` for *any* instantiated cell type — see "`leakage_power_nw`/`leakage_by_type_nw`" below. |
+| `leakage_by_type_nw` | object\<string, number\> \| null | Per-cell-type leakage, in nanowatts — the liberty `cell_leakage_power` entry `leakage_power_nw` was summed from, one entry per instantiated cell type that had one. Keys sorted for determinism. A caller can diff this object's keys against `instance_counts_by_type`'s to spot an instantiated cell type with no leakage data (e.g. a `-dont_use`d or otherwise-unmapped type) for free. `null` exactly when `leakage_power_nw` is `null`. |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
@@ -764,6 +771,44 @@ never fabricated as an infinite or arbitrary number).
 Running the exact same design twice against its own prior response produces
 a `delta_pct` of `0.0` on every metric — see `tests/test_synthesize.py`'s
 `test_run_synthesize_baseline_response_path_zero_delta`.
+
+## `leakage_power_nw`/`leakage_by_type_nw`: static leakage power
+
+[Issue #1626](https://github.com/2AMLogic/klayout-tools/issues/1626): the
+same resolved liberty this command already loads for `dfflibmap`/
+`abc -liberty` carries a `cell_leakage_power` entry per cell — `klt
+synthesize` sums it the same way `area_um2` is already summed, from the same
+two inputs (the mapped netlist's `instance_counts_by_type` and that
+liberty), rather than requiring every caller to re-derive a Liberty-parsing
+step this command already performs internally.
+
+`leakage_power_nw` is `sum(cell_leakage_power[cell_type] *
+instance_count[cell_type])` over the response's own
+`instance_counts_by_type`, in nanowatts (the liberty's own
+`leakage_power_unit`, converted when it names a different magnitude —
+`"1nW"`/`1uW`/etc. — and assumed already-nanowatts when the liberty declares
+no `leakage_power_unit` at all). `leakage_by_type_nw` is the per-cell-type
+breakdown that sum is built from — the bonus the issue asks for, which
+doubles as a free sanity check: diff its keys against
+`instance_counts_by_type`'s to spot an instantiated cell type with no
+leakage data (e.g. a `-dont_use`d or otherwise-unmapped type).
+
+**Static leakage only — never switching/dynamic power**, which needs an
+activity factor (a testbench, vectors, a toggle-rate estimate) this command
+has no way to know; that is a different ask entirely, deliberately out of
+scope here (see "Out of scope" below).
+
+**`null` — never a fabricated or partial-looking number — when the
+resolved liberty reports no `cell_leakage_power` for *any* instantiated
+cell type.** Not every cell library populates the scalar field:
+`gf180mcu_fd_sc_mcu9t5v0` reports leakage only via per-input-state
+`leakage_power () { when: "..."; value: "..."; }` groups instead, and this
+command deliberately does not average those into one number — doing so
+would assume a state probability with no vector data behind it, the same
+"no activity factor available" gap dynamic power is out of scope for. When
+*some* (not all) instantiated cell types have a `cell_leakage_power` entry,
+the total sums exactly those, and `leakage_by_type_nw` names which types
+were covered.
 
 ## Exit codes
 
@@ -973,6 +1018,10 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
 
 ## Out of scope
 
+- **Switching/dynamic power.** `leakage_power_nw`/`leakage_by_type_nw`
+  (issue #1626) are static leakage only. Dynamic power needs an activity
+  factor — a testbench, vectors, or a toggle-rate estimate — this command
+  has no way to know; that is a different, unaddressed ask.
 - **Sequential-design equivalence checking.** `--verify-equivalence` only
   works on combinational designs today — `klt equiv`'s Phase 0 MVP scope
   (#707). A future phase of #707 (temporal induction / BMC via SymbiYosys)

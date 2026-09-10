@@ -157,6 +157,18 @@ synthesize --format json`` response file) or ``request.baseline.
 netlist_path`` (a bare prior netlist, re-``stat``/re-timed against this
 run's own resolved liberty). ``None`` unless one of those two request
 fields is given. See :func:`_compute_baseline`.
+
+``leakage_power_nw``/``leakage_by_type_nw`` (issue #1626) are the static
+(leakage-only, no switching/dynamic power -- that needs an activity factor
+this command has no vectors to supply) power figure this run's own resolved
+liberty already carries: ``sum(cell_leakage_power[cell_type] *
+instance_count[cell_type])`` over the response's own
+``instance_counts_by_type``, plus the per-type breakdown that sum is built
+from. Both are ``None`` when the resolved liberty reports no
+``cell_leakage_power`` for any instantiated cell type at all (some
+libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report leakage only via
+per-input-state groups this module deliberately does not average into one
+number). See :func:`_compute_leakage`.
 """
 
 from __future__ import annotations
@@ -403,6 +415,56 @@ _WARNING_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: requirement).
 _MAX_WARNING_REPRESENTATIVES = 10
 
+#: Matches a liberty ``cell (name) {`` header -- used by
+#: :func:`_parse_liberty_leakage_nw` to isolate each cell's own body without
+#: a full brace-matching parse. ``cell_leakage_power`` is always a direct,
+#: top-level attribute of its enclosing ``cell (...) { ... }`` block, never
+#: nested inside a ``pin``/``timing`` sub-block (the Liberty grammar does not
+#: permit it there), so the text between one cell header and the next is
+#: exactly that cell's own body -- :func:`_match_brace`'s full parse (as
+#: ``restructure.py``'s pin-compatibility check needs, since a pin *is*
+#: nested) is not required here. The cell name's own quotes are optional --
+#: a real volare `sky130_fd_sc_hd` liberty quotes it (``cell
+#: ("sky130_fd_sc_hd__buf_1") {``); a synthetic/other-vendor liberty may not
+#: (verified live against both, issue #1626).
+_LIBERTY_CELL_HEADER_RE = re.compile(
+    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
+)
+
+#: The scalar ``cell_leakage_power : <value>;`` attribute Liberty defines for
+#: a cell's state-independent leakage figure -- what issue #1626 asks this
+#: module to sum. Not every cell library populates it: some (verified live,
+#: ``gf180mcu_fd_sc_mcu9t5v0``) report leakage only via per-input-state
+#: ``leakage_power () { when : "..."; value : "..."; }`` groups instead, with
+#: no way to reduce those to one number without assuming a state probability
+#: this command has no vector data to supply -- exactly the same "no
+#: activity factor available" gap the issue explicitly carves switching
+#: power out for. :func:`_parse_liberty_leakage_nw` therefore reads *only*
+#: this scalar field and leaves a cell with no such entry absent from its
+#: result, rather than guessing from the conditional groups.
+_CELL_LEAKAGE_POWER_RE = re.compile(
+    r"\bcell_leakage_power\s*:\s*(?P<value>[-+0-9.eE]+)\s*;"
+)
+
+#: ``leakage_power_unit : "1nW";`` (sky130_fd_sc_hd) / ``leakage_power_unit :
+#: 1uW ;`` (gf180mcu_fd_sc_mcu9t5v0, unquoted, space before the semicolon) --
+#: the multiplier a bare ``cell_leakage_power`` number in this liberty is
+#: expressed in. Verified live against both installed liberty families
+#: (issue #1626).
+_LEAKAGE_POWER_UNIT_RE = re.compile(
+    r'\bleakage_power_unit\s*:\s*"?(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)"?\s*;'
+)
+
+#: Multiplier from one ``leakage_power_unit`` unit to nanowatts.
+_LEAKAGE_UNIT_TO_NW: dict[str, float] = {
+    "fw": 1e-6,
+    "pw": 1e-3,
+    "nw": 1.0,
+    "uw": 1e3,
+    "mw": 1e6,
+    "w": 1e9,
+}
+
 
 class SynthesizeError(Exception):
     """Raised when a synthesis run cannot even be attempted: a missing/
@@ -605,6 +667,12 @@ def run_synthesize(
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
     warnings_summary = _summarize_warnings(yosys_log)
+    instance_counts_by_type = dict(
+        sorted((module_stats.get("num_cells_by_type") or {}).items())
+    )
+    leakage_power_nw, leakage_by_type_nw = _compute_leakage(
+        liberty_path, instance_counts_by_type
+    )
 
     deck_name = f"{cell_library}__{corner}"
     provenance = build_provenance(
@@ -656,9 +724,12 @@ def run_synthesize(
         # `stat -json` entirely. Degrade to `None` rather than a raw
         # `KeyError` -- see #560.
         "sequential_area_um2": module_stats.get("sequential_area"),
-        "instance_counts_by_type": dict(
-            sorted((module_stats.get("num_cells_by_type") or {}).items())
-        ),
+        "instance_counts_by_type": instance_counts_by_type,
+        # Static (leakage) power only -- issue #1626. `None` when the
+        # resolved liberty reports no `cell_leakage_power` for any
+        # instantiated cell type at all -- see `_compute_leakage`.
+        "leakage_power_nw": leakage_power_nw,
+        "leakage_by_type_nw": leakage_by_type_nw,
         "timing": _read_abc_timing(abc_log_path, delay_target_ps),
         "sta": sta,
         "structural": structural,
@@ -1520,6 +1591,122 @@ def _read_sta_timing(
         return compute_critical_path(netlist_path, liberty_path, hdl_toplevel)
     except StaError:
         return None
+
+
+def _leakage_unit_scale_to_nw(liberty_text: str) -> float:
+    """The multiplier from this liberty's own ``leakage_power_unit`` to
+    nanowatts (see :data:`_LEAKAGE_POWER_UNIT_RE`). Defaults to ``1.0`` --
+    i.e. assumes the file's own ``cell_leakage_power`` numbers are already
+    nanowatts, Liberty's conventional default unit -- when the file declares
+    no ``leakage_power_unit`` at all, or names a unit :data:`_LEAKAGE_UNIT_TO_NW`
+    does not recognise. Never raises, matching
+    :func:`_abc_supports_dont_use`'s own "never break a run over an
+    optional/best-effort probe" posture.
+    """
+    match = _LEAKAGE_POWER_UNIT_RE.search(liberty_text)
+    if match is None:
+        return 1.0
+    try:
+        magnitude = float(match.group("magnitude"))
+    except ValueError:  # pragma: no cover - regex only matches numbers
+        return 1.0
+    per_unit_nw = _LEAKAGE_UNIT_TO_NW.get(match.group("unit").lower())
+    if per_unit_nw is None:
+        return 1.0
+    return magnitude * per_unit_nw
+
+
+def _parse_liberty_leakage_nw(liberty_text: str) -> dict[str, float]:
+    """Read every ``cell (name) { ... cell_leakage_power : <value>; ... }``
+    scalar out of ``liberty_text``, converted to nanowatts via that
+    liberty's own ``leakage_power_unit`` (:func:`_leakage_unit_scale_to_nw`).
+
+    Deliberately minimal, matching ``restructure.py``'s
+    :func:`~klayout_tools.restructure._parse_liberty_pins`'s own scope
+    discipline: this is not a general liberty parser, it extracts only the
+    one scalar :func:`_compute_leakage` needs. A cell with no
+    ``cell_leakage_power`` line (see :data:`_CELL_LEAKAGE_POWER_RE`'s
+    docstring -- some libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report
+    leakage only via per-input-state groups instead) is simply absent from
+    the result, never assigned a guessed value.
+    """
+    unit_scale = _leakage_unit_scale_to_nw(liberty_text)
+    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
+    leakage_by_cell: dict[str, float] = {}
+    for index, header in enumerate(headers):
+        body_start = header.end()
+        body_end = (
+            headers[index + 1].start()
+            if index + 1 < len(headers)
+            else len(liberty_text)
+        )
+        match = _CELL_LEAKAGE_POWER_RE.search(liberty_text, body_start, body_end)
+        if match is None:
+            continue
+        try:
+            value = float(match.group("value"))
+        except ValueError:  # pragma: no cover - regex only matches numbers
+            continue
+        # A later block for the same cell name (should not happen in a
+        # well-formed liberty) overwrites, matching `_parse_liberty_pins`'s
+        # own "last one wins" convention.
+        leakage_by_cell[header.group("name")] = value * unit_scale
+    return leakage_by_cell
+
+
+def _compute_leakage(
+    liberty_path: str, instance_counts_by_type: dict[str, int]
+) -> tuple[float | None, dict[str, float] | None]:
+    """``(leakage_power_nw, leakage_by_type_nw)`` for the response -- issue
+    #1626. Static-leakage-only: no switching/dynamic power, which needs an
+    activity factor this command has no vectors to supply and is explicitly
+    out of scope. Computed as ``sum(cell_leakage_power[cell_type] *
+    instance_count[cell_type])`` over the response's own
+    ``instance_counts_by_type``, read from the same resolved liberty this
+    module already loaded for ``dfflibmap``/``abc -liberty`` -- no second
+    liberty fetch, no new PDK lookup.
+
+    Returns ``(0.0, {})`` -- a real, not-fabricated zero, matching
+    ``area_um2``'s own "``0.0`` for a design with no relevant cells" posture
+    -- when ``instance_counts_by_type`` is itself empty (nothing to sum in
+    the first place). Returns ``(None, None)`` -- never a fabricated/partial
+    number silently passed off as the whole design's leakage -- when the
+    liberty cannot be read, or when the design *does* instantiate cells but
+    *none* of those types have a ``cell_leakage_power`` entry at all (e.g.
+    gf180mcu_fd_sc_mcu9t5v0, which reports leakage only via per-input-state
+    ``leakage_power()`` groups this module deliberately does not average --
+    see :data:`_CELL_LEAKAGE_POWER_RE`'s docstring). When *some* (not all)
+    instantiated types are covered, the total sums exactly those --
+    ``leakage_by_type_nw`` (the bonus per-type breakdown the issue asks for)
+    names precisely which types were covered, so a caller comparing its own
+    keys against ``instance_counts_by_type`` gets a free check for a
+    ``-dont_use``d or otherwise-unmapped cell type with no leakage data.
+    """
+    if not instance_counts_by_type:
+        return 0.0, {}
+
+    try:
+        with open(liberty_path, encoding="utf-8") as handle:
+            liberty_text = handle.read()
+    except OSError:
+        return None, None
+
+    leakage_by_cell = _parse_liberty_leakage_nw(liberty_text)
+    if not leakage_by_cell:
+        return None, None
+
+    leakage_by_type: dict[str, float] = {}
+    total_nw = 0.0
+    for cell_type, count in instance_counts_by_type.items():
+        per_instance_nw = leakage_by_cell.get(cell_type)
+        if per_instance_nw is None:
+            continue
+        leakage_by_type[cell_type] = per_instance_nw
+        total_nw += per_instance_nw * count
+
+    if not leakage_by_type:
+        return None, None
+    return total_nw, dict(sorted(leakage_by_type.items()))
 
 
 def _resolve_expected_latches(request: dict[str, Any]) -> int:

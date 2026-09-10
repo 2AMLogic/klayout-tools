@@ -600,6 +600,13 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
         report["instance_counts_by_type"]
     )
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
+
+    # The fabricated `_make_pdk_install` liberty carries no
+    # `cell_leakage_power` entries at all (issue #1626) -- `_compute_leakage`
+    # must degrade to `None`/`None`, never a fabricated/partial number.
+    assert report["leakage_power_nw"] is None
+    assert report["leakage_by_type_nw"] is None
+
     assert report["timing"] == {
         "source": "abc_stime",
         "wire_load": None,
@@ -668,6 +675,237 @@ def test_run_synthesize_missing_sequential_area_degrades_to_none(tmp_path, monke
     assert report["area_um2"] == 2951.5808
     assert report["sequential_area_um2"] is None
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
+
+
+#: Real `cell_leakage_power` values for the three cell types
+#: `_GCD_MODULE_STATS["num_cells_by_type"]` instantiates -- captured
+#: verbatim from a live volare `sky130_fd_sc_hd__tt_025C_1v80.lib` install
+#: (issue #1626), so the parsing/summing logic is checked against
+#: byte-accurate real data, matching `_GCD_MODULE_STATS`'s own "real numbers,
+#: no real Yosys binary required" discipline.
+_GCD_LEAKAGE_NW = {
+    "sky130_fd_sc_hd__xor2_1": 0.0016750690,
+    "sky130_fd_sc_hd__a211o_1": 0.0019931500,
+    "sky130_fd_sc_hd__dfrtp_1": 0.0091485880,
+}
+
+
+def _append_leakage_cells(
+    liberty_path: Path, leakage_by_cell: dict[str, float], unit: str = '"1nW"'
+) -> None:
+    """Append `leakage_power_unit`/`cell (...) { cell_leakage_power : ...; }`
+    blocks to a `_make_pdk_install`-fabricated `.lib` file, for a test
+    exercising `_compute_leakage`/`run_synthesize`'s `leakage_power_nw`
+    field end to end without a real Yosys binary."""
+    lines = [f"    leakage_power_unit : {unit};\n"]
+    for cell_name, value_nw in leakage_by_cell.items():
+        lines.append(f"    cell ({cell_name}) {{\n")
+        lines.append(f"        cell_leakage_power : {value_nw:.10f};\n")
+        lines.append("    }\n")
+    liberty_path.write_text(
+        liberty_path.read_text(encoding="utf-8") + "".join(lines), encoding="utf-8"
+    )
+
+
+def test_run_synthesize_reports_leakage_power_nw(tmp_path, monkeypatch):
+    """`leakage_power_nw`/`leakage_by_type_nw` (issue #1626) sum the
+    resolved liberty's own `cell_leakage_power` entries over the response's
+    own `instance_counts_by_type` -- `sum(cell_leakage_power[cell_type] *
+    instance_count[cell_type])`, the same rollup `area_um2` already does."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    liberty_path = (
+        tmp_path
+        / "install"
+        / "sky130A"
+        / "libs.ref"
+        / "sky130_fd_sc_hd"
+        / "lib"
+        / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+    )
+    _append_leakage_cells(liberty_path, _GCD_LEAKAGE_NW)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    expected_total = sum(
+        _GCD_LEAKAGE_NW[cell_type] * count
+        for cell_type, count in _GCD_MODULE_STATS["num_cells_by_type"].items()
+    )
+    assert report["leakage_power_nw"] == pytest.approx(expected_total)
+    assert report["leakage_by_type_nw"] == pytest.approx(_GCD_LEAKAGE_NW)
+    assert list(report["leakage_by_type_nw"]) == sorted(report["leakage_by_type_nw"])
+
+
+def test_run_synthesize_leakage_power_nw_unit_conversion(tmp_path, monkeypatch):
+    """A liberty declaring `leakage_power_unit : 1uW ;` (gf180mcu's own
+    unquoted shape) is converted to nanowatts, not treated as a bare
+    already-nanowatts number."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    liberty_path = (
+        tmp_path
+        / "install"
+        / "sky130A"
+        / "libs.ref"
+        / "sky130_fd_sc_hd"
+        / "lib"
+        / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+    )
+    # 1uW == 1000nW -- a value expressed in microwatt-units below must come
+    # back scaled up by 1000x in the response's nanowatt field.
+    _append_leakage_cells(
+        liberty_path,
+        {"sky130_fd_sc_hd__dfrtp_1": 0.000091485880},
+        unit="1uW",
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["leakage_by_type_nw"]["sky130_fd_sc_hd__dfrtp_1"] == pytest.approx(
+        0.09148588
+    )
+    assert report["leakage_power_nw"] == pytest.approx(50 * 0.09148588)
+
+
+def test_run_synthesize_leakage_power_nw_partial_coverage(tmp_path, monkeypatch):
+    """When only *some* instantiated cell types have a `cell_leakage_power`
+    entry, the total sums exactly those and `leakage_by_type_nw` names which
+    types were covered -- never a fabricated/partial-looking whole-design
+    number silently missing a type's contribution without saying so."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    liberty_path = (
+        tmp_path
+        / "install"
+        / "sky130A"
+        / "libs.ref"
+        / "sky130_fd_sc_hd"
+        / "lib"
+        / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+    )
+    partial = {
+        "sky130_fd_sc_hd__dfrtp_1": _GCD_LEAKAGE_NW["sky130_fd_sc_hd__dfrtp_1"],
+    }
+    _append_leakage_cells(liberty_path, partial)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["leakage_by_type_nw"] == pytest.approx(partial)
+    assert "sky130_fd_sc_hd__xor2_1" not in report["leakage_by_type_nw"]
+    assert "sky130_fd_sc_hd__a211o_1" not in report["leakage_by_type_nw"]
+    assert report["leakage_power_nw"] == pytest.approx(
+        50 * _GCD_LEAKAGE_NW["sky130_fd_sc_hd__dfrtp_1"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Liberty leakage parsing -- direct unit tests for `_compute_leakage`'s own
+# helpers (issue #1626), mirroring `tests/test_restructure.py`'s own
+# `_parse_liberty_pins` unit-test tier.
+# --------------------------------------------------------------------------- #
+
+
+def test_leakage_unit_scale_to_nw_quoted():
+    assert synthesize._leakage_unit_scale_to_nw(
+        '    leakage_power_unit : "1nW";\n'
+    ) == pytest.approx(1.0)
+
+
+def test_leakage_unit_scale_to_nw_unquoted_microwatt():
+    assert synthesize._leakage_unit_scale_to_nw(
+        "  leakage_power_unit : 1uW ;\n"
+    ) == pytest.approx(1000.0)
+
+
+def test_leakage_unit_scale_to_nw_defaults_to_one_when_absent():
+    assert synthesize._leakage_unit_scale_to_nw("library(x) {}\n") == 1.0
+
+
+def test_leakage_unit_scale_to_nw_defaults_to_one_when_unrecognised():
+    assert synthesize._leakage_unit_scale_to_nw('leakage_power_unit : "1Zw";\n') == 1.0
+
+
+def test_parse_liberty_leakage_nw_multiple_cells():
+    liberty_text = (
+        '    leakage_power_unit : "1nW";\n'
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.001;\n"
+        "    }\n"
+        "    cell (buf_2) {\n"
+        "        cell_leakage_power : 0.002;\n"
+        "    }\n"
+    )
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    assert leakage_by_cell == {
+        "buf_1": pytest.approx(0.001),
+        "buf_2": pytest.approx(0.002),
+    }
+
+
+def test_parse_liberty_leakage_nw_cell_without_scalar_is_absent():
+    """A cell with only conditional `leakage_power () { when: ...; }` groups
+    (gf180mcu's own shape) has no `cell_leakage_power` scalar -- it must be
+    absent from the result, never assigned a guessed/averaged value."""
+    liberty_text = (
+        '    leakage_power_unit : "1nW";\n'
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.001;\n"
+        "    }\n"
+        "    cell (buf_2) {\n"
+        "        leakage_power () {\n"
+        '            when : "!A";\n'
+        '            value : "0.0005";\n'
+        "        }\n"
+        "    }\n"
+    )
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    assert leakage_by_cell == {"buf_1": pytest.approx(0.001)}
+    assert "buf_2" not in leakage_by_cell
+
+
+def test_parse_liberty_leakage_nw_last_definition_wins():
+    liberty_text = (
+        '    leakage_power_unit : "1nW";\n'
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.001;\n"
+        "    }\n"
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.005;\n"
+        "    }\n"
+    )
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    assert leakage_by_cell == {"buf_1": pytest.approx(0.005)}
+
+
+def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
+    total, by_type = synthesize._compute_leakage(
+        str(tmp_path / "nope.lib"), {"buf_1": 1}
+    )
+    assert (total, by_type) == (None, None)
+
+
+def test_compute_leakage_no_entries_at_all_degrades_to_none(tmp_path):
+    liberty_path = tmp_path / "empty.lib"
+    liberty_path.write_text('leakage_power_unit : "1nW";\n', encoding="utf-8")
+    total, by_type = synthesize._compute_leakage(str(liberty_path), {"buf_1": 3})
+    assert (total, by_type) == (None, None)
+
+
+def test_compute_leakage_empty_instance_counts_is_zero_not_none(tmp_path):
+    """A design with zero instantiated cells (an edge case, not the common
+    path) sums to `(0.0, {})`, matching `area_um2`'s own "`0.0` for a design
+    with no relevant cells" posture -- `None` is reserved for "no leakage
+    data available for an instantiated type", not "nothing to sum"."""
+    liberty_path = tmp_path / "lib.lib"
+    liberty_path.write_text(
+        '    leakage_power_unit : "1nW";\n'
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.001;\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    total, by_type = synthesize._compute_leakage(str(liberty_path), {})
+    assert (total, by_type) == (0.0, {})
 
 
 def test_run_synthesize_stubbed_success_default_corner(tmp_path, monkeypatch):
@@ -2748,6 +2986,13 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
     assert timing["wire_load"] is None
     assert timing["critical_path_ps"] > 0
     assert timing["delay_target_ps"] is None  # no `constraints` in this request
+
+    # Issue #1626: a real sky130_fd_sc_hd liberty declares `cell_leakage_power`
+    # for every cell, so `leakage_power_nw` must be a real positive number --
+    # never `None` -- with a breakdown covering every instantiated cell type.
+    assert report["leakage_power_nw"] is not None
+    assert report["leakage_power_nw"] > 0
+    assert set(report["leakage_by_type_nw"]) == set(report["instance_counts_by_type"])
 
     if (report["engine_version"] or "").startswith(_WORKED_EXAMPLE_YOSYS):
         assert report["instance_count"] == 347

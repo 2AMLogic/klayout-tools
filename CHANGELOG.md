@@ -16,6 +16,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt synthesize` now reports static leakage power (issue
+  #1626): `leakage_power_nw` — `sum(cell_leakage_power[cell_type] *
+  instance_count[cell_type])` over the response's own
+  `instance_counts_by_type`, in nanowatts — plus a per-cell-type
+  `leakage_by_type_nw` breakdown, both read from the same resolved liberty
+  already loaded for `dfflibmap`/`abc -liberty` (no second liberty fetch,
+  no new PDK lookup). Static leakage only — dynamic/switching power needs an
+  activity factor this command has no vectors to supply, and stays out of
+  scope. Both fields are `null` — never a fabricated or partial-looking
+  number — when the resolved liberty reports no `cell_leakage_power` scalar
+  for *any* instantiated cell type (some libraries, e.g.
+  `gf180mcu_fd_sc_mcu9t5v0`, report leakage only via per-input-state
+  `leakage_power()` groups this command deliberately does not average into
+  one number). Additive; `schema_version` stays `1`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
+  "`leakage_power_nw`/`leakage_by_type_nw`" section.
 - **Fixed**: `klt extract --parasitics --spef` (issue #1627) no longer
   stamps the SPEF header's `*DATE` line with the write's own wall-clock
   time. `*DATE` is optional and informational-only per the IEEE 1481-1999
