@@ -352,6 +352,74 @@ def test_sta_script_lines_with_spef_reads_after_liberty_and_clock():
     assert check_begin_idx < missing_begin_idx < read_spef_idx
 
 
+def test_sta_script_lines_wrap_read_spef_in_annotation_evidence():
+    """Issue #1624: `read_spef` must be surrounded by the evidence
+    scaffolding that lets the response say whether the annotation actually
+    landed -- a `report_checks` fingerprint on either side, markers
+    bracketing the call itself (so the SPEF reader's own warnings land in
+    one delimited stdout region), and a closing
+    `report_parasitic_annotation`."""
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        spef_path="/design/top.spef",
+        spef_net_names=["net_a"],
+    )
+
+    def idx(needle: str) -> int:
+        return next(i for i, ln in enumerate(lines) if needle in ln)
+
+    read_spef_idx = lines.index("read_spef /design/top.spef")
+    assert (
+        idx(post_route_sta._DELAY_PRE_BEGIN)
+        < idx(post_route_sta._DELAY_PRE_END)
+        < idx(post_route_sta._SPEF_READ_BEGIN)
+        < read_spef_idx
+        < idx(post_route_sta._SPEF_READ_END)
+        < idx(post_route_sta._DELAY_POST_BEGIN)
+        < idx(post_route_sta._DELAY_POST_END)
+        < idx(post_route_sta._PARASITIC_ANNOTATION_BEGIN)
+        < idx(post_route_sta._PARASITIC_ANNOTATION_END)
+    )
+    # Both fingerprints must be the *identical* invocation -- a differing
+    # flag would make the two blocks differ for reasons unrelated to
+    # annotation. `-digits 6` (not the default 2) and `min_max` (not
+    # setup-only) are what make the comparison sensitive.
+    fingerprints = [ln for ln in lines if ln.startswith("report_checks")]
+    assert fingerprints == [
+        "report_checks -path_delay min_max -digits 6 -unconstrained",
+        "report_checks -path_delay min_max -digits 6 -unconstrained",
+    ]
+    # `report_parasitic_annotation` is wrapped in `catch` so an OpenSTA
+    # build without the command degrades the derived fields to null rather
+    # than aborting the run.
+    assert any(ln.startswith("catch {report_parasitic_annotation}") for ln in lines)
+
+
+def test_sta_script_lines_no_spef_has_no_annotation_evidence():
+    """None of the issue-#1624 scaffolding is emitted for a run with no
+    `spef` -- there is no annotation to attest to, and the extra
+    `report_checks` would be pure cost."""
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+
+    script = "\n".join(lines)
+    assert post_route_sta._DELAY_PRE_BEGIN not in script
+    assert post_route_sta._SPEF_READ_BEGIN not in script
+    assert post_route_sta._PARASITIC_ANNOTATION_BEGIN not in script
+    assert "report_checks" not in script
+
+
 def test_spef_net_check_lines_uses_unescaped_names_verbatim():
     """The Tcl array that backs the design-side correlation check
     (`klt_spef_have`) must be keyed by the *unescaped* net name --
@@ -462,6 +530,199 @@ def test_parse_spef_missing_nets_no_markers_returns_empty():
 
 
 # --------------------------------------------------------------------------- #
+# Post-`read_spef` annotation evidence (issue #1624).
+# --------------------------------------------------------------------------- #
+
+
+#: Two verbatim `read_spef` reader warnings, copied from a real OpenROAD
+#: 26Q3 run against a SPEF whose flattened names the reader could not
+#: resolve -- the exact failure issue #1624 reports.
+_READER_WARNINGS = [
+    "[WARNING STA-1650] /tmp/top.spef line 16, net "
+    "g_slice\\[0\\].u_slice\\/_02_ not found.",
+    "[WARNING STA-1648] /tmp/top.spef line 18, instance "
+    "g_slice\\[0\\].u_slice\\/_16_:B not found.",
+]
+
+
+def _spef_read_block(*lines: str) -> str:
+    return "\n".join(
+        [
+            post_route_sta._SPEF_READ_BEGIN,
+            *lines,
+            post_route_sta._SPEF_READ_END,
+        ]
+    )
+
+
+def test_spef_reader_warnings_counts_delimited_stdout_region():
+    stdout = "\n".join(
+        [
+            "[WARNING STA-1234] a liberty warning from before read_spef",
+            _spef_read_block(*_READER_WARNINGS),
+            "[WARNING STA-5678] a warning from after read_spef",
+        ]
+    )
+
+    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+
+    # Only the two inside the region count -- the reader is the only thing
+    # running there, but a liberty/clock warning outside it is not evidence
+    # of a failed annotation.
+    assert count == 2
+    assert sample == [line.strip() for line in _READER_WARNINGS]
+
+
+def test_spef_reader_warnings_counts_unknown_codes_inside_region():
+    """Inside the `read_spef` region the SPEF reader is the only thing
+    running, so a warning code this module has never seen still counts --
+    the region check is deliberately broader than the STA-1648/1650 pair."""
+    stdout = _spef_read_block("[WARNING STA-9999] some future reader warning.")
+
+    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+
+    assert count == 1
+    assert sample == ["[WARNING STA-9999] some future reader warning."]
+
+
+def test_spef_reader_warnings_matches_stderr_narrowly():
+    """OpenROAD builds differ in which stream the logger writes to, and
+    stderr cannot be interleaved with the Tcl `puts` markers -- so stderr is
+    matched against the known SPEF-reader codes only."""
+    stdout = _spef_read_block()
+    stderr = "\n".join(
+        [
+            *_READER_WARNINGS,
+            "[WARNING STA-1234] an unrelated warning on stderr",
+        ]
+    )
+
+    count, sample = post_route_sta._spef_reader_warnings(stdout, stderr)
+
+    assert count == 2
+    assert all("STA-16" in line for line in sample)
+
+
+def test_spef_reader_warnings_without_markers_falls_back_to_known_codes():
+    stdout = "\n".join([*_READER_WARNINGS, "[WARNING STA-1234] unrelated"])
+
+    count, _sample = post_route_sta._spef_reader_warnings(stdout, "")
+
+    assert count == 2
+
+
+def test_spef_reader_warnings_sample_is_capped():
+    warnings = [f"[WARNING STA-1650] net n{i} not found." for i in range(50)]
+    stdout = _spef_read_block(*warnings)
+
+    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+
+    assert count == 50
+    assert len(sample) == post_route_sta._SPEF_READER_WARNING_SAMPLE_LIMIT
+
+
+def test_spef_reader_warnings_clean_run_reports_zero():
+    count, sample = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
+
+    assert count == 0
+    assert sample == []
+
+
+def _delay_blocks(pre: str, post: str) -> str:
+    return "\n".join(
+        [
+            post_route_sta._DELAY_PRE_BEGIN,
+            pre,
+            post_route_sta._DELAY_PRE_END,
+            post_route_sta._DELAY_POST_BEGIN,
+            post,
+            post_route_sta._DELAY_POST_END,
+        ]
+    )
+
+
+_UNANNOTATED_PATH = "   0.028072    0.028072 ^ u_a/i1/Y (sky130_fd_sc_hd__inv_2)"
+_ANNOTATED_PATH = "   0.163705    0.163705 ^ u_a/i1/Y (sky130_fd_sc_hd__inv_2)"
+
+
+def test_parse_delay_changed_identical_reports_is_false():
+    """The reported failure mode: `read_spef` ran, but every path is
+    digit-identical to the pre-annotation report."""
+    stdout = _delay_blocks(_UNANNOTATED_PATH, _UNANNOTATED_PATH)
+
+    assert post_route_sta._parse_delay_changed(stdout) is False
+
+
+def test_parse_delay_changed_differing_reports_is_true():
+    stdout = _delay_blocks(_UNANNOTATED_PATH, _ANNOTATED_PATH)
+
+    assert post_route_sta._parse_delay_changed(stdout) is True
+
+
+def test_parse_delay_changed_ignores_blank_line_and_trailing_space_churn():
+    stdout = _delay_blocks(f"\n{_UNANNOTATED_PATH}   \n\n", f"{_UNANNOTATED_PATH}\n")
+
+    assert post_route_sta._parse_delay_changed(stdout) is False
+
+
+def test_parse_delay_changed_missing_markers_is_unknown():
+    assert post_route_sta._parse_delay_changed("no markers here") is None
+
+
+def test_parse_delay_changed_no_paths_is_unknown_not_false():
+    """A design `report_checks` finds no path in produces two identical
+    blocks that say nothing about annotation -- that must degrade to null
+    (unknown), never to a `false` that would call an honest run
+    incomplete."""
+    assert post_route_sta._parse_delay_changed(_delay_blocks("", "")) is None
+    assert (
+        post_route_sta._parse_delay_changed(
+            _delay_blocks("No paths found.", "No paths found.")
+        )
+        is None
+    )
+
+
+def _parasitic_block(text: str) -> str:
+    return "\n".join(
+        [
+            post_route_sta._PARASITIC_ANNOTATION_BEGIN,
+            text,
+            post_route_sta._PARASITIC_ANNOTATION_END,
+        ]
+    )
+
+
+def test_parse_parasitic_annotation_reads_both_counts():
+    stdout = _parasitic_block(
+        "Found 3 unannotated drivers.\nFound 1 partially unannotated drivers."
+    )
+
+    assert post_route_sta._parse_parasitic_annotation(stdout) == (3, 1)
+
+
+def test_parse_parasitic_annotation_partial_line_is_not_the_total():
+    """`Found 3 partially unannotated drivers.` must not be misread as the
+    (absent) unannotated-driver total."""
+    stdout = _parasitic_block("Found 3 partially unannotated drivers.")
+
+    assert post_route_sta._parse_parasitic_annotation(stdout) == (None, 3)
+
+
+def test_parse_parasitic_annotation_missing_block_is_unknown():
+    assert post_route_sta._parse_parasitic_annotation("nothing here") == (None, None)
+
+
+def test_parse_parasitic_annotation_unsupported_command_is_unknown():
+    """An OpenSTA build without `report_parasitic_annotation` leaves the
+    `catch`-guarded block empty -- both fields degrade to null."""
+    assert post_route_sta._parse_parasitic_annotation(_parasitic_block("")) == (
+        None,
+        None,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Stubbed-OpenROAD end-to-end: response envelope.
 # --------------------------------------------------------------------------- #
 
@@ -486,7 +747,19 @@ def _stub_openroad_success(
     hold_violations: int = 0,
     spef_check: tuple[int, int, int, int] | None = None,
     spef_missing_nets: list[str] | None = None,
+    spef_reader_warnings: list[str] | None = None,
+    spef_delay_changed: bool = True,
+    spef_parasitic_annotation: tuple[int, int] | None = (0, 0),
+    spef_stderr: str = "",
 ) -> None:
+    """Stand in for one `openroad` run.
+
+    When `spef_check` is given, the stub also emits the issue-#1624
+    annotation-evidence blocks a real run emits around `read_spef` -- by
+    default the shape of a *successful* annotation (no reader warnings, a
+    delay report that moved, zero unannotated drivers), so a test that only
+    varies the name-correlation counts still exercises the full gate.
+    """
     metrics = metrics if metrics is not None else _STA_METRICS
 
     def fake_run(cmd, **kwargs):
@@ -507,6 +780,14 @@ def _stub_openroad_success(
         ]
         if spef_check is not None:
             a, b, c, d = spef_check
+            post_delay = _ANNOTATED_PATH if spef_delay_changed else _UNANNOTATED_PATH
+            annotation_lines = []
+            if spef_parasitic_annotation is not None:
+                unannotated, partial = spef_parasitic_annotation
+                annotation_lines = [
+                    f"Found {unannotated} unannotated drivers.",
+                    f"Found {partial} partially unannotated drivers.",
+                ]
             stdout_lines = [
                 post_route_sta._SPEF_NET_CHECK_BEGIN,
                 f"{a} {b}",
@@ -515,9 +796,23 @@ def _stub_openroad_success(
                 post_route_sta._SPEF_MISSING_NETS_BEGIN,
                 *(spef_missing_nets or []),
                 post_route_sta._SPEF_MISSING_NETS_END,
+                post_route_sta._DELAY_PRE_BEGIN,
+                _UNANNOTATED_PATH,
+                post_route_sta._DELAY_PRE_END,
+                post_route_sta._SPEF_READ_BEGIN,
+                *(spef_reader_warnings or []),
+                post_route_sta._SPEF_READ_END,
+                post_route_sta._DELAY_POST_BEGIN,
+                post_delay,
+                post_route_sta._DELAY_POST_END,
+                post_route_sta._PARASITIC_ANNOTATION_BEGIN,
+                *annotation_lines,
+                post_route_sta._PARASITIC_ANNOTATION_END,
                 *stdout_lines,
             ]
-        return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
+        return fake_completed(
+            returncode=0, stdout="\n".join(stdout_lines), stderr=spef_stderr
+        )
 
     monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
 
@@ -593,6 +888,170 @@ def test_run_sta_with_spef_reports_annotation(tmp_path, monkeypatch):
     assert annotation["annotation_warning"] is None
     # No missing-net sample when correlation is already complete.
     assert annotation["design_nets_missing_sample"] == []
+    # ... and the post-`read_spef` evidence agrees (issue #1624): the reader
+    # kept every record, the delays moved, and OpenSTA holds parasitics for
+    # every driver.
+    assert annotation["reader_warning_count"] == 0
+    assert annotation["reader_warning_sample"] == []
+    assert annotation["delay_changed"] is True
+    assert annotation["unannotated_driver_count"] == 0
+    assert annotation["partially_unannotated_driver_count"] == 0
+
+
+def test_run_sta_reader_warnings_force_annotation_incomplete(tmp_path, monkeypatch):
+    """Regression for issue #1624: name correlation is *perfect* (every
+    design net is named by the SPEF) but `read_spef` discarded the records
+    it could not resolve, leaving the delays bit-identical to the
+    unannotated run. `annotation_complete` must be `false`, not `true`."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(139, 152, 139, 139),
+        spef_reader_warnings=_READER_WARNINGS,
+        spef_delay_changed=False,
+        spef_parasitic_annotation=(139, 0),
+    )
+
+    report = run_sta(request_path)
+
+    annotation = report["spef_annotation"]
+    # The pre-`read_spef` name correlation still reports a clean sheet --
+    # that is exactly why it could not catch this on its own.
+    assert annotation["design_nets_annotated"] == annotation["design_nets_total"]
+    assert annotation["design_nets_missing_sample"] == []
+
+    assert annotation["annotation_complete"] is False
+    assert annotation["reader_warning_count"] == 2
+    assert annotation["reader_warning_sample"] == [
+        line.strip() for line in _READER_WARNINGS
+    ]
+    assert annotation["delay_changed"] is False
+    assert annotation["unannotated_driver_count"] == 139
+    warning = annotation["annotation_warning"]
+    assert "read_spef discarded annotation for 2" in warning
+    assert "byte-identical" in warning
+    assert "139 driver(s) with no parasitics" in warning
+    assert "NOT a real-parasitics measurement" in warning
+
+
+def test_run_sta_reader_warnings_on_stderr_force_incomplete(tmp_path, monkeypatch):
+    """Some OpenROAD builds log the reader's warnings to stderr, where they
+    cannot be interleaved with the script's own stdout markers -- they must
+    still gate `annotation_complete` (issue #1624)."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(4, 4, 4, 4),
+        spef_stderr="\n".join(_READER_WARNINGS),
+    )
+
+    annotation = run_sta(request_path)["spef_annotation"]
+
+    assert annotation["reader_warning_count"] == 2
+    assert annotation["annotation_complete"] is False
+
+
+def test_run_sta_unchanged_delays_alone_force_annotation_incomplete(
+    tmp_path, monkeypatch
+):
+    """The delay fingerprint is decisive on its own: even with no reader
+    warning and no unannotated driver, a post-`read_spef` timing report
+    byte-identical to the pre-`read_spef` one means these are the
+    unannotated numbers (issue #1624, suggested fix 3)."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch, spef_check=(9, 9, 9, 9), spef_delay_changed=False
+    )
+
+    annotation = run_sta(request_path)["spef_annotation"]
+
+    assert annotation["delay_changed"] is False
+    assert annotation["reader_warning_count"] == 0
+    assert annotation["annotation_complete"] is False
+    assert "byte-identical" in annotation["annotation_warning"]
+
+
+def test_run_sta_unannotated_drivers_force_annotation_incomplete(tmp_path, monkeypatch):
+    """`report_parasitic_annotation`'s post-`read_spef` accounting gates too
+    (issue #1624, suggested fix 2) -- OpenSTA saying it holds no parasitics
+    for a driver outranks a pre-`read_spef` name match."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch, spef_check=(9, 9, 9, 9), spef_parasitic_annotation=(7, 0)
+    )
+
+    annotation = run_sta(request_path)["spef_annotation"]
+
+    assert annotation["unannotated_driver_count"] == 7
+    assert annotation["annotation_complete"] is False
+    assert "7 driver(s) with no parasitics" in annotation["annotation_warning"]
+
+
+def test_run_sta_partially_unannotated_drivers_do_not_gate(tmp_path, monkeypatch):
+    """`partially_unannotated_driver_count` is reported but deliberately
+    does not gate: a complete, correctly-read SPEF routinely reports a
+    non-zero partial count (load pins with no distinct RC node of their
+    own), verified against a real OpenROAD 26Q3 run -- gating on it would
+    fail every honest annotation."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch, spef_check=(9, 9, 9, 9), spef_parasitic_annotation=(0, 3)
+    )
+
+    annotation = run_sta(request_path)["spef_annotation"]
+
+    assert annotation["partially_unannotated_driver_count"] == 3
+    assert annotation["annotation_complete"] is True
+    assert annotation["annotation_warning"] is None
+
+
+def test_run_sta_missing_evidence_blocks_degrade_to_null_not_false(
+    tmp_path, monkeypatch
+):
+    """An OpenROAD build that emits none of the new blocks (no
+    `report_parasitic_annotation`, no fingerprint markers) reports the
+    derived fields as `null` -- unknown, not a fabricated `false` -- and
+    falls back to the name-correlation verdict alone."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef\n")
+        with open(cmd[4], "w", encoding="utf-8") as handle:
+            json.dump(_STA_METRICS, handle)
+        return fake_completed(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    post_route_sta._SPEF_NET_CHECK_BEGIN,
+                    "5 5",
+                    "5 5",
+                    post_route_sta._SPEF_NET_CHECK_END,
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    annotation = run_sta(request_path)["spef_annotation"]
+
+    assert annotation["delay_changed"] is None
+    assert annotation["unannotated_driver_count"] is None
+    assert annotation["partially_unannotated_driver_count"] is None
+    assert annotation["reader_warning_count"] == 0
+    assert annotation["annotation_complete"] is True
 
 
 def test_run_sta_with_spef_incomplete_annotation_warns(tmp_path, monkeypatch):
@@ -728,6 +1187,33 @@ def test_cli_text_format_prints_missing_nets_sample(tmp_path, monkeypatch, capsy
     assert "spef_annotation:" in out
     assert "warning:" in out
     assert "missing nets (sample): a[10], u_sub/net" in out
+
+
+def test_cli_text_format_prints_annotation_evidence(tmp_path, monkeypatch, capsys):
+    """Issue #1624: the text summary must show the evidence behind
+    `complete=False`, not just the verdict -- a caller reading the human
+    output should see *why* the annotation is not trustworthy."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(139, 152, 139, 139),
+        spef_reader_warnings=_READER_WARNINGS,
+        spef_delay_changed=False,
+        spef_parasitic_annotation=(139, 0),
+    )
+
+    exit_code = main(["sta", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "complete=False" in out
+    assert "delay_changed: False" in out
+    assert "reader_warning_count: 2" in out
+    assert "unannotated_driver_count: 139 (partial: 0)" in out
+    assert "reader warnings (sample):" in out
+    assert "[WARNING STA-1650]" in out
 
 
 def test_cli_error_exits_one_with_json_error(tmp_path, monkeypatch, capsys):
