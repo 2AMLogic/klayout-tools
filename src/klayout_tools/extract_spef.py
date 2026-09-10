@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -44,11 +43,17 @@ class ExtractError(Exception):
 SPEF_STANDARD = "IEEE 1481-1999"
 
 
-def _spef_timestamp() -> str:
-    """An ISO-8601 UTC timestamp for the SPEF ``*DATE`` header line --
-    informational only (no downstream field parses it back), matching every
-    other timestamp this repo's writers emit."""
-    return datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y")
+#: Fixed value for the SPEF ``*DATE`` header line (issue #1627). ``*DATE``
+#: is informational only -- no downstream reader parses it back -- and is
+#: optional in the IEEE 1481-1999 header grammar. This used to be
+#: ``datetime.now(timezone.utc)``, which made two runs of identical
+#: extraction against an unchanged layout byte-different in exactly this
+#: one line, defeating content-addressed provenance / CI diff-checking.
+#: Fixed rather than omitted (or gated behind a new CLI flag) so every run
+#: is reproducible by default, matching the same-class GDS2 timestamp fix
+#: in :func:`klayout_tools._layout.write_layout` (#1367/#320) -- that fix
+#: is also unconditional, no opt-in flag.
+_SPEF_DATE_PLACEHOLDER = "Thu Jan 01 00:00:00 1970"
 
 
 #: Every character SPEF's own identifier grammar (IEEE 1481-1999) does *not*
@@ -599,7 +604,7 @@ def _write_spef(
     lines: list[str] = [
         f'*SPEF "{SPEF_STANDARD}"',
         f'*DESIGN "{design_name}"',
-        f'*DATE "{_spef_timestamp()}"',
+        f'*DATE "{_SPEF_DATE_PLACEHOLDER}"',
         '*VENDOR "2AM Logic"',
         '*PROGRAM "klt extract"',
         f'*VERSION "{klt_version or "unknown"}"',

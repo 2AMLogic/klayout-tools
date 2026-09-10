@@ -3218,6 +3218,14 @@ net-name-only form is still a syntactically valid file.
 correlation is actually *checked* (an explicit "N of M nets annotated"
 count against the linked design), not merely assumed here.
 
+**Reproducible output (issue #1627).** The header's `*DATE` line is a fixed
+placeholder (`"Thu Jan 01 00:00:00 1970"`), never the write's own wall-clock
+time — `*DATE` is optional and informational-only per the SPEF grammar (no
+reader parses it back), so this is a no-op for correctness but means running
+the same `--spef` request twice in a row against an unchanged input layout
+produces byte-identical output, matching the same reproducibility guarantee
+`klt place-and-route`'s DEF→GDS merge makes for GDS2 output (issue #1367).
+
 **`--def-net-connections <def_path>` (issue #961)** parses a routed DEF's
 own `NETS` section for each net's real `(instance, pin)` connections — in
 the same instance/pin spelling the linked gate-level design already uses,

@@ -14337,6 +14337,13 @@ def test_spef_header_shape(tmp_path):
     text = spef_path.read_text()
     assert '*SPEF "IEEE 1481-1999"' in text
     assert f'*DESIGN "{report["top"]}"' in text
+    # Issue #1627: *DATE must be a fixed placeholder, not a wall-clock
+    # timestamp -- otherwise two runs of identical extraction against an
+    # unchanged layout are not byte-identical, defeating content-addressed
+    # provenance / CI diff-checking. See
+    # test_spef_output_is_byte_reproducible_across_runs below for the
+    # cross-run assertion this line only spot-checks.
+    assert '*DATE "Thu Jan 01 00:00:00 1970"' in text
     assert "*DIVIDER /" in text
     assert "*DELIMITER :" in text
     assert "*BUS_DELIMITER [ ]" in text
@@ -14344,6 +14351,33 @@ def test_spef_header_shape(tmp_path):
     assert "*C_UNIT 1 FF" in text
     assert "*R_UNIT 1 OHM" in text
     assert "*L_UNIT 1 HENRY" in text
+
+
+def test_spef_output_is_byte_reproducible_across_runs(tmp_path):
+    """Issue #1627: the SPEF header's `*DATE` line must not carry a
+    wall-clock timestamp, so re-running identical extraction against an
+    unchanged input layout twice produces byte-identical `.spef` output.
+    Before the fix, `_spef_timestamp()` called `datetime.now(timezone.utc)`,
+    which made the two runs differ in exactly that one header line -- the
+    same class of gap fixed for GDS2 output by `_layout.write_layout()`
+    (#1367/#320). The fix removes the wall-clock read entirely (a fixed
+    placeholder, not merely a coarser-grained one), so unlike #1367's GDS2
+    fix this test does not need to cross a wall-clock second boundary to
+    reliably reproduce the pre-fix bug."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path_1 = tmp_path / "inv1_run1.spef"
+    spef_path_2 = tmp_path / "inv1_run2.spef"
+
+    for spef_path in (spef_path_1, spef_path_2):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            output=str(tmp_path / f"{spef_path.stem}.spice"),
+            spef_output=str(spef_path),
+        )
+
+    assert spef_path_1.read_bytes() == spef_path_2.read_bytes()
 
 
 def test_spef_one_d_net_block_per_parasitics_net_entry(tmp_path):
