@@ -3241,6 +3241,18 @@ every same-named `*D_NET` block would overclaim. `klt place-and-route`'s
 own `post_route_spef` pass does this automatically, sourcing the DEF path
 from the same routed DEF `declared_pins` already reads.
 
+A `generate`-block hierarchy's net/instance names are Verilog-*escaped*
+identifiers — the DEF `NETS` section spells them with a backslash before
+every special character (`g_slice\[0\].u_slice\/_08_`), the same
+per-character convention SPEF's own grammar uses. `--def-net-connections`
+un-escapes both the net name and each `(instance, pin)` ref back to their
+real spelling (`g_slice[0].u_slice/_08_`) before matching them against
+this extraction's own layout-label-derived, already-unescaped net names —
+mirroring `klt sta`'s SPEF correlation check, which un-escapes SPEF
+identifiers the same way (issue #1623). Without this, an escaped DEF
+identifier never matches its unescaped extraction-side counterpart, and
+the affected net silently gets no `*CONN` block at all.
+
 **Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped
 internal node, a `*CONN`-declared instance-pin identifier, or (for an
 unambiguously-named port net) the port's own bare name — never a bare

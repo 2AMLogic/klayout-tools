@@ -183,6 +183,33 @@ _DEF_NET_CONN_RE = re.compile(r"\(\s*(\S+)\s+(\S+)\s*\)")
 #: (``\+foo``) or a coordinate never triggers the split.
 _DEF_NET_CLAUSE_RE = re.compile(r"(?:^|\s)\+(?=\s|$)")
 
+#: A DEF ``NETS`` record spells a Verilog-*escaped* identifier (what a
+#: ``generate`` block produces) using the same per-character backslash
+#: convention SPEF's own grammar does -- a ``\`` before every character
+#: outside ``[A-Za-z0-9_]`` (compare :data:`_SPEF_ESCAPE_RE` above; issue
+#: #1623's own reproduction: ``g_slice\[0\].u_slice\/_08_``). This is the
+#: exact inverse of that escaping -- the same regex ``post_route_sta.py``'s
+#: ``_unescape_spef_name`` uses to recover a SPEF ``*D_NET`` name's real,
+#: design-side spelling (issue #1422) -- duplicated here rather than
+#: imported since ``extract_spef.py`` has no dependency on
+#: ``post_route_sta.py`` (see this module's own docstring).
+_DEF_ESCAPED_CHAR_RE = re.compile(r"\\(.)")
+
+
+def _unescape_def_name(name: str) -> str:
+    """Strip a DEF identifier's per-character backslash escaping (see
+    :data:`_DEF_ESCAPED_CHAR_RE`) back to its real spelling, e.g.
+    ``g_slice\\[0\\].u_slice\\/_08_`` -> ``g_slice[0].u_slice/_08_``. A
+    no-op for a DEF identifier with no escaped characters.
+
+    Required so :func:`def_net_instance_pins`'s returned net-name keys (and
+    instance/pin refs) compare equal against ``parasitics_report``'s own
+    layout-label-derived, already-*unescaped* net names -- without this, an
+    escaped DEF identifier and its unescaped extraction-side counterpart
+    never match, so :func:`_write_spef` silently emits no ``*CONN`` block
+    for that net at all (issue #1623)."""
+    return _DEF_ESCAPED_CHAR_RE.sub(r"\1", name)
+
 
 def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...]]:
     """Parse ``def_path``'s own ``NETS`` section for each net's real
@@ -252,7 +279,7 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
             # points (see `_DEF_NET_CLAUSE_RE`).
             body = _DEF_NET_CLAUSE_RE.split(" ".join(current_body), maxsplit=1)[0]
             pairs = [
-                (ref, pin)
+                (_unescape_def_name(ref), _unescape_def_name(pin))
                 for ref, pin in _DEF_NET_CONN_RE.findall(body)
                 if ref != "PIN"
             ]
@@ -272,7 +299,7 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
         start_match = _DEF_NET_START_RE.match(line)
         if start_match:
             _flush()
-            current_net = start_match.group(1)
+            current_net = _unescape_def_name(start_match.group(1))
         if current_net is not None:
             current_body.append(line)
         if line.rstrip().endswith(";"):

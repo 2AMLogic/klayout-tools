@@ -14613,6 +14613,32 @@ def test_def_net_instance_pins_ignores_single_line_routed_geometry(tmp_path):
     assert def_net_instance_pins(str(def_path)) == {"n1": (("u1", "Y"), ("u2", "A"))}
 
 
+def test_def_net_instance_pins_unescapes_def_identifiers(tmp_path):
+    """A `generate`-block hierarchy's net/instance names are Verilog-escaped
+    identifiers, spelled in the DEF `NETS` section with a backslash before
+    every special character (`g_slice\\[0\\].u_slice\\/_08_`) -- the same
+    per-character convention SPEF's own grammar uses. The returned mapping's
+    net-name key and instance/pin refs must come back *unescaped*
+    (`g_slice[0].u_slice/_08_`) so they compare equal against
+    `parasitics_report`'s own layout-label-derived, already-unescaped net
+    names; otherwise `_write_spef` never finds a lookup match and silently
+    emits no `*CONN` for the net at all (issue #1623)."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 1 ;\n"
+        r"    - g_slice\[0\].u_slice\/_08_ "
+        r"( g_slice\[0\].u_slice\/_18_ B1 ) ( g_slice\[0\].u_slice\/_17_ Y ) "
+        "+ USE SIGNAL ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {
+        "g_slice[0].u_slice/_08_": (
+            ("g_slice[0].u_slice/_18_", "B1"),
+            ("g_slice[0].u_slice/_17_", "Y"),
+        )
+    }
+
+
 def test_def_net_instance_pins_empty_when_no_nets_section(tmp_path):
     def_path = tmp_path / "top.def"
     def_path.write_text("DESIGN top ;\nEND DESIGN\n")
