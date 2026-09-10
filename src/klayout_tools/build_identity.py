@@ -190,17 +190,6 @@ def identity() -> dict[str, Any]:
     return _checkout_identity()
 
 
-def git_commit() -> str | None:
-    """The commit this build was made from, or ``None`` if unrecoverable."""
-    return identity()["git_commit"]
-
-
-def is_release() -> bool | None:
-    """Tri-state: ``True`` for a confirmed tagged-release build, ``False`` for
-    a confirmed non-release build, ``None`` when unanswerable."""
-    return identity()["is_release"]
-
-
 def format_build_version(package_version: str, ident: dict[str, Any]) -> str:
     """Render ``package_version`` plus ``ident``'s build identity as a PEP 440
     version string.
