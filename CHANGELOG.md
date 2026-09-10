@@ -24,6 +24,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   layout now produce byte-identical `.spef` output, matching the
   reproducibility guarantee `klt place-and-route`'s DEF→GDS merge already
   makes for GDS2 output (issue #1367).
+- **Added**: `klt sta` now reports `worst_hold_slack_ns`/
+  `total_negative_hold_slack_ns` (issue #1625), the hold-side counterparts of
+  the existing setup-only `worst_slack_ns`/`total_negative_slack_ns` — from
+  `report_worst_slack_metric -hold`/`report_tns_metric -hold`, mirroring
+  `klt place-and-route`'s own `worst_hold_slack_ns` field name/pairing
+  convention so the two commands' output correlates without a naming
+  mismatch. Previously the only hold-side signal in the response was
+  `hold_violation_count`, a count that could say a corner *has* a hold
+  violation but not rank corners by hold margin or identify the binding hold
+  corner in a characterization sweep. `report_tns_metric -hold` ->
+  `timing__hold__tns` was verified live against a real `openroad/orfs`
+  container (not assumed by analogy) before shipping. Purely additive; no
+  `schema_version` bump. See [`docs/cli/sta.md`](docs/cli/sta.md).
 - **Added**: new verb `klt clip` (issue #1608): writes a subset of an
   existing GDSII/OASIS stream back out as its own top-cell stream, either a
   micrometre bounding-box region (`--region`, the same inline-JSON shape

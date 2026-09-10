@@ -113,6 +113,8 @@ binary onto `$PATH`.
   "spef_path": null,
   "worst_slack_ns": -0.15321,
   "total_negative_slack_ns": -1.20144,
+  "worst_hold_slack_ns": 0.03812,
+  "total_negative_hold_slack_ns": 0.0,
   "fmax_mhz": 512.3456,
   "setup_violation_count": 3,
   "hold_violation_count": 0,
@@ -137,7 +139,8 @@ binary onto `$PATH`.
 | `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `def_path` | string | The resolved, absolute path to the analysed DEF. |
 | `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given. |
-| `worst_slack_ns` / `total_negative_slack_ns` | number \| null | WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. |
+| `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. |
+| `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
 | `setup_violation_count` / `hold_violation_count` | integer | Parsed from `report_check_types -max_delay/-min_delay -violators` stdout. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |

@@ -226,6 +226,8 @@ def run_sta(
 
     worst_slack = metrics.get("timing__setup__ws")
     tns = metrics.get("timing__setup__tns")
+    worst_hold_slack = metrics.get("timing__hold__ws")
+    hold_tns = metrics.get("timing__hold__tns")
     fmax_hz = metrics.get("timing__fmax")
     power_w = metrics.get("power__total")
     clock_skew = metrics.get("clock__skew__setup")
@@ -249,6 +251,12 @@ def run_sta(
         "spef_path": spef_path,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
+        "worst_hold_slack_ns": (
+            round(worst_hold_slack, 5) if worst_hold_slack is not None else None
+        ),
+        "total_negative_hold_slack_ns": (
+            round(hold_tns, 5) if hold_tns is not None else None
+        ),
         "fmax_mhz": round(fmax_hz / 1e6, 4) if fmax_hz is not None else None,
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
@@ -557,7 +565,9 @@ def _sta_script_lines(
         lines.append(f"read_spef {spef_path}")
     lines += [
         "report_worst_slack_metric -setup",
+        "report_worst_slack_metric -hold",
         "report_tns_metric -setup",
+        "report_tns_metric -hold",
         "report_fmax_metric",
         "report_power_metric",
         "report_clock_skew_metric -setup",

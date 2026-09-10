@@ -307,6 +307,9 @@ def test_sta_script_lines_order_no_spef():
     assert lines[3] == "read_liberty /pdk/lib.lib"
     assert lines[4] == "create_clock -name clk -period 2.5 [get_ports clk]"
     assert "report_worst_slack_metric -setup" in lines
+    assert "report_worst_slack_metric -hold" in lines
+    assert "report_tns_metric -setup" in lines
+    assert "report_tns_metric -hold" in lines
     assert "report_fmax_metric" in lines
     assert "report_power_metric" in lines
     assert "report_clock_skew_metric -setup" in lines
@@ -466,6 +469,8 @@ def test_parse_spef_missing_nets_no_markers_returns_empty():
 _STA_METRICS = {
     "timing__setup__ws": -0.15,
     "timing__setup__tns": -1.2,
+    "timing__hold__ws": 0.03812,
+    "timing__hold__tns": 0.0,
     "timing__fmax": 500_000_000.0,
     "power__total": 0.0084,
     "clock__skew__setup": 0.021,
@@ -529,6 +534,8 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert report["status"] == "ok"
     assert report["worst_slack_ns"] == -0.15
     assert report["total_negative_slack_ns"] == -1.2
+    assert report["worst_hold_slack_ns"] == 0.03812
+    assert report["total_negative_hold_slack_ns"] == 0.0
     assert report["fmax_mhz"] == 500.0
     assert report["setup_violation_count"] == 1
     assert report["hold_violation_count"] == 0
@@ -542,6 +549,29 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
     assert provenance["input"]["content_hash"] is not None
+
+
+def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
+    """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
+    ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
+    design OpenSTA finds no hold path to measure in), the two new fields
+    degrade to ``null`` -- the same null-handling the existing setup-side
+    fields already have, never a ``KeyError``."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    metrics_without_hold = {
+        "timing__setup__ws": -0.15,
+        "timing__setup__tns": -1.2,
+        "timing__fmax": 500_000_000.0,
+        "power__total": 0.0084,
+        "clock__skew__setup": 0.021,
+    }
+    _stub_openroad_success(monkeypatch, metrics=metrics_without_hold)
+
+    report = run_sta(request_path)
+
+    assert report["worst_slack_ns"] == -0.15
+    assert report["worst_hold_slack_ns"] is None
+    assert report["total_negative_hold_slack_ns"] is None
 
 
 def test_run_sta_with_spef_reports_annotation(tmp_path, monkeypatch):
@@ -675,6 +705,8 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status: ok" in out
     assert "worst_slack_ns: -0.15" in out
+    assert "worst_hold_slack_ns: 0.03812" in out
+    assert "total_negative_hold_slack_ns: 0.0" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
 
