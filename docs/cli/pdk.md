@@ -1072,15 +1072,18 @@ A PDK also ships **its own** KLayout PyCell (Python PCell) library — the
 authoritative drawing of that PDK's devices — as importable Python packages
 under `libs.tech/klayout/python/<package>/`. Whether that library actually
 *imports* in the current environment depends on things `find`/`list` cannot
-see from the filesystem alone: a third-party compat layer klt does not ship
-(the real sky130A `cells` → `gdsfactory`/`kfactory` case), or a git-submodule
-directory that checked out empty because the install came from a release
-tarball that does not carry submodule contents (the real ihp-sg13g2
-`sg13g2_pycell_lib` → `cni`/`pycell4klayout-api` case). Before issue #1610,
-the only way to see this was `klt gen --list-pdk-pcells` — a generation
-command, not a PDK-inspection one. `pcell-check` is the same probe, reachable
-from `klt pdk` directly, so checking PDK health never requires invoking `klt
-gen`.
+see from the filesystem alone: a genuine third-party compat layer klt does
+not ship (the real sky130A `cells` → `gdsfactory`/`kfactory` case), or a
+PDK-bundled compat shim (the real ihp-sg13g2 `sg13g2_pycell_lib` → `cni` /
+`pycell4klayout-api` case) that either needs an extra, PDK-relative `sys.path`
+entry klt already knows to add (issue #1630 — see
+[`docs/cli/gen.md`](gen.md#phase-1-scope-packages-that-import-with-no-extra-compat-layer)),
+or checked out empty because the install came from a release tarball (or an
+uninitialized git submodule) that does not carry submodule contents. Before
+issue #1610, the only way to see this was `klt gen --list-pdk-pcells` — a
+generation command, not a PDK-inspection one. `pcell-check` is the same
+probe, reachable from `klt pdk` directly, so checking PDK health never
+requires invoking `klt gen`.
 
 ```
 $ klt pdk pcell-check --pdk ihp-sg13g2
@@ -1089,10 +1092,16 @@ pcell_lib_dir: /…/ihp-sg13g2/libs.tech/klayout/python
 
 importable:
   SG13_native_pcell_lib  (package: sg13g2_native_pcell_lib, 12 cell(s))
+  SG13_pycell_lib  (package: sg13g2_pycell_lib, 6 cell(s))
+```
 
+A `pycell4klayout-api` that checked out empty (a release tarball, or an
+uninitialized git submodule) instead reports:
+
+```
 unavailable:
-  sg13g2_pycell_lib
-    vendored submodule directory 'sg13g2_pycell_lib/cni' appears empty -- PDK was likely installed from a release tarball that does not include git submodule contents
+  sg13g2_pycell_lib  [missing: cni]
+    requires the PDK's own bundled compat shim 'cni' (normally vendored at 'pycell4klayout-api', next to 'sg13g2_pycell_lib'), but that directory is missing or appears empty in this install -- likely an uninitialized git submodule. This is a compat shim the PDK itself vendors, not a third-party PyPI dependency klt would need to add.
 ```
 
 ```json
@@ -1111,8 +1120,8 @@ unavailable:
   "unavailable": [
     {
       "package": "sg13g2_pycell_lib",
-      "missing_dependency": null,
-      "reason": "vendored submodule directory 'sg13g2_pycell_lib/cni' appears empty -- PDK was likely installed from a release tarball that does not include git submodule contents"
+      "missing_dependency": "cni",
+      "reason": "requires the PDK's own bundled compat shim 'cni' (normally vendored at 'pycell4klayout-api', next to 'sg13g2_pycell_lib'), but that directory is missing or appears empty in this install -- likely an uninitialized git submodule. This is a compat shim the PDK itself vendors, not a third-party PyPI dependency klt would need to add."
     }
   ]
 }
@@ -1128,27 +1137,41 @@ successful "this PDK ships no PyCell library", not an error.
 
 ### The `reason` string: missing dependency vs. empty vendored directory
 
-`unavailable[].reason` distinguishes two causes, rather than reporting every
-failure with the same generic import-error text (issue #1610):
+`unavailable[].reason` distinguishes three causes, rather than reporting every
+failure with the same generic import-error text:
 
-- **A genuinely missing third-party dependency** (`missing_dependency` is
-  non-`null`): `"requires Python module '<name>', which is not importable in
-  this environment"` — the fix is installing that module per the PDK's own
-  setup docs; klt does not vendor or reimplement it (see
-  [`docs/cli/gen.md`](gen.md#phase-1-scope-packages-that-import-with-no-extra-compat-layer)).
-- **An empty or near-empty vendored (git-submodule) directory** — the
-  package's own directory tree contains a subdirectory that exists but has
-  no files, or whose only file is an empty/comment-only `__init__.py`-shaped
-  stub, exactly what an uninitialized git submodule mount point looks like
-  on disk: `"vendored submodule directory '<package>[/<subpath>]' appears
-  empty -- PDK was likely installed from a release tarball that does not
-  include git submodule contents"`. The fix here is a different one from the
-  missing-dependency case: re-fetch the PDK with its submodules initialized
-  (`git submodule update --init --recursive`, or use a checksum-verified
-  clone script like [`scripts/fetch-ihp-sg13g2.sh`](../../pdks/README.md)
-  rather than a plain release-tarball download), not `pip install` anything.
-  When the failure also names a missing Python module, both facts are
-  reported together.
+- **A genuinely missing third-party dependency** (issue #1535,
+  `missing_dependency` is non-`null`): `"requires Python module '<name>',
+  which is not importable in this environment"` — the fix is installing that
+  module per the PDK's own setup docs; klt does not vendor or reimplement it
+  (see [`docs/cli/gen.md`](gen.md#phase-1-scope-packages-that-import-with-no-extra-compat-layer)).
+- **An empty or near-empty vendored (git-submodule) directory** (issue
+  #1610) *nested inside the failing package's own directory tree* — a
+  subdirectory that exists but has no files, or whose only file is an
+  empty/comment-only `__init__.py`-shaped stub, exactly what an uninitialized
+  git submodule mount point looks like on disk: `"vendored submodule
+  directory '<package>[/<subpath>]' appears empty -- PDK was likely installed
+  from a release tarball that does not include git submodule contents"`.
+- **A PDK-bundled compat shim that is missing or empty at its own, separate
+  expected location** (issue #1630) — e.g. `sg13g2_pycell_lib`'s
+  `pycell4klayout-api`, which sits *beside* the package rather than nested
+  inside it, one level deeper than the `sys.path` entry klt normally adds:
+  `"requires the PDK's own bundled compat shim '<module>' (normally vendored
+  at '<path>', next to '<package>'), but that directory is missing or appears
+  empty in this install -- likely an uninitialized git submodule. This is a
+  compat shim the PDK itself vendors, not a third-party PyPI dependency klt
+  would need to add."` klt already adds this shim's own directory to
+  `sys.path` before importing the package that needs it (no manual step
+  required once it is populated) — this reason only fires when that
+  directory is still missing or empty afterward.
+
+Both of the latter two cases have the same fix, distinct from the
+missing-dependency case: re-fetch the PDK with its submodules initialized
+(`git submodule update --init --recursive`, or use a checksum-verified clone
+script like [`scripts/fetch-ihp-sg13g2.sh`](../../pdks/README.md) rather than
+a plain release-tarball download), not `pip install` anything. When the
+failure also names a missing Python module, that fact is reported alongside
+the reason for both.
 
 Anything else keeps its own exception text (never a traceback).
 

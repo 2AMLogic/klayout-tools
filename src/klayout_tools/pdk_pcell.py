@@ -20,9 +20,9 @@ Phase 1 scope (issue #1535): only PyCell packages that import with no
 dependency beyond the Python standard library, ``pya``/``klayout``, and
 whatever klt itself already depends on. A package that needs a third-party
 compat layer klt does not ship is reported as *unavailable*, naming the
-missing module -- klt does not vendor or reimplement that shim. Both real
-PDK PyCell libraries available when this module was written land in exactly
-that bucket:
+missing module -- klt does not vendor or reimplement that shim. One real PDK
+PyCell library available when this module was written lands in exactly that
+bucket:
 
 * ``sky130A`` -- ``libs.tech/klayout/python/cells`` is a **plain-``pya``**
   tree (``class pfet(pya.PCellDeclarationHelper)``, registered by
@@ -31,10 +31,28 @@ that bucket:
   ``import gdsfactory`` (and ``kfactory``), third-party packages klt has no
   dependency on. The PDK's own autoload macro checks for exactly that import
   and disables the PCells when it is absent.
-* ``ihp-sg13g2`` -- ``sg13g2_native_pcell_lib`` is likewise plain-``pya``, but
-  transitively imports ``sg13g2_pycell_lib``, whose first statement is
-  ``from cni.tech import Tech`` (the ``pycell4klayout-api`` compat layer,
-  wired in as an uninitialized git submodule).
+
+``ihp-sg13g2`` is a **different** case, and gets different handling (issue
+#1630): ``sg13g2_native_pcell_lib`` is plain-``pya``, but transitively imports
+``sg13g2_pycell_lib``, whose first statement is ``from cni.tech import Tech``.
+That ``cni`` compat layer is *not* a third-party PyPI package klt would need
+to vendor -- it ships **inside the PDK itself**, at
+``libs.tech/klayout/python/pycell4klayout-api/source/python/cni``, just one
+level deeper than the ``sys.path`` entry :func:`_load_libraries` adds for
+every other package. :data:`_VENDOR_COMPAT_SHIMS` below names that extra
+directory per affected package name (never PDK-wide, so this never touches
+sky130A's unrelated ``gdsfactory`` gap) so it is added to ``sys.path`` before
+the import is attempted, and separately flags a ``tkinter``-presence crash
+inside that same vendor shim's ``PCellWrapper.coerce_parameters`` (a
+Cadence-Tcl-callback code path that is unconditionally taken whenever
+``"tkinter" in sys.modules`` -- true by default in KLayout's embedded Python,
+even in headless batch mode with no widget ever created) that must be worked
+around immediately before instantiating any PCell from such a package. A
+vendored shim directory that turns out to be empty (an uninitialized git
+submodule, as opposed to merely not on ``sys.path`` yet) still reports via
+the existing empty-submodule diagnosis below, now phrased to say plainly that
+it is a compat shim the PDK itself vendors -- not a third-party dependency
+klt would need to add -- since the fix differs completely between the two.
 
 Pure library: every function returns plain, JSON-serialisable Python data and
 never prints -- serialisation lives in ``cli/gen_cmd.py``, per this repo's
@@ -46,6 +64,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
@@ -81,6 +100,57 @@ _SETTABLE_PARAM_TYPES = frozenset({0, 1, 2, 3, 4, 6})
 #: :func:`klayout_tools.gen._coerce_param` does not handle (no built-in
 #: generator exposes a layer parameter -- they are all in ``_HIDDEN_PARAMS``).
 _TYPE_LAYER = 4
+
+
+@dataclass(frozen=True)
+class _VendorCompatShim:
+    """A PDK-bundled compat layer one specific vendor PyCell *package* needs
+    (issue #1630) -- as opposed to a genuine third-party PyPI dependency klt
+    has no relationship to (sky130A's ``gdsfactory``/``kfactory``).
+
+    Keyed by *package name* in :data:`_VENDOR_COMPAT_SHIMS`, never applied
+    PDK-wide: this must only ever affect the package(s) that actually need
+    it (ihp-sg13g2's ``sg13g2_pycell_lib``), never sky130A's unrelated
+    ``cells`` package or any other PDK's packages.
+    """
+
+    #: Path segments, relative to the PDK's PyCell ``lib_dir``, of the
+    #: directory to add to ``sys.path`` before importing the package --
+    #: ihp-sg13g2 nests its ``cni`` compat layer one level deeper
+    #: (``pycell4klayout-api/source/python/cni``) than the packages
+    #: :func:`_load_libraries` already knows how to reach.
+    sys_path_hint: tuple[str, ...]
+
+    #: Path segments, relative to ``lib_dir``, of the shim's own top-level
+    #: vendored directory (``pycell4klayout-api``) -- checked for the
+    #: uninitialized-git-submodule signature :func:`_find_empty_vendor_subdir`
+    #: already detects, distinct from ``package``'s own directory.
+    shim_root: tuple[str, ...]
+
+    #: The top-level module name this shim provides (``"cni"``) -- used both
+    #: to recognise "this *is* the shim's own module failing to import" (as
+    #: opposed to some unrelated missing dependency of the same package) and
+    #: to name it in diagnostic text.
+    provides_module: str
+
+    #: Whether a ``tkinter``-presence crash is known to occur inside this
+    #: shim's PCell instantiation path (verified against ihp-sg13g2's
+    #: ``pycell4klayout-api``, see the module docstring) and must be worked
+    #: around immediately before instantiating any PCell from the package.
+    needs_tkinter_workaround: bool
+
+
+#: Packages (by name, as returned by :func:`klayout_tools.pdk._pcell_packages_in`)
+#: known to need a PDK-bundled compat shim beyond what :func:`_load_libraries`
+#: puts on ``sys.path`` by default. See :class:`_VendorCompatShim`.
+_VENDOR_COMPAT_SHIMS: dict[str, _VendorCompatShim] = {
+    "sg13g2_pycell_lib": _VendorCompatShim(
+        sys_path_hint=("pycell4klayout-api", "source", "python"),
+        shim_root=("pycell4klayout-api",),
+        provides_module="cni",
+        needs_tkinter_workaround=True,
+    ),
+}
 
 #: Per-process memo of ``lib_dir -> (libraries, unavailable)``. Registering a
 #: ``pya.Library`` is process-global and permanent, and ``sys.modules`` caches
@@ -421,11 +491,12 @@ def _load_libraries(
     unavailable: list[dict[str, Any]] = []
     for package in _pcell_packages_in(memo_key):
         package_dir = os.path.join(memo_key, package)
+        _apply_sys_path_hint(memo_key, package)
         before = set(kdb.Library.library_names())
         try:
             module = importlib.import_module(package)
         except Exception as exc:  # noqa: BLE001 - reported, never re-raised
-            unavailable.append(_unavailable_entry(package, exc, package_dir))
+            unavailable.append(_unavailable_entry(package, exc, package_dir, memo_key))
             continue
 
         new_names = set(kdb.Library.library_names()) - before
@@ -433,7 +504,9 @@ def _load_libraries(
             failure = _instantiate_library_classes(module, package, kdb)
             new_names = set(kdb.Library.library_names()) - before
             if not new_names and failure is not None:
-                unavailable.append(_unavailable_entry(package, failure, package_dir))
+                unavailable.append(
+                    _unavailable_entry(package, failure, package_dir, memo_key)
+                )
                 continue
 
         for name in sorted(new_names):
@@ -444,6 +517,30 @@ def _load_libraries(
     loaded.sort(key=lambda entry: entry["library"])
     _LOAD_MEMO[memo_key] = (loaded, unavailable)
     return loaded, unavailable
+
+
+def _apply_sys_path_hint(lib_dir: str, package: str) -> None:
+    """Add ``package``'s known compat-shim directory (if any) to ``sys.path``
+    before it is imported (issue #1630).
+
+    A no-op for every package with no :data:`_VENDOR_COMPAT_SHIMS` entry --
+    in particular sky130A's ``cells``, whose missing ``gdsfactory`` is a
+    genuine third-party PyPI dependency with no PDK-relative directory to
+    add. Scoped to exactly the named package, never applied ``lib_dir``-wide,
+    so it cannot change import behaviour for any other package.
+
+    Harmless when the hinted directory does not exist on disk (an
+    uninitialized-submodule install, or a PDK layout this table's author
+    never saw): :func:`_unavailable_entry` classifies that case separately,
+    from :data:`_VendorCompatShim.shim_root`, once the subsequent import
+    still fails.
+    """
+    shim = _VENDOR_COMPAT_SHIMS.get(package)
+    if shim is None:
+        return
+    hint_path = os.path.join(lib_dir, *shim.sys_path_hint)
+    if hint_path not in sys.path:
+        sys.path.insert(0, hint_path)
 
 
 def _instantiate_library_classes(
@@ -481,25 +578,33 @@ def _instantiate_library_classes(
 
 
 def _unavailable_entry(
-    package: str, exc: BaseException, package_dir: str
+    package: str, exc: BaseException, package_dir: str, lib_dir: str
 ) -> dict[str, Any]:
     """Turn a vendor-package load failure into the JSON ``unavailable`` shape.
 
     A :class:`ModuleNotFoundError` names the module it could not find, which
-    is the actionable half of the answer ("install ``cni``"), so it gets a
-    dedicated ``missing_dependency`` field and a message shaped around it.
+    is the actionable half of the answer, so it gets a dedicated
+    ``missing_dependency`` field and a message shaped around it -- but which
+    message depends on *what kind* of dependency it is (issue #1630):
 
-    Before falling back to that generic message, ``package_dir`` (the
-    package's own directory under ``lib_dir``) is checked for the signature
-    of an **uninitialized git submodule** (issue #1610): a directory that
-    exists but is completely empty, or whose only content is an empty/
-    near-empty ``__init__.py``-shaped stub -- exactly what a submodule mount
-    point looks like when a PDK was installed from a release tarball that
-    does not carry submodule contents (verified against ihp-sg13g2's
-    ``sg13g2_pycell_lib``, whose PyCell code reaches a nested,
-    submodule-vendored ``pycell4klayout-api`` compat layer). When found, the
-    reason names that specific, actionable cause instead of a bare
-    import-failure message.
+    1. ``package_dir`` (the package's own directory under ``lib_dir``) is
+       checked first for the signature of an **uninitialized git submodule**
+       (issue #1610): a directory that exists but is completely empty, or
+       whose only content is an empty/near-empty ``__init__.py``-shaped
+       stub -- exactly what a submodule mount point looks like when a PDK
+       was installed from a release tarball that does not carry submodule
+       contents. When found, the reason names that specific, actionable
+       cause instead of a bare import-failure message.
+    2. Otherwise, if ``package`` is listed in :data:`_VENDOR_COMPAT_SHIMS`
+       and the missing module is the one that shim provides, the reason
+       distinguishes "the PDK's own bundled compat shim is missing/empty at
+       its expected location" (:func:`_classify_missing_compat_shim`) from
+       the generic case below -- this is a compat shim the PDK itself
+       vendors, not a third-party PyPI dependency klt would need to add, so
+       the actionable fix is completely different.
+    3. Otherwise it is a genuine third-party PyPI dependency klt has no
+       relationship to (sky130A's ``gdsfactory``/``kfactory``), reported with
+       the original generic message.
 
     Anything else keeps its own text -- never a traceback.
     """
@@ -515,13 +620,57 @@ def _unavailable_entry(
         if missing:
             reason += f" (import failed looking for module '{missing}')"
     elif missing:
-        reason = (
+        shim_reason = _classify_missing_compat_shim(package, missing, lib_dir)
+        reason = shim_reason or (
             f"requires Python module '{missing}', which is not importable in "
             "this environment"
         )
     else:
         reason = f"{type(exc).__name__}: {exc}"
     return {"package": package, "missing_dependency": missing, "reason": reason}
+
+
+def _classify_missing_compat_shim(
+    package: str, missing: str, lib_dir: str
+) -> str | None:
+    """Distinguish "PDK-bundled compat shim, just not populated where
+    expected" from a genuine third-party PyPI dependency (issue #1630).
+
+    Returns ``None`` -- defer to :func:`_unavailable_entry`'s generic
+    missing-dependency message -- unless ``package`` has a
+    :data:`_VENDOR_COMPAT_SHIMS` entry *and* ``missing`` is the module that
+    specific shim provides (never for some other, genuinely third-party
+    dependency the same package happens to also need).
+    """
+    shim = _VENDOR_COMPAT_SHIMS.get(package)
+    if shim is None:
+        return None
+    if missing != shim.provides_module and not missing.startswith(
+        f"{shim.provides_module}."
+    ):
+        return None
+
+    shim_root_dir = os.path.join(lib_dir, *shim.shim_root)
+    shim_root_display = "/".join(shim.shim_root)
+    if not os.path.isdir(shim_root_dir) or (
+        _find_empty_vendor_subdir(shim_root_dir) is not None
+    ):
+        return (
+            f"requires the PDK's own bundled compat shim '{shim.provides_module}' "
+            f"(normally vendored at '{shim_root_display}', next to '{package}'), "
+            "but that directory is missing or appears empty in this install -- "
+            "likely an uninitialized git submodule. This is a compat shim the "
+            "PDK itself vendors, not a third-party PyPI dependency klt would "
+            "need to add."
+        )
+
+    hint_display = "/".join(shim.sys_path_hint)
+    return (
+        f"requires Python module '{missing}' -- klt already added this PDK's "
+        f"own bundled compat shim directory ('{hint_display}') to sys.path, "
+        "but the module still failed to import; this looks like a bug in the "
+        "vendor shim itself, not a missing third-party dependency."
+    )
 
 
 def _find_empty_vendor_subdir(package_dir: str) -> str | None:
@@ -639,6 +788,35 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+def _apply_tkinter_workaround(package: str) -> None:
+    """Work around a ``tkinter``-presence crash inside a compat shim's PCell
+    instantiation path, for a package listed in :data:`_VENDOR_COMPAT_SHIMS`
+    with ``needs_tkinter_workaround=True`` (issue #1630).
+
+    ihp-sg13g2's ``pycell4klayout-api`` shim (``sg13g2_pycell_lib``'s ``cni``
+    dependency) branches its ``PCellWrapper.coerce_parameters`` into a
+    Cadence-Tcl-callback path whenever ``"tkinter" in sys.modules`` -- true
+    by default in KLayout's embedded Python even in pure headless batch mode
+    with no widget ever created -- and that path unconditionally raises
+    (``self._callBackPath`` is never set outside a real Cadence integration).
+    That branch is never applicable to this open-source, headless flow, so
+    removing ``tkinter`` from ``sys.modules`` immediately before
+    instantiation is a reliable, narrowly-scoped workaround.
+
+    Applied unconditionally before *every* PCell instantiation from an
+    affected package -- not just specific device types -- since the crash is
+    unconditional on ``tkinter``'s mere presence, not on any PCell-specific
+    parameter. A no-op for every package with no matching
+    :data:`_VENDOR_COMPAT_SHIMS` entry, or whose entry does not need it, so
+    this can never affect sky130A or ihp-sg13g2's own
+    ``sg13g2_native_pcell_lib``.
+    """
+    shim = _VENDOR_COMPAT_SHIMS.get(package)
+    if shim is None or not shim.needs_tkinter_workaround:
+        return
+    sys.modules.pop("tkinter", None)
+
+
 def _produce_pdk_pcell(
     entry: dict[str, Any],
     pcell_name: str,
@@ -674,6 +852,7 @@ def _produce_pdk_pcell(
 
     layout = kdb.Layout()
     layout.dbu = resolve_pdk_dbu(pdk_info) or _FALLBACK_DBU_UM
+    _apply_tkinter_workaround(entry["package"])
     try:
         variant = layout.add_pcell_variant(handle, declaration.id(), values)
         top = layout.create_cell(cell_name)

@@ -15,10 +15,11 @@ package/library/class name (see :func:`_unique`); tests must never reuse one.
 
 import itertools
 import json
+import sys
 
 import pytest
 
-from klayout_tools import pdk
+from klayout_tools import pdk, pdk_pcell
 from klayout_tools.cli import main
 from klayout_tools.pdk_pcell import (
     PdkPCellError,
@@ -422,6 +423,115 @@ def test_generate_pdk_pcell_accepts_a_layer_param(tmp_path):
     layout = kdb.Layout()
     layout.read(str(output))
     assert layout.layer_infos()[0].to_s() == "67/20"
+
+
+# --------------------------------------------------------------------------- #
+# The `tkinter`-presence workaround for `_VENDOR_COMPAT_SHIMS` packages
+# (issue #1630)
+# --------------------------------------------------------------------------- #
+
+#: A toy vendor PCell that raises if `tkinter` is present in `sys.modules`
+#: at produce time -- mirrors pycell4klayout-api's own
+#: `PCellWrapper.coerce_parameters` branch, which is unconditionally taken
+#: (and crashes) whenever `"tkinter" in sys.modules`, even in pure headless
+#: batch mode with no widget ever created.
+_TKINTER_SENSITIVE_PACKAGE = """\
+import sys
+
+import pya
+
+
+class {klass}(pya.PCellDeclarationHelper):
+    def __init__(self):
+        super().__init__()
+
+    def display_text_impl(self):
+        return "{cell}"
+
+    def produce_impl(self):
+        if "tkinter" in sys.modules:
+            raise RuntimeError("tkinter must not be present at produce time")
+        index = self.cell.layout().layer(pya.LayerInfo(1, 0))
+        self.cell.shapes(index).insert(pya.DBox(0.0, 0.0, 1.0, 1.0))
+
+
+class {libklass}(pya.Library):
+    def __init__(self):
+        super().__init__()
+        self.description = "toy tkinter-sensitive vendor PCell library"
+        self.layout().register_pcell("{cell}", {klass}())
+        self.register("{library}")
+
+
+{libklass}()
+"""
+
+
+def test_generate_pdk_pcell_applies_tkinter_workaround_for_known_compat_shim(
+    tmp_path, monkeypatch
+):
+    """A package listed in `_VENDOR_COMPAT_SHIMS` with
+    `needs_tkinter_workaround=True` must have `tkinter` removed from
+    `sys.modules` before KLayout calls into the vendor PCell's
+    `produce_impl` -- otherwise ihp-sg13g2's `pycell4klayout-api` shim
+    crashes on every PCell in the package."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    package = _unique("tkshimlib")
+    library = _unique("tk_vendor_lib")
+    klass = _unique("TkBox")
+    libklass = _unique("TkLibrary")
+    _write_package(
+        variant_dir,
+        package,
+        _TKINTER_SENSITIVE_PACKAGE.format(
+            klass=klass, libklass=libklass, library=library, cell="TkBox"
+        ),
+    )
+    monkeypatch.setitem(
+        pdk_pcell._VENDOR_COMPAT_SHIMS,
+        package,
+        pdk_pcell._VendorCompatShim(
+            sys_path_hint=(),
+            shim_root=(),
+            provides_module="unused",
+            needs_tkinter_workaround=True,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "tkinter", object())
+
+    output = tmp_path / "out.gds"
+    report = generate_pdk_pcell(
+        {
+            "pdk_pcell": f"{library}/TkBox",
+            "pdk": {"variant": "ihp-sg13g2", "root": str(root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["bbox_um"]["x1"] == pytest.approx(1.0)
+
+
+def test_generate_pdk_pcell_leaves_tkinter_untouched_for_unrelated_packages(
+    tmp_path, monkeypatch
+):
+    """Regression guard: the `tkinter` workaround is scoped to packages
+    named in `_VENDOR_COMPAT_SHIMS` -- an ordinary toy vendor package (no
+    entry in that table) must never have `tkinter` touched."""
+    root, _package, library, cell = _toy_pdk(tmp_path)
+    sentinel = object()
+    monkeypatch.setitem(sys.modules, "tkinter", sentinel)
+
+    generate_pdk_pcell(
+        {
+            "pdk_pcell": f"{library}/{cell}",
+            "pdk": {"variant": "sky130A", "root": str(root)},
+            "options": {"output": str(tmp_path / "out.gds")},
+        }
+    )
+
+    assert sys.modules["tkinter"] is sentinel
 
 
 def test_cli_pdk_pcell_json_contract_keys(tmp_path, capsys):
