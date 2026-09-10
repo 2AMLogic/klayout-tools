@@ -537,8 +537,7 @@ def _resolve_pins(
             ]
             if len(search_layers) > 1:
                 sibling_desc = ", ".join(
-                    f"{layer}/{datatype}"
-                    for layer, datatype in search_layers[1:]
+                    f"{layer}/{datatype}" for layer, datatype in search_layers[1:]
                 )
                 searched_desc = (
                     f"declared layer {layer_tuple[0]}/{layer_tuple[1]} or any "
