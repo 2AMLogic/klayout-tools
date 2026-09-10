@@ -28,6 +28,14 @@
 # Palace helper repos) -- none of those are needed to resolve the PDK or run
 # its shipped KLayout/ngspice/netgen views, only optional adjunct tooling.
 #
+# This fetch alone does not make the PDK simulatable: it ships the
+# Verilog-A compact-model *sources* (`libs.tech/verilog-a/`) but no
+# compiled OSDI shared library ngspice can actually load. Run
+# `scripts/fetch-sg13g2-sim-toolchain.sh` (issue #1628) after this script
+# to fetch a checksum-pinned OpenVAF-Reloaded compiler, compile those
+# sources into `libs.tech/ngspice/osdi/`, and preflight-check the ngspice
+# on PATH against the OSDI ABI version that compiler emits.
+#
 # Usage: scripts/fetch-ihp-sg13g2.sh [--force]
 
 set -euo pipefail

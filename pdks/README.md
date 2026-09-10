@@ -20,6 +20,7 @@ upstream release so every checkout gets identical data.
 | `cell-netlists/` | Real, transistor-level SPICE netlists + primitive device models for the 7 klayout-tools.org gallery standard cells, pinned per-file (not a whole-release tarball) and checksum-verified by `scripts/fetch-cell-netlists.sh` — see that script and `scripts/gallery_signals.py`'s module docstring |
 | `sky130-liberty/` | A minimal, open_pdks-layout `sky130A` variant holding the real `sky130_fd_sc_hd__tt_025C_1v80.lib` Yosys/ABC need for `klt synthesize`'s GCD worked example, fetched by `scripts/fetch-sky130-liberty.sh` — see that script's header comment for why this can't come from `lambdapdk/` (issue #417) |
 | `ihp-open-pdk/` | [IHP-GmbH/IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK) (Apache-2.0) at the release tag pinned in `scripts/fetch-ihp-sg13g2.sh` — the **real SG13G2** PDK, a distinct project from lambdapdk's `ihp130` (see "`ihp130` vs. SG13G2" below); fetched by `scripts/fetch-ihp-sg13g2.sh` (issue #522) |
+| `ihp-open-pdk/ihp-sg13g2/libs.tech/ngspice/osdi/` | Compiled OSDI shared libraries (`psp103.osdi`, `psp103_nqs.osdi`, `r3_cmc.osdi`, `mosvar.osdi`) for the PDK's own Verilog-A compact models above — **not shipped by the fetch tarball**, compiled locally by `scripts/fetch-sg13g2-sim-toolchain.sh` (issue #1628) from a checksum-pinned OpenVAF-Reloaded (`openvaf-r`) build |
 
 lambdapdk bundles, per process: KLayout layer properties and tech
 files, DRC/PEX decks, and standard-cell library data (LEF/GDS/liberty)
@@ -47,6 +48,18 @@ than folded into `fetch-pdks.sh`.
 `PDK_ROOT=pdks/ihp-open-pdk PDK=ihp-sg13g2` resolves the normal way (issue
 #522 taught the resolver this shape and its flat, `PDK_ROOT` pointed
 directly at `ihp-sg13g2/` variant too — see `docs/cli/pdk.md`'s "Scope").
+
+**Fetching the PDK alone does not make it simulatable.** `fetch-ihp-sg13g2.sh`
+ships the PDK's Verilog-A compact-model *sources*
+(`libs.tech/verilog-a/{psp103,psp103_nqs,r3_cmc,mosvar}`) but no compiled
+`.osdi` — ngspice can only instantiate those models through OSDI shared
+libraries. Run `scripts/fetch-sg13g2-sim-toolchain.sh` after
+`fetch-ihp-sg13g2.sh` to fetch a checksum-pinned OpenVAF-Reloaded compiler,
+compile the models into `libs.tech/ngspice/osdi/`, and preflight-check the
+`ngspice` on `PATH` against the OSDI ABI version that compiler emits (issue
+#1628) — it fails closed with the concrete version floor named, rather than
+letting a too-old ngspice reject every model deep in a simulation run with
+an opaque `NGSPICE only supports OSDI v0.3 but ... targets v0.4!`.
 
 ### `ihp130` (lambdapdk) vs. SG13G2 (IHP-Open-PDK) — do not conflate these
 
