@@ -822,9 +822,7 @@ def test_leakage_unit_scale_to_nw_defaults_to_one_when_absent():
 
 
 def test_leakage_unit_scale_to_nw_defaults_to_one_when_unrecognised():
-    assert (
-        synthesize._leakage_unit_scale_to_nw('leakage_power_unit : "1Zw";\n') == 1.0
-    )
+    assert synthesize._leakage_unit_scale_to_nw('leakage_power_unit : "1Zw";\n') == 1.0
 
 
 def test_parse_liberty_leakage_nw_multiple_cells():
@@ -889,9 +887,7 @@ def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
 def test_compute_leakage_no_entries_at_all_degrades_to_none(tmp_path):
     liberty_path = tmp_path / "empty.lib"
     liberty_path.write_text('leakage_power_unit : "1nW";\n', encoding="utf-8")
-    total, by_type = synthesize._compute_leakage(
-        str(liberty_path), {"buf_1": 3}
-    )
+    total, by_type = synthesize._compute_leakage(str(liberty_path), {"buf_1": 3})
     assert (total, by_type) == (None, None)
 
 
