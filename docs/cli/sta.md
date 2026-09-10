@@ -145,10 +145,10 @@ binary onto `$PATH`.
 | `setup_violation_count` / `hold_violation_count` | integer | Parsed from `report_check_types -max_delay/-min_delay -violators` stdout. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
-| `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Net-name correlation" below for the field shapes. |
+| `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def`. |
 
-## Net-name correlation (`spef_annotation`)
+## Annotation evidence (`spef_annotation`)
 
 A caller-supplied `spef` has the same name-mismatch risk `klt
 place-and-route`'s own `post_route_spef` in-flow pass documents: a SPEF
@@ -156,9 +156,14 @@ written by a different tool (or a different net-naming convention) can
 declare net names that do not exist in the linked OpenSTA design, in which
 case `read_spef` silently annotates nothing for those nets while
 `worst_slack_ns`/etc. still report a number that looks like a real
-measurement. `klt sta` runs the identical two-directional sanity check
-`place-and-route`'s in-flow pass runs, **before** `read_spef` so a partial
-Tcl failure can't also silently skip the check:
+measurement.
+
+`klt sta` answers that with **four independent pieces of evidence**, three
+of which gate `annotation_complete`. One of them — the name-correlation
+pair — is the two-directional check `place-and-route`'s in-flow pass also
+runs; the other three (issue #1624) are measured *around and after*
+`read_spef`, because name correlation alone cannot see whether `read_spef`
+accepted anything:
 
 ```json
 "spef_annotation": {
@@ -167,10 +172,17 @@ Tcl failure can't also silently skip the check:
   "design_nets_annotated": 537,
   "design_nets_total": 537,
   "design_nets_missing_sample": [],
+  "reader_warning_count": 0,
+  "reader_warning_sample": [],
+  "unannotated_driver_count": 0,
+  "partially_unannotated_driver_count": 4,
+  "delay_changed": true,
   "annotation_complete": true,
   "annotation_warning": null
 }
 ```
+
+### 1. Name correlation (before `read_spef`)
 
 - `nets_annotated`/`nets_total` — SPEF-side: how many of the SPEF's own
   declared net names exist in the linked design (`get_nets -quiet` per
@@ -178,22 +190,77 @@ Tcl failure can't also silently skip the check:
   gate-level design never has, so this ratio is expected to sit below 1
   even on a perfectly-correlated run.
 - `design_nets_annotated`/`design_nets_total` — design-side: how many of
-  the nets OpenSTA times are actually named by the SPEF. **Check this pair
-  before trusting the timing numbers above.**
+  the nets OpenSTA times are actually named by the SPEF.
 - `design_nets_missing_sample` — a capped sample (at most 20) of the
   design's own net names (`get_full_name`'s spelling — never SPEF's
   backslash-escaped one) that did **not** correlate against the SPEF's
-  declared name set. Always `[]` when `annotation_complete` is `true`; a
+  declared name set. Always `[]` when the design-side pair is equal; a
   diagnostic aid for spotting *why* annotation is incomplete (e.g. a
   systematic naming-convention mismatch) without a separate DEF/SPEF
   cross-check. Not exhaustive on a design with more than 20 uncorrelated
   nets — a non-empty list here is a symptom to investigate, not a full
   accounting.
-- `annotation_complete` — `true` only when the design-side pair is equal
-  and non-zero.
+
+**This pair alone is not proof of annotation.** It is measured *before*
+`read_spef`, using `get_nets` — a different name resolver than the SPEF
+reader's own. It answers "does the SPEF name the nets this design has", not
+"did `read_spef` accept them". The three checks below answer the latter.
+
+### 2. Reader warnings (during `read_spef`)
+
+- `reader_warning_count` — how many records OpenSTA's SPEF reader parsed and
+  then **discarded** because it could not resolve the name against the
+  linked design (`STA-1650` `net <name> not found.`, `STA-1648` `instance
+  <name>:<pin> not found.`). Any non-zero value forces
+  `annotation_complete: false`: those parasitics are not in the timing.
+- `reader_warning_sample` — up to 5 of those warning lines verbatim, so the
+  offending name spelling is visible without re-running by hand.
+
+### 3. Delay fingerprint (before vs. after `read_spef`)
+
+- `delay_changed` — the identical `report_checks -path_delay min_max -digits
+  6 -unconstrained` report is taken immediately before and immediately after
+  `read_spef` and compared. `true` means the parasitics reached the delay
+  calculator.
+  `false` means every reported path is byte-identical to the *unannotated*
+  run — whatever the other counters say, these are not real-parasitics
+  numbers, and `annotation_complete` is forced to `false`. `null` means
+  unknown (an OpenROAD build that emitted no fingerprint, or a design
+  `report_checks` finds no path in) and never gates.
+
+### 4. Post-`read_spef` accounting
+
+- `unannotated_driver_count` — `report_parasitic_annotation`'s own count of
+  driver pins OpenSTA holds *no* parasitics for after `read_spef`. Non-zero
+  forces `annotation_complete: false`; `null` when the running OpenSTA build
+  has no `report_parasitic_annotation` (the call is `catch`-guarded and the
+  field degrades to `null` rather than failing the run).
+- `partially_unannotated_driver_count` — the companion "partially
+  unannotated" count. **Reported but deliberately not gating**: a complete,
+  correctly-read SPEF routinely reports a non-zero partial count (load pins
+  with no distinct RC node of their own), so gating on it would fail honest
+  runs.
+
+### Verdict
+
+- `annotation_complete` — `true` only when *all* of: the design-side name
+  pair is equal and non-zero, `reader_warning_count` is 0,
+  `delay_changed` is not `false`, and `unannotated_driver_count` is not
+  greater than 0. A `null` (unknown) piece of evidence never forces `false`
+  on its own — but it never manufactures a `true` either, because the
+  name-correlation gate still applies.
 - `annotation_warning` — `null` when complete, otherwise a sentence naming
-  the shortfall and stating that `worst_slack_ns`/etc. are not a
+  every failing check and stating that `worst_slack_ns`/etc. are not a
   real-parasitics measurement to the extent annotation is missing.
+
+> **Historical note (issue #1624).** Before this evidence was added,
+> `annotation_complete` attested *name correlation only*. A SPEF whose
+> flattened names contain the SPEF divider character (e.g. a `generate`-block
+> hierarchy flattened to `g_slice[0].u_slice/_08_`) could correlate perfectly
+> under `get_nets` and still be discarded wholesale by `read_spef`, producing
+> `annotation_complete: true` alongside timing numbers bit-identical to the
+> unannotated run. `reader_warning_count`/`delay_changed`/
+> `unannotated_driver_count` each independently catch that case.
 
 **Net names containing SPEF-reserved characters correlate correctly.**
 Bus-indexed (`data[7:0]`) and hierarchical (`u_submodule/net`) net names are

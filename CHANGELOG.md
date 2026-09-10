@@ -16,6 +16,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt sta`'s `spef_annotation.annotation_complete` (issue #1624)
+  no longer reports `true` for a SPEF OpenSTA's `read_spef` then discards.
+  The field previously rested on a *name-correlation* check measured
+  **before** `read_spef`, with a different name resolver (`get_nets`) than
+  the SPEF reader's own — so a SPEF whose flattened names contain the SPEF
+  divider character (e.g. a `generate`-block hierarchy flattened to
+  `g_slice[0].u_slice/_08_`) could correlate perfectly and still be thrown
+  away wholesale by the reader, yielding `annotation_complete: true`
+  alongside timing numbers bit-identical to the unannotated run. `klt sta`
+  now measures three further pieces of evidence *around and after*
+  `read_spef`, each of which independently forces `annotation_complete:
+  false`: `reader_warning_count` (+ a capped `reader_warning_sample`) —
+  OpenSTA's own `STA-1650`/`STA-1648` "net/instance not found" reader
+  diagnostics, matched on both stdout and stderr; `delay_changed` — the
+  identical `report_checks -path_delay min_max -digits 6 -unconstrained` report taken
+  before and after `read_spef`, `false` when byte-identical; and
+  `unannotated_driver_count` — `report_parasitic_annotation`'s own count of
+  drivers OpenSTA holds no parasitics for. A companion
+  `partially_unannotated_driver_count` is reported but deliberately does
+  **not** gate (a complete, correctly-read SPEF routinely reports a non-zero
+  partial count). Unknown evidence (an OpenROAD build emitting none of these)
+  degrades to `null` and never gates, so the pre-existing name-correlation
+  verdict still applies. Additive; `schema_version` stays `1`. See
+  [`docs/cli/sta.md`](docs/cli/sta.md)'s "Annotation evidence" section.
 - **Added**: `klt synthesize` now reports static leakage power (issue
   #1626): `leakage_power_nw` — `sum(cell_leakage_power[cell_type] *
   instance_count[cell_type])` over the response's own

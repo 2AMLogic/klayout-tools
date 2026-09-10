@@ -107,6 +107,49 @@ _SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 #: misnamed nets doesn't balloon the OpenSTA stdout this module parses.
 _SPEF_MISSING_NETS_SAMPLE_LIMIT = 20
 
+#: Brackets the ``read_spef`` call itself, so every diagnostic OpenSTA's own
+#: SPEF *reader* emits while parsing the file lands in one delimited stdout
+#: region -- see :func:`_spef_reader_warnings` (issue #1624).
+_SPEF_READ_BEGIN = "===KLT_STA_SPEF_READ_BEGIN==="
+_SPEF_READ_END = "===KLT_STA_SPEF_READ_END==="
+#: Brackets the two ``report_checks`` delay fingerprints (before/after
+#: ``read_spef``) whose byte-comparison backs ``delay_changed`` -- see
+#: :func:`_delay_fingerprint_lines` and :func:`_parse_delay_changed`.
+_DELAY_PRE_BEGIN = "===KLT_STA_DELAY_PRE_BEGIN==="
+_DELAY_PRE_END = "===KLT_STA_DELAY_PRE_END==="
+_DELAY_POST_BEGIN = "===KLT_STA_DELAY_POST_BEGIN==="
+_DELAY_POST_END = "===KLT_STA_DELAY_POST_END==="
+#: Brackets ``report_parasitic_annotation``'s own output -- OpenSTA's
+#: *post*-``read_spef`` account of what it actually holds. See
+#: :func:`_parasitic_annotation_lines` / :func:`_parse_parasitic_annotation`.
+_PARASITIC_ANNOTATION_BEGIN = "===KLT_STA_PARASITIC_ANNOTATION_BEGIN==="
+_PARASITIC_ANNOTATION_END = "===KLT_STA_PARASITIC_ANNOTATION_END==="
+#: Any OpenSTA-tagged warning. Only ever matched *inside* the
+#: :data:`_SPEF_READ_BEGIN`/:data:`_SPEF_READ_END` stdout region, where the
+#: SPEF reader is the only thing running.
+_STA_WARNING_RE = re.compile(r"\[WARNING STA-\d+\]")
+#: The SPEF reader's own two warnings -- ``STA-1650`` (``net <name> not
+#: found.``) and ``STA-1648`` (``instance <name>:<pin> not found.``). Matched
+#: stream-wide (not region-delimited) because OpenROAD builds differ in
+#: whether the logger writes to stdout or stderr, and stderr cannot be
+#: interleaved with the Tcl ``puts`` markers above.
+_SPEF_READER_WARNING_RE = re.compile(r"\[WARNING STA-(?:1648|1650)\]")
+#: Upper bound on how many verbatim reader-warning lines are echoed into the
+#: response -- a diagnostic sample, not an exhaustive log (a wholesale
+#: name-convention mismatch emits one per SPEF net).
+_SPEF_READER_WARNING_SAMPLE_LIMIT = 5
+#: ``report_parasitic_annotation``'s own two summary lines. OpenSTA prints
+#: the plural noun unconditionally (``Found 1 unannotated drivers.``); the
+#: optional ``s`` is tolerated anyway.
+_UNANNOTATED_DRIVERS_RE = re.compile(r"Found\s+(\d+)\s+unannotated\s+drivers?\.")
+_PARTIAL_DRIVERS_RE = re.compile(
+    r"Found\s+(\d+)\s+partially\s+unannotated\s+drivers?\."
+)
+#: ``report_checks`` prints this (and nothing else) for a design with no
+#: timing path to report -- an empty fingerprint pair that must degrade
+#: ``delay_changed`` to ``null`` (unknown), never to ``false``.
+_NO_PATHS_FOUND = "no paths found"
+
 
 class PostRouteStaError(Exception):
     """Raised when a standalone STA run cannot be completed: a missing/
@@ -276,38 +319,108 @@ def run_sta(
     }
 
     if spef_path is not None:
-        nets_check = _count_spef_nets_annotated(completed.stdout)
-        nets_annotated, nets_total, design_nets_annotated, design_nets_total = (
-            nets_check
-            if nets_check is not None
-            else (0, len(spef_net_names or []), 0, 0)
-        )
-        annotation_complete = (
-            design_nets_total > 0 and design_nets_annotated == design_nets_total
-        )
-        annotation_warning = None
-        design_nets_missing_sample: list[str] = []
-        if not annotation_complete:
-            annotation_warning = (
-                f"only {design_nets_annotated} of {design_nets_total} nets in "
-                "the linked design are named by this SPEF -- the "
-                "worst_slack_ns/etc. fields above are NOT a real-parasitics "
-                "measurement to the extent annotation is missing."
-            )
-            design_nets_missing_sample = _parse_spef_missing_nets(completed.stdout)
-        response["spef_annotation"] = {
-            "nets_annotated": nets_annotated,
-            "nets_total": nets_total,
-            "design_nets_annotated": design_nets_annotated,
-            "design_nets_total": design_nets_total,
-            "design_nets_missing_sample": design_nets_missing_sample,
-            "annotation_complete": annotation_complete,
-            "annotation_warning": annotation_warning,
-        }
+        response["spef_annotation"] = _spef_annotation_block(completed, spef_net_names)
     else:
         response["spef_annotation"] = None
 
     return response
+
+
+def _spef_annotation_block(
+    completed: subprocess.CompletedProcess,
+    spef_net_names: list[str] | None,
+) -> dict[str, Any]:
+    """Assemble the ``spef_annotation`` response block from one completed
+    OpenROAD run's own output.
+
+    Four independent pieces of evidence, three of which gate
+    ``annotation_complete`` (issue #1624 -- the field previously rested on
+    the *name-correlation* evidence alone, which is measured **before**
+    ``read_spef`` and with a different name resolver than ``read_spef``
+    itself uses, so it could report ``true`` for a SPEF ``read_spef`` then
+    discarded wholesale, leaving every timing number bit-identical to the
+    unannotated run):
+
+    1. **Name correlation** (pre-``read_spef``, :func:`_spef_net_check_lines`)
+       -- does the SPEF name the nets this design has. Gates.
+    2. **Reader warnings** (:func:`_spef_reader_warnings`) -- OpenSTA's own
+       ``STA-1650``/``STA-1648`` "net/instance not found" diagnostics, i.e.
+       annotation it parsed and then threw away. Conclusive; gates.
+    3. **Delay fingerprint** (:func:`_parse_delay_changed`) -- the same
+       ``report_checks`` output before and after ``read_spef``. Identical
+       output means the annotation changed nothing, whatever the cause.
+       Gates (only when both fingerprints actually carry a path).
+    4. **Post-``read_spef`` accounting** (:func:`_parse_parasitic_annotation`)
+       -- ``report_parasitic_annotation``'s own count of drivers OpenSTA
+       holds no parasitics for. ``unannotated_driver_count`` gates;
+       ``partially_unannotated_driver_count`` is reported but deliberately
+       does **not** gate: a complete, correctly-read SPEF routinely reports
+       a non-zero partial count (load pins with no distinct RC node of their
+       own), so gating on it would fail every honest run.
+    """
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+
+    nets_check = _count_spef_nets_annotated(stdout)
+    nets_annotated, nets_total, design_nets_annotated, design_nets_total = (
+        nets_check if nets_check is not None else (0, len(spef_net_names or []), 0, 0)
+    )
+    names_correlated = (
+        design_nets_total > 0 and design_nets_annotated == design_nets_total
+    )
+    reader_warning_count, reader_warning_sample = _spef_reader_warnings(stdout, stderr)
+    delay_changed = _parse_delay_changed(stdout)
+    unannotated_drivers, partial_drivers = _parse_parasitic_annotation(stdout)
+
+    reasons: list[str] = []
+    design_nets_missing_sample: list[str] = []
+    if not names_correlated:
+        reasons.append(
+            f"only {design_nets_annotated} of {design_nets_total} nets in "
+            "the linked design are named by this SPEF"
+        )
+        design_nets_missing_sample = _parse_spef_missing_nets(stdout)
+    if reader_warning_count:
+        reasons.append(
+            f"read_spef discarded annotation for {reader_warning_count} "
+            "SPEF record(s) it could not resolve against the linked design "
+            "(OpenSTA STA-1650/STA-1648 'not found' warnings)"
+        )
+    if delay_changed is False:
+        reasons.append(
+            "every timing path reported after read_spef is byte-identical to "
+            "the same report taken before it, so this run's delays are the "
+            "unannotated ones"
+        )
+    if unannotated_drivers:
+        reasons.append(
+            f"report_parasitic_annotation found {unannotated_drivers} driver(s) "
+            "with no parasitics attached after read_spef"
+        )
+
+    annotation_complete = not reasons
+    annotation_warning = None
+    if reasons:
+        annotation_warning = (
+            "; ".join(reasons) + " -- the worst_slack_ns/etc. fields above are "
+            "NOT a real-parasitics measurement to the extent annotation is "
+            "missing."
+        )
+
+    return {
+        "nets_annotated": nets_annotated,
+        "nets_total": nets_total,
+        "design_nets_annotated": design_nets_annotated,
+        "design_nets_total": design_nets_total,
+        "design_nets_missing_sample": design_nets_missing_sample,
+        "reader_warning_count": reader_warning_count,
+        "reader_warning_sample": reader_warning_sample,
+        "unannotated_driver_count": unannotated_drivers,
+        "partially_unannotated_driver_count": partial_drivers,
+        "delay_changed": delay_changed,
+        "annotation_complete": annotation_complete,
+        "annotation_warning": annotation_warning,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -529,6 +642,49 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     ]
 
 
+def _delay_fingerprint_lines(begin: str, end: str) -> list[str]:
+    """A marker-delimited ``report_checks`` block, emitted once *before* and
+    once *after* ``read_spef`` (issue #1624).
+
+    The two blocks are compared byte for byte
+    (:func:`_parse_delay_changed`): if annotating real parasitics left every
+    reported path digit-identical, the run's delays are the *unannotated*
+    ones no matter what the name-correlation check concluded. ``-digits 6``
+    (rather than the default 2) makes the comparison sensitive enough that a
+    real annotation always moves it; ``-path_delay min_max`` covers the
+    hold-side path too, so a setup-only coincidence cannot mask the failure;
+    and ``-unconstrained`` keeps the fingerprint non-empty (hence the check
+    live) on a design whose paths OpenSTA considers unconstrained, where a
+    bare ``report_checks`` reports only ``No paths found.``.
+
+    Cost is one worst path per path group per direction -- negligible next to
+    the ``read_lef``/``read_def``/``read_liberty`` load this session already
+    does, and paid only when the request carries a ``spef``."""
+    return [
+        f'puts "{begin}"',
+        "report_checks -path_delay min_max -digits 6 -unconstrained",
+        f'puts "{end}"',
+    ]
+
+
+def _parasitic_annotation_lines() -> list[str]:
+    """``report_parasitic_annotation``, marker-delimited -- OpenSTA's own
+    post-``read_spef`` account of how many driver pins it holds no
+    parasitics for (issue #1624).
+
+    Unlike the pre-``read_spef`` name-correlation check, this measures the
+    state ``read_spef`` actually left behind, using OpenSTA's own view of
+    its own parasitics store. Wrapped in ``catch`` so an OpenSTA build
+    without the command degrades the two derived fields to ``null`` rather
+    than aborting the whole run (the command's output still reaches stdout;
+    ``catch`` only swallows a Tcl-level error)."""
+    return [
+        f'puts "{_PARASITIC_ANNOTATION_BEGIN}"',
+        "catch {report_parasitic_annotation} klt_parasitic_annotation_msg",
+        f'puts "{_PARASITIC_ANNOTATION_END}"',
+    ]
+
+
 def _violation_count_lines() -> list[str]:
     return [
         f'puts "{_SETUP_VIOLATIONS_BEGIN}"',
@@ -560,6 +716,14 @@ def _sta_script_lines(
     design as the analysis target itself, the one and only geometry this
     session ever times), then ``read_liberty``/``create_clock`` and,
     optionally, a caller-supplied ``spef``.
+
+    When a ``spef`` is given, ``read_spef`` is wrapped in the annotation
+    *evidence* scaffolding issue #1624 added: the pre-existing name-
+    correlation check, a ``report_checks`` delay fingerprint on either side
+    of the call, markers bracketing the call itself (so the SPEF reader's
+    own warnings land in one delimited stdout region), and a closing
+    ``report_parasitic_annotation``. See :func:`_spef_annotation_block` for
+    what each piece proves.
     """
     lines = [
         f"read_lef {tech_lef}",
@@ -570,7 +734,12 @@ def _sta_script_lines(
     lines += _clock_lines(clock_port, clock_period_ns)
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
+        lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
+        lines.append(f'puts "{_SPEF_READ_BEGIN}"')
         lines.append(f"read_spef {spef_path}")
+        lines.append(f'puts "{_SPEF_READ_END}"')
+        lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
+        lines += _parasitic_annotation_lines()
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
@@ -722,3 +891,111 @@ def _parse_spef_missing_nets(stdout: str) -> list[str]:
         return []
     block = stdout[start_idx:stop_idx]
     return [line.strip() for line in block.splitlines() if line.strip()]
+
+
+def _extract_block(text: str, begin: str, end: str) -> str | None:
+    """The text between the ``begin``/``end`` markers, or ``None`` when
+    either marker is absent (an OpenROAD build that never reached that part
+    of the script, or a caller parsing a stream the markers aren't in)."""
+    try:
+        start_idx = text.index(begin) + len(begin)
+        stop_idx = text.index(end, start_idx)
+    except ValueError:
+        return None
+    return text[start_idx:stop_idx]
+
+
+def _spef_reader_warnings(stdout: str, stderr: str) -> tuple[int, list[str]]:
+    """``(count, capped_sample)`` of the diagnostics OpenSTA's *SPEF reader*
+    emitted while parsing the caller-supplied SPEF -- the conclusive signal
+    that ``read_spef`` parsed a record and then discarded it (issue #1624).
+
+    Two matching strategies, because OpenROAD builds disagree about which
+    stream the logger writes to:
+
+    * **stdout** is bracketed by :data:`_SPEF_READ_BEGIN`/
+      :data:`_SPEF_READ_END` around the ``read_spef`` call itself, and the
+      SPEF reader is the only thing running inside that region -- so *any*
+      ``[WARNING STA-...]`` there is a reader warning, including codes this
+      module has never seen. (When the markers are absent -- an older
+      script, a truncated run -- it falls back to the narrow code match.)
+    * **stderr** cannot be interleaved with the Tcl ``puts`` markers, so it
+      is matched narrowly against :data:`_SPEF_READER_WARNING_RE`
+      (``STA-1650``/``STA-1648``) -- a liberty or clock warning on stderr
+      must not be mistaken for a SPEF-annotation failure.
+    """
+    matched: list[str] = []
+    region = _extract_block(stdout, _SPEF_READ_BEGIN, _SPEF_READ_END)
+    if region is not None:
+        matched += [
+            line.strip() for line in region.splitlines() if _STA_WARNING_RE.search(line)
+        ]
+    else:
+        matched += [
+            line.strip()
+            for line in stdout.splitlines()
+            if _SPEF_READER_WARNING_RE.search(line)
+        ]
+    matched += [
+        line.strip()
+        for line in stderr.splitlines()
+        if _SPEF_READER_WARNING_RE.search(line)
+    ]
+    return len(matched), matched[:_SPEF_READER_WARNING_SAMPLE_LIMIT]
+
+
+def _parse_delay_changed(stdout: str) -> bool | None:
+    """Did annotating the SPEF change any reported timing path?
+
+    Compares the two :func:`_delay_fingerprint_lines` blocks (identical
+    ``report_checks`` invocations run before and after ``read_spef``):
+
+    * ``True`` -- the post-annotation report differs, i.e. the parasitics
+      reached the delay calculator.
+    * ``False`` -- byte-identical reports: whatever the name-correlation
+      check concluded, these delays are the *unannotated* ones. This is the
+      exact symptom issue #1624 reports.
+    * ``None`` -- unknown, never ``False`` by default: a marker is missing
+      (an OpenROAD build that failed before the second report), or the
+      design has no timing path for ``report_checks`` to report on, in which
+      case two empty/``No paths found`` blocks say nothing about annotation.
+    """
+    pre = _extract_block(stdout, _DELAY_PRE_BEGIN, _DELAY_PRE_END)
+    post = _extract_block(stdout, _DELAY_POST_BEGIN, _DELAY_POST_END)
+    if pre is None or post is None:
+        return None
+    pre_norm = _normalize_delay_block(pre)
+    post_norm = _normalize_delay_block(post)
+    if not pre_norm or not post_norm:
+        return None
+    if any(_NO_PATHS_FOUND in line.lower() for line in (pre_norm + post_norm)):
+        return None
+    return pre_norm != post_norm
+
+
+def _normalize_delay_block(block: str) -> list[str]:
+    """A ``report_checks`` block reduced to its non-blank, right-stripped
+    lines -- so trailing-whitespace or blank-line churn between two
+    otherwise-identical reports cannot be mistaken for a delay change."""
+    return [line.rstrip() for line in block.splitlines() if line.strip()]
+
+
+def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
+    """``(unannotated_drivers, partially_unannotated_drivers)`` parsed from
+    ``report_parasitic_annotation``'s own two summary lines
+    (``Found <n> unannotated drivers.`` / ``Found <n> partially unannotated
+    drivers.``), or ``(None, None)`` when the block is absent or the command
+    produced nothing this module recognises (e.g. an OpenSTA build without
+    ``report_parasitic_annotation``, where the ``catch`` kept the run
+    alive)."""
+    block = _extract_block(
+        stdout, _PARASITIC_ANNOTATION_BEGIN, _PARASITIC_ANNOTATION_END
+    )
+    if block is None:
+        return (None, None)
+    unannotated_match = _UNANNOTATED_DRIVERS_RE.search(block)
+    partial_match = _PARTIAL_DRIVERS_RE.search(block)
+    return (
+        int(unannotated_match.group(1)) if unannotated_match else None,
+        int(partial_match.group(1)) if partial_match else None,
+    )

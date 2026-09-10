@@ -60,8 +60,20 @@ def _print_text(report: dict) -> None:
             f"{annotation['design_nets_total']} design nets annotated "
             f"(complete={annotation['annotation_complete']})"
         )
+        print(f"  delay_changed: {annotation.get('delay_changed')}")
+        print(f"  reader_warning_count: {annotation.get('reader_warning_count')}")
+        print(
+            "  unannotated_driver_count: "
+            f"{annotation.get('unannotated_driver_count')} "
+            f"(partial: {annotation.get('partially_unannotated_driver_count')})"
+        )
         if annotation["annotation_warning"]:
             print(f"  warning: {annotation['annotation_warning']}")
         missing_sample = annotation.get("design_nets_missing_sample")
         if missing_sample:
             print(f"  missing nets (sample): {', '.join(missing_sample)}")
+        warning_sample = annotation.get("reader_warning_sample")
+        if warning_sample:
+            print("  reader warnings (sample):")
+            for line in warning_sample:
+                print(f"    {line}")
