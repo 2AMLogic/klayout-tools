@@ -4732,12 +4732,40 @@ def _pcell_library() -> kdb.Library:
 
 
 def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
-    """Define the reference generators' ``PCellDeclarationHelper`` subclasses.
+    """Assemble every reference generator's ``PCellDeclarationHelper``
+    subclass into one name -> class mapping.
+
+    Thin composer over the per-family ``_build_<family>_pcell()`` factory
+    functions below (one per generator family) -- each factory still does
+    its own local ``import klayout.db as kdb`` so no factory pays the
+    import cost until it's actually called, and this function's own
+    ``dict[str, type[...]]`` return shape is unchanged from when all ten
+    classes were defined inline here.
+    """
+    pcell_classes: dict[str, type[kdb.PCellDeclarationHelper]] = {}
+    pcell_classes.update(_build_resistor_strip_pcell())
+    pcell_classes.update(_build_mos_array_pcell())
+    pcell_classes.update(_build_res_array_pcell())
+    pcell_classes.update(_build_cap_array_pcell())
+    pcell_classes.update(_build_guard_ring_pcell())
+    pcell_classes.update(_build_well_island_pcell())
+    pcell_classes.update(_build_diff_pair_pcell())
+    pcell_classes.update(_build_bjt_array_pcell())
+    pcell_classes.update(_build_bond_pad_pcell())
+    pcell_classes.update(_build_esd_device_pcell())
+    return pcell_classes
+
+
+def _build_resistor_strip_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``resistor_strip`` reference generator's PCell -- a row of
+    parametrized rectangles standing in for a unit-resistor string.
 
     Defined inside a function (not at module scope) so importing
     ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
     caller actually runs a generator -- the same lazy-import discipline
-    ``layers.py``/``render.py`` use for the same reason.
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
     """
     import klayout.db as kdb
 
@@ -4784,6 +4812,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             for _ in range(self.num):
                 self.cell.shapes(li).insert(kdb.Box(x, 0, x + length, width))
                 x += length + spacing
+
+    return {"resistor_strip": _ResistorStripPCell}
+
+
+def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``mos_array`` reference generator's PCell -- a matched MOS
+    transistor array.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
 
     class _MosArrayPCell(kdb.PCellDeclarationHelper):
         """Matched MOS transistor array (spike section 4's family 1): a
@@ -5293,6 +5337,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["y0_um"],
                     )
 
+    return {"mos_array": _MosArrayPCell}
+
+
+def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``res_array`` reference generator's PCell -- a resistor array.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
+
     class _ResArrayPCell(kdb.PCellDeclarationHelper):
         """Unit resistor/capacitor array (spike section 4's family 2): a row
         of ``num`` matched unit elements (see :func:`_res_unit_layout`) with
@@ -5494,6 +5553,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li_dummy, dbu, marker_boxes, c["x0_um"], c["y0_um"]
                     )
+
+    return {"res_array": _ResArrayPCell}
+
+
+def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``cap_array`` reference generator's PCell -- a capacitor array.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
 
     class _CapArrayPCell(kdb.PCellDeclarationHelper):
         """Unit MiM capacitor array: a row of ``num`` matched unit cells
@@ -5698,6 +5772,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["y0_um"],
                     )
 
+    return {"cap_array": _CapArrayPCell}
+
+
+def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``guard_ring`` reference generator's PCell -- a substrate/well
+    tap ring.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
+
     class _GuardRingPCell(kdb.PCellDeclarationHelper):
         """Substrate/well tap guard ring (spike section 4's family 3): a
         tap ring + local-metal ring with evenly-spaced contacts (see
@@ -5873,6 +5963,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["inner_box_um"],
                     gap_box,
                 )
+
+    return {"guard_ring": _GuardRingPCell}
+
+
+def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``well_island`` reference generator's PCell -- an isolated well
+    tap island.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
 
     class _WellIslandPCell(kdb.PCellDeclarationHelper):
         """Named-net, isolated well/tap island (issue #1421).
@@ -6141,6 +6247,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                             ),
                         )
                     )
+
+    return {"well_island": _WellIslandPCell}
+
+
+def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``diff_pair`` reference generator's PCell -- a differential
+    pair / current mirror cell.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
 
     class _DiffPairPCell(kdb.PCellDeclarationHelper):
         """Differential pair / current mirror cell (spike section 4's
@@ -6528,6 +6650,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                     )
 
+    return {"diff_pair": _DiffPairPCell}
+
+
+def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``bjt_array`` reference generator's PCell -- a matched BJT
+    array.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
+
     class _BjtArrayPCell(kdb.PCellDeclarationHelper):
         """Matched vertical-bipolar (PNP/BJT) array (Epic #152 phase 4): a
         ``rows`` x ``cols`` common-centroid grid of identical unit devices
@@ -6797,6 +6935,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                             c["y0_um"],
                         )
 
+    return {"bjt_array": _BjtArrayPCell}
+
+
+def _build_bond_pad_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``bond_pad`` reference generator's PCell -- a top-metal bond pad.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
+
     class _BondPadPCell(kdb.PCellDeclarationHelper):
         """Chip-boundary bond pad (issue #568): a passivation opening (``pad``
         role) enclosed by the resolved PDK family's own topmost routing metal
@@ -6889,6 +7042,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 dbu,
                 [(-half_strap, -half_strap, half_strap, half_strap)],
             )
+
+    return {"bond_pad": _BondPadPCell}
+
+
+def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build the ``esd_device`` reference generator's PCell -- an ESD protection
+    device.
+
+    Defined inside a function (not at module scope) so importing
+    ``klayout_tools.gen`` doesn't pay ``klayout.db``'s load cost until a
+    caller actually runs a generator -- the same lazy-import discipline
+    ``layers.py``/``render.py`` use for the same reason. See
+    :func:`_build_pcell_classes`, the thin composer that merges every
+    per-family factory's single-entry dict together.
+    """
+    import klayout.db as kdb
 
     class _EsdDevicePCell(kdb.PCellDeclarationHelper):
         """Grounded-gate multi-finger ESD protection MOS (issue #569): one
@@ -7198,18 +7367,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                     )
 
-    return {
-        "resistor_strip": _ResistorStripPCell,
-        "mos_array": _MosArrayPCell,
-        "res_array": _ResArrayPCell,
-        "cap_array": _CapArrayPCell,
-        "guard_ring": _GuardRingPCell,
-        "diff_pair": _DiffPairPCell,
-        "bjt_array": _BjtArrayPCell,
-        "bond_pad": _BondPadPCell,
-        "esd_device": _EsdDevicePCell,
-        "well_island": _WellIslandPCell,
-    }
+    return {"esd_device": _EsdDevicePCell}
 
 
 # --------------------------------------------------------------------------- #
