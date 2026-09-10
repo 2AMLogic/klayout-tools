@@ -16,6 +16,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract --parasitics --spef` (issue #1627) no longer
+  stamps the SPEF header's `*DATE` line with the write's own wall-clock
+  time. `*DATE` is optional and informational-only per the IEEE 1481-1999
+  SPEF grammar (no downstream reader parses it back), so it is now a fixed
+  placeholder — two runs of identical extraction against an unchanged input
+  layout now produce byte-identical `.spef` output, matching the
+  reproducibility guarantee `klt place-and-route`'s DEF→GDS merge already
+  makes for GDS2 output (issue #1367).
 - **Added**: new verb `klt clip` (issue #1608): writes a subset of an
   existing GDSII/OASIS stream back out as its own top-cell stream, either a
   micrometre bounding-box region (`--region`, the same inline-JSON shape
