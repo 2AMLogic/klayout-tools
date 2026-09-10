@@ -668,9 +668,12 @@ def _polygon_to_um_shape(polygon: Any, dbu_um: float) -> dict[str, Any]:
     simple = polygon.to_simple_polygon()
     return {
         "kind": "polygon",
+        # `each_point()` -- *not* `each_point_hull()`, which exists only on
+        # the hole-bearing `kdb.Polygon`, never on the `kdb.SimplePolygon`
+        # `to_simple_polygon()` just returned (issue #1613).
         "points_um": [
             [round(pt.x * dbu_um, 6), round(pt.y * dbu_um, 6)]
-            for pt in simple.each_point_hull()
+            for pt in simple.each_point()
         ],
     }
 
