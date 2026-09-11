@@ -8114,10 +8114,23 @@ from klayout_tools.pdk_models import build_device_binding_map  # noqa: E402
 #: subcircuit to bind to, so `build_device_binding_map` must not invent one
 #: (see `pdk_models._RESISTOR_MODEL_TABLE`'s own comment): IHP ships
 #: `res_metal1`/`res_metal2` as a bare model-reference `R` card, not a
-#: `.subckt`. Kept as an explicit allowlist so a *new* undeclarable class has
-#: to be added here consciously rather than silently skipping the coverage
-#: assertion below.
-_SUBCKT_LESS_DEVICE_CLASSES = frozenset({"res_metal1", "res_metal2"})
+#: `.subckt`; sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) are
+#: the same carve-out -- `sky130_fd_pr__model__r+c.model.spice` wraps a
+#: `.subckt` around `res_generic_po` but not around any metal flavour, only
+#: a bare `.model ... r` card. Kept as an explicit allowlist so a *new*
+#: undeclarable class has to be added here consciously rather than silently
+#: skipping the coverage assertion below.
+_SUBCKT_LESS_DEVICE_CLASSES = frozenset(
+    {
+        "res_metal1",
+        "res_metal2",
+        "res_generic_m1",
+        "res_generic_m2",
+        "res_generic_m3",
+        "res_generic_m4",
+        "res_generic_m5",
+    }
+)
 
 
 @pytest.mark.parametrize(
@@ -8232,6 +8245,26 @@ def test_normalize_sg13g2_metal_resistor_carveout_is_not_fabricated():
     # are not invented -- the conversion still fails loudly.
     with pytest.raises(NormalizeError, match="not a known device"):
         normalize_reference_netlist("XR1 r0 r1 res_metal1 l=10u w=1u\n", deck="sg13g2")
+
+
+def test_normalize_sky130_metal_resistor_carveout_is_not_fabricated():
+    # Issue #1621's own verified finding, sky130's counterpart to the sg13g2
+    # carve-out above: `res_generic_m1`..`res_generic_m5` are now declared
+    # `ResistorDevice` entries (so a drawn metal resistor extracts and
+    # compares correctly, see `test_extract.py`), but sky130's own device
+    # library defines no `.subckt` for any of them -- only a bare `.model
+    # ... r` card, transcribed in `decks/sky130.py`'s provenance comment.
+    # Because sky130's `("sky130", "sky130")` pair already has a curated
+    # `_RESISTOR_MODEL_TABLE` entry (for the poly flavours), the
+    # assumed-identity fallback is gated off for the whole pair -- these
+    # five are not invented, so a `subckt-call`-form reference netlist
+    # naming one still fails loudly rather than binding to a guess. A real
+    # reference for one of these devices must use the bare `R`-card form
+    # instead (matching sg13g2's own documented convention).
+    with pytest.raises(NormalizeError, match="not a known device"):
+        normalize_reference_netlist(
+            "XR1 r0 r1 res_generic_m1 l=10u w=1u\n", deck="sky130"
+        )
 
 
 def test_normalize_gf180_bipolar_class_is_never_derived():

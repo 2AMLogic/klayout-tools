@@ -40,6 +40,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   degrades to `null` and never gates, so the pre-existing name-correlation
   verdict still applies. Additive; `schema_version` stays `1`. See
   [`docs/cli/sta.md`](docs/cli/sta.md)'s "Annotation evidence" section.
+- **Added**: `klt extract --deck sky130` now recognises sky130's drawn
+  metal-resistor device family (issue #1621): `res_generic_m1`..
+  `res_generic_m5` (`metN.drawing` covered by the PDK's own `metN.res`
+  resistor-ID mark, `N` = 1..5), extracting a bound `r_ohm` from each
+  layer's own sheet resistance (0.120/0.120/0.047/0.047/0.029 Ω/□ for
+  met1/met2/met3/met4/met5) instead of leaving the marked segment
+  unrecognised. Previously, ingesting a subckt-call-form reference netlist
+  that named one of these devices failed outright — there was no device
+  class for it at all. `--pdk` leaves them as the bare `R`-card form (no
+  curated subcircuit binding): sky130's own device library defines no
+  `.subckt` for any metal flavour, only a bare `.model ... r` card, the
+  same carve-out `res_metal1`/`res_metal2` already document for sg13g2.
+  `klt lvs` matches the new devices through the existing generic
+  device-comparison path with no LVS code changes. `klt gen` has no
+  generator for this family yet — filed as a follow-up. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Drawn resistors" table.
 - **Added**: `klt synthesize` now reports static leakage power (issue
   #1626): `leakage_power_nw` — `sum(cell_leakage_power[cell_type] *
   instance_count[cell_type])` over the response's own

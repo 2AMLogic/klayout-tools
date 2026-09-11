@@ -1602,6 +1602,92 @@ EXTRACTION_DECK = ExtractionDeck(
             # the shortest as representative (issue #868).
             provenance=_sky130_lvs_provenance("sky130_fd_pr__res_xhigh_po_0p35"),
         ),
+        # Drawn metal resistors (issue #1621), transcribed from
+        # `sky130.lvs`'s own "---- METAL ----" section: `res_generic_mN =
+        # metN.and(metN_res)` (each `metN_res` a dedicated resistor-ID mark
+        # layer, `metN.drawing`'s own purpose 13 -- e.g. `met1_res =
+        # polygons(68, 13)`), extracted via KLayout's native 2-terminal
+        # `resistor(name, rsh, NResistor)` builtin (`{ 'R' => metN_resistor,
+        # 'C' => metN_con }`) -- like sg13g2's `res_metal1`/`res_metal2`,
+        # this upstream extractor call carries no third bulk/substrate
+        # terminal, so `bulk_to_substrate` stays the default `False` here.
+        #
+        # `rsh` units: `sky130.lvs`'s own literal (`120`/`47`/`29`) is
+        # **milliohms/sq**, not ohms/sq -- unlike this same file's poly
+        # resistor block above, whose literals (e.g. `48.2` for
+        # `res_generic_po`) already are ohms/sq. Confirmed two ways: (1)
+        # met3/met4's literal `47` and met5's `29` exactly equal 1000x this
+        # deck's own already-curated `metals[2]`/`metals[3]`/`metals[4]`
+        # routing `sheet_res_ohm_sq` (0.047/0.047/0.029, see below) -- an
+        # exact match only possible if the LVS literal is milliohms; (2)
+        # `libs.tech/magic/sky130A.tech`'s independent `resist (allmN)/metalN`
+        # cross-check reports the identical `125`/`125`/`47`/`47`/`29`
+        # figures (its own `metal1`..`metal5` magic-layer names are
+        # off-by-one from GDS met1..met5, since magic calls li1 "metal1" --
+        # confirmed via the same file's `device resistor
+        # sky130_fd_pr__res_generic_mN rmetalN *metalN` device-model lines,
+        # which pair each GDS-numbered device name with magic's shifted
+        # layer name). met1/met2's `rsh=120` (0.120 ohm/sq) is close to but
+        # not identical to this deck's own curated met1/met2 routing value
+        # (0.125 ohm/sq, sourced from `sky130.tech`'s `defaultareacap`/
+        # `defaultperimeter`, a different derivation) -- kept as `sky130.lvs`'s
+        # own dedicated resistor-extraction constant rather than reused from
+        # the routing table, the same "cite the most specific source"
+        # discipline `res_high_po`'s independently-measured coefficient
+        # above follows.
+        #
+        # `sky130_fd_pr__res_generic_mN` has no real `.subckt` to bind to,
+        # unlike `res_generic_po` (which the same upstream ngspice model
+        # file, `sky130_fd_pr__model__r+c.model.spice`, *does* wrap in a
+        # `.subckt sky130_fd_pr__res_generic_po t1 t2 w=1 l=1` alongside its
+        # bare `.model ... r` card) -- the metal flavours only ever get the
+        # bare `.model sky130_fd_pr__res_generic_mN r ...` card, so a real
+        # netlist instantiates one as a primitive `R` element carrying that
+        # model-name token, not an `X` subcircuit call. This mirrors
+        # sg13g2's `res_metal1`/`res_metal2` carve-out exactly (see
+        # `pdk_models.py`'s `_RESISTOR_MODEL_TABLE` -- these five classes are
+        # deliberately absent from that table for the same reason).
+        #
+        # Only `res_generic_m1`..`res_generic_m5` are declared here --
+        # `res_generic_l1` (li1 local interconnect, not "metal") and
+        # `res_generic_nd`/`res_generic_pd` (diffusion) remain a documented
+        # gap, same discipline as `docs/cli/extract.md`'s "Resistor flavours
+        # beyond what's wired" table.
+        ResistorDevice(
+            name="res_generic_m1",  # sky130_fd_pr__res_generic_m1
+            body=(68, 20),  # met1.drawing
+            marker=(68, 13),  # met1.res
+            sheet_rho_ohm_sq=0.120,  # sky130.lvs: rsh=120 milliohm/sq
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_generic_m1"),
+        ),
+        ResistorDevice(
+            name="res_generic_m2",  # sky130_fd_pr__res_generic_m2
+            body=(69, 20),  # met2.drawing
+            marker=(69, 13),  # met2.res
+            sheet_rho_ohm_sq=0.120,  # sky130.lvs: rsh=120 milliohm/sq
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_generic_m2"),
+        ),
+        ResistorDevice(
+            name="res_generic_m3",  # sky130_fd_pr__res_generic_m3
+            body=(70, 20),  # met3.drawing
+            marker=(70, 13),  # met3.res
+            sheet_rho_ohm_sq=0.047,  # sky130.lvs: rsh=47 milliohm/sq
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_generic_m3"),
+        ),
+        ResistorDevice(
+            name="res_generic_m4",  # sky130_fd_pr__res_generic_m4
+            body=(71, 20),  # met4.drawing
+            marker=(71, 13),  # met4.res
+            sheet_rho_ohm_sq=0.047,  # sky130.lvs: rsh=47 milliohm/sq
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_generic_m4"),
+        ),
+        ResistorDevice(
+            name="res_generic_m5",  # sky130_fd_pr__res_generic_m5
+            body=(72, 20),  # met5.drawing
+            marker=(72, 13),  # met5.res
+            sheet_rho_ohm_sq=0.029,  # sky130.lvs: rsh=29 milliohm/sq
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_generic_m5"),
+        ),
     ),
     # Per-flavour MOS marker (issue #1369, mirroring #1111's gf180mcu
     # `Dualgate` entry and #1231's sg13g2 `ThickGateOx` entry): a transistor
