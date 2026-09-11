@@ -5365,6 +5365,232 @@ def test_pdk_resolved_leaves_sky130_metal_resistor_as_bare_r_card(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# gf180mcu drawn metal resistors (`rm1`/`rm2`/`rm3` + the `tm6k`/`tm9k`/
+# `tm11k`/`tm30k` top-metal flavour set, issue #1640) -- the gf180mcu
+# counterpart of `_make_sky130_metal_resistor_layout` above. gf180mcu labels
+# use purpose 10 (`Metal<N>` pin/label), not sky130's purpose 5.
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_metal_resistor_layout(
+    metal_gds_layer: int, marker_datatype: int, *, marked: bool = True
+) -> kdb.Layout:
+    """A 12x1um bar on `(metal_gds_layer, 0)` (e.g. gf180mcu's `Metal1`) with
+    a 6um-long `(110, marker_datatype)`-marked segment (e.g. `metal1_res`,
+    110/11 -- gf180mcu's metal resistor-ID marks all live on layer 110,
+    disambiguated by datatype, same as `RES_MK` 110/5's own poly-resistor
+    role) and a labelled, contact-free head at each end -- same shape as
+    `_make_sky130_metal_resistor_layout`, on gf180mcu's own layer numbering
+    and `(layer, 10)` pin/label convention."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: int, y: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(metal_gds_layer, 0, kdb.Box(0, 0, 12000, 1000))
+    if marked:
+        draw(110, marker_datatype, kdb.Box(3000, 0, 9000, 1000))
+    label(metal_gds_layer, 10, "RA", 1500, 500)
+    label(metal_gds_layer, 10, "RB", 10500, 500)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("name", "metal_gds_layer", "marker_datatype"),
+    [
+        ("rm1", 34, 11),  # Metal1 / metal1_res
+        ("rm2", 36, 12),  # Metal2 / metal2_res
+        ("rm3", 42, 13),  # Metal3 / metal3_res
+    ],
+)
+def test_gf180mcu_drawn_metal_resistor_extracts_with_expected_value(
+    tmp_path, name, metal_gds_layer, marker_datatype
+):
+    """A marked gf180mcu metal bar (`rm1`/`rm2`/`rm3`, issue #1640) extracts
+    as that device class at gf180mcu's own 0.09 ohm/sq sheet resistance --
+    not as a short through the metal."""
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(metal_gds_layer, marker_datatype),
+        tmp_path / f"{name}.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(_METAL_RES_SQUARES * 0.09)
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+    # Plain 2-terminal resistor -- no bulk terminal, unlike `ppolyf_u`.
+    assert "w" not in device["nets"]
+    assert report["device_classes"] == list(
+        get_extraction_deck("gf180mcu").device_classes
+    )
+
+
+def test_gf180mcu_unmarked_metal1_bar_is_not_a_resistor(tmp_path):
+    """A Metal1 bar with no `metal1_res` marker stays ordinary routing metal
+    -- same "known-unmodelled beats silently wrong" discipline every other
+    resistor flavour follows."""
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(34, 11, marked=False),
+        tmp_path / "bare.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bare.spice"))
+
+    assert report["device_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    ("value", "device_class", "sheet_rho"),
+    [
+        ("6K", "tm6k", 0.06),
+        ("9K", "tm9k", 0.04),
+        ("11K", "tm11k", 0.04),
+        ("30K", "tm30k", 0.0095),
+    ],
+)
+def test_gf180mcu_metal_top_deck_option_selects_flavour(
+    tmp_path, value, device_class, sheet_rho
+):
+    """`klt extract`'s `deck_options={"metal_top": <value>}` (`--deck-option
+    metal_top=<value>` on the CLI) selects which of the identically-drawn
+    `tm{6k,9k,11k,30k}` sheet-rho interpretations a `metal5_res`-marked
+    Metal5 segment extracts as (issue #1640, mirroring `poly_res`, issue
+    #595) -- still exactly one recognised device per drawn segment, never a
+    short."""
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(81, 15),  # Metal5 / metal5_res
+        tmp_path / f"tm_{value}.gds",
+    )
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / f"tm_{value}.spice"),
+        deck_options={"metal_top": value},
+    )
+
+    assert report["device_counts"] == {device_class: 1}
+    (device,) = report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(_METAL_RES_SQUARES * sheet_rho)
+    assert report["provenance"]["deck"]["options"] == {"metal_top": value}
+
+
+def test_gf180mcu_metal_top_deck_option_9k_matches_omitted_default(tmp_path):
+    """Selecting `metal_top=9K` explicitly reproduces the PDK's own default
+    -- the same netlist `run_extract` writes when `deck_options` is omitted
+    entirely, byte-for-byte (mirroring `poly_res`'s identical guarantee,
+    issue #595)."""
+    path = _write_gds(_make_gf180mcu_metal_resistor_layout(81, 15), tmp_path / "tm.gds")
+    baseline = run_extract(path, "gf180mcu", output=str(tmp_path / "baseline.spice"))
+    explicit = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "explicit.spice"),
+        deck_options={"metal_top": "9K"},
+    )
+
+    assert baseline["netlist_sha256"] == explicit["netlist_sha256"]
+    assert baseline["device_counts"] == explicit["device_counts"]
+    assert "options" not in baseline["provenance"]["deck"]
+    assert explicit["provenance"]["deck"]["options"] == {"metal_top": "9K"}
+
+
+def test_gf180mcu_metal_top_deck_option_invalid_value_is_extract_error(tmp_path):
+    """An unrecognised `metal_top` value is a loud `ExtractError`, not a
+    silently-kept default or a guessed resistance (issue #1640, mirroring
+    `poly_res`, issue #595)."""
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(81, 15), tmp_path / "tm_bad.gds"
+    )
+    with pytest.raises(ExtractError, match="metal_top=7K"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "bad.spice"),
+            deck_options={"metal_top": "7K"},
+        )
+
+
+@pytest.mark.parametrize("name", ["rm1", "rm2", "rm3"])
+def test_pdk_resolved_binds_gf180mcu_metal_resistor(tmp_path, name):
+    """`--pdk gf180mcuA` binds `rm1`/`rm2`/`rm3` to their real, two-terminal
+    `.subckt`s (confirmed in `sm141064.ngspice`) -- **unlike** sky130's
+    `res_generic_mN` bare-`.model`-only carve-out, these gf180mcu classes
+    write a real `X` card, never a bare `R` card (issue #1640)."""
+    layer_by_name = {"rm1": (34, 11), "rm2": (36, 12), "rm3": (42, 13)}
+    metal_gds_layer, marker_datatype = layer_by_name[name]
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(metal_gds_layer, marker_datatype),
+        tmp_path / f"{name}_pdk.gds",
+    )
+    out = str(tmp_path / f"{name}_pdk.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+    )
+
+    assert report["device_counts"] == {name: 1}
+    (card,) = _device_cards(out)
+    assert card.startswith("X"), card
+    assert f" {name} " in card
+    # Two terminals only -- no bulk/substrate tie, unlike `ppolyf_u`.
+    assert card.split()[1:3] == ["RA", "RB"]
+    assert "r_length=6U" in card and "r_width=1U" in card
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_subckt"),
+    [
+        ("6K", "tm6k"),
+        ("9K", "tm9k"),
+        ("11K", "tm11k"),
+        ("30K", "tm30k"),
+    ],
+)
+def test_pdk_resolved_binds_selected_metal_top_flavour(
+    tmp_path, value, expected_subckt
+):
+    """`--deck-option metal_top=<value>` combined with `--pdk` binds the
+    *selected* flavour's own real subcircuit (`tm6k`/`tm9k`/`tm11k`/`tm30k`,
+    all four confirmed in `sm141064.ngspice`), not a bare `R` card (issue
+    #1640, mirroring `test_pdk_resolved_binds_selected_poly_res_flavour`)."""
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(81, 15),
+        tmp_path / f"tm_{value}_pdk.gds",
+    )
+    out = str(tmp_path / f"tm_{value}_pdk.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        deck_options={"metal_top": value},
+    )
+    assert report["device_counts"] == {expected_subckt: 1}
+
+    (card,) = _device_cards(out)
+    assert card.startswith("X"), card
+    assert f" {expected_subckt} " in card
+    assert not card.startswith("R")
+    assert card.split()[1:3] == ["RA", "RB"]
+    assert "r_length=6U" in card and "r_width=1U" in card
+
+
+# --------------------------------------------------------------------------- #
 # A deck's other selectable sheet-rho poly-resistor flavours (issue #299):
 # gf180mcu's `Resistor`-marked high-sheet-rho poly and sky130's `rpm`/`urpm`
 # precision-implant poly resistors, previously pure exclusions on the base

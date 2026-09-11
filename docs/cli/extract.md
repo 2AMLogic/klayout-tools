@@ -97,11 +97,13 @@ two disagree, this document (and the code) win.
   pin, byte-for-byte unchanged. See "Declared pin set" below.
 - `--deck-option` — optional, unset by default, repeatable. `<key>=<value>`
   selects which caller-visible flavour of a deck's shared-geometry device
-  family this run wires (issue #595) — today's only recognised key is
-  gf180mcu's `poly_res` (values `1k` (the PDK's own default), `2k`, `3k`).
-  An unrecognised key or value is an application error, not a silently-kept
-  default. Omitting the flag resolves every deck exactly as before it
-  existed. See "Selecting a shared-geometry resistor flavour" below.
+  family this run wires (issue #595) — the recognised keys are gf180mcu's
+  `poly_res` (values `1k` (the PDK's own default), `2k`, `3k`) and gf180mcu's
+  `metal_top` (values `6K`, `9K` (the PDK's own default), `11K`, `30K`, issue
+  #1640). An unrecognised key or value is an application error, not a
+  silently-kept default. Omitting the flag resolves every deck exactly as
+  before it existed. See "Selecting a shared-geometry resistor flavour"
+  below.
 - `--defer-resistor-fixed-offset` — optional, off by default. Omit each
   opted-in resistor device class's `ResistorDevice.fixed_offset_ohm`
   head/end-resistance term from the extracted `R`, leaving only the raw
@@ -990,13 +992,21 @@ passes LVS silently.
 | `sky130`   | `res_generic_m5` | `sky130_fd_pr__res_generic_m5` | `met5.drawing` 72/20 | `met5.res` 72/13 | — | **0.029 Ω/□** | — |
 | `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** | — |
 | `gf180mcu` | `ppolyf_u_1k`/`_2k`/`_3k` | `gf180mcu_fd_pr__ppolyf_u_{1k,2k,3k}` (`POLY_RES` default `1k`, caller-selectable via `--deck-option poly_res=`) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000/2000/3000 Ω/□** | — |
+| `gf180mcu` | `rm1` | `gf180mcu_fd_pr__rm1` (drawn Metal1 resistor, issue #1640) | `Metal1` 34/0 | `metal1_res` 110/11 | — | **0.09 Ω/□** | — |
+| `gf180mcu` | `rm2` | `gf180mcu_fd_pr__rm2` | `Metal2` 36/0 | `metal2_res` 110/12 | — | **0.09 Ω/□** | — |
+| `gf180mcu` | `rm3` | `gf180mcu_fd_pr__rm3` | `Metal3` 42/0 | `metal3_res` 110/13 | — | **0.09 Ω/□** | — |
+| `gf180mcu` | `tm6k`/`tm9k`/`tm11k`/`tm30k` | `gf180mcu_fd_pr__tm{6k,9k,11k,30k}` (top-metal thickness flavour, `METAL_TOP` default `9K`, caller-selectable via `--deck-option metal_top=`) | `Metal5` 81/0 (this curated deck's own top-of-stack — see `decks/gf180mcu.py`'s module docstring for the 6LM/`MetalTop` approximation this makes) | `metal5_res` 110/15 | — | **0.06/0.04/0.04/0.0095 Ω/□** | — |
 
 sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) have no `.subckt`
 in the real sky130 device library — only a bare `.model
 sky130_fd_pr__res_generic_mN r ...` card — so `--pdk` leaves them as the
 bare `R`-card form, never a guessed `X` subcircuit call; see "SPICE model
 binding" below and the "no gen generator yet" note under "Resistor
-flavours beyond what's wired".
+flavours beyond what's wired". gf180mcu's `rm1`/`rm2`/`rm3`/`tm6k`/`tm9k`/
+`tm11k`/`tm30k` (issue #1640) are the opposite case: all seven **do** have a
+real two-terminal `.subckt` in the vendored `sm141064.ngspice` device
+library, so `--pdk` binds each to a genuine `X` subcircuit call, the same as
+`ppolyf_u`/`ppolyf_u_1k` above — see "SPICE model binding" below.
 
 KLayout computes `R = L / W * sheet_rho` from the recognised segment's own
 geometry, corrected by `klt extract` itself (issue #518) to
@@ -1123,18 +1133,24 @@ still extracted, but as the wrong device (a 2x/3x-off resistance), or (if the
 default entry were narrowed away for any reason) as an unmodelled short.
 
 `--deck-option <key>=<value>` (repeatable) picks the flavour explicitly for
-this run. Today's resistor case is gf180mcu's `poly_res`, the curated-deck
+this run. gf180mcu has two resistor cases: `poly_res`, the curated-deck
 counterpart of the upstream `POLY_RES` deck variable cited in
-`decks/gf180mcu.py`'s own `ppolyf_u_1k` provenance note (a second,
+`decks/gf180mcu.py`'s own `ppolyf_u_1k` provenance note, and `metal_top`
+(issue #1640), the counterpart of the upstream `METAL_TOP` deck variable
+cited in the same module's `tm9k` provenance note (a third,
 capacitor-shaped case, `mim_cap`, is documented separately below):
 
 | Deck | Key | Values | Selects |
 | ---- | --- | ------ | ------- |
 | `gf180mcu` | `poly_res` | `1k` (default), `2k`, `3k` | Which of `ppolyf_u_1k`/`ppolyf_u_2k`/`ppolyf_u_3k` (1000/2000/3000 Ω/□) a `Resistor` (62/0)-marked poly segment extracts as. |
+| `gf180mcu` | `metal_top` | `6K`, `9K` (default), `11K`, `30K` | Which of `tm6k`/`tm9k`/`tm11k`/`tm30k` (0.06/0.04/0.04/0.0095 Ω/□) a `metal5_res`-marked Metal5 segment extracts as. |
 
 ```sh
 # A design drawn against gf180mcu's 2000-ohm/sq POLY_RES='2k' flavour:
 klt extract cell.gds --deck gf180mcu --deck-option poly_res=2k -o cell.spice --format json
+
+# A design drawn against gf180mcu's 30k-ohm/sq METAL_TOP='30K' top-metal flavour:
+klt extract cell.gds --deck gf180mcu --deck-option metal_top=30K -o cell.spice --format json
 ```
 
 Rules of thumb:
@@ -2477,7 +2493,11 @@ convention), so combining `--pdk` with a non-default flavour emits
 `X … ppolyf_u_2k r_length=… r_width=…`, not a bare `R` card. Selecting a
 flavour changes *which* subcircuit is called; it never changes
 `devices[].class` handling or the extracted resistance, which the deck
-computes from that flavour's own sheet rho either way.
+computes from that flavour's own sheet rho either way. The same is true of
+`rm1`/`rm2`/`rm3` and every value `--deck-option metal_top=` accepts
+(`tm6k`/`tm9k`/`tm11k`/`tm30k`, issue #1640) — all seven have a real,
+two-terminal `.subckt` in `sm141064.ngspice` (confirmed the same way), so
+none of them fall back to a bare `R` card under `--pdk` either.
 
 sg13g2 resistor note (issue #1457): `rsil`/`rppd`/`rhigh` bind to their real,
 identically-named 3-terminal subcircuits (`X … rsil l=… w=…`, the bulk-tie
@@ -4630,11 +4650,13 @@ above, issue #217). The following remain out of scope:
   `res_generic_pd`) resistors; gf180mcu models its unsalicided p+ poly
   resistor at both its base sheet-rho and its PDK-default `POLY_RES='1k'`
   high-sheet-rho variant (the `_2k`/`_3k` siblings are geometrically
-  indistinguishable from `_1k` in a drawn layout — see `decks/gf180mcu.py`),
-  but not its salicided, N+ poly, diffusion, well, or metal resistors
-  (`rm1`/`rm2`/`rm3`/`tm*` — a real, LVS-extractable family the same way
-  sky130's is, left for a dedicated follow-up). These remaining flavours are
-  deliberately excluded rather than approximated — see "Drawn resistors".
+  indistinguishable from `_1k` in a drawn layout — see `decks/gf180mcu.py`)
+  and, since issue #1640, its drawn `Metal1`/`Metal2`/`Metal3` resistor
+  family (`rm1`/`rm2`/`rm3`) plus its top-metal thickness flavour set
+  (`tm6k`/`tm9k`/`tm11k`/`tm30k`, `METAL_TOP` default `9K`), but not its
+  salicided or N+ poly, diffusion, or well resistors. These remaining
+  flavours are deliberately excluded rather than approximated — see "Drawn
+  resistors".
   `klt gen` has no generator for sky130's new metal-resistor family yet
   either (issue #222/#299's `res_array` PCell is poly-body-only) — a layout
   containing one is now correctly extracted/LVS-comparable, but must be

@@ -1519,6 +1519,131 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # `Resistor` (its own high-sheet-rho marker) without also requiring `Pplus`,
 # deliberately not adding a stricter condition the real deck does not apply.
 #
+# Drawn metal resistors `rm1`/`rm2`/`rm3` and the `tm6k`/`tm9k`/`tm11k`/
+# `tm30k` top-metal flavour set (issue #1640, the gf180mcu counterpart of
+# sky130's `res_generic_m1`..`res_generic_m5`, issue #1621). Verified against
+# the same real fetched `gf180mcuB` install this module's own provenance
+# constants pin (`google/globalfoundries-pdk-libs-gf180mcu_fd_pv` @
+# `c6d73a35f524070e85faff4a6a9eef49553ebc2b`). `res_derivations.lvs`'s own
+# "---- METAL ----" section:
+#
+#     rm1_res = metal1.and(metal1_res)
+#     rm2_res = metal2.and(metal2_res)
+#     rm3_res = metal3.and(metal3_res)
+#     tm_res  = top_metal.and(top_metal_res)
+#
+# and `res_extraction.lvs`'s own "---- METAL ----" section extracts each via
+# KLayout's native 2-terminal `resistor(name, rsh, NResistor)` builtin (not
+# `resistor_with_bulk`), so -- like sky130's `res_generic_mN` and sg13g2's
+# `res_metal1`/`res_metal2` -- none of these five classes carry a bulk/
+# substrate terminal (`bulk_to_substrate` stays the default `False` below):
+#
+#     extract_devices(resistor('rm1', 0.09, NResistor),
+#                     { 'R' => rm1_res, 'C' => metal1_con })
+#     unless METAL_LEVEL == '2LM'
+#       extract_devices(resistor('rm2', 0.09, NResistor),
+#                       { 'R' => rm2_res, 'C' => metal2_con })
+#     end
+#     unless METAL_LEVEL == '3LM'
+#       extract_devices(resistor('rm3', 0.09, NResistor),
+#                       { 'R' => rm3_res, 'C' => metal3_con })
+#     end
+#     case METAL_TOP
+#     when '6K'
+#       extract_devices(resistor('tm6k', 0.06, NResistor),
+#                       { 'R' => tm_res, 'C' => top_metal_con })
+#     when '9K'
+#       extract_devices(resistor('tm9k', 0.04, NResistor),
+#                       { 'R' => tm_res, 'C' => top_metal_con })
+#     when '11K'
+#       extract_devices(resistor('tm11k', 0.04, NResistor),
+#                       { 'R' => tm_res, 'C' => top_metal_con })
+#     when '30K'
+#       extract_devices(resistor('tm30k', 0.0095, NResistor),
+#                       { 'R' => tm_res, 'C' => top_metal_con })
+#     end
+#
+# `rsh` units are already ohms/sq here (unlike sky130's milliohm/sq LVS
+# literal) -- independently cross-checked against `sm141064.ngspice`'s own
+# `+rsh_rm1=0.09` / `+rsh_tm6k=60e-3` etc. process-corner parameters (see
+# below), which agree bit-for-bit.
+#
+# Marker layers, from `layers_definitions.lvs`:
+#
+#     metal1_res  110/11  (`metal1_res = get_polygons(110, 11)`)
+#     metal2_res  110/12  (`metal2_res = get_polygons(110, 12)`)
+#     metal3_res  110/13  (`metal3_res = get_polygons(110, 13)`)
+#     metal5_res  110/15  (`metal5_res = get_polygons(110, 15)`)
+#
+# `top_metal`/`top_metal_res` are themselves a `case METAL_LEVEL` selection
+# (`layers_definitions.lvs`) -- upstream's own default is `METAL_LEVEL =
+# '6LM'` (`top_metal = metaltop`, 53/0), but this curated deck's own
+# connectivity model caps the routing stack at Metal5 (`metals`/`vias` above
+# stop at Metal5 -- see the module docstring's own `MetalTop`/6LM note, and
+# `gen.py`'s identical "gf180mcu output assumes the 5LM metal stack (top_metal
+# = Metal5)" precedent), matching upstream's own `'5LM'` case instead:
+# `top_metal = metal5`, `top_metal_res = metal5_res`, `top_metal_con =
+# metal5_con.not(fusetop)`. The `tm_res`/`tm*` flavour set below is therefore
+# bound to Metal5/`metal5_res`, not MetalTop -- a documented approximation
+# (a 6LM fab run's real top-metal resistor is drawn on MetalTop, invisible to
+# this curated deck's connectivity model either way). One further, smaller
+# approximation, in the same "cite the most specific source, keep the
+# conservative direction" spirit as `ppolyf_u`'s own terminal note above:
+# `top_metal_con` additionally excludes `FuseTop` (`.not(fusetop)`, since
+# Metal5 also participates in this deck's MiM-cap stack); this deck's
+# `ResistorDevice` terminal is always plain `body`-minus-recognised-segment
+# with no further per-layer subtraction, so a `tm*` resistor terminal drawn
+# under a `FuseTop`-shielded MiM cap on the same Metal5 shape stays connected
+# here where upstream would cut it -- a narrow, undrawn-in-practice corner
+# (a resistor terminal and a MiM cap plate sharing the same Metal5 polygon).
+#
+# `rm1`/`rm2`/`rm3`/`tm6k`/`tm9k`/`tm11k`/`tm30k` open research item
+# (resolves this issue's own open item 1, mirroring #1621's identical gate
+# for sky130): **unlike** sky130's `res_generic_mN` bare-`.model`-only
+# carve-out, gf180mcu's own vendored ngspice model tree
+# (`libs.tech/ngspice/sm141064.ngspice`, the same file
+# `pdk_models.py`'s module docstring already cites for `ppolyf_u`) declares a
+# real two-terminal `.subckt` for **every one** of these seven device names,
+# confirmed by direct inspection of a real fetched `gf180mcuB` install:
+#
+#     .subckt rm1 1 2 r_length=l r_width=w dtemp=0 par=1 s=1
+#       ...
+#       rb 1 2 r='r_temp*r_n*(r_rsh0+...)'
+#     .ends rm1
+#
+# (and identically-shaped `.subckt rm2`/`rm3`/`tm6k`/`tm9k`/`tm11k`/`tm30k`
+# blocks), each keyed by the same `r_length`/`r_width` call-site parameter
+# convention `ppolyf_u`/`ppolyf_u_1k` already use (`_RESISTOR_PARAM_STYLE`).
+# Further cross-checked against the same install's reference CDL testcases
+# (`libs.tech/klayout/lvs/testing/testcases/unit/res_devices/netlist/
+# rm1.cdl`/`tm6k.cdl`), which instantiate `rm1`/`tm6k` as a primitive `R...`
+# element carrying that subcircuit name as its model token, and whose
+# `+rsh_rm1=0.09` / `+rsh_tm6k=60e-3` process-corner parameters (in
+# `sm141064.ngspice`, same file) agree with `res_extraction.lvs`'s own
+# `0.09`/`0.06` literals above. So -- unlike sky130's five metal-resistor
+# classes -- all seven of these gf180mcu classes **do** get a
+# `_RESISTOR_MODEL_TABLE` binding entry (see `pdk_models.py`).
+#
+# `tm6k`/`tm9k`/`tm11k`/`tm30k` share *identical* recognition geometry
+# (`tm_res` = `top_metal.and(top_metal_res)`, disambiguated only by the
+# build-time `METAL_TOP` deck option, not by any drawn layer) -- the exact
+# "shared-geometry flavour" shape `ppolyf_u_1k`'s own `flavour_option=
+# "poly_res"` above already solves for `POLY_RES` (issue #595). So, mirroring
+# that structure, exactly **one** `ResistorDevice` entry is wired below for
+# this family, carrying all four named flavours via
+# `flavour_option="metal_top"`/`flavours=(...)` rather than four separate
+# always-on entries that would each recognise the same drawn Metal5 segment.
+# The default flavour is `gf180mcu.lvs`'s own upstream default absent a
+# caller override -- `METAL_TOP = $metal_top || '9K'` -- so `tm9k` (0.04
+# ohm/sq) is this entry's own `name`/`sheet_rho_ohm_sq`, matching
+# `ppolyf_u_1k`'s identical "default flavour is the entry's own name" choice
+# for `POLY_RES`'s `'1k'` default. Flavour `value` tokens are spelled
+# `"6K"`/`"9K"`/`"11K"`/`"30K"`, matching the PDK's own upstream `METAL_TOP`
+# deck-variable spelling (`case METAL_TOP; when '6K' ...`) exactly, the same
+# "value token cites the real deck-variable spelling" discipline
+# `ppolyf_u_1k`'s own lowercase `"1k"`/`"2k"`/`"3k"` values follow for
+# `POLY_RES`'s lowercase case-statement spelling.
+#
 # Junction-diode device recognition (issue #542). Additional layer numbers
 # from the same `klayout/lvs/rule_decks/layers_definitions.lvs` table cited
 # for the resistors above:
@@ -1856,6 +1981,69 @@ EXTRACTION_DECK = ExtractionDeck(
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__ppolyf_u_1k",
+            ),
+        ),
+        # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring
+        # sky130's `res_generic_m1`..`res_generic_m5`, issue #1621) -- see the
+        # module docstring's derivation note above this section for the full
+        # `res_derivations.lvs`/`res_extraction.lvs` transcription. Each is a
+        # plain 2-terminal `resistor(...)` (no bulk terminal), so
+        # `bulk_to_substrate` stays the default `False`.
+        ResistorDevice(
+            name="rm1",  # gf180mcu_fd_pr__rm1 (subckt "rm1")
+            body=(34, 0),  # Metal1
+            marker=(110, 11),  # metal1_res
+            sheet_rho_ohm_sq=0.09,  # res_extraction.lvs: resistor('rm1', 0.09, ...)
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "gf180mcu_fd_pr__rm1",
+            ),
+        ),
+        ResistorDevice(
+            name="rm2",  # gf180mcu_fd_pr__rm2 (subckt "rm2")
+            body=(36, 0),  # Metal2
+            marker=(110, 12),  # metal2_res
+            sheet_rho_ohm_sq=0.09,  # res_extraction.lvs: resistor('rm2', 0.09, ...)
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "gf180mcu_fd_pr__rm2",
+            ),
+        ),
+        ResistorDevice(
+            name="rm3",  # gf180mcu_fd_pr__rm3 (subckt "rm3")
+            body=(42, 0),  # Metal3
+            marker=(110, 13),  # metal3_res
+            sheet_rho_ohm_sq=0.09,  # res_extraction.lvs: resistor('rm3', 0.09, ...)
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "gf180mcu_fd_pr__rm3",
+            ),
+        ),
+        # Top-metal thickness flavour set `tm6k`/`tm9k`/`tm11k`/`tm30k`
+        # (issue #1640, mirroring `ppolyf_u_1k`'s own `flavour_option=
+        # "poly_res"` above, issue #595) -- see the module docstring's
+        # derivation note above this section for why this is one
+        # `ResistorDevice` entry with a caller-selectable flavour, not four
+        # always-on entries. `body`/`marker` are this curated deck's own
+        # already-established "top_metal = Metal5" convention (the module
+        # docstring note above explains the 6LM/MetalTop approximation this
+        # makes). Default flavour is `tm9k` (0.04 ohm/sq), matching
+        # `gf180mcu.lvs`'s own `METAL_TOP = $metal_top || '9K'` default.
+        ResistorDevice(
+            name="tm9k",  # gf180mcu_fd_pr__tm9k (subckt "tm9k", METAL_TOP='9K' default)
+            body=(81, 0),  # Metal5 (this deck's own top_metal, see note above)
+            marker=(110, 15),  # metal5_res (this deck's own top_metal_res)
+            sheet_rho_ohm_sq=0.04,  # res_extraction.lvs 'when 9K', see above
+            flavour_option="metal_top",
+            flavours=(
+                ResistorFlavour(value="6K", name="tm6k", sheet_rho_ohm_sq=0.06),
+                ResistorFlavour(value="9K", name="tm9k", sheet_rho_ohm_sq=0.04),
+                ResistorFlavour(value="11K", name="tm11k", sheet_rho_ohm_sq=0.04),
+                ResistorFlavour(value="30K", name="tm30k", sheet_rho_ohm_sq=0.0095),
+            ),
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "gf180mcu_fd_pr__tm9k",
             ),
         ),
     ),

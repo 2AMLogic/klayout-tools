@@ -3733,6 +3733,108 @@ def test_deck_options_invalid_value_on_pre_extracted_netlist_shape_raises(tmp_pa
         run_lvs(path)
 
 
+# --------------------------------------------------------------------------- #
+# gf180mcu drawn metal resistors `rm1`/`rm2`/`rm3` and the `tm6k`/`tm9k`/
+# `tm11k`/`tm30k` top-metal flavour set (issue #1640) reach `klt lvs`'s
+# existing generic device-comparison path with **no** LVS code change --
+# the same finding issue #1621 confirmed for sky130's `res_generic_mN`.
+# --------------------------------------------------------------------------- #
+
+
+def _write_gf180mcu_metal_res_gds(
+    path: Path, metal_gds_layer: int, marker_datatype: int
+) -> str:
+    """A single gf180mcu drawn metal resistor -- a 12x1um bar on
+    `(metal_gds_layer, 0)` with a 6um `(110, marker_datatype)`-marked
+    segment and a labelled, contact-free head at each end, mirroring
+    `test_extract.py`'s `_make_gf180mcu_metal_resistor_layout` (kept
+    self-contained here per this test module's existing convention of not
+    cross-importing test fixtures)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(metal_gds_layer, 0, kdb.Box(0, 0, 12000, 1000))
+    draw(110, marker_datatype, kdb.Box(3000, 0, 9000, 1000))
+    for x, name in ((1500, "RA"), (10500, "RB")):
+        label(metal_gds_layer, 10, name, x, 500)
+
+    layout.write(str(path))
+    return str(path)
+
+
+def test_gf180mcu_metal_resistor_matches_plain_reference(tmp_path):
+    """`rm1` (Metal1, 0.09 ohm/sq, plain 2-terminal -- no bulk tie, unlike
+    `ppolyf_u`) reaches `status: "match"` against a plain-element reference
+    netlist sized for its own extracted resistance, via the same generic
+    device-comparison path every other resistor class already uses (issue
+    #1640)."""
+    gds = _write_gf180mcu_metal_res_gds(tmp_path / "rm1.gds", 34, 11)
+    r_ohm = 6.0 * 0.09  # 6 squares * 0.09 ohm/sq
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        f".subckt RES RA RB\nR1 RA RB {r_ohm:.5f} rm1\n.ends\n",
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": gds, "deck": "gf180mcu"},
+                "reference": {"netlist": reference_path, "top": "RES"},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
+def test_deck_options_selects_gf180mcu_metal_top_flavour_for_inline_extraction(
+    tmp_path,
+):
+    """`layout.deck_options={"metal_top": "30K"}` on an inline `layout.file`
+    + `layout.deck: "gf180mcu"` request resolves the layout side's
+    `metal5_res`-marked Metal5 segment as `tm30k` (0.0095 ohm/sq), matching a
+    reference netlist sized for that flavour -- and echoes the resolved
+    mapping in `provenance.deck.options` (issue #1640, mirroring
+    `test_deck_options_selects_gf180mcu_poly_res_flavour_for_inline_extraction`
+    above)."""
+    gds = _write_gf180mcu_metal_res_gds(tmp_path / "tm.gds", 81, 15)
+    r_ohm = 6.0 * 0.0095  # 6 squares * 0.0095 ohm/sq (tm30k)
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        f".subckt RES RA RB\nR1 RA RB {r_ohm:.5f} tm30k\n.ends\n",
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "file": gds,
+                    "deck": "gf180mcu",
+                    "deck_options": {"metal_top": "30K"},
+                },
+                "reference": {"netlist": reference_path, "top": "RES"},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"]["layout"] == 1
+    assert report["provenance"]["deck"]["options"] == {"metal_top": "30K"}
+
+
 def test_body_unverified_warns_nmos_only_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer -- `Comp` is
     shared with ordinary active, `ExtractionDeck.tap is None` -- so the NMOS
@@ -8332,6 +8434,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "ppolyf_u_1k",
         "ppolyf_u_2k",
         "ppolyf_u_3k",
+        # Drawn metal resistors (issue #1640) -- curated, not derived, same
+        # as the poly flavours above (see `_RESISTOR_MODEL_TABLE`).
+        "rm1",
+        "rm2",
+        "rm3",
+        "tm6k",
+        "tm9k",
+        "tm11k",
+        "tm30k",
         "cap_mim_2f0_m4m5_noshield",
     }
     assert set(build_device_binding_map("sky130")) == {

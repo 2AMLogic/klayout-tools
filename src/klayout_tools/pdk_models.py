@@ -208,6 +208,23 @@ comment):
   per-family parameter-name difference (``l``/``w`` vs ``r_length``/
   ``r_width``) is why the binding carries the subcircuit's own length/width
   parameter names per family rather than assuming one convention.
+- **gf180mcu metal resistors** -- ``rm1`` / ``rm2`` / ``rm3`` / ``tm6k`` /
+  ``tm9k`` / ``tm11k`` / ``tm30k`` (issue #1640, two terminals -- no bulk tie,
+  unlike ``ppolyf_u`` above), same ``r_length``/``r_width`` convention,
+  same real fetched ``gf180mcuB`` install's
+  ``libs.tech/ngspice/sm141064.ngspice``. **Unlike** sky130's
+  ``res_generic_m1``..``res_generic_m5`` (a bare-``.model``-only carve-out,
+  see ``_RESISTOR_MODEL_TABLE`` below), all seven of these gf180mcu classes
+  *do* have a real ``.subckt`` each (``.subckt rm1 1 2 r_length=l r_width=w
+  dtemp=0 par=1 s=1`` ... ``rb 1 2 r='r_temp*r_n*(r_rsh0+...)' ... .ends
+  rm1``, and identically-shaped ``rm2``/``rm3``/``tm6k``/``tm9k``/``tm11k``/
+  ``tm30k`` blocks), cross-checked against the same install's reference CDL
+  testcases (``libs.tech/klayout/lvs/testing/testcases/unit/res_devices/
+  netlist/rm1.cdl``/``tm6k.cdl``) and process-corner ``+rsh_rm1=0.09``/
+  ``+rsh_tm6k=60e-3`` parameters, which agree with ``decks/gf180mcu.py``'s
+  own transcribed ``sheet_rho_ohm_sq`` literals. See
+  ``decks/gf180mcu.py``'s own module-docstring derivation note (immediately
+  above its ``resistors=(...)`` declaration) for the full citation.
 - **sg13g2 resistors** -- ``rsil`` / ``rppd`` / ``rhigh`` (issue #1457), each
   a three-terminal ``1 2 bn`` subcircuit (``bn`` the bulk/substrate tie,
   matching the deck's own ``bulk_to_substrate=True`` on all three classes),
@@ -1079,6 +1096,23 @@ _RESISTOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "ppolyf_u_1k": "ppolyf_u_1k",
         "ppolyf_u_2k": "ppolyf_u_2k",
         "ppolyf_u_3k": "ppolyf_u_3k",
+        # Drawn metal resistors (issue #1640, the gf180mcu counterpart of
+        # sky130's res_generic_m1..m5, #1621) -- **unlike** that sky130
+        # family, all seven of these classes have a real `.subckt` in the
+        # vendored `sm141064.ngspice` (verified against a real fetched
+        # `gf180mcuB` install; see the module docstring's own note above and
+        # `decks/gf180mcu.py`'s module-level derivation comment for the full
+        # citation), so every one gets a binding entry here.
+        "rm1": "rm1",
+        "rm2": "rm2",
+        "rm3": "rm3",
+        # All four top-metal-thickness flavours (issue #1640, mirroring
+        # poly_res's own all-flavours-bound discipline above): selected by
+        # `--deck-option metal_top={6K,9K,11K,30K}`.
+        "tm6k": "tm6k",
+        "tm9k": "tm9k",
+        "tm11k": "tm11k",
+        "tm30k": "tm30k",
     },
     # sg13g2's three drawn poly resistors (issue #1457; classes recognised by
     # issues #1231/#1235). Confirmed against a real fetched IHP-Open-PDK
