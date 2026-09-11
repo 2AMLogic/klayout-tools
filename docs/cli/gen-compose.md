@@ -198,7 +198,13 @@ cleanly.
   exposes the same third level (#1058): `"metal3"` (Metal3 `42/0`) plus its
   own connecting via role (`"via2"`, the Metal2↔Metal3 via, `38/0`) — usable
   the same way, including the two-hop ladder down to the base `"metal"` role
-  (Metal1). IHP-Open-PDK's
+  (Metal1). gf180mcu's deck exposes one level further still (#1670):
+  `"metal4"` (Metal4 `46/0`) plus its own connecting via role (`"via3"`, the
+  Metal3↔Metal4 via, `40/0`) — the layer a `klt place-and-route`-produced
+  macro's own top-level pins routinely land on (OpenROAD's global router
+  picks the pin escape layer) — usable the same way, including the
+  three-hop ladder down to the base `"metal"` role (Metal1) via
+  `"via1"`/`"via2"`/`"via3"`. IHP-Open-PDK's
   `sg13g2`/`sg13cmos5l` (issue #1474) expose the identical two-level shape:
   `"metal2"` (Metal2 `10/0`) plus `"via1"` (Via1 `19/0`, the Metal1↔Metal2
   via) and `"metal3"` (Metal3 `30/0`) plus `"via2"` (Via2 `29/0`, the

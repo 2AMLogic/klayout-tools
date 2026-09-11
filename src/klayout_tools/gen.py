@@ -824,9 +824,13 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `metals`/`vias` ladder between two roles (issue #1567), not just
         # one hop.
         # A third plane (`"metal3"`/`"via2"`, Metal3) was added below by
-        # issue #1058; Metal4-5/`vias[2:]` still stay unexposed here (out of
-        # that issue's scope, not a structural limit -- see
-        # `EXTRACTION_DECK.metals`/`.vias` in `klayout_tools.decks.gf180mcu`).
+        # issue #1058; a fourth (`"metal4"`/`"via3"`, Metal4) was added below
+        # that by issue #1670. Metal5/`vias[3]` (the Via4 hop up to Metal5)
+        # still stay unexposed here as general routing roles (out of that
+        # issue's scope, not a structural limit -- see
+        # `EXTRACTION_DECK.metals`/`.vias` in `klayout_tools.decks.gf180mcu`;
+        # Metal5 is already independently reachable via this table's own
+        # single-purpose `"top_metal"` bond-pad role below).
         "metal2": (36, 0),  # Metal2 -- EXTRACTION_DECK.metals[1]
         "via1": (35, 0),  # Via1 -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
         # Third routing-metal role + its connecting via (issue #1058, same
@@ -842,12 +846,29 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `"metal3"` reaches a pin on `"metal2"` (Metal2, one via hop away)
         # via `"via2"` directly, and a pin still on the base `"metal"` role
         # (Metal1, two hops away) via a two-hop `"via1"` + `"via2"` ladder,
-        # with a landing pad on Metal2 in between. Metal4-5/`vias[2:]` stay
-        # unexposed here (out of this issue's scope, not a structural limit
-        # -- see `EXTRACTION_DECK.metals`/`.vias` in
-        # `klayout_tools.decks.gf180mcu`).
+        # with a landing pad on Metal2 in between.
         "metal3": (42, 0),  # Metal3 -- EXTRACTION_DECK.metals[2]
         "via2": (38, 0),  # Via2 -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
+        # Fourth routing-metal role + its connecting via (issue #1670, same
+        # shape as #1058's `"metal3"`/`"via2"` addition above): a
+        # `klt place-and-route`-produced gf180mcu macro routinely lands its
+        # own top-level pins on Metal4 -- OpenROAD's global router picks the
+        # pin escape layer, and Metal4 is an unremarkable choice for a
+        # design of any size -- but `gen_compose`'s router had no role name
+        # that resolved to it, so a `connectivity[]`/`routing` request
+        # targeting one of those pins was structurally unresolvable, not
+        # merely rejected with a diagnostic. This exposes the next level up
+        # (Metal4) and the via connecting it to `"metal3"` (Metal3), mirroring
+        # `"metal3"`/`"via2"`'s own rationale exactly. `gen_compose`'s
+        # via-drop walks the full `metals`/`vias` ladder between the two
+        # layers (issue #1567) -- so `"metal4"` reaches a pin on `"metal3"`
+        # (Metal3, one via hop away) via `"via3"` directly, and a pin still on
+        # a lower role (Metal2/Metal1) via the corresponding multi-hop
+        # `via1`/`via2`/`via3` ladder, with a landing pad on each intervening
+        # metal in between. Metal5/`vias[3]` (Via4) stays unexposed here as a
+        # general routing role -- see the comment above `"metal2"` for why.
+        "metal4": (46, 0),  # Metal4 -- EXTRACTION_DECK.metals[3]
+        "via3": (40, 0),  # Via3 -- EXTRACTION_DECK.vias[2] (Metal3<->Metal4)
         # Label/pin purpose of the base `metal` role (Metal1) -- the same pair
         # `klayout_tools.decks.gf180mcu`'s `EXTRACTION_DECK.metal_labels[0]`
         # declares. Same rationale (and the same deliberate avoidance of a
