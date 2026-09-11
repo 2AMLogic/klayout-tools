@@ -4313,6 +4313,159 @@ def test_route_two_pin_detour_takes_the_shorter_of_the_two_lanes():
     assert min(y for _, y in result["points_um"]) <= bboxes["m"]["y0"] - 0.3
 
 
+# --------------------------------------------------------------------------- #
+# Layer-agnostic obstacle-overlap false positive (#1656): the check above
+# tests a route against every placed block's *bbox*, regardless of which
+# layers that block actually draws shapes on -- rejecting (or detouring
+# around) a route for "crossing" a block that draws nothing at all on the
+# route's own layer, even though there is no physical possibility of a
+# short. `res_array` is a convenient obstacle generator here: it draws real
+# pads on `"metal"` (li1) but nothing at all on `"metal3"` (met2, #508's
+# router-only role no `klt gen` generator ever draws), giving a real block
+# that is provably bare on one layer and provably not on another.
+# --------------------------------------------------------------------------- #
+
+
+def _three_block_row_with_real_obstacle_fixture(tmp_path, pdk_root):
+    """Three real `res_array` (num=1, dummy=0) blocks in a row: ``a`` and
+    ``b`` carry the net's own ports (``R0_B`` facing east, ``R0_A`` facing
+    west -- so the straight single-jog backbone between them runs due east),
+    ``obstacle`` sits squarely on that straight path between them, offset
+    far enough that neither pin's own block touches it.
+    """
+
+    def _gen_res(cell_name):
+        output = tmp_path / f"{cell_name}.gds"
+        request = {
+            "schema": gen.REQUEST_SCHEMA,
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 1, "dummy": 0},
+            "options": {"cell_name": cell_name, "output": str(output)},
+        }
+        return gen.generate(request)
+
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": "a", "generator_report": _gen_res("res_a")},
+            {"id": "obstacle", "generator_report": _gen_res("res_o")},
+            {"id": "b", "generator_report": _gen_res("res_b")},
+        ]
+    )
+    offsets = {
+        "a": {"x": 0.0, "y": 0.0},
+        "obstacle": {"x": 10.0, "y": 0.0},
+        "b": {"x": 20.0, "y": 0.0},
+    }
+    bboxes = {
+        block_id: {
+            "x0": blocks[block_id]["bbox_um"]["x0"] + off["x"],
+            "y0": blocks[block_id]["bbox_um"]["y0"] + off["y"],
+            "x1": blocks[block_id]["bbox_um"]["x1"] + off["x"],
+            "y1": blocks[block_id]["bbox_um"]["y1"] + off["y"],
+        }
+        for block_id, off in offsets.items()
+    }
+    pin_a = {"block": "a", "port": "R0_B"}
+    pin_b = {"block": "b", "port": "R0_A"}
+    return blocks, offsets, bboxes, pin_a, pin_b
+
+
+def _cached_block_geometry_for(blocks, offsets, layer):
+    """A minimal ``block_geometry_for``-shaped callable -- mirrors the lazy
+    ``{block_id: geometry}`` cache `compose()` itself builds around
+    :func:`gen_compose.read_block_layer_geometry` (see
+    ``gen_compose.py``'s own ``_block_geometry_for`` closure)."""
+    cache = {}
+
+    def _for(block_id):
+        if block_id not in cache:
+            cache[block_id] = gen_compose.read_block_layer_geometry(
+                block_id, blocks[block_id], offsets[block_id], layer
+            )
+        return cache
+
+    return _for
+
+
+def test_route_two_pin_ignores_a_bbox_crossing_on_a_layer_the_block_never_draws(
+    tmp_path, pdk_root
+):
+    # #1656: routing on "metal3" (met2) -- a role no `klt gen` generator ever
+    # draws -- straight through `obstacle`'s bbox must not be rejected or
+    # detoured around: `obstacle` (a res_array) draws nothing on met2 at all,
+    # so there is nothing physically underneath the crossing to short to.
+    blocks, offsets, bboxes, pin_a, pin_b = _three_block_row_with_real_obstacle_fixture(
+        tmp_path, pdk_root
+    )
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal3")
+    assert (
+        gen_compose.read_block_layer_geometry(
+            "obstacle", blocks["obstacle"], offsets["obstacle"], route_layer
+        )
+        is None
+    )  # sanity: the obstacle really is bare on this layer
+
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer,
+        block_geometry_for=_cached_block_geometry_for(blocks, offsets, route_layer),
+    )
+    assert result["routed"] is True, result["reason"]
+    # The path is the direct two-point backbone (no detour was needed) --
+    # confirming the obstacle was exempted outright, not merely dodged --
+    # and it genuinely crosses the obstacle's own (width-inflated) bbox.
+    assert result["points_um"] == [(2.63, 0.21), (20.21, 0.21)]
+    assert _crossing_um(result["points_um"], bboxes["obstacle"], 0.3) > 0.0
+
+
+def test_route_two_pin_still_rejects_a_block_that_draws_the_route_layer(
+    tmp_path, pdk_root
+):
+    # Companion/non-regression case for #1656: on "metal" (li1), `obstacle`
+    # *does* draw real pads -- the obstacle-overlap check must still treat
+    # it exactly as it did before the layer-scoping fix (proven here by
+    # requiring byte-identical results with/without the new
+    # `block_geometry_for` callable supplied).
+    blocks, offsets, bboxes, pin_a, pin_b = _three_block_row_with_real_obstacle_fixture(
+        tmp_path, pdk_root
+    )
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+    assert (
+        gen_compose.read_block_layer_geometry(
+            "obstacle", blocks["obstacle"], offsets["obstacle"], route_layer
+        )
+        is not None
+    )  # sanity: the obstacle really does draw here
+
+    baseline = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.3, route_layer
+    )
+    with_geometry = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer,
+        block_geometry_for=_cached_block_geometry_for(blocks, offsets, route_layer),
+    )
+    assert with_geometry == baseline
+    # Confirms the obstacle really was treated as blocking (not a no-op
+    # comparison of two equally-unaffected runs): the accepted path is a
+    # detour, longer than the direct two-point distance between the ports.
+    assert baseline["routed"] is True, baseline["reason"]
+    assert len(baseline["points_um"]) > 2
+    straight_um = 20.21 - 2.63
+    assert baseline["route_length_um"] > straight_um
+
+
 def test_route_two_pin_detours_around_two_obstacles_on_one_lane():
     # Documented depth limit (#1167): what the search bounds is the number of
     # *lanes* it tries (two), not the number of blocks in the way -- one lane

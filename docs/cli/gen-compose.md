@@ -392,6 +392,23 @@ into the circuit.)
   unroutable, so the same workarounds (an `add_guard_ring: false` parameter,
   opposite-facing port pairs, or `waypoints_um` with several microns of
   clearance from every block) still apply there.
+- **The obstacle-overlap check above is layer-scoped, not layer-agnostic
+  (#1656, fixed).** The bbox/margin heuristic described above used to test a
+  leg's backbone against every *other* placed block's `bbox_um` regardless of
+  which layers that block actually draws shapes on — so a route on, say,
+  `metal3` (a router-only role no `klt gen` generator draws pads on) could be
+  rejected (or, since #1167, detoured around) for "crossing" a neighboring
+  block's bbox even when that block draws nothing at all on `metal3`: no
+  physical short is possible, only a bbox intersection on paper. `klt
+  gen-compose` now reads each candidate obstacle block's own drawn geometry
+  on the leg's `effective_route_layer` (the same `read_block_layer_geometry`
+  helper #1520/#1527 already use for a leg's own endpoint block, here reused
+  read-only for *any* placed block) and exempts a block from the
+  obstacle-overlap check outright when it draws nothing there — a bbox
+  crossing against such a block is a false positive, not a real obstacle. A
+  block that *does* draw something on `effective_route_layer` is still
+  rejected/detoured around exactly as before; this only removes false
+  positives, it does not weaken the check against a genuine obstacle.
 - **Routing same-facing port pairs with `waypoints_um` (#634, fixed).** Case
   **(1)** above has no remedy when the caller cannot choose which ports get
   wired — e.g. a hand-drawn cell that legitimately puts its input and output

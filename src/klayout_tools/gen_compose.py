@@ -2987,6 +2987,8 @@ def route_two_pin(
     cross_block_geometry: dict[str, dict[str, Any] | None] | None = None,
     cross_block_width_um: float | None = None,
     leg_conflict: Any = None,
+    block_geometry_for: Any = None,
+    cross_block_geometry_for: Any = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -3083,11 +3085,17 @@ def route_two_pin(
        crosses the zero-width centerline through the block's true interior;
        each own-pin's allowance is bumped by the same ``width_um / 2`` so a
        normal approach into that pin's own block is not penalized by the
-       inflation. A crossing this check finds is not automatically fatal
-       (#1167): when the *only* blocks crossed are ones neither pin sits on,
-       the net is retried around them first -- see "Bounded detour search"
-       below -- and reported unroutable only if no alternate lane clears
-       them either.
+       inflation. A block that draws no shapes at all on ``effective_route_
+       layer`` is exempted from this check entirely (#1656): a route on
+       metal2 cannot short to a block whose own drawn geometry has no
+       metal2 shapes, so a bare bbox crossing there is a false positive,
+       not a real obstacle -- see ``block_geometry_for``/
+       ``cross_block_geometry_for`` below. A crossing this check finds
+       against a block that *does* draw something there is not automatically
+       fatal (#1167): when the *only* blocks crossed are ones neither pin
+       sits on, the net is retried around them first -- see "Bounded detour
+       search" below -- and reported unroutable only if no alternate lane
+       clears them either.
     6. **Via-drop resolution** (#454; multi-hop ladder since #1567): when
        ``route_layer`` and a pin's own reported layer differ,
        :func:`_resolve_via_drop_layer` looks up whether ``extraction_deck``
@@ -3185,6 +3193,23 @@ def route_two_pin(
     too, reproducing this function's pre-#1620 behaviour exactly. The
     returned result's own ``width_um`` field (see below) reports whichever
     width actually won.
+
+    ``block_geometry_for``/``cross_block_geometry_for`` (issue #1656) are the
+    same lazy per-block geometry caches ``compose()`` builds around
+    :func:`read_block_layer_geometry` for ``block_geometry``/
+    ``cross_block_geometry`` above (a callable that, given a ``block_id``,
+    returns the shared ``{block_id: geometry-or-None}`` cache dict with that
+    entry populated) -- but reachable here for *any* block in
+    ``placed_bboxes_um``, not only the leg's own two endpoint blocks. The
+    obstacle-overlap check (5) below uses them to test whether a block it is
+    about to reject a crossing against actually draws anything on
+    ``effective_route_layer``: a block whose own geometry has nothing there
+    cannot be shorted to by this route, no matter how much its *bbox*
+    overlaps the drawn path, so it is exempted from that check entirely.
+    Both are optional and ``None`` by default; when omitted (e.g. a direct
+    unit-test caller, or ``route_layer is None``), the obstacle check falls
+    back to its pre-#1656 bbox-only behaviour and every placed block stays a
+    potential obstacle regardless of what it draws.
 
     **Bounded detour search (#1167).** Rejecting every backbone that crosses
     a third block's bbox means only *immediately adjacent* blocks in a row
@@ -3911,11 +3936,37 @@ def route_two_pin(
             + obstacle_half_um
         )
 
+    # #1656: pick whichever lazy per-block geometry cache (if any) matches
+    # the layer this leg actually landed on above -- `block_geometry_for`
+    # reads `route_layer`, `cross_block_geometry_for` reads
+    # `cross_block_route_layer` (see #1620's same-layer-short retry just
+    # above for how `effective_route_layer` can end up being either one).
+    # `None` when the caller supplied neither cache for this layer (e.g. a
+    # direct unit-test caller, or `route_layer is None`) -- the obstacle
+    # check below then falls back to its pre-#1656 bbox-only behaviour.
+    if effective_route_layer == route_layer:
+        layer_geometry_for = block_geometry_for
+    elif (
+        cross_block_route_layer is not None
+        and effective_route_layer == cross_block_route_layer
+    ):
+        layer_geometry_for = cross_block_geometry_for
+    else:
+        layer_geometry_for = None
+
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
         for other_id, other_bbox in obstacle_bboxes_um.items():
             if same_block_self_net and other_id == own_a:
                 continue  # a self-net is expected to cross its own block
+            if (
+                layer_geometry_for is not None
+                and layer_geometry_for(other_id).get(other_id) is None
+            ):
+                # #1656: this block draws nothing on effective_route_layer,
+                # so the route cannot short to it -- a bbox crossing here is
+                # a false positive, not a real obstacle.
+                continue
             length = _segment_bbox_interior_overlap_um(seg_p0, seg_p1, other_bbox)
             if length > 0.0:
                 overlap_by_block_um[other_id] = (
@@ -3972,6 +4023,8 @@ def route_two_pin(
                 cross_block_route_layer=cross_block_route_layer,
                 cross_block_geometry=cross_block_geometry,
                 cross_block_width_um=cross_block_width_um,
+                block_geometry_for=block_geometry_for,
+                cross_block_geometry_for=cross_block_geometry_for,
             )
             if retry["routed"]:
                 return retry
@@ -4130,6 +4183,8 @@ def route_two_pin(
                 cross_block_route_layer=cross_block_route_layer,
                 cross_block_geometry=cross_block_geometry,
                 cross_block_width_um=cross_block_width_um,
+                block_geometry_for=block_geometry_for,
+                cross_block_geometry_for=cross_block_geometry_for,
             )
             if not retry["routed"]:
                 continue
@@ -4279,8 +4334,12 @@ def route_bundle(
     geometry) needs its own block's drawn geometry to check that stub
     against (see :func:`route_two_pin`'s own "own-block escape check"). A
     ``generator_report`` endpoint is deliberately left out of this fetch --
-    see that same docstring for why. ``leg_conflict`` is an optional callable
-    taking a
+    see that same docstring for why. ``block_geometry_for``/
+    ``cross_block_geometry_for`` are *also* forwarded to :func:`route_two_pin`
+    verbatim (issue #1656) so its obstacle-overlap check (5) can look up any
+    third-party obstacle block's own geometry on demand -- not only the
+    ``cell``-endpoint fetch just described, which remains scoped to a leg's
+    own two blocks. ``leg_conflict`` is an optional callable taking a
     candidate leg's drawn ``points_um``, ``via_drops``, ``stub_widen``, and
     (issue #1386) its effective ``route_layer`` (the same four fields
     :func:`route_two_pin` returns for it -- issue #1197 widened this from
@@ -4526,6 +4585,8 @@ def route_bundle(
             cross_block_geometry=cross_geometry,
             cross_block_width_um=cross_block_width_um,
             leg_conflict=leg_conflict,
+            block_geometry_for=block_geometry_for,
+            cross_block_geometry_for=cross_block_geometry_for,
         )
         reason = None if result["routed"] else result["reason"]
         if result["routed"] and leg_conflict is not None:
@@ -4591,6 +4652,8 @@ def route_bundle(
             cross_block_geometry=cross_geometry,
             cross_block_width_um=cross_block_width_um,
             leg_conflict=leg_conflict,
+            block_geometry_for=block_geometry_for,
+            cross_block_geometry_for=cross_block_geometry_for,
         )
         reason = None if result["routed"] else result["reason"]
         if result["routed"] and leg_conflict is not None:
