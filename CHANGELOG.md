@@ -16,6 +16,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose`'s `connectivity[]` router now retries a leg
+  onto `routing.cross_block_layer_role` when it is rejected for crossing a
+  *different* net's already-accepted route, instead of failing the whole net
+  outright (issue #1680). Two nets sharing one `routing.layer_role` purely
+  because it is the request's one primary layer — not because either
+  genuinely needs that physical plane — could not resolve a crossing between
+  them before this: `route_two_pin()`'s own same-block cross-layer retry
+  (#1168/#1393) never fired, since it only ever engages from its own checks
+  3/4, one level below where the route-vs-route collision check (#1057/#1386)
+  actually runs. The rejected leg is now re-routed once with the primary and
+  cross layers swapped and accepted only if it also clears the collision
+  check there; a leg that collides on both layers still fails the whole net.
+  A genuine same-layer short with no `routing.cross_block_layer_role`
+  configured is unaffected. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Known limitations"
+  section.
 - **Fixed**: `klt gen-compose`'s obstacle-overlap routability check is now
   layer-scoped instead of layer-agnostic (issue #1656). The check used to
   test a candidate route's backbone against every other placed block's

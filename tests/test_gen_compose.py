@@ -5798,6 +5798,163 @@ def test_compose_route_vs_route_collision_is_order_dependent(tmp_path, pdk_root)
     )
 
 
+def test_compose_route_vs_route_collision_retries_onto_cross_block_layer_role(
+    tmp_path, pdk_root
+):
+    # Issue #1680: the same two-net crossing `_crossing_routes_fixture`
+    # reproduces above (NET_V's backbone is geometrically forced to cross
+    # NET_H's already-accepted one), but with `routing.cross_block_layer_
+    # role` configured. Before this issue, `_leg_conflict`'s route-vs-route
+    # rejection (#1057) never got a chance to retry -- unlike route_two_pin's
+    # own checks 3/4 same-layer-short retry (#1168), the collision here is
+    # only ever discovered one level up, in route_bundle(), after
+    # route_two_pin() already returned. Now route_bundle() itself retries the
+    # rejected leg with the primary/cross layer roles swapped -- both nets
+    # end up `routed: true`, NET_H staying on the primary layer and NET_V
+    # hopping onto the cross layer to clear the crossing.
+    output = tmp_path / "cross_retry.gds"
+    request = _crossing_routes_fixture(tmp_path, pdk_root)
+    request["routing"]["cross_block_layer_role"] = "metal2"
+    request["options"] = {"cell_name": "cross_retry", "output": str(output)}
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    for net in report["nets"]:
+        assert net["routed"] is True, net["legs"]
+        assert net["route_length_um"] is not None
+        assert all(leg["reason"] is None for leg in net["legs"])
+
+    # NET_H stays on the primary `"metal"` plane (li1, GDS layer (67, 20));
+    # NET_V's backbone actually landed on the cross `"metal2"` plane (GDS
+    # layer (68, 20)) -- the retry, not a coincidental identical shape.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("cross_retry")
+    li1_paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    metal2_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    assert len(li1_paths) == 1  # NET_H only
+    assert len(metal2_paths) == 1  # NET_V's retried backbone
+
+    # No short: the composed layout extracts NET_H and NET_V as two distinct
+    # nodes, never merged onto one.
+    result = extract.run_extract(str(output), "sky130", top="cross_retry")
+    assert result["merged_net_labels"] == []
+
+
+def test_compose_route_vs_route_collision_with_no_cross_block_layer_role_still_rejects(
+    tmp_path, pdk_root
+):
+    # Regression guard (#1057/#1386): the exact same crossing fixture with no
+    # `routing.cross_block_layer_role` configured at all must still reject
+    # with "crosses already-routed net ..." exactly as before #1680 -- the
+    # retry this issue adds must never fire when there is no cross layer to
+    # retry onto.
+    output = tmp_path / "cross_no_retry.gds"
+    request = _crossing_routes_fixture(tmp_path, pdk_root)
+    request["options"] = {"cell_name": "cross_no_retry", "output": str(output)}
+    report = compose(request)
+
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["routed"] is False
+    assert report["unrouted_nets"] == ["NET_V"]
+    blocker_leg = next(
+        leg for leg in report["nets"][1]["legs"] if leg["reason"] is not None
+    )
+    assert "crosses already-routed net 'NET_H'" in blocker_leg["reason"]
+
+
+def test_compose_route_vs_route_collision_that_conflicts_on_both_layers_still_fails(
+    tmp_path, pdk_root
+):
+    # Edge case (#1680's own acceptance criteria): a leg that conflicts with
+    # an already-accepted route on the primary layer *and* on the cross
+    # layer must still fail the whole net outright -- no silent short. NET_H
+    # routes first on the primary layer; NET_V1 is rejected on the primary
+    # layer (crosses NET_H) but its retry onto the cross layer succeeds
+    # (nothing else is there yet); NET_V2 shares NET_V1's own vertical lane
+    # (x=16) end to end, so it is rejected on the primary layer for the same
+    # reason NET_V1 was, and its own retry onto the cross layer collides with
+    # NET_V1's now-accepted cross-layer backbone instead -- rejected on both
+    # layers, the net stays unrouted.
+    bw = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw", num=1)
+    be = _gen_block(tmp_path, pdk_root, "resistor_strip", "be", num=1)
+    bn1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bn1", num=1)
+    bs1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bs1", num=1)
+    bn2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bn2", num=1)
+    bs2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bs2", num=1)
+    output = tmp_path / "cross_both_layers.gds"
+    request = {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": "bw", "generator_report": bw},
+            {"id": "be", "generator_report": be},
+            {"id": "bn1", "generator_report": bn1},
+            {"id": "bs1", "generator_report": bs1},
+            {"id": "bn2", "generator_report": bn2},
+            {"id": "bs2", "generator_report": bs2},
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["bw", "be", "bn1", "bs1", "bn2", "bs2"],
+            "origins_um": {
+                "bw": {"x": 0.0, "y": 15.0},
+                "be": {"x": 30.0, "y": 15.0},
+                "bn1": {"x": 10.0, "y": 25.0},
+                "bs1": {"x": 18.0, "y": 5.0},
+                "bn2": {"x": 10.0, "y": 45.0},
+                "bs2": {"x": 18.0, "y": -15.0},
+            },
+        },
+        "connectivity": [
+            {
+                "net": "NET_H",
+                "pins": [
+                    {"block": "bw", "port": "P2"},
+                    {"block": "be", "port": "P1"},
+                ],
+            },
+            {
+                "net": "NET_V1",
+                "pins": [
+                    {"block": "bn1", "port": "P2"},
+                    {"block": "bs1", "port": "P1"},
+                ],
+                "waypoints_um": [[16.0, 25.21], [16.0, 5.21]],
+            },
+            {
+                "net": "NET_V2",
+                "pins": [
+                    {"block": "bn2", "port": "P2"},
+                    {"block": "bs2", "port": "P1"},
+                ],
+                # Same x=16 vertical lane as NET_V1's own retried
+                # cross-layer backbone, spanning a superset of its y range --
+                # guaranteed to collide with NET_V1 on the cross layer too.
+                "waypoints_um": [[16.0, 45.21], [16.0, -15.21]],
+            },
+        ],
+        "routing": {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+        },
+        "options": {"cell_name": "cross_both_layers", "output": str(output)},
+    }
+    report = compose(request)
+
+    nets_by_name = {net["net"]: net for net in report["nets"]}
+    assert nets_by_name["NET_H"]["routed"] is True
+    assert nets_by_name["NET_V1"]["routed"] is True
+    assert nets_by_name["NET_V2"]["routed"] is False
+    assert report["unrouted_nets"] == ["NET_V2"]
+    blocker_leg = next(
+        leg for leg in nets_by_name["NET_V2"]["legs"] if leg["reason"] is not None
+    )
+    assert "crosses already-routed net" in blocker_leg["reason"]
+
+
 def test_compose_rejects_same_block_self_net_pair_whose_via_landing_pads_cross(
     tmp_path, pdk_root
 ):
