@@ -6196,13 +6196,16 @@ class _FakePin:
 
 class _FakeCircuit(_FakeNamed):
     """Stands in for a `klayout.db.Circuit` object (issue #1622):
-    `.expanded_name()` (inherited from `_FakeNamed`) plus `.each_pin()`,
-    the declared-pin-list accessor `_reference_signal_pin_names`/
-    `_is_power_only_circuit` read to classify a circuit's pins as
-    power-only or signal-bearing."""
+    `.expanded_name()` (inherited from `_FakeNamed`) plus `.each_pin()`, the
+    declared-pin-list accessor `_reference_signal_pin_names`/
+    `_is_power_only_circuit` read to classify a circuit's pins as power-only
+    or signal-bearing, and the `.name` *attribute* (not method -- matching
+    `kdb.Circuit`) `_gate_level_power_pin_names` looks the circuit's cell up
+    in the library's pin-order data by."""
 
     def __init__(self, name: str, pins: list[str]) -> None:
         super().__init__(name)
+        self.name = name
         self._pins = [_FakePin(p) for p in pins]
 
     def each_pin(self) -> list[_FakePin]:
@@ -6408,50 +6411,130 @@ def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
     assert entry["subcircuit"] == {"layout": "lib__fill_1", "reference": None}
 
 
-def test_is_power_only_circuit_recognizes_filler_pin_list():
-    """Issue #1622: a circuit whose entire declared pin list never appears
-    as a signal pin anywhere in the reference netlist (the filler/tap-cell
-    case -- e.g. a `.SUBCKT` whose only pins are `VPWR`/`VGND`) classifies
-    as power-only: a `gate-level-verilog` reference never instantiates a
-    cell with no logic function, so there is nothing on that side to
-    describe it."""
-    signal_pins = lvs._reference_signal_pin_names(
-        _FakeNetlist([_FakeCircuit("top", ["A", "Y"])])
+#: A `mylib`-shaped standard-cell library's full (signal + power/ground) pin
+#: orders, the shape `lvs._resolve_gate_level_pin_orders` returns. `dfxtp_1`
+#: is in the library but is never instantiated by the reference netlists
+#: below -- the disjoint-pin stray-cell case (issue #1622).
+_FAKE_LIBRARY_PIN_ORDERS = {
+    "mylib__inv_1": ["A", "VGND", "VNB", "VPB", "VPWR", "Y"],
+    "mylib__tapvpwrvgnd_1": ["VGND", "VNB", "VPB", "VPWR"],
+    "mylib__dfxtp_1": ["CLK", "D", "VGND", "VNB", "VPB", "VPWR", "Q"],
+}
+
+
+def _fake_gate_level_reference() -> _FakeNetlist:
+    """A converted `gate-level-verilog` reference: a top circuit plus the
+    signal-only black-box stub for the one library cell it instantiates
+    (`NetlistSpiceReader` reads names back upper-cased)."""
+    return _FakeNetlist(
+        [
+            _FakeCircuit("TOP", ["IN", "OUT"]),
+            _FakeCircuit("MYLIB__INV_1", ["A", "Y"]),
+        ]
     )
-    assert signal_pins == frozenset({"A", "Y"})
-    filler = _FakeCircuit("mylib__fill_1", ["VPWR", "VGND"])
-    assert lvs._is_power_only_circuit(filler, signal_pins) is True
+
+
+def test_gate_level_power_pin_names_derives_supplies_from_the_library():
+    """Issue #1622: the power-pin universe is derived, never hardcoded --
+    it is exactly the pins the library declares for a cell the reference
+    instantiates, minus every pin name the reference actually carries. For
+    `mylib__inv_1` (`A VGND VNB VPB VPWR Y`) instantiated with `A`/`Y`, that
+    is the four supply/well pins and nothing else."""
+    power_pins = lvs._gate_level_power_pin_names(
+        _fake_gate_level_reference(), _FAKE_LIBRARY_PIN_ORDERS
+    )
+    assert power_pins == frozenset({"VGND", "VNB", "VPB", "VPWR"})
+    # The stray `dfxtp_1`'s own signal pins are in the library, but NOT in
+    # the universe: the reference never instantiates that cell, so the
+    # library says nothing about which of its pins the conversion dropped.
+    assert not {"CLK", "D", "Q"} & power_pins
+
+
+def test_gate_level_power_pin_names_missing_evidence_is_none():
+    """Every missing input degrades to `None` -- which
+    `_is_power_only_circuit` treats as "no evidence", never as "everything
+    is power-only" (issue #1622)."""
+    reference = _fake_gate_level_reference()
+    assert lvs._gate_level_power_pin_names(reference, None) is None
+    assert lvs._gate_level_power_pin_names(reference, {}) is None
+    assert lvs._gate_level_power_pin_names(None, _FAKE_LIBRARY_PIN_ORDERS) is None
+    assert lvs._gate_level_power_pin_names(object(), _FAKE_LIBRARY_PIN_ORDERS) is None
+    # A reference that instantiates no library cell at all yields an empty
+    # universe, not a universe of everything.
+    assert (
+        lvs._gate_level_power_pin_names(
+            _FakeNetlist([_FakeCircuit("TOP", ["IN", "OUT"])]),
+            _FAKE_LIBRARY_PIN_ORDERS,
+        )
+        == frozenset()
+    )
+
+
+def test_reference_signal_pin_names_missing_netlist_is_none():
+    """No reference netlist to read a signal-pin universe from degrades to
+    `None`, which propagates as "no evidence" (issue #1622)."""
+    assert lvs._reference_signal_pin_names(None) is None
+    assert lvs._reference_signal_pin_names(object()) is None
+    assert lvs._reference_signal_pin_names(_fake_gate_level_reference()) == frozenset(
+        {"IN", "OUT", "A", "Y"}
+    )
+
+
+def test_is_power_only_circuit_recognizes_filler_pin_list():
+    """Issue #1622: a circuit whose every declared pin is a derived
+    power/ground pin (the filler/tap-cell case -- e.g. a `.SUBCKT` whose
+    only pins are `VPWR`/`VGND`) classifies as power-only: a
+    `gate-level-verilog` reference never instantiates a cell with no logic
+    function, so there is nothing on that side to describe it."""
+    power_pins = lvs._gate_level_power_pin_names(
+        _fake_gate_level_reference(), _FAKE_LIBRARY_PIN_ORDERS
+    )
+    filler = _FakeCircuit("MYLIB__FILL_1", ["VPWR", "VGND"])
+    assert lvs._is_power_only_circuit(filler, power_pins) is True
     # Not name-pattern-based: the same structural test catches sky130's
     # `tapvpwrvgnd_1` tap cell, which `docs/cli/lvs.md`'s superseded
     # `[!f]*` glob workaround did not exclude.
-    tap = _FakeCircuit("mylib__tapvpwrvgnd_1", ["VPWR", "VGND", "VPB", "VNB"])
-    assert lvs._is_power_only_circuit(tap, signal_pins) is True
+    tap = _FakeCircuit("MYLIB__TAPVPWRVGND_1", ["VPWR", "VGND", "VPB", "VNB"])
+    assert lvs._is_power_only_circuit(tap, power_pins) is True
 
 
 def test_is_power_only_circuit_negative_controls():
     """Issue #1622's own acceptance criterion: a circuit that is NOT
     power-only must never classify as one, so a genuine topology defect is
     never masked. A circuit with a real signal pin (even alongside a power
-    pin), a circuit with no declared pins at all, and a missing
-    signal-pin universe all return `False`."""
-    signal_pins = lvs._reference_signal_pin_names(
-        _FakeNetlist([_FakeCircuit("top", ["A", "Y"])])
+    pin), a circuit with no declared pins at all, and a missing power-pin
+    universe all return `False`."""
+    power_pins = lvs._gate_level_power_pin_names(
+        _fake_gate_level_reference(), _FAKE_LIBRARY_PIN_ORDERS
     )
-    mixed = _FakeCircuit("mylib__weird_1", ["A", "VPWR"])
-    assert lvs._is_power_only_circuit(mixed, signal_pins) is False
-    pinless = _FakeCircuit("mylib__pinless", [])
-    assert lvs._is_power_only_circuit(pinless, signal_pins) is False
-    filler = _FakeCircuit("mylib__fill_1", ["VPWR", "VGND"])
+    mixed = _FakeCircuit("MYLIB__WEIRD_1", ["A", "VPWR"])
+    assert lvs._is_power_only_circuit(mixed, power_pins) is False
+    pinless = _FakeCircuit("MYLIB__PINLESS", [])
+    assert lvs._is_power_only_circuit(pinless, power_pins) is False
+    filler = _FakeCircuit("MYLIB__FILL_1", ["VPWR", "VGND"])
     assert lvs._is_power_only_circuit(filler, None) is False
-    assert lvs._is_power_only_circuit(None, signal_pins) is False
+    assert lvs._is_power_only_circuit(filler, frozenset()) is False
+    assert lvs._is_power_only_circuit(None, power_pins) is False
 
 
-def test_reference_signal_pin_names_missing_netlist_is_none():
-    """No reference netlist to derive a signal-pin universe from degrades
-    to `None` -- which `_is_power_only_circuit` treats as "no evidence",
-    never as "everything is power-only" (issue #1622)."""
-    assert lvs._reference_signal_pin_names(None) is None
-    assert lvs._reference_signal_pin_names(object()) is None
+def test_is_power_only_circuit_spares_disjoint_pin_stray_cell():
+    """The false negative this derivation exists to rule out (issue #1622,
+    PR #1663 review): a stray, genuinely signal-bearing layout master that
+    the reference never instantiates -- so none of its pin names collides
+    with the reference's own -- must NOT classify as power-only.
+
+    The superseded "no pin of mine appears anywhere in the reference" test
+    could not tell this apart from a filler cell and pruned it, silently
+    turning a real missing-cell topology defect into `status: "match"`."""
+    power_pins = lvs._gate_level_power_pin_names(
+        _fake_gate_level_reference(), _FAKE_LIBRARY_PIN_ORDERS
+    )
+    stray = _FakeCircuit("MYLIB__DFXTP_1", ["CLK", "D", "Q", "VGND", "VPWR"])
+    # Not one of `CLK`/`D`/`Q` appears anywhere in the reference netlist...
+    signal_pins = lvs._reference_signal_pin_names(_fake_gate_level_reference())
+    assert not {"CLK", "D", "Q"} & signal_pins
+    # ...yet the cell is still spared, because they are not power pins.
+    assert lvs._is_power_only_circuit(stray, power_pins) is False
 
 
 def test_build_mismatches_ambiguous_net_is_warning_topology():
@@ -11007,9 +11090,26 @@ X2 mid out VGND VPWR mylib__buf_1
 .ends
 """
 
+#: The library file behind the power-pin-carrying fixtures above, shaped
+#: like a real standard-cell `.spice`: every logic cell declares the supplies
+#: AND the two well ties (sky130's own `A VGND VNB VPB VPWR Y` alphabetical
+#: interleave), and the library also ships the physical-only and sequential
+#: cells the reference Verilog never instantiates.
+#:
+#: Both of those are load-bearing for issue #1622's power-pin derivation,
+#: not decoration. The well ties must appear on a cell the reference DOES
+#: instantiate, because that is the only evidence that makes `VPB`/`VNB`
+#: power pins -- the tap cell declaring them proves nothing about itself.
+#: And `mylib__dfxtp_1` must be in the library while being absent from the
+#: reference, because that is the disjoint-pin stray-cell case: its
+#: `CLK`/`D`/`Q` appear in the library yet nowhere in the reference, and
+#: must still NOT be admitted as power pins.
 _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER = (
-    ".subckt mylib__inv_1 A Y VGND VPWR\n.ends\n"
-    ".subckt mylib__buf_1 A Y VGND VPWR\n.ends\n"
+    ".subckt mylib__inv_1 A VGND VNB VPB VPWR Y\n.ends\n"
+    ".subckt mylib__buf_1 A VGND VNB VPB VPWR Y\n.ends\n"
+    ".subckt mylib__xor_1 A VGND VNB VPB VPWR Y\n.ends\n"
+    ".subckt mylib__tapvpwrvgnd_1 VGND VNB VPB VPWR\n.ends\n"
+    ".subckt mylib__dfxtp_1 CLK D VGND VNB VPB VPWR Q\n.ends\n"
 )
 
 
@@ -11182,6 +11282,112 @@ def test_run_lvs_gate_level_verilog_missing_signal_circuit_still_reported(tmp_pa
     assert not any("TAPVPWRVGND" in json.dumps(entry) for entry in topology_entries)
 
 
+#: The filler layout above plus a stray *sequential* cell whose pin names are
+#: entirely disjoint from the reference's own pin universe: `mylib__dfxtp_1`
+#: (`CLK`/`D`/`Q`) against a reference that only ever instantiates
+#: `mylib__inv_1`/`mylib__buf_1` (`A`/`Y`, on nets `in`/`mid`/`out`). The
+#: library does declare this cell -- it is a real cell someone's P&R flow
+#: placed -- the reference simply never instantiates it, which is exactly
+#: what makes it a defect worth reporting.
+_GATE_LEVEL_LAYOUT_SPICE_WITH_DISJOINT_STRAY = (
+    _GATE_LEVEL_LAYOUT_SPICE_WITH_FILLER.replace(
+        "XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1",
+        "XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1\n"
+        "XFF0 clk d q VGND VPWR mylib__dfxtp_1",
+    ).replace(
+        ".subckt mylib__tapvpwrvgnd_1 VPWR VGND VPB VNB\n.ends\n",
+        ".subckt mylib__tapvpwrvgnd_1 VPWR VGND VPB VNB\n.ends\n"
+        ".subckt mylib__dfxtp_1 CLK D Q VGND VPWR\n.ends\n",
+    )
+)
+
+
+def test_run_lvs_gate_level_verilog_disjoint_pin_stray_cell_still_reported(tmp_path):
+    """Regression guard for the false negative PR #1663's review caught
+    (issue #1622): a stray, genuinely signal-bearing layout master whose pin
+    names happen not to collide with any pin the reference carries must
+    still be reported, not pruned as "power-only".
+
+    `mylib__dfxtp_1`'s `CLK`/`D`/`Q` appear nowhere in a reference that only
+    instantiates inverters and buffers, so the superseded "none of my pins
+    appears anywhere in the reference" test classified it as power-only and
+    removed it -- flipping a real missing-cell topology defect to
+    `status: "match"`. The library-derived power-pin universe never admits
+    `CLK`/`D`/`Q`, because the reference instantiates no cell that would
+    show them being dropped.
+
+    The genuinely power-only tap cell alongside it is still pruned, so this
+    pins the discrimination, not a blanket disabling of the feature.
+    """
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(
+        tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_DISJOINT_STRAY
+    )
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    assert report.get("category_counts", {}).get("topology", 0) >= 1
+    topology_entries = [m for m in report["mismatches"] if m["category"] == "topology"]
+    assert any("MYLIB__DFXTP_1" in json.dumps(entry) for entry in topology_entries)
+    # ...while the real filler/tap cell is still recognised and pruned.
+    assert report.get("category_counts", {}).get("topology.power_only_pruned") == 1
+    (pruned,) = [
+        m for m in report["mismatches"] if m["category"] == "topology.power_only_pruned"
+    ]
+    assert "MYLIB__TAPVPWRVGND_1" in pruned["description"]
+    assert "MYLIB__DFXTP_1" not in pruned["description"]
+
+
+def test_prune_power_only_layout_circuits_never_prunes_keep_name(tmp_path):
+    """`keep_name` (the caller's own `layout.top`) is never pruned, even
+    when it does classify as power-only -- pruning it would turn a
+    classification edge case into a confusing "circuit not found" error
+    instead of a clean no-op (issue #1622). Exercises the guard directly:
+    a real design's top circuit always has genuine signal I/O, so no
+    end-to-end request reaches it."""
+    import klayout.db as kdb
+
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.subckt top VPWR VGND
+XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1
+.ends
+.subckt mylib__tapvpwrvgnd_1 VPWR VGND VPB VNB
+.ends
+""",
+    )
+    layout_netlist = kdb.Netlist()
+    layout_netlist.read(layout_path, kdb.NetlistSpiceReader())
+    reference_netlist = _fake_gate_level_reference()
+
+    warning = lvs._prune_power_only_layout_circuits(
+        layout_netlist,
+        reference_netlist,
+        _FAKE_LIBRARY_PIN_ORDERS,
+        keep_name="top",
+    )
+    # The tap cell is pruned; `TOP` -- power-only by the same test, and
+    # resolved through `circuit_by_name`'s own case folding -- is not.
+    assert warning is not None
+    assert "MYLIB__TAPVPWRVGND_1" in warning["description"]
+    remaining = {circuit.name for circuit in layout_netlist.each_circuit()}
+    assert remaining == {"TOP"}
+
+
 def test_run_lvs_power_only_pruning_is_scoped_to_gate_level_verilog(tmp_path):
     """Issue #1622's pruning is only sound against a `gate-level-verilog`
     reference, whose conversion never carries power pins -- so every other
@@ -11344,7 +11550,7 @@ def test_run_lvs_gate_level_verilog_pdk_not_found_errors(tmp_path):
 # The tests above pin pin-order *parsing* against `.subckt` header lines
 # copied verbatim out of real installs, which keeps them hermetic. These two
 # additionally exercise the real resolution path end to end --
-# `lvs._resolve_gate_level_pin_order_lookup` -> `pdk.find_pdk` ->
+# `lvs._resolve_gate_level_pin_orders` -> `pdk.find_pdk` ->
 # `libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}` -> the real file's
 # own bytes -- on any machine with a real volare/ciel install, and skip
 # cleanly where none is present (the same `list_pdks()`-search convention
@@ -11392,7 +11598,7 @@ _REAL_GF180MCU_9T5V0_VARIANT = _find_real_library_pin_order_variant(
 )
 def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
     root, variant = _REAL_SKY130_HD_VARIANT
-    lookup = lvs._resolve_gate_level_pin_order_lookup("sky130_fd_sc_hd", variant, root)
+    lookup = lvs._resolve_gate_level_pin_orders("sky130_fd_sc_hd", variant, root).get
     # sky130's own declared order for a 1x inverter: signal `A`, the four
     # supply/well pins, then the output `Y` -- alphabetical, with the
     # supplies interleaved between the signal pins rather than grouped at
@@ -11423,9 +11629,9 @@ def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
 )
 def test_real_gf180mcu_library_resolves_pin_order_from_the_installed_file():
     root, variant = _REAL_GF180MCU_9T5V0_VARIANT
-    lookup = lvs._resolve_gate_level_pin_order_lookup(
+    lookup = lvs._resolve_gate_level_pin_orders(
         "gf180mcu_fd_sc_mcu9t5v0", variant, root
-    )
+    ).get
     # gf180mcu's own convention differs from sky130's on BOTH axes: pin
     # names (`I`/`ZN`, not `A`/`Y`) and order (signals first, supplies
     # last). Resolving both libraries correctly from one code path is the

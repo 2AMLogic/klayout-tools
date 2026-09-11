@@ -242,9 +242,11 @@ CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
 #: exists on only one side (e.g. a reference-only lumped macro with no
 #: layout-side counterpart yet) is not itself a mistake.
 CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.unmatched"
-#: Issue #1622: a layout-side circuit whose entire declared pin list is
-#: power/ground (a filler/tap-cell master, e.g. sky130's unconditionally-
-#: inserted `tapvpwrvgnd_1` tap cell or a `fill_*` row-gap filler), plus
+#: Issue #1622: a layout-side circuit every one of whose declared pins is a
+#: power/ground pin of the reference standard-cell library (a filler/tap-cell
+#: master, e.g. sky130's unconditionally-inserted `tapvpwrvgnd_1` tap cell or
+#: a `fill_*` row-gap filler -- the classification is derived from the
+#: library's own pin-order data, see `_gate_level_power_pin_names`), plus
 #: every subcircuit instance of it, was removed from the layout netlist
 #: before comparing against a `reference.form: "gate-level-verilog"`
 #: reference -- see `_prune_power_only_layout_circuits`.
@@ -828,6 +830,17 @@ def run_lvs(request: str) -> dict[str, Any]:
             "instantiated cell's pin order (see docs/cli/lvs.md, \"Netlist "
             'form")'
         )
+    # Issue #1622: resolved here rather than inside `_read_reference_netlist`
+    # so the *same* mapping serves both consumers with one read of the
+    # library file -- the conversion's own `pin_order_lookup` and, below,
+    # the power-pin universe `_prune_power_only_layout_circuits` needs.
+    reference_pin_orders: dict[str, list[str]] | None = None
+    if reference_form == "gate-level-verilog":
+        reference_pin_orders = _resolve_gate_level_pin_orders(
+            reference_spec.get("library"),
+            reference_spec.get("pdk"),
+            reference_spec.get("pdk_root"),
+        )
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
@@ -836,6 +849,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         library=reference_spec.get("library"),
         pdk_variant=reference_spec.get("pdk"),
         pdk_root=reference_spec.get("pdk_root"),
+        pin_orders=reference_pin_orders,
     )
 
     if reference_form == "gate-level-verilog":
@@ -844,13 +858,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         # `_prune_power_only_layout_circuits`'s docstring for why this must
         # remove the layout-side instance before `compare()` runs, rather
         # than only suppress its own mismatch report after the fact. Run
-        # right after `reference_netlist` is read (the earliest point its
-        # signal-pin universe is available), and before the
+        # right after `reference_netlist` is read (the earliest point the
+        # library-derived power-pin universe is available), and before the
         # `combine_devices_per_circuit`/flatten/`combine_devices` steps
         # below, none of which have anything to do with a power-only
         # circuit's own (device-less) content.
         power_only_pruning_warning = _prune_power_only_layout_circuits(
-            layout_netlist, reference_netlist, keep_name=layout_spec.get("top")
+            layout_netlist,
+            reference_netlist,
+            reference_pin_orders,
+            keep_name=layout_spec.get("top"),
         )
         if power_only_pruning_warning is not None:
             power_only_pruning_warnings.append(power_only_pruning_warning)
@@ -2188,6 +2205,7 @@ def _read_reference_netlist(
     library: str | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    pin_orders: dict[str, list[str]] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -2216,6 +2234,14 @@ def _read_reference_netlist(
     file resolves each instantiated cell's pin order; ``pdk_variant``/
     ``pdk_root`` are forwarded to :func:`klayout_tools.pdk.find_pdk` exactly
     like `klt extract`'s own ``--pdk``/``--pdk-root`` flags.
+
+    ``pin_orders`` (issue #1622) lets a caller that already resolved that
+    library file -- ``run_lvs`` does, because
+    :func:`_gate_level_power_pin_names` needs the same mapping -- pass it in
+    rather than have it resolved and re-read here. Purely an optimisation:
+    ``None`` (every other caller, e.g. :mod:`klayout_tools.netlist_digest`)
+    resolves it internally exactly as before, and the value is ignored for
+    every form but ``"gate-level-verilog"``.
 
     Note: on genuinely malformed input, ``NetlistSpiceReader`` does not raise
     -- it prints a ``"Warning: Line ignored..."`` diagnostic (to the
@@ -2266,12 +2292,11 @@ def _read_reference_netlist(
             tmp_path = tmp.name
         read_path = tmp_path
     elif form == "gate-level-verilog":
-        pin_order_lookup = _resolve_gate_level_pin_order_lookup(
-            library, pdk_variant, pdk_root
-        )
+        if pin_orders is None:
+            pin_orders = _resolve_gate_level_pin_orders(library, pdk_variant, pdk_root)
         try:
             converted = convert_gate_level_verilog(
-                text, pin_order_lookup=pin_order_lookup
+                text, pin_order_lookup=pin_orders.get
             )
         except VerilogNetlistError as exc:
             raise LvsError(
@@ -2329,16 +2354,21 @@ _LIBRARY_PIN_ORDER_ASSETS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _resolve_gate_level_pin_order_lookup(
+def _resolve_gate_level_pin_orders(
     library: str | None,
     pdk_variant: str | None,
     pdk_root: str | None,
-):
-    """Build the ``pin_order_lookup`` callback
-    :func:`klayout_tools.verilog_netlist.convert_gate_level_verilog` needs,
-    from a resolved PDK install's own ``libs.ref/<library>/{spice,cdl}/
-    <library>.{spice,cdl}`` file (issue #1336) -- never a hardcoded pin-order
-    table.
+) -> dict[str, list[str]]:
+    """``{<cell>: [<pin>, ...]}`` -- every standard cell's real, full PDK pin
+    order (signal *and* power/ground), read from a resolved PDK install's own
+    ``libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}`` file (issue
+    #1336) -- never a hardcoded pin-order table.
+
+    Two consumers, one read of that file (issue #1622): ``.get`` on the
+    result is the ``pin_order_lookup`` callback
+    :func:`klayout_tools.verilog_netlist.convert_gate_level_verilog` wants,
+    while :func:`_gate_level_power_pin_names` needs the whole mapping, to
+    derive which of a cell's real PDK pins the conversion dropped.
 
     Resolves the PDK exactly like `klt extract --pdk`/`klt place-and-route`
     do (:func:`klayout_tools.pdk.find_pdk`, the same ``variant``/``root``
@@ -2380,8 +2410,7 @@ def _resolve_gate_level_pin_order_lookup(
                 raise LvsError(
                     f"could not read library pin-order source '{candidate}': {exc}"
                 ) from exc
-            pin_orders = parse_subckt_pin_orders(library_text)
-            return pin_orders.get
+            return parse_subckt_pin_orders(library_text)
 
     raise LvsError(
         f"library '{library}' has no pin-order source under PDK variant "
@@ -3685,9 +3714,26 @@ def _subcircuit_ref_name(obj: Any) -> str | None:
     return _name_or_none(method())
 
 
+def _circuit_pin_names(circuit: Any) -> list[str]:
+    """``circuit``'s declared pin names, upper-cased, skipping unnamed pins.
+
+    Upper-cased because SPICE is case-insensitive and the two sides of the
+    comparison reach this module through different readers:
+    ``NetlistSpiceReader`` normalises what it reads to upper case, while
+    :func:`~klayout_tools.verilog_netlist.parse_subckt_pin_orders` reports a
+    library file's ``.subckt`` header verbatim. Folding both to one case is
+    what lets a library pin order line up with the reference circuit read
+    back from the converted SPICE (issue #1622).
+    """
+    each_pin = getattr(circuit, "each_pin", None)
+    if not callable(each_pin):
+        return []
+    return [name.upper() for pin in each_pin() if (name := pin.name())]
+
+
 def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
-    """The set of every pin name declared on any circuit in ``netlist``, or
-    ``None`` when ``netlist`` itself is unavailable.
+    """Every pin name declared on any circuit in ``netlist`` (upper-cased),
+    or ``None`` when ``netlist`` itself is unavailable.
 
     Issue #1622: a ``reference.form: "gate-level-verilog"`` reference
     netlist never carries power/ground pins at all -- its conversion only
@@ -3695,19 +3741,13 @@ def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
     (``verilog_netlist.py``'s own "No power/ground pins" docstring note;
     see also ``docs/cli/lvs.md``'s "No power/ground pins" section). So
     every pin name that appears *anywhere* in the reference netlist is, by
-    construction, a genuine signal pin -- this is the PDK-agnostic
-    "signal pin universe" :func:`_is_power_only_circuit` compares a
-    layout-only circuit's own pins against, instead of a hardcoded
-    per-PDK power-pin name table (sky130's ``VPWR``/``VGND``/``VPB``/
-    ``VNB`` vs. gf180mcu's own names) or a cell-name glob
-    (``fill_*``/``tap*``, the superseded ``docs/cli/lvs.md`` workaround).
+    construction, a genuine **signal** pin.
 
-    Only sound against a ``gate-level-verilog`` reference, and so only ever
-    called from :func:`_prune_power_only_layout_circuits`, which the caller
-    invokes for that form alone. A ``"plain-element"``/``"subckt-call"``
-    reference netlist is arbitrary SPICE whose pin names need not overlap
-    the layout's at all, so "no pin of mine appears anywhere in the
-    reference" is evidence of nothing there.
+    That makes this the *subtrahend* in :func:`_gate_level_power_pin_names`'s
+    derivation, never a power-pin test on its own: "this pin name is absent
+    from the reference" says nothing by itself, because a reference that
+    never instantiates a given master says nothing at all about that
+    master's pins (see that function's docstring).
     """
     if netlist is None:
         return None
@@ -3716,52 +3756,118 @@ def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
         return None
     names: set[str] = set()
     for circuit in each_circuit():
-        each_pin = getattr(circuit, "each_pin", None)
-        if not callable(each_pin):
-            continue
-        for pin in each_pin():
-            name = pin.name()
-            if name:
-                names.add(name)
+        names.update(_circuit_pin_names(circuit))
     return frozenset(names)
 
 
+def _gate_level_power_pin_names(
+    reference_netlist: Any | None,
+    library_pin_orders: Mapping[str, list[str]] | None,
+) -> frozenset[str] | None:
+    """The set of pin names (upper-cased) that are demonstrably **power/
+    ground** pins of this PDK's standard-cell library, derived from data
+    ``run_lvs`` has already read -- or ``None`` when there is not enough
+    evidence to derive one (issue #1622).
+
+    The derivation, and why each half of it is load-bearing:
+
+    * ``library_pin_orders`` is the standard-cell library's own
+      ``.subckt`` data (see :func:`_resolve_gate_level_pin_orders`), i.e.
+      each cell's **full** PDK pin order -- signal *and* power/ground.
+    * :func:`~klayout_tools.verilog_netlist.convert_gate_level_verilog`
+      emits, for each cell the Verilog instantiates, only the pins that
+      Verilog actually connects -- structurally never a power/ground pin.
+
+    So for a cell the reference *does* instantiate, every pin the library
+    declares but the conversion did not carry is a power/ground pin. Taking
+    that difference over exactly the cells the reference declares, and then
+    subtracting :func:`_reference_signal_pin_names` (so a signal pin that
+    happens to be left unconnected on one cell but is connected on another
+    can never leak in), gives a power-pin universe with no hardcoded
+    per-PDK name table (sky130's ``VPWR``/``VGND``/``VPB``/``VNB`` vs.
+    gf180mcu's ``VDD``/``VSS``/``VNW``/``VPW``) and no cell-name glob
+    (``fill_*``/``tap*``, the superseded ``docs/cli/lvs.md`` workaround).
+
+    **Restricting the candidate set to cells the reference instantiates is
+    the whole point, not an optimisation.** The obvious wider version --
+    "every pin name anywhere in the library that is not in the reference's
+    signal-pin universe" -- is unsound in exactly the direction this
+    function exists to prevent: in a library containing ``dfxtp_1``
+    (``CLK D Q VGND VNB VPB VPWR``), a reference that only instantiates
+    inverters and buffers mentions ``CLK``/``D``/``Q`` nowhere, so they
+    would be admitted as "power" pins and a stray, genuinely
+    signal-bearing ``dfxtp_1`` master in the layout would be pruned as
+    power-only -- masking a real missing-cell defect. A cell the reference
+    never instantiates contributes nothing here, so its signal pins can
+    never be mistaken for power pins.
+
+    Returns ``None`` when either input is missing/unusable, and an empty
+    set when nothing qualifies; :func:`_is_power_only_circuit` treats both
+    as "no evidence" and prunes nothing.
+    """
+    if not library_pin_orders:
+        return None
+    signal_pin_names = _reference_signal_pin_names(reference_netlist)
+    if signal_pin_names is None:
+        return None
+    # Case-folded once: library cell names are verbatim from the `.subckt`
+    # header (lower case, in both supported libraries), while the reference
+    # circuit names come back from `NetlistSpiceReader` upper-cased.
+    by_upper_name = {
+        str(cell).upper(): pins for cell, pins in library_pin_orders.items()
+    }
+    candidates: set[str] = set()
+    for circuit in reference_netlist.each_circuit():
+        pins = by_upper_name.get(str(circuit.name).upper())
+        if pins is None:
+            continue
+        candidates.update(pin.upper() for pin in pins if pin)
+    return frozenset(candidates - signal_pin_names)
+
+
 def _is_power_only_circuit(
-    circuit: Any, signal_pin_names: frozenset[str] | None
+    circuit: Any, power_pin_names: frozenset[str] | None
 ) -> bool:
-    """True when ``circuit``'s entire declared pin list is drawn from names
-    that never appear as a signal pin anywhere in the reference netlist
-    (see :func:`_reference_signal_pin_names`) -- i.e. ``circuit`` is a
-    power-only cell (a filler/tap cell, whose real PDK pin list is
+    """True when every pin ``circuit`` declares is a known power/ground pin
+    of this PDK's standard-cell library (see
+    :func:`_gate_level_power_pin_names`) -- i.e. ``circuit`` is a power-only
+    cell (a filler/tap cell, whose real PDK pin list is
     ``VPWR``/``VGND``/``VPB``/``VNB`` and nothing else) that is out of
     scope for a signal-only ``gate-level-verilog`` compare (issue #1622).
 
     Structural, not name-pattern: this never special-cases a cell-name glob
     like ``fill_*``/``tap*`` -- it looks only at ``circuit``'s own declared
-    pins against what the reference conversion ever carries, so it also
-    catches an equally power-only cell instantiated under an unrelated name
-    (e.g. sky130's ``tapvpwrvgnd_1`` tap cell, which the superseded
-    ``[!f]*`` glob workaround in ``docs/cli/lvs.md`` did not exclude).
+    pins, so it also catches an equally power-only cell instantiated under
+    an unrelated name (e.g. sky130's ``tapvpwrvgnd_1`` tap cell, which the
+    superseded ``[!f]*`` glob workaround in ``docs/cli/lvs.md`` did not
+    exclude).
 
-    ``signal_pin_names is None`` (no reference netlist to derive a universe
-    from) and a circuit with zero declared pins both return ``False`` --
-    neither is evidence this circuit is power-only, and the safe default on
-    missing evidence is to leave the circuit in place and keep reporting the
+    It is deliberately a *positive* test ("every pin is a known power pin")
+    rather than the absence test it replaced ("no pin appears in the
+    reference"). The absence test could not tell a power-only master apart
+    from a signal-bearing master the reference simply never instantiates --
+    the false negative this direction rules out by construction.
+
+    A falsy/``None`` ``power_pin_names`` (no derivable universe) and a
+    circuit with zero declared pins both return ``False`` -- neither is
+    evidence this circuit is power-only, and the safe default on missing
+    evidence is to leave the circuit in place and keep reporting the
     existing topology mismatch rather than risk masking a real one.
     """
-    if circuit is None or signal_pin_names is None:
+    if circuit is None or not power_pin_names:
         return False
-    each_pin = getattr(circuit, "each_pin", None)
-    if not callable(each_pin):
-        return False
-    pin_names = [name for pin in each_pin() if (name := pin.name())]
+    pin_names = _circuit_pin_names(circuit)
     if not pin_names:
         return False
-    return all(name not in signal_pin_names for name in pin_names)
+    return all(name in power_pin_names for name in pin_names)
 
 
 def _prune_power_only_layout_circuits(
-    layout_netlist: Any, reference_netlist: Any, *, keep_name: str | None = None
+    layout_netlist: Any,
+    reference_netlist: Any,
+    library_pin_orders: Mapping[str, list[str]] | None,
+    *,
+    keep_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Issue #1622: remove every layout-side circuit whose entire declared
     pin list is power/ground -- a filler/tap-cell master, e.g. sky130's
@@ -3795,32 +3901,40 @@ def _prune_power_only_layout_circuits(
     whose pin list is a non-empty subset of ``{VPWR, VGND, VPB, VNB}``, plus
     its instance lines, from the extracted SPICE netlist before calling
     ``klt lvs``) -- implemented natively here, and structurally
-    (:func:`_is_power_only_circuit`'s pin-list check against the reference
-    netlist's own signal-pin universe) rather than a hardcoded, per-PDK
+    (:func:`_is_power_only_circuit`'s pin-list check against the power-pin
+    universe :func:`_gate_level_power_pin_names` derives from the PDK
+    library's own pin-order data) rather than a hardcoded, per-PDK
     power-pin name table or a cell-name glob.
 
     **Scoped to ``reference.form: "gate-level-verilog"`` only** -- the caller
     invokes this for that form alone, and that restriction is load-bearing,
-    not caution. The inference ":func:`_is_power_only_circuit` says none of
-    this circuit's pins is a signal pin anywhere in the reference, therefore
-    it is power-only" is sound only because a ``gate-level-verilog``
-    reference is a *conversion of the same design* through a known library,
-    guaranteed never to carry power pins. A ``"plain-element"``/
-    ``"subckt-call"`` reference is arbitrary SPICE whose pin names need not
-    overlap the layout's at all, so there "no pin of mine appears in the
-    reference" is evidence of nothing -- applying this to those forms masked
-    a genuine unmatched signal circuit (a layout-only ``.SUBCKT`` with pins
+    not caution. ``library_pin_orders`` (the resolved standard-cell
+    library's full ``.subckt`` pin orders) exists only for that form, and
+    the power-pin derivation it feeds is sound only because a
+    ``gate-level-verilog`` reference is a *conversion of the same design*
+    through that known library, guaranteed never to carry power pins. A
+    ``"plain-element"``/``"subckt-call"`` reference is arbitrary SPICE with
+    no library behind it, so nothing there licenses calling any pin name a
+    power pin -- applying an unscoped version of this masked a genuine
+    unmatched signal circuit (a layout-only ``.SUBCKT`` with pins
     ``A``/``Y`` against a flat reference declaring only ``IN``/``OUT``
     vanished from the report), which
     ``test_run_lvs_power_only_pruning_is_scoped_to_gate_level_verilog``
     now guards against.
 
-    Note this classification is broader than "filler/tap" by design: it also
-    catches the other physical-only cells a P&R flow inserts without the
-    logic netlist knowing (decoupling capacitors, antenna diodes), which are
-    equally invisible to a signal-only compare and equally not a topology
-    defect. Every removal is named in the returned disclosure, so a
-    ``"match"`` that depended on one stays auditable from the report alone.
+    Note this classification is broader than "filler/tap" by design: it
+    also catches the other *purely* physical cells a P&R flow inserts
+    without the logic netlist knowing -- decoupling capacitors, whose PDK
+    pin list is supplies and well ties only -- which are equally invisible
+    to a signal-only compare and equally not a topology defect. It stops
+    exactly where the evidence does: a physical-only cell that declares
+    any non-power pin (e.g. sky130's antenna diode, whose pin list
+    includes ``DIODE``) is **not** pruned, because nothing in the data
+    establishes that pin as power/ground. That is the intended direction of
+    error -- an un-pruned cell costs a reported topology mismatch, a
+    wrongly-pruned one masks a real defect. Every removal is named in the
+    returned disclosure, so a ``"match"`` that depended on one stays
+    auditable from the report alone.
 
     ``keep_name`` (the caller's own ``layout.top``, when given) is never
     pruned even if it happens to classify as power-only -- this runs before
@@ -3835,11 +3949,12 @@ def _prune_power_only_layout_circuits(
     ``"match"`` reached this way is never silently indistinguishable from
     one reached against the layout netlist's original, unpruned shape -- or
     ``None`` when nothing was power-only (the common case, and always the
-    case when ``reference_netlist`` has no circuits to derive a signal-pin
-    universe from), in which case there is nothing to disclose.
+    case when there is no derivable power-pin universe, e.g. a
+    ``reference_netlist`` with no library-cell circuits at all), in which
+    case there is nothing to disclose.
     """
-    signal_pin_names = _reference_signal_pin_names(reference_netlist)
-    if not signal_pin_names:
+    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    if not power_pin_names:
         return None
     # Resolved through the netlist's own `circuit_by_name` (whatever
     # case-folding convention it applies -- e.g. a `NetlistSpiceReader`
@@ -3862,7 +3977,7 @@ def _prune_power_only_layout_circuits(
             circuit.name
             for circuit in layout_netlist.each_circuit()
             if circuit != keep_circuit
-            and _is_power_only_circuit(circuit, signal_pin_names)
+            and _is_power_only_circuit(circuit, power_pin_names)
         }
     )
     if not removed_names:
@@ -3888,10 +4003,12 @@ def _prune_power_only_layout_circuits(
     return _mismatch(
         CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED,
         "warning",
-        "removed layout-side circuit(s) whose entire declared pin list is "
-        "power/ground, and every instance of them, before comparing -- "
-        f"{len(removed_names)} circuit(s): {', '.join(removed_names)} (see "
-        'docs/cli/lvs.md, "topology.power_only_pruned")',
+        "removed layout-side circuit(s) whose every declared pin is a "
+        "power/ground pin of the reference library (a pin the library "
+        "declares but the gate-level-Verilog reference never carries), and "
+        f"every instance of them, before comparing -- {len(removed_names)} "
+        f"circuit(s): {', '.join(removed_names)} (see docs/cli/lvs.md, "
+        '"topology.power_only_pruned")',
         "layout",
     )
 

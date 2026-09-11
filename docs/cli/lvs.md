@@ -439,10 +439,11 @@ klt place-and-route par_request.json --format json >par.json
 #    row gaps) and `sky130_fd_sc_hd__tapvpwrvgnd_1` (the `tapcell` stage's
 #    own unconditional insertion) carry no logical function, so
 #    `write_verilog` (the reference side) correctly never emits them --
-#    `klt lvs` recognizes a power-only cell (every declared pin is
-#    power/ground) as out of scope for this signal-only compare and prunes
-#    it before comparing (issue #1622; see "`topology.power_only_pruned`"
-#    below). No cell-name glob needed.
+#    `klt lvs` recognizes a power-only cell (every declared pin is a
+#    power/ground pin of `reference.library`, derived from that library's
+#    own .subckt data) as out of scope for this signal-only compare and
+#    prunes it before comparing (issue #1622; see
+#    "`topology.power_only_pruned`" below). No cell-name glob needed.
 klt extract "$(jq -r .gds_path par.json)" --deck sky130 \
   --abstract-cells 'sky130_fd_sc_hd__*' --def-net-names \
   -o gcd.gate.spice --format json >extract.json
@@ -517,10 +518,12 @@ unconditionally whenever issue #1442's row-rail fallback fires) or a tap
 cell (`sky130_fd_sc_hd__tapvpwrvgnd_1`, inserted unconditionally by the
 `tapcell` stage) carries no logic function, so `write_verilog` never
 instantiates it on the reference side — there is nothing for a signal-only
-compare to describe. `klt lvs` recognizes this structurally (not one of the
-cell's declared pins is a signal pin anywhere in the reference netlist —
-never a cell-name glob like `fill_*`/`tap*`, and never a hardcoded PDK
-power-pin table) and removes the layout-side instance before
+compare to describe. `klt lvs` recognizes this structurally — every one of
+the cell's declared pins is a pin `reference.library` declares for a cell
+the reference instantiates but the Verilog never carries, i.e. a
+power/ground pin, derived from the library's own `.subckt` data rather than
+a cell-name glob like `fill_*`/`tap*` or a hardcoded PDK power-pin table —
+and removes the layout-side instance before
 comparing, disclosing what it removed as a `severity: "warning"`,
 `category: "topology.power_only_pruned"` entry — see
 "`topology.power_only_pruned`" below — rather than reporting a false
@@ -1534,38 +1537,61 @@ opt-in normalisations.
 #### `topology.power_only_pruned`: a power-only layout circuit was removed before comparing
 
 Only possible when `reference.form: "gate-level-verilog"` (issue #1622), and
-only emitted when at least one layout circuit's entire declared pin list is
-power/ground.
+only emitted when at least one layout circuit declares nothing but
+power/ground pins.
 
 A `gate-level-verilog` reference conversion never instantiates a cell with
 no logic function — a filler cell (`sky130_fd_sc_hd__fill_*`, inserted
 unconditionally whenever issue #1442's row-rail fallback fires) or a tap
 cell (`sky130_fd_sc_hd__tapvpwrvgnd_1`, inserted unconditionally by
 `klt place-and-route`'s `tapcell` stage) has nothing on the reference side
-to describe it. `klt lvs` removes every layout circuit whose declared pins
-are drawn *entirely* from names that never appear as a signal pin anywhere
-in the reference netlist — structurally, from the reference netlist's own
-pin universe, never a hardcoded PDK power-pin name table
-(`VPWR`/`VGND`/`VPB`/`VNB` for sky130 vs. gf180mcu's own names) or a
-cell-name glob (`fill_*`/`tap*`) — along with every subcircuit instance of
-it, before the compare runs. A circuit with even one recognized signal pin
-is never pruned, even if it also has power pins (see "Negative controls"
-above for this module's general discipline on not masking a real defect).
+to describe it. `klt lvs` removes every such layout circuit, along with
+every subcircuit instance of it, before the compare runs. A circuit with
+even one pin not established as power/ground is never pruned, even if it
+also has power pins (see "Negative controls" above for this module's
+general discipline on not masking a real defect).
 
-**Scope and limits, stated precisely.** The test is *not* "this cell's name
-looks like a filler" and not "these pins are on a PDK power-pin list" — it
-is "not one of this cell's declared pins is a signal pin anywhere in the
-reference netlist". That is the same thing for a filler or tap cell, and it
-also, deliberately, covers the other physical-only cells a P&R flow inserts
-without the logic netlist knowing (decoupling capacitors, antenna diodes):
-they are equally invisible to a signal-only compare, and equally not a
-topology defect. It is applied **only** when
+**How "power/ground pin" is decided.** Not by cell name, and not from a
+hardcoded PDK power-pin table (`VPWR`/`VGND`/`VPB`/`VNB` for sky130 vs.
+gf180mcu's `VDD`/`VSS`/`VNW`/`VPW`) — it is derived, per run, from two
+things `klt lvs` has already read:
+
+1. `reference.library`'s own `.subckt` declarations give each standard
+   cell's **full** pin order, signal and power/ground alike.
+2. The Verilog conversion emits, for each cell the reference instantiates,
+   only the pins the Verilog connects — structurally never a power/ground
+   pin.
+
+So for a cell the reference *does* instantiate, every pin the library
+declares but the reference does not carry is a power/ground pin. The
+power-pin set is that difference, taken over exactly the cells the
+reference instantiates, minus every pin name the reference carries anywhere.
+
+**Restricting it to cells the reference instantiates is what keeps it
+sound.** A cell the reference never mentions tells you nothing about its own
+pins: a stray `sky130_fd_sc_hd__dfxtp_1` in the layout has pins
+`CLK`/`D`/`Q` that appear nowhere in a reference built only from inverters
+and buffers, yet they are plainly signal pins and that stray flip-flop is a
+real missing-cell defect. Pins are therefore only ever admitted as
+power/ground on the evidence of a cell the reference actually instantiates.
+
+**Scope and limits.** The pruning also covers, deliberately, other purely
+physical cells a P&R flow inserts without the logic netlist knowing —
+decoupling capacitors, whose PDK pin list is supplies and well ties only —
+which are equally invisible to a signal-only compare and equally not a
+topology defect. It stops where the evidence stops: a physical-only cell
+that declares any pin not established as power/ground (sky130's antenna
+diode, whose pin list includes `DIODE`, is the usual example) is **not**
+pruned and still reports a `topology` mismatch. That is the intended
+direction of error — an un-pruned cell costs you a reported mismatch, a
+wrongly-pruned one would hide a real defect. It is applied **only** when
 `reference.form: "gate-level-verilog"`, whose conversion is known never to
-carry power pins; a `"plain-element"`/`"subckt-call"` reference is arbitrary
-SPICE whose pin names need not overlap the layout's at all, so the same
-inference would be unsound there and is never made. Every removal is named
-in this entry's `description`, so a `"match"` that depended on one is always
-auditable from the report alone.
+carry power pins and which is the only form with a resolved
+`reference.library` behind it; a `"plain-element"`/`"subckt-call"` reference
+is arbitrary SPICE with no library to derive anything from, so the same
+inference is never made there. Every removal is named in this entry's
+`description`, so a `"match"` that depended on one is always auditable from
+the report alone.
 
 `severity` is always `"warning"` — this is a request-side transform applied
 before the compare, not a `NetlistComparer` finding, so it never changes
@@ -1585,11 +1611,14 @@ in place, a power-only circuit's *parent* fails to verify too —
 `NetlistComparer` cannot pair the parent's subcircuit-instance list against
 the reference's while one side has an extra instance the other cannot
 describe, and reports a second, consequential `topology` "circuit could not
-be matched to a counterpart" finding for the *parent*. Mirrors the known-safe downstream workaround this issue cites
+be matched to a counterpart" finding for the *parent*.
+
+This mirrors the known-safe downstream workaround issue #1622 cites
 (2AMLogic/sky130-fpga issue #20: stripping a layout-side `.SUBCKT` whose pin
 list is a non-empty subset of `{VPWR, VGND, VPB, VNB}`, plus its instance
 lines, from the extracted SPICE netlist before calling `klt lvs`) —
-implemented natively here instead of requiring a caller to pre-filter their
+implemented natively here, and derived from the library rather than from a
+fixed pin-name set, instead of requiring a caller to pre-filter their
 netlist.
 
 #### `combine_devices_per_circuit.unmatched`: an `options.combine_devices_per_circuit` glob matched no circuit
