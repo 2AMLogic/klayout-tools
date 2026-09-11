@@ -2062,7 +2062,11 @@ def _resolve_layout(
             # extract`'s own `nets[].label_positions_um`; `klt lvs`'s
             # `net_correspondence[]` disambiguates a collided-name net
             # against the *reference* schematic's net name instead, so this
-            # per-label-position map has no use here.
+            # per-label-position map has no use here. The 14th return
+            # (device_instance_paths, #1666) likewise feeds `klt extract`'s
+            # own `devices[].instance_path`; `klt lvs` compares by device
+            # class/parameter equivalence, not by originating GDS-level
+            # instance, so it has no use here either.
             (
                 netlist,
                 top_cell_name,
@@ -2077,6 +2081,7 @@ def _resolve_layout(
                 _dead_metal,
                 _mom_crosscheck,
                 _net_label_positions,
+                _device_instance_paths,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

@@ -1647,6 +1647,7 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
         _dead_metal,
         _mom_crosscheck,
         _net_label_positions,
+        _device_instance_paths,
     ) = _extract_netlist(layout, layout.top_cell(), disabled_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -4026,6 +4027,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _dead_metal,
         _mom_crosscheck,
         _net_label_positions,
+        _device_instance_paths,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -6317,6 +6319,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _dead_metal,
         _mom_crosscheck,
         _net_label_positions,
+        _device_instance_paths,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -16461,3 +16464,211 @@ def test_cli_extract_no_file_no_check_is_a_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["extract", "--format", "json"])
     assert exc_info.value.code == 2
+
+
+def _draw_sky130_poly_resistor(
+    layout: kdb.Layout, cell: kdb.Cell, *, device_length_um: float = 6.0
+) -> None:
+    """Draws one marked sky130 poly resistor (the same shape
+    `_make_poly_resistor_layout` draws, see its docstring) directly into
+    ``cell``'s own local coordinate frame -- unlike that fixture, which
+    always draws straight into the top cell, this lets a caller place the
+    identical geometry via a real ``kdb.CellInstArray``/``kdb.Instance``,
+    which issue #1666's ``instance_path`` fixtures below need.
+
+    ``device_length_um`` is the recognized resistor's own drawn length (the
+    ``poly.res`` marker-clipped segment, i.e. what comes back as
+    ``devices[].params.l_um``) -- unlike ``_make_poly_resistor_layout``
+    (always 6um), parametrized here so a fixture can draw one deliberately
+    distinct-sized resistor among several identical ones, letting a test
+    identify that one device by its own ``params`` without needing any
+    independent position information.
+    """
+    poly = (66, 20)  # poly.drawing
+    marker = (66, 13)  # poly.res
+    contact = (66, 44)  # licon1.drawing
+    metal = (67, 20)  # li1.drawing
+    metal_label = (67, 5)  # li1.pin
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        cell.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: int, y: int) -> None:
+        cell.shapes(layout.layer(*layer)).insert(kdb.Text(text, kdb.Trans(x, y)))
+
+    device_length_dbu = round(device_length_um * 1000)
+    # The same 3000dbu (3um) overhang on each end of the marked segment
+    # `_make_poly_resistor_layout` uses, for the contacted head -- so
+    # `device_length_um=6.0` reproduces that fixture's exact bar/marker
+    # geometry byte-for-byte.
+    bar_length_dbu = device_length_dbu + 6000
+    draw(poly, kdb.Box(0, 0, bar_length_dbu, 1000))
+    draw(marker, kdb.Box(3000, 0, 3000 + device_length_dbu, 1000))
+
+    for x, name in ((1500, "RA"), (bar_length_dbu - 1500, "RB")):
+        draw(contact, kdb.Box(x - 100, 400, x + 100, 600))
+        draw(metal, kdb.Box(x - 400, 200, x + 400, 800))
+        label(metal_label, name, x, 500)
+
+
+def _make_repeated_resistor_array_layout(
+    num_instances: int = 4, pitch_um: float = 20.0
+) -> kdb.Layout:
+    """A real ``kdb.CellInstArray`` of ``num_instances`` identical
+    ``RESUNIT`` leaf-cell placements (issue #1666's motivating scenario:
+    a chain of repeated instances, this time built from genuine GDS-level
+    instance placements rather than geometry drawn flat into one cell, per
+    this issue's own test-plan requirement -- unlike
+    `_make_repeated_stage_ring_layout`, issue #1540's fixture, which draws
+    flat). Plus one further, deliberately distinct single placement
+    (``RESUNIT_WIDE``, a longer resistor, *not* part of the array) well
+    clear of it -- edge case (a) from this issue's test plan: "a design with
+    only one instance of the repeated cell (no collision to resolve)".
+
+    Every array element sits ``pitch_um`` apart along x (default 20um, well
+    clear of each unit's own 12um-long bar), all on one row (``nb=1``).
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    unit = layout.create_cell("RESUNIT")
+    _draw_sky130_poly_resistor(layout, unit)
+    wide = layout.create_cell("RESUNIT_WIDE")
+    _draw_sky130_poly_resistor(layout, wide, device_length_um=10.0)
+
+    pitch_dbu = round(pitch_um * 1000)
+    top.insert(
+        kdb.CellInstArray(
+            unit.cell_index(),
+            kdb.Trans(0, 0),
+            kdb.Vector(pitch_dbu, 0),
+            kdb.Vector(0, pitch_dbu),
+            num_instances,
+            1,
+        )
+    )
+    extra_x = num_instances * pitch_dbu + 5000
+    top.insert(kdb.CellInstArray(wide.cell_index(), kdb.Trans(extra_x, 0)))
+    return layout
+
+
+def test_repeated_cell_inst_array_attributes_each_device_to_its_own_instance(
+    tmp_path,
+):
+    """Issue #1666's core scenario: a chain of `num_instances` identical
+    repeated leaf-cell instances (a real `kdb.CellInstArray`, not geometry
+    drawn flat) each contribute one device to the flattened extraction --
+    `devices[].instance_path` positively attributes every one of them back
+    to the specific array element it came from, without the caller needing
+    any independent placement data."""
+    num_instances = 4
+    layout = _make_repeated_resistor_array_layout(num_instances=num_instances)
+    path = _write_gds(layout, tmp_path / "resarray.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "resarray.spice"))
+
+    array_devices = [
+        d
+        for d in report["devices"]
+        if d["class"] == "res_generic_po" and d["params"]["l_um"] == pytest.approx(6.0)
+    ]
+    assert len(array_devices) == num_instances, report["devices"]
+
+    for device in array_devices:
+        assert len(device["instance_path"]) == 1, device
+        (entry,) = device["instance_path"]
+        assert entry["cell"] == "RESUNIT"
+        assert entry["array_index"] is not None
+
+    # Every array element is attributed to a *distinct* `(ia, ib)` pair,
+    # covering the whole array exactly once -- the mapping is a genuine
+    # bijection, not every device collapsing onto the same (or a default)
+    # instance. Checked axis-agnostically (which of `ia`/`ib` carries the
+    # variation, rather than assuming `ib` is always 0): this fixture's
+    # `CellInstArray` was authored `na=num_instances, nb=1`, but GDS's AREF
+    # encoding is free to swap which axis a 1-row array round-trips as --
+    # verified empirically, a written `na=4, nb=1` array reads back as
+    # `na=1, nb=4` (KLayout choosing to encode the lone nonzero pitch
+    # vector as "b" rather than "a") -- a harmless relabelling, not a
+    # defect, since every element still resolves to its own distinct index.
+    array_indices = [tuple(d["instance_path"][0]["array_index"]) for d in array_devices]
+    assert len(set(array_indices)) == num_instances
+    ia_values = {pair[0] for pair in array_indices}
+    ib_values = {pair[1] for pair in array_indices}
+    assert (len(ia_values), len(ib_values)) in {
+        (num_instances, 1),
+        (1, num_instances),
+    }, array_indices
+    varying_values = ia_values if len(ia_values) == num_instances else ib_values
+    assert varying_values == set(range(num_instances))
+
+    # Edge case (a): the one non-array, single-instance placement (a longer
+    # bar, distinguishable by its own `l_um`) still resolves cleanly, with
+    # `array_index: None` (nothing to disambiguate -- there is only one
+    # instance of `RESUNIT_WIDE`).
+    (wide_device,) = [
+        d for d in report["devices"] if d["params"]["l_um"] == pytest.approx(10.0)
+    ]
+    assert wide_device["instance_path"] == [
+        {"cell": "RESUNIT_WIDE", "array_index": None}
+    ]
+
+
+def _make_nested_resistor_array_layout(
+    num_instances: int = 3, pitch_um: float = 20.0
+) -> kdb.Layout:
+    """Edge case (b) from issue #1666's test plan: a design nested more than
+    one level deep -- a ``GROUP`` cell holding a real ``kdb.CellInstArray``
+    of ``RESUNIT`` placements, itself placed once (a plain, non-array
+    instance) in ``TOP``. A device's full ``instance_path`` must resolve
+    *both* levels, outermost first."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    unit = layout.create_cell("RESUNIT")
+    _draw_sky130_poly_resistor(layout, unit)
+    group = layout.create_cell("GROUP")
+
+    pitch_dbu = round(pitch_um * 1000)
+    group.insert(
+        kdb.CellInstArray(
+            unit.cell_index(),
+            kdb.Trans(0, 0),
+            kdb.Vector(pitch_dbu, 0),
+            kdb.Vector(0, pitch_dbu),
+            num_instances,
+            1,
+        )
+    )
+    top.insert(kdb.CellInstArray(group.cell_index(), kdb.Trans(0, 0)))
+    return layout
+
+
+def test_nested_instance_two_levels_deep_resolves_full_instance_path(tmp_path):
+    """Edge case (b) from issue #1666's test plan: `instance_path` resolves
+    every nesting level, not just the outermost placement."""
+    num_instances = 3
+    layout = _make_nested_resistor_array_layout(num_instances=num_instances)
+    path = _write_gds(layout, tmp_path / "nested.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "nested.spice"))
+
+    devices = [d for d in report["devices"] if d["class"] == "res_generic_po"]
+    assert len(devices) == num_instances, report["devices"]
+
+    for device in devices:
+        assert len(device["instance_path"]) == 2, device
+        outer, inner = device["instance_path"]
+        assert outer == {"cell": "GROUP", "array_index": None}
+        assert inner["cell"] == "RESUNIT"
+        assert inner["array_index"] is not None
+
+    # Same axis-agnostic bijection check as the single-level array test
+    # above -- see that test's comment for why the `(ia, ib)` axis carrying
+    # the variation is not assumed fixed across a GDS round-trip.
+    inner_indices = [tuple(d["instance_path"][1]["array_index"]) for d in devices]
+    assert len(set(inner_indices)) == num_instances
+    ia_values = {pair[0] for pair in inner_indices}
+    ib_values = {pair[1] for pair in inner_indices}
+    assert (len(ia_values), len(ib_values)) in {
+        (num_instances, 1),
+        (1, num_instances),
+    }, inner_indices
+    varying_values = ia_values if len(ia_values) == num_instances else ib_values
+    assert varying_values == set(range(num_instances))
