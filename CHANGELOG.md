@@ -16,6 +16,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose`'s obstacle-overlap routability check is now
+  layer-scoped instead of layer-agnostic (issue #1656). The check used to
+  test a candidate route's backbone against every other placed block's
+  *bbox*, regardless of which layers that block actually draws shapes on —
+  so a route on one layer (e.g. `metal3`, a router-only role no `klt gen`
+  generator draws pads on) could be rejected, or detoured around (#1167),
+  for "crossing" a neighboring block's bbox even when that block draws
+  nothing at all on that layer: no physical short is possible, only a bbox
+  intersection on paper. `route_two_pin()` now looks up each candidate
+  obstacle block's own drawn geometry on the leg's effective route layer
+  (reusing the same lazy per-block `read_block_layer_geometry` cache
+  `compose()` already builds for #1520/#1527's own-block checks) and skips a
+  block as an obstacle when it draws nothing there. A block that does draw
+  something on that layer is still rejected/detoured around exactly as
+  before — this removes false positives only, it does not weaken the check
+  against a genuine obstacle. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Known limitations"
+  section.
 - **Added**: `klt extract --format json` now reports
   `devices[].instance_path` (issue #1666) — the chain of GDS-level cell
   placements each device's recognition geometry sits inside, outermost
