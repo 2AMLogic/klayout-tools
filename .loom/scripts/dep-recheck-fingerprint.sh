@@ -487,15 +487,21 @@ _extract_dependencies_section() {
 # One "<ref#> <true|false>" line per checklist item found in the section,
 # mirroring `operator-premise`'s regex-extraction approach (a fixed,
 # machine-readable pattern rather than free-form prose matching) but scoped
-# to this file's own `## Dependencies` checklist syntax:
+# to this file's own `## Dependencies` checklist syntax. The `#N` reference
+# does not need to sit immediately after the checkbox — any prose may come
+# first, and the FIRST `#[0-9]+` token on the line is taken as the ref (a
+# later `#N` mentioned in the same line, e.g. a `Closes #N` aside, is not the
+# dependency and must not be picked up instead):
 #   - [ ] #123: Prerequisite feature
 #   - [x] #456: Required infrastructure
+#   - [ ] PR #1607 (Closes #1600) merged -- lands something. (#1669: takes
+#         1607, the first `#N`, not 1600)
 _extract_named_deps() {
     local line num checked
-    grep -oE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' <<<"$1" | while IFS= read -r line; do
+    grep -E '^[[:space:]]*-[[:space:]]*\[[ xX]\].*#[0-9]+' <<<"$1" | while IFS= read -r line; do
         checked="false"
         [[ "$line" =~ \[[xX]\] ]] && checked="true"
-        num="$(grep -oE '#[0-9]+' <<<"$line" | tr -d '#')"
+        num="$(grep -oE '#[0-9]+' <<<"$line" | head -n1 | tr -d '#')"
         printf '%s %s\n' "$num" "$checked"
     done
 }
