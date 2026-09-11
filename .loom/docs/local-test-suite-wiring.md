@@ -62,6 +62,12 @@ manually**:
   against the doc/script coupling breaking silently again, as it did on
   2026-09-06 when a same-day resync restructured the script's CLI without
   curator.md's recipe following)
+- `./.loom/scripts/tests/test-check-pr-body-closing-keywords.sh` (tests
+  `check-pr-body-closing-keywords.sh`, added by #1674 — reproduces the
+  #1671/#1600 incident: a closing-keyword-shaped string inside a markdown
+  inline-code span or fenced code block in a PR body is what GitHub's
+  auto-close scanner cannot tell apart from a genuine directive, so this
+  guard flags that shape without touching the PR's own genuine closing line)
 
 A prior attempt to list the first two in `ci-wired.txt` (PR #1524, restored
 as a stopgap by PR #1534) had no effect on this repo's CI either way (see

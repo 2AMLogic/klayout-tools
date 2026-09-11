@@ -131,3 +131,18 @@ scripts/tests/test-verdict-staleness-guard.sh
 # normally.
 scripts/dep-recheck-fingerprint.sh
 scripts/tests/test-dep-recheck-fingerprint.sh
+
+# #1674: builder-pr.md carries a local-only "Quoting a `Closes #N`-shaped
+# example inside a PR body closes an UNRELATED issue" section (added after
+# the 2026-09-11 incident where PR #1671's inline-code-quoted illustrative
+# example — `(Closes #1600)`, describing a *different* issue's checklist
+# wording — was matched by GitHub's plain-text auto-close scanner anyway and
+# falsely closed issue #1600, still-open implementation PR and all). The
+# section documents the convention (break the keyword/#N adjacency in quoted
+# example text) and points at the new `check-pr-body-closing-keywords.sh`
+# guard. This was never upstreamed into rjwalters/loom's own builder-pr.md
+# template, so an unpinned resync would silently drop it — the same
+# reversion pattern as #606/#662/#1292/#1316/#1356/#1546. If the upstream
+# Loom project ever adopts an equivalent section, this pin can be dropped and
+# the file resynced normally.
+commands/loom/builder-pr.md
