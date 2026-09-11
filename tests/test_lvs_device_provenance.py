@@ -196,11 +196,20 @@ def test_gf180mcu_mos_provenance_cites_lvs_deck():
 
 
 def test_gf180mcu_resistor_provenance_cites_lvs_deck():
-    """Both of gf180mcu's curated resistor entries carry a `provenance`
-    citing the real `res_extraction.lvs` device-class name their
-    `sheet_rho_ohm_sq` was transcribed from (issue #904)."""
+    """Every one of gf180mcu's curated resistor entries carries a
+    `provenance` citing the real `res_extraction.lvs` device-class name its
+    `sheet_rho_ohm_sq` was transcribed from (issue #904, extended to the
+    drawn metal-resistor family -- `rm1`/`rm2`/`rm3`/`tm9k` (this deck's own
+    default `metal_top` flavour) -- by issue #1640)."""
     by_name = {r.name: r for r in GF180MCU_DECK.resistors}
-    assert set(by_name) == {"ppolyf_u", "ppolyf_u_1k"}
+    assert set(by_name) == {
+        "ppolyf_u",
+        "ppolyf_u_1k",
+        "rm1",
+        "rm2",
+        "rm3",
+        "tm9k",
+    }
 
     for resistor in GF180MCU_DECK.resistors:
         assert resistor.provenance is not None
@@ -215,6 +224,10 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
 
     assert by_name["ppolyf_u"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
     assert by_name["ppolyf_u_1k"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u_1k"
+    assert by_name["rm1"].provenance.rule_id == "gf180mcu_fd_pr__rm1"
+    assert by_name["rm2"].provenance.rule_id == "gf180mcu_fd_pr__rm2"
+    assert by_name["rm3"].provenance.rule_id == "gf180mcu_fd_pr__rm3"
+    assert by_name["tm9k"].provenance.rule_id == "gf180mcu_fd_pr__tm9k"
 
 
 def test_gf180mcu_capacitor_provenance_cites_lvs_deck():
@@ -954,6 +967,76 @@ def test_golden_pair_gf180mcu_ppolyf_u_1k_r_ohm_matches_provenance_coefficient(
     )
 
 
+def _make_gf180mcu_metal_resistor_layout(
+    metal_gds_layer: int, marker_datatype: int
+) -> kdb.Layout:
+    """A drawn gf180mcu metal resistor (`rm1`/`rm2`/`rm3`/`tm9k`, issue
+    #1640): a 12x1um bar on `(metal_gds_layer, 0)` with a 6um-long
+    `(110, marker_datatype)`-marked segment and a labelled, contact-free
+    head at each end -- like the sky130 metal-resistor fixture above (and
+    `tests/test_extract.py`'s own `_make_gf180mcu_metal_resistor_layout`),
+    a metal resistor's heads are just the unmarked remainder of the same
+    metal shape, no separate contact/via stack needed. Duplicated per this
+    module's own "some duplication is acceptable" convention."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: int, y: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(metal_gds_layer, 0, kdb.Box(0, 0, 12000, 1000))
+    draw(110, marker_datatype, kdb.Box(3000, 0, 9000, 1000))
+    label(metal_gds_layer, 10, "RA", 1500, 500)
+    label(metal_gds_layer, 10, "RB", 10500, 500)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("name", "metal_gds_layer", "marker_datatype"),
+    [
+        ("rm1", 34, 11),  # Metal1 / metal1_res
+        ("rm2", 36, 12),  # Metal2 / metal2_res
+        ("rm3", 42, 13),  # Metal3 / metal3_res
+        ("tm9k", 81, 15),  # Metal5 / metal5_res (this deck's own top_metal)
+    ],
+)
+def test_golden_pair_gf180mcu_metal_resistor_r_ohm_matches_provenance_coefficient(
+    tmp_path: Path, name: str, metal_gds_layer: int, marker_datatype: int
+):
+    """A drawn 6-square gf180mcu metal resistor (`rm1`/`rm2`/`rm3`/`tm9k`,
+    issue #1640) extracts with `R = squares * sheet_rho_ohm_sq`, computed
+    directly from the deck's own provenance-cited entry -- the gf180mcu
+    counterpart of `test_golden_pair_sky130_res_generic_mN_r_ohm_matches_
+    provenance_coefficient` above, one golden pair per rule_id so this
+    module's own coverage-discipline test
+    (`test_golden_pairs_cover_every_provenanced_device_rule`) sees all four
+    new rule_ids exercised."""
+    resistor = next(r for r in GF180MCU_DECK.resistors if r.name == name)
+    assert resistor.provenance is not None
+    assert resistor.provenance.rule_id == f"gf180mcu_fd_pr__{name}"
+
+    path = _write_gds(
+        _make_gf180mcu_metal_resistor_layout(metal_gds_layer, marker_datatype),
+        tmp_path / f"{name}.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / f"{name}.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(
+        _GF180MCU_RES_SQUARES * resistor.sheet_rho_ohm_sq
+    )
+
+
 def test_golden_pair_gf180mcu_capacitor_c_f_matches_provenance_coefficients(
     tmp_path: Path,
 ):
@@ -1189,6 +1272,10 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "gf180mcu_fd_pr__pfet_03v3",
             "gf180mcu_fd_pr__ppolyf_u",
             "gf180mcu_fd_pr__ppolyf_u_1k",
+            "gf180mcu_fd_pr__rm1",
+            "gf180mcu_fd_pr__rm2",
+            "gf180mcu_fd_pr__rm3",
+            "gf180mcu_fd_pr__tm9k",
             "cap_mim_2f0_m4m5_noshield",
             "BJT.3",
             "gf180mcu_fd_pr__diode_nd2ps_06v0",

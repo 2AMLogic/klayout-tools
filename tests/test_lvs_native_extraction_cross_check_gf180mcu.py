@@ -29,7 +29,7 @@ to attempt it"). This module is that attempt.
 ## Results (verified against a real, volare-fetched gf180mcuD install and a
 real KLayout binary)
 
-**5 of 8 provenanced device rules cross-checked; 4 agree exactly, 1 agrees
+**9 of 12 provenanced device rules cross-checked; 8 agree exactly, 1 agrees
 with a documented refinement disagreement; 3 deferred (investigated, not
 executed).**
 
@@ -44,6 +44,20 @@ executed).**
   (`R`). Plain sheet-rho x squares on both sides, no refinement either way
   -- the native deck's default `$poly_res` (`'1k'`) matches the compiled
   deck's own default flavour exactly, so no `extra_rd` override is needed.
+- `gf180mcu_fd_pr__rm1` / `gf180mcu_fd_pr__rm2` / `gf180mcu_fd_pr__rm3`
+  (issue #1640): **exact** (`R`), no `extra_rd` needed -- the native deck's
+  own `resistor('rm1'/'rm2'/'rm3', 0.09, ...)` coefficient (`0.09` ohm/sq)
+  matches the compiled deck's transcribed `sheet_rho_ohm_sq` exactly for all
+  three.
+- `gf180mcu_fd_pr__tm9k` (issue #1640): **exact** (`R`), needs
+  `extra_rd={"metal_level": "5LM"}` -- same stack-selection override
+  `cap_mim_2f0_m4m5_noshield` below needs, and for the same reason (the
+  native deck's own `$metal_level` global defaults to `'6LM'`, while the
+  compiled deck's `tm9k` entry models the 5LM variant). With that override,
+  the native deck's own `resistor('tm9k', 0.04, ...)` coefficient (`METAL_
+  TOP` default `'9K'`) matches the compiled deck's `sheet_rho_ohm_sq=0.04`
+  exactly -- unlike the capacitor case immediately below, no refinement
+  disagreement here.
 - `cap_mim_2f0_m4m5_noshield`: **documented disagreement**. The native
   deck's own `$metal_level` global defaults to `'6LM'`
   (`topmin1_metal` = `Metal5`), while `decks/gf180mcu.py`'s MiM capacitor
@@ -391,6 +405,121 @@ def test_ppolyf_u_1k_r_matches_native_deck(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Drawn metal resistors `rm1`/`rm2`/`rm3` and the `tm6k`/`tm9k`/`tm11k`/
+# `tm30k` top-metal flavour set (issue #1640) -- exact agreement. `rm1`/
+# `rm2`/`rm3` need no `extra_rd` override (the native deck's own `unless
+# METAL_LEVEL == '2LM'`/`'3LM'` guards keep them extracted at every
+# `METAL_LEVEL` `decks/gf180mcu.py`'s own module docstring cites, '5LM'
+# included); `tm9k` -- like `cap_mim_2f0_m4m5_noshield` above -- needs
+# `extra_rd={"metal_level": "5LM"}`, since the native deck's own
+# `$metal_level` global defaults to `'6LM'` (`top_metal = metaltop`, not
+# `Metal5`), while the compiled deck's own `tm9k` entry models the 5LM
+# variant (`Metal5`/`metal5_res`, per `decks/gf180mcu.py`'s own module
+# docstring note on this same approximation).
+# --------------------------------------------------------------------------- #
+
+_METAL_RES_SQUARES = 6.0  # 6um marked segment / 1um width
+
+
+def _make_metal_resistor_layout(
+    metal_gds_layer: int, marker_datatype: int
+) -> kdb.Layout:
+    """`tests/test_lvs_device_provenance.py`'s own
+    `_make_gf180mcu_metal_resistor_layout` geometry (a 12x1um bar with a
+    6um-long `(110, marker_datatype)`-marked segment, 6.0 squares) --
+    duplicated per this module's own "some duplication is acceptable"
+    convention."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(metal_gds_layer, 0, _box_um(0, 0, 12, 1))
+    draw(110, marker_datatype, _box_um(3, 0, 9, 1))
+    label(metal_gds_layer, 10, "RA", 0.2, 0.5)
+    label(metal_gds_layer, 10, "RB", 11.8, 0.5)
+
+    return layout
+
+
+@_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
+@pytest.mark.parametrize(
+    ("name", "metal_gds_layer", "marker_datatype"),
+    [
+        ("rm1", 34, 11),  # Metal1 / metal1_res
+        ("rm2", 36, 12),  # Metal2 / metal2_res
+        ("rm3", 42, 13),  # Metal3 / metal3_res
+    ],
+)
+def test_rm_r_matches_native_deck(
+    tmp_path: Path, name: str, metal_gds_layer: int, marker_datatype: int
+) -> None:
+    """A 6-square `rm1`/`rm2`/`rm3` bar extracts with identical `R` under
+    both engines -- the native deck's own `resistor('rm1'/'rm2'/'rm3', 0.09,
+    ...)` coefficient (0.09 ohm/square) matches `EXTRACTION_DECK`'s own
+    provenance-cited `sheet_rho_ohm_sq=0.09` exactly (issue #1640)."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
+    assert resistor.provenance.rule_id == f"gf180mcu_fd_pr__{name}"
+
+    path = _write_gds(
+        _make_metal_resistor_layout(metal_gds_layer, marker_datatype),
+        tmp_path / f"{name}.gds",
+    )
+
+    compiled = run_extract(path, "gf180mcu", output=str(tmp_path / f"{name}.spice"))
+    assert compiled["device_counts"] == {name: 1}
+    compiled_r_ohm = compiled["devices"][0]["params"]["r_ohm"]
+
+    native_device = _one_native_device(_run_native(path))
+    assert native_device["class"].lower() == name
+    assert native_device["params"]["R"] == pytest.approx(compiled_r_ohm)
+    assert native_device["params"]["R"] == pytest.approx(
+        _METAL_RES_SQUARES * resistor.sheet_rho_ohm_sq
+    )
+
+
+@_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
+def test_tm9k_r_matches_native_deck_with_5lm_metal_level(tmp_path: Path) -> None:
+    """A 6-square `metal5_res`-marked Metal5 bar extracts as `tm9k` with
+    identical `R` under both engines, once `extra_rd={"metal_level": "5LM"}`
+    points the native deck's own `top_metal`/`top_metal_res` derivation at
+    `Metal5`/`metal5_res` -- the same stack-selection override
+    `test_cap_mim_c_disagrees_with_native_deck_by_a_documented_refinement`
+    above needs, for the same underlying reason (issue #1640). Unlike that
+    capacitor case, this one is **exact** agreement: the native deck's own
+    `resistor('tm9k', 0.04, ...)` (`METAL_TOP` default `'9K'`) coefficient
+    matches `EXTRACTION_DECK`'s own provenance-cited `sheet_rho_ohm_sq=0.04`
+    exactly, no refinement either way."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == "tm9k")
+    assert resistor.provenance.rule_id == "gf180mcu_fd_pr__tm9k"
+
+    path = _write_gds(
+        _make_metal_resistor_layout(81, 15),  # Metal5 / metal5_res
+        tmp_path / "tm9k.gds",
+    )
+
+    compiled = run_extract(path, "gf180mcu", output=str(tmp_path / "tm9k.spice"))
+    assert compiled["device_counts"] == {"tm9k": 1}
+    compiled_r_ohm = compiled["devices"][0]["params"]["r_ohm"]
+
+    native_device = _one_native_device(
+        _run_native(path, extra_rd={"metal_level": "5LM"})
+    )
+    assert native_device["class"].lower() == "tm9k"
+    assert native_device["params"]["R"] == pytest.approx(compiled_r_ohm)
+    assert native_device["params"]["R"] == pytest.approx(
+        _METAL_RES_SQUARES * resistor.sheet_rho_ohm_sq
+    )
+
+
+# --------------------------------------------------------------------------- #
 # MiM capacitor -- documented disagreement (issue #512's own perimeter-term
 # refinement), needs `extra_rd={"metal_level": "5LM"}` to point the native
 # deck at the same stack the compiled deck models
@@ -549,6 +678,10 @@ _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
         "gf180mcu_fd_pr__pfet_03v3",  # agrees
         "gf180mcu_fd_pr__ppolyf_u",  # agrees
         "gf180mcu_fd_pr__ppolyf_u_1k",  # agrees (native's own default flavour)
+        "gf180mcu_fd_pr__rm1",  # agrees
+        "gf180mcu_fd_pr__rm2",  # agrees
+        "gf180mcu_fd_pr__rm3",  # agrees
+        "gf180mcu_fd_pr__tm9k",  # agrees (needs extra_rd={"metal_level": "5LM"})
         "cap_mim_2f0_m4m5_noshield",  # documented disagreement (#512)
         "BJT.3",  # deferred (investigated)
         "gf180mcu_fd_pr__diode_nd2ps_06v0",  # deferred (investigated)

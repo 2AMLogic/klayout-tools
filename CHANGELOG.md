@@ -70,6 +70,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   device-comparison path with no LVS code changes. `klt gen` has no
   generator for this family yet — filed as a follow-up. See
   [`docs/cli/extract.md`](docs/cli/extract.md)'s "Drawn resistors" table.
+- **Added**: `klt extract --deck gf180mcu` now recognises gf180mcu's drawn
+  metal-resistor family (issue #1640, the gf180mcu counterpart of #1621
+  above): `rm1`/`rm2`/`rm3` (`Metal1`/`Metal2`/`Metal3` covered by the PDK's
+  own `metal1_res`/`metal2_res`/`metal3_res` resistor-ID marks, 0.09 Ω/□
+  each) plus a `tm6k`/`tm9k`/`tm11k`/`tm30k` top-metal thickness flavour set
+  (0.06/0.04/0.04/0.0095 Ω/□, caller-selectable via `--deck-option
+  metal_top=`, `9K` the PDK's own default — mirroring `poly_res`, issue
+  #595). Previously, a marked metal segment extracted as an ordinary short
+  and a reference netlist naming one of these devices failed to ingest at
+  all. Unlike sky130's `res_generic_mN` carve-out, all seven of these
+  gf180mcu classes have a real two-terminal `.subckt` in the vendored
+  `sm141064.ngspice` device library, so `--pdk` binds each to a genuine `X`
+  subcircuit call rather than a bare `R` card. `klt lvs` matches the new
+  devices through the existing generic device-comparison path with no LVS
+  code changes. See [`docs/cli/extract.md`](docs/cli/extract.md)'s "Drawn
+  resistors" table.
 - **Added**: `klt gen-compose`'s `routing.cross_block_layer_role` fallback
   plane (issue #1168) now has its own, independent width knob —
   `routing.cross_block_width_um` (issue #1620). Previously
