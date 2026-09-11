@@ -6182,6 +6182,45 @@ class _FakeSubCircuit:
         return self._ref
 
 
+class _FakePin:
+    """Stands in for a `klayout.db.Pin`: `.name()` only (issue #1622,
+    the attribute `_reference_signal_pin_names`/`_is_power_only_circuit`
+    read)."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+
+class _FakeCircuit(_FakeNamed):
+    """Stands in for a `klayout.db.Circuit` object (issue #1622):
+    `.expanded_name()` (inherited from `_FakeNamed`) plus `.each_pin()`,
+    the declared-pin-list accessor `_reference_signal_pin_names`/
+    `_is_power_only_circuit` read to classify a circuit's pins as
+    power-only or signal-bearing."""
+
+    def __init__(self, name: str, pins: list[str]) -> None:
+        super().__init__(name)
+        self._pins = [_FakePin(p) for p in pins]
+
+    def each_pin(self) -> list[_FakePin]:
+        return self._pins
+
+
+class _FakeNetlist:
+    """Stands in for a `klayout.db.Netlist`: `.each_circuit()` only (issue
+    #1622, the attribute `_reference_signal_pin_names` reads to derive its
+    "signal pin universe")."""
+
+    def __init__(self, circuits: list[_FakeCircuit]) -> None:
+        self._circuits = circuits
+
+    def each_circuit(self) -> list[_FakeCircuit]:
+        return self._circuits
+
+
 class _FakeParam:
     def __init__(self, name: str, param_id: int) -> None:
         self.name = name
@@ -6367,6 +6406,52 @@ def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
     assert entry["circuit"] == {"layout": "trng_top", "reference": None}
     assert entry["instance"] == {"layout": "Xfill_1_0", "reference": None}
     assert entry["subcircuit"] == {"layout": "lib__fill_1", "reference": None}
+
+
+def test_is_power_only_circuit_recognizes_filler_pin_list():
+    """Issue #1622: a circuit whose entire declared pin list never appears
+    as a signal pin anywhere in the reference netlist (the filler/tap-cell
+    case -- e.g. a `.SUBCKT` whose only pins are `VPWR`/`VGND`) classifies
+    as power-only: a `gate-level-verilog` reference never instantiates a
+    cell with no logic function, so there is nothing on that side to
+    describe it."""
+    signal_pins = lvs._reference_signal_pin_names(
+        _FakeNetlist([_FakeCircuit("top", ["A", "Y"])])
+    )
+    assert signal_pins == frozenset({"A", "Y"})
+    filler = _FakeCircuit("mylib__fill_1", ["VPWR", "VGND"])
+    assert lvs._is_power_only_circuit(filler, signal_pins) is True
+    # Not name-pattern-based: the same structural test catches sky130's
+    # `tapvpwrvgnd_1` tap cell, which `docs/cli/lvs.md`'s superseded
+    # `[!f]*` glob workaround did not exclude.
+    tap = _FakeCircuit("mylib__tapvpwrvgnd_1", ["VPWR", "VGND", "VPB", "VNB"])
+    assert lvs._is_power_only_circuit(tap, signal_pins) is True
+
+
+def test_is_power_only_circuit_negative_controls():
+    """Issue #1622's own acceptance criterion: a circuit that is NOT
+    power-only must never classify as one, so a genuine topology defect is
+    never masked. A circuit with a real signal pin (even alongside a power
+    pin), a circuit with no declared pins at all, and a missing
+    signal-pin universe all return `False`."""
+    signal_pins = lvs._reference_signal_pin_names(
+        _FakeNetlist([_FakeCircuit("top", ["A", "Y"])])
+    )
+    mixed = _FakeCircuit("mylib__weird_1", ["A", "VPWR"])
+    assert lvs._is_power_only_circuit(mixed, signal_pins) is False
+    pinless = _FakeCircuit("mylib__pinless", [])
+    assert lvs._is_power_only_circuit(pinless, signal_pins) is False
+    filler = _FakeCircuit("mylib__fill_1", ["VPWR", "VGND"])
+    assert lvs._is_power_only_circuit(filler, None) is False
+    assert lvs._is_power_only_circuit(None, signal_pins) is False
+
+
+def test_reference_signal_pin_names_missing_netlist_is_none():
+    """No reference netlist to derive a signal-pin universe from degrades
+    to `None` -- which `_is_power_only_circuit` treats as "no evidence",
+    never as "everything is power-only" (issue #1622)."""
+    assert lvs._reference_signal_pin_names(None) is None
+    assert lvs._reference_signal_pin_names(object()) is None
 
 
 def test_build_mismatches_ambiguous_net_is_warning_topology():
@@ -10993,6 +11078,150 @@ def test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable(tmp_path):
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+
+
+#: The same power-pin-carrying layout, plus one filler/tap-cell instance
+#: (issue #1622): `XTAP0`'s master, `mylib__tapvpwrvgnd_1`, declares only
+#: power/ground pins -- the real shape of sky130's `fill_*` row-gap fillers
+#: (issue #1442) and its unconditionally-inserted `tapvpwrvgnd_1` tap cell
+#: alike. A `gate-level-verilog` reference never instantiates either (no
+#: logic function to describe), so this is the reproduction from the
+#: issue's own "Reproduction" section.
+_GATE_LEVEL_LAYOUT_SPICE_WITH_FILLER = """
+.subckt top in mid out VPWR VGND
+X1 in mid VGND VPWR mylib__inv_1
+X2 mid out VGND VPWR mylib__buf_1
+XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1
+.ends
+.subckt mylib__inv_1 A Y VGND VPWR
+.ends
+.subckt mylib__buf_1 A Y VGND VPWR
+.ends
+.subckt mylib__tapvpwrvgnd_1 VPWR VGND VPB VNB
+.ends
+"""
+
+
+def test_run_lvs_gate_level_verilog_ignores_power_only_filler_circuit(tmp_path):
+    """Issue #1622: a layout-side power-only cell (filler/tap) with no
+    counterpart at all in the gate-level-Verilog reference no longer fails
+    the compare -- `status: "match"`, no `topology` finding attributable to
+    the filler instance (a `topology.power_only_pruned` disclosure records
+    what was removed instead -- `severity: "warning"`, never `"error"`, so
+    it never flips `status`). Reproduces the issue body's steps 1-4."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(
+        tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_FILLER
+    )
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert "topology" not in report.get("category_counts", {})
+    assert report.get("category_counts", {}).get("topology.power_only_pruned") == 1
+    (entry,) = report["mismatches"]
+    assert entry["severity"] == "warning"
+    assert "MYLIB__TAPVPWRVGND_1" in entry["description"]
+
+
+def test_run_lvs_gate_level_verilog_missing_signal_circuit_still_reported(tmp_path):
+    """Negative control alongside the filler-suppression test above: a
+    layout-side standard-cell instance that genuinely has no reference
+    counterpart, but whose master declares a real signal pin (not
+    power-only), still fails the compare with a `topology` finding -- this
+    fix must not mask a genuine missing-cell defect."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    extra_instance = _GATE_LEVEL_LAYOUT_SPICE_WITH_FILLER.replace(
+        "XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1",
+        "XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1\n"
+        "X3 mid out VGND VPWR mylib__xor_1",
+    ).replace(
+        ".subckt mylib__tapvpwrvgnd_1 VPWR VGND VPB VNB\n.ends\n",
+        ".subckt mylib__tapvpwrvgnd_1 VPWR VGND VPB VNB\n.ends\n"
+        ".subckt mylib__xor_1 A Y VGND VPWR\n.ends\n",
+    )
+    layout_path = _write(tmp_path / "layout.spice", extra_instance)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    assert report.get("category_counts", {}).get("topology", 0) >= 1
+    # The filler/tap circuit from the reproduction above is still pruned
+    # (disclosed via `topology.power_only_pruned`, not reported as a
+    # `topology` error) even alongside a genuine defect -- `MYLIB__XOR_1`
+    # (`NetlistSpiceReader` reads circuit names back upper-cased), the real
+    # signal-bearing missing cell, is what remains attributable.
+    assert report.get("category_counts", {}).get("topology.power_only_pruned") == 1
+    topology_entries = [m for m in report["mismatches"] if m["category"] == "topology"]
+    assert any("MYLIB__XOR_1" in json.dumps(entry) for entry in topology_entries)
+    assert not any("TAPVPWRVGND" in json.dumps(entry) for entry in topology_entries)
+
+
+def test_run_lvs_power_only_pruning_is_scoped_to_gate_level_verilog(tmp_path):
+    """Issue #1622's pruning is only sound against a `gate-level-verilog`
+    reference, whose conversion never carries power pins -- so every other
+    reference form must be left exactly as it was. A `"plain-element"`
+    reference (the default form) is arbitrary SPICE whose pin names need
+    not overlap the layout's at all: `MYSUB`'s `A`/`Y` pins appearing
+    nowhere in the reference's own pin universe is evidence of nothing, and
+    its unmatched `topology` finding must still be reported. Regression
+    guard -- an unscoped version of this fix silently swallowed it."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.subckt top IN OUT
+XI1 IN OUT mysub
+.ends
+.subckt mysub A Y
+M1 Y A 0 0 nfet w=1u l=0.15u
+.ends
+""",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt top IN OUT
+M1 OUT IN 0 0 nfet w=1u l=0.15u
+.ends
+""",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {"netlist": reference_path, "top": "top"},
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    assert "topology.power_only_pruned" not in report.get("category_counts", {})
+    assert any(
+        entry["category"] == "topology"
+        and entry["circuit"] == {"layout": "MYSUB", "reference": None}
+        for entry in report["mismatches"]
+    )
 
 
 def test_run_lvs_gate_level_verilog_reference_via_cdl_fallback(tmp_path):

@@ -433,16 +433,18 @@ klt place-and-route par_request.json --format json >par.json
 
 # 2. layout side: every standard cell a pin-only black box, with the
 #    design's own DEF net names recovered so top-level pin names line up.
-#    `[!f]*` excludes `sky130_fd_sc_hd__fill_*` -- physical-only filler
-#    cells issue #1442's row-rail fix now inserts unconditionally (even
-#    without `request.power`) to close standard-cell row gaps. Filler
-#    cells carry no logical function, so `write_verilog` (the reference
-#    side) correctly never emits them -- abstracting them on the layout
-#    side with no reference-side counterpart is a real `topology`
-#    mismatch (`circuit could not be matched to a counterpart`), not a
-#    connectivity defect.
+#    Abstract every instantiated cell, filler/tap included --
+#    `sky130_fd_sc_hd__fill_*` (issue #1442's row-rail fix inserts these
+#    unconditionally, even without `request.power`, to close standard-cell
+#    row gaps) and `sky130_fd_sc_hd__tapvpwrvgnd_1` (the `tapcell` stage's
+#    own unconditional insertion) carry no logical function, so
+#    `write_verilog` (the reference side) correctly never emits them --
+#    `klt lvs` recognizes a power-only cell (every declared pin is
+#    power/ground) as out of scope for this signal-only compare and prunes
+#    it before comparing (issue #1622; see "`topology.power_only_pruned`"
+#    below). No cell-name glob needed.
 klt extract "$(jq -r .gds_path par.json)" --deck sky130 \
-  --abstract-cells 'sky130_fd_sc_hd__[!f]*' --def-net-names \
+  --abstract-cells 'sky130_fd_sc_hd__*' --def-net-names \
   -o gcd.gate.spice --format json >extract.json
 
 # 3. compare against the same run's own verilog_path
@@ -508,6 +510,22 @@ the fixture #1443 regenerated with #1442's row-rail fix applied): `status:
 "match"`, `mismatch_count: 0`, with no `pin.unmatched` entry. You
 do **not** need to narrow the layout-side pin resolution to signal pins to
 get a verdict.
+
+**A layout-side cell with *only* power/ground pins is pruned automatically**
+(issue #1622) — a filler cell (`sky130_fd_sc_hd__fill_*`, inserted
+unconditionally whenever issue #1442's row-rail fallback fires) or a tap
+cell (`sky130_fd_sc_hd__tapvpwrvgnd_1`, inserted unconditionally by the
+`tapcell` stage) carries no logic function, so `write_verilog` never
+instantiates it on the reference side — there is nothing for a signal-only
+compare to describe. `klt lvs` recognizes this structurally (not one of the
+cell's declared pins is a signal pin anywhere in the reference netlist —
+never a cell-name glob like `fill_*`/`tap*`, and never a hardcoded PDK
+power-pin table) and removes the layout-side instance before
+comparing, disclosing what it removed as a `severity: "warning"`,
+`category: "topology.power_only_pruned"` entry — see
+"`topology.power_only_pruned`" below — rather than reporting a false
+`topology` mismatch. You do not need to exclude these cells from
+`--abstract-cells` yourself.
 
 What that costs is real and must not be misread: **a power-net defect is
 invisible to this compare**. A standard cell whose `VGND` pin is wired to
@@ -944,8 +962,8 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.property`, `device.parameter_tolerated`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `hints.rejected`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.property`, `device.parameter_tolerated`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `hints.rejected`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
@@ -1512,6 +1530,67 @@ never silently indistinguishable from one reached against the netlist's
 original hierarchy — the same transparency precedent
 `device.parameter_tolerated`/`device.bulk_reconciled` establish for their own
 opt-in normalisations.
+
+#### `topology.power_only_pruned`: a power-only layout circuit was removed before comparing
+
+Only possible when `reference.form: "gate-level-verilog"` (issue #1622), and
+only emitted when at least one layout circuit's entire declared pin list is
+power/ground.
+
+A `gate-level-verilog` reference conversion never instantiates a cell with
+no logic function — a filler cell (`sky130_fd_sc_hd__fill_*`, inserted
+unconditionally whenever issue #1442's row-rail fallback fires) or a tap
+cell (`sky130_fd_sc_hd__tapvpwrvgnd_1`, inserted unconditionally by
+`klt place-and-route`'s `tapcell` stage) has nothing on the reference side
+to describe it. `klt lvs` removes every layout circuit whose declared pins
+are drawn *entirely* from names that never appear as a signal pin anywhere
+in the reference netlist — structurally, from the reference netlist's own
+pin universe, never a hardcoded PDK power-pin name table
+(`VPWR`/`VGND`/`VPB`/`VNB` for sky130 vs. gf180mcu's own names) or a
+cell-name glob (`fill_*`/`tap*`) — along with every subcircuit instance of
+it, before the compare runs. A circuit with even one recognized signal pin
+is never pruned, even if it also has power pins (see "Negative controls"
+above for this module's general discipline on not masking a real defect).
+
+**Scope and limits, stated precisely.** The test is *not* "this cell's name
+looks like a filler" and not "these pins are on a PDK power-pin list" — it
+is "not one of this cell's declared pins is a signal pin anywhere in the
+reference netlist". That is the same thing for a filler or tap cell, and it
+also, deliberately, covers the other physical-only cells a P&R flow inserts
+without the logic netlist knowing (decoupling capacitors, antenna diodes):
+they are equally invisible to a signal-only compare, and equally not a
+topology defect. It is applied **only** when
+`reference.form: "gate-level-verilog"`, whose conversion is known never to
+carry power pins; a `"plain-element"`/`"subckt-call"` reference is arbitrary
+SPICE whose pin names need not overlap the layout's at all, so the same
+inference would be unsound there and is never made. Every removal is named
+in this entry's `description`, so a `"match"` that depended on one is always
+auditable from the report alone.
+
+`severity` is always `"warning"` — this is a request-side transform applied
+before the compare, not a `NetlistComparer` finding, so it never changes
+`status` on its own (a request whose only finding is this entry reports
+`status: "match"` with a nonzero `mismatch_count`). `side` is always
+`"layout"`. `description` names every circuit removed. Present for the same
+reason `topology.flattened` is: a `"match"` reached after this pruning is
+never silently indistinguishable from one reached against the layout
+netlist's original, unpruned shape.
+
+Removing the instance — not just leaving it in place and filtering its own
+finding out of `mismatches[]` — is what makes this work at all. `status` is
+always derived from the comparer's own boolean result, never re-derived from
+`mismatches[]` (see the module's docstring), so a report-level filter would
+leave `status: "mismatch"` regardless. And it is not the only finding: left
+in place, a power-only circuit's *parent* fails to verify too —
+`NetlistComparer` cannot pair the parent's subcircuit-instance list against
+the reference's while one side has an extra instance the other cannot
+describe, and reports a second, consequential `topology` "circuit could not
+be matched to a counterpart" finding for the *parent*. Mirrors the known-safe downstream workaround this issue cites
+(2AMLogic/sky130-fpga issue #20: stripping a layout-side `.SUBCKT` whose pin
+list is a non-empty subset of `{VPWR, VGND, VPB, VNB}`, plus its instance
+lines, from the extracted SPICE netlist before calling `klt lvs`) —
+implemented natively here instead of requiring a caller to pre-filter their
+netlist.
 
 #### `combine_devices_per_circuit.unmatched`: an `options.combine_devices_per_circuit` glob matched no circuit
 

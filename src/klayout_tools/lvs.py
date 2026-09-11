@@ -242,6 +242,13 @@ CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
 #: exists on only one side (e.g. a reference-only lumped macro with no
 #: layout-side counterpart yet) is not itself a mistake.
 CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.unmatched"
+#: Issue #1622: a layout-side circuit whose entire declared pin list is
+#: power/ground (a filler/tap-cell master, e.g. sky130's unconditionally-
+#: inserted `tapvpwrvgnd_1` tap cell or a `fill_*` row-gap filler), plus
+#: every subcircuit instance of it, was removed from the layout netlist
+#: before comparing against a `reference.form: "gate-level-verilog"`
+#: reference -- see `_prune_power_only_layout_circuits`.
+CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
 
 #: Substring KLayout's own ``Netlist.combine_devices()`` internal-consistency
 #: ``RuntimeError`` always carries (issue #466) -- e.g. "Internal error:
@@ -713,6 +720,10 @@ def run_lvs(request: str) -> dict[str, Any]:
     )
 
     flatten_warnings: list[dict[str, Any]] = []
+    # Issue #1622: disclosure for `_prune_power_only_layout_circuits`, filled
+    # in once `reference_netlist` is available below (only ever nonempty for
+    # `reference.form: "gate-level-verilog"`).
+    power_only_pruning_warnings: list[dict[str, Any]] = []
     # Issue #1552: `options.combine_devices_per_circuit`'s per-macro combine
     # choices must run *before* either side's optional structural flatten
     # (`options.flatten_layout`/`options.flatten_reference`, issue #1085)
@@ -826,6 +837,23 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_variant=reference_spec.get("pdk"),
         pdk_root=reference_spec.get("pdk_root"),
     )
+
+    if reference_form == "gate-level-verilog":
+        # Issue #1622: a `gate-level-verilog` reference never instantiates a
+        # power-only cell (filler/tap) at all -- see
+        # `_prune_power_only_layout_circuits`'s docstring for why this must
+        # remove the layout-side instance before `compare()` runs, rather
+        # than only suppress its own mismatch report after the fact. Run
+        # right after `reference_netlist` is read (the earliest point its
+        # signal-pin universe is available), and before the
+        # `combine_devices_per_circuit`/flatten/`combine_devices` steps
+        # below, none of which have anything to do with a power-only
+        # circuit's own (device-less) content.
+        power_only_pruning_warning = _prune_power_only_layout_circuits(
+            layout_netlist, reference_netlist, keep_name=layout_spec.get("top")
+        )
+        if power_only_pruning_warning is not None:
+            power_only_pruning_warnings.append(power_only_pruning_warning)
 
     if combine_devices_per_circuit is not None:
         reference_targets, reference_unmatched = (
@@ -1433,6 +1461,14 @@ def run_lvs(request: str) -> dict[str, Any]:
         # does.
         mismatches.extend(flatten_warnings)
 
+    if power_only_pruning_warnings:
+        # Issue #1622: same rationale as the disclosures above -- pruning a
+        # power-only layout circuit is a request-side transform applied
+        # before the compare (before even `combine_devices_per_circuit`/
+        # `flatten_layout` above), not a `NetlistComparer` event, so it is
+        # appended here rather than folded into `_build_mismatches`.
+        mismatches.extend(power_only_pruning_warnings)
+
     if (
         layout_deck is not None
         or combine_warnings
@@ -1440,6 +1476,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         or bulk_warnings
         or tolerance_warnings
         or flatten_warnings
+        or power_only_pruning_warnings
     ):
         mismatches.sort(key=_sort_key)
 
@@ -3648,6 +3685,217 @@ def _subcircuit_ref_name(obj: Any) -> str | None:
     return _name_or_none(method())
 
 
+def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
+    """The set of every pin name declared on any circuit in ``netlist``, or
+    ``None`` when ``netlist`` itself is unavailable.
+
+    Issue #1622: a ``reference.form: "gate-level-verilog"`` reference
+    netlist never carries power/ground pins at all -- its conversion only
+    ever emits the *signal* subset of a standard cell's real PDK pin order
+    (``verilog_netlist.py``'s own "No power/ground pins" docstring note;
+    see also ``docs/cli/lvs.md``'s "No power/ground pins" section). So
+    every pin name that appears *anywhere* in the reference netlist is, by
+    construction, a genuine signal pin -- this is the PDK-agnostic
+    "signal pin universe" :func:`_is_power_only_circuit` compares a
+    layout-only circuit's own pins against, instead of a hardcoded
+    per-PDK power-pin name table (sky130's ``VPWR``/``VGND``/``VPB``/
+    ``VNB`` vs. gf180mcu's own names) or a cell-name glob
+    (``fill_*``/``tap*``, the superseded ``docs/cli/lvs.md`` workaround).
+
+    Only sound against a ``gate-level-verilog`` reference, and so only ever
+    called from :func:`_prune_power_only_layout_circuits`, which the caller
+    invokes for that form alone. A ``"plain-element"``/``"subckt-call"``
+    reference netlist is arbitrary SPICE whose pin names need not overlap
+    the layout's at all, so "no pin of mine appears anywhere in the
+    reference" is evidence of nothing there.
+    """
+    if netlist is None:
+        return None
+    each_circuit = getattr(netlist, "each_circuit", None)
+    if not callable(each_circuit):
+        return None
+    names: set[str] = set()
+    for circuit in each_circuit():
+        each_pin = getattr(circuit, "each_pin", None)
+        if not callable(each_pin):
+            continue
+        for pin in each_pin():
+            name = pin.name()
+            if name:
+                names.add(name)
+    return frozenset(names)
+
+
+def _is_power_only_circuit(
+    circuit: Any, signal_pin_names: frozenset[str] | None
+) -> bool:
+    """True when ``circuit``'s entire declared pin list is drawn from names
+    that never appear as a signal pin anywhere in the reference netlist
+    (see :func:`_reference_signal_pin_names`) -- i.e. ``circuit`` is a
+    power-only cell (a filler/tap cell, whose real PDK pin list is
+    ``VPWR``/``VGND``/``VPB``/``VNB`` and nothing else) that is out of
+    scope for a signal-only ``gate-level-verilog`` compare (issue #1622).
+
+    Structural, not name-pattern: this never special-cases a cell-name glob
+    like ``fill_*``/``tap*`` -- it looks only at ``circuit``'s own declared
+    pins against what the reference conversion ever carries, so it also
+    catches an equally power-only cell instantiated under an unrelated name
+    (e.g. sky130's ``tapvpwrvgnd_1`` tap cell, which the superseded
+    ``[!f]*`` glob workaround in ``docs/cli/lvs.md`` did not exclude).
+
+    ``signal_pin_names is None`` (no reference netlist to derive a universe
+    from) and a circuit with zero declared pins both return ``False`` --
+    neither is evidence this circuit is power-only, and the safe default on
+    missing evidence is to leave the circuit in place and keep reporting the
+    existing topology mismatch rather than risk masking a real one.
+    """
+    if circuit is None or signal_pin_names is None:
+        return False
+    each_pin = getattr(circuit, "each_pin", None)
+    if not callable(each_pin):
+        return False
+    pin_names = [name for pin in each_pin() if (name := pin.name())]
+    if not pin_names:
+        return False
+    return all(name not in signal_pin_names for name in pin_names)
+
+
+def _prune_power_only_layout_circuits(
+    layout_netlist: Any, reference_netlist: Any, *, keep_name: str | None = None
+) -> dict[str, Any] | None:
+    """Issue #1622: remove every layout-side circuit whose entire declared
+    pin list is power/ground -- a filler/tap-cell master, e.g. sky130's
+    unconditionally-inserted ``tapvpwrvgnd_1`` tap cell (``place_and_route.py``'s
+    ``_TAPCELL_CELLS``) or a ``fill_*`` row-gap filler (issue #1442) -- along
+    with every subcircuit instance of it, from ``layout_netlist`` before the
+    compare runs.
+
+    **Why removal, not just suppressing its own mismatch report.** A
+    ``reference.form: "gate-level-verilog"`` conversion never instantiates a
+    cell with no logic function at all (see ``verilog_netlist.py``'s "No
+    power/ground pins" note), so a power-only layout circuit has nothing on
+    the reference side to describe it. Filtering the resulting finding out
+    of ``mismatches[]`` after the fact (the obvious first instinct, and what
+    a ``_build_mismatches``-level check would do) fixes nothing: ``status``
+    is always derived from ``compare()``'s own boolean result, never
+    re-derived from ``mismatches[]`` (see this module's docstring and
+    ``run_lvs``), so the verdict would stay ``"mismatch"``. It is also not
+    the only finding -- left in place, the *containing* circuit fails to
+    verify too: ``NetlistComparer`` cannot pair the container's
+    subcircuit-instance list against the reference's (one side has an extra
+    instance the other cannot describe), and reports a second,
+    consequential ``circuit could not be matched to a counterpart`` finding
+    for the *container* (KLayout's own ``circuit_skipped`` event, both sides
+    present). Removing the circuit and its instances before ``compare()``
+    ever runs is the only thing that makes the container's own comparison
+    clean and the verdict ``"match"``.
+
+    Mirrors the known-safe downstream workaround this issue cites
+    (2AMLogic/sky130-fpga issue #20: stripping a layout-side ``.SUBCKT``
+    whose pin list is a non-empty subset of ``{VPWR, VGND, VPB, VNB}``, plus
+    its instance lines, from the extracted SPICE netlist before calling
+    ``klt lvs``) -- implemented natively here, and structurally
+    (:func:`_is_power_only_circuit`'s pin-list check against the reference
+    netlist's own signal-pin universe) rather than a hardcoded, per-PDK
+    power-pin name table or a cell-name glob.
+
+    **Scoped to ``reference.form: "gate-level-verilog"`` only** -- the caller
+    invokes this for that form alone, and that restriction is load-bearing,
+    not caution. The inference ":func:`_is_power_only_circuit` says none of
+    this circuit's pins is a signal pin anywhere in the reference, therefore
+    it is power-only" is sound only because a ``gate-level-verilog``
+    reference is a *conversion of the same design* through a known library,
+    guaranteed never to carry power pins. A ``"plain-element"``/
+    ``"subckt-call"`` reference is arbitrary SPICE whose pin names need not
+    overlap the layout's at all, so there "no pin of mine appears in the
+    reference" is evidence of nothing -- applying this to those forms masked
+    a genuine unmatched signal circuit (a layout-only ``.SUBCKT`` with pins
+    ``A``/``Y`` against a flat reference declaring only ``IN``/``OUT``
+    vanished from the report), which
+    ``test_run_lvs_power_only_pruning_is_scoped_to_gate_level_verilog``
+    now guards against.
+
+    Note this classification is broader than "filler/tap" by design: it also
+    catches the other physical-only cells a P&R flow inserts without the
+    logic netlist knowing (decoupling capacitors, antenna diodes), which are
+    equally invisible to a signal-only compare and equally not a topology
+    defect. Every removal is named in the returned disclosure, so a
+    ``"match"`` that depended on one stays auditable from the report alone.
+
+    ``keep_name`` (the caller's own ``layout.top``, when given) is never
+    pruned even if it happens to classify as power-only -- this runs before
+    ``_select_circuit`` resolves the actual compare target, and removing the
+    very circuit the caller asked to compare would turn a classification
+    edge case into a confusing "circuit not found" error instead of a clean
+    no-op. Not expected to matter in practice (a real design's top circuit
+    always has genuine signal I/O), but cheap to guard against.
+
+    Returns a ``severity: "warning"`` ``mismatches[]`` entry (``category:
+    "topology.power_only_pruned"``) naming every circuit removed, so a
+    ``"match"`` reached this way is never silently indistinguishable from
+    one reached against the layout netlist's original, unpruned shape -- or
+    ``None`` when nothing was power-only (the common case, and always the
+    case when ``reference_netlist`` has no circuits to derive a signal-pin
+    universe from), in which case there is nothing to disclose.
+    """
+    signal_pin_names = _reference_signal_pin_names(reference_netlist)
+    if not signal_pin_names:
+        return None
+    # Resolved through the netlist's own `circuit_by_name` (whatever
+    # case-folding convention it applies -- e.g. a `NetlistSpiceReader`
+    # netlist matches `"top"` against a circuit actually named `"TOP"`) and
+    # compared by object equality -- a plain name-string comparison against
+    # `circuit.name` would miss that case-folding and could let this guard
+    # silently fail to protect the real top circuit. Deliberately *not*
+    # `cell_index`-based (unlike `_prune_extra_top_circuits`'s own
+    # object-identity check): a `kdb.Netlist` read straight from SPICE/
+    # Verilog text, with no backing `kdb.Layout`, reports `cell_index == 0`
+    # for every circuit -- a real, pre-existing gap in that comparison,
+    # tracked separately (issue #1657) rather than fixed here (out of this
+    # issue's own scope) -- so this guard uses `==`, which compares
+    # correctly in that same no-Layout-backing case.
+    keep_circuit = (
+        layout_netlist.circuit_by_name(keep_name) if keep_name is not None else None
+    )
+    removed_names = sorted(
+        {
+            circuit.name
+            for circuit in layout_netlist.each_circuit()
+            if circuit != keep_circuit
+            and _is_power_only_circuit(circuit, signal_pin_names)
+        }
+    )
+    if not removed_names:
+        return None
+    removed_set = set(removed_names)
+    # Every instance of a to-be-removed circuit type must go first --
+    # `Netlist.purge_circuit` refuses (leaves a dangling reference behind)
+    # if the circuit still has callers.
+    for circuit in list(layout_netlist.each_circuit()):
+        for sub in list(circuit.each_subcircuit()):
+            ref = sub.circuit_ref()
+            if ref is not None and ref.name in removed_set:
+                circuit.remove_subcircuit(sub)
+    for name in removed_names:
+        target = layout_netlist.circuit_by_name(name)
+        if target is not None:
+            layout_netlist.purge_circuit(target)
+    # Issue #500's precedent: a net left with no terminals/pins/subcircuit
+    # pins once its only connection (the just-removed instance) is gone is
+    # not part of the netlist's topology by any definition -- see
+    # `_purge_emptied_nets`'s own docstring.
+    _purge_emptied_nets(layout_netlist)
+    return _mismatch(
+        CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED,
+        "warning",
+        "removed layout-side circuit(s) whose entire declared pin list is "
+        "power/ground, and every instance of them, before comparing -- "
+        f"{len(removed_names)} circuit(s): {', '.join(removed_names)} (see "
+        'docs/cli/lvs.md, "topology.power_only_pruned")',
+        "layout",
+    )
+
+
 def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     """Turn ``logger.net_matches`` (every successful net pairing the
     comparer produced -- unambiguous and ambiguous alike) into the
@@ -4106,6 +4354,20 @@ def _build_mismatches(
     # second time).
     hint_outcomes = _same_nets_hint_outcomes(logger, same_nets_hints)
 
+    # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
+    # `subcircuit_mismatches` loops below for power-only (filler/tap)
+    # circuits. Two reasons: (a) a report-level filter cannot help anyway --
+    # `status` is always derived from `compare()`'s own boolean result (see
+    # this module's docstring), so a suppressed finding would still leave
+    # `status: "mismatch"`; the fix has to remove the circuit *before* the
+    # compare, which `_prune_power_only_layout_circuits` does. And (b) the
+    # "power-only" classification is only sound against a
+    # `reference.form: "gate-level-verilog"` reference, whose conversion
+    # never carries power pins -- `_build_mismatches` runs for every
+    # reference form, and applying it here masked a genuine unmatched
+    # signal circuit under `"plain-element"` (any layout-only circuit whose
+    # pin names simply never appear in a flat reference netlist's own pin
+    # universe classified as "power-only" and vanished from the report).
     mismatches.extend(
         _classify_net_mismatches(
             logger.net_mismatches,
