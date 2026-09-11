@@ -1064,6 +1064,14 @@ def run_extract(
                     "nets": {<terminal>: str | None, ...},
                     # MOS: {"w_um", "l_um"}; drawn resistor adds "r_ohm".
                     "params": {<name>: float, ...},
+                    # Issue #1666: the GDS-level instance placement chain
+                    # (outermost first) this device's recognition shape
+                    # positionally resolved to -- `[]` when it resolved to
+                    # none (drawn directly in the top cell, the common case
+                    # for a design with no repeated sub-cells).
+                    "instance_path": [
+                        {"cell": str, "array_index": [int, int] | None}, ...
+                    ],
                 },
                 ...
             ],
@@ -1665,6 +1673,7 @@ def run_extract(
         dead_metal,
         mom_crosscheck,
         net_label_positions,
+        device_instance_paths,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -1735,7 +1744,7 @@ def run_extract(
         # reads them back -- and the `netlist.write(...)` below therefore
         # writes the *same* corrected values into the SPICE file that
         # `devices[].params` reports.
-        devices, device_counts = _describe_devices(circuit)
+        devices, device_counts = _describe_devices(circuit, device_instance_paths)
         nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
@@ -2764,14 +2773,16 @@ def extract_netlist_from_layout(
     list[dict[str, Any]],
     dict[str, Any] | None,
     dict[int, list[dict[str, Any]]],
+    dict[int, list[dict[str, Any]]],
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
     voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck,
-    net_label_positions)`` -- see :func:`_extract_netlist`'s own docstring
-    for ``net_label_positions`` (issue #1540).
+    net_label_positions, device_instance_paths)`` -- see
+    :func:`_extract_netlist`'s own docstring for ``net_label_positions``
+    (issue #1540) and ``device_instance_paths`` (issue #1666).
 
     ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
     ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
@@ -2968,6 +2979,7 @@ def extract_netlist_from_layout(
         dead_metal,
         mom_crosscheck,
         net_label_positions,
+        device_instance_paths,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -3014,6 +3026,7 @@ def extract_netlist_from_layout(
         dead_metal,
         mom_crosscheck,
         net_label_positions,
+        device_instance_paths,
     )
 
 
@@ -4911,6 +4924,7 @@ def _extract_netlist(
     list[dict[str, Any]],
     dict[str, Any] | None,
     dict[int, list[dict[str, Any]]],
+    dict[int, list[dict[str, Any]]],
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -4943,7 +4957,7 @@ def _extract_netlist(
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
     dummy_devices_dropped, unmodelled_poly, abstracted_cells, dead_metal,
-    mom_crosscheck, net_label_positions)``.
+    mom_crosscheck, net_label_positions, device_instance_paths)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
@@ -4994,6 +5008,19 @@ def _extract_netlist(
     ``mom_crosscheck`` above, while ``l2n`` is still alive; :func:`run_extract`
     folds it into ``nets[].label_positions_um``/``nets[].net_id``/
     ``nets[].pin_index`` (see :func:`_describe_nets`).
+
+    ``device_instance_paths`` (issue #1666), keyed by ``Device.id()``, is the
+    device-level counterpart to ``net_label_positions`` above: which
+    GDS-level instance placement (cell + array index, one entry per nesting
+    level) each device's recognition shape positionally falls inside, per
+    :func:`_device_instance_paths`. Computed here (not in
+    :func:`run_extract`) because it needs ``layout``/``top_cell`` at the
+    exact point the final top circuit's devices are known, mirroring how
+    ``net_label_positions`` needs ``l2n`` while still alive; unlike
+    ``net_label_positions`` it does not depend on ``l2n`` itself, only on
+    ``layout``'s already-static instance tree, so it is computed once, right
+    before this function returns. :func:`run_extract` folds it into
+    ``devices[].instance_path`` (see :func:`_describe_devices`).
 
     ``def_net_names`` (issue #951): when ``True``, each routed net is renamed
     to the DEF net name its geometry carries as GDS shape property
@@ -6694,6 +6721,21 @@ def _extract_netlist(
         else {}
     )
 
+    # Issue #1666: per-device GDS-level instance attribution, keyed by
+    # `Device.id()` -- unlike `net_label_positions` this needs no live `l2n`
+    # API (only `layout`'s own static instance tree plus each device's own
+    # `trans`), so it is computed straight from the same final top circuit,
+    # read back exactly as `run_extract`'s own `_describe_devices` call will.
+    # `Device.id()` survives the `netlist.dup()` below unchanged (KLayout
+    # preserves per-device ids across a netlist duplication), so this
+    # mapping keys correctly against the devices `run_extract` later reads
+    # from the duplicated netlist.
+    device_instance_paths = (
+        _device_instance_paths(top_cell, final_circuit_for_labels)
+        if final_circuit_for_labels is not None
+        else {}
+    )
+
     # `l2n` (and the Region/Texts objects it owns) would otherwise be
     # garbage-collected once this function returns, which invalidates the
     # netlist it produced (KLayout raises on subsequent use) -- `dup()`
@@ -6709,6 +6751,7 @@ def _extract_netlist(
         dead_metal,
         mom_crosscheck,
         net_label_positions,
+        device_instance_paths,
     )
 
 
@@ -8567,8 +8610,126 @@ def _unique_net_name(base: str, existing: set[str], suffix: str = "__par") -> st
     return f"{base}{suffix}{counter}"
 
 
+def _instance_path_for_point(
+    cell: kdb.Cell, point_um: kdb.DPoint
+) -> list[dict[str, Any]]:
+    """Positionally resolve ``point_um`` (micrometres, ``cell``'s own
+    coordinate frame) to the chain of GDS-level instance placements that
+    contains it -- issue #1666.
+
+    ``_extract_netlist``'s device-recognition ``Region``s are built by
+    flattening ``cell.begin_shapes_rec()`` (see :func:`region` in
+    ``_layout.py``), which discards every instance transform before
+    extraction ever runs -- so the flat ``kdb.Circuit`` it produces has no
+    surviving handle back to the instance a given device came from. This
+    reconstructs that association *after the fact*, purely positionally,
+    using ``kdb.Cell.begin_instances_rec_touching`` -- KLayout's own
+    recursive instance query, backed by a native spatial index, over a
+    degenerate (zero-size) query box at ``point_um``. Each iterator step is
+    one candidate placement chain (``it.path()`` -- the ancestor chain down
+    to, but not including, the matched instance's own immediate parent --
+    plus ``it.current_inst_element()``, the matched instance itself); a
+    genuinely non-overlapping design (the common case this issue's
+    "repeated instance" scenario describes) yields exactly one, the full
+    chain down to wherever the device's recognition geometry actually
+    lives, however many levels deep. Ties (``point_um`` touching more than
+    one candidate chain -- overlapping placements, or an intermediate
+    ancestor level whose own bounding box trivially contains a descendant
+    match too) are broken deterministically: the *deepest* chain first (the
+    most specific -- an ancestor-only partial match is always shallower than
+    its own descendant's full match), then smallest matched bounding-box
+    area, then ``(cell name, ia, ib)`` per level.
+
+    **Why not a naive ``each_inst()`` walk** (this function's first cut):
+    testing every sibling instance/array element at each nesting level, once
+    per device, is O(devices x instances-at-that-level) -- fine for a small
+    fixture, but field-observed to stall for minutes against a real
+    place-and-route corpus block (`tests/corpus/place_and_route/gcd.gds.gz`,
+    4303 top-level std-cell placements x thousands of recognized devices).
+    The native spatial index turns each lookup into an O(log N + matches)
+    query instead (empirically: 2000 random-point queries against that same
+    corpus resolve in about 0.1s total).
+
+    Returns ``[{"cell": str, "array_index": [ia, ib] | None}, ...]``, one
+    entry per level descended, outermost first -- ``array_index`` is the
+    element's 0-based ``(ia, ib)`` position within its ``CellInstArray`` when
+    the instance is a regular array (``kdb.Instance.is_regular_array()``),
+    ``None`` for a plain single placement. An empty list means ``point_um``
+    touches no instance under ``cell`` at all (the device's recognition
+    shapes were drawn directly in ``cell`` itself, not inside any placed
+    sub-cell) -- a legitimate, common result, not an error.
+    """
+    import klayout.db as kdb
+
+    region = kdb.DBox(point_um.x, point_um.y, point_um.x, point_um.y)
+    iterator = cell.begin_instances_rec_touching(region)
+    best_key: tuple[int, float, tuple[tuple[str, int, int], ...]] | None = None
+    best_path: list[dict[str, Any]] = []
+    while not iterator.at_end():
+        elements = list(iterator.path())
+        elements.append(iterator.current_inst_element())
+        key_parts = tuple(
+            (element.inst().cell.name, element.ia(), element.ib())
+            for element in elements
+        )
+        bbox_area = iterator.inst_cell().dbbox().transformed(iterator.dtrans()).area()
+        key = (len(elements), -bbox_area, key_parts)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_path = [
+                {
+                    "cell": element.inst().cell.name,
+                    "array_index": (
+                        [element.ia(), element.ib()]
+                        if element.inst().is_regular_array()
+                        else None
+                    ),
+                }
+                for element in elements
+            ]
+        iterator.next()
+    return best_path
+
+
+def _device_instance_paths(
+    top_cell: kdb.Cell, circuit: kdb.Circuit
+) -> dict[int, list[dict[str, Any]]]:
+    """Per-device GDS-level instance attribution, keyed by ``Device.id()``
+    -- issue #1666.
+
+    ``device.trans`` is KLayout's own record of "the position of the device"
+    (its recognition shape's center, in micrometres, in ``top_cell``'s flat
+    coordinate frame -- the same frame every other micrometre-valued field
+    this module reports, e.g. ``nets[].label_positions_um``, already uses).
+    Resolved via :func:`_instance_path_for_point` (which queries directly in
+    this same micrometre frame -- no dbu/layout needed here at all), so a
+    repeated leaf-cell instance's devices can be told apart positionally,
+    the device-level analogue of what ``nets[].label_positions_um``/
+    ``pin_index`` (issue #1540) already does for nets.
+
+    Keyed by ``device.id()`` rather than by device index/name so it survives
+    an intervening ``kdb.Netlist.dup()`` unchanged (verified: ``dup()``
+    preserves every device's ``id()``) -- the same "resolve by object id, not
+    by position or name" convention ``net_id``/``pin_index`` already follow.
+    A device with an empty resolved path (see
+    :func:`_instance_path_for_point`'s docstring) is simply absent from the
+    returned mapping.
+    """
+    import klayout.db as kdb
+
+    result: dict[int, list[dict[str, Any]]] = {}
+    for device in circuit.each_device():
+        disp = device.trans.disp
+        point_um = kdb.DPoint(disp.x, disp.y)
+        path = _instance_path_for_point(top_cell, point_um)
+        if path:
+            result[device.id()] = path
+    return result
+
+
 def _describe_devices(
     circuit: kdb.Circuit,
+    device_instance_paths: Mapping[int, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Build the response's ``devices[]`` array and ``device_counts`` map.
 
@@ -8584,9 +8745,17 @@ def _describe_devices(
     #521); reading the already-corrected device back keeps this function's
     output identical while making it a report of the netlist rather than a
     second, independent computation.
+
+    ``device_instance_paths`` (issue #1666), keyed by ``Device.id()``, is
+    :func:`_device_instance_paths`'s result -- folded into each returned
+    entry's ``instance_path``, empty (``[]``) for a device that resolved to
+    no path (see that function's docstring) or when ``device_instance_paths``
+    itself is ``None`` (a caller with none to offer, matching
+    ``net_label_positions``'s own default-empty convention below).
     """
     devices: list[dict[str, Any]] = []
     device_counts: dict[str, int] = {}
+    instance_paths = device_instance_paths or {}
 
     for device in circuit.each_device():
         device_class = device.device_class()
@@ -8700,6 +8869,12 @@ def _describe_devices(
                 "class": class_name,
                 "nets": nets,
                 "params": params,
+                # Issue #1666: which GDS-level repeated instance this device
+                # positionally resolved to -- see
+                # `_device_instance_paths`/`_instance_path_for_point`'s
+                # docstrings. `[]` when it resolved to none (drawn directly
+                # in the top cell) or `device_instance_paths` was not given.
+                "instance_path": instance_paths.get(device.id(), []),
             }
         )
         device_counts[class_name] = device_counts.get(class_name, 0) + 1

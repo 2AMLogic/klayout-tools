@@ -2285,6 +2285,148 @@ interface, `--pins`/`--def-pins`/`--top-cell-pins`/`--pin-source-cells` are
 still the right tools to *apply* that knowledge and demote the internal
 chain nodes back off the promoted-pin set.
 
+## Per-device GDS instance attribution (`devices[].instance_path`, issue #1666)
+
+`nets[].pin_index`/`label_positions_um` (the section immediately above) let a
+caller identify a specific *net* inside a block built from repeated
+sub-cells. The device-side counterpart was missing: nothing in the report
+associated a `devices[]` entry with the **cell placement it came from**, so a
+caller could not say "these devices are repeated-instance copy 3" without
+already holding the block's placement record independently — which a general
+`klt extract` consumer does not.
+
+Why the gap existed: extraction's device-recognition regions are built from
+`cell.begin_shapes_rec()` — a recursive shape iterator that collapses the
+whole instance tree into one flat `Region` **before**
+`LayoutToNetlist.extract_netlist()` runs. Instance identity is therefore
+gone before device recognition even starts, and the resulting circuit is
+always a single flat `.SUBCKT` with no `kdb.SubCircuit` hierarchy to
+interrogate.
+
+`devices[].instance_path` closes it by reconstructing the association
+*after* extraction, **positionally**: each device's own recorded position
+(KLayout's `Device.trans`, the recognition shape's centre in the top cell's
+micrometre frame) is resolved against the layout's still-intact static
+instance tree via `Cell.begin_instances_rec_touching()`, KLayout's
+spatially-indexed recursive instance query. The result is the chain of
+placements containing that point, **outermost first**:
+
+```json
+"instance_path": [{"cell": "GROUP",   "array_index": null},
+                  {"cell": "RESUNIT", "array_index": [0, 2]}]
+```
+
+- `cell` — the placed cell's name at that nesting level.
+- `array_index` — the element's 0-based `[ia, ib]` position within its
+  `CellInstArray` when the placement is a regular array; `null` for a plain
+  single placement (nothing to disambiguate).
+- `[]` — the device's recognition geometry was drawn **directly in the top
+  cell**, inside no placed sub-cell at all. This is the common, legitimate
+  result for a flat design, not an error, and it is what every pre-#1666
+  fixture in this repo produces.
+
+### Design decision: an additive field, not a `--preserve-instances` mode
+
+Issue #1666 offered two shapes — an additive per-device field, or a mode
+that stops flattening and emits one nested `.SUBCKT` per instance. This
+implements the **additive field**, deliberately:
+
+- **It changes nothing that already works.** Every existing consumer keeps
+  the same single flat `.SUBCKT` and the same flat `devices[]`; the field is
+  purely additive (no `schema_version` bump, matching the #1540 precedent).
+  A non-flattening mode would fork the netlist topology — and with it
+  everything downstream that reads it (`klt lvs`, `klt sim`, SPEF export,
+  the parasitics star model) into two shapes to maintain.
+- **It answers the actual question.** The gap is "which devices belong to
+  this placement", not "give me a hierarchical netlist". A tag on each
+  device answers it directly and is trivially invertible (group `devices[]`
+  by `instance_path`) to recover exactly the per-instance device lists the
+  nested-`.SUBCKT` mode would have produced.
+- **Positional resolution is sound here.** The concern that made the
+  additive option look hard is that no instance handle survives extraction —
+  true, but the *layout* is still in hand, and a device's own recorded
+  position is enough to re-derive the placement it sits in. Overlapping
+  placements are resolved deterministically (deepest chain first, then
+  smallest matched bounding-box area, then `(cell, ia, ib)` per level); a
+  non-overlapping design — the repeated-instance case this exists for —
+  has exactly one candidate and no tie to break.
+- **It is cheap.** The lookup uses KLayout's native spatial index, not a
+  per-device walk over sibling placements. Against
+  `tests/corpus/place_and_route/gcd.gds.gz` (4303 top-level standard-cell
+  placements) 2000 point queries resolve in ≈0.1s total; a naive
+  `each_inst()` walk, the first cut, stalled for minutes on the same block.
+
+If a genuine hierarchical-netlist mode is ever wanted, it remains open as a
+separate capability — this field does not foreclose it.
+
+### Worked example
+
+An array of 4 identical `RESUNIT` placements (a real `kdb.CellInstArray`)
+plus one distinct single `RESUNIT_WIDE` placement, reproducing
+`tests/test_extract.py::_make_repeated_resistor_array_layout(num_instances=4)`
+(the fixture behind
+`test_repeated_cell_inst_array_attributes_each_device_to_its_own_instance`).
+Output below is the actual response for that fixture, abridged to the fields
+under discussion:
+
+```
+$ klt extract resarray.gds --deck sky130 --format json
+```
+
+```json
+{
+  "devices": [
+    {"name": "$1", "class": "res_generic_po", "params": {"l_um": 6.0, "r_ohm": 289.2},
+     "instance_path": [{"cell": "RESUNIT", "array_index": [0, 0]}]},
+    {"name": "$2", "class": "res_generic_po", "params": {"l_um": 6.0, "r_ohm": 289.2},
+     "instance_path": [{"cell": "RESUNIT", "array_index": [0, 1]}]},
+    {"name": "$3", "class": "res_generic_po", "params": {"l_um": 6.0, "r_ohm": 289.2},
+     "instance_path": [{"cell": "RESUNIT", "array_index": [0, 2]}]},
+    {"name": "$4", "class": "res_generic_po", "params": {"l_um": 6.0, "r_ohm": 289.2},
+     "instance_path": [{"cell": "RESUNIT", "array_index": [0, 3]}]},
+    {"name": "$5", "class": "res_generic_po", "params": {"l_um": 10.0, "r_ohm": 482.0},
+     "instance_path": [{"cell": "RESUNIT_WIDE", "array_index": null}]}
+  ]
+}
+```
+
+The written netlist (same run) shows what the field is *for* — five devices
+whose cards are otherwise indistinguishable in origin, four of them
+byte-identical apart from their synthesized names:
+
+```
+.SUBCKT TOP RA RA$1 RA$2 RA$3 RA$4 RB RB$1 RB$2 RB$3 RB$4
+R$1 RA   RB   289.2 res_generic_po
+R$2 RA$1 RB$1 289.2 res_generic_po
+R$3 RA$2 RB$2 289.2 res_generic_po
+R$4 RA$3 RB$3 289.2 res_generic_po
+R$5 RA$4 RB$4 482   res_generic_po
+.ENDS TOP
+```
+
+`instance_path` is the only thing in the report that says `R$3` is array
+element 2 of `RESUNIT` — and that `R$5` is the lone `RESUNIT_WIDE`
+placement, not a fifth array element.
+
+### Caveats
+
+- **The array axis is the GDS file's, not your authoring order.** A
+  `CellInstArray` authored `na=4, nb=1` may legitimately read back from GDS
+  as `na=1, nb=4` (an AREF is free to encode the lone non-zero pitch vector
+  on either axis). Treat `[ia, ib]` as an opaque, stable *element key* —
+  distinct per element, reproducible for a given file — rather than assuming
+  which component carries the variation. The fixture tests above assert this
+  axis-agnostically for exactly this reason.
+- **It is positional, so it follows geometry, not intent.** A device whose
+  recognition shape is drawn in the top cell but sits *inside* a placed
+  cell's bounding box will resolve to that placement. For the repeated-cell
+  case this feature exists for, that is the right answer; for a deliberately
+  overlapping floorplan it is a tie broken by the rules above, not a
+  hierarchy lookup.
+- **It does not change extraction.** No device, net, parameter, or written
+  netlist line differs with this field present; it is disclosure only, in
+  the same spirit as `nets[].label_positions_um`.
+
 ## Matched-device geometry check (`--matched-group`, issue #1018)
 
 Standard analog-layout review practice treats a matched pair's post-layout
@@ -4414,6 +4556,7 @@ consume.
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
 | `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"a"`, `"b"`, declared **equivalent** (order is arbitrary — see "MoM capacitor devices" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
 | `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"w_um"` / `"l_um"` only — the marker's own bounding-box height/width — and deliberately **no** `"c_f"`/`"area_um2"`/`"perimeter_um"` key at all, since the real device's capacitance is supplied by the SPICE/Verilog-A model from `density[N]*active_area + Cfeed`, not computed by LVS extraction; see "MoM capacitor devices" above for the full JSON-contract decision. Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
+| `instance_path` | array\<object\> | Additive field (issue #1666). The chain of GDS-level cell placements this device's recognition geometry sits inside, **outermost first**: `[{"cell": str, "array_index": [ia, ib] \| null}, ...]`. `array_index` is the element's 0-based position within its `CellInstArray` for a regular array, `null` for a plain single placement. `[]` means the geometry was drawn directly in the top cell, inside no placed sub-cell — the normal result for a flat design. This is the device-level counterpart to `nets[].label_positions_um`/`pin_index`: the only thing in the report that tells otherwise-identical devices from repeated copies of the same leaf cell apart. Resolved positionally after extraction (see "Per-device GDS instance attribution" above for why, and for the caveat that `[ia, ib]`'s axis is the GDS file's rather than your authoring order). |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 
@@ -4440,7 +4583,7 @@ Every field in this report falls into exactly one of three classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`, `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`, `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`, `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 
