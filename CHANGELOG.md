@@ -70,6 +70,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   device-comparison path with no LVS code changes. `klt gen` has no
   generator for this family yet — filed as a follow-up. See
   [`docs/cli/extract.md`](docs/cli/extract.md)'s "Drawn resistors" table.
+- **Added**: `klt gen-compose`'s `routing.cross_block_layer_role` fallback
+  plane (issue #1168) now has its own, independent width knob —
+  `routing.cross_block_width_um` (issue #1620). Previously
+  `routing.width_um` was validated against *both* `routing.layer_role`'s own
+  deck-minimum floor and `routing.cross_block_layer_role`'s (issue #1501),
+  so naming a cross-block layer with a stricter minimum silently forced
+  every net's *primary*-plane routing wider too. `routing.width_um` is now
+  floored against `routing.layer_role` only; a leg that actually falls back
+  to `routing.cross_block_layer_role` draws at `routing.cross_block_width_um`
+  instead, defaulting to that layer's own deck minimum when omitted and
+  floored against it the same way, with the identical error shape. Additive;
+  `schema_version` stays `1`. Same behavior reachable from
+  `layout_plan_execute`'s `request.routing.cross_block_width_um`. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Cross-block bus
+  routing" section.
 - **Added**: `klt synthesize` now reports static leakage power (issue
   #1626): `leakage_power_nw` — `sum(cell_leakage_power[cell_type] *
   instance_count[cell_type])` over the response's own

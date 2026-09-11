@@ -117,8 +117,17 @@ description alone):
    optional ``cross_block_layer_role`` :func:`gen_compose.compose` also
    reads (issue #1502) -- forwarded through unchanged since this module
    does not re-validate its meaning, only its shape (a non-empty string).
-   These three are the only keys :data:`_ALLOWED_ROUTING_KEYS` recognises;
-   an unrecognised ``request.routing`` key is a usage error, mirroring
+   ``cross_block_width_um`` (issue #1620) is a further optional field,
+   scoped to legs that actually fall back to ``cross_block_layer_role`` --
+   without it, ``width_um`` was the only width knob, so naming a
+   ``cross_block_layer_role`` with a stricter deck minimum than the primary
+   plane forced ``width_um`` up to satisfy it, silently widening every
+   primary-plane net too. This module only validates its shape (a positive
+   number, mirroring ``width_um``'s own check); :func:`gen_compose.compose`
+   re-validates it against the cross-block layer's own deck minimum, and
+   defaults it to that layer's own minimum when omitted. These four are the
+   only keys :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
+   ``request.routing`` key is a usage error, mirroring
    ``layout_plan._ALLOWED_PDK_KEYS``/``_ALLOWED_NETLIST_KEYS``. Every other
    request field is untouched -- Phase B's validator already ignores
    unknown top-level keys (``additionalProperties: true``), so a document
@@ -163,7 +172,12 @@ _DEFAULT_ROUTING = {"layer_role": "metal", "width_um": 0.17}
 #: an unrecognised key is a usage error rather than a silent drop. Kept in
 #: sync with ``gen_compose.compose()``'s own ``routing`` field handling --
 #: see the module docstring's scope decision 7.
-_ALLOWED_ROUTING_KEYS = {"layer_role", "width_um", "cross_block_layer_role"}
+_ALLOWED_ROUTING_KEYS = {
+    "layer_role",
+    "width_um",
+    "cross_block_layer_role",
+    "cross_block_width_um",
+}
 
 #: Which digest terminal names map onto which generated-port suffix, per
 #: generator -- see the module docstring's scope decision 3. A generator
@@ -284,6 +298,25 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
                 "string when given"
             )
         resolved["cross_block_layer_role"] = cross_block_layer_role
+
+    # cross_block_width_um (#1620): a second, optional width knob scoped to
+    # legs that actually fall back to cross_block_layer_role -- forwarded
+    # through unchanged (shape-only validation, mirroring width_um above);
+    # gen_compose.compose() re-validates it against the cross-block layer's
+    # own deck minimum and defaults it to that layer's own minimum when
+    # omitted, so it need not be given at all to get correct behavior.
+    if "cross_block_width_um" in raw:
+        cross_block_width_um = raw["cross_block_width_um"]
+        if (
+            isinstance(cross_block_width_um, bool)
+            or not isinstance(cross_block_width_um, (int, float))
+            or cross_block_width_um <= 0
+        ):
+            raise LayoutPlanExecuteError(
+                "request.routing.cross_block_width_um must be a positive "
+                "number when given"
+            )
+        resolved["cross_block_width_um"] = float(cross_block_width_um)
 
     return resolved
 

@@ -403,6 +403,74 @@ def test_resolve_routing_spec_rejects_non_string_cross_block_layer_role(
 
 
 # ---------------------------------------------------------------------------
+# request.routing.cross_block_width_um (#1620): a second, independent width
+# knob for legs that fall back to cross_block_layer_role -- `width_um` no
+# longer has to satisfy the cross layer's own (possibly stricter) deck
+# minimum just because a cross_block_layer_role is named.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_routing_spec_rejects_non_positive_cross_block_width_um(
+    tmp_path, pdk_root
+):
+    request = _bjt_bus_request(
+        tmp_path,
+        pdk_root,
+        {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+            "cross_block_width_um": 0,
+        },
+    )
+    with pytest.raises(LayoutPlanExecuteError, match="cross_block_width_um"):
+        execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+
+def test_resolve_routing_spec_rejects_non_numeric_cross_block_width_um(
+    tmp_path, pdk_root
+):
+    request = _bjt_bus_request(
+        tmp_path,
+        pdk_root,
+        {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+            "cross_block_width_um": "0.3",
+        },
+    )
+    with pytest.raises(LayoutPlanExecuteError, match="cross_block_width_um"):
+        execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+
+def test_execute_cross_block_width_um_is_forwarded_and_used(tmp_path, pdk_root):
+    # Byte-identical to test_execute_cross_block_layer_role_routes_the_self_
+    # net_crossing_leg above except for the explicit `cross_block_width_um`
+    # -- before issue #1620 this key did not exist at all (a usage error, see
+    # test_resolve_routing_spec_rejects_unknown_key); it must now reach
+    # `gen_compose.compose()` and actually govern the cross-block leg's own
+    # drawn width, independent of `routing.width_um`.
+    request = _bjt_bus_request(
+        tmp_path,
+        pdk_root,
+        {
+            "layer_role": "metal",
+            "width_um": 0.17,
+            "cross_block_layer_role": "metal2",
+            "cross_block_width_um": 0.3,
+        },
+    )
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["unrouted_nets"] == []
+    nets_by_name = {net["net"]: net for net in response["nets"]}
+    ebus = nets_by_name["EBUS"]
+    assert ebus["routed"] is True
+    assert all(leg["routed"] for leg in ebus["legs"])
+
+
+# ---------------------------------------------------------------------------
 # Per-group parameter resolution: netlist-derived sizing + override warning.
 # ---------------------------------------------------------------------------
 

@@ -361,9 +361,17 @@ than only in a PR description:
   this module accepts an optional, additive one (`layer_role`/`width_um`,
   defaulting to `{"layer_role": "metal", "width_um": 0.17}` when omitted,
   plus the optional `cross_block_layer_role` `gen-compose.compose()` also
-  reads, forwarded through unchanged — issue #1502). An unrecognised
-  `request.routing` key is a usage error, mirroring `request.pdk`/
-  `request.netlist`'s own unknown-key rejection.
+  reads, forwarded through unchanged — issue #1502). `cross_block_width_um`
+  (issue #1620) is a further optional field, scoped to legs that actually
+  fall back to `cross_block_layer_role` — `width_um` is no longer forced up
+  to satisfy that second layer's own deck minimum just because a
+  `cross_block_layer_role` is named; see
+  [`gen-compose.md`](gen-compose.md)'s "Cross-block bus routing" section for
+  the full mechanics. This module only validates its shape (a positive
+  number); `gen-compose.compose()` re-validates it against the cross-block
+  layer's own deck minimum and defaults it to that layer's own minimum when
+  omitted. An unrecognised `request.routing` key is a usage error, mirroring
+  `request.pdk`/`request.netlist`'s own unknown-key rejection.
 
 ## See also
 

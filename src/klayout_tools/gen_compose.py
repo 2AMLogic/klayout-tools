@@ -2985,6 +2985,7 @@ def route_two_pin(
     waypoints_um: list[tuple[float, float]] | None = None,
     cross_block_route_layer: tuple[int, int] | None = None,
     cross_block_geometry: dict[str, dict[str, Any] | None] | None = None,
+    cross_block_width_um: float | None = None,
     leg_conflict: Any = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
@@ -3173,6 +3174,18 @@ def route_two_pin(
     layer configured, is entirely unaffected -- this is an additive fallback,
     not a change to any existing single-layer behaviour.
 
+    ``cross_block_width_um`` (issue #1620) is the width a leg draws at once
+    it actually falls back to ``cross_block_route_layer`` -- checks 3/4's
+    retry above, the obstacle-overlap inflation (check 1 below), the
+    detour-lane clearance, and the stub-widen pass are all re-evaluated
+    against this width instead of ``width_um`` once the cross layer wins,
+    so a wider cross-block plane's own footprint is judged at the width it
+    is actually drawn with, not the (generally narrower) primary plane's
+    width. ``None`` (the default) reuses ``width_um`` for a cross-layer leg
+    too, reproducing this function's pre-#1620 behaviour exactly. The
+    returned result's own ``width_um`` field (see below) reports whichever
+    width actually won.
+
     **Bounded detour search (#1167).** Rejecting every backbone that crosses
     a third block's bbox means only *immediately adjacent* blocks in a row
     can ever be wired -- a real block's netlist is not a Hamiltonian path
@@ -3268,7 +3281,9 @@ def route_two_pin(
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list,
-    "route_layer": tuple[int, int] | None, "reason": str | None}``.
+    "route_layer": tuple[int, int] | None, "width_um": float, "reason":
+    str | None}`` (a rejected leg omits ``width_um``, nothing having been
+    drawn for it).
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
     "landing_layers", "block_id"}`` entries (empty unless a drop was
     resolved; issue #1567: one entry per via *hop* -- a multi-level drop
@@ -3287,7 +3302,11 @@ def route_two_pin(
     ``cross_block_route_layer`` -- so a caller drawing multiple legs on
     different layers within one net (:func:`route_bundle`) or one composition
     (``compose()``) knows which layer each leg's ``points_um``/``via_drops``
-    belong on.
+    belong on. ``width_um`` (issue #1620) is, correspondingly, the *effective*
+    drawn width -- ``width_um`` (the parameter) unless the cross-block retry
+    fired, in which case it is ``cross_block_width_um`` (or ``width_um``
+    again when that parameter was left ``None``) -- so the same caller knows
+    which width to draw each leg's geometry at.
     """
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
@@ -3512,39 +3531,28 @@ def route_two_pin(
     # statement about *insertion depth*, not about the wire's width).
     own_a, own_b = pin_a["block"], pin_b["block"]
     same_block_self_net = own_a == own_b
-    obstacle_half_um = width_um / 2.0
-    obstacle_bboxes_um = {
-        block_id: {
-            "x0": bbox["x0"] - obstacle_half_um,
-            "y0": bbox["y0"] - obstacle_half_um,
-            "x1": bbox["x1"] + obstacle_half_um,
-            "y1": bbox["y1"] + obstacle_half_um,
-        }
-        for block_id, bbox in placed_bboxes_um.items()
-    }
-    allowances_um: dict[str, float] = {}
-    if not same_block_self_net:
-        allowances_um[own_a] = (
-            max(0.0, _port_edge_margin_um(a, dir_a, placed_bboxes_um[own_a]))
-            + obstacle_half_um
-        )
-        allowances_um[own_b] = (
-            max(0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b]))
-            + obstacle_half_um
-        )
+    # obstacle_half_um/obstacle_bboxes_um/allowances_um (#999) are computed
+    # further below, *after* the same-layer-short retry decides
+    # effective_route_layer/effective_width_um (#1620) -- they must be sized
+    # from whichever width the leg actually ends up drawn at, not
+    # unconditionally from the primary plane's own width_um, or a wider
+    # cross-block leg's real footprint would be checked against too small an
+    # inflation.
 
     # Self-net pad-crossing check (#433) and self-net drawn-metal check
-    # (#453/#469), factored into a closure parameterised on which layer is
-    # under test: issue #1168 retries these two checks (and only these two --
-    # the ones the checks' own rejection text below points a caller at a
-    # "layer_role with a metal2/via stack") against an optional
-    # ``cross_block_route_layer`` when the primary ``route_layer`` rejects, so
-    # a same-block bus that must cross an intermediate pad on the same
-    # drawing layer can escape to the configured second metal instead of
-    # failing outright. See the retry drive code just below this def.
+    # (#453/#469), factored into a closure parameterised on which layer (and,
+    # since issue #1620, which width) is under test: issue #1168 retries
+    # these two checks (and only these two -- the ones the checks' own
+    # rejection text below points a caller at a "layer_role with a metal2/via
+    # stack") against an optional ``cross_block_route_layer`` when the
+    # primary ``route_layer`` rejects, so a same-block bus that must cross an
+    # intermediate pad on the same drawing layer can escape to the configured
+    # second metal instead of failing outright. See the retry drive code just
+    # below this def.
     def _same_layer_short_reason(
         effective_route_layer: tuple[int, int] | None,
         effective_block_geometry: dict[str, dict[str, Any] | None] | None,
+        effective_width_um: float,
     ) -> str | None:
         # Self-net pad-crossing check (#433): the whole-block bbox check below
         # skips a self-net's own block entirely (a same-block net's backbone
@@ -3596,7 +3604,7 @@ def route_two_pin(
         if same_block_self_net:
             own_ports = blocks[own_a].get("ports") or {}
             own_offset = offsets_um[own_a]
-            route_half_um = width_um / 2.0
+            route_half_um = effective_width_um / 2.0
             skip_port_names = {pin_a["port"], pin_b["port"]}
             facing_vertical = va[1] != 0
             # A degenerate single-jog backbone only forms when both pins face
@@ -3674,7 +3682,8 @@ def route_two_pin(
                     or isinstance(pad_w, bool)
                     or (pad_w <= 0)
                 ):
-                    pad_w = width_um  # no reported pad size -- fall back to trace width
+                    # no reported pad size -- fall back to trace width
+                    pad_w = effective_width_um
                 half = float(pad_w) / 2.0 + route_half_um
                 pad_bbox_um = {
                     "x0": px - half,
@@ -3724,7 +3733,7 @@ def route_two_pin(
                     geometry,
                     a,
                     b,
-                    width_um,
+                    effective_width_um,
                     blocks[own_a].get("ports") or {},
                     offsets_um[own_a],
                 )
@@ -3736,7 +3745,7 @@ def route_two_pin(
                         noun = "port" if len(crossed_names) == 1 else "ports"
                         where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
                     return (
-                        f"self-net's drawn {width_um}um metal overlaps "
+                        f"self-net's drawn {effective_width_um}um metal overlaps "
                         f"{overlap_um2:.4g}um^2 of block '{own_a}''s own "
                         f"drawn pad metal on the route layer ({where}) -- "
                         "bussing this net across the block would draw a "
@@ -3800,7 +3809,7 @@ def route_two_pin(
                     geometry,
                     point,
                     point,
-                    width_um,
+                    effective_width_um,
                     block.get("ports") or {},
                     offsets_um[own_id],
                 )
@@ -3812,7 +3821,7 @@ def route_two_pin(
                         noun = "port" if len(crossed_names) == 1 else "ports"
                         where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
                     return (
-                        f"leg's drawn {width_um}um metal overlaps "
+                        f"leg's drawn {effective_width_um}um metal overlaps "
                         f"{overlap_um2:.4g}um^2 of block '{own_id}''s own "
                         f"drawn geometry on the route layer ({where}) near "
                         f"its own port '{pin['port']}' -- the escape from "
@@ -3842,10 +3851,13 @@ def route_two_pin(
     # drawing layer. Everything downstream (obstacle-overlap check 5,
     # via-drop check 6, stub-widen) uses whichever layer wins here.
     effective_route_layer = route_layer
-    short_reason = _same_layer_short_reason(route_layer, block_geometry)
+    short_reason = _same_layer_short_reason(route_layer, block_geometry, width_um)
     if short_reason is not None and cross_block_route_layer is not None:
+        cross_effective_width_um = (
+            cross_block_width_um if cross_block_width_um is not None else width_um
+        )
         cross_short_reason = _same_layer_short_reason(
-            cross_block_route_layer, cross_block_geometry
+            cross_block_route_layer, cross_block_geometry, cross_effective_width_um
         )
         if cross_short_reason is None:
             effective_route_layer = cross_block_route_layer
@@ -3857,6 +3869,47 @@ def route_two_pin(
             "points_um": None,
             "reason": short_reason,
         }
+
+    # effective_width_um (#1620): the width this leg actually draws at --
+    # cross_block_width_um once the retry above switched effective_route_layer
+    # to cross_block_route_layer (falling back to width_um when the caller
+    # left cross_block_width_um unset), width_um otherwise. Everything below
+    # that sizes drawn/checked geometry (obstacle-overlap inflation, the
+    # detour-lane clearance, stub-widen) uses this, not the bare width_um
+    # parameter, so a wider cross-block leg's own footprint is judged and
+    # drawn consistently.
+    effective_width_um = (
+        (cross_block_width_um if cross_block_width_um is not None else width_um)
+        if cross_block_route_layer is not None
+        and effective_route_layer == cross_block_route_layer
+        else width_um
+    )
+
+    # obstacle_half_um/obstacle_bboxes_um/allowances_um (#999, relocated here
+    # by #1620): every bbox this check tests against is inflated by
+    # `effective_width_um / 2` on every side, sized from whichever layer this
+    # leg actually landed on above -- see the check's own docstring section
+    # further up this function for the full rationale.
+    obstacle_half_um = effective_width_um / 2.0
+    obstacle_bboxes_um = {
+        block_id: {
+            "x0": bbox["x0"] - obstacle_half_um,
+            "y0": bbox["y0"] - obstacle_half_um,
+            "x1": bbox["x1"] + obstacle_half_um,
+            "y1": bbox["y1"] + obstacle_half_um,
+        }
+        for block_id, bbox in placed_bboxes_um.items()
+    }
+    allowances_um: dict[str, float] = {}
+    if not same_block_self_net:
+        allowances_um[own_a] = (
+            max(0.0, _port_edge_margin_um(a, dir_a, placed_bboxes_um[own_a]))
+            + obstacle_half_um
+        )
+        allowances_um[own_b] = (
+            max(0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b]))
+            + obstacle_half_um
+        )
 
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
@@ -3902,7 +3955,7 @@ def route_two_pin(
             (b, vb, placed_bboxes_um[own_b]),
             [placed_bboxes_um[other_id] for other_id in blocking_um],
             placed_bboxes_um,
-            width_um,
+            effective_width_um,
         )
         for lane in lanes:
             retry = route_two_pin(
@@ -3918,6 +3971,7 @@ def route_two_pin(
                 waypoints_um=lane,
                 cross_block_route_layer=cross_block_route_layer,
                 cross_block_geometry=cross_block_geometry,
+                cross_block_width_um=cross_block_width_um,
             )
             if retry["routed"]:
                 return retry
@@ -3933,7 +3987,7 @@ def route_two_pin(
         allowed_um = allowances_um.get(other_id, 0.0)
         if other_id in (own_a, own_b):
             reason = (
-                f"backbone's {width_um}um-wide drawn path crosses "
+                f"backbone's {effective_width_um}um-wide drawn path crosses "
                 f"{crossed_um:.4g}um through its own pin's block '{other_id}' "
                 f"-- more than that pin's own {allowed_um:.4g}um edge margin "
                 f"(including {obstacle_half_um:.4g}um for the route's own "
@@ -3946,7 +4000,7 @@ def route_two_pin(
             )
         else:
             reason = (
-                f"backbone's {width_um}um-wide drawn path crosses "
+                f"backbone's {effective_width_um}um-wide drawn path crosses "
                 f"{crossed_um:.4g}um through unrelated block '{other_id}''s "
                 "bbox (including its own edge, within half the route's "
                 "width) -- the route is not point-to-point between only the "
@@ -4029,7 +4083,7 @@ def route_two_pin(
         (pin_b, port_b, b, dir_b, stub_b_um),
     ):
         widen = _endpoint_stub_widen_um(
-            port, pos, direction, stub_len_um, width_um, effective_route_layer
+            port, pos, direction, stub_len_um, effective_width_um, effective_route_layer
         )
         if widen is not None:
             # block_id (#1520): same purpose as via_drops' own block_id above.
@@ -4059,7 +4113,7 @@ def route_two_pin(
     )
     if conflict_reason is not None:
         lanes = _self_net_cross_layer_lane_waypoints_um(
-            a, b, placed_bboxes_um[own_a], width_um
+            a, b, placed_bboxes_um[own_a], effective_width_um
         )
         for lane in lanes:
             retry = route_two_pin(
@@ -4075,6 +4129,7 @@ def route_two_pin(
                 waypoints_um=lane,
                 cross_block_route_layer=cross_block_route_layer,
                 cross_block_geometry=cross_block_geometry,
+                cross_block_width_um=cross_block_width_um,
             )
             if not retry["routed"]:
                 continue
@@ -4105,6 +4160,7 @@ def route_two_pin(
         "via_drops": via_drops,
         "stub_widen": stub_widen,
         "route_layer": effective_route_layer,
+        "width_um": effective_width_um,
         "reason": None,
     }
 
@@ -4156,6 +4212,7 @@ def route_bundle(
     waypoints_um: list[tuple[float, float]] | None = None,
     cross_block_route_layer: tuple[int, int] | None = None,
     cross_block_geometry_for: Any = None,
+    cross_block_width_um: float | None = None,
     explicit_legs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
@@ -4255,7 +4312,19 @@ def route_bundle(
     leg's own :func:`route_two_pin` call; see that function's docstring for
     the retry mechanics. Both default to ``None`` (no cross-block layer
     configured), which reproduces this function's pre-#1168 behaviour
-    exactly.
+    exactly. ``cross_block_width_um`` (issue #1620) is the width a leg
+    draws at once it actually falls back to ``cross_block_route_layer`` --
+    distinct from ``width_um`` so a caller is never forced to widen the
+    primary plane's own routing just to satisfy the cross layer's own
+    (typically stricter) deck minimum; ``None`` (the default) reuses
+    ``width_um`` for a cross-layer leg too, reproducing this function's
+    pre-#1620 behaviour exactly. Threaded straight through to every
+    candidate leg's own :func:`route_two_pin` call, and each accepted leg's
+    own effective width -- ``cross_block_width_um`` or ``width_um``,
+    whichever layer it actually landed on -- is reported back in its own
+    ``legs[]`` entry as ``width_um`` (see the return-value doc below), since
+    a partially-routed net's drawn legs may not all share one width any more
+    than they all share one layer.
 
     ``waypoints_um`` (#634) applies to the single backbone of a **2-pin** net;
     supplying it for a >2-pin net raises :class:`GenComposeError` (there is no
@@ -4302,12 +4371,15 @@ def route_bundle(
     ``legs[]`` entry is ``{"pins": [pin_a, pin_b], "routed": bool,
     "route_length_um": float | None, "reason": str | None, "points_um": list
     | None, "via_drops": list, "stub_widen": list, "route_layer":
-    tuple[int, int] | None}`` -- ``points_um``/``via_drops``/``stub_widen``/
-    ``route_layer`` being the same per-leg drawing payload
-    :func:`route_two_pin` returns, consumed by ``compose()`` (``route_layer``
-    is the *effective* layer that leg actually drew on, #1168 -- and it is
-    per *leg*, not per net, so a partially-routed net's drawn legs may sit on
-    different layers). A leg that came from ``explicit_legs`` also carries
+    tuple[int, int] | None, "width_um": float}`` (a rejected leg omits
+    ``width_um``, nothing having been drawn for it) --
+    ``points_um``/``via_drops``/``stub_widen``/``route_layer``/``width_um``
+    being the same per-leg drawing payload :func:`route_two_pin` returns,
+    consumed by ``compose()`` (``route_layer`` is the *effective* layer that
+    leg actually drew on, #1168; ``width_um`` (#1620) is the width it drew
+    at on that layer -- and both are per *leg*, not per net, so a
+    partially-routed net's drawn legs may sit on different layers at
+    different widths). A leg that came from ``explicit_legs`` also carries
     ``"explicit": True`` -- an internal marker for the retention rule above,
     not part of the ``klt gen-compose`` response (``compose()`` projects
     every leg down to ``pins``/``routed``/``route_length_um``/``reason``).
@@ -4452,6 +4524,7 @@ def route_bundle(
             waypoints_um=leg_spec.get("waypoints_um"),
             cross_block_route_layer=cross_block_route_layer,
             cross_block_geometry=cross_geometry,
+            cross_block_width_um=cross_block_width_um,
             leg_conflict=leg_conflict,
         )
         reason = None if result["routed"] else result["reason"]
@@ -4478,6 +4551,7 @@ def route_bundle(
                     "via_drops": result.get("via_drops", []),
                     "stub_widen": result.get("stub_widen", []),
                     "route_layer": result.get("route_layer"),
+                    "width_um": result.get("width_um", width_um),
                 }
             )
         else:
@@ -4515,6 +4589,7 @@ def route_bundle(
             waypoints_um=waypoints_um,
             cross_block_route_layer=cross_block_route_layer,
             cross_block_geometry=cross_geometry,
+            cross_block_width_um=cross_block_width_um,
             leg_conflict=leg_conflict,
         )
         reason = None if result["routed"] else result["reason"]
@@ -4541,6 +4616,7 @@ def route_bundle(
                     "via_drops": result.get("via_drops", []),
                     "stub_widen": result.get("stub_widen", []),
                     "route_layer": result.get("route_layer"),
+                    "width_um": result.get("width_um", width_um),
                 }
             )
         else:
@@ -4967,6 +5043,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # (and every leg behaves exactly as before #1168) in that case.
     cross_route_layer: tuple[int, int] | None = None
     cross_label_layer: tuple[int, int] | None = None
+    # routing.cross_block_width_um (#1620): the width a leg draws at once it
+    # actually falls back to cross_route_layer -- distinct from width_um so
+    # naming a cross_block_layer_role never forces the *primary* plane's
+    # width up to satisfy the cross layer's own (typically stricter) deck
+    # minimum. None unless a cross layer is configured; resolved below.
+    cross_block_width_um: float | None = None
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
         if not isinstance(layer_role, str) or not layer_role:
@@ -5027,18 +5109,42 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             cross_route_layer, _cross_via_layer = _resolve_cross_block_route_layer(
                 pdk_info["variant"], layer_role, cross_layer_role
             )
-            # #1501: a leg that falls back to cross_route_layer still draws
-            # at the same routing.width_um -- validate it against this
-            # second layer's own deck minimum too, exactly as route_layer
-            # was above.
+            # #1620: a leg that falls back to cross_route_layer draws at its
+            # own routing.cross_block_width_um -- a second, independent width
+            # -- rather than being forced to share routing.width_um with the
+            # primary plane. Defaults to the cross layer's own deck minimum
+            # when omitted, so a caller that only wants "minimum pitch on
+            # each plane" never has to spell either width out; explicitly
+            # supplying one is still validated against that layer's own
+            # floor, exactly as width_um is against route_layer's above.
             cross_width_floor = _min_width_um_for_layer(
                 pdk_info["variant"], cross_route_layer
             )
-            if cross_width_floor is not None and width_um < cross_width_floor[0] - 1e-9:
+            raw_cross_width = routing.get("cross_block_width_um")
+            if raw_cross_width is None:
+                cross_block_width_um = (
+                    cross_width_floor[0] if cross_width_floor is not None else width_um
+                )
+            else:
+                if (
+                    isinstance(raw_cross_width, bool)
+                    or not isinstance(raw_cross_width, (int, float))
+                    or raw_cross_width <= 0
+                ):
+                    raise GenComposeError(
+                        "request.routing.cross_block_width_um must be a "
+                        "positive number when given"
+                    )
+                cross_block_width_um = float(raw_cross_width)
+            if (
+                cross_width_floor is not None
+                and cross_block_width_um < cross_width_floor[0] - 1e-9
+            ):
                 floor_um, rule_id = cross_width_floor
                 raise GenComposeError(
-                    f"request.routing.width_um ({width_um}um) is narrower "
-                    "than the resolved PDK deck's own minimum width for "
+                    f"request.routing.cross_block_width_um "
+                    f"({cross_block_width_um}um) is narrower than the "
+                    "resolved PDK deck's own minimum width for "
                     f"routing.cross_block_layer_role '{cross_layer_role}' -- "
                     f"'{rule_id}' requires >= {floor_um}um"
                 )
@@ -5283,8 +5389,25 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             that the overlap-only version of this check could not see. A
             layer with no known ``"space"`` rule keeps the overlap-only test.
             """
+            # candidate_width_um (#1620): this candidate's own drawn width --
+            # cross_block_width_um when it resolved on cross_route_layer,
+            # width_um otherwise -- so the compared footprint matches what
+            # _write_composed_gds actually draws for it, not the primary
+            # plane's width for a leg that never drew on that plane.
+            candidate_width_um = (
+                cross_block_width_um
+                if cross_route_layer is not None
+                and layer == cross_route_layer
+                and cross_block_width_um is not None
+                else width_um
+            )
             region = _drawn_leg_footprint_region(
-                points_um, width_um, via_drops, stub_widen, _route_dbu(), layer
+                points_um,
+                candidate_width_um,
+                via_drops,
+                stub_widen,
+                _route_dbu(),
+                layer,
             )
             spacing = _min_spacing_um_for_layer(layer)
             inflated_region = None
@@ -5434,6 +5557,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 waypoints_um=entry.get("waypoints_um"),
                 cross_block_route_layer=cross_route_layer,
                 cross_block_geometry_for=_cross_block_geometry_for,
+                cross_block_width_um=cross_block_width_um,
                 explicit_legs=entry.get("legs"),
             )
         nets.append(
@@ -5477,6 +5601,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # so `_leg_conflict`'s own layer-aware comparison (#1386) has it
             # for every accepted entry.
             leg_route_layer = leg.get("route_layer") or route_layer
+            # leg_width_um (#1620): the width this leg actually drew at --
+            # route_two_pin/route_bundle report it per leg since it can
+            # differ from the primary plane's own width_um whenever the leg
+            # fell back to cross_route_layer (drawn at cross_block_width_um
+            # instead). Falls back to width_um for a leg that predates this
+            # field (defensive; every leg compose() produces itself sets it).
+            leg_width_um = leg.get("width_um", width_um)
             accepted_route_regions.append(
                 (
                     net_label,
@@ -5484,7 +5615,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     leg_route_layer,
                     _drawn_leg_footprint_region(
                         leg["points_um"],
-                        width_um,
+                        leg_width_um,
                         leg["via_drops"],
                         leg["stub_widen"],
                         _route_dbu(),
@@ -5502,7 +5633,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 {
                     "net": net_label,
                     "points_um": leg["points_um"],
-                    "width_um": width_um,
+                    "width_um": leg_width_um,
                     "via_drops": leg["via_drops"],
                     "stub_widen": leg["stub_widen"],
                     "route_layer": leg_route_layer,

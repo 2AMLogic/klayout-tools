@@ -4138,6 +4138,83 @@ def test_route_two_pin_waypoints_do_not_disable_the_self_net_pad_check():
 
 
 # --------------------------------------------------------------------------- #
+# route_two_pin() cross_block_width_um (#1620): a leg that falls back to
+# cross_block_route_layer draws at its own width, independent of the primary
+# plane's width_um -- naming a cross_block_layer_role must never force the
+# primary plane's own routing wider than the caller asked for. Same
+# same-row/same-block self-net fixture as the #453 pad-crossing tests above
+# (E0-E1 bussed straight over B0); B0 is reported on (68, 20), so a cross
+# layer of (69, 20) is never itself an obstacle -- the retry succeeds
+# trivially, isolating this test to the width bookkeeping alone.
+# --------------------------------------------------------------------------- #
+
+
+def test_route_two_pin_cross_block_leg_draws_at_its_own_cross_block_width_um():
+    blocks, offsets, bboxes, pin_a, pin_b = _self_net_same_row_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer=(68, 20),
+        cross_block_route_layer=(69, 20),
+        cross_block_width_um=0.5,
+    )
+    assert result["routed"] is True
+    assert result["route_layer"] == (69, 20)
+    # The cross-block leg draws at cross_block_width_um, not the primary
+    # plane's own (narrower) width_um -- the whole point of issue #1620.
+    assert result["width_um"] == 0.5
+
+
+def test_route_two_pin_cross_block_width_um_defaults_to_width_um_when_omitted():
+    # Mirrors route_two_pin's pre-#1620 behaviour exactly when the caller
+    # does not supply cross_block_width_um at all: the cross-block leg
+    # reuses the primary plane's own width_um, exactly as if both planes
+    # shared one width knob.
+    blocks, offsets, bboxes, pin_a, pin_b = _self_net_same_row_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer=(68, 20),
+        cross_block_route_layer=(69, 20),
+    )
+    assert result["routed"] is True
+    assert result["route_layer"] == (69, 20)
+    assert result["width_um"] == 0.3
+
+
+def test_route_two_pin_primary_layer_leg_is_unaffected_by_cross_block_width_um():
+    # A leg that never needs the cross-block fallback (E0-B0: adjacent, no
+    # intervening port to cross) must draw at the primary plane's own
+    # width_um even when a much wider cross_block_width_um is configured --
+    # naming a cross-block width must never leak into primary-plane routing,
+    # the exact silent-widening bug issue #1620 reports.
+    blocks, offsets, bboxes, pin_a, pin_b = _self_net_same_row_fixture()
+    pin_b_adjacent = {"block": "u", "port": "B0"}
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b_adjacent,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer=(68, 20),
+        cross_block_route_layer=(69, 20),
+        cross_block_width_um=0.5,
+    )
+    assert result["routed"] is True
+    assert result["route_layer"] == (68, 20)
+    assert result["width_um"] == 0.3
+
+
+# --------------------------------------------------------------------------- #
 # route_two_pin() bounded detour search (#1167) -- a backbone rejected *only*
 # for crossing unrelated blocks' bboxes now retries around them on up to two
 # alternate lanes before the net is reported unroutable. Hand-built block/port
@@ -6259,6 +6336,254 @@ def test_compose_cross_block_layer_role_leaves_non_crossing_nets_on_primary_laye
     assert len(met1_paths) == 1
 
     drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# routing.cross_block_width_um (#1620): routing.width_um used to be one
+# scalar shared by both the primary route_layer and the cross-block fallback
+# plane -- naming routing.cross_block_layer_role silently forced width_um up
+# to satisfy the *cross* layer's own deck minimum, widening every net on the
+# primary plane too. gf180mcu's own metal1/metal2 deck minimums (0.23um vs.
+# 0.28um, both exercised by the #1501 tests above) are genuinely mismatched
+# -- unlike sky130's own "metal"/"metal2" role pair, whose li1/met1 minimums
+# (0.17um/0.14um) happen not to expose the bug -- so this cluster is built on
+# gf180mcuD instead of the sky130 fixtures the rest of this file's own
+# cross_block_layer_role tests use.
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_cross_block_layer_role_no_longer_forces_width_um_to_the_cross_floor(
+    tmp_path, both_pdk_root
+):
+    # The exact reproduction from issue #1620: routing.width_um sits exactly
+    # on the *primary* plane's own deck minimum (gf180mcu metal1.width.1,
+    # 0.23um) and routing.cross_block_layer_role names a second plane with a
+    # *stricter* deck minimum (metal2.width.1, 0.28um), with no
+    # cross_block_width_um given. Before this issue, gen_compose validated
+    # the single routing.width_um against both floors, so this exact request
+    # raised GenComposeError -- the only way forward was raising width_um to
+    # 0.28um, which then drew the *primary* plane's backbone that wide too,
+    # for every net, not only the one that needed the cross layer.
+    arr = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    m1 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "m1",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    m2 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "m2",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    output = tmp_path / "gf180mcu_mixed_layer_bus.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["arr", "b1", "b2"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                # A same-block self-net bussing two emitters straight over
+                # the intervening base pad -- forced onto metal2 exactly as
+                # the sky130 cross_block_layer_role cluster's own EBUS1 is.
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                # An ordinary block-to-block net that never touches the
+                # cross layer at all -- this is the net whose width must
+                # stay at the primary plane's own routing.width_um.
+                {
+                    "net": "GBIAS",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.23,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {
+                "cell_name": "gf180mcu_mixed_layer_bus",
+                "output": str(output),
+            },
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == []
+    nets_by_name = {net["net"]: net for net in report["nets"]}
+    assert nets_by_name["EBUS1"]["routed"] is True
+    assert nets_by_name["GBIAS"]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("gf180mcu_mixed_layer_bus")
+    metal1 = layout.layer(34, 0)
+    metal2 = layout.layer(36, 0)
+    dbu = layout.dbu
+
+    def _path_widths_um(layer_index):
+        return [
+            round(shape.path.width * dbu, 6)
+            for shape in top.shapes(layer_index).each()
+            if shape.is_path()
+        ]
+
+    # GBIAS's backbone stayed on the primary plane (metal1) at the primary
+    # plane's own routing.width_um -- never widened to metal2's floor.
+    assert _path_widths_um(metal1) == [0.23]
+    # EBUS1's leg fell back to metal2, drawn at *that* layer's own deck
+    # minimum (defaulted, since routing.cross_block_width_um was omitted) --
+    # not at the primary plane's narrower routing.width_um.
+    assert _path_widths_um(metal2) == [0.28]
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_cross_block_width_um_below_cross_floor_is_rejected(
+    tmp_path, both_pdk_root
+):
+    # Mirrors test_compose_gf180mcu_default_routing_width_below_deck_minimum_
+    # is_rejected above, one layer up the stack: an explicit
+    # routing.cross_block_width_um below the *cross* layer's own deck
+    # minimum is rejected the same way an under-floor routing.width_um is --
+    # naming the violated field, the offending value, and the resolved
+    # deck's own rule id.
+    arr = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "gf180mcu_bad_cross_width.gds"
+    request = {
+        "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+        "blocks": [{"id": "arr", "generator_report": arr}],
+        "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+        "connectivity": [
+            {
+                "net": "EBUS1",
+                "pins": [
+                    {"block": "arr", "port": "Q0_E"},
+                    {"block": "arr", "port": "Q1_E"},
+                ],
+            }
+        ],
+        "routing": {
+            "layer_role": "metal",
+            "width_um": 0.23,
+            "cross_block_layer_role": "metal2",
+            "cross_block_width_um": 0.2,
+        },
+        "options": {
+            "cell_name": "gf180mcu_bad_cross_width",
+            "output": str(output),
+        },
+    }
+    with pytest.raises(GenComposeError, match="cross_block_width_um"):
+        compose(request)
+    assert not output.exists()
+
+
+def test_compose_cross_block_width_um_at_cross_floor_is_accepted_and_drc_clean(
+    tmp_path, both_pdk_root
+):
+    # The same request as the rejection test above, only
+    # routing.cross_block_width_um raised to the cross layer's own deck
+    # minimum (0.28um) -- composes successfully and stays DRC-clean,
+    # confirming the rejection is a real units-mismatch catch rather than an
+    # over-broad one that also blocks the legal, explicitly-supplied case.
+    arr = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "gf180mcu_explicit_cross_width.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                }
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.23,
+                "cross_block_layer_role": "metal2",
+                "cross_block_width_um": 0.28,
+            },
+            "options": {
+                "cell_name": "gf180mcu_explicit_cross_width",
+                "output": str(output),
+            },
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
