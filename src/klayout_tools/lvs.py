@@ -3281,9 +3281,16 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
     its own spurious top-level circuit mismatch. Safe to prune: by
     definition, a *top* circuit is not referenced by anything else in the
     netlist, so removing one never affects ``keep``'s own hierarchy.
+
+    Compares circuits by identity (``is not``) rather than ``cell_index``:
+    a netlist read directly from SPICE/Verilog text (``kdb.NetlistSpiceReader``
+    or this module's gate-level-verilog/subckt-call conversions) has no
+    backing ``kdb.Layout``, so every circuit's ``cell_index`` reads back as 0
+    -- making a ``cell_index`` comparison always false and silently pruning
+    nothing (issue #1657).
     """
     for circuit in list(netlist.top_circuits()):
-        if circuit.cell_index != keep.cell_index:
+        if circuit is not keep:
             netlist.purge_circuit(circuit)
 
 

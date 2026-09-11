@@ -488,6 +488,73 @@ def test_ambiguous_top_without_explicit_selection_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# _prune_extra_top_circuits (issue #1657)
+# --------------------------------------------------------------------------- #
+
+
+def test_prune_extra_top_circuits_removes_unrelated_circuit_with_no_backing_layout(
+    tmp_path,
+):
+    """A netlist read directly from SPICE/Verilog text (via
+    `kdb.NetlistSpiceReader`, or this module's gate-level-verilog/subckt-call
+    conversions -- i.e. every reference netlist, and the pre-extracted
+    `layout.netlist` shape) has no backing `kdb.Layout`, so every circuit's
+    `cell_index` reads back as `0`. `_prune_extra_top_circuits` used to
+    compare `circuit.cell_index != keep.cell_index`, which is always `False`
+    in that case (`0 != 0`), so it silently pruned nothing. The fixed
+    identity comparison (`circuit is not keep`) does not depend on
+    `cell_index` at all, so it prunes correctly regardless of whether the
+    netlist has a backing layout."""
+    import klayout.db as kdb
+
+    spice_path = _write(
+        tmp_path / "two_tops.spice", _INVERTER_SPICE + _BUF2_REFERENCE_SPICE
+    )
+    netlist = kdb.Netlist()
+    netlist.read(spice_path, kdb.NetlistSpiceReader())
+
+    top_circuits = list(netlist.top_circuits())
+    assert len(top_circuits) == 2
+    # The bug's precondition: with no backing `kdb.Layout`, every circuit's
+    # `cell_index` reads back as 0, so a `cell_index`-based comparison could
+    # never distinguish them.
+    assert {circuit.cell_index for circuit in top_circuits} == {0}
+
+    keep = next(circuit for circuit in top_circuits if circuit.name.lower() == "inv")
+    lvs._prune_extra_top_circuits(netlist, keep)
+
+    assert list(netlist.top_circuits()) == [keep]
+
+
+def test_reference_netlist_with_extra_subckt_and_explicit_top_matches_cleanly(
+    tmp_path,
+):
+    """Integration-level regression for issue #1657: before the fix,
+    `_prune_extra_top_circuits` never removed `buf2` from the reference
+    netlist (every SPICE-text circuit has `cell_index == 0`), so the extra,
+    unrelated top circuit would have surfaced as its own spurious mismatch
+    even though `reference.top` explicitly pins `inv` as the circuit under
+    comparison. With the fix, `buf2` is pruned before comparison and the
+    `inv`-vs-`inv` compare is clean."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice", _INVERTER_SPICE + _BUF2_REFERENCE_SPICE
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # Clean match (synthetic self-compare)
 # --------------------------------------------------------------------------- #
 
