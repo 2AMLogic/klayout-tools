@@ -2667,6 +2667,78 @@ declares only `c b e mult=1`; the extraction deck ties the collector net to
 the substrate internally, but no separate substrate pin is emitted on the
 `X` card).
 
+### Device-card node order matches the bound subcircuit's own declared order (issue #1673)
+
+Every bound `X` card's terminal order comes from a **fixed, hand-curated
+tuple per device kind** — `pdk_models.DeviceBinding.terminals` — not from
+KLayout's own extraction order, and not derived dynamically from the
+resolved subcircuit at bind time. The writer joins nets in exactly that
+tuple's order (`_ModelBindingSpiceWriterDelegate.write_device`: `pins = "
+".join(net_str(terminal) for terminal in binding.terminals)`), so the
+position of, say, a MOS gate on the emitted card is a property of the
+*device kind*, verified once against the real vendor subcircuit's own
+declaration — never a property of the particular extraction run, the
+layout, or the order KLayout happened to discover the device's terminals
+in:
+
+| Device kind | Node order on the `X` card | Matches |
+|---|---|---|
+| `mos` (`nfet`/`pfet`) | `D G S B` | sky130's/gf180mcu's/sg13g2's MOS subcircuits' own `d g s b` declaration |
+| `resistor` (2-terminal) | `A B` | the target `.subckt`'s own two-pin declaration |
+| `resistor` (bulk-tied — sg13g2's `rsil`/`rppd`/`rhigh`) | `A B W` | the target `.subckt`'s own three-pin declaration, bulk tie last |
+| `capacitor` | `A B` | the target `.subckt`'s own two-pin declaration |
+| `bipolar` (sky130 `pnp`) | `C B E` | the vendor subcircuit's own `c b e` declaration |
+
+This is identical across every curated family — `resolve_device_bindings`
+builds the same per-kind tuple regardless of `family` (sky130, gf180mcu,
+sg13g2), so a caller does not need to special-case a PDK to know where a
+gate sits on a card. Two real emitted cards confirming the `mos` row:
+
+```
+XM1 Y A VGND VGND sky130_fd_pr__nfet_01v8 L=0.15u W=0.65u   # D=Y G=A S=VGND B=VGND
+XM1 Y A VGND VGND nfet_03v3 L=1.5e-7 W=6.5e-7 m=1           # D=Y G=A S=VGND B=VGND (gf180mcu)
+```
+
+**Practical consequence**: because the order is fixed *per model* rather
+than *per extraction*, a caller can classify every terminal on a net as
+receiver-side (a gate — always position 2 of a `mos` card) versus
+driver-side (every other position) purely from the device's class and its
+position on the card, with **no per-instance attribution needed at all**.
+Combined with the star topology's per-terminal addressability above
+(`parasitics.nets[].terminals[].terminal`, e.g. `"G"`), this is enough to
+answer "is this terminal on the net a gate or a driver" for a flattened,
+`--parasitics`-extracted block without consulting `devices[].instance_path`
+(issue #1666) or any other instance-level tag.
+
+**The unbound / bare-primitive case is a *different* order-determination
+mechanism, not the same guarantee minus curation.** When no binding exists
+— no `--pdk`, or the device's class has no curated `DeviceBinding` entry
+(see "Scope limits" below) — `write_device` falls through to KLayout's own
+default `NetlistSpiceWriterDelegate.write_device`, whose node order comes
+from the built-in device class's own primitive-card writer, not from
+anything this repo curates. Verified against the installed `klayout` Python
+package (0.30.10) by writing a minimal netlist through each built-in device
+class this repo's extractors produce:
+
+| Device class | `terminal_definitions()` order | Actual bare-card node order |
+|---|---|---|
+| `DeviceClassMOS4Transistor` (`M` card) | `S G D B` | `D G S B` — KLayout's own writer reorders MOS terminals into the conventional SPICE `M`-card shape; it does **not** follow the class's raw terminal-declaration order |
+| `DeviceClassResistor` / `ResistorWithBulk` (`R` card) | `A B[ W]` | `A B[ W]` — matches `terminal_definitions()` directly |
+| `DeviceClassCapacitor` (`C` card) | `A B` | `A B` — matches `terminal_definitions()` directly |
+| `DeviceClassBJT3Transistor` (`Q` card) | `C B E` | `C B E` — matches `terminal_definitions()` directly |
+
+Only the MOS case reorders; every other class this repo extracts writes its
+bare card in the same order `terminal_definitions()` reports. **Do not
+assume `terminal_definitions()` order for an unbound MOS card** — check the
+actual written card (or KLayout's own writer source) instead, not the raw
+terminal declaration. For every device kind this repo curates, the unbound
+order above happens to coincide with the bound order in the first table
+(`D G S B`, `A B[ W]`, `C B E`) — so the receiver/driver classification
+described above holds identically whether or not `--pdk` was given, even
+though the bound and unbound orders are produced by two unrelated
+mechanisms (a hand-curated tuple checked against the vendor subcircuit, vs.
+KLayout's own built-in primitive-card writer).
+
 **Scope limits** (deliberately narrower than the general PDK-device-metadata
 resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
 future epic):
@@ -2852,6 +2924,20 @@ net(hub) --C--> <substrate_net>`); a net with **no** device terminal at all
 shape, but through a fresh internal node rather than the net itself
 (`net --R--> net__par --C--> <substrate_net>`), since there is no terminal
 to make the net double as a hub for.
+
+**Addressing one terminal's own resistance.** Because every device terminal
+on the net gets its own leg and its own series resistor, a caller never has
+to disentangle a single shared value to get at one terminal's contribution —
+every terminal is individually addressable, by construction, not by a
+separate lookup step. In the JSON, filter `parasitics.nets[].terminals[]`
+(documented in the field table below) by `device`/`terminal` and read that
+one entry's own `resistance_ohm`. In the raw SPICE, that same leg is its own
+`R` card — named `R<net>_t<i>` (see "Parasitic R/C instance names are
+sanitized" below), one card per terminal, in the same order as the JSON
+array — never merged with any other terminal's resistor into one shared
+lumped card. This holds regardless of how many terminals share the net: two
+terminals never collapse onto a single `R<net>` card the way a naive
+per-net lumped model would produce.
 
 - **C to ground** (femtofarads) = Σ over conductor roles of
   `(area_um2 − coupled_area_um2) * cap_area + perimeter_um * cap_perim`, the
