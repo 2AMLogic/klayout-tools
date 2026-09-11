@@ -602,6 +602,13 @@ jobs:
         # above. libgmp10/libmpfr6 back Bitwuzla's own dynamic linkage
         # (see the script's header comment); libstdc++6/libgcc-s1 ship by
         # default on ubuntu-latest and need no explicit install.
+        # python3-click: sby's launcher (`sby_core.py`) imports `click` from
+        # the SYSTEM python3 -- the only third-party module in sby 0.67.
+        # ubuntu-latest happens to ship it; the dedicated heavy runner's
+        # image (2AMLogic/2am#29) does not, and on a cache hit the install
+        # script never runs, so the verify step below died with
+        # `ModuleNotFoundError: No module named 'click'` on the first
+        # main run after #1246 routed this job there (2026-09-11).
         #
         # Per-step timeout + noninteractive apt (issue #1204) and the
         # mirror-resilient wrapper (issue #1219): same apt-mirror-stall
@@ -610,7 +617,7 @@ jobs:
         timeout-minutes: 5
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: scripts/ci-apt-install.sh libgmp10 libmpfr6
+        run: scripts/ci-apt-install.sh libgmp10 libmpfr6 python3-click
 
       - name: Cache pinned SymbiYosys + Bitwuzla install
         id: symbiyosys-cache
