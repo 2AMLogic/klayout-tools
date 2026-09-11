@@ -16,6 +16,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs`'s internal `_prune_extra_top_circuits` now compares
+  circuits by identity (`circuit is not keep`) instead of `cell_index`
+  (issue #1657). Every netlist read directly from SPICE/Verilog text — every
+  reference netlist, and the pre-extracted `layout.netlist` shape — has no
+  backing `kdb.Layout`, so every circuit's `cell_index` previously read back
+  as `0`, making the old `cell_index`-based comparison always false and
+  silently pruning nothing. This could surface as a spurious `"mismatch"`
+  status when a reference or layout netlist declared an extra, unrelated
+  top-level `.subckt` alongside the circuit pinned via `top`. Layout-backed
+  netlists (distinct `cell_index` values) already pruned correctly and are
+  unaffected.
 - **Added**: `DrcRule.check` accepts a new single-layer check kind,
   `"isolated"` (issue #1654), dispatching to KLayout's
   `Region.isolated_check` — spacing measured only between edges of
