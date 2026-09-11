@@ -99,19 +99,29 @@ Each declared pin becomes a `PIN <name>` block:
   LEF's own `USE` value for exactly this pin class, and this command's
   macros are analog blocks per Epic #393's own scope. There is no
   mechanical way to derive true signal direction from geometry alone.
-- **`PORT` geometry** — real drawn shapes when the layout actually has
-  metal on the pin's declared `layer` whose bounding box contains the
+- **`PORT` geometry** — real drawn shapes whose bounding box contains the
   declared `(x, y)` position (every such shape becomes its own `RECT`,
-  mirroring how a real standard-cell LEF's multi-`RECT` pins look).
-  Otherwise a **synthesized** placeholder box, centered at `(x, y)`, sized
-  from the descriptor's own `width_um`/`height_um` when given, else the
-  resolved tech-LEF routing layer's own `WIDTH`. Each pin's response entry
-  reports which (`geometry_source`: `"drawn"` \| `"synthesized"` \|
-  `"none"`) — never silently fabricating precision the layout doesn't
-  actually have, mirroring `klt socket-check`'s own
-  `"declared_unverified"` transparency convention for `budgets`. A pin
-  whose declared `layer` does not resolve to a known routing LEF layer gets
-  `"none"` (no `PORT` at all) and a `warnings[]` entry.
+  mirroring how a real standard-cell LEF's multi-`RECT` pins look). The
+  search covers **every** GDS `(layer, datatype)` pair that the resolved
+  layer map maps to the same LEF layer *name* as the pin's declared
+  `layer` — not just that single declared datatype (the declared datatype
+  is always searched first). This matters because `klt socket-check` reads
+  text labels off the pin's *exact* declared `layer`, which some PDKs
+  (e.g. gf180mcu) put on a dedicated pin/label datatype distinct from the
+  datatype the actual metal is drawn on (both resolving to the same LEF
+  layer, e.g. `Metal1`) — searching every sibling datatype (mirroring how
+  `OBS` geometry below is already unioned across every datatype sharing a
+  LEF layer name) finds real geometry a single-datatype search would
+  silently miss (issue #1614). Otherwise a **synthesized** placeholder
+  box, centered at `(x, y)`, sized from the descriptor's own
+  `width_um`/`height_um` when given, else the resolved tech-LEF routing
+  layer's own `WIDTH`. Each pin's response entry reports which
+  (`geometry_source`: `"drawn"` \| `"synthesized"` \| `"none"`) — never
+  silently fabricating precision the layout doesn't actually have,
+  mirroring `klt socket-check`'s own `"declared_unverified"` transparency
+  convention for `budgets`. A pin whose declared `layer` does not resolve
+  to a known routing LEF layer gets `"none"` (no `PORT` at all) and a
+  `warnings[]` entry.
 
   A `geometry_source: "none"` pin is not itself an error here — this
   command still writes a structurally valid LEF — but if that pin is later

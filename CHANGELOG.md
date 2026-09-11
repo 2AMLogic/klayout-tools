@@ -67,6 +67,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   metal run. Such shapes now emit as the LEF `POLYGON` they always should
   have; rectangular geometry still emits as `RECT`, and no JSON field
   changed.
+- **Fixed**: `klt lef-abstract` (issue #1614) now finds a declared pin's
+  real drawn geometry when a PDK puts a routing layer's drawn metal and its
+  pin/net text label on two different GDS datatypes of the same LEF layer
+  (e.g. gf180mcu's `Metal1`: `(34, 0)` drawn, `(34, 10)` pin label). Pin
+  resolution previously searched only the exact datatype the socket
+  descriptor's `pins[].layer` declares — the same datatype `klt
+  socket-check` reads the pin's text label from — so a pin satisfying
+  `socket-check`'s label-layer contract could never see real drawn metal on
+  a sibling datatype, and was always synthesized as a placeholder box even
+  when metal existed. `_resolve_pins` now searches every GDS datatype that
+  shares the pin's resolved LEF layer name, mirroring `_resolve_obs`'s
+  existing per-LEF-layer union across datatypes. See
+  [`docs/cli/lef-abstract.md`](docs/cli/lef-abstract.md).
 - **Fixed**: `klt extract --parasitics --spef` (issue #1627) no longer
   stamps the SPEF header's `*DATE` line with the write's own wall-clock
   time. `*DATE` is optional and informational-only per the IEEE 1481-1999

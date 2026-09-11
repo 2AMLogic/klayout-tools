@@ -32,6 +32,11 @@ DBU_UM = 0.001
 # simplified sky130-shaped layer map (see `_write_layer_map`).
 LI1_NET = (67, 20)
 MET1_NET = (68, 20)
+# met1's dedicated pin/net-label datatype (per `_MAP_FILE_TEXT` below) --
+# resolves to the same LEF layer name ("met1") as `MET1_NET` but is a
+# *different* GDS datatype, mirroring gf180mcu's real `Metal1` PIN/drawing
+# datatype split (issue #1614).
+MET1_PIN = (68, 16)
 NWELL = (64, 20)  # deliberately not in the routing-layer map
 
 
@@ -255,6 +260,62 @@ def test_synthesized_pin_uses_declared_width_height(tmp_path, monkeypatch):
     x0, y0, x1, y1 = report["pins"][0]["rects_um"][0]
     assert x1 - x0 == pytest.approx(1.0, abs=1e-6)
     assert y1 - y0 == pytest.approx(0.5, abs=1e-6)
+
+
+def test_drawn_pin_geometry_found_via_sibling_datatype_of_same_lef_layer(
+    tmp_path, monkeypatch
+):
+    """Issue #1614: a pin declared on a PDK's dedicated pin/label datatype
+    (e.g. gf180mcu's ``met1`` ``(68, 16)`` ``LEFPIN,PIN`` purpose) must still
+    resolve ``geometry_source: "drawn"`` when real metal is drawn on a
+    *different* datatype that maps to the same LEF layer name (``met1``'s
+    ``(68, 20)`` ``NET,SPNET,PIN,VIA`` purpose) -- not just the exact
+    declared datatype, which is where `klt socket-check`'s own text-label
+    lookup requires the pin to be declared and where no polygon geometry
+    exists in this fixture."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    met1_net = layout.layer(*MET1_NET)
+    # Real drawn metal lives only on the *drawing* datatype -- nothing is
+    # drawn on the declared pin/label datatype (68, 16) itself.
+    top.shapes(met1_net).insert(_box_um(0.0, 2.0, 0.2, 3.0))
+
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": list(MET1_PIN), "x": 0.1, "y": 2.5}]
+    )
+    report = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+
+    pin = report["pins"][0]
+    assert pin["geometry_source"] == "drawn"
+    assert pin["layer"] == "met1"
+    assert pin["rects_um"] == [[0.0, 2.0, 0.2, 3.0]]
+    assert not report["warnings"]
+
+    # `_resolve_obs`'s pin-subtraction logic still correctly removes this
+    # now-correctly-detected drawn geometry from the OBS region -- the only
+    # met1 shape in the layout was the pin's own port, so no OBS remains.
+    met1_obs = [entry for entry in report["obs"] if entry["layer"] == "met1"]
+    assert met1_obs == []
+
+
+def test_synthesized_fallback_still_used_when_no_sibling_datatype_has_geometry(
+    tmp_path, monkeypatch
+):
+    """A pin declared on a datatype that shares a LEF layer name with other
+    datatypes (``met1``'s ``(68, 16)``/``(68, 20)`` split) still falls back
+    to ``geometry_source: "synthesized"`` when genuinely no drawn geometry
+    exists on *any* of them -- issue #1614's fix must not report false
+    positives."""
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VSS", "layer": list(MET1_PIN), "x": 4.9, "y": 4.9}]
+    )
+    report = _run(tmp_path, monkeypatch, descriptor=descriptor)
+
+    pin = report["pins"][0]
+    assert pin["geometry_source"] == "synthesized"
+    assert any("synthesized a placeholder" in w for w in report["warnings"])
+    assert any("sibling datatype" in w for w in report["warnings"])
 
 
 def test_obs_excludes_declared_pin_geometry(tmp_path, monkeypatch):
