@@ -3499,6 +3499,90 @@ def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
     assert not any("sky130_fd_sc_hd__diode_2" in line for line in route_lines)
 
 
+#: The `7t` track-option twin of `_GF180MCU_CELL_LIBRARY`/`_GF180MCU_CORNER`
+#: above (issue #1649): same platform, same nominal corner and IO layers --
+#: `platforms/gf180/config.mk` only varies `PLACE_SITE` by `TRACK_OPTION`
+#: (`GF018hv5v_mcu_sc7` for `7t`, vs. `GF018hv5v_green_sc9` for `9t`).
+_GF180MCU_7T_CELL_LIBRARY = "gf180mcu_fd_sc_mcu7t5v0"
+
+
+def _setup_gf180mcu_7t_success_env(tmp_path, monkeypatch, **request_overrides) -> str:
+    """`_setup_gf180mcu_success_env`'s `7t` twin: a fabricated `gf180mcuC`
+    install shipping a `gf180mcu_fd_sc_mcu7t5v0` liberty/LEF/GDS set."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuC",
+        cell_library=_GF180MCU_7T_CELL_LIBRARY,
+        corner=_GF180MCU_CORNER,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    request = _base_request(
+        pdk={"cell_library": _GF180MCU_7T_CELL_LIBRARY, "corner": _GF180MCU_CORNER},
+        io={"layer_h": "Metal3", "layer_v": "Metal4"},
+        **request_overrides,
+    )
+    request["floorplan"]["site"] = "GF018hv5v_mcu_sc7"
+    return _write_request(tmp_path / "request.json", request)
+
+
+def test_stubbed_full_route_success_gf180mcu_7t(tmp_path, monkeypatch):
+    """The `gf180mcu_fd_sc_mcu7t5v0` (7-track) twin of
+    `test_stubbed_full_route_success_gf180mcu` (issue #1649): the six
+    per-cell-library reference tables now carry a verified `7t5v0` entry
+    alongside the existing `9t5v0` one, so a `7t` run reaches the `route`
+    stage the same way."""
+    request_path = _setup_gf180mcu_7t_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    merge_calls = _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert report["verilog_path"] is not None
+    assert os.path.isfile(report["verilog_path"])
+    assert len(merge_calls) == 1
+
+    provenance = report["provenance"]
+    assert provenance["pdk"]["name"] == "gf180mcuC"
+    assert provenance["deck"]["name"] == f"gf180mcu_fd_sc_mcu7t5v0__{_GF180MCU_CORNER}"
+
+
+def test_gf180mcu_7t_cts_and_route_scripts_carry_verified_reference_data(
+    tmp_path, monkeypatch
+):
+    """Issue #1649: `gf180mcu_fd_sc_mcu7t5v0`'s `_CTS_BUFFER_CELLS`/
+    `_ROUTING_LAYER_RANGE`/`_ANTENNA_DIODE_CELLS`/`_TAPCELL_CELLS`/
+    `_FILLER_CELLS` entries reach the generated Tcl verbatim -- the same
+    `Metal2-Metal5` range and cell-naming shape as the `9t` sibling, just
+    with the `7t5v0` cell-library prefix."""
+    request_path = _setup_gf180mcu_7t_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    assert (
+        "clock_tree_synthesis -root_buf gf180mcu_fd_sc_mcu7t5v0__buf_4 "
+        "-buf_list gf180mcu_fd_sc_mcu7t5v0__buf_4 "
+        "-sink_clustering_enable -obstruction_aware"
+    ) in cts_lines
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "set_routing_layers -signal Metal2-Metal5" in route_lines
+    assert not any("Metal1-Metal5" in line for line in route_lines)
+    assert "repair_antennas gf180mcu_fd_sc_mcu7t5v0__antenna" in route_lines
+    assert not any("gf180mcu_fd_sc_mcu9t5v0__antenna" in line for line in route_lines)
+
+
 def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
     tmp_path, monkeypatch
 ):
