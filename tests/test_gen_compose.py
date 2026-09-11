@@ -4466,6 +4466,234 @@ def test_route_two_pin_still_rejects_a_block_that_draws_the_route_layer(
     assert baseline["route_length_um"] > straight_um
 
 
+# --------------------------------------------------------------------------- #
+# Hollow-obstacle false positive (#1681): #1656/#1678 above exempt a block
+# that draws *nothing* on the route's own layer -- but a block that draws
+# something there is still tested against its whole (solid) bbox, so a
+# `guard_ring` block is treated as solid metal across its own hollow
+# interior. A composition that places a region's ring and the content it
+# encloses as two separate `blocks[]` entries (the pattern the issue reports)
+# then cannot route anything inside that region: every such route "crosses"
+# the ring block. `guard_ring` is the natural fixture here -- a real block
+# whose drawn li1 is provably a hollow rectangle, so "inside the bbox" and
+# "on the drawn metal" are provably different places.
+# --------------------------------------------------------------------------- #
+
+
+def _ring_enclosure_fixture(tmp_path, pdk_root):
+    """A `guard_ring` block enclosing a `res_array` content block, plus two
+    more blocks to test the fix does not over-reach:
+
+    * ``ring`` -- a 12x8um `klt gen guard_ring` at the origin. Its drawn li1
+      is one hollow rectangle: outer (0,0)-(12.84,8.84), cavity
+      (0.42,0.42)-(12.42,8.42).
+    * ``content`` -- a `res_array` sitting wholly inside that cavity, whose
+      two ports (``R0_A`` west, ``R0_B`` east) are the issue's own "route
+      whose declared pins both sit on the content block".
+    * ``inner`` -- a second, smaller `guard_ring` further east *inside* the
+      outer ring's cavity, enclosing...
+    * ``content2`` -- a second `res_array` inside ``inner``'s own cavity.
+
+    A leg between ``content`` and ``content2`` therefore crosses the outer
+    ring's hollow interior (a false positive to be exempted) *and*
+    ``inner``'s genuinely drawn west wall (a real obstruction that must
+    still block).
+    """
+    ring = _gen_block(
+        tmp_path,
+        pdk_root,
+        "guard_ring",
+        "ring_outer",
+        inner_width_um=12.0,
+        inner_height_um=8.0,
+    )
+    inner = _gen_block(
+        tmp_path,
+        pdk_root,
+        "guard_ring",
+        "ring_inner",
+        inner_width_um=4.0,
+        inner_height_um=4.0,
+    )
+    content = _gen_block(tmp_path, pdk_root, "res_array", "res_in", num=1, dummy=0)
+    content2 = _gen_block(tmp_path, pdk_root, "res_array", "res_in2", num=1, dummy=0)
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": "ring", "generator_report": ring},
+            {"id": "content", "generator_report": content},
+            {"id": "inner", "generator_report": inner},
+            {"id": "content2", "generator_report": content2},
+        ]
+    )
+    offsets = {
+        "ring": {"x": 0.0, "y": 0.0},
+        "content": {"x": 2.0, "y": 4.0},
+        "inner": {"x": 7.0, "y": 2.0},
+        "content2": {"x": 8.0, "y": 4.0},
+    }
+    bboxes = {
+        block_id: {
+            "x0": blocks[block_id]["bbox_um"]["x0"] + off["x"],
+            "y0": blocks[block_id]["bbox_um"]["y0"] + off["y"],
+            "x1": blocks[block_id]["bbox_um"]["x1"] + off["x"],
+            "y1": blocks[block_id]["bbox_um"]["y1"] + off["y"],
+        }
+        for block_id, off in offsets.items()
+    }
+    return blocks, offsets, bboxes
+
+
+def test_route_two_pin_ignores_a_bbox_crossing_through_a_ring_blocks_cavity(
+    tmp_path, pdk_root
+):
+    # #1681's own repro: a self-net on the enclosed `content` block never
+    # leaves the outer ring's cavity, so it cannot short to the ring -- but
+    # the pre-fix bbox-only check rejected it for "crossing" the ring block.
+    blocks, offsets, bboxes = _ring_enclosure_fixture(tmp_path, pdk_root)
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+    ring_geometry = gen_compose.read_block_layer_geometry(
+        "ring", blocks["ring"], offsets["ring"], route_layer
+    )
+    # Sanity: the ring is NOT exempt under #1656/#1678 -- it really does draw
+    # on the route layer; what it does not do is draw across its own cavity.
+    assert ring_geometry is not None
+
+    pin_a = {"block": "content", "port": "R0_A"}
+    pin_b = {"block": "content", "port": "R0_B"}
+    args = (pin_a, pin_b, blocks, offsets, bboxes, 0.17, route_layer)
+
+    # Pre-fix behaviour, still reachable with no geometry cache supplied
+    # (`route_layer is None`-style callers): bbox-only, so the ring blocks.
+    bbox_only = gen_compose.route_two_pin(*args)
+    assert bbox_only["routed"] is False
+    assert "'ring'" in bbox_only["reason"]
+
+    result = gen_compose.route_two_pin(
+        *args,
+        block_geometry_for=_cached_block_geometry_for(blocks, offsets, route_layer),
+    )
+    assert result["routed"] is True, result["reason"]
+    # The direct two-point backbone -- the ring was exempted outright, not
+    # dodged -- and it genuinely crosses the ring's own inflated bbox.
+    assert result["points_um"] == [(2.21, 4.21), (4.63, 4.21)]
+    assert _crossing_um(result["points_um"], bboxes["ring"], 0.17) > 0.0
+
+
+def test_route_two_pin_still_rejects_a_route_across_a_rings_drawn_metal(
+    tmp_path, pdk_root
+):
+    # Companion/non-regression case for #1681: the exemption is scoped to
+    # the *hollow* part of the bbox. A leg from the enclosed `content` block
+    # out to a block beyond the ring has to cross the ring's real drawn east
+    # wall, and must still be rejected exactly as before the fix.
+    blocks, offsets, bboxes = _ring_enclosure_fixture(tmp_path, pdk_root)
+    outside = _gen_block(tmp_path, pdk_root, "res_array", "res_out", num=1, dummy=0)
+    blocks.update(
+        gen_compose._parse_blocks([{"id": "outside", "generator_report": outside}])
+    )
+    offsets["outside"] = {"x": 16.0, "y": 4.0}
+    bboxes["outside"] = {
+        "x0": blocks["outside"]["bbox_um"]["x0"] + 16.0,
+        "y0": blocks["outside"]["bbox_um"]["y0"] + 4.0,
+        "x1": blocks["outside"]["bbox_um"]["x1"] + 16.0,
+        "y1": blocks["outside"]["bbox_um"]["y1"] + 4.0,
+    }
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+
+    args = (
+        {"block": "content", "port": "R0_B"},
+        {"block": "outside", "port": "R0_A"},
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer,
+    )
+    baseline = gen_compose.route_two_pin(*args)
+    with_geometry = gen_compose.route_two_pin(
+        *args,
+        block_geometry_for=_cached_block_geometry_for(blocks, offsets, route_layer),
+    )
+    # Byte-identical to the bbox-only run: the ring is a real obstacle here.
+    assert with_geometry == baseline
+    assert baseline["routed"] is False
+    assert "'ring'" in baseline["reason"]
+
+
+def test_route_two_pin_rejects_a_real_obstruction_beyond_an_exempt_ring_cavity(
+    tmp_path, pdk_root
+):
+    # #1681's edge case: one leg crossing *both* a hollow ring interior (now
+    # exempt) and a genuinely drawn wall further along (the nested `inner`
+    # ring) must still be rejected -- for the genuine obstruction, and naming
+    # only it.
+    blocks, offsets, bboxes = _ring_enclosure_fixture(tmp_path, pdk_root)
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+    result = gen_compose.route_two_pin(
+        {"block": "content", "port": "R0_B"},
+        {"block": "content2", "port": "R0_A"},
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer,
+        block_geometry_for=_cached_block_geometry_for(blocks, offsets, route_layer),
+    )
+    assert result["routed"] is False
+    assert "'inner'" in result["reason"]
+    assert "'ring'" not in result["reason"]
+
+
+def test_compose_routes_inside_a_separately_placed_guard_ring_block(tmp_path, pdk_root):
+    # End-to-end shape of #1681's report: a composition that places a
+    # region's `guard_ring` and the content it encloses as two separate
+    # `blocks[]` entries must be able to route a net inside that region.
+    ring = _gen_block(
+        tmp_path,
+        pdk_root,
+        "guard_ring",
+        "ring_compose",
+        inner_width_um=12.0,
+        inner_height_um=8.0,
+    )
+    content = _gen_block(tmp_path, pdk_root, "res_array", "res_compose", num=1, dummy=0)
+    output = tmp_path / "ring_encloses_content.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "ring", "generator_report": ring},
+                {"id": "content", "generator_report": content},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["ring", "content"],
+                "origins_um": {
+                    "ring": {"x": 0.0, "y": 0.0},
+                    "content": {"x": 2.0, "y": 4.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "RNET",
+                    "pins": [
+                        {"block": "content", "port": "R0_A"},
+                        {"block": "content", "port": "R0_B"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {
+                "cell_name": "ring_encloses_content",
+                "output": str(output),
+            },
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert output.is_file()
+
+
 def test_route_two_pin_detours_around_two_obstacles_on_one_lane():
     # Documented depth limit (#1167): what the search bounds is the number of
     # *lanes* it tries (two), not the number of blocks in the way -- one lane

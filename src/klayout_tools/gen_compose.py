@@ -3090,8 +3090,19 @@ def route_two_pin(
        metal2 cannot short to a block whose own drawn geometry has no
        metal2 shapes, so a bare bbox crossing there is a false positive,
        not a real obstacle -- see ``block_geometry_for``/
-       ``cross_block_geometry_for`` below. A crossing this check finds
-       against a block that *does* draw something there is not automatically
+       ``cross_block_geometry_for`` below. A block that *does* draw there is
+       exempted too whenever this leg's own drawn metal
+       (:func:`_drawn_route_region`) does not actually overlap any of those
+       shapes (#1681): a bbox is a solid proxy for a shape that need not be
+       solid, so a route crossing only the *hollow interior* of a
+       ``guard_ring``-style enclosure block -- the natural shape for a
+       composition that places a region's ring and the content it encloses
+       as two separate ``blocks[]`` entries -- was being rejected for
+       "crossing" metal it never comes near. Both exemptions remove false
+       positives only: a leg that does reach a block's real drawn shapes is
+       still measured, and rejected or detoured, exactly as before. A
+       crossing this check finds against a block neither exemption clears is
+       not automatically
        fatal (#1167): when the *only* blocks crossed are ones neither pin
        sits on, the net is retried around them first -- see "Bounded detour
        search" below -- and reported unroutable only if no alternate lane
@@ -3206,6 +3217,11 @@ def route_two_pin(
     ``effective_route_layer``: a block whose own geometry has nothing there
     cannot be shorted to by this route, no matter how much its *bbox*
     overlaps the drawn path, so it is exempted from that check entirely.
+    Since issue #1681 they are also used for the stronger test the same
+    cached ``region`` makes possible: a block that *does* draw on that layer
+    is exempted too when this leg's own drawn metal does not overlap any of
+    its shapes, so an enclosure block (a ``guard_ring``) whose hollow
+    interior the route merely passes through stops reading as an obstacle.
     Both are optional and ``None`` by default; when omitted (e.g. a direct
     unit-test caller, or ``route_layer is None``), the obstacle check falls
     back to its pre-#1656 bbox-only behaviour and every placed block stays a
@@ -3954,18 +3970,56 @@ def route_two_pin(
     else:
         layer_geometry_for = None
 
+    # #1681: the leg's own drawn metal, as the composed cell would draw it --
+    # the same `_drawn_route_region` construction `_self_net_drawn_short`
+    # tests a self-net's backbone against. Built at most once per distinct
+    # `dbu` (every block read from a PDK-family layout shares one in
+    # practice, so this is one region per leg) and only when some block
+    # actually reaches the geometry test below.
+    drawn_route_by_dbu: dict[float, Any] = {}
+
+    def _route_touches_drawn_geometry(geometry: dict[str, Any]) -> bool:
+        """Whether this leg's drawn metal actually overlaps ``geometry``'s
+        own drawn shapes (positive area -- a bare edge touch is a ``klt drc``
+        spacing question, not a short, the same convention
+        :func:`_self_net_drawn_short` applies)."""
+        dbu = geometry["dbu"]
+        drawn = drawn_route_by_dbu.get(dbu)
+        if drawn is None:
+            drawn = _drawn_route_region(points, effective_width_um, dbu)
+            drawn_route_by_dbu[dbu] = drawn
+        return not (geometry["region"] & drawn).is_empty()
+
+    # Per-block exemptions, decided once per block rather than per segment --
+    # both are properties of the whole leg against one block, not of a single
+    # segment against it.
+    exempt_block_ids: set[str] = set()
+    if layer_geometry_for is not None:
+        for other_id in obstacle_bboxes_um:
+            if same_block_self_net and other_id == own_a:
+                continue
+            geometry = layer_geometry_for(other_id).get(other_id)
+            if geometry is None:
+                # #1656: this block draws nothing on effective_route_layer,
+                # so the route cannot short to it -- a bbox crossing here is
+                # a false positive, not a real obstacle.
+                exempt_block_ids.add(other_id)
+            elif not _route_touches_drawn_geometry(geometry):
+                # #1681: this block *does* draw on effective_route_layer, but
+                # not anywhere this leg's own drawn metal actually reaches --
+                # the classic case being a `guard_ring` block whose hollow
+                # interior holds the content block a route legitimately
+                # starts inside. A bbox is a solid proxy for a shape that is
+                # not solid, so the crossing it reports here is a false
+                # positive exactly as #1656's "draws nothing" one was.
+                exempt_block_ids.add(other_id)
+
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
         for other_id, other_bbox in obstacle_bboxes_um.items():
             if same_block_self_net and other_id == own_a:
                 continue  # a self-net is expected to cross its own block
-            if (
-                layer_geometry_for is not None
-                and layer_geometry_for(other_id).get(other_id) is None
-            ):
-                # #1656: this block draws nothing on effective_route_layer,
-                # so the route cannot short to it -- a bbox crossing here is
-                # a false positive, not a real obstacle.
+            if other_id in exempt_block_ids:
                 continue
             length = _segment_bbox_interior_overlap_um(seg_p0, seg_p1, other_bbox)
             if length > 0.0:

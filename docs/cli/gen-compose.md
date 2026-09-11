@@ -409,6 +409,30 @@ into the circuit.)
   block that *does* draw something on `effective_route_layer` is still
   rejected/detoured around exactly as before; this only removes false
   positives, it does not weaken the check against a genuine obstacle.
+- **The obstacle-overlap check no longer treats a hollow block's bbox as
+  solid metal (#1681, fixed).** #1656 above exempts a block that draws
+  *nothing* on the leg's layer — but a block that draws *something* there
+  was still tested against its whole `bbox_um`, as if the bbox were filled.
+  A `klt gen guard_ring` block is the case that breaks: its drawn local
+  metal is a hollow rectangle, so a composition that places a region's ring
+  and the content it encloses as **two separate `blocks[]` entries** (a
+  natural shape for several isolated/guarded regions, and what the ring
+  generator exists for) could not route anything inside that region — every
+  leg between the content block's own ports "crossed" the ring block,
+  because the ring's bbox covers its own cavity. `klt gen-compose` now uses
+  the same already-cached `read_block_layer_geometry` region to intersect
+  the leg's **actual drawn metal** (the same `kdb.Path` the composed cell
+  gets) against the candidate obstacle block's **actual drawn shapes**, and
+  exempts the block when the two do not overlap — so a route that only
+  passes through a ring's cavity is no longer rejected, while a route that
+  crosses the ring's drawn wall still is. As with #1656 this removes false
+  positives only; a leg that reaches a block's real geometry is measured,
+  reported, and detoured around exactly as before, and the check falls back
+  to its bbox-only behaviour whenever no per-block geometry is available for
+  the leg's layer. (The issue's alternative suggestion — a `blocks[]` field
+  declaring which other block ids an entry shares a footprint with — was not
+  needed: no new request-schema surface is involved, and nothing has to
+  declare that a ring and its content are the same logical region.)
 - **Routing same-facing port pairs with `waypoints_um` (#634, fixed).** Case
   **(1)** above has no remedy when the caller cannot choose which ports get
   wired — e.g. a hand-drawn cell that legitimately puts its input and output
