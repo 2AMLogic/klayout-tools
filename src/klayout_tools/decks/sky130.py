@@ -255,9 +255,9 @@ illegally-close, effectively-merged well islands (e.g. two n-wells spaced
 well under the real minimum) passed ``klt drc`` cleanly on the very layer
 its own extraction correctness silently depends on. ``nwell.width.1`` and
 ``nwell.space.1`` below close the two highest-value rules of that gap,
-transcribed from ``sky130.lydrc``'s ``nwell.1a``/``nwell.2a`` (see each
-rule's own docstring for its one approximation, ``nwell.2a``'s ``isolated``
-vs. ``space`` distinction).
+transcribed from ``sky130.lydrc``'s ``nwell.1a``/``nwell.2a`` (see
+``nwell.space.1``'s own docstring for ``nwell.2a``'s ``"isolated"`` check
+kind, issue #1654).
 
 Two more ``sky130.lydrc`` well rules are deliberately **not** transcribed
 here: ``nwell.enclosing(diff.and(psdm), 0.18)`` and
@@ -1001,23 +1001,21 @@ DECK: list[DrcRule] = [
         id="nwell.space.1",
         description="minimum nwell spacing / isolation between distinct wells",
         layer=(64, 20),  # nwell.drawing
-        check="space",
+        check="isolated",
         threshold_dbu=1270,  # 1.27 um
         # sky130.lydrc rule "nwell.2a": nwell.isolated(1.27, euclidian)
         # -> "nwell.2a : min. nwell space to nwell : 1.27um"
-        # Approximation: the source rule uses `isolated`, which (unlike
-        # `space`) only measures the gap between *different* polygons,
-        # skipping any concave notch within a single polygon. This engine's
-        # `DrcRule` vocabulary only exposes `"space"` (`Region.space_check`,
-        # which also flags same-polygon notches -- see `drc.py`'s
-        # `isolated_check`/`space_check` distinction, used internally for
-        # gf180mcu's `mim.space.1`) as a check kind, not `"isolated"`. This
-        # makes the transcribed rule strictly *stricter* than `nwell.2a`: it
-        # additionally flags a sufficiently narrow concave notch carved into
-        # one nwell polygon, which the real rule would not. No corpus
-        # regression from this was found (see the test suite's sky130
-        # corpus regression check for this rule), and the threshold value
-        # itself is unmodified.
+        # Uses `"isolated"` (`Region.isolated_check`, issue #1654), matching
+        # the source rule's own `isolated` semantics exactly: spacing is
+        # measured between *different* nwell polygons only, never a concave
+        # notch carved into one merged nwell polygon. Before issue #1654 this
+        # was transcribed as `"space"` (`Region.space_check`, which also
+        # flags same-polygon notches) since `"isolated"` was not yet exposed
+        # as a `DrcRule` check kind -- that gap made the rule strictly
+        # *stricter* than `nwell.2a`, flagging a reproduced class of
+        # same-polygon concave-notch false positives on production layouts
+        # (see #1654). The threshold value itself is, and always was, the
+        # real, unmodified source value.
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.2a"),
     ),

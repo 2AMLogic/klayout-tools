@@ -16,6 +16,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `DrcRule.check` accepts a new single-layer check kind,
+  `"isolated"` (issue #1654), dispatching to KLayout's
+  `Region.isolated_check` — spacing measured only between edges of
+  *different* polygons, unlike `"space"` (`Region.space_check`), which also
+  measures the width of a concave notch carved into a single merged polygon.
+  `klt drc` can therefore emit `"isolated"` as a `violations[].check` value;
+  this is additive value-set growth on an unchanged shape, so `klt drc`'s
+  `schema_version` stays `1` (see [`docs/json-contract.md`](docs/json-contract.md)'s
+  "Pre-1.0 caveat: value sets within an unchanged shape can grow").
+- **Fixed**: the `sky130` curated deck's `nwell.space.1` now uses
+  `check="isolated"` instead of `check="space"` (issue #1654), matching the
+  real semantics of its source rule — `sky130.lydrc`'s `nwell.2a` is
+  `nwell.isolated(1.27, euclidian)`, an inter-polygon spacing check.
+  Transcribing it as `"space"` also flagged a concave notch *within* a
+  single merged nwell island, which `nwell.2a` does not consider a
+  violation; on a production layout roughly a third of the reported
+  `nwell.space.1` violations were this same-polygon false-positive class.
+  Genuine inter-well spacing violations are still caught unchanged. Two
+  consumer-visible consequences: violations of this rule now carry
+  `check: "isolated"` rather than `check: "space"`, and `nwell.space.1` no
+  longer appears in `tests/golden_deck/sky130/manifest.json` (that
+  manifest's sky130 scope is `("width", "space")`). The rule itself is
+  unchanged in id, layer, and 1.27 um threshold.
 - **Fixed**: `klt place-and-route` no longer raises `PlaceAndRouteError` when
   reaching the `"cts"`/`"route"` stage against a
   `gf180mcu_fd_sc_mcu7t5v0` (7-track) netlist (issue #1649). The module's six

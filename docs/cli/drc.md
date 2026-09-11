@@ -46,8 +46,8 @@ klt drc --check <report.json> [--rerun] [--format text|json]
 `klt drc` runs fully headless via the pip `klayout` package's native
 `klayout.db.Region` check primitives (`width_check`, `space_check`,
 `separation_check`, `enclosing_check`, `enclosed_check`, `notch_check`,
-`overlap_check`) — the same C++ polygon-processing engine that backs
-KLayout's higher-level DRC-DSL scripts, invoked directly instead of through
+`overlap_check`, `isolated_check`) — the same C++ polygon-processing engine
+that backs KLayout's higher-level DRC-DSL scripts, invoked directly instead of through
 the script runner. By default there is **no dependency on the standalone
 `klayout` application binary or its `.drc`/`.lydrc` script runner** — only
 `pip install klayout` (already this repo's sole runtime dependency), so the
@@ -367,9 +367,10 @@ them.
 
 ### `"area"` / `"density"` / `"antenna"` check kinds (issue #812)
 
-Three more check kinds exist alongside `"width"`/`"space"`/`"notch"`
-(single-layer) and `"separation"`/`"enclosing"`/`"enclosed"`/`"overlap"`
-(two-layer) above. None of the shipped `sky130`/`gf180mcu` decks author a
+Three more check kinds exist alongside `"width"`/`"space"`/`"notch"`/
+`"isolated"` (single-layer) and
+`"separation"`/`"enclosing"`/`"enclosed"`/`"overlap"` (two-layer) above.
+None of the shipped `sky130`/`gf180mcu` decks author a
 rule of any of these three kinds yet — that's a separate follow-on issue;
 this section documents the primitives themselves.
 
@@ -447,10 +448,10 @@ referencing `nwell` (64/20), even though `EXTRACTION_DECK` has always used
 that exact layer for PMOS device recognition and body-net derivation — a
 layout with illegally-close, effectively-merged well islands passed `klt
 drc` cleanly on the very layer its own extraction correctness depends on.
-`nwell.space.1` additionally approximates its source rule's `isolated`
-check (space between distinct polygons only) as this engine's `"space"`
-check (which also catches same-polygon notches) — strictly *stricter* than
-the source rule, not looser; see its own docstring in `sky130.py`. Two more
+`nwell.space.1` uses this engine's `"isolated"` check kind (issue #1654),
+matching its source rule's own `isolated` semantics exactly: spacing is
+measured between distinct nwell polygons only, never a concave notch carved
+into one merged nwell polygon — see its own docstring in `sky130.py`. Two more
 official well rules — `nwell`'s enclosure of opposite-type diffusion/tap
 (`difftap.8`/`difftap.10`, both scoped to a `psdm`/`nsdm` implant-layer
 boolean expression no `klt gen` generator draws today) — are deliberately

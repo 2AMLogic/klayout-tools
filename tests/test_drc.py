@@ -4342,7 +4342,7 @@ def test_run_drc_sky130_nwell_space_violation(tmp_path):
     assert report["rule_counts"] == {"nwell.space.1": 1}
     (violation,) = report["violations"]
     assert violation["rule"] == "nwell.space.1"
-    assert violation["check"] == "space"
+    assert violation["check"] == "isolated"
     assert violation["layer"] == "nwell.drawing"
 
 
@@ -4363,6 +4363,51 @@ def test_run_drc_sky130_nwell_space_clean(tmp_path):
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_nwell_space_same_polygon_notch_clean(tmp_path):
+    """Reproducer for #1654: a single nwell polygon with a concave notch
+    narrower than the 1270 dbu `nwell.space.1` threshold must not trigger
+    the rule, since the rule's source (`nwell.2a`) uses `isolated`
+    semantics -- spacing between *distinct* polygons only -- which never
+    measures a notch carved into one polygon. Before #1654, `nwell.space.1`
+    was transcribed as `"space"` (`Region.space_check`), which *does*
+    measure intra-polygon notches -- this same geometry would have produced
+    exactly the kind of same-polygon false positive the issue reports (a
+    real production layout found roughly a third of `nwell.space.1`'s
+    reported violations were this class, not genuine inter-well spacing
+    violations)."""
+    # A 8000x6000 dbu box with a 1000 dbu wide notch (< 1270 dbu threshold)
+    # cut in from the top edge -- a single merged polygon, not two distinct
+    # ones, modeled on the identical gf180mcu `mim.space.1` slotted-plate
+    # reproducer (`test_run_drc_gf180mcu_mim_space_slotted_bottom_plate_clean`
+    # above).
+    notched = kdb.Region(kdb.Box(0, 0, 8000, 6000)) - kdb.Region(
+        kdb.Box(3500, 2000, 4500, 6001)
+    )
+    assert notched.count() == 1  # confirms this is one polygon, not two
+
+    # Directly demonstrate the two primitives' differing semantics on this
+    # exact geometry: `space_check` (the pre-#1654 substitute) flags the
+    # notch; `isolated_check` (what `nwell.space.1` now uses) does not.
+    threshold_dbu = 1270
+    assert not notched.merged().space_check(threshold_dbu).is_empty()
+    assert notched.merged().isolated_check(threshold_dbu).is_empty()
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(64, 20)
+    layout.set_info(nwell, kdb.LayerInfo(64, 20, "nwell.drawing"))
+    for polygon in notched.each():
+        top.shapes(nwell).insert(polygon)
+    path = tmp_path / "nwell_space_same_polygon_notch.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert "nwell.space.1" not in report["coverage"]["rules_skipped"]
+    assert report["rule_counts"].get("nwell.space.1", 0) == 0
+    assert report["status"] == "clean"
 
 
 @pytest.mark.parametrize(

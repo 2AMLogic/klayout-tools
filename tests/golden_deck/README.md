@@ -1,8 +1,10 @@
 # Golden-pair manifest (`klt drc` rules)
 
 Declarative, rule-id-keyed golden violate/clean fixture manifest for
-`sky130.py`'s width/space `DrcRule` entries (29, +2 for issue #1420's
-`nwell.width.1`/`nwell.space.1`), `sg13g2.py`'s width/space
+`sky130.py`'s width/space `DrcRule` entries (28, +1 for issue #1420's
+`nwell.width.1`; `nwell.space.1` -- issue #1420's other addition -- uses the
+`"isolated"` check kind as of issue #1654, so it no longer falls within this
+manifest's width/space-only scope), `sg13g2.py`'s width/space
 `DrcRule` entries (14, issue #905/#911), and **all** of `gf180mcu.py`'s
 `DrcRule` entries (44: 13 width, 14 space, 15 enclosing, 2 separation --
 recounted for issue #1110, which both added two rules and corrected a stale
@@ -103,9 +105,9 @@ representative of the whole manifest.)
   approximation (see its `DrcRule.description`/inline comment) is known to
   produce a genuine, reviewed disagreement between the curated engine and
   the real PDK-native deck for *this specific fixture* -- see "Cross-check
-  results" below. **Seven** of the piloted rules carry one today, all in
+  results" below. **Six** of the piloted rules carry one today, all in
   sky130 (`diff.width.1`, `mcon.space.1`, `poly.width.1`, `via.space.1`,
-  `via.width.1`, `nwell.width.1`, `nwell.space.1`); each was established
+  `via.width.1`, `nwell.width.1`); each was established
   empirically against a real `sky130A.lydrc`, not assumed -- see that
   section.
 
@@ -181,19 +183,21 @@ Ran tier 3 against a real `volare`-fetched sky130A install
 `sky130.py`'s own provenance notes cite) and a real KLayout 0.30.10 binary,
 covering all 11 sky130 width/space rules (22 fixtures: 11 violate + 11
 clean) as of issue #747; re-verified issue #1420, which added
-`nwell.width.1`/`nwell.space.1` (13 rules, 26 fixtures):
+`nwell.width.1` (12 rules, 24 fixtures as of issue #1654 -- `nwell.space.1`
+was also added by #1420 but moved to the `"isolated"` check kind by #1654
+and is no longer part of this width/space-scoped manifest, see above):
 
-**13/13 rules verified against the native deck, 7 documented
+**12/12 rules verified against the native deck, 6 documented
 approximations, 0 unexplained disagreements.**
 
-**Six** of the thirteen agree outright on both fixtures -- `li1.width.1`,
+**Six** of the twelve agree outright on both fixtures -- `li1.width.1`,
 `li1.space.1`, `met1.width.1`, `met1.space.1`, `met2.width.1`,
 `met2.space.1`: each violate fixture trips the corresponding native BEOL
 rule (e.g. `met1.width.1` -> `m1.1`, `met2.width.1` -> `m2.1`,
 `met2.space.1` -> `m2.2`) and each clean fixture is clean under both
 engines. These six carry `"expected_disagreement": null`.
 
-**Seven** genuinely disagree on one of their two fixtures, and each carries a
+**Six** genuinely disagree on one of their two fixtures, and each carries a
 non-null `expected_disagreement` in `sky130/manifest.json` recording why.
 These are documented approximations, not unexplained failures -- the tier-3
 test tolerates exactly these and still fails loudly on any *other*
@@ -204,7 +208,6 @@ disagreement:
 | `diff.width.1` | `violate` | violations | clean | The script hard-codes `FEOL = false` ("do not change"), with no `-rd`-settable override, so this rule sits inside an `if FEOL ... end` block the native run never evaluates. |
 | `poly.width.1` | `violate` | violations | clean | Same `FEOL = false` gate as `diff.width.1`. |
 | `nwell.width.1` | `violate` | violations | clean | Same `FEOL = false` gate -- `nwell.1a` also lives inside the script's `if FEOL ... end` block. |
-| `nwell.space.1` | `violate` | violations | clean | Same `FEOL = false` gate -- `nwell.2a` also lives inside the script's `if FEOL ... end` block. |
 | `mcon.space.1` | `clean` | clean | violations (`ct.1`, `ct.4`) | A bare, isolated mcon shape -- all this single-layer pilot can build -- trips the native deck's `ct.1` (mcon edges must be exactly 0.17um) and `ct.4` (mcon must be covered by li), neither of which this pilot's geometry can satisfy. |
 | `via.width.1` | `clean` | clean | violations (`via.1a`, `m2.via`, `via.4c.5c`) | The native `via.1a` demands an *exact* 0.15um square (`edges.without_length(0.15)`), not a minimum width; any fixture wide enough to pass this engine's min-only `width_check` is by construction wider than the native max. |
 | `via.space.1` | `clean` | clean | violations (`m2.5`, `m2.via`, `via.1a`, `via.4c.5c`) | Same exact-size `via.1a` mismatch, plus the native deck's met2-enclosure rules that this single-layer fixture never draws. |
@@ -214,12 +217,10 @@ Note in particular that `diff.width.1`'s disagreement is **not** about the
 pilot's fixtures draw only `diff.drawing`, so that union is exactly
 `diff.drawing` and would agree) -- it is the `FEOL = false` gate above,
 which suppresses the native check entirely regardless of the input layout.
-`nwell.width.1`/`nwell.space.1` disagree for the identical reason, not
-because of `nwell.space.1`'s own `isolated`-vs-`space` approximation noted
-in its `sky130.py` docstring (that approximation would, if anything, make
-the curated engine *more* likely to report a violation the native deck
-also reports -- it is strictly stricter -- not less; the `FEOL` gate
-suppresses the native side outright regardless).
+`nwell.width.1` disagrees for the identical reason. (`nwell.space.1` was
+part of this same `FEOL = false`-gated disagreement before issue #1654 --
+now that it uses `"isolated"` instead of `"space"`, it has left this
+width/space manifest entirely rather than resolving the disagreement.)
 
 gf180mcu's 44 rules have no native-*DRC*-deck cross-check verdict either
 way (deferred per the scope above -- no single runnable native DRC deck
