@@ -1974,6 +1974,8 @@ def test_res_array_tight_spacing_is_advisory_not_rejected(tmp_path, pdk_root):
         {"num": 0},
         {"dummy": -1},
         {"rows": 0},
+        {"metal_level": -1},
+        {"metal_level": 6},
     ],
 )
 def test_res_array_invalid_params_rejected(tmp_path, pdk_root, params):
@@ -1986,6 +1988,174 @@ def test_res_array_invalid_params_rejected(tmp_path, pdk_root, params):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+# --- res_array metal-layer resistors (issue #1639) ---------------------------- #
+
+#: One `(metal_level, device_class, sheet_rho_ohm_sq)` triple per sky130
+#: `res_generic_mN` device (`klayout_tools.decks.sky130.EXTRACTION_DECK
+#: .resistors`) -- met1/met2 deliberately share `0.120` ohm/sq and met3/met4
+#: share `0.047` ohm/sq, so a code path that silently picked the wrong
+#: level's marker/sheet-rho pair would still coincidentally extract *a*
+#: `res_generic_mN` class with *a* plausible-looking `r_ohm`; asserting the
+#: exact class name per level (not just "some resistor class") is what
+#: actually catches that collision.
+_METAL_RES_LEVELS = (
+    (1, "res_generic_m1", 0.120),
+    (2, "res_generic_m2", 0.120),
+    (3, "res_generic_m3", 0.047),
+    (4, "res_generic_m4", 0.047),
+    (5, "res_generic_m5", 0.029),
+)
+
+
+@pytest.mark.parametrize(("level", "device_class", "sheet_rho"), _METAL_RES_LEVELS)
+def test_res_array_metal_level_draws_expected_device_class(
+    tmp_path, pdk_root, level, device_class, sheet_rho
+):
+    """`metal_level=N` (issue #1639) draws sky130's drawn metal-resistor
+    family -- `res_generic_m1`..`res_generic_m5` -- instead of `res_array`'s
+    original poly body: the output must pass `klt drc --deck sky130`
+    cleanly and round-trip through `klt extract --deck sky130` as exactly
+    the expected device class with `r_ohm = length_um / width_um *
+    sheet_rho`, confirming met1/met2 (sharing 0.120 ohm/sq) and met3/met4
+    (sharing 0.047 ohm/sq) don't collide on a shared code path that silently
+    draws the wrong level's body/marker layer pair."""
+    length_um = 4.0
+    # met5.width.1 (sky130A_mr.drc "m5.1") requires >= 1.6um; every other
+    # level's own width rule is looser than the generic UNIT_MIN_W_UM floor.
+    width_um = 2.0 if level == 5 else 1.0
+    output = tmp_path / f"res_array_metal_m{level}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "length_um": length_um,
+                "width_um": width_um,
+                "num": 1,
+                "dummy": 0,
+                "metal_level": level,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    assert report["drc_hints"]["matched_group_id"] == "res_array:1"
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    extract_report = run_extract(str(output), "sky130")
+    assert extract_report["device_counts"] == {device_class: 1}
+    (device,) = extract_report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(length_um / width_um * sheet_rho)
+
+
+def test_res_array_metal_level_default_zero_is_poly_body_unchanged(tmp_path, pdk_root):
+    """Omitting `metal_level` (or passing `metal_level=0` explicitly) must
+    reproduce `res_array`'s original poly-body geometry exactly -- the
+    feature is purely additive."""
+    output_default = tmp_path / "res_array_metal_default.gds"
+    report_default = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3, "dummy": 1},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_explicit = tmp_path / "res_array_metal_level0.gds"
+    report_explicit = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3, "dummy": 1, "metal_level": 0},
+            "options": {"output": str(output_explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_explicit)
+    assert report_default["ports"] == report_explicit["ports"]
+
+    extract_report = run_extract(str(output_default), "sky130")
+    assert extract_report["device_counts"] == {"res_generic_po": 3}
+
+
+def test_res_array_metal_level_multi_unit_rows_is_drc_clean(tmp_path, pdk_root):
+    """A folded (`rows > 1`), multi-unit `metal_level=5` array must stay
+    DRC-clean: sky130's `met5.space.1` (1.6um, far coarser than the generic
+    `MIN_SAME_LAYER_SPACING_UM`/0.4um and even `via4.space.1`/0.8um) binds
+    on the body-to-body gap both within a row and across a row transition,
+    not just on the end-via-to-end-via gap -- a generator that floored only
+    the via spacing would leave this DRC-dirty."""
+    output = tmp_path / "res_array_metal_m5_multi.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "length_um": 4.0,
+                "width_um": 2.0,
+                "num": 6,
+                "dummy": 1,
+                "rows": 2,
+                "metal_level": 5,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 6
+    assert any("spacing_um was widened" in n for n in report["drc_hints"]["notes"])
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    extract_report = run_extract(str(output), "sky130")
+    assert extract_report["device_counts"] == {"res_generic_m5": 6}
+    assert extract_report["dummy_devices_dropped"] == 2
+
+
+def test_res_array_metal_level_unsupported_family_rejected(tmp_path, both_pdk_root):
+    """`metal_level` requires a PDK family with a drawn metal-resistor
+    device class -- gf180mcu's curated deck declares none, so a request
+    against it must fail clearly rather than silently drawing unrecognised
+    geometry."""
+    with pytest.raises(GenError, match="metal_level"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"metal_level": 1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_res_array_metal_level_narrow_width_notes_not_rejected(tmp_path, pdk_root):
+    """`width_um` is never auto-widened for `metal_level` (the caller owns
+    this primary requested dimension, like `mos_array`'s `w_um`) -- a
+    request under met5's own 1.6um `met5.width.1` minimum is surfaced via
+    `drc_hints.notes`, not rejected outright."""
+    output = tmp_path / "res_array_metal_m5_narrow.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "length_um": 4.0,
+                "width_um": 0.5,
+                "num": 1,
+                "dummy": 0,
+                "metal_level": 5,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert any(
+        "width_um" in n and "minimum body width" in n
+        for n in report["drc_hints"]["notes"]
+    )
 
 
 # --- res_array row folding (issue #415) --------------------------------------- #

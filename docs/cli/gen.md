@@ -763,15 +763,49 @@ class is reachable by *either* `"generic"` (the cross-family default every
 other family uses) or `"rsil"` (its own literal device-class name), both
 resolving to the identical `EXTBlock` + `Res` mask set.
 
+`metal_level` (issue #1639, default `0`) switches this generator entirely off
+the poly-body path above: `1`..`5` on sky130 instead draws that level's
+*drawn metal-layer* resistor — `res_generic_m1`..`res_generic_m5`
+(`klayout_tools.decks.sky130.EXTRACTION_DECK.resistors`, added by issue
+#1621) — with the body on `metN.drawing`, that level's own resistor-ID
+marker (`metN.res`), and an end via/landing-pad stack connecting *down* to
+the metal level immediately below (`li1` for `met1`; `met1`..`met4` for
+`met2`..`met5`) instead of up through a contact to `li1` the way the poly
+body's own end pads do — `metN` is already a routing metal, so `R<i>_A`/
+`R<i>_B` are reported directly on it rather than on a separate landing
+layer. `flavor` has no effect while `metal_level` is non-zero (sky130's
+`res_generic_mN` classes need no extra requires-mask at all, unlike the
+poly flavours above). No other family exposes a drawn metal-resistor device
+class today, so a non-zero `metal_level` on gf180mcu/sg13g2/sg13cmos5l
+raises a clear error.
+
+Every level but `met5` (sheet ρ 0.120/0.120/0.047/0.047/0.029 Ω/□ for
+`met1`..`met5` respectively — met1/met2 and met3/met4 deliberately share a
+sheet ρ) draws DRC-clean with `res_array`'s own generic contact/enclosure/
+spacing constants, since sky130's own `mcon`/`via`/`via2`/`via3` and their
+enclosing `met1`..`met4` rules are all looser than those constants. `met5`
+is the one exception — sky130's top redistribution metal carries markedly
+coarser rules than every level below it (`sky130A_mr.drc`'s `via4.1_a`/
+`m5.3`/`m5.2`), so a `metal_level=5` request automatically draws a wider end
+via (0.8µm), wider via enclosure (0.31µm), and wider unit-to-unit
+`spacing_um` (floored to 1.6µm, both within a row and across a `rows`
+fold, with a `drc_hints.notes` entry when it widens the request) — every
+one of these is the generator's own internal geometry, resolved from the
+target PDK, never a caller-facing param. `width_um` is the one exception:
+like `mos_array`'s `w_um`/`cap_array`'s `plate_w_um`, it is never
+auto-widened, so a `met5` request under `met5.width.1`'s own 1.6µm minimum
+is instead flagged via `drc_hints.notes`, not silently widened or rejected.
+
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
 | `length_um`    | double | `2.0`   | Unit resistor body length (µm). Must be `> 0`. |
 | `width_um`     | double | `0.42`  | Unit resistor width (µm). Must be `>= 0.42`. |
-| `spacing_um`   | double | `0.5`   | Spacing between unit resistors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). |
+| `spacing_um`   | double | `0.5`   | Spacing between unit resistors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected) — floored under `metal_level`'s own minimum on sky130's `met5` (see above). |
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
-| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on gf180mcu, `"1k"` / `"2k"` / `"3k"` (`ppolyf_u_1k`/`_2k`/`_3k`, 1000/2000/3000 Ω/□ — pair with `klt extract --deck-option poly_res=<value>`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on gf180mcu, `"1k"` / `"2k"` / `"3k"` (`ppolyf_u_1k`/`_2k`/`_3k`, 1000/2000/3000 Ω/□ — pair with `klt extract --deck-option poly_res=<value>`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. Ignored when `metal_level` is non-zero. |
+| `metal_level`  | int    | `0`     | Draw a metal-layer resistor body instead of poly: `0` (default) draws the original poly-body resistor selected by `flavor`; `1`..`5` on sky130 draws that level's `res_generic_mN` device (`met1`..`met5`) instead (issue #1639). Must be between `0` and `5`; a level a resolved PDK family does not expose (every non-zero value on gf180mcu/sg13g2/sg13cmos5l today) raises a clear error. |
 
 ### `cap_array` (MiM capacitor array, issue #1117)
 

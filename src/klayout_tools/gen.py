@@ -151,6 +151,15 @@ _HIDDEN_PARAMS = {
     # request schema. See :func:`_ring_tap_implant_layer`.
     "ring_implant_layer",
     "ring_implant_present",
+    # `res_array`'s own metal-layer-resistor geometry floors (issue #1639),
+    # harness-computed from the resolved PDK family/`params.metal_level`
+    # exactly like `cap_bottom_plate_margin_min_um`/friends above -- see
+    # :data:`_PDK_METAL_RES_LEVEL_MIN_UM`. `params.metal_level` itself is
+    # *not* hidden -- it is a real, request-facing param, exactly like
+    # `flavor`.
+    "metal_res_via_min_w_um",
+    "metal_res_via_enclosure_min_um",
+    "metal_res_via_space_min_um",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -1691,6 +1700,209 @@ def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
         ) from None
 
 
+#: Per-PDK-family metal-layer resistor levels (issue #1639): the ordered
+#: ``body``/``marker``/``via``/``landing`` layer set ``res_array``'s
+#: ``metal_level`` request param selects between, keyed ``1``..``5`` (sky130's
+#: ``met1``..``met5``). Unlike :data:`_PDK_RES_FLAVOR_LAYERS`'s poly-body
+#: flavours (which only ever add *extra* masks over one fixed poly body), a
+#: metal-layer resistor's recognised device class (sky130's
+#: ``res_generic_m1``..``res_generic_m5``,
+#: ``klayout_tools.decks.sky130.EXTRACTION_DECK.resistors``) swaps the body
+#: layer itself -- ``metal_level=0`` (the default) leaves ``res_array``'s
+#: original poly-body geometry byte-for-byte unchanged; ``1``..``5`` instead
+#: draw the body on ``metN.drawing``, its own resistor-ID marker
+#: (``metN.res``), and an end via/landing-pad stack connecting *down* to the
+#: metal level immediately below (``li1`` for ``met1``, ``metN-1`` otherwise)
+#: -- the same "contact + local-metal landing pad at each end" shape
+#: :func:`_res_unit_layout` already draws for the poly case, just relocated
+#: one or more levels up the stack. Landing on the layer below (never above)
+#: keeps a single, uniform code path across all five levels: sky130 always has
+#: a metal level immediately below (down to ``li1``), while only ``met1``..
+#: ``met4`` have one immediately above.
+#:
+#: Each entry's layer/datatype pairs are the *same* ones
+#: ``klayout_tools.decks.sky130.EXTRACTION_DECK`` already declares -- never a
+#: second, private map:
+#:
+#: - ``body``/``marker`` -- the exact ``ResistorDevice.body``/``.marker`` pair
+#:   for that level's ``res_generic_mN`` entry.
+#: - ``via`` -- ``EXTRACTION_DECK.vias[N - 1]``, the via connecting ``metN``
+#:   down to the level below (``mcon`` for ``met1``; ``via``/``via2``/
+#:   ``via3``/``via4`` for ``met2``..``met5``).
+#: - ``landing`` -- ``EXTRACTION_DECK.metals[N - 1]``, the conductor that via
+#:   lands on (``li1`` for ``met1``; ``met1``..``met4`` for ``met2``..
+#:   ``met5``).
+#:
+#: Only ``sky130`` is populated today -- neither gf180mcu's nor sg13g2's
+#: curated decks declare a drawn metal-resistor device class (see
+#: ``klayout_tools.decks.gf180mcu``/``.sg13g2``'s own ``resistors`` tuples), so
+#: a ``metal_level`` request against either raises :class:`GenError` via
+#: :func:`_metal_res_layers` rather than silently drawing unrecognised
+#: geometry.
+_PDK_METAL_RES_LEVELS: dict[str, dict[int, dict[str, tuple[int, int]]]] = {
+    "sky130": {
+        1: {
+            "body": (68, 20),  # met1.drawing
+            "marker": (68, 13),  # met1.res
+            "via": (67, 44),  # mcon.drawing (li1<->met1)
+            "landing": (67, 20),  # li1.drawing
+        },
+        2: {
+            "body": (69, 20),  # met2.drawing
+            "marker": (69, 13),  # met2.res
+            "via": (68, 44),  # via.drawing (met1<->met2)
+            "landing": (68, 20),  # met1.drawing
+        },
+        3: {
+            "body": (70, 20),  # met3.drawing
+            "marker": (70, 13),  # met3.res
+            "via": (69, 44),  # via2.drawing (met2<->met3)
+            "landing": (69, 20),  # met2.drawing
+        },
+        4: {
+            "body": (71, 20),  # met4.drawing
+            "marker": (71, 13),  # met4.res
+            "via": (70, 44),  # via3.drawing (met3<->met4)
+            "landing": (70, 20),  # met3.drawing
+        },
+        5: {
+            "body": (72, 20),  # met5.drawing
+            "marker": (72, 13),  # met5.res
+            "via": (71, 44),  # via4.drawing (met4<->met5)
+            "landing": (71, 20),  # met4.drawing
+        },
+    },
+}
+
+#: The highest ``metal_level`` any currently-registered family supports --
+#: ``res_array``'s own structural upper bound (see :func:`_res_array_validate`),
+#: independent of which PDK family a given request eventually resolves to
+#: (mirrors ``ESD_FINGER_WIDTH_MAX_UM``'s "generator-side structural floor,
+#: not the target PDK's own rule" precedent). Derived from the table above
+#: rather than hard-coded, so a future family adding a sixth level needs no
+#: ``validate()`` change.
+_MAX_METAL_RES_LEVEL = max(
+    (level for levels in _PDK_METAL_RES_LEVELS.values() for level in levels),
+    default=0,
+)
+
+
+def _metal_res_layers(family: str, level: int) -> dict[str, tuple[int, int]]:
+    """Return ``level``'s ``body``/``marker``/``via``/``landing`` layer pairs
+    for ``family`` (see :data:`_PDK_METAL_RES_LEVELS`).
+
+    Raises :class:`GenError` for a family with no metal-resistor levels
+    configured at all, or a ``level`` outside the ones that family declares --
+    mirrors :func:`_res_flavor_layers`'s own unsupported-value error."""
+    levels = _PDK_METAL_RES_LEVELS.get(family)
+    if not levels:
+        raise GenError(
+            "generator 'res_array': params.metal_level requires a PDK family "
+            "with a drawn metal-resistor device class -- supported families: "
+            f"{', '.join(sorted(_PDK_METAL_RES_LEVELS)) or '(none)'}"
+        )
+    try:
+        return levels[level]
+    except KeyError:
+        raise GenError(
+            f"generator 'res_array': params.metal_level {level} is not a "
+            f"recognised metal-resistor level for PDK family '{family}' -- "
+            f"supported levels: {', '.join(str(n) for n in sorted(levels))}"
+        ) from None
+
+
+#: Per-PDK-family, per-``metal_level`` geometry floors (um) for the end
+#: via/landing-pad stack :func:`_res_unit_layout` draws when ``metal_level``
+#: is set (issue #1639) -- the metal-resistor sibling of
+#: :data:`_PDK_CAP_GEOMETRY_MIN_UM`, applied the same ``max(generic, floor)``
+#: way so a level/family absent from this table draws exactly the generic
+#: :data:`CONTACT_SIZE_UM`/:data:`ENCLOSURE_MARGIN_UM`/
+#: :data:`MIN_SAME_LAYER_SPACING_UM` geometry :func:`_res_unit_layout` already
+#: uses for the poly case.
+#:
+#: Keys (all optional per level, ``0.0`` when absent -- see
+#: :func:`_metal_res_geometry_min_um`):
+#:
+#: - ``via_min_w_um`` -- minimum drawn side of the end via connecting the
+#:   body down to the landing metal.
+#: - ``via_enclosure_min_um`` -- minimum enclosure of that via by *both* the
+#:   body and the landing metal (the stricter of sky130's two per-via
+#:   enclosure rules is used for both sides, matching this deck's own
+#:   documented "primary rule only" approximation elsewhere).
+#: - ``via_space_min_um`` -- minimum spacing between two adjacent unit
+#:   resistors' end vias *and* between their body-layer shapes (the stricter
+#:   of the two binds, since the body spans the full unit -- including both
+#:   end vias -- so widening ``params.spacing_um`` widens both gaps at once),
+#:   floored under ``params.spacing_um`` exactly like
+#:   :data:`_PDK_CAP_GEOMETRY_MIN_UM`'s own ``cap_min_spacing_um``.
+#: - ``body_width_min_um`` -- minimum drawn width (``params.width_um``) this
+#:   level's own body-layer width rule requires. Unlike the three keys above,
+#:   this is *never* applied to drawn geometry (``width_um`` stays exactly
+#:   what the request asks for, matching every other generator's "the caller
+#:   owns the primary requested dimension" convention -- see `mos_array`'s
+#:   `w_um`/`cap_array`'s `plate_w_um`/`plate_h_um`) -- it is surfaced as a
+#:   ``drc_hints.notes`` entry instead when the request falls short, mirroring
+#:   the existing ``spacing_um``-below-margin note.
+#:
+#: sky130 levels 1-4 need no entry at all: every DRC rule those levels' own
+#: via/enclosure/spacing/width checks impose (``mcon``/``via``/``via2``/
+#: ``via3`` and their enclosing ``met1``..``met4`` rules,
+#: ``klayout_tools.decks.sky130``) is already looser than the generic
+#: :data:`CONTACT_SIZE_UM` (0.22um) / :data:`ENCLOSURE_MARGIN_UM` (0.1um) /
+#: :data:`MIN_SAME_LAYER_SPACING_UM` (0.4um) / :data:`UNIT_MIN_W_UM` (0.42um)
+#: constants every other generator already relies on. Level 5 (``met5``/
+#: ``via4``) is the one exception -- sky130's top redistribution metal carries
+#: markedly coarser rules than every level below it:
+#:
+#: - ``via_min_w_um`` 0.8um -- ``via4.width.1`` (``sky130A_mr.drc`` rule
+#:   ``via4.1_a``).
+#: - ``via_enclosure_min_um`` 0.31um -- ``met5.enclosing.via4.1``
+#:   (``sky130A_mr.drc`` rule ``m5.3``; ``met4``'s own enclosure of the same
+#:   via, ``met4.enclosing.via4.1``/``via4.4``, is looser at 0.19um, so using
+#:   the stricter value for both sides is conservative, never a violation).
+#: - ``via_space_min_um`` 1.6um -- the *stricter* of ``via4.space.1``
+#:   (``sky130A_mr.drc`` rule ``via4.2``, 0.8um, the end-via-to-end-via gap)
+#:   and ``met5.space.1`` (rule ``m5.2``, 1.6um, the met5 body-to-body gap the
+#:   same ``params.spacing_um`` also controls, since the body spans the
+#:   entire unit including both end vias) -- 1.6um binds.
+#: - ``body_width_min_um`` 1.6um -- ``met5.width.1`` (``sky130A_mr.drc`` rule
+#:   ``m5.1``).
+_PDK_METAL_RES_LEVEL_MIN_UM: dict[str, dict[int, dict[str, float]]] = {
+    "sky130": {
+        5: {
+            "via_min_w_um": 0.8,  # via4.width.1 (via4.1_a)
+            "via_enclosure_min_um": 0.31,  # met5.enclosing.via4.1 (m5.3)
+            "via_space_min_um": 1.6,  # max(via4.space.1=0.8, met5.space.1=1.6)
+            "body_width_min_um": 1.6,  # met5.width.1 (m5.1)
+        },
+    },
+}
+
+#: Every geometry-floor key :data:`_PDK_METAL_RES_LEVEL_MIN_UM` may carry.
+#: The first three also name the exact hidden PCell params
+#: :func:`_resistor_layer_params` resolves and ``_ResArrayPCell`` declares
+#: (the ``metal_res_`` prefix distinguishes them there, mirroring
+#: :data:`_CAP_GEOMETRY_MIN_KEYS`'s own role) -- ``body_width_min_um`` is
+#: describe()-only (see the table's own docstring above) and is never passed
+#: to the PCell.
+_METAL_RES_GEOMETRY_MIN_KEYS = (
+    "via_min_w_um",
+    "via_enclosure_min_um",
+    "via_space_min_um",
+    "body_width_min_um",
+)
+
+
+def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
+    """Every :data:`_METAL_RES_GEOMETRY_MIN_KEYS` geometry floor (um)
+    resolved for ``family``/``level`` (see
+    :data:`_PDK_METAL_RES_LEVEL_MIN_UM`), with ``0.0`` -- "no floor, draw the
+    generic geometry" -- for each key that level does not override. Safe to
+    call with ``level=0`` (the poly-body default, never in the table)."""
+    floors = _PDK_METAL_RES_LEVEL_MIN_UM.get(family, {}).get(level, {})
+    return {key: floors.get(key, 0.0) for key in _METAL_RES_GEOMETRY_MIN_KEYS}
+
+
 def _pdk_family(variant: str) -> str:
     """Map a resolved PDK ``variant`` (e.g. ``"sky130A"``, ``"gf180mcuC"``,
     ``"ihp-sg13g2"``) to the layer-role family key
@@ -2053,22 +2265,65 @@ def _resistor_layer_params(
 
     Also resolves ``dummy_layer``/``dummy_present`` (issue #491), the same
     optional PDK dummy-device marker :func:`_device_layer_params` resolves --
-    see that function's docstring."""
+    see that function's docstring.
+
+    ``params.metal_level`` (issue #1639), when non-zero, switches this
+    generator entirely off the poly-body path above: ``poly_layer``/
+    ``contact_layer``/``metal_layer`` resolve instead to that level's
+    ``body``/``via``/``landing`` layers (see :data:`_PDK_METAL_RES_LEVELS`),
+    ``res_mark_layer``/``res_mark_present`` resolve to that level's own
+    resistor-ID marker (unconditionally present -- every entry in
+    :data:`_PDK_METAL_RES_LEVELS` carries one), and every
+    ``res_flavor_<i>_present`` slot is forced ``False`` -- sky130's
+    ``res_generic_mN`` classes declare no ``requires`` masks at all, so
+    ``params.flavor`` is simply ignored in this mode (like
+    `bond_pad`'s own `via_style`-has-no-effect precedent, an unused param in
+    one mode is reported, not rejected -- see :func:`_res_array_describe`).
+    Also resolves the three ``metal_res_via_*`` geometry floors (see
+    :data:`_PDK_METAL_RES_LEVEL_MIN_UM`/:func:`_metal_res_geometry_min_um`);
+    the poly-body path (``metal_level=0``) leaves them at the PCell's own
+    ``0.0`` default (omitted here), which :func:`_res_unit_layout`/
+    :func:`_res_array_layout` already treat as "no floor, draw the generic
+    geometry"."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    dummy = _role_layer_info(family, "dummy")
+    dummy_params: dict[str, Any] = {
+        "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
+        "dummy_present": dummy is not None,
+    }
+
+    metal_level = params.get("metal_level", 0)
+    if metal_level:
+        levels = _metal_res_layers(family, metal_level)
+        resolved: dict[str, Any] = {
+            "poly_layer": kdb.LayerInfo(*levels["body"]),
+            "contact_layer": kdb.LayerInfo(*levels["via"]),
+            "metal_layer": kdb.LayerInfo(*levels["landing"]),
+            "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
+            "res_mark_present": True,
+            **dummy_params,
+        }
+        for i in range(_MAX_RES_FLAVOR_LAYERS):
+            resolved[f"res_flavor_{i}_layer"] = kdb.LayerInfo(0, 0)
+            resolved[f"res_flavor_{i}_present"] = False
+        floors = _metal_res_geometry_min_um(family, metal_level)
+        resolved["metal_res_via_min_w_um"] = floors["via_min_w_um"]
+        resolved["metal_res_via_enclosure_min_um"] = floors["via_enclosure_min_um"]
+        resolved["metal_res_via_space_min_um"] = floors["via_space_min_um"]
+        return resolved
+
     flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
     flavor_layers = _res_flavor_layers(family, flavor)
     mark = _role_layer_info(family, "res_mark")
-    dummy = _role_layer_info(family, "dummy")
-    resolved: dict[str, Any] = {
+    resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
         "metal_layer": _role_layer_info(family, "metal"),
         "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "res_mark_present": mark is not None,
-        "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
-        "dummy_present": dummy is not None,
+        **dummy_params,
     }
     for i in range(_MAX_RES_FLAVOR_LAYERS):
         pair = flavor_layers[i] if i < len(flavor_layers) else None
@@ -3284,7 +3539,12 @@ def _mos_array_layout(
     }
 
 
-def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
+def _res_unit_layout(
+    length_um: float,
+    width_um: float,
+    via_min_w_um: float = 0.0,
+    via_enclosure_min_um: float = 0.0,
+) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
     of ``length_um`` between two contact+local-metal end pads.
 
@@ -3297,8 +3557,22 @@ def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
     poly behind for the contacts to land on -- see
     ``klayout_tools.extract._resolve_resistors``, which subtracts the
     recognised body from the conductor region to derive the terminal poly.
+
+    ``via_min_w_um``/``via_enclosure_min_um`` (issue #1639, ``0.0`` by
+    default) are ``res_array``'s ``metal_level`` per-level geometry floors --
+    see :data:`_PDK_METAL_RES_LEVEL_MIN_UM` -- applied as ``max(generic,
+    floor)`` exactly like :func:`_cap_unit_layout`'s own ``*_min_*``
+    arguments, so the default ``0.0`` leaves every existing (poly-body) caller
+    byte-for-byte unchanged. Despite the ``poly``/``contact``/``metal`` box
+    keys' names (kept as-is so ``_ResArrayPCell.produce_impl`` needs no
+    change), this same geometry is what a ``metal_level`` request draws its
+    ``metN`` body / end via / landing pad on -- see
+    :func:`_resistor_layer_params`'s own docstring for how those roles are
+    resolved to different physical layers depending on ``params.metal_level``.
     """
-    contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    contact_side_um = max(CONTACT_SIZE_UM, via_min_w_um)
+    enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
+    contact_region_um = contact_side_um + 2 * enclosure_um
     total_len_um = 2 * contact_region_um + length_um
     seg_positions = [
         (0.0, contact_region_um),
@@ -3311,7 +3585,7 @@ def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
         "metal": [],
         "marker": [(contact_region_um, 0.0, contact_region_um + length_um, width_um)],
     }
-    contact_half = CONTACT_SIZE_UM / 2.0
+    contact_half = contact_side_um / 2.0
     for sx0, sx1 in seg_positions:
         boxes["metal"].append((sx0, 0.0, sx1, width_um))
         cx = (sx0 + sx1) / 2.0
@@ -3342,6 +3616,9 @@ def _res_array_layout(
     num: int,
     dummy: int,
     rows: int = 1,
+    via_min_w_um: float = 0.0,
+    via_enclosure_min_um: float = 0.0,
+    min_spacing_um: float = 0.0,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
     into ``rows`` parallel rows in boustrophedon ("snake") order once
@@ -3372,10 +3649,31 @@ def _res_array_layout(
     physical pad (``a_xy``/``b_xy``) reports as ``_A``/``_B`` so ``R<i>_B``
     stays physically next to ``R<i + 1>_A`` in every row, not just even
     ones.
+
+    ``via_min_w_um``/``via_enclosure_min_um`` (issue #1639, forwarded
+    unchanged to :func:`_res_unit_layout`) and ``min_spacing_um`` are
+    ``metal_level``'s own per-level geometry floors (see
+    :data:`_PDK_METAL_RES_LEVEL_MIN_UM`) -- ``min_spacing_um`` is this level's
+    own minimum spacing between adjacent unit resistors' end vias, applied to
+    ``spacing_um`` as ``max(spacing_um, min_spacing_um)`` exactly like
+    :func:`_cap_array_layout`'s own ``min_spacing_um`` floor, and reported
+    back as this function's own ``spacing_um`` so the caller (
+    :func:`_res_array_describe`) can note when it widened the request. All
+    three default to ``0.0``, leaving every existing (poly-body) caller
+    byte-for-byte unchanged.
     """
-    unit = _res_unit_layout(length_um, width_um)
-    pitch = unit["total_len_um"] + spacing_um
-    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    unit = _res_unit_layout(length_um, width_um, via_min_w_um, via_enclosure_min_um)
+    effective_spacing_um = max(spacing_um, min_spacing_um)
+    pitch = unit["total_len_um"] + effective_spacing_um
+    # Row-to-row pitch (issue #1639): the same `min_spacing_um` floor applies
+    # here too -- it is the *same* same-layer same-metal spacing rule
+    # (sky130's `met5.space.1`) that binds between two body shapes whether
+    # they are adjacent within one row or across a row transition, so using
+    # the generic `MIN_SAME_LAYER_SPACING_UM` unconditionally here (while
+    # `pitch` above already floors under `min_spacing_um`) would leave a
+    # folded (`rows > 1`) met5 request DRC-dirty even though the unfolded
+    # case is clean.
+    row_pitch = unit["height_um"] + max(MIN_SAME_LAYER_SPACING_UM, min_spacing_um)
     cols_per_row = -(-num // rows) if rows > 0 else num  # ceil(num / rows)
 
     def _row_and_column(i: int) -> tuple[int, int, int]:
@@ -3423,6 +3721,7 @@ def _res_array_layout(
         "cols_per_row": cols_per_row,
         "cells": cells,
         "dummy_cells": dummy_cells,
+        "spacing_um": effective_spacing_um,
     }
 
 
@@ -5410,6 +5709,18 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=_DEFAULT_RES_FLAVOR,
             )
             self.param(
+                "metal_level",
+                self.TypeInt,
+                "Draw a metal-layer resistor body instead of poly: 0 "
+                "(default) draws the original poly-body resistor selected "
+                "by 'flavor'; 1..5 on sky130 draws that level's "
+                "res_generic_mN device (met1..met5, its own resistor-ID "
+                "marker, and an end via/landing-pad stack down to the metal "
+                "level below) instead, ignoring 'flavor' entirely (issue "
+                "#1639)",
+                default=0,
+            )
+            self.param(
                 "poly_layer",
                 self.TypeLayer,
                 "Resistor body drawing layer",
@@ -5481,11 +5792,42 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "deck declares (see ExtractionDeck.dummy)",
                 default=False,
             )
+            # `metal_level`'s own per-level geometry floors (issue #1639) --
+            # harness-computed from the resolved PDK family/level exactly
+            # like `cap_array`'s own `cap_top_via_min_w_um`/friends. `0.0`
+            # (the poly-body default) leaves `_res_unit_layout`'s generic
+            # CONTACT_SIZE_UM/ENCLOSURE_MARGIN_UM/MIN_SAME_LAYER_SPACING_UM
+            # geometry unchanged -- see that function's own docstring.
+            self.param(
+                "metal_res_via_min_w_um",
+                self.TypeDouble,
+                "Minimum drawn side (um) for metal_level's end via on the "
+                "resolved PDK family -- 0.0 leaves the generic "
+                "CONTACT_SIZE_UM cut unchanged",
+                default=0.0,
+            )
+            self.param(
+                "metal_res_via_enclosure_min_um",
+                self.TypeDouble,
+                "Minimum enclosure (um) of metal_level's end via by the body "
+                "and landing-pad layers on the resolved PDK family -- 0.0 "
+                "leaves the generic ENCLOSURE_MARGIN_UM unchanged",
+                default=0.0,
+            )
+            self.param(
+                "metal_res_via_space_min_um",
+                self.TypeDouble,
+                "Minimum spacing (um) between metal_level's end vias on "
+                "adjacent unit resistors on the resolved PDK family -- 0.0 "
+                "draws exactly the requested spacing_um",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return (
                 f"res_array(l={self.length_um},w={self.width_um},"
-                f"n={self.num},rows={self.rows},flavor={self.flavor})"
+                f"n={self.num},rows={self.rows},flavor={self.flavor},"
+                f"metal_level={self.metal_level})"
             )
 
         def produce_impl(self) -> None:
@@ -5500,6 +5842,9 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.num,
                 self.dummy,
                 self.rows,
+                self.metal_res_via_min_w_um,
+                self.metal_res_via_enclosure_min_um,
+                self.metal_res_via_space_min_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -7821,12 +8166,26 @@ def _res_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'res_array': params.dummy must be >= 0")
     if params["rows"] < 1:
         raise GenError("generator 'res_array': params.rows must be >= 1")
+    if not (0 <= params["metal_level"] <= _MAX_METAL_RES_LEVEL):
+        raise GenError(
+            "generator 'res_array': params.metal_level must be between 0 "
+            f"(poly body, the default) and {_MAX_METAL_RES_LEVEL} -- a "
+            "generator-side structural bound, independent of which PDK "
+            "family the request eventually resolves to (see "
+            "_metal_res_layers for the per-family/level support check)"
+        )
 
 
 def _res_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     family = _pdk_family(pdk_info["variant"])
+    metal_level = params.get("metal_level", 0)
+    floors = (
+        _metal_res_geometry_min_um(family, metal_level)
+        if metal_level
+        else {key: 0.0 for key in _METAL_RES_GEOMETRY_MIN_KEYS}
+    )
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -7834,9 +8193,22 @@ def _res_array_describe(
         params["num"],
         params["dummy"],
         params["rows"],
+        floors["via_min_w_um"],
+        floors["via_enclosure_min_um"],
+        floors["via_space_min_um"],
     )
     unit = info["unit"]
-    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    # A metal-level resistor's own body layer (metN) is already a routing
+    # metal, so its ports are reported there directly -- unlike the poly-body
+    # case, where `"metal"` (li1) is the practically-routable layer one level
+    # *above* the raw poly terminal (see the module's own `_PDK_ROLE_LAYERS`
+    # "metal" role comment). Both are electrically the same net either way
+    # once `klt extract` merges connectivity through the end contact/via.
+    metal_pair = (
+        _metal_res_layers(family, metal_level)["body"]
+        if metal_level
+        else _PDK_ROLE_LAYERS[family]["metal"]
+    )
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
 
     ports = []
@@ -7882,22 +8254,48 @@ def _res_array_describe(
         )
 
     notes = []
-    if 0 <= params["spacing_um"] < MIN_SAME_LAYER_SPACING_UM:
+    # The effective spacing actually drawn -- the requested `spacing_um`,
+    # floored under `metal_level`'s own minimum body/end-via spacing (issue
+    # #1639; only sky130's met5/via4 sets one today, so every other
+    # level/family's effective spacing is exactly what was asked for --
+    # mirrors `_cap_array_describe`'s own `cap_min_spacing_um` handling).
+    effective_spacing_um = info["spacing_um"]
+    if effective_spacing_um > params["spacing_um"]:
+        notes.append(
+            f"spacing_um was widened from {params['spacing_um']}um to "
+            f"{effective_spacing_um}um -- metal_level {metal_level}'s own "
+            "minimum body/end-via spacing rule (sky130's met5.space.1) "
+            "binds above the requested value"
+        )
+    elif 0 <= effective_spacing_um < MIN_SAME_LAYER_SPACING_UM:
         notes.append(
             "spacing_um is below the recommended "
             f"{MIN_SAME_LAYER_SPACING_UM}um margin -- may violate the target "
             "PDK's minimum same-layer spacing rule"
         )
 
+    # width_um is never auto-widened (the caller owns this primary requested
+    # dimension, like `mos_array`'s `w_um`/`cap_array`'s `plate_w_um` --
+    # see :data:`_PDK_METAL_RES_LEVEL_MIN_UM`'s own docstring), so a request
+    # under metal_level's own body-width DRC rule is surfaced here instead of
+    # silently drawn non-DRC-clean or silently widened.
+    if params["width_um"] < floors["body_width_min_um"]:
+        notes.append(
+            f"width_um ({params['width_um']}um) is below metal_level "
+            f"{metal_level}'s own minimum body width "
+            f"({floors['body_width_min_um']}um) on PDK family '{family}' -- "
+            "the drawn body will violate that layer's own DRC width rule"
+        )
+
     snapped = _grid_snapped(
-        dbu, params["length_um"], params["width_um"], params["spacing_um"]
+        dbu, params["length_um"], params["width_um"], effective_spacing_um
     )
 
     return {
         "device_count": params["num"],
         "ports": ports,
         "drc_hints": {
-            "min_spacing_um": params["spacing_um"],
+            "min_spacing_um": effective_spacing_um,
             "matched_group_id": f"res_array:{params['num']}",
             "snapped_to_grid": snapped,
             "notes": notes,
@@ -9452,7 +9850,11 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
             "Unit resistor/capacitor array: a row of matched unit elements "
             "(poly body + contact + local-metal pads at both ends) with "
             "dummy elements at each end, per the sky130-bandgap-reference KB "
-            "entry's resistor-array layout idiom -- family 2."
+            "entry's resistor-array layout idiom -- family 2. "
+            "params.metal_level (1..5 on sky130) instead draws that level's "
+            "drawn metal-layer resistor (met1..met5's res_generic_mN, issue "
+            "#1639) -- body + resistor-ID marker + an end via/landing-pad "
+            "stack down to the metal level below."
         ),
         dbu=0.001,
         validate=_res_array_validate,
