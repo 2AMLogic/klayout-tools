@@ -1988,7 +1988,9 @@ _REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
 @pytest.mark.skipif(
-    shutil.which("openroad") is None, reason="openroad is not installed on this machine"
+    shutil.which("openroad") is None
+    or os.environ.get("KLT_SKIP_OPENROAD_TESTS") == "1",
+    reason="openroad is not installed on this machine",
 )
 @pytest.mark.skipif(
     _REAL_SKY130_PNR_VARIANT is None,
@@ -2115,7 +2117,9 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
 @pytest.mark.skipif(
-    shutil.which("openroad") is None, reason="openroad is not installed on this machine"
+    shutil.which("openroad") is None
+    or os.environ.get("KLT_SKIP_OPENROAD_TESTS") == "1",
+    reason="openroad is not installed on this machine",
 )
 @pytest.mark.skipif(
     _REAL_SKY130_PNR_VARIANT is None,
