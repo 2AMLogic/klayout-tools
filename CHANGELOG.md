@@ -16,6 +16,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt extract --format json` now reports
+  `devices[].instance_path` (issue #1666) — the chain of GDS-level cell
+  placements each device's recognition geometry sits inside, outermost
+  first: `[{"cell": str, "array_index": [ia, ib] | null}, ...]`, with
+  `array_index` giving the 0-based element position within a regular
+  `CellInstArray` (`null` for a plain single placement) and `[]` meaning the
+  geometry was drawn directly in the top cell. Extraction flattens the whole
+  instance tree before device recognition runs, so until now nothing in the
+  report distinguished devices coming from different repeated copies of the
+  same leaf cell; this is the device-level counterpart to the net-level
+  `nets[].net_id`/`pin_index`/`label_positions_um` disclosure added in issue
+  #1540, and is resolved positionally after extraction from each device's
+  own recorded position against the layout's instance tree. Purely additive
+  disclosure — no device, net, parameter, or written netlist line changes,
+  and `klt extract`'s `schema_version` stays `3`. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Per-device GDS instance
+  attribution" section for the worked example, the rationale for choosing an
+  additive field over a non-flattening `--preserve-instances` mode, and the
+  caveat that `[ia, ib]`'s axis is the GDS file's rather than the authoring
+  order's.
 - **Fixed**: `klt lvs`'s internal `_prune_extra_top_circuits` now compares
   circuits by identity (`circuit is not keep`) instead of `cell_index`
   (issue #1657). Every netlist read directly from SPICE/Verilog text — every
