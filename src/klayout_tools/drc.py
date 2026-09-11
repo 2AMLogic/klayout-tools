@@ -60,7 +60,17 @@ from .decks import (
 from .layers import layers_report
 
 # Check kinds that operate on a single region (no other_layer).
-_SINGLE_LAYER_CHECKS = {"width", "space", "notch"}
+# "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
+# -- unlike "space" (`Region.space_check`) -- measures spacing between
+# *different* polygons of a merged region only, never a concave notch
+# carved into one polygon. It exists as a first-class check kind so a rule
+# transcribed from a source rule whose real semantics is `isolated` (e.g.
+# sky130's `nwell.2a`, see `decks/sky130.py`'s `nwell.space.1`) can use the
+# primitive that actually matches it, instead of the strictly-stricter
+# `"space"` substitute. Already used internally for gf180mcu's
+# `mim.space.1` peer check (see `peer_edge_pairs` below) before this issue
+# exposed it as a `DrcRule.check` option.
+_SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
 # Check kinds that compare a region against another region (other_layer required).
 _TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside

@@ -212,13 +212,20 @@ class DrcRule:
 
     ``layer`` and ``other_layer`` are ``(layer, datatype)`` pairs. ``check``
     selects which ``klayout.db.Region`` check primitive to run:
-    ``"width"`` / ``"space"`` / ``"notch"`` are single-layer checks;
-    ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"`` are
-    two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
+    ``"width"`` / ``"space"`` / ``"notch"`` / ``"isolated"`` are single-layer
+    checks; ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"``
+    are two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
     and ``"antenna"`` (issue #812) are a third shape entirely -- see their own
     fields below and ``drc.py``'s ``_run_area_check``/``_run_density_check``/
     ``_run_antenna_check`` for why they cannot reuse ``threshold_dbu`` or the
     ``EdgePairs``-shaped result the checks above return.
+    ``"isolated"`` (``Region.isolated_check``, issue #1654) measures spacing
+    between *different* polygons of a merged region only -- unlike
+    ``"space"`` (``Region.space_check``), it never flags a concave notch
+    carved into a single polygon. Use it for a rule transcribed from a
+    source rule whose real semantics is "isolated"/"distinct polygon"
+    spacing (as opposed to "space", which also bounds intra-polygon
+    notches) -- see ``sky130.py``'s ``nwell.space.1`` for a worked example.
     ``threshold_dbu`` is the
     rule's distance threshold expressed in database units of the deck's own
     *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM`` constant — e.g.
