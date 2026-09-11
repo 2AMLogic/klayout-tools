@@ -352,6 +352,23 @@ identically as long as it reports the same `ports[]`/`bbox_um` shape —
 mirroring the same "engine swap invisible to the caller" property the
 original generator contract already has relative to its own PCell backend.
 
+**Post-spike addendum (#1679):** trusting a declared `bbox_um` verbatim for
+*placement math* also meant nothing ever cross-checked it against the
+block's own stream — so a `generator_report` whose declared `bbox_um`
+understates its real drawn extent (e.g. an externally-produced macro whose
+guard/seal ring extends past the bbox it happened to report) could place a
+neighbour just outside the *declared* box but still inside the *real* one,
+composing a `klt drc`-clean same-layer short that only surfaced later via
+`klt extract`'s `merged_net_labels` diagnostic — silently corrupting the
+macro's own connectivity. `gen-compose` now adds one additional advisory
+check (`docs/cli/gen-compose.md` → "A declared `bbox_um` is trusted, not
+verified") that *reads* each block's own stream to compare its real bbox
+against what it declared, purely to detect this discrepancy — placement
+offsets themselves are still computed from declared `bbox_um` alone, exactly
+as this guarantee states; nothing about *where* a block gets placed changes,
+only whether a caller is warned about geometry a declared `bbox_um` never
+admitted to.
+
 ### Proposed exit codes
 
 Extending `klt gen`'s own trichotomy (`docs/cli/gen.md`):

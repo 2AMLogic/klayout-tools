@@ -1678,6 +1678,59 @@ as good as the input: a block whose `generator_report` doesn't report a
 courtesy for generators (like `guard_ring`) that do report one, not a
 general-purpose spacing check.
 
+### A declared `bbox_um` is trusted, not verified (#1679)
+
+Every check above — including the clearance advisory just described —
+compares **declared** `bbox_um` values. For a `blocks[].generator_report`
+entry, `bbox_um` is whatever that report says (`_parse_blocks` never reads
+the block's own stream to confirm it); only a `blocks[].cell` entry with no
+`bbox_um` of its own falls back to reading the stream's real
+`kdb.Cell.dbbox()`. A `generator_report` whose declared `bbox_um` understates
+the block's real drawn extent — for example a `klt place-and-route`-produced
+macro whose guard ring, seal ring, or redistribution layer extends past the
+bbox its own report happened to declare — can silently corrupt a composition
+even when every declared-bbox-based check above finds nothing wrong: a second
+block placed just outside the *declared* bbox, but still inside the *real*
+one, physically overlaps the first block's undeclared excess geometry. `klt
+drc` reports this clean (the merged shapes are not an illegal shape by any
+spacing rule); the corruption only otherwise surfaces later as a spurious
+`klt extract` `merged_net_labels` entry joining two of the macro's own
+unrelated nets — even though extracting the same, unmodified macro GDS
+directly (no composition) is clean.
+
+`gen-compose` closes most of this gap with a second advisory check,
+independent of (and broader than) the declared-bbox clearance check above:
+for every block whose real, stream-read placed bbox is **not** contained in
+its own declared `bbox_um` (beyond a small dbu-quantization tolerance), it
+reads that block's real per-layer drawn geometry and every other block's
+real per-layer drawn geometry, and checks for an actual shape overlap on any
+layer they share. A confirmed overlap adds one `warnings[]` entry naming both
+blocks and the shared layer:
+
+```json
+{
+  "warnings": [
+    "block 'macro' draws real geometry on layer 67/20 that extends past its own declared bbox_um (0.000, 0.000)-(2.000, 2.000) -- that excess geometry overlaps block 'blockb' there. `klt drc` will not flag this (a zero-clearance same-layer merge is not an illegal shape by any spacing rule), but `klt extract` will report a spurious merged_net_labels short once the composed output is extracted"
+  ]
+}
+```
+
+Like every other geometry check in this module, this never raises and never
+blocks composition — it applies to `"row"` and `"explicit"` placement alike
+(both place from the same, potentially-inaccurate declared `bbox_um`;
+`"array"` never triggers it in practice, since it always resolves to exactly
+one `blocks[]` entry, so there is no second block to overlap). It costs
+nothing when every block's declared `bbox_um` already matches its own real
+geometry (the common case for a `klt gen`-produced block, whose own report is
+derived from the same geometry it just drew) — the expensive per-layer
+geometry read only runs for a block whose declared and real bboxes disagree
+in the first place. If your composition includes a block from a tool this
+repository does not control (e.g. a `klt place-and-route` macro, or any
+externally-produced `generator_report`), treat this warning as a signal that
+the block's own `bbox_um` needs correcting at the source, not merely that the
+two blocks named here should be moved apart — the same undeclared excess
+geometry can overlap a *different* neighbour the next time placement changes.
+
 ## Array placement (a repeated-block regular tiling, #1053)
 
 `"row"` and `"explicit"` both place a distinct block once each. Neither
