@@ -16,6 +16,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt place-and-route` no longer raises `PlaceAndRouteError` when
+  reaching the `"cts"`/`"route"` stage against a
+  `gf180mcu_fd_sc_mcu7t5v0` (7-track) netlist (issue #1649). The module's six
+  per-cell-library reference tables (`_CTS_BUFFER_CELLS`,
+  `_ROUTING_LAYER_RANGE`, `_ANTENNA_DIODE_CELLS`, `_TAPCELL_CELLS`,
+  `_FILLER_CELLS`, `_POWER_PIN_PATTERNS`) previously carried only a
+  `gf180mcu_fd_sc_mcu9t5v0` (9-track) entry, so any 7-track run's table
+  lookup failed before OpenROAD did any real work. Each table now also
+  carries a verified `gf180mcu_fd_sc_mcu7t5v0` entry, sourced the same way
+  as the existing 9-track ones: `platforms/gf180/config.mk`'s
+  `TRACK_OPTION`-templated variables for the CTS buffer/tapcell/filler/power
+  pin-pattern cells, and that library's own LEF (`CLASS .../ANTENNACELL`
+  and pin data) for the antenna-diode and routing-layer-range rationale.
+
 - **Fixed**: `klt sta`'s `spef_annotation.annotation_complete` (issue #1624)
   no longer reports `true` for a SPEF OpenSTA's `read_spef` then discards.
   The field previously rested on a *name-correlation* check measured

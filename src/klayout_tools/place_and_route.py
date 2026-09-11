@@ -617,9 +617,19 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
 #:   *not* mirrored from the sky130hd entry's derivation here, since
 #:   ``dlya`` is a delay cell for hold fixing, the wrong shape for a
 #:   clock-tree root buffer.
+#: - ``gf180mcu_fd_sc_mcu7t5v0`` -> ``gf180mcu_fd_sc_mcu7t5v0__buf_4``: the
+#:   same ``platforms/gf180/config.mk`` ``ABC_DRIVER_CELL`` template
+#:   resolved for the platform's other supported ``TRACK_OPTION ?= 9t|7t``
+#:   value (``POWER_OPTION`` still defaults to ``5v0``), i.e.
+#:   ``gf180mcu_fd_sc_mcu7t5v0__buf_4`` (issue #1649). Confirmed present as
+#:   ``MACRO gf180mcu_fd_sc_mcu7t5v0__buf_4`` in that library's own LEF
+#:   (``libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef``,
+#:   gf180mcuA variant), and not excluded by the platform's
+#:   ``DONT_USE_CELLS = *_1``.
 _CTS_BUFFER_CELLS: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130_fd_sc_hd__buf_4",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu_fd_sc_mcu9t5v0__buf_4",
+    "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu_fd_sc_mcu7t5v0__buf_4",
 }
 
 #: Per-cell-library ``set_routing_layers -signal`` range for the ``"route"``
@@ -656,9 +666,21 @@ _CTS_BUFFER_CELLS: dict[str, str] = {
 #: itself, above that line, and each is independently corroborated against
 #: the platform's own open-source LEFs (issue #637). Values above read
 #: 2026-08-09 from ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``.
+#:
+#: ``gf180mcu_fd_sc_mcu7t5v0`` (issue #1649) shares the ``gf180mcu_fd_sc_
+#: mcu9t5v0`` entry's value verbatim: ``platforms/gf180/config.mk``'s
+#: ``MIN_ROUTING_LAYER ?= Metal2``/``MAX_ROUTING_LAYER ?= Metal5`` are plain,
+#: un-templated values -- unlike ``TECH_LEF``/``SC_LEF``/``FILL_CELLS``/etc,
+#: they do not interpolate ``$(TRACK_OPTION)``, so the platform pins the same
+#: routing-layer range regardless of the ``9t``/``7t`` track option. The same
+#: ``Metal1``-reserved-for-pin-access rationale above also holds for this
+#: library: its own ``buf_4``'s ``I``/``Z`` are both ``LAYER Metal1`` in
+#: ``libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef``
+#: (gf180mcuA variant).
 _ROUTING_LAYER_RANGE: dict[str, str] = {
     "sky130_fd_sc_hd": "met1-met5",
     "gf180mcu_fd_sc_mcu9t5v0": "Metal2-Metal5",
+    "gf180mcu_fd_sc_mcu7t5v0": "Metal2-Metal5",
 }
 
 #: Per-cell-library fallback "row rail" ``-followpins`` PDN stripe, emitted
@@ -683,15 +705,16 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
 #: strap later lands in that same gap (see this module's own "Power
 #: delivery" docstring section and issue #1442 for the full analysis).
 #:
-#: This table intentionally covers only ``sky130_fd_sc_hd``:
-#: ``gf180mcu_fd_sc_mcu9t5v0`` is not affected -- its own
-#: :data:`_ROUTING_LAYER_RANGE` entry starts one layer *above* where that
-#: library's row rail lives (``Metal2``, not ``Metal1`` -- see that table's
-#: own docstring), so its signal router never shares a layer with the row
-#: rail in the first place, and this repo has no independently-verified
-#: gf180mcu row-rail geometry to add here regardless (this table follows the
-#: same "not derivable from the install, verified not guessed" posture as
-#: every other per-library table in this module).
+#: This table intentionally covers only ``sky130_fd_sc_hd``: neither
+#: gf180mcu cell library is affected -- both ``gf180mcu_fd_sc_mcu9t5v0`` and
+#: ``gf180mcu_fd_sc_mcu7t5v0`` (issue #1649) share the same
+#: :data:`_ROUTING_LAYER_RANGE` entry, which starts one layer *above* where
+#: that platform's row rail lives (``Metal2``, not ``Metal1`` -- see that
+#: table's own docstring), so their signal router never shares a layer with
+#: the row rail in the first place, and this repo has no independently-
+#: verified gf180mcu row-rail geometry to add here regardless (this table
+#: follows the same "not derivable from the install, verified not guessed"
+#: posture as every other per-library table in this module).
 #:
 #: Values sourced 2026-08-26 from the real ``openroad/orfs:latest``
 #: container's own vendored ORFS checkout (``The-OpenROAD-Project/
@@ -744,6 +767,13 @@ _ROW_RAIL_STRAP: dict[str, tuple[str, float, float, float, str, str]] = {
 #:   only ``ANTENNACELL``-classed macro (``CLASS core ANTENNACELL``), with
 #:   exactly one non-power/ground pin (``I``, ``DIRECTION INPUT``; ``VDD``/
 #:   ``VSS`` are ``USE power``/``USE ground``).
+#: - ``gf180mcu_fd_sc_mcu7t5v0`` -> ``gf180mcu_fd_sc_mcu7t5v0__antenna``,
+#:   pin ``I`` (issue #1649) -- that library's own LEF
+#:   (``libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef``,
+#:   gf180mcuA variant)'s only ``ANTENNACELL``-classed macro (``CLASS core
+#:   ANTENNACELL``), with exactly one non-power/ground pin (``I``,
+#:   ``DIRECTION INPUT``; ``VDD``/``VNW`` are ``USE POWER``, ``VSS``/``VPW``
+#:   are ``USE GROUND``) -- the same shape as the ``9t`` sibling above.
 #:
 #: The pin is recorded here for verification/documentation only (confirming
 #: each cell has exactly one signal pin, matching what OpenROAD's own
@@ -760,6 +790,7 @@ _ROW_RAIL_STRAP: dict[str, tuple[str, float, float, float, str, str]] = {
 _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__diode_2", "DIODE"),
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__antenna", "I"),
+    "gf180mcu_fd_sc_mcu7t5v0": ("gf180mcu_fd_sc_mcu7t5v0__antenna", "I"),
 }
 
 #: Per-cell-library ``add_global_connection`` pin-pattern rules for the
@@ -787,6 +818,13 @@ _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
 #: - `sky130_fd_sc_hd` -> `platforms/sky130hd/pdn.tcl`
 #: - `gf180mcu_fd_sc_mcu9t5v0` ->
 #:   `platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg`
+#: - `gf180mcu_fd_sc_mcu7t5v0` (issue #1649) ->
+#:   `platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg`'s `global
+#:   connections` section -- byte-for-byte the same `add_global_connection`
+#:   pattern list as the `9t` config above (`PDN_TCL ?= .../pdn_grid_strategy_
+#:   $(TRACK_OPTION)_6M.cfg` selects the sibling file per `TRACK_OPTION`, but
+#:   both files' global-connection rules are identical), fetched 2026-09-11
+#:   from the same `OpenROAD-flow-scripts` @ `master`.
 _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
     "sky130_fd_sc_hd": (
         ("power", "^VDD$", True),
@@ -800,6 +838,18 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("ground", "VNB", False),
     ),
     "gf180mcu_fd_sc_mcu9t5v0": (
+        ("power", "^VDD$", True),
+        ("power", "^VDDPE$", False),
+        ("power", "^VDDCE$", False),
+        ("power", "^VDDP$", False),
+        ("power", "^VDDC$", False),
+        ("power", "^VNW$", False),
+        ("ground", "^VSS$", True),
+        ("ground", "^VSSE$", False),
+        ("ground", "^VSSC$", False),
+        ("ground", "^VPW$", False),
+    ),
+    "gf180mcu_fd_sc_mcu7t5v0": (
         ("power", "^VDD$", True),
         ("power", "^VDDPE$", False),
         ("power", "^VDDCE$", False),
@@ -830,11 +880,25 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
 #:   gf180mcu_fd_sc_mcu9t5v0__endcap` (`TRACK_OPTION ?= 9t`, `POWER_OPTION ?=
 #:   5v0` are that platform's own defaults, matching this supported
 #:   `cell_library` name).
+#: - `gf180mcu_fd_sc_mcu7t5v0` (issue #1649) -> the same
+#:   `platforms/gf180/openROAD/tapcell.tcl`/`config.mk` templates resolved
+#:   for `TRACK_OPTION = 7t` instead: `TIE_CELL`/`ENDCAP_CELL` both
+#:   interpolate `$(TRACK_OPTION)$(POWER_OPTION)`, giving
+#:   `gf180mcu_fd_sc_mcu7t5v0__filltie`/`gf180mcu_fd_sc_mcu7t5v0__endcap`; the
+#:   `tapcell.tcl` call's own `-distance 100` is a plain, un-templated value
+#:   shared by both track options. Confirmed present as
+#:   `MACRO gf180mcu_fd_sc_mcu7t5v0__filltie`/`__endcap` in that library's own
+#:   LEF (gf180mcuA variant).
 _TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__tapvpwrvgnd_1", None, 14),
     "gf180mcu_fd_sc_mcu9t5v0": (
         "gf180mcu_fd_sc_mcu9t5v0__filltie",
         "gf180mcu_fd_sc_mcu9t5v0__endcap",
+        100,
+    ),
+    "gf180mcu_fd_sc_mcu7t5v0": (
+        "gf180mcu_fd_sc_mcu7t5v0__filltie",
+        "gf180mcu_fd_sc_mcu7t5v0__endcap",
         100,
     ),
 }
@@ -846,6 +910,14 @@ _TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
 #: (`platforms/sky130hd/config.mk`/`platforms/gf180/config.mk`,
 #: `The-OpenROAD-Project/OpenROAD-flow-scripts` @ `master`), in the same
 #: order each platform's own list names.
+#:
+#: `gf180mcu_fd_sc_mcu7t5v0` (issue #1649) reuses `platforms/gf180/
+#: config.mk`'s own `FILL_CELLS` template -- `gf180mcu_fd_sc_mcu$(TRACK_
+#: OPTION)$(POWER_OPTION)__fill_*`, largest-to-smallest -- resolved for
+#: `TRACK_OPTION = 7t` instead of the `9t` entry's default, giving the same
+#: seven sizes in the same order. Confirmed present as `MACRO
+#: gf180mcu_fd_sc_mcu7t5v0__fill_{1,2,4,8,16,32,64}` in that library's own
+#: LEF (gf180mcuA variant).
 _FILLER_CELLS: dict[str, tuple[str, ...]] = {
     "sky130_fd_sc_hd": (
         "sky130_fd_sc_hd__fill_1",
@@ -861,6 +933,15 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
         "gf180mcu_fd_sc_mcu9t5v0__fill_4",
         "gf180mcu_fd_sc_mcu9t5v0__fill_2",
         "gf180mcu_fd_sc_mcu9t5v0__fill_1",
+    ),
+    "gf180mcu_fd_sc_mcu7t5v0": (
+        "gf180mcu_fd_sc_mcu7t5v0__fill_64",
+        "gf180mcu_fd_sc_mcu7t5v0__fill_32",
+        "gf180mcu_fd_sc_mcu7t5v0__fill_16",
+        "gf180mcu_fd_sc_mcu7t5v0__fill_8",
+        "gf180mcu_fd_sc_mcu7t5v0__fill_4",
+        "gf180mcu_fd_sc_mcu7t5v0__fill_2",
+        "gf180mcu_fd_sc_mcu7t5v0__fill_1",
     ),
 }
 
