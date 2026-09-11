@@ -50,6 +50,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   longer appears in `tests/golden_deck/sky130/manifest.json` (that
   manifest's sky130 scope is `("width", "space")`). The rule itself is
   unchanged in id, layer, and 1.27 um threshold.
+- **Fixed**: `klt lvs`'s `reference.form: "gate-level-verilog"` compare no
+  longer reports a false `topology` "circuit could not be matched to a
+  counterpart" mismatch for a layout-side power-only cell — a filler cell
+  (`sky130_fd_sc_hd__fill_*`, inserted unconditionally whenever issue
+  #1442's row-rail fallback fires) or a tap cell
+  (`sky130_fd_sc_hd__tapvpwrvgnd_1`, inserted unconditionally by the
+  `tapcell` stage) — that a gate-level-Verilog reference never instantiates
+  at all (issue #1622). `klt lvs` now removes every layout circuit whose
+  entire declared pin list is a power/ground pin of `reference.library`
+  (derived per run from that library's own `.subckt` data, never a
+  cell-name glob or a hardcoded per-PDK power-pin table), along with every
+  instance of it, before the compare runs, disclosing each removal as a new
+  `severity: "warning"`, `category: "topology.power_only_pruned"`
+  `mismatches[]` entry so a `"match"` reached this way stays auditable from
+  the report alone. Scoped strictly to `reference.form:
+  "gate-level-verilog"` — the same inference is unsound against a
+  `"plain-element"`/`"subckt-call"` reference, whose pin names need not
+  overlap the layout's. Additive; `schema_version` stays `1`. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "`topology.power_only_pruned`"
+  section.
 - **Fixed**: `klt place-and-route` no longer raises `PlaceAndRouteError` when
   reaching the `"cts"`/`"route"` stage against a
   `gf180mcu_fd_sc_mcu7t5v0` (7-track) netlist (issue #1649). The module's six
