@@ -5604,12 +5604,8 @@ def test_compose_route_vs_route_collision_retries_onto_cross_block_layer_role(
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.cell("cross_retry")
-    li1_paths = [
-        s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()
-    ]
-    metal2_paths = [
-        s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()
-    ]
+    li1_paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    metal2_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
     assert len(li1_paths) == 1  # NET_H only
     assert len(metal2_paths) == 1  # NET_V's retried backbone
 
