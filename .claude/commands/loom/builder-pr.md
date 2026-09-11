@@ -791,6 +791,47 @@ immediately after the merge if GitHub closed it anyway. That leaves a close/reop
 plus notification churn on the issue — fix the body or the commit message instead of relying
 on it.
 
+### Quoting a `Closes #N`-shaped example inside a PR body closes an UNRELATED issue (#1674)
+
+The #4569 hazard above is about a stray keyword defeating `Part of #N` on the **PR's own**
+tracked issue. This one is different and easy to trigger by accident: GitHub's auto-close
+scanner matches a closing keyword adjacent to `#N` **anywhere in the raw body text, including
+inside a single-backtick inline-code span or a fenced code block** — markdown code-quoting
+gives you no protection at all.
+
+This is a real, observed incident, not a hypothetical. PR #1671's body quoted, as an
+inline-code illustrative example of a *different* bug, a line of checklist syntax that
+happened to contain a closing-keyword phrase next to an unrelated issue's number — describing
+how that OTHER issue's own checklist item was worded, not stating any intent to close it. The
+backticks made it read as an inert code sample to every human reviewer. GitHub's scanner does
+not parse markdown; it matched the keyword and the `#N` anyway, and closed that unrelated,
+still-in-progress issue the instant #1671 merged. A Curator pass caught it only by chance,
+days later.
+
+**Rule: when a PR body needs to quote example text shaped like `Close(s|d) #N` / `Fix(es|ed)
+#N` / `Resolve(s|d) #N` — for ANY issue number, not just this PR's own — break the
+keyword/`#N` adjacency so GitHub's scanner cannot read it as a directive.** Backticks do
+*not* do this. Options, in order of preference:
+
+- Rephrase to avoid the literal adjacency entirely: `"...merged, per its own closing
+  reference to #1600..."` instead of `"...(Closes #1600) merged..."`.
+- Insert a zero-width or literal space between the keyword and `#`: `` Closes # 1600 `` or
+  `` Closes #&#8203;1600 `` (HTML entity, renders as a normal `#` on GitHub, invisible to the
+  scanner's plain-text match).
+
+**Before creating the PR, run the guard this issue added** — it flags exactly this shape
+(closing-keyword text inside a code span or fence) without touching the PR's own genuine
+closing line, which is never inside a code span:
+
+```bash
+gh pr view <N> --json body -q .body | ./.loom/scripts/check-pr-body-closing-keywords.sh
+# or, before the PR exists yet:
+./.loom/scripts/check-pr-body-closing-keywords.sh --body-file /tmp/pr-body.txt
+```
+
+Exit `2` means a code-span/fenced occurrence was found — rewrite it per the rule above before
+pushing. Full incident writeup and the guard's design: `.loom/docs/pr-body-closing-keywords.md`.
+
 ### PR Creation Checklist
 
 When creating a PR, verify:
