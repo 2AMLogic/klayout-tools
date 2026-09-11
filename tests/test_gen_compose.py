@@ -5824,6 +5824,44 @@ def test_resolve_route_layer_metal3_and_via2_roles_gf180mcu():
     assert gen_compose._resolve_route_layer("gf180mcuA", "via2") == (38, 0)
 
 
+def test_resolve_via_drop_layer_metal4_to_metal3_resolves_the_via_gf180mcu():
+    # Issue #1670: a route on Metal4 (metals[3], "metal4") to a pin on
+    # Metal3 (metals[2], "metal3") is exactly one via hop apart -- resolves
+    # to a one-hop ladder through the Metal3<->Metal4 via (Via3, 40/0), the
+    # same shape #1058's Metal3<->Metal2 case above already established.
+    deck = get_extraction_deck("gf180mcu")
+    ladder, error = _resolve_via_drop_layer(deck, (46, 0), (42, 0))
+    assert ladder == (((40, 0), (42, 0), (46, 0)),)
+    assert error is None
+
+
+def test_resolve_via_drop_layer_three_hop_ladder_gf180mcu():
+    # Issue #1670's equivalent of #1567's two-hop ladder test above: a route
+    # on Metal4 (metals[3], "metal4") to a pin still on Metal1 (metals[0],
+    # the base "metal" role) is three via hops apart -- resolves to the full
+    # three-hop ladder (Via1, Via2, then Via3) against the real gf180mcu
+    # deck.
+    deck = get_extraction_deck("gf180mcu")
+    ladder, error = _resolve_via_drop_layer(deck, (46, 0), (34, 0))
+    assert ladder == (
+        ((35, 0), (34, 0), (36, 0)),
+        ((38, 0), (36, 0), (42, 0)),
+        ((40, 0), (42, 0), (46, 0)),
+    )
+    assert error is None
+
+
+def test_resolve_route_layer_metal4_and_via3_roles_gf180mcu():
+    # `routing.layer_role`/the connecting via role resolve through the same
+    # `_PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
+    # deck directly -- confirming the router-facing role names (issue #1670)
+    # match gf180mcu's own Metal4/Via3 layers, the layer a
+    # `klt place-and-route`-produced macro's own top-level pins routinely
+    # land on.
+    assert gen_compose._resolve_route_layer("gf180mcuA", "metal4") == (46, 0)
+    assert gen_compose._resolve_route_layer("gf180mcuA", "via3") == (40, 0)
+
+
 def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
     tmp_path, pdk_root
 ):
@@ -6076,6 +6114,19 @@ def test_resolve_cross_block_route_layer_gf180mcu():
     )
     assert cross_layer == (42, 0)
     assert via_layers == ((38, 0),)
+
+
+def test_resolve_cross_block_route_layer_gf180mcu_metal4():
+    # Issue #1670: "metal3" (Metal3, 42/0) and "metal4" (Metal4, 46/0) are
+    # exactly one via hop apart (Via3, 40/0) -- the pairing a
+    # `klt place-and-route`-produced macro's own Metal4 pins need to be
+    # cross-block-routable at all, mirroring "metal2"/"metal3"'s existing
+    # coverage above.
+    cross_layer, via_layers = gen_compose._resolve_cross_block_route_layer(
+        "gf180mcuA", "metal3", "metal4"
+    )
+    assert cross_layer == (46, 0)
+    assert via_layers == ((40, 0),)
 
 
 def test_resolve_cross_block_route_layer_sg13g2():
