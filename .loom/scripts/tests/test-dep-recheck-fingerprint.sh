@@ -470,6 +470,26 @@ assert_eq "blocked" "$(field "$out_single_section" VERDICT)" \
 assert_eq "333:OPEN" "$(field "$out_single_section" DEPS)" \
     "T16c: DEPS still excludes #444 from the unrelated following section"
 
+# --- T17: named-dependency - `#N` reference is not the first token after the
+# checkbox (#1669: `_extract_named_deps` used to require `#[0-9]+` to appear
+# immediately after `\[[ xX]\]`, so a prose-prefixed form like `PR #N (...)`
+# silently extracted zero dependencies and reported a false VERDICT=clear) ---
+jq -n '{body: "## Dependencies\n\n- [ ] PR #1607 (Closes #1600) merged -- lands something.\n- [ ] PR #1602 (Closes #1599) merged -- lands something else.\n- [ ] no reference on this line at all\n"}' \
+    >"$STUB_DIR/issue-6339.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-1607.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-1602.json"
+
+out_prose_prefixed="$("$TARGET_SCRIPT" named-dependency --number 6339 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_prose_prefixed" VERDICT)" \
+    "T17a: a 'PR #N (...)' prose-prefixed checklist item is no longer silently dropped -- VERDICT=blocked while both named PRs are OPEN (the #1606 regression this issue was filed against)"
+deps_prose="$(printf '%s\n' "$out_prose_prefixed" | sed -n '/^DEPS=/,/^CONCLUSION_HASH=/p' | sed '$d' | sed 's/^DEPS=//')"
+# DEPS is sorted by ref number (_named_dependency_deps), so 1602 sorts before
+# 1607 regardless of checklist-line order -- the important assertion is which
+# numbers appear (1607/1602, extracted as the FIRST #N per line) not 1600/1599
+# (the parenthetical "Closes #N" aside on each line, which must be ignored).
+assert_eq "$(printf '1602:OPEN\n1607:OPEN')" "$deps_prose" \
+    "T17b: DEPS extracts 1607 (the FIRST #N on its line, not the parenthetical 'Closes #1600') and 1602 (not 1599) -- and the line with no #N at all is skipped, not mis-parsed"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"
