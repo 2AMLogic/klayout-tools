@@ -69,6 +69,22 @@
 # `CI_APT_PER_CMD_TIMEOUT` overrides on that step in
 # `.github/workflows/ci.yml`.
 #
+# Update (issue #1665): the rewrite above was hard-coded in one direction --
+# always toward `archive.ubuntu.com`, deleting `azure.archive.ubuntu.com`
+# unconditionally -- on the assumption baked in from #1219's incident that
+# the public mirror is always the healthy one. On 2026-09-11 the roles
+# reversed: `archive.ubuntu.com` started blackholing connections while
+# `azure.archive.ubuntu.com` (the mirror the runner ships with) was fine, and
+# the unconditional rewrite deleted the only mirror that still worked, so
+# every attempt in the retry loop hit the same dead host with nothing to fail
+# over to. `sanitize_sources` now probes both candidate mirrors with a cheap,
+# bounded `curl` request before touching anything: it leaves the sources
+# alone if the mirror already in place answers, rewrites toward the other
+# candidate if that one answers instead, and -- to preserve the invariant
+# that apt must never be left with exactly one *unverified* mirror -- leaves
+# the sources untouched (rather than guessing) when neither candidate
+# answers the probe.
+#
 # Knobs (all optional; defaults are tuned for `timeout-minutes: 5`):
 #   CI_APT_DEADLINE          total wall-clock budget, seconds (default 250)
 #   CI_APT_PER_CMD_TIMEOUT   per apt-get invocation cap, seconds (default 90)
@@ -80,6 +96,11 @@
 #                            files to sanitize (default:
 #                            /etc/apt/apt-mirrors.txt -- see the Update note
 #                            above)
+#   CI_APT_MIRROR_PROBE_PATH    path appended to a candidate mirror's origin
+#                                for the reachability probe (default
+#                                /ubuntu/dists/noble/InRelease)
+#   CI_APT_MIRROR_PROBE_TIMEOUT per-probe `curl --max-time`, seconds
+#                                (default 5)
 #   CI_APT_NO_SUDO           set to any value to invoke apt-get directly
 #                            (already root, or under test)
 
@@ -89,9 +110,13 @@ DEADLINE="${CI_APT_DEADLINE:-250}"
 PER_CMD_TIMEOUT="${CI_APT_PER_CMD_TIMEOUT:-90}"
 MAX_ATTEMPTS="${CI_APT_MAX_ATTEMPTS:-4}"
 BACKOFF="${CI_APT_BACKOFF:-5}"
+PROBE_PATH="${CI_APT_MIRROR_PROBE_PATH:-/ubuntu/dists/noble/InRelease}"
+PROBE_TIMEOUT="${CI_APT_MIRROR_PROBE_TIMEOUT:-5}"
 
-# The runner-local mirror observed stalling, and the public mirror that kept
-# serving in the same window (issue #1219's log evidence).
+# The two mirrors GitHub's Ubuntu 24.04 runners ship candidates for: the
+# runner-local Azure mirror, and the public archive. Neither is assumed
+# healthy any more (issue #1665) -- `sanitize_sources` probes both at run
+# time and picks whichever answers.
 FLAKY_MIRROR="azure.archive.ubuntu.com"
 GOOD_MIRROR="archive.ubuntu.com"
 
@@ -126,13 +151,26 @@ remaining() {
     echo $((DEADLINE - SECONDS))
 }
 
-# Rewrite the flaky runner-local mirror to the public one, in place, in
-# whichever source files actually reference it. Ubuntu 24.04 uses the deb822
-# format (/etc/apt/sources.list.d/*.sources) by default, but the runner image
-# layout has varied, so both are handled. Rewriting the host (rather than
-# deleting the entry) keeps every suite/component the stanza declares --
-# apt's "configured multiple times" warning on a resulting duplicate is
-# harmless and does not fail the update.
+# Cheap reachability probe for a candidate mirror host (issue #1665). A
+# short, bounded `curl` request against a real index file is enough to tell
+# a blackholed/degraded mirror apart from a healthy one without waiting for
+# apt's own (much longer) timeout/retry budget. Missing `curl` fails the
+# probe rather than the whole script -- sanitize_sources treats that as "not
+# verified reachable" and leaves the sources untouched.
+probe_mirror() {
+    local host="$1"
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -fsS --max-time "$PROBE_TIMEOUT" -o /dev/null \
+        "http://${host}${PROBE_PATH}" 2>/dev/null
+}
+
+# Rewrite the currently-configured mirror to the other candidate, in place,
+# in whichever source files actually reference it. Ubuntu 24.04 uses the
+# deb822 format (/etc/apt/sources.list.d/*.sources) by default, but the
+# runner image layout has varied, so both are handled. Rewriting the host
+# (rather than deleting the entry) keeps every suite/component the stanza
+# declares -- apt's "configured multiple times" warning on a resulting
+# duplicate is harmless and does not fail the update.
 #
 # GitHub's real `ubuntu-24.04` runner images do not reference the mirror
 # hostname in *.sources/*.list at all: their `URIs:` line is
@@ -142,6 +180,17 @@ remaining() {
 # applies to it unmodified -- it is checked alongside the classic/deb822
 # source files below, not instead of them, since a non-GitHub or future
 # runner layout may still reference the mirror directly.
+#
+# Update (issue #1665): which mirror is "the currently-configured one" and
+# which is "the other candidate" is no longer hard-coded -- neither
+# `FLAKY_MIRROR` nor `GOOD_MIRROR` is assumed healthy. This function probes
+# before touching anything: if the mirror already in the files answers, it
+# leaves them alone; only when that one fails to answer *and* the other
+# candidate does answer does it rewrite. If neither answers, it leaves the
+# files untouched rather than guessing -- the invariant to preserve is that
+# apt is never left with exactly one mirror that hasn't been verified
+# reachable, and blindly deleting the only reachable mirror (as the previous
+# one-directional rewrite did on 2026-09-11) violates that.
 sanitize_sources() {
     local files=()
     if [[ -n "${CI_APT_SOURCE_FILES:-}" ]]; then
@@ -161,38 +210,81 @@ sanitize_sources() {
         mirror_files=(/etc/apt/apt-mirrors.txt)
     fi
 
-    # This step's own apt-get calls in this workflow job may not be the
-    # first: `install-yosys.sh`'s Yosys step comes after the ngspice step
-    # already ran this same rewrite in-place on the shared runner, so by the
-    # time this call runs, the flaky mirror may genuinely already be gone --
-    # that is success, not the drift/no-op case the warning below is for.
-    local file matched=0 already_clean=0
-    for file in "${files[@]}" "${mirror_files[@]}"; do
+    local all_candidates=("${files[@]}" "${mirror_files[@]}")
+    local file existing_files=()
+    for file in "${all_candidates[@]}"; do
         # Unmatched globs stay literal; -f skips them.
         [[ -f "$file" ]] || continue
-        if grep -q "${FLAKY_MIRROR}" "$file" 2>/dev/null; then
-            matched=1
-            log "rewriting ${FLAKY_MIRROR} -> ${GOOD_MIRROR} in $file"
-            # `-i.bak` (suffix attached, no space) is the one in-place form
-            # both GNU and BSD/macOS sed accept identically -- bare `-i`
-            # means "edit in place" on GNU but "use the next arg as the
-            # backup suffix" on BSD, which silently eats the sed script as
-            # that suffix and the file path as the script (issue #1337).
-            as_root sed -i.bak "s#${FLAKY_MIRROR//./\\.}#${GOOD_MIRROR}#g" "$file"
-            as_root rm -f "${file}.bak"
-        elif grep -q "${GOOD_MIRROR}" "$file" 2>/dev/null; then
-            already_clean=1
-        fi
+        existing_files+=("$file")
     done
 
-    if ((matched == 0 && already_clean == 0)); then
+    if ((${#existing_files[@]} == 0)); then
+        log "WARNING: no apt source/mirror-list file found among candidates" \
+            "(checked: ${all_candidates[*]}) -- nothing to sanitize; if" \
+            "apt-get still fails below, CI_APT_SOURCE_FILES/" \
+            "CI_APT_MIRROR_LIST_FILES needs updating for this runner"
+        return
+    fi
+
+    # Which candidate mirror(s) do the files currently reference? A file may
+    # legitimately reference only one, both (a partially-completed rewrite
+    # from an earlier apt-get step in this same job -- see the "prior call"
+    # note below), or neither (unrecognized runner layout / enterprise
+    # proxy).
+    local references_flaky=0 references_good=0
+    for file in "${existing_files[@]}"; do
+        grep -q "${FLAKY_MIRROR}" "$file" 2>/dev/null && references_flaky=1
+        grep -q "${GOOD_MIRROR}" "$file" 2>/dev/null && references_good=1
+    done
+
+    if ((references_flaky == 0 && references_good == 0)); then
         log "WARNING: no candidate apt source/mirror-list file referenced" \
             "${FLAKY_MIRROR} or ${GOOD_MIRROR} -- the mirror rewrite was a" \
             "no-op this run (checked: ${files[*]} ${mirror_files[*]}); if" \
             "${FLAKY_MIRROR} still shows up in apt-get output below, the" \
             "runner's real file/format has drifted from these paths and" \
             "CI_APT_SOURCE_FILES/CI_APT_MIRROR_LIST_FILES needs updating"
+        return
     fi
+
+    # Prefer treating the flaky (runner-local) mirror as "currently
+    # configured" when both are referenced, since that mirrors what the
+    # runner ships with and what #1219's original rewrite targeted first.
+    local current other
+    if ((references_flaky == 1)); then
+        current="$FLAKY_MIRROR"
+        other="$GOOD_MIRROR"
+    else
+        current="$GOOD_MIRROR"
+        other="$FLAKY_MIRROR"
+    fi
+
+    if probe_mirror "$current"; then
+        log "mirror ${current} answered a reachability probe -- leaving apt sources as-is"
+        return
+    fi
+
+    if ! probe_mirror "$other"; then
+        log "WARNING: neither ${current} nor ${other} answered a" \
+            "reachability probe (http://<host>${PROBE_PATH}, ${PROBE_TIMEOUT}s" \
+            "timeout) -- leaving apt sources untouched rather than deleting" \
+            "the only configured mirror without a verified replacement; the" \
+            "apt-get retry loop below may still succeed if this was transient"
+        return
+    fi
+
+    log "mirror ${current} failed a reachability probe and ${other} answered -- rewriting ${current} -> ${other}"
+    for file in "${existing_files[@]}"; do
+        grep -q "${current}" "$file" 2>/dev/null || continue
+        log "rewriting ${current} -> ${other} in $file"
+        # `-i.bak` (suffix attached, no space) is the one in-place form both
+        # GNU and BSD/macOS sed accept identically -- bare `-i` means "edit
+        # in place" on GNU but "use the next arg as the backup suffix" on
+        # BSD, which silently eats the sed script as that suffix and the
+        # file path as the script (issue #1337).
+        as_root sed -i.bak "s#${current//./\\.}#${other}#g" "$file"
+        as_root rm -f "${file}.bak"
+    done
 }
 
 # Run one apt-get invocation under a hard cap that never exceeds the script's

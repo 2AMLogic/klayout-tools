@@ -11,6 +11,11 @@ succeeding with the following `install` stalling (signature 2) -- because
 the second is the reason the retry has to wrap the *pair* rather than just
 `apt-get update`.
 
+The mirror-sanitization tests also put a fake `curl` on `PATH` (issue
+#1665): `sanitize_sources` probes both candidate mirrors before rewriting
+anything, so these tests control which host(s) the fake probe reports as
+reachable via `FAKE_CURL_MODE`, independent of real network access.
+
 One test asserts the workflow wiring itself, so a future edit that
 reintroduces a bare `sudo apt-get update && sudo apt-get install` into
 `.github/workflows/ci.yml` fails here rather than silently re-exposing CI to
@@ -86,6 +91,40 @@ _FAKE_DPKG = """#!/usr/bin/env bash
 exit 0
 """
 
+# Stands in for the real `curl` reachability probe `sanitize_sources` (issue
+# #1665) runs before rewriting anything. The probed host is embedded in the
+# last argument (`http://<host><path>`); which host(s) "answer" is
+# controlled by $FAKE_CURL_MODE so tests can simulate either mirror being
+# the degraded one without touching the network.
+_FAKE_CURL = r"""#!/usr/bin/env bash
+url="${@: -1}"
+host="$(echo "$url" | sed -E 's#https?://([^/]+).*#\1#')"
+
+case "$FAKE_CURL_MODE" in
+    all_ok)
+        exit 0
+        ;;
+    good_only)
+        [[ "$host" == "archive.ubuntu.com" ]] && exit 0
+        exit 7
+        ;;
+    flaky_only)
+        [[ "$host" == "azure.archive.ubuntu.com" ]] && exit 0
+        exit 7
+        ;;
+    all_fail)
+        exit 7
+        ;;
+    *)
+        # Default: mirrors the historical assumption (issue #1219) that
+        # archive.ubuntu.com is healthy -- keeps every pre-existing rewrite
+        # test's expectations (azure -> archive) unchanged.
+        [[ "$host" == "archive.ubuntu.com" ]] && exit 0
+        exit 7
+        ;;
+esac
+"""
+
 
 def _fake_bin(tmp_path: Path) -> Path:
     bindir = tmp_path / "bin"
@@ -96,6 +135,9 @@ def _fake_bin(tmp_path: Path) -> Path:
     dpkg = bindir / "dpkg"
     dpkg.write_text(_FAKE_DPKG)
     dpkg.chmod(0o755)
+    curl = bindir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(0o755)
     return bindir
 
 
@@ -419,6 +461,122 @@ def test_no_false_warning_when_a_prior_call_already_rewrote_the_file(
     )
     assert proc.returncode == 0
     assert "WARNING" not in proc.stdout
+    assert "rewriting" not in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Mirror reachability probing (issue #1665): the rewrite direction is no
+# longer hard-coded toward archive.ubuntu.com -- both candidates are probed
+# and the rewrite (if any) follows whichever one actually answers.
+# --------------------------------------------------------------------------- #
+
+
+def test_does_not_delete_a_healthy_flaky_mirror(tmp_path: Path):
+    """The exact regression from issue #1665: a fresh runner ships with only
+    azure.archive.ubuntu.com configured. If that mirror is healthy, the
+    unconditional pre-#1665 rewrite still deleted it in favor of
+    archive.ubuntu.com -- which is exactly wrong when archive.ubuntu.com is
+    the one that's degraded. The probe must see azure answering and leave
+    the sources alone."""
+    sources = tmp_path / "sources.list"
+    sources.write_text("deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n")
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://azure.archive.ubuntu.com/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+        FAKE_CURL_MODE="flaky_only",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Untouched: still exactly the original, unrewritten content.
+    assert (
+        sources.read_text()
+        == "deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n"
+    )
+    assert mirror_list.read_text() == "http://azure.archive.ubuntu.com/ubuntu/\n"
+    assert "rewriting" not in proc.stdout
+    assert "answered a reachability probe" in proc.stdout
+
+
+def test_rewrites_toward_the_flaky_mirror_when_the_good_one_is_down(
+    tmp_path: Path,
+):
+    """The scenario reported in issue #1665: archive.ubuntu.com is the
+    degraded mirror this time, and the sources already reference only it
+    (e.g. from an earlier call in the same job, or a runner default). The
+    probe must find archive.ubuntu.com unreachable and azure.archive.ubuntu.com
+    reachable, and rewrite *toward* azure -- the reverse of #1219's
+    original, one-directional fix."""
+    sources = tmp_path / "sources.list"
+    sources.write_text("deb http://archive.ubuntu.com/ubuntu/ noble main\n")
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://archive.ubuntu.com/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+        FAKE_CURL_MODE="flaky_only",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (
+        sources.read_text()
+        == "deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n"
+    )
+    assert mirror_list.read_text() == "http://azure.archive.ubuntu.com/ubuntu/\n"
+    assert "rewriting archive.ubuntu.com -> azure.archive.ubuntu.com" in proc.stdout
+
+
+def test_leaves_sources_untouched_when_neither_mirror_answers(tmp_path: Path):
+    """Both candidates can be down (or the probe itself can be blocked)
+    at once. The invariant is that apt must never be left with exactly one
+    mirror that hasn't been verified reachable -- so the script must not
+    guess: it leaves the (already-configured, unverified) mirror as-is and
+    lets the apt-get retry loop have a shot, rather than deleting it for an
+    equally-unverified alternative."""
+    sources = tmp_path / "sources.list"
+    sources.write_text("deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n")
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://azure.archive.ubuntu.com/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+        FAKE_CURL_MODE="all_fail",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "azure.archive.ubuntu.com" in sources.read_text()
+    assert "rewriting" not in proc.stdout
+    assert "WARNING" in proc.stdout
+    assert "neither" in proc.stdout
+
+
+def test_unusable_curl_is_tolerated_and_leaves_sources_untouched(tmp_path: Path):
+    """A probe that can't succeed at all -- curl missing from a minimal
+    image, or present but unable to connect -- must fail closed the same way
+    an unreachable probe does, never treated as "reachable". This exercises
+    `probe_mirror`'s `command -v curl || return 1` guard: the fake `curl` on
+    `PATH` here always exits non-zero, standing in for "no usable curl"."""
+    sources = tmp_path / "sources.list"
+    sources.write_text("deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n")
+    mirror_list = tmp_path / "apt-mirrors.txt"
+    mirror_list.write_text("http://azure.archive.ubuntu.com/ubuntu/\n")
+
+    proc, _ = _run(
+        tmp_path,
+        "ngspice",
+        CI_APT_SOURCE_FILES=str(sources),
+        CI_APT_MIRROR_LIST_FILES=str(mirror_list),
+        FAKE_CURL_MODE="all_fail",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "azure.archive.ubuntu.com" in sources.read_text()
     assert "rewriting" not in proc.stdout
 
 
