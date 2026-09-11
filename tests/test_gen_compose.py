@@ -1131,6 +1131,250 @@ def test_compose_row_strategy_has_no_clearance_warnings(tmp_path, pdk_root):
     assert report["warnings"] == []
 
 
+# --------------------------------------------------------------------------- #
+# Declared-bbox-understates-real-geometry overlap advisory (#1679)
+# --------------------------------------------------------------------------- #
+
+
+def _write_gds_with_labeled_pad(
+    path, cell_name, box_um, label_text, label_xy_um=None, dbu=0.001
+):
+    """A single li1 (67/20) pad, labelled on li1.pin (67/5), in its own top
+    cell -- the minimal drawn+labelled shape `klt extract`'s connectivity
+    needs to name a net. ``box_um`` is ``(x0, y0, x1, y1)`` in the cell's own
+    local frame; ``label_xy_um`` defaults to the box's own center.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    li1 = layout.layer(67, 20)
+    li1pin = layout.layer(67, 5)
+    cell = layout.create_cell(cell_name)
+
+    def d(v):
+        return int(round(v / dbu))
+
+    x0, y0, x1, y1 = box_um
+    cell.shapes(li1).insert(kdb.Box(d(x0), d(y0), d(x1), d(y1)))
+    lx, ly = label_xy_um or ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    cell.shapes(li1pin).insert(kdb.Text(label_text, kdb.Trans(d(lx), d(ly))))
+    layout.write(str(path))
+    return str(path)
+
+
+def test_compose_warns_when_declared_bbox_understates_real_geometry_overlap(
+    tmp_path, pdk_root
+):
+    # Issue #1679's minimal repro: "macro"'s own `generator_report.bbox_um`
+    # (0,0)-(2,2) is trusted verbatim by `_parse_blocks` and never
+    # cross-checked against its own stream -- but its real drawn geometry (a
+    # stand-in for an under-reported guard/seal ring) includes a second,
+    # electrically distinct CLK2 pad at x -1.0..-0.5 that extends well past
+    # the declared bbox. "blockb" is placed at x=-1.3 -- clear of macro's
+    # *declared* bbox (no warning from _explicit_placement_clearance_warnings
+    # above, and no min_spacing_um is even declared) but landing squarely on
+    # macro's *real* CLK2 pad. `klt drc` would report this clean (a
+    # zero-clearance same-layer merge is not an illegal shape); this new
+    # check must catch it at compose time instead of leaving it to surface
+    # only later as a spurious `klt extract` merged_net_labels short.
+    macro_gds = _write_gds_with_labeled_pad(
+        tmp_path / "macro.gds", "macro_top", (0.2, 0.2, 0.8, 0.8), "CLK"
+    )
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(macro_gds)
+    top = layout.cell("macro_top")
+    dbu = layout.dbu
+    li1 = layout.layer(67, 20)
+    li1pin = layout.layer(67, 5)
+
+    def d(v):
+        return int(round(v / dbu))
+
+    # Real geometry extending past the declared (0,0)-(2,2) bbox below --
+    # simulates a guard ring the macro's own report never accounted for.
+    top.shapes(li1).insert(kdb.Box(d(-1.0), d(-1.0), d(-0.5), d(3.0)))
+    top.shapes(li1pin).insert(kdb.Text("CLK2", kdb.Trans(d(-0.75), d(1.0))))
+    layout.write(macro_gds)
+
+    blockb_gds = _write_gds_with_labeled_pad(
+        tmp_path / "blockb.gds", "blockb_top", (0.0, 0.0, 0.6, 0.6), "DATA"
+    )
+
+    macro_report = {
+        "generator": "fake_macro",
+        "cell_name": "macro_top",
+        "gds_path": macro_gds,
+        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 2.0},
+        "ports": [{"name": "CLK", "x_um": 0.5, "y_um": 0.5, "width_um": 0.6}],
+    }
+    blockb_report = {
+        "generator": "fake_blockb",
+        "cell_name": "blockb_top",
+        "gds_path": blockb_gds,
+        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 0.6, "y1": 0.6},
+        "ports": [{"name": "DATA", "x_um": 0.3, "y_um": 0.3, "width_um": 0.6}],
+    }
+
+    output = tmp_path / "composed.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "macro", "generator_report": macro_report},
+                {"id": "blockb", "generator_report": blockb_report},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["macro", "blockb"],
+                "origins_um": {
+                    "macro": {"x": 0.0, "y": 0.0},
+                    "blockb": {"x": -1.3, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "composed_top", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert len(report["warnings"]) == 1
+    warning = report["warnings"][0]
+    assert "macro" in warning
+    assert "blockb" in warning
+    assert "67/20" in warning
+    assert "declared bbox_um" in warning
+    assert "merged_net_labels" in warning
+
+    # `klt drc` really is clean on the composed output -- this bug is defined
+    # by DRC-clean/LVS-dirty behavior, and the fix must not turn it into a
+    # DRC violation on what `klt drc` itself considers legal geometry.
+    drc_report = run_drc(str(output), "sky130", top="composed_top")
+    assert drc_report["violation_count"] == 0
+
+    # Confirming the mechanism this warning exists to flag: extracting the
+    # composed output really does merge macro's own CLK2 net onto blockb's
+    # DATA net -- connectivity that does not exist when macro is extracted
+    # standalone (the issue's own step-1/step-2 contrast).
+    ext_report = extract.run_extract(
+        str(output),
+        "sky130",
+        output=str(tmp_path / "composed.spice"),
+        top="composed_top",
+    )
+    assert {"net": "CLK2|DATA", "labels": ["CLK2", "DATA"]} in ext_report[
+        "merged_net_labels"
+    ]
+
+    macro_ext_report = extract.run_extract(
+        macro_gds, "sky130", output=str(tmp_path / "macro.spice"), top="macro_top"
+    )
+    assert macro_ext_report["merged_net_labels"] == []
+
+
+def test_compose_no_warning_when_declared_bbox_matches_real_geometry(
+    tmp_path, pdk_root
+):
+    # Control case: two ordinary `klt gen` blocks, whose declared bbox_um is
+    # always exactly their own real drawn extent -- fully overlapping origins
+    # (the existing, intentionally-tolerated #692 "no min_spacing_um declared"
+    # case) must still gain no *new* warning from this check, since neither
+    # block's real geometry ever exceeds what it declared.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=0.0)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", spacing_um=0.0)
+    output = tmp_path / "no_leak.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": {
+                    "b1": {"x": 0.0, "y": 0.0},
+                    "b2": {"x": 0.0, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "no_leak_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+
+
+def test_compose_no_warning_when_leaky_bbox_excess_does_not_overlap_a_neighbor(
+    tmp_path, pdk_root
+):
+    # A block whose real geometry exceeds its declared bbox_um (same "ring"
+    # fixture as the warning test above) but with no other block placed
+    # anywhere near the excess geometry: no warning fires -- an inaccurate
+    # bbox_um is only actionable once it actually collides with something.
+    macro_gds = _write_gds_with_labeled_pad(
+        tmp_path / "macro.gds", "macro_top", (0.2, 0.2, 0.8, 0.8), "CLK"
+    )
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(macro_gds)
+    top = layout.cell("macro_top")
+    dbu = layout.dbu
+    li1 = layout.layer(67, 20)
+    li1pin = layout.layer(67, 5)
+
+    def d(v):
+        return int(round(v / dbu))
+
+    top.shapes(li1).insert(kdb.Box(d(-1.0), d(-1.0), d(-0.5), d(3.0)))
+    top.shapes(li1pin).insert(kdb.Text("CLK2", kdb.Trans(d(-0.75), d(1.0))))
+    layout.write(macro_gds)
+
+    blockb_gds = _write_gds_with_labeled_pad(
+        tmp_path / "blockb.gds", "blockb_top", (0.0, 0.0, 0.6, 0.6), "DATA"
+    )
+
+    macro_report = {
+        "generator": "fake_macro",
+        "cell_name": "macro_top",
+        "gds_path": macro_gds,
+        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 2.0},
+        "ports": [{"name": "CLK", "x_um": 0.5, "y_um": 0.5, "width_um": 0.6}],
+    }
+    blockb_report = {
+        "generator": "fake_blockb",
+        "cell_name": "blockb_top",
+        "gds_path": blockb_gds,
+        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 0.6, "y1": 0.6},
+        "ports": [{"name": "DATA", "x_um": 0.3, "y_um": 0.3, "width_um": 0.6}],
+    }
+
+    output = tmp_path / "composed_far.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "macro", "generator_report": macro_report},
+                {"id": "blockb", "generator_report": blockb_report},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["macro", "blockb"],
+                "origins_um": {
+                    "macro": {"x": 0.0, "y": 0.0},
+                    # Far east of macro's real ring geometry (x up to 2.0)
+                    # and its declared bbox alike -- no overlap anywhere.
+                    "blockb": {"x": 10.0, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "composed_far_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+
+
 def test_compose_explicit_places_three_blocks_at_non_collinear_origins(
     tmp_path, pdk_root
 ):

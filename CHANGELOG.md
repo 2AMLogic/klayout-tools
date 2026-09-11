@@ -32,6 +32,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   configured is unaffected. See
   [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Known limitations"
   section.
+- **Fixed**: `klt gen-compose` now warns when a block's declared `bbox_um`
+  understates its own real drawn geometry, and that undeclared excess
+  geometry physically overlaps another placed block (issue #1679). A
+  `blocks[].generator_report` entry's `bbox_um` is trusted verbatim for
+  placement math (never re-derived from its own stream) — but a block whose
+  real geometry (e.g. an externally-produced macro's guard/seal ring) extends
+  past what it declared could have that excess silently overlap a neighbour
+  placed just outside the *declared* bbox but still inside the *real* one.
+  `klt drc` reports this clean (a zero-clearance same-layer merge is not an
+  illegal shape by any spacing rule); the corruption previously only
+  surfaced later as a spurious `klt extract` `merged_net_labels` entry
+  joining two of the macro's own unrelated nets, even though extracting the
+  same, unmodified macro GDS directly (no composition) was clean.
+  `gen-compose` now reads each block's own stream to compare its real placed
+  bbox against its declared one, and — only for a block where they disagree —
+  checks its real per-layer geometry against every other block's for an
+  actual shape overlap, adding one `warnings[]` entry naming both blocks and
+  the shared layer when found. Advisory-only (never raises, never blocks
+  composition), applies to `"row"`/`"explicit"` placement alike. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "A declared
+  `bbox_um` is trusted, not verified" section.
 - **Fixed**: `klt gen-compose`'s obstacle-overlap routability check is now
   layer-scoped instead of layer-agnostic (issue #1656). The check used to
   test a candidate route's backbone against every other placed block's

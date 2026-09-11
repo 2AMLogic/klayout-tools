@@ -539,6 +539,217 @@ def _explicit_placement_clearance_warnings(
     return clearance_warnings
 
 
+# Tolerance (um) for comparing a block's declared ``bbox_um`` against its own
+# real, stream-read ``kdb.Cell.dbbox()`` in
+# :func:`_declared_bbox_overlap_warnings` below -- large enough to absorb dbu
+# quantization noise between an analytically-computed declared bbox and the
+# same geometry's dbu-rounded drawn extent (dbu is typically 0.001um, so
+# quantization alone can differ by up to half a dbu step), far too small to
+# ever mask a real "declared bbox undershoots the block's own guard ring/seal
+# ring" discrepancy (#1679), which is always at least tens of nm.
+_BBOX_REALITY_TOLERANCE_UM = 1e-4
+
+
+def _bbox_contains(outer: dict[str, float], inner: dict[str, float]) -> bool:
+    """Whether ``outer`` fully contains ``inner`` (within
+    :data:`_BBOX_REALITY_TOLERANCE_UM`)."""
+    tol = _BBOX_REALITY_TOLERANCE_UM
+    return (
+        inner["x0"] >= outer["x0"] - tol
+        and inner["y0"] >= outer["y0"] - tol
+        and inner["x1"] <= outer["x1"] + tol
+        and inner["y1"] <= outer["y1"] + tol
+    )
+
+
+def _block_real_placed_bbox_um(
+    block_id: str, block: dict[str, Any], offset_um: dict[str, float]
+) -> dict[str, float] | None:
+    """A block's own *real* placed bbox -- read straight from its stream via
+    :func:`read_cell_bbox_um`, oriented and translated exactly like its
+    declared ``bbox_um`` already is -- or ``None`` when it cannot be read
+    (bad ``gds_path``/``cell_name``, or an empty cell).
+
+    Never raises: this is an advisory cross-check (#1679), and a block whose
+    stream genuinely cannot be read fails identically -- loudly, as a
+    :class:`GenComposeError` -- later in :func:`compose` regardless (when its
+    geometry is actually copied into the composed output), so silently
+    skipping the advisory here for that block costs nothing.
+    """
+    try:
+        real_bbox_um = read_cell_bbox_um(
+            block["gds_path"], block["cell_name"], where=f"block '{block_id}'"
+        )
+    except GenComposeError:
+        return None
+    orientation = block.get("orientation", "none")
+    if orientation != "none":
+        real_bbox_um = _orient_bbox_um(real_bbox_um, orientation)
+    return _translate_bbox(real_bbox_um, offset_um)
+
+
+def _read_all_block_layers_geometry(
+    block_id: str, block: dict[str, Any], offset_um: dict[str, float]
+) -> dict[tuple[int, int], dict[str, Any]]:
+    """Every layer ``block`` draws on, read into the composed frame -- the
+    same per-layer read :func:`read_block_layer_geometry` performs for one
+    caller-named layer, generalised to every layer the block's own stream
+    actually has (issue #1679's real per-layer overlap check below needs to
+    compare *whichever* layer a leaky block's excess geometry and a
+    neighbour's placement happen to share, not one route/obstacle layer
+    named in advance).
+
+    Returns ``{(layer, datatype): {"region": kdb.Region, "dbu": float}}``,
+    omitting any layer with no shapes on ``block``'s own cell (empty after
+    ``region.merge()``) -- mirrors :func:`read_block_layer_geometry`'s own
+    ``None`` return for an absent/empty layer, just keyed by every present
+    layer instead of gated on one.
+    """
+    import klayout.db as kdb
+
+    gds_path = block["gds_path"]
+    src_layout = kdb.Layout()
+    try:
+        src_layout.read(gds_path)
+    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
+        raise GenComposeError(
+            f"block '{block_id}': could not read gds_path '{gds_path}': {exc}"
+        ) from exc
+
+    src_cell_name = block["cell_name"]
+    src_cell = src_layout.cell(src_cell_name)
+    if src_cell is None:
+        raise GenComposeError(
+            f"block '{block_id}': gds '{gds_path}' has no cell named "
+            f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
+        )
+
+    dbu = src_layout.dbu
+    rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
+    trans = kdb.Trans(
+        rot,
+        mirrx,
+        int(round(offset_um["x"] / dbu)),
+        int(round(offset_um["y"] / dbu)),
+    )
+
+    geometry: dict[tuple[int, int], dict[str, Any]] = {}
+    for layer_index in src_layout.layer_indexes():
+        region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
+        region.merge()
+        if region.is_empty():
+            continue
+        region.transform(trans)
+        info = src_layout.get_info(layer_index)
+        geometry[(info.layer, info.datatype)] = {"region": region, "dbu": dbu}
+    return geometry
+
+
+def _declared_bbox_overlap_warnings(
+    order: list[str],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+) -> list[str]:
+    """Real per-layer geometry overlap advisory for a block whose declared
+    ``bbox_um`` understates its own real drawn extent (#1679).
+
+    :func:`_explicit_placement_clearance_warnings` above only ever compares
+    *declared* ``bbox_um`` values -- accurate for a ``klt gen`` block (which
+    reports its own bbox from the same geometry it just drew), but a
+    ``generator_report`` block's ``bbox_um`` is trusted verbatim
+    (:func:`_parse_blocks`) and never cross-checked against its own stream.
+    A block whose real drawn geometry extends past its declared bbox (e.g. a
+    ``klt place-and-route``-produced macro's guard/seal ring, under-reported
+    by the tool that produced it) can have that excess geometry physically
+    overlap a neighbour placed just outside the *declared* bbox but still
+    inside the *real* one -- composing a `klt drc`-clean same-layer merge
+    (not an illegal shape by any spacing rule) that only surfaces later via
+    `klt extract`'s ``merged_net_labels`` diagnostic, corrupting the macro's
+    own extracted connectivity.
+
+    Scoped to blocks whose real placed bbox (:func:`_block_real_placed_bbox_um`)
+    is not contained in their own declared ``placed_bboxes_um`` entry -- the
+    (hopefully rare) "declared bbox lies" case this bug depends on. A block
+    whose declared bbox already matches (or exceeds) its own real geometry
+    contributes nothing here, so two same-footprint blocks placed flush or
+    fully overlapping (a caller-declared, advisory-tolerated choice --
+    :func:`resolve_explicit_offsets`'s docstring) never gains a new warning
+    from this check merely for the declared overlap itself -- only an
+    *undeclared* one (real geometry the caller's own bbox_um never admitted
+    to) does. Applies regardless of ``placement.strategy`` (unlike the
+    declared-bbox clearance check above, which is ``"explicit"``-only): the
+    "row"/"array" placement math is itself computed from the same
+    unreliable declared ``bbox_um``, so it is no less exposed.
+
+    Never raises and never blocks composition, matching every other check in
+    this module's "geometry is advisory" philosophy.
+    """
+    warnings: list[str] = []
+    real_placed_bbox: dict[str, dict[str, float]] = {}
+    for block_id in order:
+        real_bbox = _block_real_placed_bbox_um(
+            block_id, blocks[block_id], offsets_um[block_id]
+        )
+        if real_bbox is not None:
+            real_placed_bbox[block_id] = real_bbox
+
+    leaky_ids = [
+        block_id
+        for block_id, real_bbox in real_placed_bbox.items()
+        if not _bbox_contains(placed_bboxes_um[block_id], real_bbox)
+    ]
+    if not leaky_ids:
+        return warnings
+
+    geometry_cache: dict[str, dict[tuple[int, int], dict[str, Any]]] = {}
+
+    def _geometry_for(block_id: str) -> dict[tuple[int, int], dict[str, Any]]:
+        if block_id not in geometry_cache:
+            geometry_cache[block_id] = _read_all_block_layers_geometry(
+                block_id, blocks[block_id], offsets_um[block_id]
+            )
+        return geometry_cache[block_id]
+
+    reported_pairs: set[frozenset[str]] = set()
+    for leaky_id in leaky_ids:
+        leaky_real_bbox = real_placed_bbox[leaky_id]
+        for other_id in order:
+            if other_id == leaky_id:
+                continue
+            pair_key = frozenset((leaky_id, other_id))
+            if pair_key in reported_pairs:
+                continue
+            # Cheap pre-filter: only reach for real per-layer geometry when
+            # the leaky block's real bbox even overlaps/touches the other
+            # block's own declared bbox -- distant blocks never do.
+            if _bbox_clearance_um(leaky_real_bbox, placed_bboxes_um[other_id]) > 0.0:
+                continue
+            leaky_geometry = _geometry_for(leaky_id)
+            other_geometry = _geometry_for(other_id)
+            for layer in sorted(set(leaky_geometry) & set(other_geometry)):
+                overlap = (
+                    leaky_geometry[layer]["region"] & other_geometry[layer]["region"]
+                )
+                if overlap.is_empty():
+                    continue
+                declared = placed_bboxes_um[leaky_id]
+                warnings.append(
+                    f"block '{leaky_id}' draws real geometry on layer "
+                    f"{layer[0]}/{layer[1]} that extends past its own "
+                    f"declared bbox_um ({declared['x0']:.3f}, {declared['y0']:.3f})-"
+                    f"({declared['x1']:.3f}, {declared['y1']:.3f}) -- that excess "
+                    f"geometry overlaps block '{other_id}' there. `klt drc` will "
+                    "not flag this (a zero-clearance same-layer merge is not an "
+                    "illegal shape by any spacing rule), but `klt extract` will "
+                    "report a spurious merged_net_labels short once the composed "
+                    "output is extracted"
+                )
+                reported_pairs.add(pair_key)
+                break
+    return warnings
+
+
 def _require_bbox(value: Any, where: str) -> dict[str, float]:
     if not isinstance(value, dict):
         raise GenComposeError(f"{where}.bbox_um must be a JSON object")
@@ -5236,6 +5447,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         warnings.extend(
             _explicit_placement_clearance_warnings(order, blocks, placed_bboxes_um)
         )
+
+    # #1679: every check above (and every placement strategy's own math)
+    # trusts a block's *declared* bbox_um -- accurate for a `klt gen` block,
+    # but a `generator_report` block's bbox_um is taken verbatim
+    # (_parse_blocks) and never cross-checked against its own stream. A
+    # block whose real drawn geometry (e.g. a guard/seal ring) extends past
+    # its declared bbox can silently overlap a neighbour placed just outside
+    # the *declared* box -- a `klt drc`-clean same-layer merge that only
+    # surfaces later via `klt extract`'s merged_net_labels diagnostic.
+    # Real-geometry-based, so (unlike the declared-bbox check above) it
+    # applies to every strategy -- "row"/"array" place from the same
+    # unreliable declared bbox_um and are no less exposed; "array" is a
+    # no-op here in practice (exactly one blocks[] entry, so no pairwise
+    # comparison is possible).
+    warnings.extend(
+        _declared_bbox_overlap_warnings(order, blocks, offsets_um, placed_bboxes_um)
+    )
 
     # --- Routing (phase 2) --------------------------------------------------
     # A connectivity[] net is routed only when routing.layer_role/width_um are
