@@ -4363,6 +4363,30 @@ def route_bundle(
     already-accepted route on the shared cross layer, where there is no
     other candidate pair left to fall back to.
 
+    **Route-vs-route cross-layer retry (issue #1680).** The two cases above
+    -- #1057's plain rejection and #1393's same-block cross-layer retry --
+    both leave one gap: a leg that ``route_two_pin`` itself already accepted
+    on the *primary* ``route_layer`` (no same-block short, #1393's own gate
+    never engaged) can still be rejected by this function's own post-hoc
+    ``leg_conflict`` call, once its footprint is compared against a
+    *different* net's already-accepted route -- and at that point
+    ``route_two_pin`` is no longer on the call stack to retry itself onto
+    ``cross_block_route_layer`` the way checks 3/4 do. When that happens and
+    ``cross_block_route_layer`` is configured, this function re-invokes
+    :func:`route_two_pin` for the identical pin pair with the primary/cross
+    layer roles swapped (``cross_block_route_layer`` as its ``route_layer``,
+    this leg's own cross-layer geometry cache as its ``block_geometry``) --
+    the same checks (including via-drop resolution for a port whose reported
+    layer differs from the new drawing layer) run exactly as they would for
+    a leg drawn on the cross layer from the start; ``leg_conflict`` is
+    re-checked against *that* result before it is accepted, so a leg that
+    conflicts on both layers still fails the whole net rather than drawing a
+    silent short. This retry is scoped to a *route-vs-route* rejection only
+    (a genuine same-layer short with no ``cross_block_route_layer``
+    configured is unaffected and still rejects exactly as before #1680) and,
+    like every other detour search in this module, offers no further
+    fallback beyond that one retried attempt.
+
     ``cross_block_route_layer``/``cross_block_geometry_for`` (issue #1168)
     mirror ``route_layer``/``block_geometry_for`` for an optional second,
     higher metal :func:`route_two_pin` retries a same-block self-net leg on
@@ -4540,6 +4564,61 @@ def route_bundle(
                         cross_geometry = cross_block_geometry_for(pin["block"])
         return geometry, cross_geometry
 
+    # Route-vs-route cross-layer retry (issue #1680): `leg_conflict` (#1057)
+    # only ever runs *after* `route_two_pin()` has already returned
+    # `routed: True` on the primary `route_layer` -- so, unlike checks 3/4's
+    # own same-layer-short retry inside that function (#1168/#1393), a
+    # rejection here never got a chance to try `cross_block_route_layer`
+    # before failing the whole net. This closure re-runs the identical pin
+    # pair with the primary/cross layer roles swapped -- `cross_geometry`
+    # (this leg's own drawn-geometry cache for `cross_block_route_layer`,
+    # the same one checks 3/4's own retry already uses) standing in for
+    # `block_geometry`, `cross_block_geometry_for` standing in for
+    # `block_geometry_for` -- so every one of `route_two_pin`'s own checks
+    # (including its own via-drop resolution for a port whose reported
+    # layer differs from this new "primary") runs exactly as they would for
+    # a leg drawn on `cross_block_route_layer` from the start, not only the
+    # narrower same-block short case #1393 already covers. No further
+    # fallback layer is offered to this retried call (`cross_block_route_
+    # layer=None`) -- one level of retry, mirroring the bound every other
+    # detour search in this module already enforces (#1167/#1393).
+    def _retry_leg_on_cross_layer(
+        i: int,
+        j: int,
+        cross_geometry: Any,
+        leg_waypoints_um: list[tuple[float, float]] | None,
+    ) -> dict[str, Any] | None:
+        if cross_block_route_layer is None or leg_conflict is None:
+            return None
+        retry_width_um = (
+            cross_block_width_um if cross_block_width_um is not None else width_um
+        )
+        retry = route_two_pin(
+            pins[i],
+            pins[j],
+            blocks,
+            offsets_um,
+            placed_bboxes_um,
+            retry_width_um,
+            cross_block_route_layer,
+            extraction_deck,
+            cross_geometry,
+            waypoints_um=leg_waypoints_um,
+            leg_conflict=leg_conflict,
+            block_geometry_for=cross_block_geometry_for,
+        )
+        if not retry["routed"]:
+            return None
+        retry_reason = leg_conflict(
+            retry["points_um"],
+            retry.get("via_drops", []),
+            retry.get("stub_widen", []),
+            retry.get("route_layer"),
+        )
+        if retry_reason is not None:
+            return None
+        return retry
+
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
 
@@ -4596,6 +4675,16 @@ def route_bundle(
                 result.get("stub_widen", []),
                 result.get("route_layer"),
             )
+            if (
+                reason is not None
+                and result.get("route_layer") != cross_block_route_layer
+            ):
+                retry = _retry_leg_on_cross_layer(
+                    i, j, cross_geometry, leg_spec.get("waypoints_um")
+                )
+                if retry is not None:
+                    result = retry
+                    reason = None
         if reason is None and result["routed"]:
             if _union(i, j):
                 components -= 1
@@ -4663,6 +4752,14 @@ def route_bundle(
                 result.get("stub_widen", []),
                 result.get("route_layer"),
             )
+            if (
+                reason is not None
+                and result.get("route_layer") != cross_block_route_layer
+            ):
+                retry = _retry_leg_on_cross_layer(i, j, cross_geometry, waypoints_um)
+                if retry is not None:
+                    result = retry
+                    reason = None
 
         if reason is None and result["routed"]:
             _union(i, j)

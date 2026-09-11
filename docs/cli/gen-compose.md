@@ -750,6 +750,30 @@ into the circuit.)
   spacing rule against each other, so they are no longer compared at all.
   Like #1057, this remains an advisory heuristic, not a substitute for
   `klt drc` — see "Geometry is advisory" above.
+- **A route-vs-route collision now retries onto `routing.cross_block_layer_role`
+  instead of failing the net outright (#1680, fixed).** #1057/#1386 above only
+  ever *rejected* a leg that collided with a different net's already-accepted
+  route — even when `routing.cross_block_layer_role` was configured, since
+  that fallback only ever fired from `route_two_pin()`'s own checks 3/4
+  (a leg crossing another pad or drawn shape on its *own* block, #1168/#1393)
+  before this issue; the #1057 check runs one level up, in `route_bundle()`,
+  *after* `route_two_pin()` has already returned, so it had no way to trigger
+  that same retry. Two different nets sharing one `routing.layer_role` purely
+  because it is the request's one primary layer — not because either
+  genuinely needs that physical plane — could not resolve a crossing between
+  them the way a real board/chip would: assigning the two to different metal
+  layers with a via at the crossing point. When `routing.cross_block_layer_role`
+  is configured, a leg rejected this way is now retried with the primary and
+  cross layers swapped — the identical pin pair re-routed by `route_two_pin()`
+  on `routing.cross_block_layer_role` (its own via-drop resolution handling
+  the transition off each port's native layer, exactly as it already does for
+  a same-block self-net that fell back there) — and accepted only if the
+  retried leg *also* clears the collision check on the cross layer. A leg
+  that collides with an already-accepted route on **both** layers still fails
+  the whole net (`unrouted_nets[]`, a `legs[].reason` entry naming the
+  colliding net) — this is a bounded, one-level retry, not a general router,
+  and a genuine same-layer short with no `routing.cross_block_layer_role`
+  configured is entirely unaffected, rejecting exactly as before this issue.
 - **A via-drop landing pad (or stub-widen box) is checked against its *own*
   block's other drawn geometry, not just against `bbox_um`/`ports[]` (#1520,
   fixed).** The two checks above only ever compare a candidate leg's own
@@ -1142,13 +1166,17 @@ retry — recursion is bounded at one level exactly as #1167's is), and one
 that actually resolved onto `routing.cross_block_layer_role`. Every other
 leg — an inter-block net, a same-block self-net that never needed the
 fallback, a caller-routed path — reaches the route-vs-route collision check
-exactly as it did before, and that check remains the sole decision-maker
-there. Nothing is waived to make a lane fit: each candidate lane goes back
-through the *whole* of `route_two_pin()` (ring checks, pad crossings,
-drawn-metal shorts, obstacle overlap, via drops) plus the route-vs-route
-collision check again, and a leg whose every lane still conflicts is still
-reported `routed: false`, with the original collision wording plus a note
-that the detour was tried.
+exactly as it did before this retry's own narrow gate. (Since #1680 below,
+the route-vs-route collision check itself also has its own, separately-gated
+retry onto `routing.cross_block_layer_role` — see "A route-vs-route collision
+now retries onto `routing.cross_block_layer_role`..." above — so a leg that
+falls through to that check is not necessarily final either; the two retries
+are independent and do not recurse into each other.) Nothing is waived to
+make a lane fit: each candidate lane goes back through the *whole* of
+`route_two_pin()` (ring checks, pad crossings, drawn-metal shorts, obstacle
+overlap, via drops) plus the route-vs-route collision check again, and a leg
+whose every lane still conflicts is still reported `routed: false`, with the
+original collision wording plus a note that the detour was tried.
 
 One consequence worth knowing: a retried lane is **not** pinned to
 `routing.cross_block_layer_role`. Because it loops clear of the block, it no
@@ -1357,7 +1385,7 @@ exit codes).
 | `routing` | object | Optional (#1188). **Absent or `{}`** with a non-empty `connectivity[]` is a **declare-only** request: every net's `pins[]` is still validated, but no metal is drawn — each net comes back in `nets[]` with `status: "unrouted"` and `reason: "routing not requested"`, and its label lands in `unrouted_nets[]` (partial-success exit code `3`; see "Response" below). Supplying **any** key of `routing` opts into routing instead, and both `routing.layer_role`/`routing.width_um` become required at that point (a `routing` object with only one of the two set is an application error, exit 1 — there is no unambiguous partial routing spec). A request with an empty `connectivity[]` ignores `routing` either way. |
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
-| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's — that retry can land the second leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
+| `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's, and (issue #1680) the general route-vs-route collision retry — any leg, same-block or inter-block, rejected for crossing a *different* net's already-accepted route is retried once with `routing.layer_role`/`routing.cross_block_layer_role` swapped before the net is failed outright. Either retry can land a leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 
