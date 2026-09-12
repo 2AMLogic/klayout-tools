@@ -5958,7 +5958,18 @@ def test_merged_gds_carries_def_component_names_as_instance_properties(tmp_path)
 # module's own docstring)
 # --------------------------------------------------------------------------- #
 
-HAVE_OPENROAD = shutil.which("openroad") is not None
+#: Real `openroad` invocations here run a full synthesis->place->route flow
+#: against a real sky130/gf180mcu PDK install -- on a dev host with a local
+#: `openroad` wrapper (even a Docker-backed one, as `shutil.which` only checks
+#: PATH resolution) these are genuinely slow, multi-minute-per-test
+#: integration runs. CI never installs `openroad` so this tier already skips
+#: there for free; `KLT_SKIP_OPENROAD_TESTS=1` (local-only, set by
+#: `npm run check:ci` -- never by CI) lets a host that *does* have `openroad`
+#: skip this tier locally too, mirroring `tests/test_extract.py`'s
+#: `KLT_SKIP_NGSPICE_TESTS` knob for the analogous ngspice case (issue #1651).
+HAVE_OPENROAD = shutil.which("openroad") is not None and (
+    os.environ.get("KLT_SKIP_OPENROAD_TESTS") != "1"
+)
 
 
 def _techlef_declares_layers(tlef_path: str, layers: tuple[str, ...]) -> bool:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import difflib
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -66,7 +67,17 @@ CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
 GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
 
-HAVE_NGSPICE = shutil.which("ngspice") is not None
+#: Real `ngspice` invocations (sky130 vendor-deck simulations) are slow and
+#: host-load-sensitive -- the same wall-clock cost is fine in CI's dedicated,
+#: uncontended runner (~3.5min for the full suite, see issue #1651) but can
+#: blow well past the local buildGate's timeout on a shared/busy host running
+#: several concurrent builders. `KLT_SKIP_NGSPICE_TESTS=1` (set by
+#: `npm run check:ci`'s local-only test script, never by CI) lets a host with
+#: ngspice installed still skip this tier locally, mirroring what already
+#: happens for free on a host with no ngspice at all.
+_NGSPICE_ON_PATH = shutil.which("ngspice") is not None
+_NGSPICE_TESTS_SKIPPED = os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1"
+HAVE_NGSPICE = _NGSPICE_ON_PATH and not _NGSPICE_TESTS_SKIPPED
 _SKIP_NO_NGSPICE = pytest.mark.skipif(
     not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
 )
