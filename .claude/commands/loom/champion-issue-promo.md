@@ -75,10 +75,16 @@ Before promoting new issues, check the current backlog distribution:
 check_backlog_balance() {
   echo "=== Backlog Tier Balance ==="
 
-  # Count issues by tier
-  tier1=$(gh issue list --label="tier:goal-advancing" --state=open --json number --jq 'length')
-  tier2=$(gh issue list --label="tier:goal-supporting" --state=open --json number --jq 'length')
-  tier3=$(gh issue list --label="tier:maintenance" --state=open --json number --jq 'length')
+  # Count issues by tier, scoped to loom:issue (Builder-visible/claimable)
+  # issues only. A tier label alone is not enough: Hermit/Architect/etc. pre-
+  # label their own split proposals with a tier before Champion ever promotes
+  # them, so an unpromoted proposal's own tier label — and its siblings' —
+  # must not count against the very cap that gates its own promotion (#1714).
+  # `gh issue list` ANDs repeated `--label` flags, so this scopes each count
+  # to "carries this tier AND is already loom:issue".
+  tier1=$(gh issue list --label="tier:goal-advancing" --label="loom:issue" --state=open --json number --jq 'length')
+  tier2=$(gh issue list --label="tier:goal-supporting" --label="loom:issue" --state=open --json number --jq 'length')
+  tier3=$(gh issue list --label="tier:maintenance" --label="loom:issue" --state=open --json number --jq 'length')
   unlabeled=$(gh issue list --label="loom:issue" --state=open --json number,labels \
     --jq '[.[] | select([.labels[].name] | any(startswith("tier:")) | not)] | length')
 
@@ -1025,9 +1031,13 @@ occupant set** that explains the deferral, since a capacity deferral has no
 verdict comment to piggyback its marker on:
 
 ```bash
-# OCCUPANTS: the same backlog occupant set already computed by
-# "Backlog Balance Check" / this tier's own gh issue list query above — pass
-# it through verbatim, comma- or whitespace-separated, `#` prefix optional.
+# OCCUPANTS: the SAME corrected backlog occupant set "Backlog Balance Check"
+# computes above (tier label AND loom:issue — never a bare tier-label count,
+# #1714) — pass it through verbatim, comma- or whitespace-separated, `#`
+# prefix optional. If recomputing directly instead of reusing that check's
+# result, use the identical filter:
+#   gh issue list --label="tier:maintenance" --label="loom:issue" --state=open \
+#     --json number --jq '[.[].number] | join(",")'
 CAP_RC=0
 ./.loom/scripts/classify-capacity-defer.sh --issue "$ISSUE_NUMBER" \
   --tier "tier:maintenance" --occupants "#6612,#6076,#6068,#5512,#4136" \
