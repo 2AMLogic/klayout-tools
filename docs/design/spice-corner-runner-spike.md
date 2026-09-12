@@ -380,3 +380,28 @@ three are now implemented as an extension of the same `local`/
 for the shipped `options.wall_clock_budget_s`/`options.resume` fields and
 the always-on orphan check. No contract decision this spike made changed;
 this is additive.
+
+## Update (issue #1686): timeout-budget preflight
+
+A per-corner `options.timeout_s` (row above) protects against a *hang*, but
+another real incident showed it does not protect against a *budget that can
+never be met*: a manifest widened a `tran` window 33× while raising
+`timeout_s` only 6×, and every corner in the grid came back `timeout` after
+burning its full budget with no usable result — ~45 wall-clock hours of
+saturated cores producing a response with zero measurements in it.
+
+`klt sim` now runs a coarse, advisory-only preflight before the grid starts,
+comparing `options.timeout_s` against the timepoints implied by a `tran`
+analysis's own step/window under a deliberately generous throughput floor —
+see `docs/cli/sim.md`'s "Timeout-budget preflight" section for the shipped
+`environment.timeout_preflight_warning` field. This issue also scoped a
+stronger, dispatch-time fail-fast guard (abort the grid once early corners
+prove the budget itself is unmeetable, not just one slow corner) — that
+guard is **not implemented**: it requires recovering how far a timed-out
+corner's simulated time actually got, and every mechanism investigated
+turned out to be unsafe or non-functional against this spike's own
+`.control`-block-based per-corner deck (see `docs/cli/sim.md`'s section for
+the empirical findings and issue
+[#1694](https://github.com/2AMLogic/klayout-tools/issues/1694), which tracks
+this open design question). No contract decision this spike made changed;
+this is additive.

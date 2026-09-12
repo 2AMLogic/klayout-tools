@@ -706,6 +706,17 @@ def run_sim(
 
     resume = resume if resume is not None else bool(options.get("resume", False))
 
+    # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
+    # check -- never blocks the sweep, only surfaces an advisory string.
+    # See `_preflight_timeout_warning`'s docstring for why this is
+    # deliberately not a real per-engine throughput estimate, and this
+    # module's "Timeout-budget preflight" section header for why a
+    # dispatch-time fail-fast guard (this issue's more impactful second
+    # acceptance criterion) is not implemented here.
+    preflight_warning = _preflight_timeout_warning(
+        analysis=analysis, timeout_s=timeout_s
+    )
+
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "sim")
 
@@ -1026,6 +1037,13 @@ def run_sim(
         # the process that would have read it live is, by definition, the
         # one that died.
         environment["orphaned"] = True
+    if preflight_warning is not None:
+        # Additive/optional: only present when the coarse, pre-grid budget
+        # preflight had something to say (issue #1686, third acceptance
+        # criterion) -- absent for the common case (an `options.timeout_s`
+        # that looks plausible for the declared `tran` window), exactly
+        # like `orphaned` above. Advisory only -- never blocks the sweep.
+        environment["timeout_preflight_warning"] = preflight_warning
     if resume:
         # Additive/optional: only present when `options.resume`/`--resume`
         # was requested -- see `run_sim`'s docstring.
@@ -2807,7 +2825,7 @@ def _run_corner(
         raw_path=raw_path,
     )
 
-    diagnostics: list[dict[str, str]] = []
+    diagnostics: list[dict[str, Any]] = []
     started = time.monotonic()
     timed_out = False
     engine_version: str | None = None
@@ -3030,6 +3048,122 @@ def _write_corner_deck(
 def _extract_engine_version(stdout: str) -> str | None:
     match = _ENGINE_VERSION_RE.search(stdout or "")
     return match.group(1) if match else None
+
+
+# --------------------------------------------------------------------------- #
+# Timeout-budget preflight (issue #1686)
+# --------------------------------------------------------------------------- #
+#
+# NOTE on scope: this issue's first two acceptance criteria (a per-corner
+# `reached_s`/`fraction` progress diagnostic sourced from ngspice's `-r`
+# rawfile, and a dispatch-time fail-fast abort built on it) turned out not
+# to be safely implementable against this module's actual per-corner deck
+# shape -- verified empirically while building this:
+#
+# 1. ngspice's command-line `-r <path>` only streams incrementally when the
+#    run is "autorun" (a bare top-level `.tran` card, no `.control` block).
+#    Every real corner deck :func:`_write_corner_deck` generates wraps the
+#    analysis in a `.control` block (for the `alter` supply-override
+#    cards), and *any* `.control` block -- even one that never calls
+#    `write` -- silently disables `-r`'s streaming behavior entirely: a
+#    `.control`-wrapped `tran` killed mid-run (`SIGTERM` or `SIGKILL`)
+#    leaves no rawfile at all, while the exact same analysis as a bare
+#    top-level card leaves a large partial rawfile behind. So `-r` would
+#    report `reached_s: null` on literally every real invocation, not "most".
+# 2. The seemingly-obvious workaround -- periodic `stop when time > <t>` /
+#    `write` / `resume` checkpoints inside the `.control` block, without an
+#    autorun card -- corrupts `.meas` correctness instead: ngspice
+#    evaluates (and prints) `.meas` results once, tied to the *first*
+#    `doAnalyses` completion (including an early `stop` pause), not to the
+#    analysis's true final completion. A `.meas ... AT=<t>` beyond the
+#    first checkpoint fails with "out of interval" at that first pause and
+#    is never re-evaluated once the run actually finishes -- silently
+#    breaking measurement extraction for the overwhelming majority of real
+#    (non-timeout) sweeps, which is unacceptable.
+#
+# Both are real, reproducible findings (not merely "harder than expected"),
+# so this Builder pass ships the parts of the issue's acceptance criteria
+# that are safe today -- the preflight heuristic below -- and files
+# https://github.com/2AMLogic/klayout-tools/issues/1694 for the harder,
+# deck-architecture-level question that `reached_s` recovery actually raises.
+# --------------------------------------------------------------------------- #
+
+
+def _parse_spice_seconds(raw: str) -> float | None:
+    """Parse a SPICE time literal (``100u``, ``1e-4``, ``5n``) to seconds,
+    reusing :data:`_WIDTH_UNIT_SUFFIXES` -- the same engineering-notation
+    suffix table :func:`_parse_width_um` uses for geometry (itself
+    deliberately duplicated from ``netlist_normalize._SPICE_SUFFIXES``, see
+    that data's own docstring). Unlike a bare geometry literal, a SPICE
+    time literal has no ambiguous "bare" case -- seconds is always the
+    implicit base unit -- so, unlike :func:`_parse_width_um`, no additional
+    unit conversion is applied on top of the suffix multiplier. Returns
+    ``None`` for anything that is not a plain numeric literal.
+    """
+    match = _WIDTH_NUMBER_RE.match(raw.strip())
+    if match is None:
+        return None
+    mantissa = float(match.group(1))
+    suffix = match.group(2).lower()
+    multiplier = 1.0
+    for name, value in _WIDTH_UNIT_SUFFIXES:
+        if suffix.startswith(name):
+            multiplier = value
+            break
+    return mantissa * multiplier
+
+
+#: Deliberately generous floor used only by :func:`_preflight_timeout_warning`
+#: -- NOT a real per-engine throughput estimate. ngspice's actual rate
+#: depends heavily on circuit size/complexity/convergence behavior and is
+#: not knowable without running it (the incident behind issue #1686
+#: observed ~18us of simulated time per wall-clock *hour*, three orders of
+#: magnitude below this). This floor exists only to catch the most
+#: obviously-impossible requests before the grid starts -- see this
+#: module's "Timeout-budget preflight" section header for why this
+#: coarse, advisory-only heuristic is what this issue ships, rather than
+#: the more impactful dispatch-time fail-fast guard it also asked for.
+_PREFLIGHT_MIN_TIMEPOINTS_PER_S = 50.0
+
+
+def _preflight_timeout_warning(
+    *, analysis: dict[str, Any], timeout_s: float
+) -> str | None:
+    """Best-effort, pre-grid sanity check of ``options.timeout_s`` against a
+    ``tran`` analysis's own declared step/window (issue #1686, third
+    acceptance criterion). Never raises and never blocks the sweep -- only
+    returns an advisory string (surfaced via
+    ``environment.timeout_preflight_warning``) when the declared timeout
+    looks implausible even under the deliberately generous per-timepoint
+    floor above.
+
+    Scoped to ``kind == "tran"`` (the only analysis with a "window of
+    simulated time" concept); returns ``None`` for anything else, or when
+    ``args``'s step/window tokens cannot be parsed.
+    """
+    if analysis.get("kind") != "tran":
+        return None
+    tokens = (analysis.get("args") or "").split()
+    if len(tokens) < 2:
+        return None
+    step_s = _parse_spice_seconds(tokens[0])
+    window_s = _parse_spice_seconds(tokens[1])
+    if step_s is None or window_s is None or step_s <= 0 or window_s <= 0:
+        return None
+    timepoints = window_s / step_s
+    min_plausible_s = timepoints / _PREFLIGHT_MIN_TIMEPOINTS_PER_S
+    if timeout_s >= min_plausible_s:
+        return None
+    return (
+        f"options.timeout_s ({timeout_s:g}s) looks implausible for a tran "
+        f"analysis with ~{timepoints:.3g} timepoints ({tokens[0]} step, "
+        f"{tokens[1]} window) -- even {_PREFLIGHT_MIN_TIMEPOINTS_PER_S:.0f} "
+        "timepoints/s (a generous floor, not a real engine-rate estimate) "
+        f"would need {min_plausible_s:.3g}s per corner. This is only a "
+        "coarse, advisory pre-grid heuristic -- it does not block the "
+        "sweep, and a plausible-looking budget can still turn out to be "
+        "too short in practice."
+    )
 
 
 def _classify_diagnostics(

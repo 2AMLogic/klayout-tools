@@ -1204,6 +1204,90 @@ def test_run_sim_stubbed_timeout_is_corner_error(tmp_path, monkeypatch):
     assert codes == ["timeout"]
 
 
+# --------------------------------------------------------------------------- #
+# Timeout-budget preflight (issue #1686)
+# --------------------------------------------------------------------------- #
+
+
+def test_preflight_timeout_warning_flags_implausible_budget():
+    # ~1e5 timepoints (1n step, 100u window); even the deliberately generous
+    # 50 timepoints/s floor needs ~2000s, so a 1s budget is obviously
+    # implausible.
+    warning = sim._preflight_timeout_warning(
+        analysis={"kind": "tran", "args": "1n 100u"}, timeout_s=1
+    )
+    assert warning is not None
+    assert "options.timeout_s" in warning
+    assert "tran" in warning
+
+
+def test_preflight_timeout_warning_none_for_plausible_budget():
+    # Same window/step as above, but a budget well above the generous floor's
+    # own minimum (~2000s) -- looks plausible, no warning.
+    warning = sim._preflight_timeout_warning(
+        analysis={"kind": "tran", "args": "1n 100u"}, timeout_s=10000
+    )
+    assert warning is None
+
+
+def test_preflight_timeout_warning_none_for_non_tran_analysis():
+    # `op`/`dc`/`ac` have no "window of simulated time" concept -- the
+    # heuristic never fires for them, however tight `timeout_s` is.
+    warning = sim._preflight_timeout_warning(
+        analysis={"kind": "op", "args": ""}, timeout_s=1
+    )
+    assert warning is None
+
+
+def test_preflight_timeout_warning_none_for_unparseable_args():
+    warning = sim._preflight_timeout_warning(
+        analysis={"kind": "tran", "args": "not-a-number"}, timeout_s=1
+    )
+    assert warning is None
+
+
+def test_run_sim_stubbed_implausible_timeout_surfaces_preflight_warning(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 100u"},
+            "options": {"timeout_s": 1},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    warning = report["environment"]["timeout_preflight_warning"]
+    assert "options.timeout_s" in warning
+    # Advisory only -- never blocks the sweep; the stubbed corner still runs
+    # and passes normally.
+    assert report["status"] == "pass"
+
+
+def test_run_sim_stubbed_plausible_timeout_omits_preflight_warning(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"timeout_s": 30},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert "timeout_preflight_warning" not in report["environment"]
+
+
 def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     _write_body(tmp_path)
     request = _write_request(
