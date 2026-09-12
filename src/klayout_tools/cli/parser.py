@@ -3657,5 +3657,17 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
             "suitable for a CI gate."
         ),
     )
+    validate_parser.add_argument(
+        "--recheck-measured",
+        action="store_true",
+        help=(
+            "Additionally re-run every distinct measured.figures[].testbench "
+            "via klt sim and fail if a recorded figure value has drifted "
+            "beyond a fixed relative tolerance from what the testbench now "
+            "produces. Expensive (actually simulates every measured entry) "
+            "-- intended for the nightly kb-drift-canary workflow, not "
+            "every-PR CI."
+        ),
+    )
     _add_format_arg(validate_parser)
     validate_parser.set_defaults(func=kb_cmd.run_validate)

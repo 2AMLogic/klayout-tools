@@ -1,0 +1,130 @@
+name: KB measured-figures drift canary
+
+# Issue #1726: #1720 added an optional `measured` block to `kb/entries/*.json`
+# entries -- numeric figures (`av_db`, `gbw_hz`, `vout_v`, ...) recorded as
+# the output of running a checked-in `klt sim` testbench on a named corner.
+# Plain `klt kb validate` (the `test` job's every-PR gate) only checks that
+# each figure's `measured.figures[].testbench` path *exists on disk* -- it
+# never re-runs the testbench, so a recorded figure can silently drift out of
+# sync with what the testbench actually produces (e.g. someone edits a
+# netlist's component values without re-running `klt sim` and updating the
+# entry's recorded value).
+#
+# This job runs the same check's `--recheck-measured` extension instead (see
+# `docs/cli/kb.md`'s "Recheck measured figures" section for the full
+# contract): re-run every distinct `measured.figures[].testbench` via
+# `klt sim`, and fail if a recorded figure has drifted beyond a fixed 1%
+# relative tolerance from what the testbench now produces. `klt kb
+# validate --recheck-measured` is the single implementation behind both this
+# job and its own dedicated test coverage in `tests/test_kb_cmd.py`, per
+# `src/klayout_tools/kb.py`'s existing convention (`_measured_errors` /
+# `klt kb validate`'s plain path check follows the same pattern).
+#
+# `workflow_dispatch`/`schedule` only, mirroring `equiv-canary.yml`'s
+# posture: actually simulating every measured KB entry's testbench --
+# including at least one (`pfd-charge-pump-tri-state`) that needs a full
+# sky130A PDK install, not just a behavioral/PDK-model-free netlist -- is not
+# free, and this corpus changes rarely enough that gating every PR on it is
+# not worth the cost. A failure here is a real finding (a KB entry's numeric
+# claims no longer match its own reproduction recipe) that a human/agent
+# should investigate -- see docs/cli/kb.md for what to do about it. This job
+# never auto-fixes a drifted figure; flagging it is the whole point.
+#
+# PDK provisioning below is deliberately NOT reinvented: it copies the same
+# pinned volare + full sky130A PDK fetch `equiv-canary.yml` /
+# `place-and-route-smoke.yml` already established (same pinned open_pdks
+# commit, for the same reproducibility reason) rather than introduce a third
+# copy of that recipe.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly, off the hour (the shared GitHub Actions scheduler is
+    # congested at the top of the hour) -- an arbitrary cadence matching the
+    # issue's "nightly" framing; adjust freely.
+    - cron: "37 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kb-drift-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kb-drift-canary:
+    name: Recheck kb/entries/*.json measured figures against a fresh klt sim
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Verify KLayout imports headlessly
+        run: |
+          uv run --frozen --extra dev python -c "
+          import klayout.db as kdb
+          print('klayout', kdb.Layout().dbu)
+          "
+
+      - name: Install ngspice
+        # See .github/workflows/ci.yml's step of the same name for the
+        # per-package/timeout rationale -- identical install path. `klt sim`
+        # (docs/cli/sim.md) invokes `ngspice -b` as a subprocess.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh ngspice
+
+      - name: Verify ngspice runs headlessly
+        run: ngspice -v
+
+      - name: Install volare
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: Cache full sky130A PDK (volare, pinned)
+        id: pdk-cache
+        uses: actions/cache@v6
+        with:
+          path: .pdk-cache
+          # Same pinned open_pdks build equiv-canary.yml/place-and-route-
+          # smoke.yml pin, reused here for reproducibility rather than
+          # "whatever volare's latest is at run time".
+          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Fetch full sky130A PDK (volare, cache miss only)
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          PDK_ROOT="${{ github.workspace }}/.pdk-cache" \
+            volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Recheck kb/ measured figures against a fresh klt sim
+        # GitHub Actions' default bash shell runs with `-eo pipefail`, so
+        # `klt kb validate`'s own nonzero exit (exit 3 -- "ran successfully
+        # but found one or more invalid entries", per docs/cli/kb.md's exit
+        # code table) fails this step -- and therefore the job -- through
+        # the `tee` pipe below, exactly as it would running the bare command.
+        # No separate "check the JSON and fail" step needed.
+        env:
+          PDK: sky130A
+          PDK_ROOT: ${{ github.workspace }}/.pdk-cache
+        run: |
+          uv run --frozen --extra dev klt kb validate --recheck-measured \
+            --format json | tee kb-drift-canary.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kb-drift-canary-report
+          path: kb-drift-canary.json
+          retention-days: 90

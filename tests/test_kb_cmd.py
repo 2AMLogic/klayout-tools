@@ -768,6 +768,216 @@ def test_validate_entries_rejects_parent_traversal_measured_testbench_path(tmp_p
 
 
 # --------------------------------------------------------------------------- #
+# validate_entries(recheck_measured=True): re-run the testbench via `klt sim`
+# (issue #1726). `kb.run_sim` is monkeypatched to a canned report rather than
+# invoking a real ngspice subprocess -- these tests exercise the comparison
+# logic (`_sim_candidate_values`/`_closest_relative_diff`/
+# `_recheck_measured_errors`), not `run_sim` itself (covered by
+# `tests/test_sim.py`).
+# --------------------------------------------------------------------------- #
+
+
+def _fake_sim_report(measurements: dict[str, float]) -> dict:
+    """Minimal stand-in for a `run_sim` report -- just the fields
+    `kb._sim_candidate_values` reads: one corner carrying each measurement's
+    raw value, plus the same value as that measurement's rolled-up
+    `worst_case` (a single-corner sweep's rollup equals its own corner)."""
+    return {
+        "corners": [
+            {
+                "corner_id": "tt/1.8V/27C",
+                "measurements": [
+                    {"name": name, "value": value}
+                    for name, value in measurements.items()
+                ],
+            }
+        ],
+        "measurements": [
+            {"name": name, "worst_case": {"value": value}}
+            for name, value in measurements.items()
+        ],
+    }
+
+
+def _entry_with_one_figure(
+    testbench: str, *, name: str = "av_db", value: float = 55.0
+) -> dict:
+    return _valid_entry(
+        "entry-a",
+        measured={
+            "pdk": "sky130",
+            "corner": "tt, 1.8V, 27C",
+            "figures": [
+                {"name": name, "value": value, "unit": "dB", "testbench": testbench}
+            ],
+        },
+    )
+
+
+def _write_testbench(tmp_path: Path) -> str:
+    rel_path = "examples/entry-a/request.json"
+    path = tmp_path / rel_path
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    return rel_path
+
+
+def test_recheck_measured_off_by_default_never_runs_sim(tmp_path, monkeypatch):
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path)})
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("run_sim must not run without --recheck-measured")
+
+    monkeypatch.setattr(kb, "run_sim", _boom)
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+
+
+def test_recheck_measured_passes_when_value_matches_fresh_sim(tmp_path, monkeypatch):
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path, value=55.0)})
+    monkeypatch.setattr(
+        kb, "run_sim", lambda *a, **k: _fake_sim_report({"av_db": 55.0})
+    )
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is True
+
+
+def test_recheck_measured_tolerates_small_relative_difference(tmp_path, monkeypatch):
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path, value=55.0)})
+    # 0.5% off -- within the 1% default tolerance.
+    monkeypatch.setattr(
+        kb, "run_sim", lambda *a, **k: _fake_sim_report({"av_db": 55.25})
+    )
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is True
+
+
+def test_recheck_measured_fails_when_value_drifted(tmp_path, monkeypatch):
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path, value=55.0)})
+    monkeypatch.setattr(
+        kb, "run_sim", lambda *a, **k: _fake_sim_report({"av_db": 40.0})
+    )
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any(
+        "measured/figures/0/av_db" in error and "drifted" in error
+        for error in result["errors"]
+    ), result["errors"]
+
+
+def test_recheck_measured_matches_via_reciprocal_duality(tmp_path, monkeypatch):
+    """A `freq_hz` figure recorded alongside a `period_s` one (see
+    `kb/entries/rc-relaxation-oscillator.json`) is the *reciprocal* of a raw
+    measurement, not a distinct one -- `_sim_candidate_values` must still
+    recheck it without drift."""
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(
+        tmp_path,
+        {"entry-a": _entry_with_one_figure(rel_path, name="freq_hz", value=2.0)},
+    )
+    monkeypatch.setattr(
+        kb, "run_sim", lambda *a, **k: _fake_sim_report({"period": 0.5})
+    )
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is True
+
+
+def test_recheck_measured_reports_sim_failure(tmp_path, monkeypatch):
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path)})
+
+    def _raise(*_args, **_kwargs):
+        raise kb.SimError("ngspice exited nonzero")
+
+    monkeypatch.setattr(kb, "run_sim", _raise)
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any(
+        "failed to reproduce this testbench" in error for error in result["errors"]
+    ), result["errors"]
+
+
+def test_recheck_measured_skips_when_testbench_path_already_missing(
+    tmp_path, monkeypatch
+):
+    """A missing/absolute/escaping testbench path is already reported by the
+    plain path-existence check -- `--recheck-measured` must not also try
+    (and fail) to run it."""
+    root = _make_kb(
+        tmp_path,
+        {"entry-a": _entry_with_one_figure("examples/entry-a/does-not-exist.json")},
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("run_sim must not run for a missing testbench path")
+
+    monkeypatch.setattr(kb, "run_sim", _boom)
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any("does not exist" in error for error in result["errors"])
+
+
+def test_recheck_measured_caches_one_sim_run_per_testbench(tmp_path, monkeypatch):
+    rel_path = _write_testbench(tmp_path)
+    entry = _valid_entry(
+        "entry-a",
+        measured={
+            "pdk": "sky130",
+            "corner": "tt, 1.8V, 27C",
+            "figures": [
+                {
+                    "name": "period_s",
+                    "value": 0.5,
+                    "unit": "s",
+                    "testbench": rel_path,
+                },
+                {
+                    "name": "freq_hz",
+                    "value": 2.0,
+                    "unit": "Hz",
+                    "testbench": rel_path,
+                },
+            ],
+        },
+    )
+    root = _make_kb(tmp_path, {"entry-a": entry})
+
+    calls = []
+
+    def _fake_run_sim(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _fake_sim_report({"period": 0.5})
+
+    monkeypatch.setattr(kb, "run_sim", _fake_run_sim)
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is True
+    assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 
@@ -980,6 +1190,44 @@ def test_cli_validate_text_lists_invalid_entries(_cli_kb, capsys):
     out = capsys.readouterr().out
     assert "valid: no" in out
     assert "broken-entry" in out
+
+
+def test_cli_validate_recheck_measured_flag_reruns_testbench(
+    _cli_kb, tmp_path, monkeypatch, capsys
+):
+    root = _cli_kb({"entry-a": _entry_with_one_figure("examples/entry-a/request.json")})
+    (root.parent / "examples" / "entry-a").mkdir(parents=True)
+    (root.parent / "examples" / "entry-a" / "request.json").write_text("{}")
+    monkeypatch.setattr(
+        kb, "run_sim", lambda *a, **k: _fake_sim_report({"av_db": 10.0})
+    )
+
+    exit_code = main(["kb", "validate", "--recheck-measured", "--format", "json"])
+
+    assert exit_code != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    (result,) = payload["entries"]
+    assert any("drifted" in error for error in result["errors"])
+
+
+def test_cli_validate_without_recheck_measured_flag_never_runs_sim(
+    _cli_kb, tmp_path, monkeypatch, capsys
+):
+    root = _cli_kb({"entry-a": _entry_with_one_figure("examples/entry-a/request.json")})
+    (root.parent / "examples" / "entry-a").mkdir(parents=True)
+    (root.parent / "examples" / "entry-a" / "request.json").write_text("{}")
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("run_sim must not run without --recheck-measured")
+
+    monkeypatch.setattr(kb, "run_sim", _boom)
+
+    exit_code = main(["kb", "validate", "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
 
 
 def test_cli_kb_no_subcommand_prints_help(capsys):

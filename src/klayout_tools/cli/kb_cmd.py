@@ -55,7 +55,7 @@ def run_search(args: argparse.Namespace) -> int:
 
 def run_validate(args: argparse.Namespace) -> int:
     try:
-        report = validate_entries()
+        report = validate_entries(recheck_measured=args.recheck_measured)
     except KbError as exc:
         return emit_error("kb validate", str(exc), args.format)
 

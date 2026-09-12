@@ -55,6 +55,10 @@ klt kb validate                    # schema + id-matches-filename + artifact/
                                     # measured-path check; nonzero exit with
                                     # structured per-entry errors on any
                                     # failure (this is what CI runs)
+klt kb validate --recheck-measured # + re-runs each measured.figures[]
+                                    # testbench via klt sim and flags drift
+                                    # from the recorded value (expensive;
+                                    # nightly-only, see docs/cli/kb.md)
 ```
 
 `search` is deliberately stdlib-simple substring matching — no embeddings, no
