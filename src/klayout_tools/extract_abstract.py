@@ -730,20 +730,61 @@ def _def_net_name_probes(
     """Per distinct DEF net name (:data:`_DEF_NET_NAME_PROPERTY_ID`), up to
     :data:`_DEF_NET_NAME_PROBE_CANDIDATES` ``(metal_index, point)`` probe
     candidates taken from ``top_cell``'s own routed-metal shapes carrying that
-    name (issue #951). ``metal_layers`` is ``deck.metals`` -- the same
-    ``(layer, datatype)`` list :func:`_extract_netlist` builds its flattened
+    name, **plus** the same shapes one level down in each of ``top_cell``'s
+    direct child cell instances (issue #951, extended for composed macros by
+    issue #1689). ``metal_layers`` is ``deck.metals`` -- the same ``(layer,
+    datatype)`` list :func:`_extract_netlist` builds its flattened
     ``metals[]`` regions from, so ``metal_index`` indexes straight into them.
 
     Shape properties must be read off the raw ``kdb.Shape`` objects, not off
     the flattened ``Region``s the deck builds from them (a ``Region`` merge
     discards per-shape properties) -- hence the direct
-    ``top_cell.shapes(...)`` scan here. Only the top cell is scanned, not a
-    recursive flatten: a DEF->GDS merge draws the DEF's ``NETS``/
-    ``SPECIALNETS`` routed geometry directly in the top cell, and a *sub*-cell
-    shape carrying property 1 would be a standard cell's own internal
-    annotation, not a top-level net name. (Issue #1488's unrouted single-pin
-    net markers are synthesized into the **top** cell for exactly that reason,
-    even though the pin geometry they sit inside belongs to a sub-cell.)
+    ``kdb.RecursiveShapeIterator`` scan here (``Cell.begin_shapes_rec``, same
+    idiom :func:`klayout_tools._layout.region` uses for the flattened
+    ``Region`` itself) rather than a plain ``top_cell.shapes(...)`` walk.
+
+    The scan is depth-1 (``iterator.max_depth = 1``: ``top_cell``'s own
+    shapes at depth 0, plus exactly one level into each direct child cell
+    instance at depth 1), not an unbounded recursive flatten. This is a
+    deliberate, bounded extension of the original top-cell-only scan, not a
+    return to it: a DEF->GDS merge draws the DEF's ``NETS``/``SPECIALNETS``
+    routed geometry directly in *its own* top cell, and
+    ``klt gen-compose``'s ``_write_composed_gds`` places that exact top cell
+    one level down as a composed block's sub-cell
+    (``f"{block_id}__{src_cell_name}"``, per its own docstring -- hierarchy is
+    preserved, not flattened, when a block is placed as a whole-cell
+    instance). So a depth-1 shape carrying this property is either the
+    composed top's own DEF-merged geometry (as before) or a composed block's
+    DEF-merged geometry one level down -- both genuine net names. A shape
+    found *deeper* than depth 1 (inside a composed block's own internal
+    hierarchy, or an ordinary standard cell placed several levels under an
+    unrelated top cell) is deliberately **not** scanned: that is exactly the
+    "a sub-cell shape carrying property 1 would be a standard cell's own
+    internal annotation, not a top-level net name" false-positive this
+    function has always guarded against, and going unbounded would reopen it
+    for arbitrary PDK standard-cell hierarchies that happen to reuse property
+    id 1 for something unrelated. (Issue #1488's unrouted single-pin net
+    markers are synthesized into the cell whose own DEF-merged geometry they
+    annotate -- the top cell for a standalone merge, or a composed block's
+    sub-cell for a merge later composed one level down -- for exactly this
+    reason.)
+
+    The known limitation this leaves: a block composed *more than one* level
+    deep (a macro composed into a macro composed into a macro) is not
+    reached -- its DEF net-name properties would sit at depth 2+ under the
+    outermost composed top. Nothing in this codebase currently produces that
+    shape (``gen-compose`` always places a source block exactly one level
+    below its own composed top), so it is not covered here; a caller doing
+    multi-level nested composition would need a deeper (or unbounded) scan.
+
+    Candidate points are returned in ``top_cell``'s own coordinate frame:
+    each depth-1 shape's bounding box is transformed by
+    ``iterator.trans()`` -- the iterator's cumulative transform for the
+    current shape, i.e. the placing instance's transform -- before its centre
+    is taken, since :func:`_apply_def_net_name_overrides` resolves probes
+    through ``LayoutToNetlist.probe_net`` against the netlist that
+    :func:`_extract_netlist` builds in the composed top cell's frame, not a
+    sub-cell's local frame.
 
     Several candidates rather than one because
     :func:`_apply_def_net_name_overrides` resolves each name through
@@ -764,25 +805,33 @@ def _def_net_name_probes(
         layer_index = layout.find_layer(*layer)
         if layer_index is None:
             continue
-        for shape in top_cell.shapes(layer_index).each():
+        iterator = top_cell.begin_shapes_rec(layer_index)
+        iterator.max_depth = 1
+        while not iterator.at_end():
+            shape = iterator.shape()
             if shape.is_text():
+                iterator.next()
                 continue
             properties = shape.properties()
             if not properties:
+                iterator.next()
                 continue
             net_name = properties.get(_DEF_NET_NAME_PROPERTY_ID)
             if not isinstance(net_name, str) or not net_name:
+                iterator.next()
                 continue
             candidates = probes.setdefault(net_name, [])
             if len(candidates) >= _DEF_NET_NAME_PROBE_CANDIDATES:
+                iterator.next()
                 continue
-            box = shape.bbox()
+            box = shape.bbox().transformed(iterator.trans())
             candidates.append(
                 (
                     metal_index,
                     kdb.Point((box.left + box.right) // 2, (box.bottom + box.top) // 2),
                 )
             )
+            iterator.next()
     return probes
 
 
