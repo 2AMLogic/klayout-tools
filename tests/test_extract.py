@@ -10294,6 +10294,7 @@ def test_parasitics_summary_block_shape(tmp_path):
             "terminals",
             "segments",
             "coupled",
+            "by_layer",
         }
         # `rc_model`/`segments` (issue #977): `"lumped"`/`[]` unless
         # `--distributed-rc` named this net -- additive, unset here.
@@ -10305,6 +10306,23 @@ def test_parasitics_summary_block_shape(tmp_path):
         assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
+        # `by_layer` (issue #1701): per-role/per-metal-level breakdown of the
+        # scalar totals above -- non-empty whenever the net's totals are
+        # non-zero (every net in this fixture), one entry per shape, and each
+        # entry's own two fields are `{"layer", "resistance_ohm",
+        # "capacitance_ff"}` exactly.
+        assert entry["by_layer"]
+        for layer_entry in entry["by_layer"]:
+            assert set(layer_entry) == {"layer", "resistance_ohm", "capacitance_ff"}
+            assert isinstance(layer_entry["layer"], str)
+            assert layer_entry["resistance_ohm"] >= 0.0
+            assert layer_entry["capacitance_ff"] >= 0.0
+        assert sum(le["resistance_ohm"] for le in entry["by_layer"]) == pytest.approx(
+            entry["resistance_ohm"], abs=1e-3
+        )
+        assert sum(le["capacitance_ff"] for le in entry["by_layer"]) == pytest.approx(
+            entry["capacitance_ff"], abs=1e-5
+        )
         for term in entry["terminals"]:
             assert set(term) == {"device", "terminal", "leg_net", "resistance_ohm"}
             assert term["resistance_ohm"] >= 0.0
@@ -10324,6 +10342,109 @@ def test_parasitics_summary_block_shape(tmp_path):
     )
     # Ground net never gets its own parasitic stub.
     assert "vsubs" not in names
+
+
+def test_parasitics_by_layer_includes_non_metal_role_and_metal(tmp_path):
+    """Issue #1701: a net whose ground-eligible geometry spans both a
+    non-metal role (curated `poly`, sky130's shared gate bar's interconnect
+    portion outside the transistor channel) and a metal level (`li1`, the
+    gate contact pad) reports one `by_layer` entry per contributing
+    role/level, and their `resistance_ohm`/`capacitance_ff` sum back to the
+    net's own scalar totals -- the invariant the acceptance criteria calls
+    out explicitly."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    para_nets = {n["net"]: n for n in report["parasitics"]["nets"]}
+    gate = para_nets["A"]
+
+    layers = {le["layer"] for le in gate["by_layer"]}
+    # sky130's `PARASITICS.poly` is curated (unlike `PARASITICS.diffusion`,
+    # left `None`) and `metal0` is `li1` -- see `decks.sky130.PARASITICS`.
+    assert "poly" in layers
+    assert "metal0" in layers
+    # No diffusion role at all for this deck (`PARASITICS.diffusion=None`).
+    assert "diffusion" not in layers
+
+    total_r = sum(le["resistance_ohm"] for le in gate["by_layer"])
+    total_c = sum(le["capacitance_ff"] for le in gate["by_layer"])
+    assert total_r == pytest.approx(gate["resistance_ohm"], abs=1e-3)
+    assert total_c == pytest.approx(gate["capacitance_ff"], abs=1e-5)
+    # Every declared layer term is itself strictly positive here (both the
+    # gate's interconnect poly and its li1 contact pad have real area).
+    for le in gate["by_layer"]:
+        assert le["resistance_ohm"] > 0.0
+        assert le["capacitance_ff"] > 0.0
+
+
+def test_parasitics_by_layer_single_metal_level_is_one_entry(tmp_path):
+    """Issue #1701, test plan edge case: a net with geometry on exactly one
+    metal level and no curated non-metal role gets a single-entry
+    `by_layer` list whose one entry's totals equal the net's scalar
+    totals exactly (one term, nothing to sum)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    para_nets = {n["net"]: n for n in report["parasitics"]["nets"]}
+    # `VGND`'s only drawn shape is its li1 source pad -- no poly, no met1.
+    vgnd = para_nets["VGND"]
+
+    assert len(vgnd["by_layer"]) == 1
+    assert vgnd["by_layer"][0]["layer"] == "metal0"
+    assert vgnd["by_layer"][0]["resistance_ohm"] == pytest.approx(
+        vgnd["resistance_ohm"], abs=1e-3
+    )
+    assert vgnd["by_layer"][0]["capacitance_ff"] == pytest.approx(
+        vgnd["capacitance_ff"], abs=1e-5
+    )
+
+
+def test_parasitics_by_layer_spans_multiple_metal_levels(tmp_path):
+    """Issue #1701: a net routed up through two curated metal levels
+    (extending `_make_sg13g2_inverter_layout()`'s `Y` net onto Metal2, the
+    same fixture `test_sg13g2_parasitics_metal1_metal2_report_nonzero_rc`
+    uses) gets one `by_layer` entry per level (`metal0` = Metal1, `metal1` =
+    Metal2), and their sum reproduces that net *object*'s scalar totals --
+    covering the test plan's "net spanning multiple metal layers" scenario.
+
+    `Y` labels **two** distinct, un-strapped net objects here (the NMOS and
+    PMOS drain pads share a layout label but nothing physically joins them,
+    same "several islands share one name" shape `_compute_parasitics`'s own
+    docstring documents) -- only the extended (NMOS-side) island gains
+    Metal2, so this resolves the specific `net_id` the extension targeted
+    rather than assuming a single `"Y"` entry exists.
+    """
+    layout = _make_sg13g2_inverter_layout()
+    top = layout.cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(19, 0, kdb.Box(1650, 250, 1950, 550))  # Via1.drawing (Metal1<->Metal2)
+    draw(10, 0, kdb.Box(1600, 200, 2000, 1200))  # Metal2.drawing
+
+    path = _write_gds(layout, tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sg13g2", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    y_entries = [n for n in report["parasitics"]["nets"] if n["net"] == "Y"]
+    assert len(y_entries) == 2  # two disjoint, un-strapped `Y`-labelled islands
+    two_metal_entries = [e for e in y_entries if len(e["by_layer"]) == 2]
+    assert len(two_metal_entries) == 1
+    y_net = two_metal_entries[0]
+
+    layer_names = [le["layer"] for le in y_net["by_layer"]]
+    assert layer_names == ["metal0", "metal1"]  # ascending level order
+
+    total_r = sum(le["resistance_ohm"] for le in y_net["by_layer"])
+    total_c = sum(le["capacitance_ff"] for le in y_net["by_layer"])
+    assert total_r == pytest.approx(y_net["resistance_ohm"], abs=1e-3)
+    assert total_c == pytest.approx(y_net["capacitance_ff"], abs=1e-5)
+    for le in y_net["by_layer"]:
+        assert le["resistance_ohm"] > 0.0
+        assert le["capacitance_ff"] > 0.0
 
 
 def test_parasitics_netlist_header_declares_model_scope(tmp_path):

@@ -7160,14 +7160,17 @@ def _compute_parasitics(
     Returns a 2-tuple:
 
     - Ground list (sorted by ``(net name, net_id)`` for deterministic
-      output): ``{"net", "net_id", "resistance_ohm", "capacitance_ff"}`` for
-      every net with non-zero *raw* (pre-coupling-deduction) ground-eligible
-      geometry --
+      output): ``{"net", "net_id", "resistance_ohm", "capacitance_ff",
+      "by_layer"}`` for every net with non-zero *raw* (pre-coupling-deduction)
+      ground-eligible geometry --
       including a net whose ground capacitance was fully moved to coupling
       by the correction above (``capacitance_ff`` can be ``0.0`` in that
       case; the net still needs a star/hub so a coupling ``C`` card has
       somewhere to attach). A net with no eligible interconnect geometry at
-      all is omitted, exactly as before this feature existed.
+      all is omitted, exactly as before this feature existed. ``by_layer``
+      (issue #1701) is a per-role/per-metal-level breakdown -- see the "Pass
+      3" comment above `results.append` for the exact shape and the
+      sum-equals-total invariant it satisfies.
     - Coupled-pair list (sorted by ``(net_a, net_b)`` for deterministic
       output): ``{"net_a", "net_b", "capacitance_ff", "levels",
       "lateral_levels"}`` for every distinct net pair with non-zero
@@ -7252,10 +7255,14 @@ def _compute_parasitics(
         flavour_gate_indices.append(layer_index[f"nfet_gate_{flavour.flavour}"])
         flavour_gate_indices.append(layer_index[f"pfet_gate_{flavour.flavour}"])
 
-    non_metal_roles: list[tuple[Any, list[int], list[int]]] = []
+    # Each tuple's leading `str` is the role name reported in a net's
+    # `by_layer[]` breakdown (issue #1701) -- `"diffusion"`/`"poly"`, matching
+    # the `ParasiticsDeck` field name the coefficient came from.
+    non_metal_roles: list[tuple[str, Any, list[int], list[int]]] = []
     if parasitics_deck.diffusion is not None:
         non_metal_roles.append(
             (
+                "diffusion",
                 parasitics_deck.diffusion,
                 [layer_index["nfet_sd"], layer_index["pfet_sd"], *flavour_sd_indices],
                 [],
@@ -7270,6 +7277,7 @@ def _compute_parasitics(
         # are left untouched -- only the parasitic measurement subtracts them.
         non_metal_roles.append(
             (
+                "poly",
                 parasitics_deck.poly,
                 [layer_index["poly"]],
                 [
@@ -7322,19 +7330,33 @@ def _compute_parasitics(
     metal_regions: list[dict[kdb.Net, kdb.Region]] = [dict() for _ in range(num_metals)]
     net_metal_area_um2: dict[tuple[kdb.Net, int], float] = {}
     net_metal_perim_um: dict[tuple[kdb.Net, int], float] = {}
+    # Per-(net, role-name)/(net, metal-index) R/C, retained past the
+    # summation into `base_c_ff`/`base_r_ohm` purely to populate each net's
+    # `by_layer[]` breakdown below (issue #1701) -- these are the exact
+    # per-role/per-level terms already folded into the scalar totals, not a
+    # second computation. Metal capacitance is *not* cached here: it still
+    # needs the coupling deduction (Pass 2/3 below) applied first, so its
+    # `by_layer` counterpart is captured where that deduction is known.
+    net_role_r_ohm: dict[tuple[kdb.Net, str], float] = {}
+    net_role_c_ff: dict[tuple[kdb.Net, str], float] = {}
+    net_metal_r_ohm: dict[tuple[kdb.Net, int], float] = {}
 
     for net in nets:
         r_ohm = 0.0
         c_ff = 0.0
-        for layer_rc, indices, subtract in non_metal_roles:
+        for role_name, layer_rc, indices, subtract in non_metal_roles:
             area_um2, perim_um = _net_area_perim_um(l2n, net, dbu, indices, subtract)
             if area_um2 <= 0.0:
                 continue
-            c_ff += (
+            role_c_ff = (
                 area_um2 * layer_rc.cap_area_ff_um2
                 + perim_um * layer_rc.cap_perim_ff_um
             )
-            r_ohm += layer_rc.sheet_res_ohm_sq * _n_squares(area_um2, perim_um)
+            role_r_ohm = layer_rc.sheet_res_ohm_sq * _n_squares(area_um2, perim_um)
+            c_ff += role_c_ff
+            r_ohm += role_r_ohm
+            net_role_c_ff[(net, role_name)] = role_c_ff
+            net_role_r_ohm[(net, role_name)] = role_r_ohm
         base_c_ff[net] = c_ff
         base_r_ohm[net] = r_ohm
 
@@ -7351,9 +7373,9 @@ def _compute_parasitics(
                 continue
             net_metal_area_um2[(net, i)] = area_um2
             net_metal_perim_um[(net, i)] = perim_um
-            base_r_ohm[net] += layer_rc.sheet_res_ohm_sq * _n_squares(
-                area_um2, perim_um
-            )
+            metal_r_ohm = layer_rc.sheet_res_ohm_sq * _n_squares(area_um2, perim_um)
+            net_metal_r_ohm[(net, i)] = metal_r_ohm
+            base_r_ohm[net] += metal_r_ohm
             metal_regions[i][net] = region
 
     # Pass 2: vertical-overlap coupling between adjacent metal levels.
@@ -7525,6 +7547,14 @@ def _compute_parasitics(
     # Pass 3: finalize each net's ground C, applying the coupling deduction
     # (if any) to its metal-level area terms only -- perimeter/fringe and
     # every non-metal role are untouched by coupling.
+    #
+    # `net_metal_c_ff[(net, i)]` caches each metal level's *effective*
+    # (post-coupling-deduction) capacitance contribution -- exactly the term
+    # folded into `c_ff` below -- purely so the `by_layer[]` breakdown built
+    # a few lines down can report the same number the net's scalar total was
+    # actually built from (issue #1701), rather than re-deriving it from the
+    # raw (pre-deduction) area a second time.
+    net_metal_c_ff: dict[tuple[kdb.Net, int], float] = {}
     results: list[dict[str, Any]] = []
     for net in nets:
         raw_c_ff = base_c_ff.get(net, 0.0)
@@ -7543,10 +7573,12 @@ def _compute_parasitics(
             )
             deduction = deduction_um2.get((net, i), 0.0)
             effective_area_um2 = max(0.0, area_um2 - deduction)
-            c_ff += (
+            metal_c_ff = (
                 effective_area_um2 * layer_rc.cap_area_ff_um2
                 + perim_um * layer_rc.cap_perim_ff_um
             )
+            c_ff += metal_c_ff
+            net_metal_c_ff[(net, i)] = metal_c_ff
         if raw_c_ff <= 0.0:
             # `raw_c_ff` is exactly the pre-#760 ground capacitance (every
             # role's full area *and* perimeter term, no coupling deduction),
@@ -7563,6 +7595,57 @@ def _compute_parasitics(
             # star/hub for a coupling `C` card to attach to, even though its
             # own reported `capacitance_ff` can be `0.0`.
             continue
+
+        # `by_layer[]` (issue #1701): exposes the per-role/per-metal-level
+        # R/C terms already summed into `resistance_ohm`/`capacitance_ff`
+        # above, so a caller composing a hierarchical netlist from
+        # separately-extracted sub-blocks can attribute a net's R/C to a
+        # layer instead of hand-subtracting scalar totals. One entry per
+        # role/level with non-zero geometry on this net -- non-metal roles
+        # (``"diffusion"``/``"poly"``, in `non_metal_roles`' declared order)
+        # first, then each metal level (``"metal<i>"``, 0-based, matching
+        # `deck.metals`' own indexing) in ascending order. A role/level with
+        # no geometry on this net is omitted entirely, exactly like the
+        # per-net inclusion test above -- so a net entirely on one layer
+        # gets a single-entry list. Metal capacitance is the *effective*
+        # (post-coupling-deduction) term -- the one actually folded into
+        # `capacitance_ff` -- not the raw pre-deduction area, so summing
+        # `by_layer[].resistance_ohm`/`capacitance_ff` across a net's
+        # entries reproduces that net's `resistance_ohm`/`capacitance_ff`
+        # totals exactly (modulo ordinary floating-point rounding).
+        #
+        # Not adjusted for a subsequent `--mom-net`/`--mom-rlc-net`
+        # substitution: those overwrite this entry's `resistance_ohm`/
+        # `capacitance_ff` in place, downstream of this function, with a
+        # value this lumped-RC model did not compute (a `klt mom` field
+        # solve, or an opaque caller-supplied override) -- `by_layer` still
+        # reflects the lumped-RC decomposition that would have produced the
+        # pre-substitution total. See `docs/cli/extract.md`'s `--mom-net`/
+        # `--mom-rlc-net` sections.
+        by_layer: list[dict[str, Any]] = []
+        for role_name, _layer_rc, _indices, _subtract in non_metal_roles:
+            role_key = (net, role_name)
+            if role_key not in net_role_c_ff and role_key not in net_role_r_ohm:
+                continue
+            by_layer.append(
+                {
+                    "layer": role_name,
+                    "resistance_ohm": round(net_role_r_ohm.get(role_key, 0.0), 4),
+                    "capacitance_ff": round(net_role_c_ff.get(role_key, 0.0), 6),
+                }
+            )
+        for i in range(num_metals):
+            metal_key = (net, i)
+            if metal_key not in net_metal_area_um2:
+                continue
+            by_layer.append(
+                {
+                    "layer": f"metal{i}",
+                    "resistance_ohm": round(net_metal_r_ohm.get(metal_key, 0.0), 4),
+                    "capacitance_ff": round(net_metal_c_ff.get(metal_key, 0.0), 6),
+                }
+            )
+
         results.append(
             {
                 # Unescaped identity spelling (issue #1162) -- this feeds
@@ -7574,6 +7657,7 @@ def _compute_parasitics(
                 "net_id": net.cluster_id,
                 "resistance_ohm": round(base_r_ohm.get(net, 0.0), 4),
                 "capacitance_ff": round(max(0.0, c_ff), 6),
+                "by_layer": by_layer,
             }
         )
 
@@ -8308,6 +8392,20 @@ def _inject_parasitics(
                 "net_id": entry["net_id"],
                 "resistance_ohm": entry["resistance_ohm"],
                 "capacitance_ff": entry["capacitance_ff"],
+                # Additive field (issue #1701): the per-role/per-metal-level
+                # R/C breakdown `_compute_parasitics` built for this net --
+                # see that function's docstring/inline comment above its own
+                # `by_layer` construction for the exact shape, the
+                # sum-equals-total invariant, and the one documented
+                # exception (a subsequent `--mom-net`/`--mom-rlc-net`
+                # substitution above does not adjust this list). `[]` only
+                # for a net whose ground-eligible geometry has no curated
+                # `ParasiticsDeck` coefficient at all -- effectively
+                # unreachable here, since such a net would also have no raw
+                # ground capacitance and never reach `parasitic_nets` in the
+                # first place. Passed through verbatim: layer names are not
+                # net names, so no `spice_safe_net_name` re-escaping applies.
+                "by_layer": entry.get("by_layer", []),
                 # Additive field (issue #988): the series inductor spliced in
                 # for this net by `mom_rlc_inductor` -- `0.0` (the default)
                 # for every net unless `--mom-rlc-net`/

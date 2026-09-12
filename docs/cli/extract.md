@@ -4208,6 +4208,10 @@ also gains the additive `node_scope` field (always `"global"`). See
       "capacitance_ff": 1.910204,
       "inductance_nh": 0.0,
       "hub_net": "Y",
+      "by_layer": [
+        { "layer": "metal0", "resistance_ohm": 526.291, "capacitance_ff": 1.203102 },
+        { "layer": "metal1", "resistance_ohm": 643.4917, "capacitance_ff": 0.707102 }
+      ],
       "terminals": [
         {
           "device": "$1",
@@ -4323,12 +4327,59 @@ Each `nets[]` entry:
 | `segments`       | array\<object\> | Additive field (issue #977). The ladder's per-segment resistors, in node order: `{"net_a", "net_b", "resistance_ohm"}`. `[]` unless `rc_model == "distributed"`. |
 | `terminals`      | array\<object\> | One entry per device terminal moved onto its own leg net. For `rc_model == "lumped"`: `{"device", "terminal", "leg_net", "resistance_ohm"}` — `device` is the owning device's `expanded_name()`, `terminal` its terminal name (e.g. `"D"`, `"G"`, `"A"`), `leg_net` the fresh internal node that terminal now connects to (`<net>__t<i>`, or a collision-suffixed variant), and `resistance_ohm` that leg's own series resistance back to `hub_net`. For `rc_model == "distributed"` the shape differs (issue #977): `{"device", "terminal", "leg_net", "order", "capacitance_ff"}` — `order` is the terminal's 0-based position in the ladder's node sequence and `capacitance_ff` its own per-node ground capacitance; resistance lives on `segments[]` instead (between adjacent nodes), not per terminal. **Empty** for the no-device-terminal fallback case above. |
 | `coupled`        | array\<object\> | This net's vertical-overlap coupling counterparts (issue #760), `{"net", "capacitance_ff", "levels"}`, sorted by counterpart `net`. `capacitance_ff` is the pair's total coupling capacitance summed over every contributing level pair; `levels` lists the contributing `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs. **Empty** when the net has no inter-net crossover. Each pair appears on both endpoints' lists — see `total_coupling_capacitance_ff`. |
+| `by_layer`       | array\<object\> | Additive field (issue #1701). This net's `resistance_ohm`/`capacitance_ff` totals broken down by contributing conductor: `{"layer", "resistance_ohm", "capacitance_ff"}` per role/level with non-zero geometry on this net. See below. |
 
 Two device terminals on the same net now sit in series through their two
 `terminals[]` legs (`leg_a --Ra--> hub_net <--Rb-- leg_b`) — the
 terminal-to-terminal resistance is `Ra + Rb`, strictly positive whenever
 both legs are, unlike the pre-#592 topology where it was always exactly
 zero.
+
+### Per-layer breakdown (`nets[].by_layer`, issue #1701)
+
+`resistance_ohm`/`capacitance_ff` above are scalar totals, summed across
+every conductor role that contributed to the net — useful for driving a
+device model or a lumped SPICE card, but not enough for a caller composing a
+hierarchical netlist from separately-extracted sub-blocks to attribute a
+net's R/C to a specific layer (e.g. to avoid double-counting the metal a
+shared sub-block already reported). `by_layer` exposes exactly the
+per-role/per-metal-level terms already summed into those totals — no new
+computation, just retained intermediates from the same Pass 1/3 measurement
+`--parasitics` always runs:
+
+```json
+"by_layer": [
+  { "layer": "poly", "resistance_ohm": 412.3, "capacitance_ff": 0.0821 },
+  { "layer": "metal0", "resistance_ohm": 87.1, "capacitance_ff": 1.2033 },
+  { "layer": "metal1", "resistance_ohm": 0.0, "capacitance_ff": 0.4108 }
+]
+```
+
+- `layer` — `"diffusion"`/`"poly"` for the two non-metal roles (present only
+  when the deck curates a `ParasiticsDeck.diffusion`/`.poly` coefficient),
+  or `"metal<i>"` (0-based, matching `deck.metals`' own indexing — index `0`
+  is the deck's bottom-most metal level) for a metal level. Non-metal roles
+  are listed first (in `diffusion`, then `poly` order), followed by metal
+  levels in ascending index order.
+- A role/level with **no** geometry on this net is omitted entirely — so a
+  net entirely on one metal level gets a single-entry list, matching this
+  field's own "expose what was measured" scope.
+- Metal `capacitance_ff` is the **effective** (post-coupling-deduction) term
+  — the same one folded into the net's scalar `capacitance_ff` above, not
+  the raw pre-deduction area — so a level whose entire area moved to a
+  coupling `C` card (see "Vertical-overlap coupling capacitance" above) can
+  report `0.0` capacitance here even though the level has real geometry (its
+  `resistance_ohm`, unaffected by coupling, stays non-zero).
+- **Invariant**: summing `by_layer[].resistance_ohm`/`.capacitance_ff` across
+  one net's list reproduces that net's own `resistance_ohm`/`capacitance_ff`
+  totals (modulo ordinary floating-point rounding) — the property that makes
+  the breakdown trustworthy for the double-counting-avoidance use case above.
+- **Not adjusted by `--mom-net`/`--mom-rlc-net`.** Those flags substitute a
+  matched net's `resistance_ohm`/`capacitance_ff` in place with a value this
+  lumped-RC model did not compute (a `klt mom` field solve, or an opaque
+  caller-supplied override — see their own sections below); `by_layer` for
+  that net keeps reporting the pre-substitution lumped-RC decomposition, so
+  the invariant above does not hold for a net named by either flag.
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 
@@ -4700,7 +4751,7 @@ Every field in this report falls into exactly one of three classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`, `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 
