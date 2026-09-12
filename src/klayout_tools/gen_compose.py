@@ -588,22 +588,14 @@ def _block_real_placed_bbox_um(
     return _translate_bbox(real_bbox_um, offset_um)
 
 
-def _read_all_block_layers_geometry(
-    block_id: str, block: dict[str, Any], offset_um: dict[str, float]
-) -> dict[tuple[int, int], dict[str, Any]]:
-    """Every layer ``block`` draws on, read into the composed frame -- the
-    same per-layer read :func:`read_block_layer_geometry` performs for one
-    caller-named layer, generalised to every layer the block's own stream
-    actually has (issue #1679's real per-layer overlap check below needs to
-    compare *whichever* layer a leaky block's excess geometry and a
-    neighbour's placement happen to share, not one route/obstacle layer
-    named in advance).
+def _load_block_cell(block_id: str, block: dict[str, Any]) -> tuple[Any, Any]:
+    """Load ``block``'s GDS and resolve its cell, raising ``GenComposeError``
+    on a bad path or a missing cell name.
 
-    Returns ``{(layer, datatype): {"region": kdb.Region, "dbu": float}}``,
-    omitting any layer with no shapes on ``block``'s own cell (empty after
-    ``region.merge()``) -- mirrors :func:`read_block_layer_geometry`'s own
-    ``None`` return for an absent/empty layer, just keyed by every present
-    layer instead of gated on one.
+    Shared by :func:`read_block_layer_geometry` and
+    :func:`_read_all_block_layers_geometry` -- both need the same
+    read-then-resolve step before diverging on which layer(s) to read.
+    Returns ``(src_layout, src_cell)`` as a ``(kdb.Layout, kdb.Cell)`` pair.
     """
     import klayout.db as kdb
 
@@ -623,6 +615,29 @@ def _read_all_block_layers_geometry(
             f"block '{block_id}': gds '{gds_path}' has no cell named "
             f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
         )
+    return src_layout, src_cell
+
+
+def _read_all_block_layers_geometry(
+    block_id: str, block: dict[str, Any], offset_um: dict[str, float]
+) -> dict[tuple[int, int], dict[str, Any]]:
+    """Every layer ``block`` draws on, read into the composed frame -- the
+    same per-layer read :func:`read_block_layer_geometry` performs for one
+    caller-named layer, generalised to every layer the block's own stream
+    actually has (issue #1679's real per-layer overlap check below needs to
+    compare *whichever* layer a leaky block's excess geometry and a
+    neighbour's placement happen to share, not one route/obstacle layer
+    named in advance).
+
+    Returns ``{(layer, datatype): {"region": kdb.Region, "dbu": float}}``,
+    omitting any layer with no shapes on ``block``'s own cell (empty after
+    ``region.merge()``) -- mirrors :func:`read_block_layer_geometry`'s own
+    ``None`` return for an absent/empty layer, just keyed by every present
+    layer instead of gated on one.
+    """
+    import klayout.db as kdb
+
+    src_layout, src_cell = _load_block_cell(block_id, block)
 
     dbu = src_layout.dbu
     rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
@@ -2909,22 +2924,7 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    gds_path = block["gds_path"]
-    src_layout = kdb.Layout()
-    try:
-        src_layout.read(gds_path)
-    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
-        raise GenComposeError(
-            f"block '{block_id}': could not read gds_path '{gds_path}': {exc}"
-        ) from exc
-
-    src_cell_name = block["cell_name"]
-    src_cell = src_layout.cell(src_cell_name)
-    if src_cell is None:
-        raise GenComposeError(
-            f"block '{block_id}': gds '{gds_path}' has no cell named "
-            f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
-        )
+    src_layout, src_cell = _load_block_cell(block_id, block)
 
     dbu = src_layout.dbu
     layer_index = src_layout.find_layer(layer[0], layer[1])
