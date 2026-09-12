@@ -1,0 +1,37 @@
+klayout-tools
+Copyright (c) 2026 Two AM Logic, Inc
+
+This product includes software developed by third parties, incorporated
+under the terms below. See LICENSE for this project's own license (MIT).
+
+--------------------------------------------------------------------------
+native/wave/ (klt-wave-native): waveform build/query engine
+--------------------------------------------------------------------------
+
+Portions of this code are ported and adapted from:
+
+  boldaxolotl/booley (https://github.com/boldaxolotl/booley)
+  crates/bwave/src/parser.rs (ported verbatim: the VcdHandler trait,
+    header parsing, and streaming event dispatch)
+  crates/bwave/src/signal.rs (partial port: the SignalMeta struct only)
+  crates/bwave/src/fst.rs (adapted: the small write-side helper
+    functions timescale_to_exponent, timescale_str_from_exponent,
+    var_type_of, canon_bits_into/canon_bits_append, and
+    transition_scopes -- not the FST-read ColumnCache/query engine,
+    which a later phase ports separately)
+  Copyright (c) the boldaxolotl/booley contributors
+  Licensed under the Apache License, Version 2.0
+  Source commit: 0c3b4cd7b66a0f793de605ce58e82dc1bc0ac892
+
+  A copy of the Apache License, Version 2.0 is available at
+  http://www.apache.org/licenses/LICENSE-2.0
+
+native/wave/ also depends on (unmodified, ordinary Cargo dependencies, no
+code copied):
+
+  fst-reader (https://github.com/ekiwi/fst-reader), BSD-3-Clause,
+  Copyright (c) 2023 The Regents of the University of California,
+  Copyright (c) 2024-2026 Cornell University (Kevin Laeufer)
+
+  fst-writer (https://github.com/ekiwi/fst-writer), BSD-3-Clause,
+  Copyright (c) 2024 Cornell University (Kevin Laeufer)
