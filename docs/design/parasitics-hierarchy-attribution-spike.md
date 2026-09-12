@@ -67,11 +67,29 @@ For each **drawn** layer that feeds a curated parasitics role, build two
 regions once — independent of net count *and* of instance count:
 
 ```python
-# layer_index_drawn = layout.find_layer(*drawn_layer)   # NOT the l2n index
+layer_index_drawn = layout.find_layer(*drawn_layer)  # NOT the l2n index
+
+# Geometry drawn directly in the top cell.
 own_drawn = kdb.Region(top_cell.shapes(layer_index_drawn)).merged()
-all_drawn = kdb.Region(top_cell.begin_shapes_rec(layer_index_drawn)).merged()
-instance_drawn = (all_drawn - own_drawn).merged()
+
+# Merged union of the instance subtree's own geometry, transforms applied.
+# min_depth = 1 skips the depth-0 shapes (the ones drawn in top_cell itself),
+# so this is the instances' union and nothing else. It is deliberately NOT
+# `all_drawn - own_drawn`: that difference form removes the top/instance
+# overlap from the mask and hands it back to the top cell, the bias §3.3
+# rejects. Verified against the installed klayout.db 0.30.12 (§4).
+it = top_cell.begin_shapes_rec(layer_index_drawn)
+it.min_depth = 1
+instance_drawn = kdb.Region(it).merged()
+
+# Only needed as a diagnostic/sanity check, never as a mask:
+# all_drawn = kdb.Region(top_cell.begin_shapes_rec(layer_index_drawn)).merged()
 ```
+
+> **This block supersedes the snippet in #1704**, which still carries the
+> `instance_region = all_region - own_region` difference form and the
+> `metal_index[i]` layer-index confusion corrected immediately below. Build
+> from this section, not from the issue body.
 
 > **Correction worth stating explicitly, because it is an easy and silent
 > bug:** the index passed to `top_cell.shapes(...)` is a **`kdb.Layout`
@@ -96,9 +114,10 @@ poly + the metal stack.
 
 ### 3.2 The split, inside Pass 1's existing loop
 
-Both masks come from the identical `begin_shapes_rec` flatten that produced
-the registered regions in the first place, so they sit in the **same
-coordinate frame and DBU** as `l2n.polygons_of_net`'s per-net regions —
+Both masks are built from `top_cell` in layout DBU coordinates — the same
+`begin_shapes_rec` traversal (`min_depth`-restricted for `instance_drawn`)
+that produced the registered regions in the first place — so they sit in the
+**same coordinate frame and DBU** as `l2n.polygons_of_net`'s per-net regions —
 directly comparable with a plain `Region &` / `Region -`, the same idiom
 Pass 2's coupling loop already uses (`extract.py:7359+`).
 
@@ -135,29 +154,77 @@ point of the feature is "let a caller subtract what they already extracted
 separately," and only the second form makes that arithmetic sound. This
 distinction is measurable, not hypothetical — see §4.
 
-Note that defining `instance_drawn = all_drawn - own_drawn` (as above) and
-then subtracting it is *not* the same as subtracting the raw union of the
-instances' transformed shapes; the former silently hands the overlap back to
-the top cell. Build `instance_drawn` as a merged union of the instance
-subtree's own geometry, then subtract it from the net region.
+**Two constructions of `instance_drawn` look equivalent and are not.**
+Subtracting `all_drawn - own_drawn` is *not* the same as subtracting the
+merged union of the instance subtree's transformed shapes: the difference
+form removes the overlap from the mask, so the overlap survives
+`net_region - instance_drawn` and is silently charged to the **top cell** —
+i.e. it reproduces row 1 of the table above, the bias this section rejects,
+while looking like row 2. §3.1's `min_depth = 1` construction builds the
+instance-subtree union directly and is the normative one; it is the mask §4
+measures, and it is what the implementation must use.
+
+A corollary worth stating, because it looks like a bug the first time it is
+seen: under the chosen construction `own_drawn` and `instance_drawn`
+**deliberately overlap**, so their areas do *not* sum to `all_drawn` (§4).
+The rejected difference form is precisely the one whose areas do sum
+exactly — that exactness is the symptom, not a validation.
 
 ## 4. Prototype measurements
 
-A throwaway prototype (two-level hierarchy built in memory: `SUB` placed
-twice under `TOP`, one net wholly inside `SUB`, one wholly drawn in `TOP`,
-one spanning both with a deliberate top-strap-over-instance-shape overlap)
-confirmed the three load-bearing claims against the installed KLayout
-Python API:
+A throwaway prototype (two-level hierarchy built in memory, `dbu = 0.001`:
+`SUB` placed twice under `TOP`; net **A** wholly inside `SUB`, net **B**
+wholly drawn in `TOP`, net **C** spanning both — a top-level strap joining
+the two placements and deliberately overlapping each instance's own shape by
+`0.25 µm²`, `0.5 µm²` in total) measured the load-bearing claims against the
+installed KLayout Python API (`klayout.db` **0.30.12**, where
+`RecursiveShapeIterator.min_depth` is confirmed present and
+`layout.find_layer(1, 0)` is confirmed to return the same layout layer index
+as `layout.layer(1, 0)`):
+
+Per-layer masks:
+
+| Quantity | Measured |
+|---|---|
+| `own_drawn` (`top_cell.shapes`) | `6.5 µm²` |
+| `all_drawn` (plain `begin_shapes_rec`) | `12.0 µm²` |
+| `instance_drawn`, **rejected** `all_drawn - own_drawn` | `5.5 µm²` |
+| `instance_drawn`, **chosen** `min_depth = 1` subtree union (§3.1) | `6.0 µm²` |
+| overlap, `own_drawn & instance_drawn` | `0.5 µm²` |
+
+The two constructions differ by **exactly the overlap**, and only the
+rejected one satisfies `own + instance == all` (`6.5 + 5.5 = 12.0` vs.
+`6.5 + 6.0 = 12.5`) — see §3.3's corollary: that sum being exact is the tell
+that the mask has handed the overlap to the top cell, not a validation of it.
+
+Per-net split, under the chosen mask (`net_region - instance_drawn`):
+
+| Net | Total area | Top-cell share | Instance share | Area additive? |
+|---|---|---|---|---|
+| A (wholly inside `SUB`) | `1.0 µm²` | `0.0 µm²` | `1.0 µm²` | exact |
+| B (wholly top-drawn) | `2.0 µm²` | `2.0 µm²` | `0.0 µm²` | exact |
+| C (spanning, with overlap) | `8.0 µm²` | `4.0 µm²` | `4.0 µm²` | exact |
+
+Per-net area additivity is exact for every net **by construction** —
+`net_region - instance_drawn` and `net_region & instance_drawn` partition the
+net region — which is what §5's "exact in area" claim rests on. Note this is
+a different statement from the per-layer masks summing, which they
+deliberately do not.
+
+The remaining two claims, both measured on the spanning net C:
 
 | Claim | Result |
 |---|---|
-| Area of the own/instance split is exact | `own 4.8 µm² + instance 2.6 µm² = all 7.4 µm²` — **exact** |
-| Perimeter is **not** additive across the split | `own 29.2 µm + instance 16.8 µm = 46.0 µm` vs. uncut `45.2 µm` — **+0.8 µm inflation** |
-| The overlap case is real and the two bias definitions differ | overlap `0.2 µm²`; spanning net's top-cell share is `0.8 µm²` (overlap→top) vs. `0.6 µm²` (overlap→instance) |
+| The two bias definitions differ, by the overlap | top-cell share is `4.5 µm²` with the rejected mask `all_drawn - own_drawn` (identical to `net_region & own_drawn`, overlap → top) vs. `4.0 µm²` with the chosen `min_depth = 1` mask (overlap → instance) |
+| Perimeter is **not** additive across the split | top `17.0 µm` + instance `12.0 µm` = `29.0 µm` vs. uncut `27.0 µm` — **+2.0 µm inflation**, exactly `2 ×` the two `0.5 µm` cut lines where the strap crosses an instance boundary |
+
+Nets A and B, lying wholly on one side of the boundary, are additive in
+perimeter as well (`4.0 µm` and `6.0 µm`, uncut and split alike) — the
+inflation is confined to genuinely spanning nets, as §5 describes.
 
 The prototype validated the geometric primitive only and is deliberately not
 committed; the fixture it describes belongs in the implementation issue's
-test plan (§6), wired through the real `_compute_parasitics`.
+test plan (§7), wired through the real `_compute_parasitics`.
 
 ## 5. Complexity and risk against the existing Pass 1 / Pass 2 structure
 
@@ -200,8 +267,11 @@ test plan (§6), wired through the real `_compute_parasitics`.
   here so a future reviewer does not read the discrepancy as a regression.
 - **Risk: routine-to-moderate.** The real judgment calls are (a) threading
   the mask through `_net_area_perim_um` without perturbing gate subtraction,
-  (b) using the layout layer index rather than the l2n index (§3.1), and
-  (c) documenting the perimeter caveat clearly enough that it does not later
+  (b) using the layout layer index rather than the l2n index (§3.1),
+  (c) building `instance_drawn` as the `min_depth = 1` subtree union rather
+  than the `all_drawn - own_drawn` difference (§3.3) — the two differ only by
+  the top/instance overlap and neither raises, and
+  (d) documenting the perimeter caveat clearly enough that it does not later
   read as a bug.
 
 ## 6. Why not the per-source-cell breakdown (shape 2)
