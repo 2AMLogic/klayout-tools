@@ -1,0 +1,26 @@
+* Reference solution for benchmarks/design-agent/tasks/differential-pair.json
+* -- common-mode-drive variant. See diff_pair_diff.spice for the
+* differential-drive companion and the full circuit rationale (identical
+* topology; only Vinp/Vinn's AC phase differs here: in-phase, AC 1V each).
+*
+* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
+* from models.lib.
+
+.param vdd=1.8
+.param vbias=0.9
+.param itail=100u
+.param rd=8k
+
+Vdd vdd 0 DC {vdd}
+Vinp inp 0 DC {vbias} AC 1 0
+Vinn inn 0 DC {vbias} AC 1 0
+Mp outp inp tail 0 bench_nmos W=20u L=1u
+Mn outn inn tail 0 bench_nmos W=20u L=1u
+Itail tail 0 DC {itail}
+Rdp vdd outp {rd}
+* Same deliberate 0.5% "n" branch load mismatch as diff_pair_diff.spice --
+* this is what gives common-mode drive a small, non-zero differential
+* output to measure (an ideal tail current source alone would reject it
+* completely).
+Rdn vdd outn {rd*1.005}
+Bdout dout 0 V=V(outp)-V(outn)

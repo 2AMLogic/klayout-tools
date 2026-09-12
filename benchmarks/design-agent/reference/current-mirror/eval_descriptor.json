@@ -1,0 +1,13 @@
+{
+  "gates": [
+    { "check": "sim", "name": "mirror_ratio_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.0.worst_case.margin",
+    "polarity": "maximize",
+    "name": "mirror_margin_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": []
+}

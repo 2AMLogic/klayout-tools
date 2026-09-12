@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/benchmarks/design-agent/schema/task.schema.json",
+  "title": "Design-agent benchmark task",
+  "description": "One task in the design-agent benchmark (issue #1719): a fixed textbook-analog block, the tier it belongs to, and the `klt eval` descriptor that is its pass criterion. Modeled after AnalogCoder (Lai et al., AAAI 2025, arXiv 2405.14918) -- the task set and checks here are written fresh against this repo's own KB and toolchain, not reproduced from that (unlicensed) paper's repo. See benchmarks/design-agent/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "tier", "pdk", "description", "block_spec", "reference"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable slug; must match the task's filename stem (benchmarks/design-agent/tasks/<id>.json).",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable name of the task.",
+      "minLength": 1
+    },
+    "tier": {
+      "type": "string",
+      "description": "Difficulty tier, per the AnalogCoder-style easy/medium/hard split this benchmark reuses.",
+      "enum": ["easy", "medium", "hard"]
+    },
+    "pdk": {
+      "type": "string",
+      "description": "Target PDK this task's corners are drawn against (e.g. 'sky130').",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "description": "One-paragraph description of the block and what a passing design must do, mirroring the textbook-task framing this benchmark's tasks are written fresh against.",
+      "minLength": 1
+    },
+    "block_spec": {
+      "type": "object",
+      "description": "S3-shape block spec stand-in (klt.pipeline.blockspec/1 is proposed, not shipped -- see .claude/skills/design-topology-selection/SKILL.md) -- the input a real S4 topology-selection run would be handed.",
+      "additionalProperties": false,
+      "required": ["spec_class", "io_nodes"],
+      "properties": {
+        "spec_class": {
+          "type": "string",
+          "description": "What kind of spec this task serves, matching kb entries' own spec_class field so KB lookups during S4 can be judged for fit.",
+          "minLength": 1
+        },
+        "io_nodes": {
+          "type": "array",
+          "description": "Declared circuit I/O node names an S6 netlist-authoring run must produce.",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "target_specs": {
+          "description": "Free-form electrical targets (e.g. {\"gain_db_min\": 20}) informational alongside the authoritative reference.eval_descriptor gate -- never re-derived or re-checked outside that descriptor.",
+          "type": ["object", "null"]
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "description": "The known-good reference solution this task's own criterion must accept -- what keeps the task satisfiable (see acceptance criteria in issue #1719).",
+      "additionalProperties": false,
+      "required": ["eval_descriptor", "netlists"],
+      "properties": {
+        "eval_descriptor": {
+          "type": "string",
+          "description": "Path, relative to the repository root, to the `klt eval` descriptor (docs/cli/eval.md) that is this task's pass criterion.",
+          "minLength": 1
+        },
+        "netlists": {
+          "type": "array",
+          "description": "Path(s), relative to the repository root, to the known-good reference SPICE netlist(s) the eval_descriptor's gates score. Documentation/on-disk-existence check only -- the descriptor's own gate args are the executable source of truth.",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "notes": {
+          "description": "Free-form notes about the reference solution (e.g. modeling shortcuts taken). Optional: omit or set null when there is nothing to add.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "source": {
+      "description": "Citation for the textbook task class this task is modeled on (topology/spec framing only -- never reproduced text/figures), per kb/SOURCING.md's open-sources-only rule. Optional: omit or set null when the task is this repo's own composition.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "citation": { "type": "string", "minLength": 1 },
+        "url": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

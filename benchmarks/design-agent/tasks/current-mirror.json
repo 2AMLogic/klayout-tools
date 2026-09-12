@@ -1,0 +1,25 @@
+{
+  "id": "current-mirror",
+  "title": "NMOS current mirror",
+  "tier": "easy",
+  "pdk": "sky130",
+  "description": "Design a simple two-transistor NMOS current mirror (diode-connected reference device mirroring a 50 uA reference current at nominally 1:1 ratio) whose output current stays within +/-10% of the 50 uA reference across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix, with the output node held mid-swing.",
+  "block_spec": {
+    "spec_class": "bias-current replication / current mirror",
+    "io_nodes": ["ref", "out", "vdd", "gnd"],
+    "target_specs": {
+      "iref_a": 5e-5,
+      "iout_tolerance_pct": 10,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/current-mirror/eval_descriptor.json",
+    "netlists": ["benchmarks/design-agent/reference/current-mirror/mirror.spice"],
+    "notes": "Generic (non-PDK) NMOS model stands in for sky130 devices -- see mirror.spice/models.lib headers and README.md's 'Known limitation' note."
+  },
+  "source": {
+    "citation": "Current mirror is a standard first analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) easy-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

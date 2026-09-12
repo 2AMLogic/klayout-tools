@@ -1,0 +1,25 @@
+{
+  "id": "source-follower",
+  "title": "NMOS source follower (common-drain buffer)",
+  "tier": "easy",
+  "pdk": "sky130",
+  "description": "Design an NMOS source-follower (common-drain) unity-gain buffer, current-source biased, that holds small-signal voltage gain between 0.90 and 0.999 V/V at 1 kHz across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix.",
+  "block_spec": {
+    "spec_class": "unity-gain voltage buffer / level shifter",
+    "io_nodes": ["in", "out", "vdd", "gnd"],
+    "target_specs": {
+      "gain_v_min_at_1khz": 0.90,
+      "gain_v_max_at_1khz": 0.999,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/source-follower/eval_descriptor.json",
+    "netlists": ["benchmarks/design-agent/reference/source-follower/sf.spice"],
+    "notes": "Generic (non-PDK) NMOS model stands in for a sky130 device -- see sf.spice/models.lib headers and README.md's 'Known limitation' note."
+  },
+  "source": {
+    "citation": "Source follower is a standard first analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) easy-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

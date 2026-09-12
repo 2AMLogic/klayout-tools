@@ -1,0 +1,25 @@
+* Reference solution for benchmarks/design-agent/tasks/common-source-amp.json.
+*
+* Common-source NMOS amplifier: resistive drain load, drain-to-gate
+* feedback resistor for a process/temperature-robust self-bias point
+* (Id = (Vdd-Vout)/Rd with Vgate=Vout at DC, since no DC current flows in
+* the gate branch -- negative feedback that survives the Vt/KP corner
+* sweep below without a fixed external bias generator), and an AC-coupled
+* input so the feedback loop's DC operating point is undisturbed by the
+* input source.
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md, "Netlist convention"). bench_nmos comes from
+* models.lib.
+
+.param vdd=1.8
+.param rd=10k
+.param rf=300k
+.param cin=1u
+
+Vdd vdd 0 DC {vdd}
+Vin in 0 DC 0 AC 1
+Cin in gate {cin}
+Rf out gate {rf}
+Mn out gate 0 0 bench_nmos W=15u L=2u
+Rd vdd out {rd}

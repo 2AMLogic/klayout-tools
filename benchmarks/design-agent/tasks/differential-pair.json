@@ -1,0 +1,28 @@
+{
+  "id": "differential-pair",
+  "title": "NMOS differential pair with resistive loads",
+  "tier": "easy",
+  "pdk": "sky130",
+  "description": "Design an open-loop NMOS differential pair (tail current source, resistive drain loads) whose differential-mode voltage gain at 1 kHz is at least 8 dB across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix, while its common-mode-driven differential output stays at or below 0 dB across the same matrix -- i.e. differential gain must exceed common-mode response by a wide margin.",
+  "block_spec": {
+    "spec_class": "differential transconductance / input stage",
+    "io_nodes": ["inp", "inn", "outp", "outn", "vdd", "gnd"],
+    "target_specs": {
+      "diff_gain_db_min_at_1khz": 8,
+      "cm_gain_db_max_at_1khz": 0,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/differential-pair/eval_descriptor.json",
+    "netlists": [
+      "benchmarks/design-agent/reference/differential-pair/diff_pair_diff.spice",
+      "benchmarks/design-agent/reference/differential-pair/diff_pair_cm.spice"
+    ],
+    "notes": "Two netlists for the identical topology (differential-drive and common-mode-drive excitation), gated together by one eval_descriptor -- see diff_pair_diff.spice's header for why. Generic (non-PDK) NMOS model stands in for sky130 devices; see README.md's 'Known limitation' note."
+  },
+  "source": {
+    "citation": "Differential pair is a standard first analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) easy-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

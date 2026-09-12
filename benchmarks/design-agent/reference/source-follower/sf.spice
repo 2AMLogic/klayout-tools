@@ -1,0 +1,19 @@
+* Reference solution for benchmarks/design-agent/tasks/source-follower.json.
+*
+* NMOS source follower (common-drain): drain tied to the supply rail, gate
+* driven directly by the input, tail current source biasing the source
+* node -- the ideal current-source tail gives a very high output
+* impedance, which is what pushes voltage gain close to (but just under)
+* unity across every corner below.
+*
+* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
+* from models.lib.
+
+.param vdd=1.8
+.param vbias=1.0
+.param itail=100u
+
+Vdd vdd 0 DC {vdd}
+Vin gate 0 DC {vbias} AC 1
+Mn vdd gate out 0 bench_nmos W=40u L=1u
+Itail out 0 DC {itail}

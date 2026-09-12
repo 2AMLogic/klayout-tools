@@ -1,0 +1,13 @@
+{
+  "gates": [
+    { "check": "sim", "name": "unity_gain_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.0.worst_case.value",
+    "polarity": "maximize",
+    "name": "gain_v_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": []
+}
