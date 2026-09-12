@@ -20,7 +20,8 @@ not merely left unpopulated.
 `ALLOWED_CHECKS` is deliberately **per-deck**: issue #747 piloted `width`/
 `space` on *both* decks; issue #904 widens gf180mcu's own set to also cover
 `enclosing`/`separation` (completing gf180mcu's full DRC deck -- 42 rules at
-that issue, 44 as of issue #1110's `DF.1a`/`DF.3a` `_LV`/`_MV` split, per
+that issue, 44 as of issue #1110's `DF.1a`/`DF.3a` `_LV`/`_MV` split, 46 as
+of issue #1688's `metal4.width.1`/`metal4.space.1` pair, per
 Epic #711 Phase 3a's "every rule ships a golden pair" acceptance criterion),
 but deliberately leaves sky130's set at its original `width`/`space` pilot
 scope -- extending sky130's own enclosure coverage is a separate, unscoped

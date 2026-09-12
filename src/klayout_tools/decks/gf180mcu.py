@@ -1006,6 +1006,26 @@ DECK: list[DrcRule] = [
         provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
     ),
     DrcRule(
+        id="metal4.width.1",
+        description="minimum metal4 width",
+        layer=(46, 0),  # Metal4
+        check="width",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
+    ),
+    DrcRule(
+        id="metal4.space.1",
+        description="minimum metal4 spacing",
+        layer=(46, 0),  # Metal4
+        check="space",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
+    ),
+    DrcRule(
         id="metal5.width.1",
         description="minimum metal5 width",
         layer=(81, 0),  # Metal5

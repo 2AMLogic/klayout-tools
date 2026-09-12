@@ -222,13 +222,13 @@ part of this same `FEOL = false`-gated disagreement before issue #1654 --
 now that it uses `"isolated"` instead of `"space"`, it has left this
 width/space manifest entirely rather than resolving the disagreement.)
 
-gf180mcu's 44 rules have no native-*DRC*-deck cross-check verdict either
+gf180mcu's 46 rules have no native-*DRC*-deck cross-check verdict either
 way (deferred per the scope above -- no single runnable native DRC deck
 exists to cross-check against, re-verified unchanged as of issue #904); their
 `expected_disagreement` fields are all `null` because none has been
 cross-checked, which is **not** a claim of agreement. This is explicitly
 noted, not a silent skip: gf180mcu's DRC rules are still validated by tiers 1
-and 2 above (coverage + curated-engine self-consistency) on all 44 rules, and
+and 2 above (coverage + curated-engine self-consistency) on all 46 rules, and
 issue #904 additionally cross-checks gf180mcu's *LVS* device-extraction
 rules against a real, directly-runnable native deck (see the tier-3 note
 above) -- the DRC-side gap and the LVS-side result are two different
