@@ -1,0 +1,24 @@
+{
+  "id": "common-source-amp",
+  "title": "Common-source NMOS amplifier",
+  "tier": "easy",
+  "pdk": "sky130",
+  "description": "Design a single-transistor NMOS common-source voltage amplifier with a resistive drain load: an inverting stage with a self-stabilizing DC bias point (no external bias generator) that must hold at least 6 dB of small-signal voltage gain at 1 kHz across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix.",
+  "block_spec": {
+    "spec_class": "single-stage inverting voltage amplifier",
+    "io_nodes": ["in", "out", "vdd", "gnd"],
+    "target_specs": {
+      "gain_db_min_at_1khz": 6,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/common-source-amp/eval_descriptor.json",
+    "netlists": ["benchmarks/design-agent/reference/common-source-amp/cs_amp.spice"],
+    "notes": "Generic (non-PDK) NMOS models stand in for sky130 devices -- same PDK-free-reference-artifact precedent as examples/kb/rc-relaxation-oscillator; see cs_amp.spice/models.lib headers and README.md's 'Known limitation' note."
+  },
+  "source": {
+    "citation": "Common-source amplifier is a standard first analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) easy-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

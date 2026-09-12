@@ -1,0 +1,32 @@
+* Reference solution for benchmarks/design-agent/tasks/differential-pair.json
+* -- differential-drive variant. See diff_pair_cm.spice for the
+* common-mode-drive companion (identical circuit; only Vinp/Vinn's AC
+* phase differs, so both this task's gates score the *same* topology).
+*
+* NMOS differential pair, resistive drain loads, ideal tail current
+* source. Vinp/Vinn are 180deg out of phase at AC 0.5V each, so the
+* differential input magnitude is 1V. Bdout is a behavioral element
+* forming the differential output V(outp)-V(outn) -- ngspice's
+* `.meas ac ... FIND` does not accept a two-node `vdb(a,b)` expression
+* directly, so the difference is formed explicitly as its own node.
+*
+* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
+* from models.lib.
+
+.param vdd=1.8
+.param vbias=0.9
+.param itail=100u
+.param rd=8k
+
+Vdd vdd 0 DC {vdd}
+Vinp inp 0 DC {vbias} AC 0.5 0
+Vinn inn 0 DC {vbias} AC 0.5 180
+Mp outp inp tail 0 bench_nmos W=20u L=1u
+Mn outn inn tail 0 bench_nmos W=20u L=1u
+Itail tail 0 DC {itail}
+Rdp vdd outp {rd}
+* Deliberate 0.5% mismatch on the "n" branch load -- real layouts never
+* match resistors exactly; this is what gives diff_pair_cm.spice's
+* common-mode drive a small, non-zero differential output to measure.
+Rdn vdd outn {rd*1.005}
+Bdout dout 0 V=V(outp)-V(outn)

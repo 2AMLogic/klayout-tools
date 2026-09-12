@@ -1,0 +1,20 @@
+{
+  "netlist": "sf.spice",
+  "engine": "ngspice",
+  "models": { "lib": "models.lib" },
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "ac", "args": "dec 5 1 100meg" },
+  "measurements": [
+    {
+      "name": "gain_v",
+      "spice": ".meas ac gain_v FIND vm(out) AT=1k",
+      "unit": "V/V",
+      "limits": { "min": 0.90, "max": 0.999 }
+    }
+  ],
+  "options": { "timeout_s": 30, "keep_artifacts": false }
+}

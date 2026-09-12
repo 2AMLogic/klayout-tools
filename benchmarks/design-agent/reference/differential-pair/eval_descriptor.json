@@ -1,0 +1,21 @@
+{
+  "gates": [
+    { "check": "sim", "name": "differential_gain_gate", "args": { "request": "sim_request_diff.json" } },
+    { "check": "sim", "name": "common_mode_rejection_gate", "args": { "request": "sim_request_cm.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.0.worst_case.value",
+    "polarity": "maximize",
+    "name": "diff_gain_db_worst_case",
+    "args": { "request": "sim_request_diff.json" }
+  },
+  "metrics": [
+    {
+      "name": "common_mode_output",
+      "check": "sim",
+      "metric": "measurements.0.worst_case.value",
+      "args": { "request": "sim_request_cm.json" }
+    }
+  ]
+}

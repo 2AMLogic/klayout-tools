@@ -1,0 +1,82 @@
+name: Design-agent benchmark
+
+# Issue #1719: task-set schema validation + "every reference solution passes
+# its own gate" check for benchmarks/design-agent/ -- the harness's own
+# self-check, not yet the live-agent pass@k run (see
+# benchmarks/design-agent/README.md, "Known limitations": the shipped
+# `run` mode's default candidate provider is a deterministic stand-in, not
+# a live S4->S5->S6 skill-driven agent).
+#
+# `workflow_dispatch`/`schedule` only, mirroring `equiv-canary.yml`'s
+# posture: every task's reference solution is an 18-corner `ngspice` sweep
+# per `klt sim` call, which is minutes of simulator time in aggregate --
+# judged too heavy to gate every PR for a check whose task set changes
+# rarely. Trigger manually from the Actions tab, or `gh workflow run
+# design-agent-benchmark.yml`, whenever a task/reference solution changes,
+# or on the weekly schedule below to catch a `klt eval`/`klt sim` engine
+# regression even when the benchmark tree itself is untouched.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday 09:00 UTC -- an arbitrary, infrequent cadence; adjust
+    # freely, this is not tied to any release schedule.
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: design-agent-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  design-agent-benchmark:
+    name: Task-set validation + reference-solution self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install ngspice
+        # See .github/workflows/ci.yml's step of the same name for the
+        # per-package/timeout rationale -- identical install path.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh ngspice
+
+      - name: Verify ngspice runs headlessly
+        run: ngspice -v
+
+      - name: Validate task set + reference solutions
+        run: |
+          uv run --frozen python scripts/design_agent_benchmark.py validate \
+            | tee design-agent-benchmark-validate.json
+
+      - name: Run the harness (reference candidate provider, pass@1/pass@5)
+        # Deterministic reference-provider proof-of-concept -- see
+        # benchmarks/design-agent/README.md "Known limitations". Always
+        # reports 100% pass while the harness itself is healthy; a drop
+        # below 100% here is a regression in the harness's own klt
+        # eval/klt sim wiring, not (yet) in the design pipeline.
+        run: |
+          uv run --frozen python scripts/design_agent_benchmark.py run \
+            --attempts 5 --k 1 5 --out design-agent-benchmark-run.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: design-agent-benchmark-report
+          path: |
+            design-agent-benchmark-validate.json
+            design-agent-benchmark-run.json
+          retention-days: 90

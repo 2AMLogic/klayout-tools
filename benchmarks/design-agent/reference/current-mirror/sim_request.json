@@ -1,0 +1,20 @@
+{
+  "netlist": "mirror.spice",
+  "engine": "ngspice",
+  "models": { "lib": "models.lib" },
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "dc", "args": "Vout 0.7 1.1 0.05" },
+  "measurements": [
+    {
+      "name": "iout_a",
+      "spice": ".meas dc iout_a FIND vout#branch AT=0.9",
+      "unit": "A",
+      "limits": { "min": -5.5e-5, "max": -4.5e-5 }
+    }
+  ],
+  "options": { "timeout_s": 30, "keep_artifacts": false }
+}

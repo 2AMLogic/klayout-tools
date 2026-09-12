@@ -1,0 +1,19 @@
+* Reference solution for benchmarks/design-agent/tasks/current-mirror.json.
+*
+* NMOS current mirror: a diode-connected reference device (Mref) mirrors
+* the reference current Iref into the output branch (Mout) at nominally
+* 1:1 ratio (matched W/L on both devices). Vout holds the output branch at
+* a fixed operating point mid-swing so the mirrored current can be read
+* directly as the current through Vout across the whole corner matrix.
+*
+* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
+* from models.lib.
+
+.param vdd=1.8
+.param iref=50u
+
+Vdd vdd 0 DC {vdd}
+Iref vdd ref DC {iref}
+Mref ref ref 0 0 bench_nmos W=10u L=2u
+Mout out ref 0 0 bench_nmos W=10u L=2u
+Vout out 0 DC 0.9
