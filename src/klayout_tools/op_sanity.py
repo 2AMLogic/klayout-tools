@@ -446,7 +446,19 @@ def parse_netlist(text: str, model_overrides: dict[str, Any]) -> ParsedNetlist:
         elif element == "X" and len(tokens) >= 6:
             nodes = [tok.lower() for tok in tokens[1:-1]]
             model = tokens[-1]
-            kind = model_kinds.get(model.lower()) or _mos_kind(model)
+            # The `op_lint.models.<model>.kind` override is consulted BEFORE
+            # the naming heuristics, mirroring `_record_mos`'s own precedence
+            # on the unconditional `M` path: it exists precisely to resolve a
+            # model name this tool cannot classify, so gating it behind those
+            # heuristics would make it unreachable for the PDK subcircuit
+            # calls (`X<name> d g s b <model>`) it is documented to fix -- and
+            # a model name that also fails `_looks_like_mos` would drop out of
+            # the report with no `device_kind_unknown` diagnostic at all.
+            kind = (
+                (model_overrides.get(model.lower()) or {}).get("kind")
+                or model_kinds.get(model.lower())
+                or _mos_kind(model)
+            )
             if len(nodes) == 4 and kind is not None:
                 _record_mos(parsed, name, kind, model, nodes, model_overrides)
             else:

@@ -245,6 +245,63 @@ def test_parse_netlist_resolves_param_referenced_source_value():
     assert parsed.sources["dd"][2] == pytest.approx(1.8)
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Unclassifiable, but `_looks_like_mos` would at least have reported it
+        # as unresolved.
+        "mycustomfet",
+        # Unclassifiable AND does not smell like a MOS -- before the override
+        # was consulted first, this device vanished from `devices`,
+        # `unresolved`, and therefore every finding, with zero trace.
+        "mycustomdev",
+    ],
+)
+def test_model_kind_override_classifies_an_x_instance_pdk_call(model):
+    # `op_lint.models.<model>.kind` exists to resolve a model name this tool
+    # cannot classify; `X<name> d g s b <model>` is the dominant PDK shape, so
+    # the override must reach it exactly as it reaches a plain `M` element.
+    parsed = op_sanity.parse_netlist(
+        f"Vdd vdd 0 DC 1.8\nXM1 d g 0 0 {model} L=0.5 W=4\n",
+        {model: {"kind": "nmos"}},
+    )
+
+    assert [device.name for device in parsed.devices] == ["XM1"]
+    assert parsed.devices[0].kind == "nmos"
+    assert parsed.devices[0].model == model
+    assert parsed.devices[0].nodes == {
+        "drain": "d",
+        "gate": "g",
+        "source": "0",
+        "bulk": "0",
+    }
+    # Resolved, so no `device_kind_unknown` diagnostic is owed for it.
+    assert parsed.unresolved == []
+
+
+def test_unclassifiable_x_instance_without_an_override_is_still_reported():
+    # The counterpart to the override path: with no override to rescue it, a
+    # MOS-looking subcircuit call must still surface as unresolved rather than
+    # being silently dropped (the false negative this module must never emit).
+    parsed = op_sanity.parse_netlist(
+        "Vdd vdd 0 DC 1.8\nXM1 d g 0 0 mycustomfet L=0.5 W=4\n", {}
+    )
+
+    assert parsed.devices == []
+    assert parsed.unresolved == ["XM1"]
+
+
+def test_model_kind_override_beats_a_conflicting_naming_heuristic():
+    # Precedence must match `_record_mos`'s on the `M` path: the explicit
+    # override wins over what the model name implies, not the other way round.
+    parsed = op_sanity.parse_netlist(
+        "XM1 d g vdd vdd sky130_fd_pr__nfet_01v8 L=0.15 W=1\n",
+        {"sky130_fd_pr__nfet_01v8": {"kind": "pmos"}},
+    )
+
+    assert parsed.devices[0].kind == "pmos"
+
+
 def test_op_candidates_cover_both_pdk_inner_element_conventions():
     # sky130 names the inner element `m<subckt>`, gf180mcu names it `m0`
     # (both verified against the installed PDKs -- see op_sanity.py).
