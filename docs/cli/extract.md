@@ -3106,6 +3106,53 @@ i.e. the first extracted netlist that can show crosstalk in `klt sim` at all.
 the crossover charge better *attributed* and better *sized*; it does not make
 `--parasitics` a PEX tool. See "What it does *not* do" below.
 
+### Scoping the ground R/C pass to named nets (`--parasitics-net`, issue #1700)
+
+Everything above is a **whole-layout** pass: `--parasitics` measures the
+ground R/C of every net in the design. That is the right default, but it is
+also the dominant cost on a large block — the pass queries each net's
+geometry once per conductor role, so a mixed-signal top cell with a few
+thousand nets spends tens of minutes producing R/C for thousands of nets
+when the caller wanted it for a handful. `--parasitics-net <net>`
+(repeatable; requires `--parasitics`) restricts the ground R/C pass to the
+named nets:
+
+```
+klt extract cell.gds --deck sky130 --parasitics --parasitics-net VOUT --parasitics-net VCTRL --format json
+```
+
+- **What it changes: which nets are measured, never how.** A named net's
+  `resistance_ohm`/`capacitance_ff` are bit-for-bit what the full-layout pass
+  reports for it. An unnamed net is measured not at all: no
+  `parasitics.nets[]` entry, no injected `R`/`C` cards, and no contribution
+  to `total_resistance_ohm`/`total_capacitance_ff`.
+- **Coupling follows the scope.** Both coupling passes (vertical-overlap
+  above, and `--critical-net`'s lateral pass below) are computed from the
+  per-net geometry the ground pass caches, so under a scoped run **only a
+  pair of both-named nets can couple**. Naming only the victim of a
+  crosstalk pair and not its aggressor reports zero coupling for it — name
+  both sides. A `--critical-net` name left out of `--parasitics-net` is
+  called out in `warnings` for exactly this reason.
+- **A name matching no net is a warning, not an error.** Same tolerant
+  convention as `--critical-net` (and unlike `--mom-net`): a caller may
+  legitimately name several candidate nets across several blocks/runs, so an
+  unmatched name is reported in `warnings` rather than raised.
+- **Naming an anonymous net.** Matches against the same spelling
+  `parasitics.nets[].net` reports (see "Anonymous nets are backslash-escaped"
+  below) — an unlabelled net's placeholder must be given backslash-escaped
+  (`--parasitics-net '\$2'`), exactly as for `--critical-net`.
+- **Omitted is unchanged.** With the flag absent the full-layout pass runs
+  exactly as before this flag existed.
+
+This trades completeness for runtime and says so explicitly — it is the only
+`--parasitics` flag that *removes* content from the report, so the request is
+echoed back so a consumer can tell a deliberately-scoped run from a layout
+whose other nets genuinely had no ground-eligible geometry:
+
+| Field | Meaning |
+|---|---|
+| `parasitics.parasitics_nets` | The `--parasitics-net` request, echoed back verbatim. `[]` when the flag was never given (i.e. a full-layout pass). |
+
 ### Lateral (same-layer, sidewall) coupling capacitance for critical nets (`--critical-net`, issue #976)
 
 Vertical-overlap coupling above only ever fires when one net's conductor
@@ -4265,6 +4312,7 @@ also gains the additive `node_scope` field (always `"global"`). See
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 | `overlap_pairs_without_coefficient` | array\<object\> | Adjacent metal-level pairs the deck declares but its `PARASITICS.metal_overlaps` table has no vertical-overlap coefficient for (issue #760). See below. Empty for both shipped decks. |
 | `critical_nets`        | array\<string\> | The `--critical-net` request, echoed back verbatim (issue #976). `[]` when the flag was never given. |
+| `parasitics_nets`      | array\<string\> | The `--parasitics-net` request, echoed back verbatim (issue #1700) — the nets the ground R/C pass was scoped to. `[]` when the flag was never given, i.e. a full-layout pass. See "Scoping the ground R/C pass to named nets" above. |
 | `distributed_rc`       | boolean         | `true` only when `--distributed-rc` was given (issue #977). `false` otherwise, `--critical-net`-only runs included. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
