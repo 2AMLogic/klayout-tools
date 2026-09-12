@@ -88,21 +88,38 @@ Suggested working shape (not a shipped contract — do not present this as a
 
 ## Applicable `klt` verbs
 
-`klt kb list` / `klt kb show <id>` / `klt kb search <query>` — shipped, full
+`klt kb list` / `klt kb show <id>` / `klt kb search [<query>]` — shipped, full
 contract in [`docs/cli/kb.md`](../../../docs/cli/kb.md) (this skill does not
 restate that contract; read it for the exact request/response shape,
-matching rules, and exit codes). Typical flow:
+matching rules, and exit codes). Typical flow, **numeric first**:
 
-1. `klt kb search "<keyword from the block spec's topology-relevant terms>" --format json`
+1. **When the S3 block spec has numeric electrical targets** (a gain, phase
+   margin, bandwidth, bias current, supply, ...), start with
+   `klt kb search --where "<figure><op><value>" [--where ...] [--pdk <pdk>] --format json`
+   — e.g. `klt kb search --where av_db>=40 --where idd_a<=2e-6 --pdk sky130`.
+   This filters on an entry's `measured.figures` (reproduced by `klt sim` on a
+   named corner), which is a much stronger fit signal than a keyword hit: a
+   numeric match tells you the candidate topology has already demonstrated
+   the spec, not just that its title/prose mentions related terms. `<query>`
+   is optional — omit it to filter purely on `--where`/`--pdk`. Repeat
+   `--where` for multiple numeric conditions (AND'd together).
+   - An entry with no `measured` block (still the common case — the corpus is
+     shallow, see the KB-status note above) never matches a `--where`/`--pdk`
+     filter; a miss here is exactly as inconclusive as a keyword miss below,
+     not evidence the topology doesn't exist.
+2. `klt kb search "<keyword from the block spec's topology-relevant terms>" --format json`
    — case-insensitive substring match over `title`, `topology`, `spec_class`,
    `layout_idioms`, `notes`. Try more than one keyword; a miss on one term is
-   not evidence of "no match" (see the KB-status note above).
-2. `klt kb list --format json` when a search misses, to scan the whole corpus
-   by eye rather than trust one query's keyword choice.
-3. `klt kb show <id> --format json` on a promising candidate — read
-   `pdk_portability`, `sizing_approach`, and `layout_idioms` to judge fit
-   against the S3 spec, not just the title match.
-4. `klt kb validate --format json` is a corpus-integrity check, not part of
+   not evidence of "no match" (see the KB-status note above). Numeric and
+   keyword filters can be combined in one call (`search <query> --where ...`).
+3. `klt kb list --format json` when both miss, to scan the whole corpus by
+   eye rather than trust one query's keyword/numeric choice.
+4. `klt kb show <id> --format json` on a promising candidate — read
+   `pdk_portability`, `sizing_approach`, `layout_idioms`, and (when present)
+   `measured` to judge fit against the S3 spec, not just the title match or a
+   single passing `--where` condition; a topology can clear one numeric bar
+   and miss another the spec also cares about.
+5. `klt kb validate --format json` is a corpus-integrity check, not part of
    this stage's normal flow — only relevant if `show`/`search` results look
    malformed.
 

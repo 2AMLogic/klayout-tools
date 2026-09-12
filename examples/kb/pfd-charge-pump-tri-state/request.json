@@ -1,0 +1,37 @@
+{
+  "netlist": "charge_pump.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": ["tt"],
+    "temperature_c": [27]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "1n 2n"
+  },
+  "measurements": [
+    {
+      "name": "i_up",
+      "spice": ".meas tran i_up find i(Vctrlp) at=1n",
+      "unit": "A"
+    },
+    {
+      "name": "i_down",
+      "spice": ".meas tran i_down find par('-1*i(Vctrln)') at=1n",
+      "unit": "A"
+    },
+    {
+      "name": "i_mismatch_pct",
+      "spice": ".meas tran i_mismatch_pct find par('100*(i(Vctrlp)-(-1*i(Vctrln)))/((i(Vctrlp)+(-1*i(Vctrln)))/2)') at=1n",
+      "unit": "%"
+    }
+  ],
+  "options": {
+    "timeout_s": 60,
+    "keep_artifacts": false
+  }
+}
