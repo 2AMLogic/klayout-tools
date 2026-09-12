@@ -2969,6 +2969,18 @@ def test_spef_sta_script_writes_sdf_immediately_after_read_spef():
     )
 
 
+def _count_spef_nets_annotated(stdout: str):
+    """Call the shared, `_paths.py`-hosted implementation (issue #1703) with
+    `place_and_route.py`'s own marker constants bound, mirroring how
+    `place_and_route.py` itself calls it."""
+    return place_and_route._count_spef_nets_annotated(
+        stdout,
+        begin=place_and_route._SPEF_NET_CHECK_BEGIN,
+        end=place_and_route._SPEF_NET_CHECK_END,
+        pattern=place_and_route._SPEF_NET_CHECK_RE,
+    )
+
+
 def test_count_spef_nets_annotated_parses_marker_block():
     stdout = "\n".join(
         [
@@ -2980,11 +2992,11 @@ def test_count_spef_nets_annotated_parses_marker_block():
             "trailer",
         ]
     )
-    assert place_and_route._count_spef_nets_annotated(stdout) == (7, 10, 4, 4)
+    assert _count_spef_nets_annotated(stdout) == (7, 10, 4, 4)
 
 
 def test_count_spef_nets_annotated_defensive_when_markers_missing():
-    assert place_and_route._count_spef_nets_annotated("no markers here") is None
+    assert _count_spef_nets_annotated("no markers here") is None
 
 
 def test_stubbed_target_stage_place_reports_null_route_drc_violation_count(

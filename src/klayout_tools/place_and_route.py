@@ -510,7 +510,12 @@ from typing import Any
 
 from ._layout import write_layout
 from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import (
+    _count_spef_nets_annotated,
+    _load_request_json,
+    _tcl_net_list,
+    validate_request_shape,
+)
 from ._provenance import build_provenance
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import (
@@ -3341,20 +3346,6 @@ def _corner_sweep_script_lines(
 # --------------------------------------------------------------------------- #
 
 
-def _tcl_net_list(names: Iterable[str]) -> str:
-    """Render ``names`` as a brace-quoted Tcl list body (each name wrapped
-    ``{...}``, whitespace-joined) -- the standard Tcl idiom for embedding
-    arbitrary literal strings in a generated script without word-splitting
-    or ``$``/``[...]`` substitution inside each token. Net names this module
-    ever embeds this way come from ``klt extract``'s own SPICE-safe naming
-    (:func:`klayout_tools.extract.spice_safe_net_name`), which does not
-    introduce a literal ``}`` -- an unbalanced brace in a caller-supplied
-    name is a known, unguarded edge case, consistent with this module's
-    existing "not independently verified live" posture for newly-added Tcl
-    surface (see this module's own docstring)."""
-    return " ".join("{" + name + "}" for name in names)
-
-
 def _spef_sta_script_lines(
     *,
     checkpoint_in: str,
@@ -3454,29 +3445,6 @@ def _spef_sta_script_lines(
     lines += _metrics_report_lines(include_fmax=False, include_power=False)
     lines += _violation_count_lines()
     return lines
-
-
-def _count_spef_nets_annotated(stdout: str) -> tuple[int, int, int, int] | None:
-    """``(nets_annotated, nets_total, design_nets_annotated,
-    design_nets_total)`` parsed from :func:`_spef_sta_script_lines`'s own
-    ``===KLT_SPEF_NET_CHECK_BEGIN===``/``===END===``-delimited stdout block,
-    or ``None`` when the markers aren't found (defensive; should not happen
-    for a successful run) -- same marker-scrape convention as
-    :func:`_count_antenna_violations`."""
-    try:
-        start_idx = stdout.index(_SPEF_NET_CHECK_BEGIN) + len(_SPEF_NET_CHECK_BEGIN)
-        stop_idx = stdout.index(_SPEF_NET_CHECK_END, start_idx)
-    except ValueError:
-        return None
-    match = _SPEF_NET_CHECK_RE.search(stdout[start_idx:stop_idx])
-    if match is None:
-        return None
-    return (
-        int(match.group(1)),
-        int(match.group(2)),
-        int(match.group(3)),
-        int(match.group(4)),
-    )
 
 
 #: Matches a DEF ``PINS`` section's opening line (``PINS <numPins> ;``,
@@ -3845,7 +3813,12 @@ def _post_route_spef_metrics(
     hold_violation_count = _count_violations(
         completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
     )
-    nets_check = _count_spef_nets_annotated(completed.stdout)
+    nets_check = _count_spef_nets_annotated(
+        completed.stdout,
+        begin=_SPEF_NET_CHECK_BEGIN,
+        end=_SPEF_NET_CHECK_END,
+        pattern=_SPEF_NET_CHECK_RE,
+    )
     nets_annotated, nets_total, design_nets_annotated, design_nets_total = (
         nets_check if nets_check is not None else (0, len(net_names), 0, 0)
     )
