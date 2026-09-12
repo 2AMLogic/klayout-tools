@@ -433,6 +433,56 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   recomputed this run; `checkpoint_retained` is `false` once a run finishes
   with every corner accounted for (the file is then deleted).
 
+## Timeout-budget preflight
+
+Issue [#1686](https://github.com/2AMLogic/klayout-tools/issues/1686): a
+per-corner `options.timeout_s` protects against a *hang* (see "Failure
+classification" above), but nothing protects against a *budget that can
+never be met* — a real incident widened a `tran` analysis window 33× while
+raising `timeout_s` only 6×, and every one of 45 corners came back
+`timeout` after burning its full budget with no usable result, for ~45
+wall-clock hours of saturated cores before anyone noticed the shape.
+
+Before the grid starts, `klt sim` runs a coarse, advisory-only sanity check
+on `options.timeout_s` against a `tran` analysis's own declared step/window
+(scoped to `kind: "tran"` — `op`/`dc`/`ac` have no "window of simulated
+time" concept). It compares `timeout_s` against the number of timepoints
+implied by `window / step`, under a deliberately generous floor (50
+timepoints/second — **not** a real per-engine throughput estimate; ngspice's
+actual rate depends heavily on circuit size/complexity and is not knowable
+without running it, and can be *orders of magnitude* slower than this floor
+in practice, as the incident above shows). When `timeout_s` looks
+implausible even under that generous floor, the response carries an
+advisory string:
+
+```json
+{
+  "environment": {
+    "timeout_preflight_warning": "options.timeout_s (1s) looks implausible for a tran analysis with ~1e+05 timepoints (1n step, 100u window) -- even 50 timepoints/s (a generous floor, not a real engine-rate estimate) would need 2e+03s per corner. This is only a coarse, advisory pre-grid heuristic -- it does not block the sweep, and a plausible-looking budget can still turn out to be too short in practice."
+  }
+}
+```
+
+Present only when the heuristic actually has something to say — absent for
+the common case. **This is advisory only: it never blocks the sweep**, and a
+budget that looks "plausible" under this coarse, generous floor can still be
+wildly insufficient in practice (as the motivating incident's own numbers
+show) — this heuristic catches only the most obviously-impossible requests,
+it is not a substitute for verifying a real campaign's actual throughput.
+
+A stronger, dispatch-time guard that aborts a grid once early corners prove
+the budget itself (not one slow corner) is the problem was scoped by the
+same issue but is **not implemented**: it requires recovering how far a
+timed-out corner's simulated time actually got (`reached_s`), and every
+mechanism investigated for that turned out to be unsafe or non-functional
+against this module's actual per-corner deck shape (ngspice's `-r`
+streaming rawfile is silently disabled by the `.control` block every real
+corner deck uses for its `alter` supply-override cards; a `stop`/`resume`
+checkpoint workaround around that corrupts `.meas` evaluation for ordinary,
+non-timeout sweeps). See issue
+[#1694](https://github.com/2AMLogic/klayout-tools/issues/1694), which tracks
+this open design question with the full empirical findings.
+
 ## Deviation from the spike
 
 The spike's proposed response shape carries a top-level
@@ -1150,7 +1200,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. |
+| `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case; see "Timeout-budget preflight" above. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
@@ -1200,6 +1250,16 @@ the full reasoning):
   measurement's `value` is `null`.
 - **Every corner is reported** — `corners.length == corner_count` always,
   including errored corners (with their diagnostics).
+- **`errored == corner_count` means zero measurements, not `corner_count`
+  rows of evidence.** `passed`/`failed` corners are the ones that actually
+  produced a trustworthy result; `errored` corners (timeout, nonconvergence,
+  a never-dispatched `budget_exceeded`/`orphaned` corner, …) did not (issue
+  [#1686](https://github.com/2AMLogic/klayout-tools/issues/1686)). A
+  response where every corner errored — the exact shape an unmeetable
+  `options.timeout_s` budget produces — is a record with **no** measurement
+  data in it; a downstream reader (human or agent) should treat it as "the
+  sweep produced no evidence", never mistake its `corner_count` for a count
+  of usable rows.
 - **Reproducibility is in-band** — `environment` hashes the netlist and
   resolved model library so a stored result can be checked against the
   inputs that produced it; a `monte_carlo` request additionally makes the

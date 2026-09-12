@@ -54,6 +54,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   `gen-compose` always places a source block exactly one level below its own
   composed top. See [`docs/cli/extract.md`](docs/cli/extract.md)'s
   "DEF-derived net names" section.
+- **Added**: `klt sim --format json` now reports
+  `environment.timeout_preflight_warning` (part of issue #1686) — an
+  advisory string emitted before the corner grid starts when the requested
+  `options.timeout_s` looks implausible for a `tran` analysis's own declared
+  step/window. A per-corner `timeout_s` protects against a *hang*, but
+  nothing protected against a budget that can never be met: a real incident
+  widened a `tran` window 33× while raising `timeout_s` only 6×, and all 45
+  corners came back `timeout` after burning their full budget for ~45
+  wall-clock hours with no usable result. The check compares `timeout_s`
+  against the `window / step` timepoint count under a deliberately generous
+  50 timepoints/second floor (**not** a real per-engine throughput estimate),
+  is scoped to `kind: "tran"` only, and is **advisory only — it never blocks
+  the sweep**; a budget that looks plausible under this coarse floor can
+  still be wildly insufficient in practice. Present only when the heuristic
+  has something to say, absent for the common case — purely additive, and
+  `klt sim`'s `schema_version` stays `1`. The stronger dispatch-time abort
+  scoped by the same issue is **not** implemented (it needs a timed-out
+  corner's `reached_s`, which no investigated mechanism can recover safely
+  against this module's per-corner deck shape); issue #1694 tracks that open
+  design question with the empirical findings. See
+  [`docs/cli/sim.md`](docs/cli/sim.md)'s "Timeout-budget preflight" section.
 - **Fixed**: `klt gen-compose`'s `connectivity[]` router now retries a leg
   onto `routing.cross_block_layer_role` when it is rejected for crossing a
   *different* net's already-accepted route, instead of failing the whole net
