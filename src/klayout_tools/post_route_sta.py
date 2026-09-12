@@ -35,22 +35,24 @@ already carries. It never places, routes, or runs CTS -- there is no
 one and only geometry analysed.
 
 Deliberately duplicates a couple of small helpers already defined in
-``place_and_route.py`` (``_clock_lines``, ``_read_metrics``, the SPEF
-net-name-correlation Tcl) rather than importing them -- this repo's own
-stated convention (see ``place_and_route.py``'s ``_resolve_liberty``
-docstring) is that each verb module stays self-contained; every existing
-cross-module import between verb modules in this repo is of a *public* name
-(``run_place_and_route``, ``PlaceAndRouteError``, ``run_extract``, ...),
-never a private one. ``_run_openroad``, ``_count_violations``, and
-``_openroad_version`` are the exception: those three were byte-identical
-(modulo exception class/docstring length) between this module and
-``place_and_route.py`` with no caller-visible behavioral difference worth
-preserving per-copy, so they were consolidated into the shared
-``_openroad_engine`` internal utility module both import from (issue
-#1637) -- following the same precedent as ``_paths.py`` (issue #642).
-``_openroad_engine`` is a shared utility module, not a verb module, so
-importing its (underscore-prefixed, ``_paths.py``-style) helpers by name
-does not violate the convention above.
+``place_and_route.py`` (``_clock_lines``, ``_read_metrics``) rather than
+importing them -- this repo's own stated convention (see
+``place_and_route.py``'s ``_resolve_liberty`` docstring) is that each verb
+module stays self-contained; every existing cross-module import between verb
+modules in this repo is of a *public* name (``run_place_and_route``,
+``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
+``_run_openroad``, ``_count_violations``, ``_openroad_version``, and (issue
+#1703) the SPEF net-name-correlation Tcl helpers ``_tcl_net_list``/
+``_count_spef_nets_annotated`` are the exceptions: those were byte-identical
+(modulo exception class/docstring length, or -- for
+``_count_spef_nets_annotated`` -- module-local marker constants) between this
+module and ``place_and_route.py`` with no caller-visible behavioral
+difference worth preserving per-copy, so they were consolidated into the
+shared ``_openroad_engine``/``_paths.py`` internal utility modules both
+import from (issues #1637/#1703) -- following the same precedent as
+``_paths.py`` (issue #642). ``_openroad_engine``/``_paths.py`` are shared
+utility modules, not verb modules, so importing their (underscore-prefixed)
+helpers by name does not violate the convention above.
 
 Scope deliberately excluded from this first version (tracked as follow-up,
 not required for this issue): a ``propagated_clock`` request option (the
@@ -68,7 +70,12 @@ import subprocess
 from typing import Any
 
 from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import (
+    _count_spef_nets_annotated,
+    _load_request_json,
+    _tcl_net_list,
+    validate_request_shape,
+)
 from ._provenance import build_provenance
 from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
 
@@ -361,7 +368,12 @@ def _spef_annotation_block(
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
 
-    nets_check = _count_spef_nets_annotated(stdout)
+    nets_check = _count_spef_nets_annotated(
+        stdout,
+        begin=_SPEF_NET_CHECK_BEGIN,
+        end=_SPEF_NET_CHECK_END,
+        pattern=_SPEF_NET_CHECK_RE,
+    )
     nets_annotated, nets_total, design_nets_annotated, design_nets_total = (
         nets_check if nets_check is not None else (0, len(spef_net_names or []), 0, 0)
     )
@@ -581,13 +593,6 @@ def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
         f"create_clock -name {clock_port} -period {clock_period_ns} "
         f"[get_ports {clock_port}]"
     ]
-
-
-def _tcl_net_list(names: list[str]) -> str:
-    """Render ``names`` as a brace-quoted Tcl list body -- see
-    ``place_and_route.py``'s identical ``_tcl_net_list`` docstring for the
-    escaping rationale (brace-quoting, not glob-escaping)."""
-    return " ".join("{" + name + "}" for name in names)
 
 
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
@@ -849,28 +854,6 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
             f"sta metrics '{metrics_path}' must contain a JSON object"
         )
     return data
-
-
-def _count_spef_nets_annotated(stdout: str) -> tuple[int, int, int, int] | None:
-    """``(nets_annotated, nets_total, design_nets_annotated,
-    design_nets_total)`` parsed from :func:`_spef_net_check_lines`'s own
-    ``===KLT_STA_SPEF_NET_CHECK_BEGIN===``/``===END===``-delimited stdout
-    block, or ``None`` when the markers aren't found (defensive; should not
-    happen for a successful run)."""
-    try:
-        start_idx = stdout.index(_SPEF_NET_CHECK_BEGIN) + len(_SPEF_NET_CHECK_BEGIN)
-        stop_idx = stdout.index(_SPEF_NET_CHECK_END, start_idx)
-    except ValueError:
-        return None
-    match = _SPEF_NET_CHECK_RE.search(stdout[start_idx:stop_idx])
-    if match is None:
-        return None
-    return (
-        int(match.group(1)),
-        int(match.group(2)),
-        int(match.group(3)),
-        int(match.group(4)),
-    )
 
 
 def _parse_spef_missing_nets(stdout: str) -> list[str]:

@@ -45,14 +45,31 @@ required ``"resistance_ohm"`` key, and ``power.py``'s additional
 layered on top of the shared result. ``_validate_via_entries`` below
 factors out the shared shape/parse/duplicate-tracking logic; each caller
 still builds its own final entry dict from the returned pieces.
+
+``place_and_route.py`` and ``post_route_sta.py`` also each defined an
+identical ``_tcl_net_list(names)`` (render ``names`` as a brace-quoted Tcl
+list body -- the standard Tcl idiom for embedding arbitrary literal
+strings in a generated script without word-splitting or ``$``/``[...]``
+substitution inside each token) and an identically-shaped
+``_count_spef_nets_annotated(stdout)`` (parse the four
+``nets_annotated``/``nets_total``/``design_nets_annotated``/
+``design_nets_total`` ints out of a marker-delimited ``puts`` block in a
+completed OpenSTA run's stdout, or ``None`` when the markers aren't
+found) -- differing only in which module-local marker constants
+(``_SPEF_NET_CHECK_BEGIN``/``_END``/``_RE``) each module's own generated
+Tcl embeds. ``_tcl_net_list`` below is unchanged; ``_count_spef_nets_annotated``
+now takes the three marker values (``begin``, ``end``, ``pattern``) as
+parameters instead of reading module-local constants, since that was the
+only per-module variation.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 
@@ -200,6 +217,50 @@ def _validate_via_entries(
         results.append((i, entry, name, layer, (str(between[0]), str(between[1]))))
 
     return results
+
+
+def _tcl_net_list(names: Iterable[str]) -> str:
+    """Render ``names`` as a brace-quoted Tcl list body (each name wrapped
+    ``{...}``, whitespace-joined) -- the standard Tcl idiom for embedding
+    arbitrary literal strings in a generated script without word-splitting
+    or ``$``/``[...]`` substitution inside each token. Shared by
+    ``place_and_route.py`` and ``post_route_sta.py``, whose net names come
+    from ``klt extract``'s own SPICE-safe naming
+    (:func:`klayout_tools.extract.spice_safe_net_name`) or a caller-supplied
+    ``spef``'s own (unescaped) net names -- neither introduces a literal
+    ``}``, so an unbalanced brace in a caller-supplied name is a known,
+    unguarded edge case."""
+    return " ".join("{" + name + "}" for name in names)
+
+
+def _count_spef_nets_annotated(
+    stdout: str, *, begin: str, end: str, pattern: re.Pattern[str]
+) -> tuple[int, int, int, int] | None:
+    """``(nets_annotated, nets_total, design_nets_annotated,
+    design_nets_total)`` parsed from a ``begin``/``end``-delimited stdout
+    block -- ``place_and_route.py``'s ``_spef_sta_script_lines`` and
+    ``post_route_sta.py``'s ``_spef_net_check_lines`` each ``puts`` this
+    block using their own module-local marker constants (differing only in
+    the literal marker string), which callers pass in as ``begin``/``end``/
+    ``pattern`` rather than this function hardcoding either module's own.
+
+    Returns ``None`` when the markers aren't found, or the block's contents
+    don't match ``pattern`` (defensive; should not happen for a successful
+    run)."""
+    try:
+        start_idx = stdout.index(begin) + len(begin)
+        stop_idx = stdout.index(end, start_idx)
+    except ValueError:
+        return None
+    match = pattern.search(stdout[start_idx:stop_idx])
+    if match is None:
+        return None
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        int(match.group(4)),
+    )
 
 
 def validate_request_shape(
