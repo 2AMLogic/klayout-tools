@@ -92,6 +92,31 @@ the response to drive the next sizing iteration:
   outranks `fail` in the aggregate — don't read an errored run's `passed`
   count as partial progress.
 
+**`klt sim <request.json> --op-lint`** — shipped, full contract in
+[`docs/cli/sim.md`](../../../docs/cli/sim.md) → "Operating-point lint". The
+**first thing to run when a measurement misses**, before spending another
+sizing pass. Same request document, one `.op` at one corner, and a
+per-device answer to "which MOSFET is not doing its job?": `off`
+(`|Vgs| < |Vth|` with `Id` ≈ 0), `triode` (`|Vds| < |Vdsat|` + a
+corner-aware margin), wiring smells (drain tied to its own rail, gate
+shorted to source, untied bulk), and netlist hygiene (a measured node the
+netlist never creates, a floating node).
+
+- Read `findings[]` first: each entry names the device, its four terminal
+  nodes, the measured `vgs_v`/`vth_v`/`vds_v`/`vdsat_v`/`id_a`, and a
+  one-line suggestion. `error_count > 0` means the circuit is broken, not
+  mis-sized — **do not spend a sizing pass on it**.
+- `devices[].region` gives the whole bias picture at a glance
+  (`off`/`subthreshold`/`triode`/`saturation`). A load or tail device that
+  reads `triode` at a skewed corner but `saturation` at nominal is the
+  signature of the `gain_db` collapse in the failure-modes section below.
+- Warnings (`triode`, `bulk_not_tied`, `floating_node`) do not fail the run
+  on their own — they are legitimate in some topologies. Read them, don't
+  gate on them blindly.
+- It is also a `klt eval` gate kind (`op-sanity`), so a descriptor can put
+  it *before* its `sim` gate and skip the corner sweep entirely on a turn
+  that trips it — see [`docs/cli/eval.md`](../../../docs/cli/eval.md).
+
 No dedicated sizing/optimization verb exists — the next-candidate proposal
 after reading a `klt sim` result is this skill's own reasoning, not a tool
 call. That is a **recorded decision, not an unfilled gap**: design doc §2's
@@ -112,6 +137,13 @@ Per design doc §1. Track margins and worst-case-offender measurements across
 consecutive `klt sim` passes (N = the number you fixed before starting, per
 the escalation rule above) and check these every pass:
 
+- [ ] **Is the circuit even alive?** *Run this first, on every miss, before
+      any of the boxes below.* `klt sim <request.json> --op-lint` — if
+      `error_count > 0`, a device is off or mis-wired and the measurement
+      result carries no sizing information at all. Fix the named device;
+      do **not** count that pass as a sizing iteration. A miss whose
+      op-lint is clean is a genuine sizing signal; a miss whose op-lint is
+      not is a netlist bug wearing a sizing bug's clothes.
 - [ ] **Converged?** Every declared measurement's `status` is `"pass"` across
   the full corner matrix on this pass — not just the previously-worst
   measurement. Confirm the *whole* `measurements[]` array, not only the one
@@ -141,6 +173,14 @@ frontier-reasoning per the rule above rather than continuing to spend passes.
 
 (Design doc §2, S5 row.)
 
+- **A dead device mistaken for a sizing deficiency.** A measurement that
+  reads ≈ 0 (no gain, no oscillation, a `.meas` that never triggers) is the
+  *same observation* whether the sizing is wrong or one MOSFET is simply off
+  / in triode / wired drain-to-its-own-rail — and iterating sizing against
+  the second case cannot converge, because nothing you change to `W`/`L`
+  makes an off device conduct. `klt sim --op-lint` is what tells the two
+  apart in one cheap run, by name; it is the first checklist box above for
+  exactly this reason.
 - **Loop A's stuck condition** (the checklist above) — mistaken for ordinary
   slow convergence and iterated past the point of being useful.
 - **Fragile local optimum.** A sizing candidate that clears every declared

@@ -2257,6 +2257,31 @@ def create_parser() -> argparse.ArgumentParser:
             "request's own `options.resume` when given. See docs/cli/sim.md."
         ),
     )
+    sim_parser.add_argument(
+        "--op-lint",
+        dest="op_lint",
+        action="store_true",
+        default=False,
+        help=(
+            "instead of running the corner sweep, run the per-device "
+            "operating-point sanity lint on this same request's netlist: "
+            "every MOS instance's off/triode region, wiring smells (drain "
+            "on its own rail, gate shorted to source, untied bulk) and "
+            "netlist hygiene (a declared/measured node the netlist never "
+            "creates, a floating node). Run this first when a measurement "
+            "misses -- see docs/cli/sim.md's 'Operating-point lint'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--op-lint-corner",
+        dest="op_lint_corner",
+        default=None,
+        help=(
+            "corner_id from this request's own corner matrix to bias the "
+            "--op-lint operating point at (default: the first expanded "
+            "corner). Ignored without --op-lint."
+        ),
+    )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
 

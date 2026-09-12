@@ -15,11 +15,23 @@ Exit codes (see ``docs/cli/sim.md`` for the full table):
 Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2, per
 the spike's flagged open question -- see docs/cli/sim.md's "Exit codes"
 section for the reasoning.
+
+``--op-lint`` (issue #1718) runs the per-device operating-point sanity lint
+(:func:`klayout_tools.op_sanity.run_op_sanity`) on the *same request
+document* instead of the corner sweep, and emits that verb's own envelope.
+It is a deliberately separate mode rather than an extra key on the sweep
+payload: the whole point is to be the cheap *first* thing an agent runs when
+a measurement misses, so it must be able to say "fail" on its own exit code
+rather than hiding a dead device inside an otherwise-passing sweep report.
+Its exit codes keep the same meaning as the sweep's (0 ran-and-clean,
+1 could not run, 3 real finding, 4 the analysis itself is untrustworthy) --
+see ``docs/cli/sim.md``'s "Operating-point lint" section.
 """
 
 import argparse
 
 from ..env_provenance import render_path_field
+from ..op_sanity import OpSanityError, run_op_sanity
 from ..sim import SimError, run_sim
 from .output import emit_error, emit_success
 
@@ -29,6 +41,9 @@ EXIT_CORNER_ERRORED = 4
 
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "op_lint", False):
+        return _run_op_lint(args)
+
     try:
         report = run_sim(
             args.request,
@@ -49,6 +64,70 @@ def run(args: argparse.Namespace) -> int:
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
     return EXIT_PASS
+
+
+def _run_op_lint(args: argparse.Namespace) -> int:
+    """``klt sim --op-lint``: the operating-point sanity lint mode (#1718).
+
+    Same request document, same exit-code vocabulary, different question --
+    see this module's docstring.
+    """
+    try:
+        report = run_op_sanity(args.request, corner=args.op_lint_corner)
+    except OpSanityError as exc:
+        return emit_error("sim", str(exc), args.format)
+
+    emit_success(report, args.format, _print_op_lint_text)
+
+    if report["status"] == "error":
+        return EXIT_CORNER_ERRORED
+    if report["error_count"] > 0:
+        return EXIT_MEASUREMENT_FAILED
+    return EXIT_PASS
+
+
+def _print_op_lint_text(report: dict) -> None:
+    print(f"netlist: {render_path_field(report['netlist'])}")
+    print(f"status: {report['status']}")
+    print(f"corner: {report['corner']['corner_id']}")
+    print(
+        f"devices: {report['device_count']}  "
+        f"findings: {report['finding_count']} "
+        f"(errors: {report['error_count']}, warnings: {report['warning_count']})"
+    )
+
+    devices = report["devices"]
+    if devices:
+        print()
+        print("devices:")
+        for device in devices:
+            values = device["values"]
+            detail = "  ".join(
+                f"{key}={values[key]!r}"
+                for key in sorted(values)
+                if values[key] is not None
+            )
+            print(
+                f"  {device['name']} [{device['kind']}] {device['region']}"
+                f"{'  ' + detail if detail else ''}"
+            )
+
+    findings = report["findings"]
+    if findings:
+        print()
+        print("findings:")
+        for finding in findings:
+            print(f"  [{finding['severity']}] {finding['check']}: {finding['message']}")
+            print(f"      -> {finding['suggestion']}")
+
+    diagnostics = report["diagnostics"]
+    if diagnostics:
+        print()
+        for diagnostic in diagnostics:
+            print(
+                f"diagnostic: {diagnostic['severity']} {diagnostic['code']} - "
+                f"{diagnostic['message']}"
+            )
 
 
 def _print_text(report: dict) -> None:

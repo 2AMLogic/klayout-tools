@@ -16,6 +16,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt sim --op-lint` — a per-device operating-point sanity lint
+  ("op-sanity") that answers "which MOSFET is not doing its job, and why?"
+  instead of running the corner sweep (issue #1718). It takes the *same*
+  request document (only `netlist` is required), runs one `.op` at one
+  corner (`--op-lint-corner` picks which), and walks every MOS instance in
+  the netlist reporting: `off` (`|Vgs| < |Vth|` with `Id` at/below a noise
+  floor), `triode` (`|Vds| < |Vdsat|` plus a **corner-aware** margin
+  defaulting to 2 kT/q at that corner's temperature), wiring smells
+  (`drain_tied_to_rail`, `gate_shorted_to_source`, `bulk_not_tied`), and
+  netlist hygiene (`missing_node` for a declared/`.meas`-referenced node the
+  netlist never creates, `floating_node` for a single-terminal node). Each
+  finding names the device, its four terminal nodes, the model-reported
+  values, and a one-line suggestion; per-device `Vth` is read from the model
+  (`@m…[vth]`), never a constant. Exit codes reuse `klt sim`'s vocabulary
+  against this mode's own verdict (`0` no error-severity finding, `3` at
+  least one, `4` the operating point itself is untrustworthy). The same
+  entry point is exposed as a new `klt eval` gate kind, `op-sanity` — the
+  cheapest useful analog gate, meant to sit *before* a `sim` gate in a
+  descriptor. New module `klayout_tools/op_sanity.py`
+  (`schema_version: 1`); no new dependency (it reuses the ngspice
+  `print @m…[param]` path `klt size` already uses). The corner-sweep path is
+  unchanged when `--op-lint` is absent. See `docs/cli/sim.md`'s
+  "Operating-point lint" and `docs/cli/eval.md`.
 - **Added**: `klt extract --parasitics` now reports a per-net `by_layer[]`
   breakdown alongside each net's scalar `resistance_ohm`/`capacitance_ff`
   totals (issue #1701) — `{"layer", "resistance_ohm", "capacitance_ff"}` per
