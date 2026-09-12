@@ -88,10 +88,12 @@ two disagree, this document (and the code) win.
   "Top-cell-only pin promotion" below.
 - `--pins` — optional, unset by default. Comma-separated declared pin set
   (e.g. `A,B,VDD,VSS`) — a per-*net* interface declaration, orthogonal to
-  `--top-cell-pins`'s per-*cell* one (issue #514). Every named net not in
-  this set keeps its name but is demoted to an internal node instead of
-  being promoted to a top-level pin — use this to name an internal node of
-  a lumped schematic device (e.g. one tap of a metal-option ladder) for
+  `--top-cell-pins`'s per-*cell* one (issue #514). A promoted net matches
+  the declared set when *any* of its comma-joined component labels is in
+  it (issue #1687 — not a whole-string match); every net that matches none
+  of its labels keeps its name but is demoted to an internal node instead
+  of being promoted to a top-level pin — use this to name an internal node
+  of a lumped schematic device (e.g. one tap of a metal-option ladder) for
   documentation without blocking `klt lvs`'s `options.combine_devices` from
   folding the series chain. When unset, every named net still promotes to a
   pin, byte-for-byte unchanged. See "Declared pin set" below.
@@ -2030,14 +2032,16 @@ the reference's one device becomes several unpairable extracted devices, and
 attributed anywhere in the report.
 
 `--pins A,B,VDD,VSS` (a comma-separated list of net names) declares the
-**intended interface** explicitly, per net rather than per cell: every named
-net **not** in the declared set keeps its name (still visible in the written
-SPICE and in `nets[]`) but is demoted to an internal node instead of being
-promoted to a pin. A declared name that matches no promoted net is reported
-in `warnings` rather than silently ignored (a likely typo). Applied *after*
-`--top-cell-pins`'s own reconciliation — it can only further restrict the
-promoted set, never re-promote a net `--top-cell-pins` already kept
-internal.
+**intended interface** explicitly, per net rather than per cell: a promoted
+net matches the declared set when **any** one of its comma-joined component
+labels is in the set (issue #1687 — not a whole-string match), and every
+net that matches none of its labels keeps its name (still visible in the
+written SPICE and in `nets[]`) but is demoted to an internal node instead
+of being promoted to a pin. A declared name that matched no promoted net's
+label set is reported in `warnings` rather than silently ignored (a likely
+typo). Applied *after* `--top-cell-pins`'s own reconciliation — it can only
+further restrict the promoted set, never re-promote a net `--top-cell-pins`
+already kept internal.
 
 Omitting `--pins` (the default) skips this reconciliation entirely: every
 named net still promotes to a pin, byte-for-byte identical to extraction
@@ -2045,27 +2049,28 @@ before this flag existed. `klt lvs` exposes the same control as the
 `layout.declared_pins` request field (a JSON array of net name strings —
 see [`docs/cli/lvs.md`](lvs.md)).
 
-**Do not paste a `--format json`-reported `nets[].name` straight into
-`--pins`** (issue #1513). `--pins`'s own matching reads a promoted net's
-*internal* name, which KLayout spells with a comma between joined labels
-(`Net.name`, e.g. `A,CLK`) — but every JSON-reported surface
-(`nets[].name`, `merged_net_labels[]`) and the written SPICE go through
-`spice_safe_net_name`, which rewrites that same join to a `|` (`A|CLK`,
-see ["Merged net labels"](#merged-net-labels-issue-470) above) before
-either is ever written out. A `--pins` value built by round-tripping a
-name straight out of `nets[].name` therefore never matches — `--pins
-A|CLK` is compared against the net's own `,`-joined `A,CLK` and always
-misses, silently demoting the net exactly as if it had been mistyped, with
-no error distinguishing "no such net" from "wrong separator". Re-derive the
-comma-joined form yourself (`nets[].name.replace("|", ",")`, the *exact*
-inverse of `spice_safe_net_name`) before handing a name back to `--pins`,
-or declare only a single (never-joined) label — the two forms agree on
-any name that never needed escaping in the first place. Also note that a
-name containing its own comma component (e.g. `A,CLK`) can never be spelled
-as a single `--pins` token at all, since `--pins`'s own list separator is
-the same character — see ["DEF-derived declared pins"](#def-derived-declared-pins---def-pins-issue-1390)
-and ["Pin-source cells"](#pin-source-cells-issue-1513) below for two ways
-around that.
+**Matching is per-label, not per whole net name** (issue #1687). KLayout's
+flat extraction joins every distinct text label found on one electrical net
+into a single, comma-separated `Net.name` (see
+["Merged net labels"](#merged-net-labels-issue-470) above) — e.g. a library
+cell's own pad label plus a top-level wire's label landing on the same pad
+composes into `en,en1`. `--pins` used to compare a declared name against
+that *whole* joined string, so no declared name could ever match a
+multi-label net, and — because `--pins` is itself a comma-separated list —
+no `--pins` value could even spell one (`en,en1` parses as two separate
+declared names, neither of which equals the net's actual name). `--pins`
+now matches whenever **any** one of a net's comma-joined component labels
+is a declared name, the same any-label match `--def-pins` (below) already
+used — so `--pins en1` promotes the `en,en1` net directly, without needing
+to spell the joined name at all, and stays correct if a *future* extra
+label lands on that same net.
+
+Note that `nets[].name` and the written SPICE report that same joined name
+through `spice_safe_net_name`, which escapes it with `|` instead of `,`
+(`en|en1` — see ["Merged net labels"](#merged-net-labels-issue-470) above).
+Declare the individual label(s) you actually care about (`--pins en1`)
+rather than pasting that reported, pipe-escaped form back into `--pins` — a
+pasted `en|en1` is one (never-matching) component label, not two.
 
 ## DEF-derived declared pins (`--def-pins`, issue #1390)
 
@@ -2083,9 +2088,10 @@ right alongside the real top-level ports" failure mode, scoped specifically
 to a `klt place-and-route`-originated layout (it needs that DEF file to
 exist).
 
-`--def-pins` cannot reuse `--pins`'s plain exact-string match, though.
-KLayout's flat extraction joins every distinct text label found on one
-electrical net into a single, comma-separated net name (`Net.name` — see
+`--def-pins` reuses `--pins`'s own any-component-label reconciliation
+(issue #1687) rather than a whole-string match. KLayout's flat extraction
+joins every distinct text label found on one electrical net into a single,
+comma-separated net name (`Net.name` — see
 ["Merged net labels"](#merged-net-labels-issue-470) above), and in a
 densely-routed DEF-merged layout *most* nets — port or not — carry two or
 more such labels: a genuine top-level port's net carries both the DEF
@@ -2098,9 +2104,9 @@ here and in the written netlist, `Net.name`'s own internal spelling is
 comma-joined, see `spice_safe_net_name`). So `--def-pins` keeps a promoted
 net whenever **any** of its joined component labels is a declared DEF pin
 name, not only when the whole joined name matches verbatim — every other
-currently-promoted net is demoted, exactly as `--pins` demotes on a plain
-miss. A `warnings` entry lists any net demoted this way, and a separate
-entry lists any `--def-pins` name that matched no promoted net's label set.
+currently-promoted net is demoted, exactly as `--pins` demotes on a miss.
+A `warnings` entry lists any net demoted this way, and a separate entry
+lists any `--def-pins` name that matched no promoted net's label set.
 
 ```
 $ klt place-and-route pnr_request.json --format json | jq -r .def_path

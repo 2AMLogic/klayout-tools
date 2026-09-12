@@ -1878,6 +1878,121 @@ def test_declared_pins_applied_after_top_cell_pins_only(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# `declared_pins` matches by any component label, not the whole joined name
+# (issue #1687)
+#
+# KLayout's flat extraction joins every distinct text label found on one
+# electrical net into a single, comma-separated `Net.name` (`Y,clk` --
+# rendered `Y|clk` in `nets[].name`/the written SPICE, see
+# `spice_safe_net_name`'s docstring). Before this fix `declared_pins` compared
+# a declared name against that *whole* joined string, so no declared name
+# could ever match a multi-label net -- and because `--pins` is itself a
+# comma-separated list, a comma-containing name could not even be spelled as
+# a single `--pins` token. `declared_pins` now reuses `def_pins`'s own
+# any-component-label match: a promoted net matches the declared set whenever
+# *any* one of its joined component labels is in it.
+# --------------------------------------------------------------------------- #
+
+
+def test_declared_pins_promotes_multi_label_net_by_any_component_label(tmp_path):
+    """The core regression (issue #1687): a net whose `Net.name` is KLayout's
+    own comma-joined multi-label form (`Y,clk`, rendered `Y|clk` in
+    `nets[].name`/the written SPICE) is promoted when the declared set
+    contains any one of its component labels ("clk" here), even though the
+    whole joined name is never declared and could not even be spelled as a
+    single `--pins` token."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"),
+        tmp_path / "multi_label.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "multi_label.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    assert "Y|clk" in net_names
+    assert "Y|clk" in pins
+    assert {"VGND", "VPWR", "VPB", "A"}.issubset(pins)
+    assert not any("matched no promoted net" in w for w in report["warnings"])
+
+
+def test_declared_pins_demotes_multi_label_net_with_no_matching_component(tmp_path):
+    """A promoted, multi-label net with *no* component label in the declared
+    set is still demoted, exactly as a single-label net is -- matching by
+    component label does not accidentally widen what counts as "declared"."""
+    path = _write_gds(
+        _make_inverter_layout(extra_a_label="B"),
+        tmp_path / "multi_label_undeclared.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "multi_label_undeclared.spice"),
+        # Neither "A" nor "B" -- the "A,B" net's two component labels -- is
+        # declared.
+        declared_pins=frozenset({"VGND", "VPWR", "VPB", "Y"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    assert "A|B" in net_names
+    assert "A|B" not in pins
+    assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
+
+    warning = next((w for w in report["warnings"] if "declared pin set" in w), None)
+    assert warning is not None
+    assert "A,B" in warning
+
+
+def test_declared_pins_matches_one_label_of_a_three_way_joined_net(tmp_path):
+    """A 3+-way joined net (`Y,clk,extra`) is promoted when the declared set
+    contains just one of its three component labels."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label=["clk", "extra"]),
+        tmp_path / "multi_label_three.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "multi_label_three.spice"),
+        declared_pins=frozenset({"extra", "VGND", "VPWR", "VPB", "A"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "Y|clk|extra" in net_names
+    assert "Y|clk|extra" in pins
+
+
+def test_declared_pins_two_names_matching_same_joined_net_do_not_double_count(tmp_path):
+    """Two different declared names that both hit component labels of the
+    *same* joined net (`Y` and `clk`, both on the `Y,clk` net) both count as
+    matched -- neither is reported in the "matched no promoted net" warning
+    -- and the net is promoted exactly once (it only ever appears once in
+    `nets[]`)."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"),
+        tmp_path / "multi_label_both.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "multi_label_both.spice"),
+        declared_pins=frozenset({"Y", "clk", "VGND", "VPWR", "VPB", "A"}),
+    )
+
+    pins = [n["name"] for n in report["nets"] if n["pin"]]
+    assert pins.count("Y|clk") == 1
+    assert not any("matched no promoted net" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
 # DEF-derived declared pins (`--def-pins`, issue #1390)
 #
 # `--top-cell-pins` cannot help a DEF->GDS-merged (`klt place-and-route`)
