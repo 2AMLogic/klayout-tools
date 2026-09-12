@@ -47,7 +47,11 @@ objective/metrics contract an analog descriptor already uses: a digital
 descriptor is not a different shape, just a different set of ``check``
 names strung together (``synthesize`` -> ``functional-verification`` ->
 ``place-and-route`` -> ``drc``/``layout-metrics``), each one a new entry in
-:data:`_INVOKE_FNS` and nothing else.
+:data:`_INVOKE_FNS` and nothing else. ``op-sanity`` (issue #1718 -- the
+per-device operating-point lint in :mod:`klayout_tools.op_sanity`) joined on
+exactly those terms too, and is the cheapest useful analog gate to put
+*first* in a descriptor: it names the dead/mis-wired device directly, so a
+turn that trips it need never pay for the corner sweep behind it.
 
 Descriptor shape (see ``docs/cli/eval.md`` for the full field reference)::
 
@@ -118,6 +122,7 @@ from .functional_verification import (
 )
 from .layout_metrics import LayoutMetricsError, layout_metrics_report
 from .lvs import LvsError, run_lvs
+from .op_sanity import OpSanityError, run_op_sanity
 from .place_and_route import PlaceAndRouteError, run_place_and_route
 from .sim import SimError, run_sim
 from .synthesize import SynthesizeError, run_synthesize
@@ -128,6 +133,7 @@ _UNDERLYING_ERRORS = (
     DrcError,
     LvsError,
     SimError,
+    OpSanityError,
     LayoutMetricsError,
     FunctionalVerificationError,
     SynthesizeError,
@@ -271,6 +277,29 @@ def _invoke_sim(args: dict[str, Any], base_dir: str) -> dict[str, Any]:
     )
 
 
+def _invoke_op_sanity(args: dict[str, Any], base_dir: str) -> dict[str, Any]:
+    """The per-device operating-point sanity lint (issue #1718).
+
+    Takes the *same* request document a ``sim`` gate takes (see
+    ``op_sanity.py``'s "Request document"), plus an optional ``corner``
+    naming which expanded corner point to bias at. Like ``synthesize``/
+    ``place-and-route``, ``run_op_sanity``'s own ``load_request`` accepts
+    only a file path -- no ``"-"``/inline-JSON form -- so ``request``
+    resolves via :func:`_resolve_path`, not :func:`_resolve_request`.
+
+    Pairing this gate *before* a ``sim`` gate in a descriptor is the
+    intended composition: it is far cheaper than a corner sweep and names
+    the offending device directly, so an optimizer turn that trips it can
+    skip the sweep entirely.
+    """
+    if "request" not in args:
+        raise EvalError("'op-sanity' check args require 'request'")
+    return run_op_sanity(
+        _resolve_path(args["request"], base_dir, "request"),
+        corner=args.get("corner"),
+    )
+
+
 def _invoke_layout_metrics(args: dict[str, Any], base_dir: str) -> dict[str, Any]:
     if "block" not in args:
         raise EvalError("'layout-metrics' check args require 'block'")
@@ -311,6 +340,7 @@ _INVOKE_FNS: dict[str, Callable[[dict[str, Any], str], dict[str, Any]]] = {
     "drc": _invoke_drc,
     "lvs": _invoke_lvs,
     "sim": _invoke_sim,
+    "op-sanity": _invoke_op_sanity,
     "layout-metrics": _invoke_layout_metrics,
     "functional-verification": _invoke_functional_verification,
     "synthesize": _invoke_synthesize,
@@ -359,6 +389,32 @@ def _status_sim(report: dict[str, Any]) -> tuple[str, int, Any]:
     return "fail", 3, report.get("failed")
 
 
+def _status_op_sanity(report: dict[str, Any]) -> tuple[str, int, Any]:
+    """``klt sim --op-lint``'s own three-outcome split (issue #1718),
+    mirroring :func:`_status_sim`'s: an analysis that never produced a
+    trustworthy operating point (``status: "error"``) gates as ``fail`` with
+    exit ``4``; a run with at least one ``error``-severity finding gates as
+    ``fail`` with exit ``3``; anything else passes.
+
+    **Warnings alone do not fail the gate.** ``triode``/``bulk_not_tied``/
+    ``floating_node`` are legitimate in real topologies (a switch, a
+    deep-nwell device, a deliberately-undriven test node), so failing on
+    them would make the gate unusable as a default. A descriptor that wants
+    the stricter reading declares ``threshold: {"metric": "finding_count",
+    "max": 0}`` on the gate, which overrides this derivation entirely (see
+    :func:`_derive_status`).
+
+    ``count`` cites ``finding_count`` (every finding), not ``error_count``,
+    so the headline number in ``gates[]`` matches what a human reading the
+    lint's own output sees.
+    """
+    if report["status"] == "error":
+        return "fail", 4, report.get("finding_count")
+    if report.get("error_count", 0) > 0:
+        return "fail", 3, report.get("finding_count")
+    return "pass", 0, report.get("finding_count")
+
+
 def _status_functional_verification(report: dict[str, Any]) -> tuple[str, int, Any]:
     """`klt functional-verification`'s own two-outcome split (Epic #391 Phase
     3): `status: "pass"` -> exit 0 -> `valid: true`, `status: "fail"` -> exit
@@ -377,6 +433,7 @@ _DEFAULT_STATUS_FNS: dict[str, Callable[[dict[str, Any]], tuple[str, int, Any]]]
     "drc": _status_drc,
     "lvs": _status_lvs,
     "sim": _status_sim,
+    "op-sanity": _status_op_sanity,
     "functional-verification": _status_functional_verification,
 }
 

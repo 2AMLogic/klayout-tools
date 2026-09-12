@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -37,6 +37,11 @@ this document (and the code) win.
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
   orphan safety, and resume" below.
+- `--op-lint` — **run the per-device operating-point sanity lint instead of
+  the corner sweep**, on the same request document: every MOS instance's
+  off/triode region, wiring smells, and netlist hygiene. Run it first when a
+  measurement misses. `--op-lint-corner` picks which corner to bias at. See
+  "Operating-point lint" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -1028,6 +1033,152 @@ report-not-judge precedent `measurements[].limits` already sets); one — a
 per-corner netlist snapshot — is a genuine contract gap tracked by
 [#356](https://github.com/2AMLogic/klayout-tools/issues/356).
 
+## Operating-point lint (`--op-lint`)
+
+`klt sim --op-lint <request.json>` answers a different, much cheaper
+question than the corner sweep: **"which MOSFET in this netlist is not doing
+its job, and why?"** It runs a single `.op` analysis at one corner, walks
+every MOS instance in the netlist, and reports per-device findings — the
+first thing to run when a measurement misses, *before* spending another Loop
+A sizing pass (issue #1718).
+
+It takes the **same request document** the sweep takes — only `netlist` is
+required; `models`/`corners` are read exactly as documented above;
+`analysis`/`measurements` are not needed for the analysis itself (this mode
+always runs a plain `op`). A `--op-lint` run never runs the corner matrix,
+never writes artifacts, and emits its own envelope (below) instead of the
+sweep response.
+
+```
+klt sim <request.json> --op-lint [--op-lint-corner <corner_id>] [--format text|json]
+```
+
+- `--op-lint-corner` — which expanded `corner_id` from the request's own
+  matrix to bias at. Defaults to the **first** expanded corner. Exactly one
+  corner is run either way: this is a diagnostic meant to be cheap enough to
+  run on every miss, not a second sweep.
+
+### What it checks
+
+| `check` | Severity | Condition |
+| --- | --- | --- |
+| `off` | `error` | `\|Vgs\| < \|Vth\|` **and** `\|Id\|` at or below `thresholds.off_current_a` (default `1e-9` A). A device conducting real current below `Vth` is weak inversion — a legitimate design point — and is reported as `region: "subthreshold"` with no finding. |
+| `triode` | `warning` | `\|Vds\| < \|Vdsat\| + margin`, where the margin is **corner-aware**: `thresholds.triode_margin_kt` (default `2`) thermal voltages `kT/q` at *this corner's* temperature — ~40 mV at −40 °C, ~52 mV at 27 °C, ~69 mV at 125 °C. `thresholds.triode_margin_v` pins it absolutely instead. |
+| `drain_tied_to_rail` | `error` | An NMOS whose drain node is ground, or a PMOS whose drain node is the positive supply — the drain voltage can never move. |
+| `gate_shorted_to_source` | `error` | Gate and source are the same node: `Vgs` is 0 by construction. |
+| `bulk_not_tied` | `warning` | Bulk is tied to neither the device's own source nor the matching rail. A warning, not an error — a deep-nwell/isolated device may genuinely want this. |
+| `missing_node` | `error` | A declared I/O node (`op_lint.nodes`, or any `v(<node>)` reference inside the request's own `.meas` cards) that does not appear in the netlist at all — the usual cause of a measurement that silently reads 0 V. |
+| `floating_node` | `warning` | A node with exactly one element terminal on it and no DC path. This is the *structural* counterpart of the singular-matrix / gmin-stepping narration the sweep classifies from the log ([#205](https://github.com/2AMLogic/klayout-tools/issues/205)); that classification is reused here verbatim rather than re-implemented, so the two never disagree. |
+
+Every threshold comparison is on **magnitudes**: BSIM4 reports a PMOS's
+`vgs`/`vds`/`vth`/`vdsat` as positive numbers while a bare SPICE level-1
+device reports `vdsat` negative for the same device, so only `abs()`
+comparisons classify both consistently.
+
+`Vth` is always read **from the model** (`@m...[vth]`), per device — never a
+constant — which is why a device's reported `vth_v` differs between channel
+types and between W/L bins on the same PDK.
+
+Rails are identified from the request, not guessed: the keys of
+`corners.supply_v` name the source elements `klt sim` `alter`s, so each
+one's positive terminal is a declared supply rail; ground is `0` plus the
+conventional spellings (`gnd`, `vss`, …) and anything a 0 V source ties to
+them. A testbench's own stimulus source (`Vin in 0 DC 0.9`) is deliberately
+*not* promoted to a rail. `op_lint.rails.supply`/`.ground` override both.
+
+The **structural** checks (`drain_tied_to_rail`, `gate_shorted_to_source`,
+`bulk_not_tied`, `missing_node`, `floating_node`) need no simulator, so they
+are still reported when the operating point itself fails to converge — which
+is exactly when an agent most needs them.
+
+### Optional `op_lint` request block
+
+```json
+"op_lint": {
+  "thresholds": { "off_current_a": 1e-9, "triode_margin_kt": 2.0 },
+  "nodes": { "inputs": ["inp", "inn"], "outputs": ["out"] },
+  "rails": { "supply": ["vdd"], "ground": ["0", "vgnd"] },
+  "models": {
+    "nfet_03v3": { "kind": "nmos", "op_point_element": "m0" }
+  },
+  "timeout_s": 120
+}
+```
+
+Every key is optional. `models.<model>.op_point_element` names the *inner*
+element of a PDK device subcircuit, which is a per-PDK convention rather
+than a standard: sky130 names it `m` + the subcircuit name
+(`msky130_fd_pr__nfet_01v8`), gf180mcu names it `m0`. Both are probed
+automatically — the generated deck `print`s every candidate path and an
+unknown vector name is a harmless log line in ngspice batch mode — so this
+override is only needed for a PDK following neither convention. When no
+candidate answers for a device, a `op_point_unavailable` diagnostic names
+the device and the paths that were tried instead of silently reporting
+nothing. `models.<model>.kind` likewise resolves a model name this tool
+cannot classify as n- or p-channel.
+
+### Response
+
+```json
+{
+  "schema_version": 1,
+  "status": "findings",
+  "netlist": { "path": "examples/design-pipeline/ota_5t.spice", "scope": "repo" },
+  "corner": { "corner_id": "ss/1.620V/125C", "process": "ss", "supply_v": { "vdd": 1.62 }, "temperature_c": 125 },
+  "device_count": 6,
+  "finding_count": 1,
+  "error_count": 0,
+  "warning_count": 1,
+  "thresholds": { "triode_margin_v": 0.06862, "off_current_a": 1e-9 },
+  "rails": { "ground": ["0"], "supply": ["vdd"] },
+  "devices": [
+    {
+      "name": "XM5",
+      "kind": "nmos",
+      "model": "sky130_fd_pr__nfet_01v8",
+      "op_point_element": "m.xm5.msky130_fd_pr__nfet_01v8",
+      "nodes": { "drain": "tail", "gate": "nbias", "source": "0", "bulk": "0" },
+      "values": { "vgs_v": 0.72, "vth_v": 0.64, "vds_v": 0.166, "vdsat_v": 0.097, "id_a": 1.83e-5 },
+      "region": "triode"
+    }
+  ],
+  "findings": [
+    {
+      "check": "triode",
+      "severity": "warning",
+      "device": "XM5",
+      "kind": "nmos",
+      "node": null,
+      "nodes": { "drain": "tail", "gate": "nbias", "source": "0", "bulk": "0" },
+      "values": { "vgs_v": 0.72, "vth_v": 0.64, "vds_v": 0.166, "vdsat_v": 0.097, "id_a": 1.83e-5 },
+      "message": "XM5 (nmos): |Vds| 0.166 V is below |Vdsat| 0.097 V + 69 mV margin -- the device is in triode, not saturation",
+      "suggestion": "give node `tail` more headroom above `0` ..."
+    }
+  ],
+  "node_voltages": { "out": 0.892, "tail": 0.166, "vdd": 1.62 },
+  "diagnostics": [],
+  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": { "path": null, "scope": "external" }, "models_lib_sha256": "…", "netlist_sha256": "…", "runtime_s": 48.05 },
+  "provenance": { "…": "the shared block (docs/json-contract.md)" }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `"clean"` (no findings), `"findings"` (at least one, of any severity), or `"error"` (the operating point itself produced no trustworthy result). |
+| `finding_count` / `error_count` / `warning_count` | Totals. `error_count` is what the exit code and the `klt eval` gate key off; `finding_count` is the headline number. |
+| `devices[]` | Every MOS instance found at the netlist body's top level, in netlist order, with its four terminal nodes, model-reported values (`null` for any the model does not expose), the resolved `op_point_element`, and its `region` (`off`/`subthreshold`/`triode`/`saturation`/`unknown`). |
+| `findings[]` | One entry per finding, in device-then-node order. `device`/`kind`/`nodes`/`values` are `null` on a node-level finding and `node` is `null` on a device-level one — every key is always present. |
+| `node_voltages` | Every probed node's DC voltage, for the agent's own reasoning. |
+| `diagnostics[]` | The same `{severity, code, message}` shape the sweep's per-corner diagnostics use, plus this mode's own `op_point_unavailable` / `device_kind_unknown` codes. |
+| `thresholds` | The thresholds this run actually applied, including the corner-derived `triode_margin_v` — so a finding is reproducible without re-deriving the margin. |
+
+Exit codes keep the same meaning as the sweep's: `0` ran with no
+`error`-severity finding (warnings alone do **not** fail), `1` could not run
+at all, `3` at least one `error`-severity finding, `4` `status: "error"`.
+
+The same entry point is available as a `klt eval` gate kind, `op-sanity` —
+see [`docs/cli/eval.md`](eval.md).
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the schema
@@ -1275,6 +1426,12 @@ the full reasoning):
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
 | `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded or the launching process exited (`budget_exceeded`/`orphaned` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" above. |
+
+Under `--op-lint` the same four codes keep the same *meanings* against that
+mode's own verdict: `0` ran with no `error`-severity finding (a
+warnings-only run still exits `0`), `3` at least one `error`-severity
+finding, `4` the operating point itself produced no trustworthy result. See
+"Operating-point lint" above.
 
 This resolves the open question the spike flagged (a pass/fail/error
 trichotomy doesn't fit `klt drc`'s two-way clean/violations split): rather

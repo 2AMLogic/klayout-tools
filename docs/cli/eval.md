@@ -33,10 +33,11 @@ klt eval <descriptor> [--candidate <candidate>] [--format text|json]
   independent of `--format`" precedent. See "Trajectory logging" below.
 
 `klt eval` is **pure orchestration**: it imports and calls the existing
-library entry points behind `klt drc`/`klt lvs`/`klt sim`/`klt
-layout-metrics`/`klt functional-verification`/`klt synthesize`/`klt
-place-and-route` (`run_drc`/`run_lvs`/`run_sim`/`layout_metrics_report`/
-`run_functional_verification`/`run_synthesize`/`run_place_and_route`) —
+library entry points behind `klt drc`/`klt lvs`/`klt sim`/`klt sim
+--op-lint`/`klt layout-metrics`/`klt functional-verification`/`klt
+synthesize`/`klt place-and-route` (`run_drc`/`run_lvs`/`run_sim`/
+`run_op_sanity`/`layout_metrics_report`/`run_functional_verification`/
+`run_synthesize`/`run_place_and_route`) —
 never re-implements DRC/LVS/sim/metrics/synthesis/place-and-route logic
 itself, per this repo's "wrap the proven engine" convention.
 
@@ -55,15 +56,18 @@ two candidates can be compared without domain knowledge.
 
 Which checks constitute the gate, and what the objective is, are declared in
 the **descriptor** — never a fixed check list built into `klt eval` itself.
-Seven checks are implemented today (`drc`/`lvs`/`sim`/`layout-metrics`/
-`functional-verification`/`synthesize`/`place-and-route`), and the design is
+Eight checks are implemented today (`drc`/`lvs`/`sim`/`op-sanity`/
+`layout-metrics`/`functional-verification`/`synthesize`/`place-and-route`),
+and the design is
 check-name-agnostic by construction: adding the digital flow's
 [`functional-verification`](functional-verification.md) gate (Epic #391
 Phase 3) and its [`synthesize`](synthesize.md)/
 [`place-and-route`](place-and-route.md) checks (Epic #391 Phase 5) each
 needed no schema change here, only a new invoke adapter (plus, for
 `functional-verification`, a status adapter — `synthesize`/`place-and-route`
-have no gate semantics of their own, see "`gates[]` entries" below).
+have no gate semantics of their own, see "`gates[]` entries" below). The
+analog [`op-sanity`](sim.md#operating-point-lint---op-lint) gate (issue
+#1718) joined on exactly the same terms.
 
 A digital candidate's descriptor chains the same four gate/objective/metrics
 fields an analog descriptor uses, just with digital `check` names:
@@ -165,7 +169,7 @@ to vary per candidate). See `docs/cli/synthesize.md`/
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, `"layout-metrics"`, `"functional-verification"`, `"synthesize"`, or `"place-and-route"`. An unknown value is an application error (exit 1). |
+| `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, `"op-sanity"`, `"layout-metrics"`, `"functional-verification"`, `"synthesize"`, or `"place-and-route"`. An unknown value is an application error (exit 1). |
 | `name` | string | Label for this gate in the response's `gates[].name` — disambiguates two gates of the same `check` (e.g. two DRC decks). Defaults to `check`. |
 | `args` | object | Arguments forwarded to the underlying check — see "Check `args`" below. `${name}`-style placeholders are substituted from `--candidate` before invocation. |
 | `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"`/`"synthesize"`/`"place-and-route"` gates (none has an exit code above 2 / a "ran but found a problem" outcome of its own — `synthesize`/`place-and-route` always report `"status": "ok"`, see [`klt synthesize`](synthesize.md)/[`klt place-and-route`](place-and-route.md) — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"`/`"functional-verification"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails", or gate `"place-and-route"` on `worst_slack_ns` >= `0` for timing closure). |
@@ -177,6 +181,7 @@ to vary per candidate). See `docs/cli/synthesize.md`/
 | `"drc"` | `file`, `deck` | Forwarded to `run_drc(file, deck)` — see [`klt drc`](drc.md). `file` resolves relative to the descriptor file's own directory when not absolute (mirrors `klt lvs`'s request-relative-path convention). |
 | `"lvs"` | `request` | Forwarded to `run_lvs(request)` — see [`klt lvs`](lvs.md). A string resolves the same file/`-`/inline-JSON three-form convention `klt lvs`'s own `request` CLI argument uses (relative paths resolve against the descriptor file's directory); an inline JSON object is serialised and passed through directly (its own internal relative paths resolve against the current working directory, matching `klt lvs -`'s convention). |
 | `"sim"` | `request` | Forwarded to `run_sim(request, ...)` — see [`klt sim`](sim.md). Same `request` resolution as `"lvs"` above. Optional `artifacts_dir`, `backend`, `max_workers`, `hosts` forward to `run_sim`'s matching keyword arguments. |
+| `"op-sanity"` | `request` | Forwarded to `run_op_sanity(request, corner=...)` — the per-device operating-point lint, see [`klt sim --op-lint`](sim.md#operating-point-lint---op-lint). **Unlike** `"sim"`, `request` resolves the same way as `"drc"`'s `file` (a path only — `run_op_sanity`'s own `load_request` does not accept the `"-"`/inline-JSON forms), and takes the *same* request document a `"sim"` gate does. Optional `corner` names which expanded corner to bias at. Default status derivation: `status: "error"` → `fail`/exit `4`; any `error`-severity finding → `fail`/exit `3`; otherwise `pass`. **Warnings alone do not fail the gate** (`triode`/`bulk_not_tied`/`floating_node` are legitimate in real topologies) — declare `threshold: {"metric": "finding_count", "max": 0}` for the strict reading. Cheapest useful analog gate, so put it *first*: it names the dead/mis-wired device directly, and a turn that trips it need never pay for the corner sweep behind it. |
 | `"layout-metrics"` | `block` | Forwarded to `layout_metrics_report(block, deck=...)` — see [`klt layout-metrics`](layout-metrics.md). `block` resolves the same way as `"drc"`'s `file`. Optional `deck` forwards to the DRC-violation-count sub-field. |
 | `"functional-verification"` | `request` | Forwarded to `run_functional_verification(request)` — see [`klt functional-verification`](functional-verification.md). Same `request` resolution as `"lvs"` above. `status: "pass"` → `valid: true`, `status: "fail"` → `valid: false`; a run that never produced a `results.xml` is a `klt eval` error (exit 1), never a `false` score. |
 | `"synthesize"` | `request` | Forwarded to `run_synthesize(request)` — see [`klt synthesize`](synthesize.md). **Unlike** `"lvs"`/`"sim"`/`"functional-verification"`, `request` resolves the same way as `"drc"`'s `file` (a path only — `run_synthesize`'s own `load_request` does not accept the `"-"`/inline-JSON forms). Reports `instance_count`, `area_um2`, `sequential_area_um2`, `netlist_path`, etc.; always `"status": "ok"` (synthesis either produces a netlist or the check itself fails to run — exit 1). |
@@ -252,7 +257,7 @@ pass a literal `"${name}"` string to the underlying check.**
 | `name` | string | This gate's declared (or default) name. |
 | `status` | `"pass"` \| `"fail"` | This gate's verdict. |
 | `exit_code` | integer | The exit code the cited `check` would itself have returned for this report (e.g. `3` for a `drc` gate with violations) — `0` for a threshold-derived gate (the underlying check itself ran and reported successfully; the threshold comparison, not that check's own exit-code vocabulary, produced `status`). Lets a human debugging a `valid: false` run trace it back to the specific `klt <check>` invocation and outcome. A `4` means the check ran but could not reach a trustworthy verdict, so `status: "fail"` there is "did not clear the gate", not "the design is bad": `sim`'s broken-corner `status: "error"`, and (issue #1370) an `lvs` gate whose report is `status: "inconclusive"` — `options.combine_devices` exhausted its retry budget, so the compare never ran. Both are distinguished from `3` deliberately; `3` alone would claim the design differs. |
-| `count` | integer \| number | Present when the underlying check (or threshold) has a natural headline count/value: `violation_count` for `drc`, `mismatch_count` for `lvs`, failed/errored corner count for `sim`, the threshold's extracted metric value for a threshold-derived gate. Absent otherwise. |
+| `count` | integer \| number | Present when the underlying check (or threshold) has a natural headline count/value: `violation_count` for `drc`, `mismatch_count` for `lvs`, failed/errored corner count for `sim`, `finding_count` for `op-sanity`, the threshold's extracted metric value for a threshold-derived gate. Absent otherwise. |
 
 ## Trajectory logging
 
