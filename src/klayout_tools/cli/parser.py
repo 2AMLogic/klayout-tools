@@ -1291,14 +1291,17 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), issue "
             "#514. Orthogonal to --top-cell-pins (a per-cell filter): this "
-            "is per-net -- every named net not in this set keeps its name "
-            "but is demoted to an internal node, instead of being promoted "
-            "to a top-level pin. Use this to name an internal node of a "
-            "lumped schematic device (e.g. one tap of a metal-option "
-            "ladder) for documentation without blocking `klt lvs`'s "
-            "options.combine_devices from folding the series chain. Off by "
-            "default -- every named net still promotes to a pin, "
-            "byte-identical to today's behavior. See docs/cli/extract.md."
+            "is per-net -- a promoted net matches this set when any one of "
+            "its comma-joined component labels is in it (issue #1687, not "
+            "a whole-string match), and every net that matches none of its "
+            "labels keeps its name but is demoted to an internal node, "
+            "instead of being promoted to a top-level pin. Use this to "
+            "name an internal node of a lumped schematic device (e.g. one "
+            "tap of a metal-option ladder) for documentation without "
+            "blocking `klt lvs`'s options.combine_devices from folding the "
+            "series chain. Off by default -- every named net still "
+            "promotes to a pin, byte-identical to today's behavior. See "
+            "docs/cli/extract.md."
         ),
     )
     extract_parser.add_argument(
@@ -1315,14 +1318,11 @@ def create_parser() -> argparse.ArgumentParser:
             "design into the top cell, so --top-cell-pins's below-top-label "
             "heuristic cannot tell a genuine top-level port from an "
             "internal DEF NETS connection point (both land 'in the top "
-            "cell'). Reuses --pins' own per-net reconciliation, but matches "
-            "on any of a promoted net's comma-joined labels rather than "
-            "the whole joined name -- a DEF-merged layout routinely joins "
-            "2+ labels onto one net (a driver's local pin name, a "
-            "receiver's, and/or the DEF PINS name), which plain --pins "
-            "exact matching cannot see through. Off by default -- "
-            "byte-identical to today's behavior. See docs/cli/extract.md's "
-            "'DEF-derived declared pins' section."
+            "cell'). Reuses --pins' own per-net, any-component-label "
+            "reconciliation (issue #1687), with the DEF's own PINS section "
+            "as the declared set instead of a hand-derived --pins list. "
+            "Off by default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's 'DEF-derived declared pins' section."
         ),
     )
     extract_parser.add_argument(

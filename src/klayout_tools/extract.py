@@ -701,24 +701,32 @@ def run_extract(
     ``declared_pins`` (the ``--pins`` flag, issue #514) is a per-*net*
     declaration of the intended interface, orthogonal to
     ``top_cell_pins_only``'s per-*cell* one: when given (a non-``None`` set
-    of net names), every promoted pin whose net name is *not* in the set is
+    of net names), every promoted pin whose net is *not* named by the set is
     demoted back to an internal net -- it keeps its name, it is simply not
     exposed as a top-level pin. This is the fix for labelling an internal
     node of a lumped schematic device (e.g. one tap of a metal-option
     ladder modelled as a single series device) purely for documentation --
     today that label always promotes the node to a pin, which blocks ``klt
     lvs``'s ``options.combine_devices`` from folding the series chain the
-    reference netlist models as one device. Reuses
-    :func:`_reconcile_top_pins` exactly as ``top_cell_pins_only`` does, with
-    a different demote-set: every currently-promoted pin name minus
-    ``declared_pins``. A ``warnings`` entry lists any net demoted this way,
-    and a separate entry lists any declared name that matched no promoted
-    net (a likely typo, not silently ignored). ``None`` (the default) skips
-    this reconciliation entirely -- byte-identical to today's behavior, same
-    invariant ``top_cell_pins_only``'s own default preserves. Applied after
-    ``top_cell_pins_only``'s own reconciliation, and only ever *further*
-    demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
-    kept internal.
+    reference netlist models as one device. A promoted net's name matches
+    the declared set if *any* of its comma-joined component labels is in
+    ``declared_pins`` (issue #1687) -- not a whole-string match -- since
+    KLayout joins every distinct text label found on one electrical net into
+    a single, comma-separated ``Net.name`` (see ``spice_safe_net_name``'s
+    docstring), so a net composed from two independently-labelled blocks
+    (e.g. a library cell's own pin label plus a top-level wire's label
+    landing on the same pad) can carry a joined name no single declared
+    string can ever equal. Reuses :func:`_reconcile_top_pins` exactly as
+    ``top_cell_pins_only`` does, with a different demote-set: every
+    currently-promoted pin name whose component-label set does not
+    intersect ``declared_pins``. A ``warnings`` entry lists any net demoted
+    this way, and a separate entry lists any declared name that matched no
+    promoted net's label set (a likely typo, not silently ignored). ``None``
+    (the default) skips this reconciliation entirely -- byte-identical to
+    today's behavior, same invariant ``top_cell_pins_only``'s own default
+    preserves. Applied after ``top_cell_pins_only``'s own reconciliation,
+    and only ever *further* demotes -- it cannot re-promote a net
+    ``top_cell_pins_only`` already kept internal.
 
     ``def_pins`` (the ``--def-pins`` flag, issue #1390) is the **automatic**
     counterpart to ``declared_pins``, for a layout produced by ``klt
@@ -6337,13 +6345,27 @@ def _extract_netlist(
 
     # Issue #514: a per-*net* declared-interface reconciliation, orthogonal
     # to the per-*cell* one above. When `declared_pins` is given, demote
-    # every currently-promoted pin whose net name is not in the declared
-    # set -- the net keeps its name (a human/testbench can still find it),
-    # it is simply not exposed as a top-level pin `combine_devices` must
-    # treat as un-foldable. Applied *after* the top_cell_pins_only pass, so
-    # it can only further restrict the promoted set, never re-promote a net
-    # that pass already kept internal. Reuses `_reconcile_top_pins` exactly
-    # as top_cell_pins_only does, with a different demote-set.
+    # every currently-promoted pin whose net does not carry a declared name
+    # -- the net keeps its name (a human/testbench can still find it), it is
+    # simply not exposed as a top-level pin `combine_devices` must treat as
+    # un-foldable. Applied *after* the top_cell_pins_only pass, so it can
+    # only further restrict the promoted set, never re-promote a net that
+    # pass already kept internal. Reuses `_reconcile_top_pins` exactly as
+    # top_cell_pins_only does, with a different demote-set.
+    #
+    # Issue #1687: matching is done against a promoted net's comma-joined
+    # component-label set (`set(name.split(",")) & declared_pins`), not the
+    # whole joined string -- exactly the pattern `def_pins`'s own
+    # reconciliation below already uses, and for the identical reason.
+    # KLayout joins every distinct text label found on one electrical net
+    # into a single, comma-separated `Net.name` (see `spice_safe_net_name`'s
+    # docstring), so a net formed by composing two independently-labelled
+    # blocks (e.g. a library cell's own pin label plus a top-level wire's
+    # label landing on the same pad) can end up named e.g. `en,en1` -- a
+    # name no single declared string can ever equal, and one `--pins`
+    # (itself a comma-separated list) cannot even spell as a single entry.
+    # Matching on any component label instead makes a hand-declared pin list
+    # robust to a *future* extra label landing on the same net, too.
     if declared_pins is not None:
         top_circuit = netlist.circuit_by_name(top_cell.name)
         promoted_names: set[str] = set()
@@ -6353,9 +6375,17 @@ def _extract_netlist(
                 if pin_net is not None and pin_net.name:
                     promoted_names.add(pin_net.name)
 
-        non_declared = promoted_names - declared_pins
+        matched_declared_pins: set[str] = set()
+        non_matching_declared_pins: set[str] = set()
+        for name in promoted_names:
+            hit = set(name.split(",")) & declared_pins
+            if hit:
+                matched_declared_pins |= hit
+            else:
+                non_matching_declared_pins.add(name)
+
         demoted_by_declared_pins = _reconcile_top_pins(
-            netlist, top_cell.name, non_declared, demote=True
+            netlist, top_cell.name, non_matching_declared_pins, demote=True
         )
         if demoted_by_declared_pins:
             joined = ", ".join(demoted_by_declared_pins)
@@ -6365,7 +6395,7 @@ def _extract_netlist(
                 f"({joined}) -- issue #514"
             )
 
-        unmatched_declared_pins = sorted(declared_pins - promoted_names)
+        unmatched_declared_pins = sorted(declared_pins - matched_declared_pins)
         if unmatched_declared_pins:
             joined = ", ".join(unmatched_declared_pins)
             count = len(unmatched_declared_pins)
