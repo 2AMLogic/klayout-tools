@@ -1333,6 +1333,112 @@
       ]
     }
   },
+  "metal4.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        },
+        {
+          "box": [
+            2370,
+            0,
+            4370,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      46,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        },
+        {
+          "box": [
+            2190,
+            0,
+            4190,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal4.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            370,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      46,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            190,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "metal5.enclosing.via4.1": {
     "check": "enclosing",
     "clean": {

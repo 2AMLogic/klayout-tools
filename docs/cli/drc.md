@@ -497,7 +497,7 @@ defect class the issue reports (a conductor missing part of its cut) with no
 false positives on correct geometry; the 0.08 um two-adjacent-edges half
 stays uncovered, like the end-of-line variants noted for gf180mcu below.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 44 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 46 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
 (diffusion/active), `Contact`, `Via1`-`Via4`, `Metal1`-`Metal5`, and
 `MetalTop`
@@ -1216,7 +1216,8 @@ claim" against the DRM's own table of contents. `provenance` is **per-rule
 and exact** — the one specific file and official rule id *this individual
 rule* came from, with no deck-wide aggregation. Many rules sharing one
 `scope` value each carry a different `provenance.rule_id` (e.g. gf180mcu's
-`metal1.width.1`/`metal2.width.1`/`metal3.width.1`/`metal5.width.1` all
+`metal1.width.1`/`metal2.width.1`/`metal3.width.1`/`metal4.width.1`/
+`metal5.width.1` all
 share `scope="7.13 Metaln"` but each cites the DRM's own `"Mn.1"` row for
 their own metal level). `provenance` is not (yet) surfaced in `klt drc`'s
 JSON output — it lives on `DrcRule` itself, queryable by a caller that
@@ -1225,7 +1226,8 @@ same way `scope` was before `coverage.deck_scope` aggregated it.
 
 As of issue #747, `provenance` was populated only for the 37 piloted
 width/space rules. As of issue #904, it is populated for **all** of
-gf180mcu's `DrcRule` entries (42 then, 44 as of issue #1110) — sky130's own remaining (non-width/space)
+gf180mcu's `DrcRule` entries (42 then, 44 as of issue #1110, 46 as of issue
+#1688) — sky130's own remaining (non-width/space)
 rules still leave it `None` (the default), an unpopulated field, not a
 claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this

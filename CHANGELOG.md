@@ -16,6 +16,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: the curated `gf180mcu` DRC deck now checks Metal4's own minimum
+  width and spacing — `metal4.width.1` and `metal4.space.1`, both 0.28 um
+  (280 dbu) on layer `(46, 0)` (issue #1688). Every other routing metal
+  (`Metal1`-`Metal3`, `Metal5`, `MetalTop`) already carried both, and Metal4
+  was otherwise present in the deck (its `Via3`/`Via4` enclosure rules and
+  the MiM-cap stack), so a sub-0.28 um Metal4 wire — or two Metal4 wires
+  closer than 0.28 um — previously came back `clean` rather than reported.
+  Both values are transcribed from the same DRM table the sibling rules cite
+  (`google/gf180mcu-pdk`,
+  `docs/physical_verification/design_manual/tables_clear/22_Metaln_58.csv`,
+  rules `Mn.1`/`Mn.2a`, whose published `0.28 (2 <= n <= 5)` range covers
+  `n = 4`), under the already-registered `scope="7.13 Metaln"` — so
+  `coverage.deck_scope` is unchanged. The gf180mcu deck is now 46 rules (was
+  44), and `coverage.rules_skipped` gains the two new ids on a stream with no
+  Metal4 geometry.
 - **Fixed**: `klt gen-compose`'s `connectivity[]` router now retries a leg
   onto `routing.cross_block_layer_role` when it is rejected for crossing a
   *different* net's already-accepted route, instead of failing the whole net
