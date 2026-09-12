@@ -16,6 +16,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt extract --parasitics` now reports a per-net `by_layer[]`
+  breakdown alongside each net's scalar `resistance_ohm`/`capacitance_ff`
+  totals (issue #1701) — `{"layer", "resistance_ohm", "capacitance_ff"}` per
+  contributing conductor role (`"diffusion"`/`"poly"`) or metal level
+  (`"metal<i>"`, 0-based), letting a caller composing a hierarchical netlist
+  from separately-extracted sub-blocks attribute a net's R/C to a specific
+  layer instead of hand-subtracting scalar totals. Purely additive (no
+  `schema_version` bump per `docs/json-contract.md`'s additive-field policy)
+  and derived entirely from intermediates `_compute_parasitics` already
+  computed internally — no new geometry pass. Summing `by_layer[].resistance_
+  ohm`/`.capacitance_ff` across one net's list reproduces that net's own
+  scalar totals, except for a net named by `--mom-net`/`--mom-rlc-net` (those
+  substitute the scalar totals with a value this lumped-RC breakdown did not
+  compute). See `docs/cli/extract.md`'s "Per-layer breakdown" section.
 - **Fixed**: the curated `gf180mcu` DRC deck now checks Metal4's own minimum
   width and spacing — `metal4.width.1` and `metal4.space.1`, both 0.28 um
   (280 dbu) on layer `(46, 0)` (issue #1688). Every other routing metal
