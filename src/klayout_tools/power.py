@@ -88,7 +88,7 @@ from typing import TYPE_CHECKING, Any
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
-from ._paths import _load_spec_json, _parse_layer_datatype
+from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
 from .ir_solver import solve_ir_drop
 
 if TYPE_CHECKING:
@@ -229,37 +229,14 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
 def _validate_vias(
     spec: dict[str, Any], spec_path: str, stackup_names: list[str]
 ) -> list[dict[str, Any]]:
-    raw = spec.get("vias", [])
-    if raw is None:
-        raw = []
-    if not isinstance(raw, list):
-        raise PowerError(f"spec '{spec_path}': 'vias' must be an array")
-
     entries: list[dict[str, Any]] = []
-    names: list[str] = list(stackup_names)
-    for i, entry in enumerate(raw):
-        if not isinstance(entry, dict):
-            raise PowerError(f"spec '{spec_path}': vias[{i}] must be a JSON object")
-        for key in ("layer", "between", "resistance_ohm"):
-            if key not in entry:
-                raise PowerError(f"spec '{spec_path}': vias[{i}] missing {key!r}")
-
-        layer = _parse_layer_datatype(
-            str(entry["layer"]), spec_path, f"vias[{i}].layer", PowerError
-        )
-
-        between = entry["between"]
-        if (
-            not isinstance(between, list)
-            or len(between) != 2
-            or str(between[0]) == str(between[1])
-            or any(str(n) not in stackup_names for n in between)
-        ):
-            raise PowerError(
-                f"spec '{spec_path}': vias[{i}].between must name two distinct "
-                f"'stackup' entries (got {between!r})"
-            )
-
+    for i, entry, name, layer, between in _validate_via_entries(
+        spec,
+        spec_path,
+        stackup_names,
+        PowerError,
+        required_keys=("layer", "between", "resistance_ohm"),
+    ):
         try:
             resistance_ohm = float(entry["resistance_ohm"])
         except (TypeError, ValueError) as exc:
@@ -272,11 +249,6 @@ def _validate_vias(
                 f"spec '{spec_path}': vias[{i}].resistance_ohm must be >= 0 "
                 f"(got {resistance_ohm!r})"
             )
-
-        name = str(entry.get("name", f"via{i}"))
-        if name in names:
-            raise PowerError(f"spec '{spec_path}': duplicate via/stackup name {name!r}")
-        names.append(name)
 
         # `current_limit_a` (issue #846, Phase 1c): this via role's own EM
         # limit -- unlike a metal role's `current_limit_a_per_um`, a real
@@ -308,7 +280,7 @@ def _validate_vias(
             {
                 "name": name,
                 "layer": layer,
-                "between": (str(between[0]), str(between[1])),
+                "between": between,
                 "resistance_ohm": resistance_ohm,
                 "current_limit_a": current_limit_a,
                 "current_limit_source": current_limit_source,
