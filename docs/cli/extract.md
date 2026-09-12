@@ -3709,6 +3709,31 @@ covered by drawn conductor) are named in that command's own
 `$<id>` fallback; see
 [`docs/cli/place-and-route.md`](place-and-route.md).
 
+**Composed layouts (issue #1689).** A DEF-merged macro that
+[`klt gen-compose`](gen-compose.md) has placed into a larger layout keeps its
+DEF net names too. KLayout stamps the property onto the routed geometry it
+draws in the *merge's own* top cell, and composition places that exact cell
+one level below the composed top (`<block_id>__<src_cell_name>` — hierarchy
+is preserved, not flattened, when a block is placed as a whole-cell
+instance), so the names live one level down rather than in the cell being
+extracted. This flag reads them there: the scan covers the extraction top
+cell's own shapes **plus exactly one level into each direct child cell
+instance**, transforming each probe point into the composed top cell's own
+coordinate frame first. Before this, extracting a composed layout with
+`--def-net-names` silently degraded that block's nets to `$<id>`
+placeholders. A standalone (non-composed) layout behaves exactly as before.
+
+**Known limitation — depth 1 only.** The scan stops one level down, so a
+block composed *more than one* level deep (a macro composed into a macro
+composed into a macro) is not reached: its DEF net-name properties sit at
+depth 2+ under the outermost composed top and those nets keep the `$<id>`
+fallback. Nothing `klt` itself produces has that shape — `gen-compose` always
+places a source block exactly one level below its own composed top. The bound
+is deliberate rather than incidental: it preserves the false-positive guard
+this flag has always had, since a property found deeper would more likely be
+an ordinary standard cell's own internal annotation (property `1` carries no
+guaranteed meaning outside a LEF/DEF merge) than a top-level net name.
+
 ```
 klt extract routed.gds --deck sky130 --def-net-names \
   --parasitics --spef routed.spef --format json

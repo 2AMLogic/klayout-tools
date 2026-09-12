@@ -31,6 +31,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `coverage.deck_scope` is unchanged. The gf180mcu deck is now 46 rules (was
   44), and `coverage.rules_skipped` gains the two new ids on a stream with no
   Metal4 geometry.
+- **Fixed**: `klt extract --def-net-names` now recovers the real DEF net names
+  of a **composed** layout's block — a DEF-merged P&R macro that `klt
+  gen-compose` placed into a larger layout — instead of silently degrading
+  every one of that block's nets to a synthesized `$<id>` placeholder (issue
+  #1689). Composition never dropped the DEF net-name shape property; the scan
+  that reads it looked in the wrong cell. KLayout's LEF/DEF reader stamps the
+  property onto the routed geometry it draws in the *merge's own* top cell,
+  and `gen-compose`'s composed GDS places that exact cell one level below the
+  composed top (`<block_id>__<src_cell_name>`, hierarchy preserved rather
+  than flattened) — so the property sat one level below the only cell
+  `_def_net_name_probes` scanned. The scan is now depth-1: the extraction top
+  cell's own shapes (unchanged) plus exactly one level into each direct child
+  cell instance, with each candidate probe point transformed into the
+  composed top cell's own coordinate frame before it is resolved. A
+  standalone (non-composed) layout's output is unchanged, and the original
+  false-positive guard is kept for anything nested deeper — a standard cell's
+  own internal annotation several levels down still is not read as a
+  top-level net name. **Known limitation**: a block composed *more than one*
+  level deep (a macro composed into a macro composed into a macro) is not
+  reached; nothing in this codebase currently produces that shape, since
+  `gen-compose` always places a source block exactly one level below its own
+  composed top. See [`docs/cli/extract.md`](docs/cli/extract.md)'s
+  "DEF-derived net names" section.
 - **Fixed**: `klt gen-compose`'s `connectivity[]` router now retries a leg
   onto `routing.cross_block_layer_role` when it is rejected for crossing a
   *different* net's already-accepted route, instead of failing the whole net

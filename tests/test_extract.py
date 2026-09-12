@@ -53,6 +53,7 @@ from klayout_tools.extract import (
     run_extract,
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
+from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     _format_um,
@@ -15712,6 +15713,165 @@ def test_def_net_names_cli_flag_is_wired(tmp_path, capsys):
     assert exit_code == 0
     report = json.loads(capsys.readouterr().out)
     assert "_019_" in {net["name"] for net in report["nets"]}
+
+
+# --------------------------------------------------------------------------- #
+# `--def-net-names` on a `klt gen-compose`d layout (issue #1689): a DEF-merged
+# macro's own top cell survives composition as a sub-cell one level below the
+# composed top (`_write_composed_gds`'s `f"{block_id}__{src_cell_name}"`
+# convention) -- the DEF net-name property is *not* dropped by composition
+# (verified directly against `kdb.Cell.copy_tree` for the issue), but the
+# pre-#1689 `_def_net_name_probes` scanned only the top cell's own shapes and
+# so never saw it. These tests exercise the depth-1 extension that fixes
+# that, and the depth boundary it deliberately keeps.
+# --------------------------------------------------------------------------- #
+
+
+def _composed_inverter_gds(
+    tmp_path: Path,
+    *,
+    macro_gds: str,
+    macro_cell_name: str = "TOP",
+    second_gds: str | None = None,
+    filename: str = "composed.gds",
+    top_cell_name: str = "COMPOSED",
+) -> str:
+    """Compose ``macro_gds`` (its top cell named ``macro_cell_name``) plus a
+    second, unrelated inverter block into one composed GDS via
+    `gen_compose._write_composed_gds` -- the exact mechanism `klt gen-compose`
+    uses to place each block as a translated sub-cell instance, hierarchy
+    preserved (issue #1689's reproducer step 3). ``second_gds`` defaults to a
+    freshly-drawn plain inverter (no DEF-name property at all) offset well
+    clear of the macro's own ~2 x 3.2 um footprint.
+    """
+    if second_gds is None:
+        second_gds = _write_gds(_make_inverter_layout(), tmp_path / "second_block.gds")
+
+    composed_path = str(tmp_path / filename)
+    _write_composed_gds(
+        blocks={
+            "macro": {"gds_path": macro_gds, "cell_name": macro_cell_name},
+            "second": {"gds_path": second_gds, "cell_name": "TOP"},
+        },
+        order=["macro", "second"],
+        offsets_um={
+            "macro": {"x": 0.0, "y": 0.0},
+            "second": {"x": 10.0, "y": 0.0},
+        },
+        cell_name=top_cell_name,
+        output_path=composed_path,
+    )
+    return composed_path
+
+
+def test_def_net_names_recovers_the_name_after_gen_compose_places_macro_one_level_down(
+    tmp_path,
+):
+    """Issue #1689's exact reproducer: compose a DEF-merged macro (its own
+    top cell carries the DEF net-name property directly on routed metal,
+    exactly like `_inverter_with_def_net_property`) next to a second block,
+    then extract the composed output with `--def-net-names`. Before the
+    fix, this silently degraded to placeholder names because the property
+    now lives one hierarchy level below the composed top cell that was
+    being scanned; the depth-1 extension recovers it."""
+    macro_gds = _inverter_with_def_net_property(tmp_path, net_name="_019_")
+    composed_path = _composed_inverter_gds(tmp_path, macro_gds=macro_gds)
+
+    default_report = run_extract(
+        composed_path,
+        "sky130",
+        output=str(tmp_path / "composed_default.spice"),
+        top="COMPOSED",
+    )
+    report = run_extract(
+        composed_path,
+        "sky130",
+        output=str(tmp_path / "composed_def_names.spice"),
+        top="COMPOSED",
+        def_net_names=True,
+    )
+
+    # Without the flag, composition alone does not manufacture the DEF name
+    # (matching the always-opt-in behaviour of the standalone case).
+    assert "_019_" not in {net["name"] for net in default_report["nets"]}
+
+    names = {net["name"] for net in report["nets"]}
+    assert "_019_" in names
+    # Both blocks' own label-derived nets are still present -- the rename is
+    # additive, not a wholesale renaming of the composed layout.
+    assert "Y" in names
+    # Nothing was left unresolved.
+    assert not [
+        warning for warning in report["warnings"] if "--def-net-names" in warning
+    ]
+
+
+def test_def_net_names_warns_when_composed_layout_has_no_property_anywhere(tmp_path):
+    """Regression guard on the warning path (issue #1689): a genuinely
+    property-less composed layout still gets the "no such property" warning
+    after the depth-1 scan extension -- extending the scan to a sub-cell
+    level must not manufacture a match out of nothing."""
+    macro_gds = _write_gds(_make_inverter_layout(), tmp_path / "macro_plain.gds")
+    composed_path = _composed_inverter_gds(
+        tmp_path, macro_gds=macro_gds, filename="composed_plain.gds"
+    )
+
+    report = run_extract(
+        composed_path,
+        "sky130",
+        output=str(tmp_path / "composed_plain.spice"),
+        top="COMPOSED",
+        def_net_names=True,
+    )
+
+    assert any(
+        "--def-net-names found no DEF net-name shape property" in warning
+        for warning in report["warnings"]
+    )
+    assert "Y" in {net["name"] for net in report["nets"]}
+
+
+def test_def_net_names_ignores_property_more_than_one_level_below_top(tmp_path):
+    """False-positive guard preserved (issue #1689): the depth-1 scan
+    `_def_net_name_probes` now performs stops at exactly one level below the
+    top cell -- a property two or more levels down (an ordinary standard
+    cell's own internal annotation nested *inside* a placed block, not a
+    DEF-merged macro's own top-level geometry) is not read. This is the same
+    false-positive case the scan has always excluded, exercised at the
+    now-relevant depth boundary rather than at the top cell itself."""
+    layout = _make_inverter_layout()
+    top = layout.cell("TOP")
+    li1 = layout.layer(67, 20)
+
+    # Two levels below `top`: `MID` (an ordinary sub-cell, standing in for a
+    # composed block's own sub-cell) instantiates `INNER`, which carries the
+    # property -- so the property sits at depth 2, one level past what the
+    # depth-1 scan reaches. Drawn at the same coordinates as the PMOS-side
+    # drain pad so the flattened geometry stays a normal, connected circuit
+    # (the property being unreadable is the only thing under test).
+    mid = layout.create_cell("MID")
+    inner = layout.create_cell("INNER")
+    shape = inner.shapes(li1).insert(kdb.Box(1600, 200, 2000, 800))
+    shape.set_property(1, "_too_deep_")
+    mid.insert(kdb.CellInstArray(inner.cell_index(), kdb.Trans(kdb.Trans.R0, 0, 0)))
+    top.insert(kdb.CellInstArray(mid.cell_index(), kdb.Trans(kdb.Trans.R0, 0, 0)))
+
+    layout_path = _write_gds(layout, tmp_path / "too_deep.gds")
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "too_deep.spice"),
+        def_net_names=True,
+    )
+
+    names = {net["name"] for net in report["nets"]}
+    assert "_too_deep_" not in names
+    assert "Y" in names
+    assert any(
+        "found no DEF net-name shape property" in warning
+        for warning in report["warnings"]
+    )
 
 
 def test_def_net_names_recovers_the_routed_corpus_designs_own_net_names(
