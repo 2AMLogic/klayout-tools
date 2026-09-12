@@ -246,3 +246,120 @@ def test_both_artifact_kinds_are_exercised_by_the_corpus():
 
     assert wired["netlist"], "no entry links a netlist artifact"
     assert wired["layout"], "no entry links a layout artifact"
+
+
+# --------------------------------------------------------------------------- #
+# measured field (schema shape only -- path-existence checks are
+# validate_entries()'s job, covered in tests/test_kb_cmd.py)
+# --------------------------------------------------------------------------- #
+
+
+def _valid_measured_block() -> dict:
+    return {
+        "pdk": "sky130",
+        "corner": "tt, 1.8V, 27C",
+        "figures": [
+            {
+                "name": "av_db",
+                "value": 55,
+                "unit": "dB",
+                "testbench": "examples/kb/some-entry/request.json",
+            }
+        ],
+    }
+
+
+def test_entry_without_measured_still_validates():
+    """Backward compatibility: an entry predating this field must still
+    validate with `measured` entirely absent."""
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    assert "measured" not in entry
+    jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_with_null_measured_still_validates():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    entry["measured"] = None
+    jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_with_measured_block_validates():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    entry["measured"] = _valid_measured_block()
+    jsonschema.validate(instance=entry, schema=schema)
+
+
+@pytest.mark.parametrize("missing_field", ["pdk", "corner", "figures"])
+def test_entry_measured_missing_required_field_fails_validation(missing_field):
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    measured = _valid_measured_block()
+    del measured[missing_field]
+    entry["measured"] = measured
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_measured_empty_figures_fails_validation():
+    """`figures` requires at least one entry -- an empty array is a mistake,
+    not a "no figures yet" signal (that's what omitting/null `measured` is
+    for)."""
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    measured = _valid_measured_block()
+    measured["figures"] = []
+    entry["measured"] = measured
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+@pytest.mark.parametrize("missing_field", ["name", "value", "unit", "testbench"])
+def test_entry_measured_figure_missing_required_field_fails_validation(missing_field):
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    measured = _valid_measured_block()
+    del measured["figures"][0][missing_field]
+    entry["measured"] = measured
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_measured_unknown_key_fails_validation():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    measured = _valid_measured_block()
+    measured["bogus"] = "x"
+    entry["measured"] = measured
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_measured_figure_value_must_be_numeric():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    measured = _valid_measured_block()
+    measured["figures"][0]["value"] = "not a number"
+    entry["measured"] = measured
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_at_least_four_seed_entries_carry_measured_figures():
+    """Issue #1720's acceptance bar: entries with an existing reference
+    netlist carry `measured` figures produced by `klt sim` on a named sky130
+    corner. Path existence and schema conformance are covered corpus-wide by
+    `test_entries_validate_against_schema_and_id_matches_filename` above."""
+    entries_with_measured = [
+        path.stem
+        for path in _entry_paths()
+        if json.loads(path.read_text()).get("measured")
+    ]
+    assert len(entries_with_measured) >= 4, entries_with_measured

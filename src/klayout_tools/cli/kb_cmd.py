@@ -45,7 +45,7 @@ def run_show(args: argparse.Namespace) -> int:
 
 def run_search(args: argparse.Namespace) -> int:
     try:
-        report = search_entries(args.query)
+        report = search_entries(args.query, where=args.where, pdk=args.pdk)
     except KbError as exc:
         return emit_error("kb search", str(exc), args.format)
 
@@ -67,6 +67,10 @@ def _print_summary_text(report: dict) -> None:
     entries = report["entries"]
     if "query" in report:
         print(f"query: {report['query']}")
+    for expr in report.get("where") or []:
+        print(f"where: {expr}")
+    if report.get("pdk"):
+        print(f"pdk: {report['pdk']}")
     print(f"count: {report['count']}")
     if not entries:
         return
@@ -118,6 +122,16 @@ def _print_show_text(report: dict) -> None:
             print(f"artifacts.layout: {artifacts['layout']}")
         if artifacts.get("notes"):
             print(f"artifacts.notes: {artifacts['notes']}")
+
+    measured = entry.get("measured")
+    if measured:
+        print(f"measured.pdk: {measured.get('pdk')}")
+        print(f"measured.corner: {measured.get('corner')}")
+        if measured.get("supply_v") is not None:
+            print(f"measured.supply_v: {measured['supply_v']}")
+        for figure in measured.get("figures") or []:
+            value = f"{figure['name']}={figure['value']}{figure['unit']}"
+            print(f"measured.figures: {value}")
 
 
 def _print_validate_text(report: dict) -> None:

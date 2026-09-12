@@ -23,5 +23,20 @@
   "notes": "Framed here as the baseline external-capacitor PMOS-pass LDO; capless (on-chip-only output capacitor) variants replace the ESR-zero reliance with an internal buffer stage and Miller compensation, trading quiescent current and design complexity for the ability to drop the external component, and are a natural follow-up KB entry if a capless design becomes relevant to a spec_class target. The dropout voltage floor for this topology is set by the PMOS pass device's Vds(sat)/on-resistance at the maximum load current, not by any bandgap-related Vbe drop, which is what makes it compatible with sub-1.8V rails when paired with a sub-1V reference such as the current-summing bandgap in kb/entries/sky130-bandgap-reference.json.",
   "artifacts": {
     "netlist": "examples/kb/ldo-pmos-pass-error-amp/testbench.spice"
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "vin_val=3.0V, 27C (request.json's 3.0V-3.6V x -40C/27C/125C sweep; vout is flat across it in this behavioral testbench, see notes)",
+    "supply_v": 3.0,
+    "notes": "testbench.spice models the pass device with a generic (non-PDK) PMOS model and the error amp as an ideal finite-gain block (see artifacts.netlist's own header), not sky130 device models -- this demonstrates the feedback-regulation relation this entry's sizing_approach describes, not silicon accuracy. Reproduce with `klt sim examples/kb/ldo-pmos-pass-error-amp/request.json`.",
+    "figures": [
+      {
+        "name": "vout_v",
+        "value": 1.80324,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/ldo-pmos-pass-error-amp/request.json"
+      }
+    ]
   }
 }

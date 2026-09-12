@@ -3591,14 +3591,34 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
 
     search_parser = kb_sub.add_parser(
         "search",
-        help="keyword search over kb entries",
+        help="keyword and/or numeric search over kb entries",
         description=(
             "Case-insensitive keyword match over title, topology, "
-            "spec_class, layout_idioms, and notes. Plain substring search -- "
-            "no embeddings, no index (kb/README.md's flat-files design)."
+            "spec_class, layout_idioms, and notes, optionally narrowed by "
+            "numeric --where filters over an entry's measured.figures and/or "
+            "an exact --pdk match against measured.pdk. Plain substring "
+            "search for the keyword -- no embeddings, no index "
+            "(kb/README.md's flat-files design)."
         ),
     )
-    search_parser.add_argument("query", help="keyword to search for")
+    search_parser.add_argument(
+        "query", nargs="?", default="", help="keyword to search for (optional)"
+    )
+    search_parser.add_argument(
+        "--where",
+        action="append",
+        metavar="<figure><op><value>",
+        help=(
+            "Numeric filter over measured.figures, e.g. 'av_db>=40'. op is "
+            "one of >=, <=, ==, !=, >, <. Repeatable -- every --where must "
+            "match (AND). An entry with no measured block never matches."
+        ),
+    )
+    search_parser.add_argument(
+        "--pdk",
+        metavar="<pdk>",
+        help="Exact (case-insensitive) match against measured.pdk, e.g. 'sky130'.",
+    )
     _add_format_arg(search_parser)
     search_parser.set_defaults(func=kb_cmd.run_search)
 

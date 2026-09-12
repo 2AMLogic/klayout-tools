@@ -10,22 +10,27 @@ matching, per `kb/README.md`'s flat-files design).
 ```
 klt kb list                    [--format text|json]
 klt kb show <id>                [--format text|json]
-klt kb search <query>           [--format text|json]
+klt kb search [<query>] [--where <figure><op><value>]... [--pdk <pdk>] [--format text|json]
 klt kb validate                 [--format text|json]
 ```
 
 - `list` — id, title, spec_class for every entry (id-sorted).
 - `show <id>` — the full entry for `kb/entries/<id>.json`.
-- `search <query>` — case-insensitive keyword match over `title`, `topology`,
-  `spec_class`, `layout_idioms`, and `notes`.
+- `search [<query>]` — case-insensitive keyword match over `title`,
+  `topology`, `spec_class`, `layout_idioms`, and `notes`, optionally narrowed
+  by numeric filters over an entry's `measured.figures` (`--where`, repeatable,
+  AND'd together) and/or an exact `measured.pdk` match (`--pdk`). `<query>` is
+  optional — omit it to filter purely on `--where`/`--pdk`. See "Numeric
+  filters" below.
 - `validate` — every entry parses as JSON, validates against
   `kb/schema/entry.schema.json`, has `id` matching its filename stem, and —
-  when the entry sets `artifacts` — that any `artifacts.netlist`/
-  `artifacts.layout` path it references actually exists on disk (resolved
-  relative to the repository root; `artifacts.notes` is prose and is never
-  treated as a path). This is the single implementation
-  behind both the CI gate and `tests/test_kb.py`'s schema-conformance
-  coverage.
+  when the entry sets `artifacts` or `measured` — that any
+  `artifacts.netlist`/`artifacts.layout` path, or any
+  `measured.figures[].testbench` path, it references actually exists on disk
+  (resolved relative to the repository root; `artifacts.notes` and
+  `measured.notes` are prose and are never treated as a path). This is the
+  single implementation behind both the CI gate and `tests/test_kb.py`'s
+  schema-conformance coverage.
 
 Every subcommand emits through the shared envelope
 ([`docs/json-contract.md`](../json-contract.md): `schema_version`, error
@@ -67,6 +72,15 @@ An empty `kb/entries/` is success (exit `0`), not an error.
       "netlist": "examples/...",
       "layout": "path/to.gds",
       "notes": "..."
+    },
+    "measured": {
+      "pdk": "sky130",
+      "corner": "tt, 1.8V, 27C",
+      "supply_v": 1.8,
+      "notes": "...",
+      "figures": [
+        { "name": "av_db", "value": 55, "unit": "dB", "analysis": "ac", "testbench": "examples/..." }
+      ]
     }
   }
 }
@@ -76,14 +90,16 @@ An empty `kb/entries/` is success (exit `0`), not an error.
 [`kb/README.md`](../../kb/README.md#schema) for the field reference. An
 unknown `<id>` is an error (exit `1`), not an empty/`null` result.
 
-## `klt kb search <query>`
+## `klt kb search [<query>]`
 
-Same shape as `list`, plus the `query` that was searched:
+Same shape as `list`, plus the `query`/`where`/`pdk` filters that were applied:
 
 ```json
 {
   "schema_version": 1,
   "query": "inductor",
+  "where": [],
+  "pdk": null,
   "count": 1,
   "entries": [
     { "id": "sky130-spiral-inductor", "title": "...", "spec_class": "..." }
@@ -95,7 +111,36 @@ Matching is a plain case-insensitive substring test against `title`,
 `topology`, `spec_class`, each string in `layout_idioms`, and `notes` — an
 entry with `layout_idioms: ["guard rings"]` matches a `--format text`
 `search guard` or `search rings` query. `null`/absent optional fields are
-skipped, never a match. No result is success (exit `0`), not an error.
+skipped, never a match. `<query>` may be omitted (an empty string never
+excludes an entry) to search purely on `--where`/`--pdk`. No result is
+success (exit `0`), not an error.
+
+### Numeric filters (`--where`, `--pdk`)
+
+`--where <figure><op><value>` filters on an entry's `measured.figures`, e.g.
+`--where av_db>=40`. `op` is one of `>=`, `<=`, `==`, `!=`, `>`, `<` (checked
+longest-first, so `>=`/`<=` are never misparsed as `>`/`<`). Repeat `--where`
+for multiple conditions — every one must match (AND), against possibly
+different figures. `--pdk <pdk>` is a separate, case-insensitive exact match
+against `measured.pdk` (e.g. `--pdk sky130`) — not a `--where` condition,
+since `pdk` is a string, not a number.
+
+An entry with no `measured` block, or missing the named figure, never
+matches a `--where`/`--pdk` filter — it is excluded, not an error. A
+malformed `--where` expression (no recognised operator, empty figure name,
+or non-numeric value) is an application error (exit `1`), same as any other
+`KbError`:
+
+```
+$ klt kb search --where av_db --format json
+{ "schema_version": 1, "error": { "command": "kb search", "message": "--where 'av_db': expected '<figure_name><op><value>' with op one of >=, <=, ==, !=, >, <" } }
+```
+
+This is the preferred **first step** for KB-assisted topology selection
+(`.claude/skills/design-topology-selection/SKILL.md`) whenever the S3 block
+spec has numeric electrical targets: filter on numbers before falling back
+to keyword search or a full `kb list` scan, since a numeric match is a much
+stronger fit signal than a title/topology keyword hit.
 
 ## `klt kb validate`
 
@@ -123,8 +168,10 @@ skipped, never a match. No result is success (exit `0`), not an error.
   "examples/kb/<id>/testbench.spice"`), or `artifacts/<netlist|layout>: must
   be a repository-relative path without '..' segments: <path>` for an
   absolute path or one escaping the repository — a link only the author's
-  machine can follow is not a verification link. Empty when `valid` is
-  `true`.
+  machine can follow is not a verification link. The same two error shapes
+  apply to `measured.figures[].testbench`, reported as
+  `measured/figures/<index>/testbench: ...` — one entry per figure whose
+  path is missing or escapes the repository. Empty when `valid` is `true`.
 
 A malformed `kb/entries/*.json` file or a schema mismatch produces a
 per-entry `valid: false` with a populated `errors` array — it does **not**

@@ -22,5 +22,34 @@
   "notes": "Most modern sub-1V bandgap variants, including curvature-corrected ones, build on this current-summing base circuit rather than replacing it. sky130's parasitic PNP devices are lower-performance than a dedicated BiCMOS process, so expect larger die area and more careful trimming to approach the temperature coefficient reported in the original paper.",
   "artifacts": {
     "netlist": "examples/kb/sky130-bandgap-reference/testbench.spice"
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "1.62V-1.98V supply x -40C/27C/125C sweep (request.json); vref_v is the 1.62V/27C corner, vref_min_v/vref_max_v are the sweep's -40C/125C extremes (supply-independent in this behavioral testbench)",
+    "supply_v": 1.62,
+    "notes": "testbench.spice models the PTAT/CTAT current-domain summing with ideal diodes/current sources (see artifacts.netlist's own header), not sky130's parasitic PNP devices -- these figures demonstrate the current-summing sizing relation this entry's sizing_approach describes, not silicon accuracy from real sky130 bipolar devices. Reproduce with `klt sim examples/kb/sky130-bandgap-reference/request.json`.",
+    "figures": [
+      {
+        "name": "vref_v",
+        "value": 0.208907,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-bandgap-reference/request.json"
+      },
+      {
+        "name": "vref_min_v",
+        "value": 0.195149,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-bandgap-reference/request.json"
+      },
+      {
+        "name": "vref_max_v",
+        "value": 0.228172,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-bandgap-reference/request.json"
+      }
+    ]
   }
 }

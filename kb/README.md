@@ -45,19 +45,27 @@ reading `kb/entries/*.json` directly — same JSON envelope as every other
 codes; see `docs/cli/kb.md` for the full JSON schema of each subcommand):
 
 ```
-klt kb list                # id, title, spec_class for every entry
-klt kb show <id>            # the full entry
-klt kb search <query>       # case-insensitive keyword match over title,
-                             # topology, spec_class, layout_idioms, notes
-klt kb validate             # schema + id-matches-filename check; nonzero
-                             # exit with structured per-entry errors on
-                             # any failure (this is what CI runs)
+klt kb list                       # id, title, spec_class for every entry
+klt kb show <id>                   # the full entry
+klt kb search [<query>]            # case-insensitive keyword match over title,
+                                    # topology, spec_class, layout_idioms, notes
+klt kb search --where av_db>=40    # numeric filter over measured.figures
+                --pdk sky130       # (repeatable, AND'd) + exact measured.pdk match
+klt kb validate                    # schema + id-matches-filename + artifact/
+                                    # measured-path check; nonzero exit with
+                                    # structured per-entry errors on any
+                                    # failure (this is what CI runs)
 ```
 
 `search` is deliberately stdlib-simple substring matching — no embeddings, no
-index — matching this directory's flat-files design. `klt kb validate` is the
-single implementation behind both the CI gate and `tests/test_kb.py`'s own
-schema-conformance coverage; run it locally the same way CI does:
+index — matching this directory's flat-files design; `--where`/`--pdk` add a
+numeric layer on top for entries that carry a `measured` block (see "Schema"
+below) — the preferred first step when the query has numeric targets (a
+gain/bandwidth/current spec), full detail in
+[`docs/cli/kb.md`](../docs/cli/kb.md#numeric-filters-where---pdk). `klt kb
+validate` is the single implementation behind both the CI gate and
+`tests/test_kb.py`'s own schema-conformance coverage; run it locally the same
+way CI does:
 
 ```
 klt kb validate --format json
@@ -82,6 +90,7 @@ of the fields:
 | `source.license_or_openness` | optional | Why the source clears the sourcing bar below. |
 | `notes` | optional | Free-form notes. |
 | `artifacts` | optional | `{ netlist, layout, notes }` — repo-root-relative paths linking this entry to a runnable netlist/testbench under `examples/` (`klt sim`) and/or a GDS layout (`klt drc`), plus optional prose `notes` about them (never treated as a path). At least one of `netlist`/`layout` is required when `artifacts` is given — `notes` alone does not satisfy it. `klt kb validate` fails if a referenced path doesn't exist, is absolute, or escapes the repo via `..`. |
+| `measured` | optional | `{ pdk, corner, supply_v, notes, figures[] }` — numeric figures (gain, phase, bias point, current, ...) reproduced by running a checked-in testbench via `klt sim` on a named corner, so `klt kb search --where`/`--pdk` can match on numbers instead of prose. Each `figures[]` entry is `{ name, value, unit, analysis, testbench }`, where `testbench` is a repo-root-relative path to the `klt sim` request/netlist that reproduces it — checked for existence by `klt kb validate` the same way `artifacts.{netlist,layout}` is. |
 
 Every seed entry under `kb/entries/` populates all fields (including the
 optional ones) to prove the schema against real content — new entries may

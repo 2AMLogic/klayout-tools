@@ -19,5 +19,38 @@
     "url": "https://doi.org/10.1109/TCOM.1980.1094619",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its charge-pump PLL linearized loop analysis and the resulting loop-filter sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the foundational reference introducing the charge-pump PLL as an analysis framework; the tri-state PFD-plus-charge-pump front end described here is the near-universal implementation that realizes the current-output phase/frequency detector this analysis assumes."
   },
-  "notes": "The dead-zone-elimination reset delay is the single most commonly under-sized parameter in first-pass PFD/charge-pump designs -- too short and the loop exhibits a dead zone (poor in-band phase noise / high jitter near lock), too long and the reference spur grows; always verify with a transient simulation sweeping input phase difference through zero, not just a linear small-signal loop model. This entry is the front-end companion to either VCO entry in this KB (cmos-ring-vco-current-starved or sky130-lc-vco-cross-coupled) -- the charge-pump's output drives the loop filter that in turn drives the VCO's control voltage."
+  "notes": "The dead-zone-elimination reset delay is the single most commonly under-sized parameter in first-pass PFD/charge-pump designs -- too short and the loop exhibits a dead zone (poor in-band phase noise / high jitter near lock), too long and the reference spur grows; always verify with a transient simulation sweeping input phase difference through zero, not just a linear small-signal loop model. This entry is the front-end companion to either VCO entry in this KB (cmos-ring-vco-current-starved or sky130-lc-vco-cross-coupled) -- the charge-pump's output drives the loop filter that in turn drives the VCO's control voltage.",
+  "artifacts": {
+    "netlist": "examples/kb/pfd-charge-pump-tri-state/charge_pump.spice",
+    "notes": "Transistor-level (real sky130_fd_pr__pfet_01v8/nfet_01v8 devices) UP/DOWN current-source/sink stage only -- the PFD's own flip-flop/AND-gate reset logic is standard-cell-portable digital logic (see pdk_portability.notes) and out of scope for this artifact. Originally authored for issue #1325's `klt size` reproduction test (tests/test_size.py); this request.json wraps it for `klt sim` as this entry's own reference figures."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 27C (vdd=1.8V fixed by the netlist's own .param, not swept)",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched), unlike this KB's other three measured entries, which use behavioral/ideal elements. Reproduce with `klt sim examples/kb/pfd-charge-pump-tri-state/request.json`.",
+    "figures": [
+      {
+        "name": "icp_up_a",
+        "value": 1.97971e-05,
+        "unit": "A",
+        "analysis": "tran",
+        "testbench": "examples/kb/pfd-charge-pump-tri-state/request.json"
+      },
+      {
+        "name": "icp_down_a",
+        "value": 2.02665e-05,
+        "unit": "A",
+        "analysis": "tran",
+        "testbench": "examples/kb/pfd-charge-pump-tri-state/request.json"
+      },
+      {
+        "name": "icp_mismatch_pct",
+        "value": -2.34316,
+        "unit": "%",
+        "analysis": "tran",
+        "testbench": "examples/kb/pfd-charge-pump-tri-state/request.json"
+      }
+    ]
+  }
 }

@@ -185,6 +185,194 @@ def test_search_tolerates_null_optional_fields(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# library: search_entries numeric filters (--where / --pdk)
+# --------------------------------------------------------------------------- #
+
+
+def _measured_entry(entry_id: str, pdk: str, figures: list[dict]) -> dict:
+    return _valid_entry(
+        entry_id,
+        measured={
+            "pdk": pdk,
+            "corner": "tt, 1.8V, 27C",
+            "figures": figures,
+        },
+    )
+
+
+def test_search_empty_query_matches_everything_before_filters(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {"entry-a": _valid_entry("entry-a"), "entry-b": _valid_entry("entry-b")},
+    )
+
+    report = kb.search_entries(root=root)
+
+    assert report["query"] == ""
+    assert report["count"] == 2
+
+
+def test_search_where_filters_on_numeric_figure(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "high-gain": _measured_entry(
+                "high-gain",
+                "sky130",
+                [{"name": "av_db", "value": 55, "unit": "dB", "testbench": "x.json"}],
+            ),
+            "low-gain": _measured_entry(
+                "low-gain",
+                "sky130",
+                [{"name": "av_db", "value": 20, "unit": "dB", "testbench": "x.json"}],
+            ),
+        },
+    )
+
+    report = kb.search_entries(where=["av_db>=40"], root=root)
+
+    assert report["where"] == ["av_db>=40"]
+    assert report["count"] == 1
+    assert report["entries"][0]["id"] == "high-gain"
+
+
+@pytest.mark.parametrize(
+    "expr,expected_ids",
+    [
+        ("av_db==40", ["exact"]),
+        ("av_db!=40", ["other"]),
+        ("av_db>40", []),
+        ("av_db<40", ["other"]),
+        ("av_db<=40", ["exact", "other"]),
+    ],
+)
+def test_search_where_supports_every_operator(tmp_path, expr, expected_ids):
+    root = _make_kb(
+        tmp_path,
+        {
+            "exact": _measured_entry(
+                "exact",
+                "sky130",
+                [{"name": "av_db", "value": 40, "unit": "dB", "testbench": "x.json"}],
+            ),
+            "other": _measured_entry(
+                "other",
+                "sky130",
+                [{"name": "av_db", "value": 10, "unit": "dB", "testbench": "x.json"}],
+            ),
+        },
+    )
+
+    report = kb.search_entries(where=[expr], root=root)
+
+    assert sorted(entry["id"] for entry in report["entries"]) == sorted(expected_ids)
+
+
+def test_search_where_multiple_conditions_are_anded(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "both": _measured_entry(
+                "both",
+                "sky130",
+                [
+                    {
+                        "name": "av_db",
+                        "value": 55,
+                        "unit": "dB",
+                        "testbench": "x.json",
+                    },
+                    {
+                        "name": "idd_a",
+                        "value": 1e-6,
+                        "unit": "A",
+                        "testbench": "x.json",
+                    },
+                ],
+            ),
+            "only-gain": _measured_entry(
+                "only-gain",
+                "sky130",
+                [{"name": "av_db", "value": 55, "unit": "dB", "testbench": "x.json"}],
+            ),
+        },
+    )
+
+    report = kb.search_entries(where=["av_db>=40", "idd_a<=1e-6"], root=root)
+
+    assert report["count"] == 1
+    assert report["entries"][0]["id"] == "both"
+
+
+def test_search_where_entry_without_measured_never_matches(tmp_path):
+    root = _make_kb(tmp_path, {"entry-a": _valid_entry("entry-a")})
+
+    report = kb.search_entries(where=["av_db>=0"], root=root)
+
+    assert report["count"] == 0
+
+
+def test_search_where_missing_figure_name_never_matches(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _measured_entry(
+                "entry-a",
+                "sky130",
+                [{"name": "pm_deg", "value": 60, "unit": "deg", "testbench": "x.json"}],
+            )
+        },
+    )
+
+    report = kb.search_entries(where=["av_db>=0"], root=root)
+
+    assert report["count"] == 0
+
+
+def test_search_pdk_filter_is_case_insensitive_exact_match(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "sky": _measured_entry(
+                "sky",
+                "sky130",
+                [{"name": "av_db", "value": 1, "unit": "dB", "testbench": "x.json"}],
+            ),
+            "gf": _measured_entry(
+                "gf",
+                "gf180mcu",
+                [{"name": "av_db", "value": 1, "unit": "dB", "testbench": "x.json"}],
+            ),
+        },
+    )
+
+    report = kb.search_entries(pdk="SKY130", root=root)
+
+    assert report["pdk"] == "SKY130"
+    assert report["count"] == 1
+    assert report["entries"][0]["id"] == "sky"
+
+
+def test_search_pdk_filter_entry_without_measured_never_matches(tmp_path):
+    root = _make_kb(tmp_path, {"entry-a": _valid_entry("entry-a")})
+
+    report = kb.search_entries(pdk="sky130", root=root)
+
+    assert report["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "expr",
+    ["no-operator-here", "av_db>=not-a-number", ">=40", "  >=40"],
+)
+def test_search_where_malformed_expression_raises(tmp_path, expr):
+    root = _make_kb(tmp_path, {"entry-a": _valid_entry("entry-a")})
+
+    with pytest.raises(kb.KbError):
+        kb.search_entries(where=[expr], root=root)
+
+
+# --------------------------------------------------------------------------- #
 # library: validate_entries
 # --------------------------------------------------------------------------- #
 
@@ -488,6 +676,98 @@ def test_validate_entries_resolves_artifacts_against_explicit_repo_root(tmp_path
 
 
 # --------------------------------------------------------------------------- #
+# validate_entries: measured.figures[].testbench (mirrors artifacts above)
+# --------------------------------------------------------------------------- #
+
+
+def _measured_block(testbench: str) -> dict:
+    return {
+        "pdk": "sky130",
+        "corner": "tt, 1.8V, 27C",
+        "figures": [
+            {"name": "av_db", "value": 55, "unit": "dB", "testbench": testbench}
+        ],
+    }
+
+
+def test_validate_entries_tolerates_absent_measured_field(tmp_path):
+    root = _make_kb(tmp_path, {"entry-a": _valid_entry("entry-a")})
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+
+
+def test_validate_entries_passes_when_measured_testbench_path_exists(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a", measured=_measured_block("examples/entry-a/request.json")
+            )
+        },
+    )
+    netlist_path = tmp_path / "examples" / "entry-a" / "request.json"
+    netlist_path.parent.mkdir(parents=True)
+    netlist_path.write_text("{}")
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+
+
+def test_validate_entries_fails_when_measured_testbench_path_missing(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a",
+                measured=_measured_block("examples/entry-a/does-not-exist.json"),
+            )
+        },
+    )
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any(
+        "measured/figures/0/testbench" in error and "does not exist" in error
+        for error in result["errors"]
+    ), result["errors"]
+
+
+def test_validate_entries_rejects_absolute_measured_testbench_path(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {"entry-a": _valid_entry("entry-a", measured=_measured_block("/etc/passwd"))},
+    )
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any("repository-relative path" in error for error in result["errors"])
+
+
+def test_validate_entries_rejects_parent_traversal_measured_testbench_path(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a", measured=_measured_block("../outside/request.json")
+            )
+        },
+    )
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any("repository-relative path" in error for error in result["errors"])
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 
@@ -581,6 +861,86 @@ def test_cli_search_json(_cli_kb, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["count"] == 1
     assert payload["entries"][0]["id"] == "inductor"
+
+
+def test_cli_search_query_is_optional(_cli_kb, capsys):
+    _cli_kb({"entry-a": _valid_entry("entry-a")})
+
+    exit_code = main(["kb", "search", "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["query"] == ""
+    assert payload["count"] == 1
+
+
+def test_cli_search_where_and_pdk_json(_cli_kb, capsys):
+    _cli_kb(
+        {
+            "high-gain": _measured_entry(
+                "high-gain",
+                "sky130",
+                [{"name": "av_db", "value": 55, "unit": "dB", "testbench": "x.json"}],
+            ),
+            "low-gain": _measured_entry(
+                "low-gain",
+                "sky130",
+                [{"name": "av_db", "value": 10, "unit": "dB", "testbench": "x.json"}],
+            ),
+        }
+    )
+
+    exit_code = main(
+        [
+            "kb",
+            "search",
+            "--where",
+            "av_db>=40",
+            "--pdk",
+            "sky130",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["where"] == ["av_db>=40"]
+    assert payload["pdk"] == "sky130"
+    assert payload["count"] == 1
+    assert payload["entries"][0]["id"] == "high-gain"
+
+
+def test_cli_search_malformed_where_error_envelope(_cli_kb, capsys):
+    _cli_kb({"entry-a": _valid_entry("entry-a")})
+
+    exit_code = main(
+        ["kb", "search", "--where", "not-an-expression", "--format", "json"]
+    )
+
+    assert exit_code == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"]["command"] == "kb search"
+
+
+def test_cli_search_where_text_output(_cli_kb, capsys):
+    _cli_kb(
+        {
+            "entry-a": _measured_entry(
+                "entry-a",
+                "sky130",
+                [{"name": "av_db", "value": 55, "unit": "dB", "testbench": "x.json"}],
+            )
+        }
+    )
+
+    exit_code = main(["kb", "search", "--where", "av_db>=40", "--pdk", "sky130"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "where: av_db>=40" in out
+    assert "pdk: sky130" in out
+    assert "count: 1" in out
 
 
 def test_cli_validate_exits_zero_when_all_valid(_cli_kb, capsys):

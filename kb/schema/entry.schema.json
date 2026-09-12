@@ -100,6 +100,66 @@
           "type": ["string", "null"]
         }
       }
+    },
+    "measured": {
+      "description": "Numeric figures (gain, phase, bias point, corner, ...) reproduced by running a checked-in testbench via `klt sim`, so `klt kb search --where` / `klt kb match` can filter on numbers instead of prose. `klt kb validate` checks that every figure's `testbench` path exists on disk, the same way it checks `artifacts.{netlist,layout}`. Optional: omit or set null when no reproducible measured figures exist yet for this entry.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["pdk", "corner", "figures"],
+      "properties": {
+        "pdk": {
+          "type": "string",
+          "description": "PDK the figures below were measured against, e.g. 'sky130'.",
+          "minLength": 1
+        },
+        "corner": {
+          "type": "string",
+          "description": "Named process/voltage/temperature corner the figures below were measured at, e.g. 'tt, 1.8V, 27C'. Free text -- record whatever the testbench's request.json actually swept/held fixed.",
+          "minLength": 1
+        },
+        "supply_v": {
+          "description": "Supply voltage the figures were measured at, when a single fixed nominal supply applies. Optional: omit or set null when the corner text above already captures it, or when multiple supplies are in play.",
+          "type": ["number", "null"]
+        },
+        "notes": {
+          "description": "Free-form prose caveat about the figures below -- e.g. that the testbench uses behavioral/ideal elements rather than PDK device models, so the numbers demonstrate a sizing relation rather than silicon accuracy. Prose only: never treated as a path by `klt kb validate`. Optional: omit or set null when there is nothing to add.",
+          "type": ["string", "null"]
+        },
+        "figures": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value", "unit", "testbench"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Figure name, e.g. av_db, cm_av_db, input_phase, vin_bias_v, gbw_hz, pm_deg, idd_a, vout_v, period_s. No fixed vocabulary -- name it after what it measures so `--where <name><op><value>` reads naturally.",
+                "minLength": 1
+              },
+              "value": {
+                "type": "number",
+                "description": "The measured numeric value, in `unit` below."
+              },
+              "unit": {
+                "type": "string",
+                "description": "Unit for `value`, e.g. 'dB', 'deg', 'V', 'Hz', 'A', 's'.",
+                "minLength": 1
+              },
+              "analysis": {
+                "description": "SPICE analysis kind that produced this figure (e.g. 'op', 'tran', 'ac'). Optional: omit or set null when not meaningfully distinct from the testbench's own single analysis.",
+                "type": ["string", "null"]
+              },
+              "testbench": {
+                "type": "string",
+                "description": "Path, relative to the repository root, to the `klt sim` request (or netlist, if no request.json exists) that reproduces this figure -- e.g. 'examples/kb/<id>/request.json'. `klt kb validate` checks this path exists on disk, the same way it checks artifacts.{netlist,layout}.",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
