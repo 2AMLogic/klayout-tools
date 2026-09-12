@@ -1148,6 +1148,25 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--parasitics-net",
+        dest="parasitics_nets",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "scope --parasitics' per-net ground R/C pass onto this net "
+            "(issue #1700); repeatable. Without it the ground R/C pass "
+            "measures every net in the design, which dominates runtime on a "
+            "large block even when only a handful of nets' R/C is wanted; "
+            "with it, only the named nets are measured (and only a pair of "
+            "named nets can couple). Requires --parasitics. A name matching "
+            "no net in this layout is not an error -- it is reported in "
+            "`warnings` instead, same as --critical-net. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitics-net' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",

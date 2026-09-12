@@ -89,6 +89,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   against this module's per-corner deck shape); issue #1694 tracks that open
   design question with the empirical findings. See
   [`docs/cli/sim.md`](docs/cli/sim.md)'s "Timeout-budget preflight" section.
+- **Added**: `klt extract --parasitics` gains **`--parasitics-net NET`,
+  repeatable** (issue #1700) — it scopes the per-net **ground R/C pass** to
+  the named nets instead of measuring every net in the design, and the
+  request is echoed back verbatim as the additive
+  `parasitics.parasitics_nets` field. The whole-layout default is the
+  dominant cost of `--parasitics` on a large block (each net's geometry is
+  queried once per conductor role), so a mixed-signal top cell can spend
+  tens of minutes producing R/C for thousands of nets when the caller
+  wanted it for a handful. Requires `--parasitics` (the flag alone is an
+  error, same as `--critical-net`); a name matching no net with
+  ground-eligible geometry is reported in `warnings`, not raised, and an
+  anonymous net is named in the same backslash-escaped spelling
+  `parasitics.nets[].net` reports (issue #1162). This is the only
+  `--parasitics` flag that *removes* content from the report, so two
+  consequences are deliberate rather than layout findings: an unnamed net
+  gets **no `parasitics.nets[]` entry, no injected `R`/`C` SPICE cards, and
+  no contribution to `total_resistance_ohm`/`total_capacitance_ff`** — the
+  totals of a scoped run are partial by construction; and because both
+  coupling passes are computed from the per-net geometry the ground pass
+  caches, **only a pair of both-named nets can couple** — naming a
+  crosstalk victim without its aggressor reports zero coupling for it. A
+  `--critical-net` net left out of `--parasitics-net` gets its own
+  `warnings` entry naming the responsible flag combination, instead of the
+  generic "matches no net in this layout" wording that would misdirect the
+  caller at their layout. The flag changes *which* nets are measured, never
+  *how*: a named net's `resistance_ohm`/`capacitance_ff` are bit-for-bit
+  what the full-layout pass reports for it. `parasitics.parasitics_nets` is
+  `[]` when the flag was never given, and omitting the flag leaves every
+  field byte-identical to before it existed — purely additive, and `klt
+  extract`'s `schema_version` stays `3`. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Scoping the ground R/C
+  pass to named nets" section.
 - **Fixed**: `klt gen-compose`'s `connectivity[]` router now retries a leg
   onto `routing.cross_block_layer_role` when it is rejected for crossing a
   *different* net's already-accepted route, instead of failing the whole net

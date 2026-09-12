@@ -646,6 +646,7 @@ def run_extract(
     spef_output: str | None = None,
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
+    parasitics_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
     def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     mom_rlc_net: str | None = None,
@@ -926,6 +927,28 @@ def run_extract(
     since a caller may legitimately name several candidate nets across
     several blocks/runs. ``None``/empty (the default) skips this entirely --
     byte-identical to before this feature existed.
+
+    ``parasitics_nets`` (``klt extract --parasitics-net <net>``, repeatable,
+    issue #1700) scopes the *ground* R/C pass itself -- the base per-net
+    ``(R, C)`` measurement every other parasitics flag layers onto -- down to
+    the named nets, instead of measuring every net in the design. This is the
+    cost half of issue #1699: the ground pass calls
+    ``LayoutToNetlist.polygons_of_net`` once per net per conductor role, so
+    on a large mixed-signal top cell it dominates runtime even when the
+    caller only wants R/C for a handful of nets. Membership reuses
+    ``critical_nets``' own ``frozenset[str]`` pattern verbatim (the escaped
+    spelling ``parasitics.nets[].net`` reports, issue #1162), deliberately
+    rather than introducing a second net-classification mechanism. A net not
+    named here is measured not at all: it gets no ``parasitics.nets[]``
+    entry, no injected ``R``/``C`` cards, and -- since coupling is computed
+    from the geometry this pass caches -- can neither give nor receive
+    coupling capacitance, so only a pair of *both*-named nets can couple.
+    Requires ``parasitics=True``, same convention as ``critical_nets`` above.
+    A name matching no net with ground-eligible parasitics geometry is a
+    ``warnings`` entry, not an :class:`ExtractError` -- again matching
+    ``critical_nets`` rather than ``mom_net``'s stricter contract.
+    ``None``/empty (the default) runs the full-layout pass -- byte-identical
+    to before this feature existed.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -1603,6 +1626,13 @@ def run_extract(
     if critical_nets_set is not None and not parasitics:
         raise ExtractError("--critical-net requires --parasitics")
 
+    # `--parasitics-net` (issue #1700) requires `--parasitics`: it scopes the
+    # lumped-RC ground pass itself, so without that pass there is nothing to
+    # scope -- same reasoning as `--critical-net` immediately above.
+    parasitics_nets_set = frozenset(parasitics_nets) if parasitics_nets else None
+    if parasitics_nets_set is not None and not parasitics:
+        raise ExtractError("--parasitics-net requires --parasitics")
+
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
@@ -1697,6 +1727,7 @@ def run_extract(
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
+        parasitics_nets=parasitics_nets_set,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
     )
@@ -2158,6 +2189,30 @@ def run_extract(
         parasitics_report["critical_nets"] = (
             list(critical_nets) if critical_nets else []
         )
+        # Additive field (issue #1700): echoes the `--parasitics-net` request
+        # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
+        # flag was never given. Without it a scoped run's deliberately-short
+        # `parasitics.nets[]` would be indistinguishable from a layout whose
+        # other nets genuinely had no ground-eligible geometry.
+        parasitics_report["parasitics_nets"] = (
+            list(parasitics_nets) if parasitics_nets else []
+        )
+        if parasitics_nets_set:
+            # Same escaped-spelling comparison `critical_nets` makes below
+            # (issue #1162): `ground_nets[].net` is the unescaped identity
+            # spelling, the caller-supplied set is the escaped one.
+            scoped_matched_names = {
+                spice_safe_net_name(entry["net"]) for entry in ground_nets
+            }
+            unscoped = sorted(parasitics_nets_set - scoped_matched_names)
+            if unscoped:
+                warnings.append(
+                    "--parasitics-net name(s) "
+                    f"{', '.join(repr(name) for name in unscoped)} match no "
+                    "net with ground-eligible parasitics geometry in this "
+                    "layout -- no R/C was computed for them. See "
+                    "docs/cli/extract.md's '--parasitics-net' section."
+                )
         if critical_nets_set:
             # `ground_nets[].net` is the unescaped identity spelling (issue
             # #1162, see `_net_identity_name`'s docstring); `critical_nets_set`
@@ -2167,7 +2222,31 @@ def run_extract(
             matched_net_names = {
                 spice_safe_net_name(entry["net"]) for entry in ground_nets
             }
-            unmatched = sorted(critical_nets_set - matched_net_names)
+            # `--parasitics-net` (issue #1700) scoped the ground pass that
+            # `matched_net_names` is derived from, so a critical net left out
+            # of that scope is absent for a reason the generic "matches no
+            # net in this layout" wording below would misattribute to the
+            # layout. Reported separately, and excluded from that warning, so
+            # the caller is pointed at the flag combination actually
+            # responsible. Empty (and therefore inert) unless the new flag
+            # was given.
+            scoped_out_critical = (
+                sorted(critical_nets_set - parasitics_nets_set)
+                if parasitics_nets_set
+                else []
+            )
+            if scoped_out_critical:
+                warnings.append(
+                    "--critical-net name(s) "
+                    f"{', '.join(repr(name) for name in scoped_out_critical)} "
+                    "were not also named --parasitics-net -- that flag scopes "
+                    "the ground R/C pass lateral coupling is measured from, "
+                    "so no lateral coupling was computed for them. See "
+                    "docs/cli/extract.md's '--parasitics-net' section."
+                )
+            unmatched = sorted(
+                critical_nets_set - matched_net_names - set(scoped_out_critical)
+            )
             if unmatched:
                 warnings.append(
                     "--critical-net name(s) "
@@ -2765,6 +2844,7 @@ def extract_netlist_from_layout(
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
+    parasitics_nets: frozenset[str] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
 ) -> tuple[
@@ -3004,6 +3084,7 @@ def extract_netlist_from_layout(
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
         critical_nets=critical_nets,
+        parasitics_nets=parasitics_nets,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
     )
@@ -4919,6 +5000,7 @@ def _extract_netlist(
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
+    parasitics_nets: frozenset[str] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
 ) -> tuple[
@@ -6677,6 +6759,7 @@ def _extract_netlist(
             layer_index,
             metal_index,
             critical_nets=critical_nets,
+            parasitics_nets=parasitics_nets,
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
@@ -7074,6 +7157,7 @@ def _compute_parasitics(
     layer_index: dict[str, int],
     metal_index: list[int],
     critical_nets: frozenset[str] | None = None,
+    parasitics_nets: frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -7138,6 +7222,26 @@ def _compute_parasitics(
     CDAC top plate, a PLL loop filter) keeps this increment's cost bounded
     to exactly the nets a caller cares about while still closing the gap
     ``PARASITIC_MODEL_SCOPE["coupling"]`` names.
+
+    **Scoping the ground pass itself (issue #1700, the cost half of issue
+    #1699):** ``parasitics_nets`` (``klt extract --parasitics-net``,
+    repeatable) restricts which nets Pass 1 measures at all -- ``None``/empty
+    (the default) measures every net, byte-identical to this function's
+    pre-#1700 behaviour. The membership test is the identical
+    ``spice_safe_net_name(_net_identity_name(net)) in <frozenset>`` check the
+    lateral pass already applies to ``critical_nets`` (issue #1162's escaped
+    spelling), reused rather than introducing a second net-classification
+    mechanism. Pass 1 is where the per-net ``polygons_of_net`` /
+    ``_net_area_perim_um`` calls live, so skipping a net there is the actual
+    saving; the consequence is that an unnamed net also contributes no
+    ``metal_regions`` entry, and therefore can neither give nor receive
+    *coupling* capacitance -- only a pair of both-named nets can couple under
+    a scoped run. That is deliberate and is the point: a coupling term
+    computed against a partner whose own ground model was never built would
+    be attributing charge to a net that does not appear in the output at all.
+    Unlike ``critical_nets``, which only ever *adds* a pass, this one
+    subtracts work, so a caller trading completeness for runtime must say so
+    explicitly.
 
     For each metal level ``i`` with a curated
     ``parasitics_deck.metal_sidewalls[i]`` coefficient and
@@ -7314,6 +7418,17 @@ def _compute_parasitics(
             # cluster has no geometry to measure by definition, so skipping
             # it is the correct (and crash-free) answer for any future caller
             # that hands us a synthesised net.
+            continue
+        if parasitics_nets is not None and (
+            spice_safe_net_name(_net_identity_name(net)) not in parasitics_nets
+        ):
+            # `--parasitics-net` scoping (issue #1700): this net was not
+            # named, so none of Pass 1's per-net geometry queries run for it
+            # -- which is the entire cost saving, since `polygons_of_net` is
+            # called once per net per conductor role. Membership re-escapes
+            # the identity spelling for exactly the reason the lateral pass'
+            # `critical_nets` check does (issue #1162): the caller names nets
+            # using the escaped spelling this module reports everywhere else.
             continue
         nets.append(net)
 

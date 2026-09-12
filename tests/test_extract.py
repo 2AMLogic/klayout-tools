@@ -10228,6 +10228,7 @@ def test_parasitics_summary_block_shape(tmp_path):
         "metals_without_coefficient",
         "overlap_pairs_without_coefficient",
         "critical_nets",
+        "parasitics_nets",
         "distributed_rc",
         "model",
         "mom_crosscheck",
@@ -11357,6 +11358,195 @@ def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
 def test_critical_net_requires_parasitics():
     with pytest.raises(ExtractError, match="--critical-net requires --parasitics"):
         run_extract("/nonexistent.gds", "sky130", critical_nets=["VIC"])
+
+
+# ---------------------------------------------------------------------------
+# Scoping the ground R/C pass to named nets (--parasitics-net, issue #1700 --
+# the cost half of friction report #1699)
+# ---------------------------------------------------------------------------
+
+
+def test_parasitics_net_omitted_measures_every_net(tmp_path):
+    """Baseline (issue #1700): with no `parasitics_nets` given at all, the
+    ground R/C pass measures every net in the layout and echoes an empty
+    request back -- byte-identical to this function's pre-#1700 behaviour."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "lateral.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+    assert para["parasitics_nets"] == []
+    assert {entry["net"] for entry in para["nets"]} == {"AGR", "VIC", "FAR"}
+
+
+def test_parasitics_net_scopes_ground_pass_to_named_nets(tmp_path):
+    """Acceptance bar (issue #1700): naming a subset restricts the ground
+    R/C pass -- and therefore `parasitics.nets[]`, the injected `R`/`C`
+    cards, and the reported totals -- to exactly those nets, while each
+    named net's own R/C is *identical* to what the full-layout pass reports
+    for it (scoping changes which nets are measured, never how)."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    full = run_extract(
+        path, "sky130", output=str(tmp_path / "full.spice"), parasitics=True
+    )
+    scoped = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "scoped.spice"),
+        parasitics=True,
+        parasitics_nets=["VIC"],
+    )
+
+    para = scoped["parasitics"]
+    assert para["parasitics_nets"] == ["VIC"]
+    assert [entry["net"] for entry in para["nets"]] == ["VIC"]
+    assert para["c_count"] == 1  # one ground capacitor, for the one kept net
+    assert para["c_count"] < full["parasitics"]["c_count"]
+    assert not any("VIC" in w for w in scoped["warnings"])
+
+    full_vic = next(e for e in full["parasitics"]["nets"] if e["net"] == "VIC")
+    scoped_vic = para["nets"][0]
+    assert scoped_vic["capacitance_ff"] == full_vic["capacitance_ff"]
+    assert scoped_vic["resistance_ohm"] == full_vic["resistance_ohm"]
+
+    # The written SPICE carries only the scoped net's ground capacitor.
+    c_lines = [
+        ln
+        for ln in (tmp_path / "scoped.spice").read_text().splitlines()
+        if ln.startswith("C") and not ln.startswith("Ccc_")
+    ]
+    assert len(c_lines) == 1
+    assert "VIC" in c_lines[0]
+
+
+def test_parasitics_net_naming_every_net_matches_the_unscoped_run(tmp_path):
+    """Edge case from issue #1700's own test plan: naming *every* net is
+    equivalent to not scoping at all -- the scoped and unscoped
+    `parasitics.nets[]` blocks are identical, so the gate can only ever
+    subtract nets, never perturb the measurement of one it keeps."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    full = run_extract(
+        path, "sky130", output=str(tmp_path / "full.spice"), parasitics=True
+    )
+    scoped = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "scoped.spice"),
+        parasitics=True,
+        parasitics_nets=["AGR", "VIC", "FAR"],
+    )
+    assert scoped["parasitics"]["nets"] == full["parasitics"]["nets"]
+    assert (
+        scoped["parasitics"]["total_capacitance_ff"]
+        == full["parasitics"]["total_capacitance_ff"]
+    )
+
+
+def test_parasitics_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
+    """A `--parasitics-net` name matching no net in the layout is reported
+    in `warnings`, not raised as an :class:`ExtractError` -- consistent with
+    `--critical-net`'s tolerant convention rather than `--mom-net`'s strict
+    one (issue #1700)."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        parasitics_nets=["VIC", "NOT_A_REAL_NET"],
+    )
+    para = report["parasitics"]
+    assert [entry["net"] for entry in para["nets"]] == ["VIC"]
+    assert any(
+        "NOT_A_REAL_NET" in w and "--parasitics-net" in w for w in report["warnings"]
+    )
+
+
+def test_parasitics_net_scopes_coupling_to_pairs_of_named_nets(tmp_path):
+    """Coupling is computed from the geometry the (now-scoped) ground pass
+    caches, so a pair with only one side named cannot couple -- naming just
+    the victim drops the AGR<->VIC lateral pair that the same
+    `--critical-net` run finds unscoped, and naming both sides restores it
+    at its full unscoped value (issue #1700)."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    one_side = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "one.spice"),
+        parasitics=True,
+        critical_nets=["VIC"],
+        parasitics_nets=["VIC"],
+    )
+    assert one_side["parasitics"]["cc_count"] == 0
+    assert one_side["parasitics"]["total_coupling_capacitance_ff"] == 0.0
+
+    both_sides = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "both.spice"),
+        parasitics=True,
+        critical_nets=["VIC"],
+        parasitics_nets=["VIC", "AGR"],
+    )
+    assert both_sides["parasitics"]["cc_count"] == 1
+    assert both_sides["parasitics"]["total_coupling_capacitance_ff"] == pytest.approx(
+        0.044
+    )
+
+
+def test_critical_net_scoped_out_by_parasitics_net_warns_specifically(tmp_path):
+    """A `--critical-net` name excluded by `--parasitics-net` is absent from
+    the ground pass for a reason the layout is not responsible for, so it
+    gets its own warning naming the flag combination -- not the generic
+    "matches no net with ground-eligible parasitics geometry" wording, which
+    would misdirect the caller (issue #1700)."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        critical_nets=["AGR"],
+        parasitics_nets=["VIC"],
+    )
+    scoped_out = [
+        w for w in report["warnings"] if "--critical-net" in w and "'AGR'" in w
+    ]
+    assert len(scoped_out) == 1
+    assert "--parasitics-net" in scoped_out[0]
+    assert "ground-eligible parasitics geometry" not in scoped_out[0]
+
+
+def test_parasitics_net_requires_parasitics():
+    with pytest.raises(ExtractError, match="--parasitics-net requires --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", parasitics_nets=["VIC"])
+
+
+def test_cli_parasitics_net_flag_json(tmp_path, capsys):
+    """`klt extract --parasitics-net` (issue #1700), repeated, is parsed
+    into a list and scopes the ground R/C pass -- CLI-level counterpart to
+    `test_parasitics_net_scopes_ground_pass_to_named_nets`' direct
+    `run_extract` call."""
+    path = str(_write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds"))
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--parasitics-net",
+            "VIC",
+            "--parasitics-net",
+            "AGR",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["parasitics_nets"] == ["VIC", "AGR"]
+    assert {entry["net"] for entry in out["parasitics"]["nets"]} == {"VIC", "AGR"}
 
 
 def test_describe_parasitics_overlap_gaps_reports_truncation_and_none_entries():

@@ -251,6 +251,11 @@ def run(args: argparse.Namespace) -> int:
             # names. `None` when the flag was never given, unchanged from
             # every call site that predates it.
             critical_nets=args.critical_nets,
+            # `--parasitics-net` (issue #1700): scopes --parasitics' per-net
+            # ground R/C pass onto these net names instead of measuring
+            # every net in the design. `None` when the flag was never given,
+            # unchanged from every call site that predates it.
+            parasitics_nets=args.parasitics_nets,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
@@ -362,6 +367,12 @@ def _print_text(report: dict) -> None:
         critical_nets = parasitics.get("critical_nets")
         if critical_nets:
             print(f"critical_nets: {', '.join(critical_nets)}")
+        # Additive (issue #1700): only printed when --parasitics-net was
+        # given -- the scoped run's `parasitics.nets[]` is deliberately short,
+        # so say why rather than leaving a reader to guess.
+        parasitics_nets = parasitics.get("parasitics_nets")
+        if parasitics_nets:
+            print(f"parasitics_nets: {', '.join(parasitics_nets)}")
         # Additive (issue #977): only printed when --distributed-rc was given.
         if parasitics.get("distributed_rc"):
             distributed_count = sum(
