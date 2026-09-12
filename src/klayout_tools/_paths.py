@@ -32,6 +32,19 @@ just with ``"spec"`` wording) and ``_parse_layer_datatype(raw, spec_path,
 field)`` (parse a ``"<layer>/<datatype>"`` string) -- again differing only
 in which ``*Error`` class each module raises. ``_load_spec_json`` and
 ``_parse_layer_datatype`` below factor those out the same way.
+
+``erc.py`` and ``power.py`` also each defined an identically-shaped
+``_validate_vias(spec, spec_path, stackup_names)`` (validate the optional
+``"vias"`` array against a ``stackup_names`` list: default/type-check the
+raw array, check each entry is an object with the required keys, parse
+``"layer"`` via ``_parse_layer_datatype``, check ``"between"`` names two
+distinct ``stackup_names`` entries, and reject duplicate via/stackup
+names) -- differing only in the exception class, ``power.py``'s extra
+required ``"resistance_ohm"`` key, and ``power.py``'s additional
+``resistance_ohm``/``current_limit_a``/``current_limit_source`` fields
+layered on top of the shared result. ``_validate_via_entries`` below
+factors out the shared shape/parse/duplicate-tracking logic; each caller
+still builds its own final entry dict from the returned pieces.
 """
 
 from __future__ import annotations
@@ -120,6 +133,73 @@ def _parse_layer_datatype(
         return int(parts[0]), int(parts[1])
     except ValueError as exc:
         raise malformed from exc
+
+
+ViaEntry = tuple[int, dict[str, Any], str, tuple[int, int], tuple[str, str]]
+
+
+def _validate_via_entries(
+    spec: dict[str, Any],
+    spec_path: str,
+    stackup_names: list[str],
+    error_cls: type[Exception],
+    *,
+    required_keys: tuple[str, ...] = ("layer", "between"),
+) -> list[ViaEntry]:
+    """Validate the ``"vias"`` array shared shape used by ``erc.py``'s and
+    ``power.py``'s ``_validate_vias``: default/type-check ``spec["vias"]``,
+    require each entry be a JSON object containing ``required_keys``, parse
+    ``"layer"`` via :func:`_parse_layer_datatype`, check that ``"between"``
+    names two distinct entries from ``stackup_names``, and reject duplicate
+    via/stackup names (tracked cumulatively against ``stackup_names``).
+
+    Returns one ``(index, raw_entry, name, layer, between)`` tuple per via,
+    in input order, where ``layer`` is the parsed ``(layer, datatype)`` pair
+    and ``between`` is the ``(str, str)`` pair of stackup names. Callers
+    still own building their own final entry dict -- ``power.py`` layers
+    ``resistance_ohm``/``current_limit_a``/``current_limit_source`` handling
+    on top of ``raw_entry`` using ``required_keys=("layer", "between",
+    "resistance_ohm")``; ``erc.py`` uses the pieces as-is.
+    """
+    raw = spec.get("vias", [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise error_cls(f"spec '{spec_path}': 'vias' must be an array")
+
+    results: list[ViaEntry] = []
+    names: list[str] = list(stackup_names)
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise error_cls(f"spec '{spec_path}': vias[{i}] must be a JSON object")
+        for key in required_keys:
+            if key not in entry:
+                raise error_cls(f"spec '{spec_path}': vias[{i}] missing {key!r}")
+
+        layer = _parse_layer_datatype(
+            str(entry["layer"]), spec_path, f"vias[{i}].layer", error_cls
+        )
+
+        between = entry["between"]
+        if (
+            not isinstance(between, list)
+            or len(between) != 2
+            or str(between[0]) == str(between[1])
+            or any(str(n) not in stackup_names for n in between)
+        ):
+            raise error_cls(
+                f"spec '{spec_path}': vias[{i}].between must name two distinct "
+                f"'stackup' entries (got {between!r})"
+            )
+
+        name = str(entry.get("name", f"via{i}"))
+        if name in names:
+            raise error_cls(f"spec '{spec_path}': duplicate via/stackup name {name!r}")
+        names.append(name)
+
+        results.append((i, entry, name, layer, (str(between[0]), str(between[1]))))
+
+    return results
 
 
 def validate_request_shape(
