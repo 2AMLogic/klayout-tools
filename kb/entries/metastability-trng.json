@@ -19,5 +19,45 @@
     "url": "https://doi.org/10.1109/JSSC.2007.910965",
     "license_or_openness": "Tokunaga-Blaauw-Mudge is a peer-reviewed IEEE journal paper cited here for its metastability-resolution TRNG topology and the metastability-tracking quality-control methodology only (no figures or text reproduced) — case 2, restated ideas only, IEEE Xplore subscription for the full PDF. NIST SP 800-90B is a public-domain U.S. government standard, freely downloadable. No proprietary or NDA'd data is recorded."
   },
-  "notes": "The metastability-quality feedback loop is what distinguishes a robust metastable TRNG from a fragile one: without it, process mismatch and slow drift pull the latch off its balance point and the bit stops being random even though the circuit still toggles. As with all raw entropy sources, condition the output (vetted conditioning function or extractor) and run always-on SP 800-90B health tests (Repetition Count Test, Adaptive Proportion Test) on the raw resolved bits with a raw-tap access path for silicon validation. Compared with the oscillator-jitter sources (ring-oscillator-jitter-trng, multi-ro-xor-entropy-source), this cell is more compact and faster per event but more sensitive to systematic offset, so its calibration loop is the critical design element."
+  "notes": "The metastability-quality feedback loop is what distinguishes a robust metastable TRNG from a fragile one: without it, process mismatch and slow drift pull the latch off its balance point and the bit stops being random even though the circuit still toggles. As with all raw entropy sources, condition the output (vetted conditioning function or extractor) and run always-on SP 800-90B health tests (Repetition Count Test, Adaptive Proportion Test) on the raw resolved bits with a raw-tap access path for silicon validation. Compared with the oscillator-jitter sources (ring-oscillator-jitter-trng, multi-ro-xor-entropy-source), this cell is more compact and faster per event but more sensitive to systematic offset, so its calibration loop is the critical design element.",
+  "artifacts": {
+    "netlist": "examples/kb/metastability-trng/metastability_latch.spice",
+    "notes": "From-scratch netlist (real sky130_fd_pr__nfet_01v8/pfet_01v8 devices, not behavioral): a cross-coupled inverter pair held equalized near its own switching threshold by a transmission gate shorting its two nodes, then released to resolve. Because a single deterministic SPICE run has no thermal noise, one inverter's pull-down NMOS is drawn a deterministic 5% wider than the other's as a stand-in for the noise that decides a real cell's outcome -- the same technique sram-power-up-puf/sram_cell_powerup.spice and ro-puf/ro_puf.spice use for their own mismatch/noise stand-ins. The resolved state measured here (q low / qb high) is a property of this injected asymmetry's sign, not a prediction of any real trial's outcome, and no entropy/min-entropy claim is made. This testbench also does NOT implement the metastability-quality feedback/tracking loop this entry's own sizing_approach and notes call load-bearing for a robust design -- it demonstrates only the release-and-resolve mechanism the loop would operate on. See measured.notes for the same disclosure."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. Reproduce with `klt sim examples/kb/metastability-trng/request.json`. The cell is held equalized (transmission gate closed) from t=0 to t=2ns; vmeta_q_v/vmeta_qb_v/vmeta_sep_v are sampled at t=1.9ns, just before release, and confirm the cell is sitting near its shared switching threshold (both ~0.85V, ~2mV apart) rather than at either rail -- i.e. actually at the metastable balance point this entry's topology describes, not merely claimed to be. Release happens at t=2ns (t_release); resolve_delay_s is the time from release to qb crossing back through 0.9V (t_resolve_qb), and vq_final_v/vqb_final_v are the settled full-rail resolution at t=5.9ns. The resolved polarity (q low, qb high) is a property of the injected pull-down-width asymmetry's sign described in artifacts.notes, not a prediction of any real trial's outcome -- on real silicon the outcome is thermal-noise-driven and differs trial to trial. NO metastability-quality feedback/tracking loop is implemented (see artifacts.notes), and NO entropy/min-entropy claim is made or measurable from one deterministic run.",
+    "figures": [
+      {
+        "name": "vmeta_sep_v",
+        "value": 0.00194535,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/metastability-trng/request.json"
+      },
+      {
+        "name": "resolve_delay_s",
+        "value": 5.89162e-11,
+        "unit": "s",
+        "analysis": "tran",
+        "testbench": "examples/kb/metastability-trng/request.json"
+      },
+      {
+        "name": "vq_final_v",
+        "value": 5.24243e-07,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/metastability-trng/request.json"
+      },
+      {
+        "name": "vqb_final_v",
+        "value": 1.8,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/metastability-trng/request.json"
+      }
+    ]
+  }
 }

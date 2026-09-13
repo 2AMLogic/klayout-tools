@@ -1,0 +1,114 @@
+* Metastability-resolution TRNG -- cross-coupled-latch release-and-resolve
+* reference testbench: a cross-coupled inverter pair is held equalized near
+* its own switching threshold (the metastable balance point) by a
+* transmission-gate short between its two nodes, then released, letting a
+* deliberately injected device asymmetry (standing in for real thermal-noise
+* / mismatch) decide the resolved state.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/metastability-trng.json's own topology text, not
+* imported from anywhere (kb/SOURCING.md):
+*
+*   "A bistable element -- a cross-coupled latch, a flip-flop, or a pair of
+*    cross-coupled inverters -- is deliberately driven into its metastable
+*    balance point (both nodes at roughly the trip voltage) and then
+*    released, letting thermal noise decide which of the two stable states
+*    it resolves to."
+*
+* HOW "DRIVEN INTO THE METASTABLE BALANCE POINT" IS IMPLEMENTED. A
+* transmission gate (XTGN + XTGP below) directly shorts the latch's two
+* cross-coupled nodes (q, qb) together while `hold` is high. With q and qb
+* tied to the same physical node, each inverter is effectively self-biased
+* (its own output shorted back to its own input through the other inverter's
+* identical connection) -- a standard way to bias an inverter to its own
+* switching threshold. Because both inverters share the shorted node, the
+* cell settles at a compromise voltage near both inverters' switching
+* thresholds, i.e. near the metastable balance point the entry's topology
+* text describes, with NO manual .ic needed to find it. Opening the
+* transmission gate (`hold` falls, `holdb` rises) then releases the latch
+* from that balance point to resolve, exactly as the entry's topology
+* describes.
+*
+* HOW THE RESOLUTION DIRECTION IS MODELLED -- read this before trusting any
+* number here. A single deterministic SPICE run has no thermal noise: with
+* perfectly matched cross-coupled inverters this cell has an exactly
+* symmetric solution and a noiseless simulator has nothing to grow an
+* imbalance from once released, so it would ride the balance point
+* indefinitely (which is itself the real hazard a metastable circuit poses,
+* not a simulation artifact). Real silicon has thermal noise (which is
+* exactly this entry's own entropy source) breaking that symmetry. So this
+* testbench injects ONE deterministic asymmetry -- XN1's pull-down NMOS is
+* drawn `mism` (5%) wider than XN2's -- as a stand-in for the noise that
+* would otherwise decide the outcome, exactly the same technique
+* examples/kb/sram-power-up-puf/sram_cell_powerup.spice and
+* examples/kb/ro-puf/ro_puf.spice use for their own mismatch/noise stand-ins.
+* Consequences, stated plainly:
+*   - The resolved state measured here is a property of THIS injected
+*     asymmetry's sign, not a prediction of what any real cell resolves to
+*     on a given trial -- on real silicon the outcome is noise-driven and
+*     differs trial to trial, which is the entire point of this entry.
+*   - Empirically (see this directory's request.json): a wider XN1 shifts
+*     inverter 1's own switching threshold down, so the shared equalized
+*     voltage lands slightly below inverter 2's threshold once released --
+*     the cell resolves q LOW / qb HIGH. Mirroring `mism` onto XN2 instead
+*     flips which node resolves high, which is the point: the outcome
+*     tracks the injected asymmetry, not a fixed "q always wins" polarity.
+*   - This testbench does NOT implement the entry's own metastability-
+*     quality feedback/tracking loop (the offset-cancellation or balancing-
+*     pulse-timing control the entry's sizing_approach and notes both call
+*     load-bearing for a robust design) -- it shows the release-and-resolve
+*     mechanism the loop operates on, not the loop itself. See
+*     measured.notes/artifacts.notes for the same disclosure.
+*   - No entropy/min-entropy claim is made or measurable from one
+*     deterministic run; SP 800-90B characterization needs many trials
+*     across real noise realizations on silicon.
+*
+* Node map:
+*   q, qb   -- the cross-coupled bistable's two nodes (this entry's "both
+*              nodes at roughly the trip voltage" balance point when held)
+*   hold, holdb -- complementary control for the equalizing transmission
+*              gate: hold=1.8V (holdb=0V) shorts q=qb (equalized/held);
+*              hold=0V (holdb=1.8V) opens the gate (released, resolving)
+*
+* SIZING. Minimum-length (L=0.15) cross-coupled inverters, matching the
+* entry's own note that "tight ... matching ... minimize[s] the systematic
+* offset" -- the only intentional mismatch is the single injected asymmetry
+* described above. The transmission gate is sized wide relative to the
+* inverters so it is a strong-enough short to pull q/qb to their compromise
+* equalized voltage well within the 2ns hold window.
+.param wn=2
+.param wp=4
+.param linv=0.15
+.param mism=0.05
+.param wtg=6
+.param ltg=0.15
+
+* --- supply ---
+Vdd vdd 0 DC 1.8
+
+* --- cross-coupled inverter pair (the bistable element) ---
+* Inverter 1: input qb, output q. Pull-down carries the injected asymmetry.
+XP1 q  qb vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XN1 q  qb 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn*(1+mism)} nf=1 mult=1
+* Inverter 2: input q, output qb. Nominal (unmismatched) devices.
+XP2 qb q  vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XN2 qb q  0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+
+* --- equalizing transmission gate: shorts q=qb while hold is high.
+* Pin order is (D G S B) per the sky130_fd_pr subckt convention -- q and qb
+* are the pass-gate's drain/source, hold/holdb the gate control. ---
+XTGN q hold  qb 0   sky130_fd_pr__nfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+XTGP q holdb qb vdd sky130_fd_pr__pfet_01v8 L={ltg} W={2*wtg} nf=1 mult=1
+
+* --- hold/release control: equalized (held) from t=0 to t=2ns, then
+* released (transmission gate opens) with a fast 10ps edge. Complementary
+* PWL sources rather than a single source + inverter, matching the
+* schematic-level clock idiom examples/kb/strongarm-latch-comparator/strongarm.spice
+* uses for its own multi-phase clocking. ---
+Vhold  hold  0 PWL(0 1.8 2n 1.8 2.01n 0   6n 0)
+Vholdb holdb 0 PWL(0 0   2n 0   2.01n 1.8 6n 1.8)
+
+* --- storage-node wiring capacitance ---
+Cq  q  0 1f
+Cqb qb 0 1f

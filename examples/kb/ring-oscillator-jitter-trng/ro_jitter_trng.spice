@@ -1,0 +1,110 @@
+* Ring-oscillator phase-jitter TRNG -- single free-running ring oscillator
+* reference testbench, sampled at successive non-commensurate reference-clock
+* instants.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/ring-oscillator-jitter-trng.json's own topology
+* text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "A free-running ring oscillator ... whose output is sampled by a much
+*    slower, independent reference clock using a D flip-flop. Entropy comes
+*    from the accumulated phase jitter ... of the fast oscillator's edges
+*    relative to the slow sampling clock: when the accumulated jitter over
+*    one sampling period spans a significant fraction of the fast
+*    oscillator's period, the sampled bit is unpredictable."
+*
+* WHAT THIS TESTBENCH DOES AND DOES NOT MODEL -- read this before trusting
+* any number below.
+*
+*   1. NO NOISE, NO ENTROPY CLAIM. Real entropy in this topology comes from
+*      accumulated THERMAL-NOISE-DRIVEN phase jitter, which ngspice cannot
+*      simulate directly here (no periodic-steady-state/noise analysis, and
+*      a transient-noise campaign over many periods and seeds is beyond a
+*      single reference run). This testbench injects no noise and claims no
+*      entropy/jitter figure -- see
+*      kb/entries/cmos-ring-vco-current-starved.json's own testbench for
+*      the same "no phase-noise/jitter figure claimed" disclosure on the
+*      sibling ring-oscillator VCO entry. Instead it demonstrates the
+*      SAMPLING MECHANISM that real jitter exploits: this directory's own
+*      request.json reads the ring's ro1 node directly at successive
+*      instants spaced by a period deliberately chosen NOT to be a whole
+*      multiple of the ring's own free-running period, so each successive
+*      sample lands at a different, walking phase of the ring's waveform (a
+*      "beat" between the two frequencies). Because the sampled level
+*      changes across the walk, this shows the mechanism by which a small,
+*      uncontrolled timing difference (real jitter, in silicon) flips the
+*      sampled bit -- WITHOUT claiming this testbench's deterministic phase
+*      walk IS entropy, or that any specific bit is unpredictable. Only a
+*      validated SP 800-90B min-entropy measurement on real hardware (as
+*      this entry's own pdk_portability and notes both call for) can
+*      support an entropy claim.
+*
+*   2. NO TRANSISTOR-LEVEL D FLIP-FLOP SAMPLER. An earlier version of this
+*      testbench built one (a transmission-gate latch: an input pass gate
+*      driving a two-inverter regenerative loop, closed by a feedback pass
+*      gate during hold). It failed for a reason worth recording: with a
+*      track window narrow enough to sample a specific ring phase (rather
+*      than smearing across nearly a full ring period, which a wide window
+*      does), the external drive could not reliably overpower the already-
+*      latched regenerative feedback within the window -- a genuine
+*      flip-flop APERTURE/setup-time problem, not a netlist bug. Modeling
+*      that properly (a flip-flop sized to reliably capture a fast ring's
+*      edges within a short aperture) is exactly the kind of engineering
+*      problem real sampler design solves, and is a separate concern from
+*      what this entry's own topology text is about (the ring's jitter
+*      accumulation and the sampling mechanism's sensitivity to it). This
+*      testbench instead reads the ring's own ro1 node directly at each
+*      reference instant -- which demonstrates the identical
+*      phase-sensitivity mechanism -- and disclaims the sampler circuit
+*      itself as unmodeled, rather than shipping a flip-flop whose write
+*      reliability was not actually verified. See measured.notes for the
+*      same disclosure.
+*
+* Node map:
+*   ro1..ro5 -- the free-running ring oscillator's 5 stage outputs; ro5
+*               feeds ro1. ro1 is this directory's request.json's sample
+*               point, standing in for the flip-flop sampler's D input.
+*
+* SIZING. The ring is the same 5-stage, minimum-length, free-running
+* building block as examples/kb/ro-puf/ro_puf.spice's ring A (no current
+* starving -- a jitter TRNG wants the ring's own natural, fastest-available
+* frequency, same reasoning as the PUF entry). This directory's
+* request.json samples ro1 every 1.05ns -- deliberately not a whole
+* multiple of the ring's measured ~331ps free-running period -- so the
+* resulting phase walk is visible within 8 successive samples.
+.param wn=1
+.param wp=2
+.param linv=0.15
+.param cload=3f
+
+* --- supply ---
+Vdd vdd 0 DC 1.8
+
+* --- free-running 5-stage ring oscillator (same building block as
+* ro-puf's ring A) ---
+XIP1 ro1 ro5 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XIN1 ro1 ro5 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+C1   ro1 0 {cload}
+
+XIP2 ro2 ro1 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XIN2 ro2 ro1 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+C2   ro2 0 {cload}
+
+XIP3 ro3 ro2 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XIN3 ro3 ro2 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+C3   ro3 0 {cload}
+
+XIP4 ro4 ro3 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XIN4 ro4 ro3 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+C4   ro4 0 {cload}
+
+XIP5 ro5 ro4 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XIN5 ro5 ro4 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+C5   ro5 0 {cload}
+
+* --- seed the ring into oscillation (simulation device only, same
+* reasoning as ro-puf/ro_puf.spice and cmos-ring-vco-current-starved.spice:
+* a noiseless simulator has no other way to break the symmetric DC
+* solution) ---
+.ic v(ro1)=0 v(ro2)=1.8 v(ro3)=0 v(ro4)=1.8 v(ro5)=0

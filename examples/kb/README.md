@@ -491,3 +491,100 @@ unverified here — see
 [`kb/entries/sky130-lc-vco-cross-coupled.json`](../../kb/entries/sky130-lc-vco-cross-coupled.json)
 for the LC counterpart. Single corner, so this establishes the nominal
 tuning curve only, not the across-corners behaviour the entry asks for.
+
+## `ro-puf/`
+
+Backs [`kb/entries/ro-puf.json`](../../kb/entries/ro-puf.json) —
+`ro_puf.spice` is a from-scratch netlist (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, not behavioral) built per
+the entry's own topology text: two nominally identical, free-running
+5-stage ring oscillators (the same building block as
+`cmos-ring-vco-current-starved`, minus the current starving — a PUF wants
+each ring's own natural frequency), with each ring's period measured
+directly via SPICE `.meas` TRIG/TARG timing rather than the entry's own
+counter+comparator digital back-end.
+
+```
+uv run klt sim examples/kb/ro-puf/request.json
+```
+
+A single deterministic SPICE run has no per-instance random mismatch, so
+ring B's five stages are all drawn a deterministic 5% wider (both NMOS and
+PMOS) than ring A's, as a stand-in for the random Vt/geometry mismatch a
+real RO-PUF exploits — the same technique
+`examples/kb/sram-power-up-puf/sram_cell_powerup.spice` uses for its own
+injected asymmetry. Reproduces `freq_a_hz` (3.16132 GHz) and `freq_b_hz`
+(3.21356 GHz), with `freq_diff_hz` (52.2213 MHz, +1.65187%) positive as
+expected since ring B's wider devices carry more drive current. The
+measured sign is a property of this injected asymmetry, not a prediction
+of any real device pair's response — mirroring the asymmetry onto ring A
+instead would flip it. No bit-error-rate, min-entropy, or
+response-stability claim is made; that needs Monte Carlo over sky130's
+mismatch models across temperature/voltage/aging, which this single
+deterministic corner does not do — see the entry's own `artifacts.notes`.
+
+## `metastability-trng/`
+
+Backs [`kb/entries/metastability-trng.json`](../../kb/entries/metastability-trng.json)
+— `metastability_latch.spice` is a from-scratch netlist (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, not behavioral) realizing
+the entry's topology as a cross-coupled inverter pair held equalized near
+its own switching threshold by a transmission gate shorting its two nodes
+(`q`, `qb`) together, then released to resolve. Shorting the two nodes
+together turns each inverter into a self-biased loop through the other, so
+the cell settles near the metastable balance point with no manual `.ic`
+needed to find it.
+
+```
+uv run klt sim examples/kb/metastability-trng/request.json
+```
+
+Because a single deterministic SPICE run has no thermal noise, one
+inverter's pull-down NMOS is drawn a deterministic 5% wider than the
+other's, standing in for the noise that decides a real cell's outcome.
+Reproduces `vmeta_sep_v` (1.94535 mV — confirming the cell really is
+sitting near its shared switching threshold, ~0.85 V, before release, not
+merely claimed to be), `resolve_delay_s` (58.9162 ps from release to the
+losing node crossing back through 0.9 V), and the settled full-rail
+resolution (`vq_final_v` ≈ 0.52 µV, `vqb_final_v` = 1.8 V). The resolved
+polarity is a property of the injected asymmetry's sign, not a prediction
+of any real trial's outcome — on real silicon the outcome is
+thermal-noise-driven and differs trial to trial. This testbench does NOT
+implement the entry's own metastability-quality feedback/tracking loop
+(the offset-cancellation or balancing-pulse-timing control the entry's
+`sizing_approach` and notes call load-bearing for a robust design); it
+demonstrates only the release-and-resolve mechanism the loop would operate
+on — see the entry's own `artifacts.notes`.
+
+## `ring-oscillator-jitter-trng/`
+
+Backs [`kb/entries/ring-oscillator-jitter-trng.json`](../../kb/entries/ring-oscillator-jitter-trng.json)
+— `ro_jitter_trng.spice` is a from-scratch netlist (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, not behavioral): a
+free-running 5-stage ring oscillator, the same building block as
+`ro-puf`'s ring A.
+
+```
+uv run klt sim examples/kb/ring-oscillator-jitter-trng/request.json
+```
+
+This testbench does not build a transistor-level D flip-flop sampler — an
+earlier version tried a transmission-gate latch (input pass gate + a
+two-inverter regenerative loop + a feedback pass gate) and found that, with
+a track window narrow enough to sample a specific ring phase, the external
+drive could not reliably overpower the already-latched feedback within the
+window: a genuine flip-flop aperture/setup-time problem, not a netlist bug,
+and a separate concern from what this entry's own topology is about.
+Instead, this directory's `request.json` reads the ring's own `ro1` node
+directly at 8 instants spaced 1.05 ns apart — deliberately not a whole
+multiple of the ring's own `period_ro_s` (315.857 ps) — so each successive
+sample lands at a different, walking phase of the ring's waveform. The
+resulting sequence (1.68, 1.79, 0.006, 1.60, 1.91, 0.007, 1.45, 1.89 V,
+with `toggle_sum_v` = 7.58424 V of cumulative movement across the walk)
+visibly swings between near-0 V and near/above-VDD, demonstrating the
+"small timing difference flips the sampled level" mechanism real jitter
+exploits — without claiming this deterministic phase walk IS entropy, or
+that ngspice measured any jitter/phase-noise figure at all (it has no
+periodic-steady-state/noise analysis) — see the entry's own
+`artifacts.notes` for the full disclosure, including why the flip-flop
+sampler itself is not modeled here.
