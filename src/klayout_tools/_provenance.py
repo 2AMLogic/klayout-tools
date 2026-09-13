@@ -25,7 +25,9 @@ This module also owns the single ``sha256_file`` implementation the verbs
 share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``),
 plus ``_yosys_version``/``_combined_content_hash`` (previously copy-pasted --
 and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
-#1112).
+#1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
+WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
+leaving ``equiv.py``'s independent error-formatting function without it).
 """
 
 from __future__ import annotations
@@ -40,6 +42,36 @@ from typing import Any
 from .decks.history import is_deck_hash_released
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
+
+_WASI_SANDBOX_SCRIPT_NOT_FOUND_RE = re.compile(
+    r"Can't open script file `(.+)' for reading: No such file or directory"
+)
+
+_WASI_SANDBOX_HINT = (
+    "; the script file exists on disk but yosys could not read it -- this "
+    "usually means the 'yosys' on $PATH is a WASI-sandboxed build (e.g. "
+    "yowasp-yosys) whose sandbox does not preopen this path. Try prepending "
+    "a native yosys build's directory to $PATH."
+)
+
+
+def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
+    """``_WASI_SANDBOX_HINT`` if ``error_line`` is Yosys's ``Can't open
+    script file `<path>' for reading: No such file or directory`` shape
+    *and* ``<path>`` verifiably exists on the host filesystem -- otherwise
+    ``""``.
+
+    A script path that genuinely does not exist is a different, unrelated
+    failure and must not get the hint. Shared by ``synthesize.py`` and
+    ``equiv.py`` (issue #1755) so the #1368 WASI-sandboxed-yosys (e.g.
+    ``yowasp-yosys``) detection can't silently diverge between verbs again,
+    the same failure mode issue #1112 fixed for ``_yosys_version``/
+    ``_combined_content_hash`` above.
+    """
+    match = _WASI_SANDBOX_SCRIPT_NOT_FOUND_RE.search(error_line)
+    if match and os.path.isfile(match.group(1)):
+        return _WASI_SANDBOX_HINT
+    return ""
 
 
 def sha256_file(path: str | None) -> str | None:

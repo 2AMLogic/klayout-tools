@@ -223,7 +223,12 @@ from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
-from ._provenance import _combined_content_hash, _yosys_version, build_provenance
+from ._provenance import (
+    _combined_content_hash,
+    _yosys_version,
+    build_provenance,
+    wasi_sandbox_hint_if_applicable,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -807,11 +812,21 @@ def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> st
     mirrors ``synthesize.py``'s ``_synthesis_error_message``: prefers the
     last ``ERROR:`` line Yosys itself printed, falling back to a short tail
     of captured output.
+
+    When the error line is the ``Can't open script file `<path>' for
+    reading: No such file or directory`` shape *and* ``<path>`` verifiably
+    exists on the host filesystem, appends a hint that the ``yosys`` on
+    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
+    sandbox does not preopen that path -- see issue #1368/#1755. A script
+    path that genuinely does not exist is a different failure and is left
+    unchanged.
     """
     for stream in (stderr, stdout):
         error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
         if error_lines:
-            return f"yosys equivalence check failed: {error_lines[-1]}"
+            message = f"yosys equivalence check failed: {error_lines[-1]}"
+            message += wasi_sandbox_hint_if_applicable(error_lines[-1])
+            return message
 
     tail_source = (stderr or stdout).strip().splitlines()
     snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
