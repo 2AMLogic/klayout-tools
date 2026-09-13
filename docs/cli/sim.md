@@ -989,12 +989,18 @@ per declared variable, in `variables[].index` order. Waveform data is never
 inlined into the response — only `artifacts.raw` (the rawfile itself) and
 `artifacts.waveform` (its parsed JSON) paths are.
 
-Known gap: an `ac`/`sp` rawfile carries ngspice's own complex (`real,imag`
-per value) encoding, which this parser does not understand yet — capturing
-`options.waveforms` (or `--plot`, below) against an `ac`/`sp` analysis leaves
-that corner's `artifacts.waveform`/plots `null`/empty with a `"warning"`
-diagnostic rather than the parsed data, instead of raising. `tran`/`dc`
-waveforms are real-valued and unaffected.
+### Complex-valued (`ac`/`sp`) rawfiles
+
+An `ac`/`sp` rawfile declares `Flags: complex` in its header, and ngspice
+writes every value in the `Values:` section as a comma-separated `real,imag`
+pair rather than a bare float. `points[]` always holds plain real-valued
+floats (per the JSON contract's additive-only convention — the shape never
+changes to `[real, imag]` tuples), so for a `Flags: complex` rawfile each
+column's value is reduced to its **magnitude** (`hypot(real, imag)`) before
+being written into `points[]`. This is applied uniformly to every column,
+including the sweep variable (frequency): its imaginary part is always `0`
+in practice, so its magnitude and real part are the same value. `tran`/`dc`
+rawfiles (`Flags: real`) are unaffected and continue to report bare floats.
 
 ## Waveform plots (`--plot <dir>`, issue #1723)
 
