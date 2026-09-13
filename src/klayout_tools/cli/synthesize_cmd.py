@@ -32,7 +32,7 @@ concept is `structural.has_critical` above, see docs/cli/synthesize.md's
 import argparse
 
 from ..synthesize import SynthesizeError, run_synthesize
-from .output import emit_error, emit_success
+from .output import emit_error, emit_success, render_table
 
 #: Returned when a successful run's `structural.has_critical` is `true` --
 #: see this module's docstring "Exit codes" and `docs/cli/synthesize.md`.
@@ -162,3 +162,65 @@ def _print_text(report: dict) -> None:
                 "  restructured_netlist_path: "
                 f"{restructuring['restructured_netlist_path']}"
             )
+
+    arithmetic = report.get("arithmetic")
+    if arithmetic is not None:
+        _print_arithmetic(arithmetic)
+
+
+def _print_arithmetic(arithmetic: dict) -> None:
+    """Render the `arithmetic` per-candidate sweep as a text table.
+
+    A courtesy rendering of the JSON contract, not part of it -- see
+    ``docs/json-contract.md``.
+    """
+    print()
+    print(
+        f"arithmetic: mode={arithmetic['mode']} "
+        f"requested={arithmetic['requested']} "
+        f"status={arithmetic['status']} "
+        f"selected={arithmetic['selected_architecture']}"
+    )
+    if arithmetic["adder_widths"]:
+        widths = ", ".join(str(width) for width in arithmetic["adder_widths"])
+        print(f"  substituted $add widths: {widths}")
+    if arithmetic["reason"]:
+        print(f"  reason: {arithmetic['reason']}")
+
+    rows = []
+    for candidate in arithmetic["candidates"]:
+        measured = candidate["measured"] or {}
+        rows.append(
+            (
+                candidate["architecture"],
+                _cell(candidate["prefix_cells"]),
+                _cell(candidate["logic_levels"]),
+                _cell(measured.get("instance_count")),
+                _cell(measured.get("area_um2")),
+                _cell(measured.get("delay_ns")),
+                _cell(measured.get("meets_constraint")),
+                candidate["disqualified_reason"] or "-",
+            )
+        )
+    render_table(
+        (
+            "architecture",
+            "cells",
+            "levels",
+            "instances",
+            "area_um2",
+            "delay_ns",
+            "meets",
+            "disqualified",
+        ),
+        rows,
+        left_aligned={0, 7},
+    )
+
+
+def _cell(value: object) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)

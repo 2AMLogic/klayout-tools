@@ -16,6 +16,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt arith-gen` — generate a parallel-prefix adder as Verilog
+  RTL from one of five named architectures (`ripple`, `brent-kung`,
+  `han-carlson`, `sklansky`, `kogge-stone`) or from an explicit N×N binary
+  **cell map** (issue #1722, new module `klayout_tools/arith_gen.py`). Pure
+  Python string generation — no Yosys, no PDK, no engine. Writes the
+  structural adder, a behavioural `a + b + cin` reference with identical
+  ports, a self-checking testbench, a Yosys `techmap -map` rule file
+  substituting the adder for same-width `$add` cells, and a ready-to-run
+  `klt equiv` request pairing the reference (gold) against the adder (gate).
+  Reports `prefix_cells`/`logic_levels`/`max_fanout` so the cell-count vs.
+  depth vs. fanout trade is visible without synthesizing. The representation
+  (cell map) and the measured-in-loop selection below are reimplemented from
+  Lai et al., *Scalable and Effective Arithmetic Tree Generation for Adder
+  and Multiplier Designs* (NeurIPS 2024, arXiv:2405.06758); their RL/MCTS
+  search is deliberately **not** reimplemented. See
+  `docs/cli/arith-gen.md`.
+- **Added**: `klt synthesize` request field `arithmetic` (issue #1722) —
+  `{"adders": "auto" | "default" | "<architecture>", "min_width": 8,
+  "candidates": [...], "verify_adders": true}`. Substitutes a generated
+  prefix adder for Yosys's own `$add` expansion via a `techmap -map` rule
+  inserted between `hierarchy` and `synth`, guarded by `_TECHMAP_FAIL_` so
+  only the probed widths are replaced. `"auto"` runs a full trial synthesis
+  per candidate **plus** Yosys's own default expansion, and keeps the
+  smallest candidate meeting `constraints.clock_period_ns` (with an explicit
+  reported fallback when none does). Every substituted adder is proven
+  equivalent to a behavioural `a + b + cin` by `klt equiv` before it is kept
+  — scoped to the adder module, so the gate works on sequential designs too.
+  Additive: the new response field `arithmetic` is `null` for every request
+  without the field, and `schema_version` is unchanged. Measured on the
+  `modexp` canary at `WIDTH=16` (gf180mcu, `clock_period_ns: 22`): Yosys's
+  own expansion missed the constraint at 23.79 ns while all five prefix
+  architectures met it, and the selection kept the smallest of those.
+  Multipliers (compressor trees) and search over cell maps are explicit
+  non-goals. See `docs/cli/synthesize.md`'s "Arithmetic architecture"
+  section and `docs/design/synthesize-qor-improvements-survey.md` §3.8.
 - **Added**: `klt sim --plot <dir>` — renders one self-contained,
   dependency-free waveform SVG per non-sweep signal per corner (issue
   #1723), reusing `klt trajectory --plot`'s no-plotting-library, string-

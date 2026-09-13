@@ -123,6 +123,7 @@ klt pex design.gds request.json --deck sky130  # extracted (parasitic-annotated)
 klt mom design.gds stackup.json          # quasi-static capacitance matrix (Method of Moments, Rust core)
 klt lvs request.json                     # compare extracted vs reference netlist
 klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
+klt arith-gen --width 16 --arch kogge-stone  # parallel-prefix adder RTL from a cell map (+ testbench, techmap rules, equiv request)
 klt place-and-route request.json         # netlist -> placed+routed DEF/GDS (OpenROAD), JSON out
 klt sta request.json                     # standalone timing/power analysis of an already-routed DEF (OpenSTA), no re-implementation
 klt power routed.gds power.json          # routed power/ground nets -> resistive network + static IR-drop map

@@ -515,6 +515,252 @@ modeled at all** — the engine reports only the worst (longest) path, never
 a minimum-delay check, so despite this issue's "setup/hold" framing, this
 increment addresses setup only.
 
+## Arithmetic architecture (`adders`)
+
+[Issue #1722](https://github.com/2AMLogic/klayout-tools/issues/1722): the
+optional `arithmetic` request field gives this command a say in **how an
+`$add` becomes gates**, instead of always taking whatever adder structure
+Yosys's own `alumacc`/`techmap` expansion produces. This matters because the
+fleet's adder-bound canaries (`examples/functional-verification/modexp.v` —
+one interleaved-Montgomery add per cycle, widened to `WIDTH+2`) put the adder
+*on* the critical path, so the adder architecture is the critical path.
+
+Off by default: a request with no `arithmetic` field synthesizes exactly as
+it did before this field existed, and `response.arithmetic` is `null`.
+
+```json
+"arithmetic": {
+  "adders": "auto",
+  "min_width": 8,
+  "candidates": ["ripple", "brent-kung", "han-carlson", "sklansky", "kogge-stone"],
+  "verify_adders": true
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `adders` | string | `"auto"` (sweep and measure), `"default"` (an explicit no-op — leave Yosys's own expansion in place), or one architecture name: `ripple`, `brent-kung`, `han-carlson`, `sklansky`, `kogge-stone` (underscore spelling and any case also accepted). Required when `arithmetic` is given. An unknown name is an error, never a silent fallback. |
+| `min_width` | integer \| omitted | `$add` cells narrower than this keep Yosys's own expansion. Default `8`; must be `>= 2`. Below ~8 bits the structures collapse onto each other and the measurement is dominated by mapping noise — #1722's own "sub-16-bit micro-optimisation" non-goal, with a little headroom. |
+| `candidates` | array\<string\> \| omitted | The architectures `"auto"` sweeps; defaults to all five. Only valid with `"auto"` — an explicit architecture is already the only candidate. Duplicates are collapsed. |
+| `verify_adders` | boolean \| omitted | Default `true`. Run the equivalence gate below on every generated adder before it is substituted. |
+
+### How the substitution works
+
+1. **Probe.** One extra, cheap Yosys pass (`read_verilog` → `hierarchy` →
+   `proc` → `opt_expr`/`opt_clean` → `write_json`) dumps the elaborated
+   design and reads the `Y_WIDTH` of every `$add` cell. This is deliberately
+   *not* regexed out of the RTL: a `+` in the source can be constant-folded
+   away, widened by context, or shared, and only the elaborated netlist knows
+   the width Yosys will actually build. Nothing at or above `min_width` is
+   reported as `status: "no-wide-adders"` and the run continues untouched.
+2. **Generate.** Each candidate architecture is generated at every probed
+   width by [`klt arith-gen`](arith-gen.md)'s own generator, into
+   `.klt/synthesize/arith/<architecture>/rtl/`.
+3. **Prove** (unless `verify_adders: false`). Each generated adder is proven
+   equivalent to a behavioural `a + b + cin` of the same width by
+   [`klt equiv`](equiv.md). See "Equivalence gate for substituted adders"
+   below.
+4. **Substitute.** The synthesis script gains, **between `hierarchy` and
+   `synth`**:
+
+   ```
+   proc
+   opt_expr
+   opt_clean
+   read_verilog <generated adder>.v
+   techmap -map <architecture>_add_techmap.v
+   ```
+
+   The position is load-bearing in both directions: after
+   `hierarchy -check -top` (which would otherwise prune the freshly-read
+   adder modules as unused) and before `synth` (whose own `alumacc` step
+   rewrites every surviving `$add` into `$alu`/`$lcu`, after which no `$add`
+   is left for a `techmap` rule to match). The rule file is guarded by
+   `_TECHMAP_FAIL_`, so any `$add` whose width was not generated keeps
+   Yosys's own expansion — this is always a **subset** substitution, never
+   all-or-nothing.
+
+### Selection, in `"auto"` mode
+
+Every surviving candidate — **plus Yosys's own default expansion**, as a real
+row in the table — gets a full trial synthesis using exactly the engine
+configuration the real run will use (same liberty, same
+`-constr`/`-D`/`-dont_use`/`hilomap` knobs), into its own
+`.klt/synthesize/arith/<label>/` directory. Every trial's script, netlist,
+stats and ABC log survive as debuggable artifacts: "measured, not guessed" is
+only a real claim if the measurement is reproducible afterwards.
+
+The winner is then, in order:
+
+1. Among candidates that **met** `constraints.clock_period_ns`: the one with
+   the smallest `area_um2` (ties broken on delay). This is the issue's "keeps
+   the one meeting `clock_period_ns` at least area".
+2. With **no** target given: the fastest candidate (ties broken on area). A
+   caller who stated no period asked for the best structure available, not
+   for "whatever the default did".
+3. With a target given but **nothing meeting it**: the fastest candidate, and
+   `arithmetic.reason` names the target and the best delay achieved — the
+   acceptance criterion's "or the JSON says why none did". The run still
+   returns a netlist.
+4. If **no** candidate produced a delay number at all (no `sta` extension and
+   no ABC `stime` line): the smallest area, with `reason` saying the
+   selection was made without timing data.
+
+The winner's `techmap` rule file is then used by the real synthesis run, so
+the response's own `instance_count`/`area_um2`/`timing`/`sta` describe the
+selected architecture. `arithmetic.selected_measured` restates that final
+measurement in the same comparable shape the candidate rows use.
+
+**`delay_ns` prefers the native `sta` worst path and falls back to ABC's own
+`stime` estimate**, recording which in `delay_source`. The two are *not*
+interchangeable numbers (see "`timing`" and "`sta`" above), so a caller
+comparing two reports must check they came from the same source. Every
+candidate within one sweep is measured the same way, so the *ranking* inside
+a single report is always consistent.
+
+With an explicit architecture there is nothing to select: **no trials are
+run at all**, the one requested architecture is substituted directly, and the
+only measurement is the real run's own (`candidates[0].measured` is `null`;
+`selected_measured` carries the numbers).
+
+### Equivalence gate for substituted adders
+
+Issue #1722 step 3: every substituted adder is proven equivalent to the
+behavioural `+` it replaces before it is kept. The proof is deliberately
+scoped to the **generated adder module**, not to the whole substituted
+design:
+
+- it is what makes "this structure computes addition" a *checked* claim
+  rather than an assumed one;
+- it is cheap — an N-bit adder miter, far cheaper than a whole-design proof
+  (the survey's §4.2 already notes an 8×8 multiplier proof is affordable);
+- unlike a whole-design check it works even when the design itself is
+  **sequential**, which the fleet's adder-bound canaries are, and which
+  [`klt equiv`](equiv.md)'s combinational `yosys` engine cannot gate.
+
+A candidate whose adder is not proven `"equivalent"` is **disqualified**: in
+`"auto"` mode it stays in the table with a `disqualified_reason` and is
+skipped by the selection rule; with an explicit architecture it is a hard
+failure (exit 1), because the caller asked for exactly that structure. The
+per-width verdicts are reported in each candidate's `adder_equivalence`.
+
+This is orthogonal to `--verify-equivalence`, which still gates the *whole*
+netlist against the source RTL and can be requested in the same run.
+
+### Response shape
+
+The `arithmetic` field, `null` unless `request.arithmetic` was given:
+
+```json
+"arithmetic": {
+  "mode": "auto",
+  "requested": "auto",
+  "min_width": 8,
+  "status": "ok",
+  "reason": null,
+  "adder_widths": [18],
+  "target_period_ns": 22.0,
+  "selected_architecture": "sklansky",
+  "candidates": [
+    {
+      "architecture": "default",
+      "prefix_cells": null,
+      "logic_levels": null,
+      "max_fanout": null,
+      "adder_equivalence": [],
+      "disqualified_reason": null,
+      "measured": {
+        "instance_count": 706,
+        "area_um2": 28525.9968,
+        "delay_ns": 23.79036,
+        "delay_source": "abc_stime",
+        "meets_constraint": false,
+        "label": "default",
+        "netlist_path": "/abs/path/.klt/synthesize/arith/default/modexp_synth.v",
+        "script_path": "/abs/path/.klt/synthesize/arith/default/synth_modexp.ys"
+      }
+    },
+    {
+      "architecture": "sklansky",
+      "prefix_cells": 35,
+      "logic_levels": 5,
+      "max_fanout": 8,
+      "adder_equivalence": [{"width": 18, "status": "equivalent", "detail": null}],
+      "disqualified_reason": null,
+      "measured": {"instance_count": 728, "area_um2": 27083.7504, "delay_ns": 21.99447, "delay_source": "abc_stime", "meets_constraint": true, "...": "..."}
+    }
+  ],
+  "selected_measured": {
+    "instance_count": 728,
+    "area_um2": 27083.7504,
+    "delay_ns": 21.99447,
+    "delay_source": "abc_stime",
+    "meets_constraint": true
+  }
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `mode` | string | `"auto"` or `"explicit"`. |
+| `requested` | string | The `arithmetic.adders` value as normalised (hyphen spelling, lowercase). |
+| `min_width` | integer | The effective `min_width` for this run. |
+| `status` | string | `"ok"` (a substitution was considered and a selection made), `"no-wide-adders"` (nothing at or above `min_width` survived elaboration — nothing substituted), `"not-requested"` (`adders: "default"`), or `"no-candidate"` (every candidate was disqualified — the default expansion is used and `reason` says so). |
+| `reason` | string \| null | Why the selection is what it is, whenever that is not self-evident: no wide adders, no candidate met the target, no delay data, every candidate disqualified. `null` when a candidate simply met the target. |
+| `adder_widths` | array\<integer\> | The distinct elaborated `$add` result widths at or above `min_width`, sorted — exactly the widths that were generated and substituted. |
+| `target_period_ns` | number \| null | `constraints.clock_period_ns`, echoed as the target the selection rule used. |
+| `selected_architecture` | string | The architecture the real run used — an architecture name, or `"default"` when Yosys's own expansion won (or nothing was substituted). |
+| `candidates` | array | One row per measured candidate (in `"auto"` mode, including a `"default"` row; in explicit mode, exactly one row with `measured: null`). |
+| `candidates[].prefix_cells` / `.logic_levels` / `.max_fanout` | integer \| null | The generated network's structural metrics, summed/maximised over every substituted width. `null` on the `"default"` row — Yosys's own expansion has no cell map. |
+| `candidates[].adder_equivalence` | array | `{width, status, detail}` per proven adder. Empty when `verify_adders` is `false` or on the `"default"` row. `status` is `klt equiv`'s own verdict, plus `"error"` when the proof could not be attempted at all. |
+| `candidates[].disqualified_reason` | string \| null | Why this candidate was excluded from selection (an unproven adder). `null` for an eligible candidate. |
+| `candidates[].measured` | object \| null | `{instance_count, area_um2, delay_ns, delay_source, meets_constraint, label, netlist_path, script_path}` from that candidate's own trial synthesis. `null` when the candidate was disqualified, when its trial synthesis failed outright (one architecture Yosys cannot map is not a reason to abandon the others), or in explicit mode. |
+| `selected_measured` | object \| null | The **real** run's own measurement in the same comparable shape (without the trial-specific `label`/paths) — always present when `arithmetic` is non-`null` and a netlist was produced. |
+
+### Worked example: `modexp` at `WIDTH=16`
+
+Measured on the issue's own canary
+(`examples/functional-verification/modexp.v`, default `WIDTH = 16`, whose
+interleaved-Montgomery step elaborates to a single 18-bit `$add`), against
+`gf180mcu_fd_sc_mcu9t5v0` at its nominal corner with
+`constraints.clock_period_ns: 22` and `arithmetic: {"adders": "auto"}`
+(Yosys 0.69+post, macOS ARM64 — the absolute numbers are build-platform
+sensitive, per the note under `constraints.clock_period_ns` above; the
+*ordering* is the point):
+
+```
+arithmetic: mode=auto requested=auto status=ok selected=sklansky
+  substituted $add widths: 18
+
+architecture  cells  levels  instances    area_um2  delay_ns  meets  disqualified
+------------  -----  ------  ---------  ----------  --------  -----  ------------
+default           -       -        706  28525.9968   23.7904  False  -
+ripple           17      17        726  27351.8784   21.9945   True  -
+brent-kung       29       6        721  27095.0400   21.9945   True  -
+han-carlson      38       5        725  27349.0560   21.9945   True  -
+sklansky         35       5        728  27083.7504   21.9945   True  -
+kogge-stone      59       5        744  27509.9328   21.8305   True  -
+```
+
+This is issue #1722's acceptance criterion 2 in one table: **Yosys's own
+expansion missed the 22 ns constraint (23.79 ns); every prefix architecture
+met it**, and the selection rule kept `sklansky` — the smallest of the ones
+that met it — rather than the fastest. Tightening the constraint to 6 ns (a
+target nothing reaches on this design) instead produces
+`status: "ok"`, `selected_architecture: "kogge-stone"`, and
+
+```
+reason: no candidate met constraints.clock_period_ns=6.0 ns; the fastest was
+'kogge-stone' at 20.816 ns -- selected it anyway as the closest available
+structure
+```
+
+— the "or the JSON says why none did" half of the same criterion.
+
+**Multipliers (compressor trees) are out of scope**, per #1722's own
+non-goals; so is RL/MCTS search over cell maps (see
+[`klt arith-gen`](arith-gen.md)).
+
 ## Equivalence gate
 
 [Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 1:
@@ -580,6 +826,8 @@ section and Out of scope below.
 | `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
 | `baseline.response_path` \| `baseline.netlist_path` | string | Optional; names a prior run to compare this one against — see "`baseline`" below. Set **exactly one**, resolved relative to the request file's own directory (like `sources`). |
 | `baseline.ref` | string \| omitted | A label identifying the baseline (e.g. a git ref or `"main"`), echoed verbatim into the response's `baseline.ref`. Defaults to the literal `response_path`/`netlist_path` string when omitted. |
+| `arithmetic.adders` | string \| omitted | `"auto"`, `"default"`, or a prefix-adder architecture name — substitute a generated parallel-prefix adder for Yosys's own `$add` expansion, and (with `"auto"`) pick the architecture by measured synthesis. Omitted entirely leaves every pre-#1722 request unaffected. See "Arithmetic architecture" above. |
+| `arithmetic.min_width` \| `.candidates` \| `.verify_adders` | integer \| array\<string\> \| boolean | Optional modifiers on the above — see the field table in "Arithmetic architecture". |
 
 **`clock_period_ns: null` (or omitted) is a defined state, not a fallback.**
 The run still passes `-constr`, so ABC's `buffer`/`upsize`/`dnsize` sizing
@@ -656,6 +904,7 @@ caller decision rather than something this command should pick.
   },
   "equivalence": null,
   "restructuring": null,
+  "arithmetic": null,
   "baseline": null
 }
 ```
@@ -681,6 +930,7 @@ caller decision rather than something this command should pick.
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 | `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
+| `arithmetic` | object \| null | `null` unless `request.arithmetic` was given (issue #1722) — the arithmetic-architecture substitution and, in `"auto"` mode, the per-candidate delay/area table it selected from: `{mode, requested, min_width, status, reason, adder_widths, target_period_ns, selected_architecture, candidates, selected_measured}`. See "Arithmetic architecture" above for the full field-by-field description. |
 | `baseline` | object \| null | `null` unless `request.baseline` was given (issue #1588) — a comparison against a prior run: `{ref, instance_count, area_um2, critical_path_ns, delta_pct}`. `ref` identifies what was compared against — `request.baseline.ref` when given, else the literal `response_path`/`netlist_path` string. `area_um2`/`critical_path_ns` (and their `delta_pct` siblings) are present only when both this run and the baseline produced a number; `instance_count` is always present. `delta_pct` is `(current - baseline) / baseline * 100` per metric — see "`baseline`" below. |
 
 ## `structural`: latches, combinational loops, multiply-driven nets
