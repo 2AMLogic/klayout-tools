@@ -61,6 +61,18 @@ Tcl embeds. ``_tcl_net_list`` below is unchanged; ``_count_spef_nets_annotated``
 now takes the three marker values (``begin``, ``end``, ``pattern``) as
 parameters instead of reading module-local constants, since that was the
 only per-module variation.
+
+``pex.py``, ``op_sanity.py``, and ``netlist_normalize.py`` each also
+independently implemented the SPICE ``+`` continuation-line fold -- glue a
+line starting with ``+`` onto the end of the previously-collected line,
+dropping the ``+`` -- as part of their own ``_logical_lines``/
+``_merge_continuations`` helpers. The fold step itself was byte-for-byte
+identical in intent across all three; only what happens *before* the fold
+(comment stripping, blank/``*``-comment-line dropping) genuinely varies per
+caller. ``_fold_spice_continuations`` below factors out just the fold: each
+caller still runs its own pre-pass over the raw lines (and, for
+``op_sanity.py``, an additional post-pass -- see its docstring) before/after
+delegating to this helper.
 """
 
 from __future__ import annotations
@@ -261,6 +273,36 @@ def _count_spef_nets_annotated(
         int(match.group(3)),
         int(match.group(4)),
     )
+
+
+def _fold_spice_continuations(lines: list[str]) -> list[str]:
+    """Fold SPICE ``+`` continuation lines onto the entry they continue.
+
+    ``lines`` is whatever a caller's own pre-pass has already produced (raw
+    lines, comment-stripped lines, or comment-stripped-and-filtered lines --
+    this function does not care). For each entry, if it starts with ``+``
+    (after left-stripping) *and* there is already a previous entry to fold
+    onto, that previous entry is replaced with itself plus a single space
+    plus the continuation's own content (the ``+`` and any leading/trailing
+    whitespace around it dropped); otherwise the entry is appended as-is.
+
+    A ``+``-prefixed entry with nothing preceding it to fold onto (the first
+    entry in ``lines`` starts with ``+``, or every entry before it was
+    itself folded away) is appended verbatim, ``+`` prefix intact, rather
+    than raising or being silently dropped -- callers that want an orphan
+    continuation line dropped (as ``op_sanity.py`` does) filter such
+    unfolded ``+``-prefixed entries out of this function's return value
+    themselves; callers that want it kept as a literal line (``pex.py``,
+    ``netlist_normalize.py``) use the return value as-is.
+    """
+    folded: list[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("+") and folded:
+            folded[-1] = f"{folded[-1]} {stripped[1:].strip()}"
+        else:
+            folded.append(line)
+    return folded
 
 
 def validate_request_shape(

@@ -140,7 +140,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance
-from ._paths import _resolve_relative
+from ._paths import _fold_spice_continuations, _resolve_relative
 from .extract import ExtractError, run_extract
 from .sim import SimError, load_request, run_sim
 
@@ -361,15 +361,11 @@ def _logical_lines(netlist_text: str) -> list[str]:
     """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
     into the line they continue, and inline ``$``/``;`` comments stripped --
     so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
-    lines: list[str] = []
-    for raw in netlist_text.splitlines():
-        line = re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
-        stripped = line.lstrip()
-        if stripped.startswith("+") and lines:
-            lines[-1] = f"{lines[-1]} {stripped[1:].strip()}"
-        else:
-            lines.append(line)
-    return lines
+    lines = [
+        re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
+        for raw in netlist_text.splitlines()
+    ]
+    return _fold_spice_continuations(lines)
 
 
 def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:

@@ -115,6 +115,7 @@ from __future__ import annotations
 
 import re
 
+from ._paths import _fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
@@ -257,15 +258,12 @@ def _merge_continuations(lines: list[str]) -> list[str]:
     """Join SPICE ``+`` continuation lines into their logical parent line.
 
     Comment (``*``) and blank lines are preserved as their own entries so
-    they pass through the transform verbatim.
+    they pass through the transform verbatim. Delegates the fold itself to
+    :func:`klayout_tools._paths._fold_spice_continuations`; this module does
+    no comment/blank-line pre-pass of its own (that is handled elsewhere by
+    a quote/paren-depth-aware tokenizer), so the delegation is direct.
     """
-    logical: list[str] = []
-    for raw in lines:
-        if raw.lstrip().startswith("+") and logical:
-            logical[-1] = f"{logical[-1]} {raw.lstrip()[1:].strip()}"
-        else:
-            logical.append(raw)
-    return logical
+    return _fold_spice_continuations(lines)
 
 
 def _parse_um(
