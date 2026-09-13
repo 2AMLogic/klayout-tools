@@ -19,5 +19,87 @@
     "url": "https://search.worldcat.org/search?q=CMOS+Analog+Circuit+Design+Allen+Holberg",
     "license_or_openness": "Standard graduate-level analog IC design textbook cited here for its topology, sizing methodology, and named ('beta multiplier') terminology only (no figures or text reproduced), per the KB's open-sources-only rule (case 4, textbook-level common knowledge, in kb/SOURCING.md)."
   },
-  "notes": "Distinct from a bandgap reference: the beta-multiplier cell gives a supply-insensitive current (and, with careful device sizing, a roughly temperature-stable gm bias) but not an absolute, PVT-independent voltage reference the way a bandgap circuit does (compare `sky130-bandgap-reference` in this KB). It is the lighter-weight, smaller-area choice whenever the downstream circuit needs a stable bias current/gm rather than a precision absolute voltage — a very common case for OTA tail currents and comparator bias in area-constrained PHY blocks."
+  "notes": "Distinct from a bandgap reference: the beta-multiplier cell gives a supply-insensitive current (and, with careful device sizing, a roughly temperature-stable gm bias) but not an absolute, PVT-independent voltage reference the way a bandgap circuit does (compare `sky130-bandgap-reference` in this KB). It is the lighter-weight, smaller-area choice whenever the downstream circuit needs a stable bias current/gm rather than a precision absolute voltage — a very common case for OTA tail currents and comparator bias in area-constrained PHY blocks.",
+  "artifacts": {
+    "netlist": "examples/kb/beta-multiplier-bias-cell/beta_multiplier.spice",
+    "notes": "From-scratch netlist per this entry's own topology/sizing_approach text: a PMOS mirror over two NMOS branches with K=4 (four unit devices in parallel), a real sky130_fd_pr__res_high_po degeneration resistor, a self-extinguishing start-up circuit, a downstream mirror leg that turns the reference current back into a distributable bias voltage, and -- as a baseline for comparison only -- a plain resistor-to-diode bias leg at the same operating current. ONE DELIBERATE DEPARTURE FROM THIS ENTRY'S PROSE, spelled out at length in the netlist header: the `topology` field above places the degeneration resistor in the *unscaled* branch, but that orientation has no non-zero solution (at equal branch currents the K-times-wider device carries the *smaller* Vgs, so Vgs(Kx) - Vgs(1x) is negative). The resistor must sit in the source of the K-times-wider device so that I*Rbias = Vgs(1x) - Vgs(Kx) > 0, which is the orientation this entry's own cited source (Allen & Holberg, Ch. 4) derives and the one built here. Also worth knowing when reading the netlist: the K=4 parallel count rides on ngspice's `m=`, not on `mult=`. sky130's `.subckt sky130_fd_pr__nfet_01v8` declares a `mult` parameter but never passes it to the enclosed BSIM device line, so `mult=4` alone is accepted silently and yields a 1x device -- which collapses this cell to its degenerate near-zero-current state. Simplifications: the mirrors are plain rather than cascoded (the entry lists cascoding as an optional supply-rejection improvement, and line_sens_pct_per_v below is therefore the plain-mirror baseline); the comparison leg's resistor is an ideal R element rather than a sky130 model, because a ~195 kohm res_high_po is ~610 squares of poly whose layout would dominate a discussion of what is only a topology baseline. Every device in the cell under test is a real sky130 model."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 27C, supply swept 1.2V-2.0V (figures reported at 1.8V unless the name says otherwise)",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models throughout (volare-fetched, open_pdks), including the degeneration resistor, which is a sky130_fd_pr__res_high_po instance rather than an ideal R -- this entry's pdk_portability singles the resistor out as the sky130-specific term, so idealising it would have erased exactly the PDK-dependent part. Reproduce with `klt sim examples/kb/beta-multiplier-bias-cell/request.json`. The headline pair is line_sens_pct_per_v against simple_bias_line_sens_pct_per_v: both are measured on the same netlist at the same ~6 uA operating current, one for this cell and one for the plain resistor-to-diode bias leg the entry's topology text contrasts it against ('far less sensitive to supply variation than a simple resistor-divider bias'). The beta-multiplier is 7.6x less supply-sensitive, so that comparative claim is measured here rather than asserted. i_startup_a and vsu_v together show the start-up circuit has genuinely extinguished itself at the operating point (sub-picoamp, detector latched at ~1 mV) rather than sitting half-on and perturbing the loop. This is a SUPPLY sweep at a fixed 27C: it substantiates the supply-insensitivity half of this entry's claim and says nothing about temperature drift, which is what this entry's pdk_portability calls out as the sky130-specific resistor-TC question. Single corner, no mismatch, no Monte Carlo -- nothing here supports a spread or trim-range claim.",
+    "figures": [
+      {
+        "name": "iref_a",
+        "value": 5.78923e-06,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "line_sens_pct_per_v",
+        "value": 10.7585,
+        "unit": "%/V",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "simple_bias_line_sens_pct_per_v",
+        "value": 81.794,
+        "unit": "%/V",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "vr_v",
+        "value": 0.0572793,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "vnbias_v",
+        "value": 0.63479,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "vbias_out_v",
+        "value": 0.646292,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "i_copy_a",
+        "value": 5.79491e-06,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "i_startup_a",
+        "value": 7.41473e-13,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "vsu_v",
+        "value": 0.000999287,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      },
+      {
+        "name": "idd_cell_a",
+        "value": 1.75076e-05,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/beta-multiplier-bias-cell/request.json"
+      }
+    ]
+  }
 }

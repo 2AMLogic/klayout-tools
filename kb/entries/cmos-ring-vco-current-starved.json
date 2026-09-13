@@ -19,5 +19,122 @@
     "url": "https://doi.org/10.1109/4.165341",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its current-starved delay-stage VCO topology and sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the widely-cited original description of the current-starved CMOS ring VCO used in on-chip PLL clock generators, and the technique it introduced remains the standard reference topology for wide-tuning-range digital-PLL VCOs."
   },
-  "notes": "Current-starved ring VCOs trade phase noise (worse than an LC-tank VCO at the same power, due to the ring's lower effective Q) for much smaller area, no inductor, and a very wide tuning range spanning multiple octaves -- useful when the PLL must lock across a broad frequency range or area is at a premium. See the sky130-lc-vco-cross-coupled entry for the complementary LC-tank approach when phase-noise performance dominates the spec instead."
+  "notes": "Current-starved ring VCOs trade phase noise (worse than an LC-tank VCO at the same power, due to the ring's lower effective Q) for much smaller area, no inductor, and a very wide tuning range spanning multiple octaves -- useful when the PLL must lock across a broad frequency range or area is at a premium. See the sky130-lc-vco-cross-coupled entry for the complementary LC-tank approach when phase-noise performance dominates the spec instead.",
+  "artifacts": {
+    "netlist": "examples/kb/cmos-ring-vco-current-starved/ring_vco.spice",
+    "notes": "From-scratch netlist per this entry's own topology/sizing_approach text: five single-ended CMOS inverter stages in a ring, each with its pull-up and pull-down current limited by a series PMOS/NMOS starving device, and a bias mirror that turns the control voltage into the two starving-gate rails. The SINGLE-ENDED variant is built, not the pseudo-differential delay-cell variant this entry's topology text offers as an alternative -- the differential cell is a different circuit whose distinguishing figures (supply/common-mode rejection, even-order harmonic content) deserve their own testbench rather than being conflated with these. The whole tuning curve is swept inside ONE transient run: the control voltage is a staircase dwelling at 0.7/0.9/1.1/1.3V for 600ns each, and the testbench counts 8 oscillation periods inside each dwell, 150ns after the step. That is deliberate -- this entry's headline verification item is the tuning curve's SHAPE (monotonicity and linearity), which is a property of several control voltages together, not of any single operating point. Simplifications and omissions, all disclosed: (a) no phase-noise or jitter figure is claimed, because ngspice has no PSS/pnoise analysis and jitter needs either that or a transient-noise campaign -- so what this entry's notes say about ring-vs-LC phase noise remains unverified here; (b) single corner, whereas this entry's own sizing_approach asks for the tuning curve across PVT corners; (c) schematic-level, with a lumped 10 fF per-stage load capacitor standing in for wiring plus next-stage gate load, so a post-layout ring runs slower by an amount only extraction can tell you; (d) the ring is started by an explicit `.ic` seeding one node per rail, because a noiseless simulator will otherwise sit on the ring's symmetric DC solution forever -- that is a simulation device, not part of the circuit, and nothing measured depends on which phase it picks."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models throughout (volare-fetched, open_pdks). Reproduce with `klt sim examples/kb/cmos-ring-vco-current-starved/request.json`. The four f_vctrl_* figures are the tuning curve at 0.7/0.9/1.1/1.3V of control, measured in one transient run. On this entry's own verification criterion -- 'verify the tuning curve stays monotonic and reasonably linear' -- the measured answer is monotonic YES, linear NO, and the figures are chosen to say so precisely. step_lo_hz/step_mid_hz/step_hi_hz are the three successive frequency increments, all positive, which is the monotonicity check. kvco_low_hz_per_v (480.563 MHz/V) against kvco_high_hz_per_v (84.8807 MHz/V) is the linearity check: Kvco falls 5.66x (kvco_spread_ratio) across the control range, so a single Kvco number would be misleading and none is published as the headline. That compression is not a sizing defect but what this bias topology does -- the V-I converter is square-law in vctrl to begin with, and the rising current drags the PMOS gate rail down until the control device leaves saturation for triode and stops following vctrl at all. A PLL closing a loop around this VCO therefore has a loop bandwidth that varies by that same 5.66x across its lock range, which is why real designs linearise the V-I stage (source degeneration, or the replica-biased delay cell of this entry's cited source) rather than driving the starving gates from a bare square-law device. tuning_ratio (10.4811x, i.e. 3.4 octaves from 18.3413 MHz to 192.237 MHz) is the 'very wide tuning range spanning multiple octaves' this entry's notes claim for the topology. vpp_slow_v (1.82506 V) is the start-up check this entry's sizing_approach asks for -- at the most-starved end of the control range the ring is still swinging rail to rail, so current starving has not been pushed past the point where oscillation stops. (vpp figures exceed the 1.8V supply by the stages' own switching overshoot.) NO PHASE-NOISE OR JITTER FIGURE IS CLAIMED -- see artifacts.notes. Single corner, no mismatch, no Monte Carlo: this establishes the nominal tuning curve only, not the across-corners behaviour this entry's sizing_approach and pdk_portability both ask for.",
+    "figures": [
+      {
+        "name": "f_vctrl_0p7_hz",
+        "value": 18341300.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "f_vctrl_0p9_hz",
+        "value": 114454000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "f_vctrl_1p1_hz",
+        "value": 175261000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "f_vctrl_1p3_hz",
+        "value": 192237000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "step_lo_hz",
+        "value": 96112500.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "step_mid_hz",
+        "value": 60807400.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "step_hi_hz",
+        "value": 16976100.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "tuning_ratio",
+        "value": 10.4811,
+        "unit": "1",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "kvco_low_hz_per_v",
+        "value": 480563000.0,
+        "unit": "Hz/V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "kvco_high_hz_per_v",
+        "value": 84880700.0,
+        "unit": "Hz/V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "kvco_avg_hz_per_v",
+        "value": 289827000.0,
+        "unit": "Hz/V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "kvco_spread_ratio",
+        "value": 5.66162,
+        "unit": "1",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "vpp_slow_v",
+        "value": 1.82506,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "vpp_fast_v",
+        "value": 1.8675,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      },
+      {
+        "name": "idd_fast_a",
+        "value": 0.000293266,
+        "unit": "A",
+        "analysis": "tran",
+        "testbench": "examples/kb/cmos-ring-vco-current-starved/request.json"
+      }
+    ]
+  }
 }

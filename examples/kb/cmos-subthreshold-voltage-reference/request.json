@@ -1,0 +1,30 @@
+{
+  "netlist": "subthreshold_ref.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] }
+  },
+  "analysis": { "kind": "dc", "args": "temp -40 125 1" },
+  "measurements": [
+    { "name": "vref_27c_v", "spice": ".meas dc vref_27c_v find v(vref) at=27", "unit": "V", "limits": { "min": 0.5, "max": 1.0 } },
+    { "name": "vref_m40c_v", "spice": ".meas dc vref_m40c_v find v(vref) at=-40", "unit": "V", "limits": { "min": 0.5, "max": 1.0 } },
+    { "name": "vref_125c_v", "spice": ".meas dc vref_125c_v find v(vref) at=125", "unit": "V", "limits": { "min": 0.5, "max": 1.0 } },
+    { "name": "vref_min_v", "spice": ".meas dc vref_min_v min v(vref) from=-40 to=125", "unit": "V" },
+    { "name": "vref_max_v", "spice": ".meas dc vref_max_v max v(vref) from=-40 to=125", "unit": "V" },
+    { "name": "tc_ppm_per_c", "spice": ".meas dc tc_ppm_per_c param='1e6 * (vref_max_v - vref_min_v) / vref_27c_v / 165'", "unit": "ppm/C", "limits": { "max": 300 } },
+    { "name": "iptat_27c_a", "spice": ".meas dc iptat_27c_a find i(Vsense1) at=27", "unit": "A", "limits": { "min": 2e-7, "max": 3e-6 } },
+    { "name": "iptat_m40c_a", "spice": ".meas dc iptat_m40c_a find i(Vsense1) at=-40", "unit": "A" },
+    { "name": "iptat_125c_a", "spice": ".meas dc iptat_125c_a find i(Vsense1) at=125", "unit": "A" },
+    { "name": "iptat_ratio_125_m40", "spice": ".meas dc iptat_ratio_125_m40 param='iptat_125c_a / iptat_m40c_a'", "unit": "1", "limits": { "min": 1.2 } },
+    { "name": "dvgs_v", "spice": ".meas dc dvgs_v find v(nsrc) at=27", "unit": "V", "limits": { "min": 0.03, "max": 0.15 } },
+    { "name": "vctat_v", "spice": ".meas dc vctat_v find v(vg) at=27", "unit": "V", "limits": { "min": 0.3, "max": 0.9 } },
+    { "name": "vptat_v", "spice": ".meas dc vptat_v param='vref_27c_v - vctat_v'", "unit": "V", "limits": { "min": 0.02 } },
+    { "name": "vnbias_v", "spice": ".meas dc vnbias_v find v(nbias) at=27", "unit": "V", "limits": { "min": 0.2, "max": 0.8 } },
+    { "name": "i_startup_a", "spice": ".meas dc i_startup_a find i(Vsense_su) at=27", "unit": "A", "limits": { "max": 1e-9 } },
+    { "name": "idd_raw", "spice": ".meas dc idd_raw find i(Vdd) at=27", "unit": "A" },
+    { "name": "iq_a", "spice": ".meas dc iq_a param='-1 * idd_raw'", "unit": "A", "limits": { "max": 1e-5 } }
+  ],
+  "options": { "timeout_s": 600, "keep_artifacts": false }
+}

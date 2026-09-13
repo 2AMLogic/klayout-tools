@@ -19,5 +19,115 @@
     "url": "https://doi.org/10.1109/JSSC.2002.806266",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its subthreshold-MOSFET PTAT/CTAT topology and sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a widely cited reference for a bipolar-free, all-MOSFET weak-inversion voltage reference."
   },
-  "notes": "Complements kb/entries/sky130-bandgap-reference.json rather than duplicating it: that entry is a bipolar (parasitic-PNP-based) current-summing bandgap with well-characterized sub-1V/curvature-corrected performance; this entry is the BJT-free alternative for the case where parasitic-bipolar device area, matching, or characterization is a limiting constraint, at the cost of typically worse absolute accuracy and a temperature coefficient in the tens-of-ppm/C to low-hundreds-of-ppm/C range rather than the single-digit-to-low-tens-of-ppm/C range achievable with a well-trimmed bipolar bandgap. A reasonable design default is to reach for the bipolar bandgap when sky130's parasitic PNP is available and accuracy matters, and reach for this subthreshold-MOSFET reference when bipolar device area/count is the binding constraint or ultra-low static current draw dominates the spec."
+  "notes": "Complements kb/entries/sky130-bandgap-reference.json rather than duplicating it: that entry is a bipolar (parasitic-PNP-based) current-summing bandgap with well-characterized sub-1V/curvature-corrected performance; this entry is the BJT-free alternative for the case where parasitic-bipolar device area, matching, or characterization is a limiting constraint, at the cost of typically worse absolute accuracy and a temperature coefficient in the tens-of-ppm/C to low-hundreds-of-ppm/C range rather than the single-digit-to-low-tens-of-ppm/C range achievable with a well-trimmed bipolar bandgap. A reasonable design default is to reach for the bipolar bandgap when sky130's parasitic PNP is available and accuracy matters, and reach for this subthreshold-MOSFET reference when bipolar device area/count is the binding constraint or ultra-low static current draw dominates the spec.",
+  "artifacts": {
+    "netlist": "examples/kb/cmos-subthreshold-voltage-reference/subthreshold_ref.spice",
+    "notes": "From-scratch netlist per this entry's own topology/sizing_approach text, containing NO bipolar devices of any kind -- which is the whole point of this entry versus kb/entries/sky130-bandgap-reference.json. A self-biased loop runs one unit NMOS against eight in parallel, both deliberately in weak inversion (W/L = 20 devices at ~0.8 uA, roughly a quarter of the ~3.8 uA weak-inversion ceiling for that geometry, so the log law actually applies rather than merely 'low current'); their dVgs is dropped across R1 to make a PTAT current, which a PMOS mirror copies into an output branch of R2 in series with a diode-connected NMOS, so Vref = Vgs_ctat + I_ptat*R2. R2/R1 is the single first-order-cancellation knob, and both resistors are the same sky130 flavour so their own TCs cancel in the ratio. Resistors are real sky130_fd_pr__res_xhigh_po models, not ideal R elements -- the extra-high-sheet poly flavour rather than the res_high_po used by the sibling entries, because at the sub-uA-to-low-uA currents this entry is specifically about the summing resistor is hundreds of kohm. The start-up circuit this entry's sizing_approach demands is present, but it is a single source-follower device keyed off the PMOS gate rail, NOT the skewed-inverter detector used by examples/kb/beta-multiplier-bias-cell. That difference is forced by weak inversion and is documented at length in the netlist header: a weak-inversion loop settles at nbias ~ Vth, and a CMOS inverter's trip point is itself pinned near Vth however hard the devices are skewed, so an inverter detector sits permanently half-on and bleeds current into the very dVgs the reference is built from. Also worth knowing when reading the netlist: the 8x parallel count rides on ngspice's `m=`, not on `mult=` -- sky130's `.subckt` declares a `mult` parameter but never passes it to the enclosed BSIM device line, so `mult=8` alone silently yields a 1x device, which would collapse dVgs to zero and the reference with it."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, temperature swept -40C to 125C (figures reported at 27C unless the name says otherwise)",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models throughout (volare-fetched, open_pdks), resistors included, so the resistors' own temperature coefficients are inside tc_ppm_per_c rather than idealised away. Reproduce with `klt sim examples/kb/cmos-subthreshold-voltage-reference/request.json`. tc_ppm_per_c is the box method -- (max - min) over the -40C..125C sweep, normalised to the 27C output and to the 165C span -- and the 61.4 ppm/C it reports lands inside the 'tens-of-ppm/C to low-hundreds-of-ppm/C range' this entry's own notes predict for a BJT-free reference. The residual is curvature, not uncancelled first-order slope: vref traces a bowl with its minimum near 44C and its maximum at the -40C end, which is the signature of a correctly-weighted PTAT/CTAT sum. iptat_ratio_125_m40 (2.18x from -40C to 125C) is the evidence that the dVgs term really is PTAT; dvgs_v, vctat_v and vptat_v expose the two summed terms separately so the cancellation can be checked by hand. iq_a (2.39 uA total) is the low-static-current claim this entry's spec_class makes against a bipolar bandgap. i_startup_a confirms the start-up device has extinguished itself (7 pA) rather than perturbing the weak-inversion loop. This is a TEMPERATURE sweep at a fixed 1.8V supply: it says nothing about line regulation or PSRR (the complementary supply sweep is on the sibling cell, examples/kb/beta-multiplier-bias-cell). Single process corner, no mismatch, no Monte Carlo -- and this entry's pdk_portability is explicit that weak-inversion corner/Monte-Carlo behaviour must be validated empirically and that this topology needs a wider trim range than a bipolar bandgap. Nothing here supports a spread, trim-range, or absolute-accuracy claim.",
+    "figures": [
+      {
+        "name": "vref_27c_v",
+        "value": 0.709757,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vref_m40c_v",
+        "value": 0.716702,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vref_125c_v",
+        "value": 0.716395,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vref_min_v",
+        "value": 0.709511,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vref_max_v",
+        "value": 0.716702,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "tc_ppm_per_c",
+        "value": 61.4074,
+        "unit": "ppm/C",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "iptat_27c_a",
+        "value": 7.96822e-07,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "iptat_ratio_125_m40",
+        "value": 2.17926,
+        "unit": "1",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "dvgs_v",
+        "value": 0.0674289,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vctat_v",
+        "value": 0.608573,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vptat_v",
+        "value": 0.101184,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "vnbias_v",
+        "value": 0.473685,
+        "unit": "V",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "i_startup_a",
+        "value": 7.13586e-12,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      },
+      {
+        "name": "iq_a",
+        "value": 2.38765e-06,
+        "unit": "A",
+        "analysis": "dc",
+        "testbench": "examples/kb/cmos-subthreshold-voltage-reference/request.json"
+      }
+    ]
+  }
 }

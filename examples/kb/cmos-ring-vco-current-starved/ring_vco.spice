@@ -1,0 +1,178 @@
+* Current-starved 5-stage CMOS ring VCO, with its tuning curve swept in a
+* single transient run.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/cmos-ring-vco-current-starved.json's own
+* topology/sizing_approach text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "An odd number of CMOS inverter delay stages connected in a ring, with
+*    each stage's pull-up and pull-down current limited ('starved') by a
+*    series PMOS/NMOS current-source transistor whose gate is driven by the
+*    control voltage; restricting the charge/discharge current into each
+*    stage's output capacitance sets the per-stage delay and therefore the
+*    oscillation frequency."
+*
+*   "... verify the tuning curve (frequency vs. control voltage) stays
+*    monotonic and reasonably linear ... and check that the minimum
+*    current-starved condition still guarantees startup (loop gain > 1 at the
+*    lowest supported frequency) since current starving can stop oscillation
+*    entirely if pushed too far."
+*
+* The SINGLE-ENDED inverter-stage variant is built here, not the
+* pseudo-differential delay-cell variant the entry's topology text offers as
+* an alternative. Deliberate: the single-ended ring is the base topology the
+* entry names first, it is the one the tuning-range/area trade-off in the
+* entry's own notes is about, and the differential variant is a different
+* circuit that deserves its own figures (supply/common-mode rejection, even-
+* order harmonic content) rather than being conflated with these.
+*
+* WHY THE TUNING CURVE IS SWEPT INSIDE ONE TRANSIENT RUN. The entry's
+* headline verification item is the tuning curve's shape -- monotonicity and
+* linearity -- which is a property of several control voltages together, not
+* of any single operating point. So vctrl below is a staircase: it dwells at
+* 0.7V, 0.9V, 1.1V and 1.3V for 600ns each, and this directory's request.json
+* counts 8 oscillation periods inside each dwell, 150ns after the step so
+* the ring has fully settled to the new starved current. That yields four
+* tuning-curve points, a Kvco slope across them, and a tuning ratio, from one
+* simulation.
+*
+* Node map:
+*   vctrl          -- the control voltage (the staircase described above)
+*   pctrl / nctrl  -- starving-device gate rails, generated from vctrl by the
+*                     bias mirror below
+*   r1 .. r5       -- the five ring-stage outputs; r5 feeds back into r1
+*   sp1..sp5       -- per-stage starved pull-up rails (PMOS starve -> PMOS)
+*   sn1..sn5       -- per-stage starved pull-down rails (NMOS -> NMOS starve)
+*
+* SIZING (per the entry's sizing_approach)
+*   N = 5 stages: odd, and mid-range in the entry's own "typically 3-9" band.
+*   The inverter devices are minimum-length (L=0.15) with the usual ~2:1
+*   PMOS:NMOS width ratio so the stage's own rising and falling intrinsic
+*   delays are roughly matched, leaving the starving devices -- not the
+*   inverter -- as the thing that sets the delay. The starving devices are
+*   deliberately drawn NO WIDER than the inverter devices they feed, and
+*   longer (lstarve = 0.5 vs linv = 0.15), so that they stay the current
+*   bottleneck rather than handing control back to the inverter. cload is an
+*   explicit per-stage load capacitance which, with the starved current, sets
+*   the per-stage delay: f ~ I_starve / (2 * N * cload * Vdd). The sizing
+*   below lands the ring at 18 MHz to 192 MHz across a 0.7V-1.3V control
+*   range -- a 10.5x (3.4-octave) span, which is the "very wide tuning range
+*   spanning multiple octaves" the entry's own notes claim for this topology,
+*   and a range that brackets this entry's cited source (Young et al.'s
+*   5-110MHz microprocessor PLL, scaled forward from its 1992 node).
+*
+*   WHAT THE MEASURED CURVE SAYS ABOUT "REASONABLY LINEAR". The entry asks
+*   for the tuning curve to be verified "monotonic and reasonably linear".
+*   Measured here it is firmly monotonic and decidedly NOT linear: Kvco falls
+*   from 481 MHz/V at the bottom of the control range to 85 MHz/V at the top,
+*   a 5.7x spread (kvco_spread_ratio below). That is not a sizing defect to
+*   be tuned away, it is what this bias topology does. Two effects compound:
+*   the V-I converter is square-law in vctrl to begin with, and as vctrl
+*   rises, the growing current drags pctrl down towards ground, which pushes
+*   the control device XMCTL out of saturation and into triode so that its
+*   current stops following vctrl at all. The figures report the spread
+*   explicitly rather than quoting a single Kvco, because a PLL designer
+*   closing a loop around this VCO has a loop bandwidth that varies by that
+*   same 5.7x across the lock range -- which is precisely the thing worth
+*   knowing, and why real designs linearise the V-I stage (source
+*   degeneration, or a replica-biased delay cell as in the cited source)
+*   rather than driving the starving gates from a bare square-law device.
+*
+* WHAT THIS TESTBENCH DOES AND DOES NOT SHOW (also in artifacts.notes):
+*   1. NO PHASE-NOISE OR JITTER FIGURE. That is the headline spec a VCO is
+*      usually judged on, and this testbench deliberately does not claim one:
+*      phase noise needs a periodic-steady-state/noise analysis (ngspice has
+*      no PSS/pnoise), and jitter needs either that or a transient-noise
+*      campaign over many periods. What the entry's own notes say about ring
+*      vs. LC phase noise therefore remains an unverified claim here -- see
+*      kb/entries/sky130-lc-vco-cross-coupled.json for the LC counterpart.
+*      The figures below are tuning-curve and startup figures only.
+*   2. Single corner (tt, 1.8V, 27C). The entry's sizing_approach explicitly
+*      asks for the tuning curve to be checked "across process/voltage/
+*      temperature corners" and its pdk_portability says the control-voltage-
+*      to-current mapping "must be re-simulated against sky130 corners". One
+*      corner does not do that; it establishes the nominal curve only.
+*   3. Schematic-level: cload is a lumped ideal capacitor standing in for
+*      each stage's wiring plus next-stage gate load. A post-layout ring runs
+*      slower than this, and by an amount only extraction can tell you.
+.param wn=1
+.param wp=2
+.param linv=0.15
+* Starving devices: same width as (or narrower than) the inverter devices
+* they feed, and longer, so they remain the current bottleneck across the
+* whole control range instead of handing delay control back to the inverter.
+.param wsn=1
+.param wsp=1
+.param lstarve=0.5
+.param cload=10f
+* Bias mirror device sizes.
+.param wctl=4
+.param lctl=0.5
+
+* --- supply ---
+Vdd vdd 0 DC 1.8
+
+* --- control-voltage staircase: four 600ns dwells at 0.7/0.9/1.1/1.3V, with
+* 10ns transitions. This directory's request.json measures 8 periods inside
+* each dwell, starting 150ns in. ---
+Vctrl vctrl 0 PWL(0 0.7 600n 0.7 610n 0.9 1200n 0.9 1210n 1.1 1800n 1.1 1810n 1.3 2400n 1.3)
+
+* --- BIAS MIRROR: turns vctrl into the two starving-gate rails.
+* XMCTL converts vctrl into a current (rising with vctrl, so frequency rises
+* with vctrl -- a monotonically increasing tuning curve, which is the
+* polarity a PLL loop filter expects). XMPD mirrors it onto the pctrl rail
+* for the PMOS starving devices; XMPC/XMND fold it back down to make the
+* matching nctrl rail for the NMOS starving devices, so both the pull-up and
+* pull-down paths of every stage are starved by the same current. ---
+XMCTL pctrl vctrl 0   0   sky130_fd_pr__nfet_01v8 L={lctl} W={wctl} nf=1 mult=1
+XMPD  pctrl pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lctl} W={wctl} nf=1 mult=1
+XMPC  nctrl pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lctl} W={wctl} nf=1 mult=1
+XMND  nctrl nctrl 0   0   sky130_fd_pr__nfet_01v8 L={lctl} W={wctl} nf=1 mult=1
+
+* --- STAGE 1 (input r5, output r1) ---
+XSP1 sp1 pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lstarve} W={wsp} nf=1 mult=1
+XIP1 r1  r5    sp1 vdd sky130_fd_pr__pfet_01v8 L={linv}    W={wp}  nf=1 mult=1
+XIN1 r1  r5    sn1 0   sky130_fd_pr__nfet_01v8 L={linv}    W={wn}  nf=1 mult=1
+XSN1 sn1 nctrl 0   0   sky130_fd_pr__nfet_01v8 L={lstarve} W={wsn} nf=1 mult=1
+C1   r1  0 {cload}
+
+* --- STAGE 2 (input r1, output r2) ---
+XSP2 sp2 pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lstarve} W={wsp} nf=1 mult=1
+XIP2 r2  r1    sp2 vdd sky130_fd_pr__pfet_01v8 L={linv}    W={wp}  nf=1 mult=1
+XIN2 r2  r1    sn2 0   sky130_fd_pr__nfet_01v8 L={linv}    W={wn}  nf=1 mult=1
+XSN2 sn2 nctrl 0   0   sky130_fd_pr__nfet_01v8 L={lstarve} W={wsn} nf=1 mult=1
+C2   r2  0 {cload}
+
+* --- STAGE 3 (input r2, output r3) ---
+XSP3 sp3 pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lstarve} W={wsp} nf=1 mult=1
+XIP3 r3  r2    sp3 vdd sky130_fd_pr__pfet_01v8 L={linv}    W={wp}  nf=1 mult=1
+XIN3 r3  r2    sn3 0   sky130_fd_pr__nfet_01v8 L={linv}    W={wn}  nf=1 mult=1
+XSN3 sn3 nctrl 0   0   sky130_fd_pr__nfet_01v8 L={lstarve} W={wsn} nf=1 mult=1
+C3   r3  0 {cload}
+
+* --- STAGE 4 (input r3, output r4) ---
+XSP4 sp4 pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lstarve} W={wsp} nf=1 mult=1
+XIP4 r4  r3    sp4 vdd sky130_fd_pr__pfet_01v8 L={linv}    W={wp}  nf=1 mult=1
+XIN4 r4  r3    sn4 0   sky130_fd_pr__nfet_01v8 L={linv}    W={wn}  nf=1 mult=1
+XSN4 sn4 nctrl 0   0   sky130_fd_pr__nfet_01v8 L={lstarve} W={wsn} nf=1 mult=1
+C4   r4  0 {cload}
+
+* --- STAGE 5 (input r4, output r5) -- closes the ring back into stage 1 ---
+XSP5 sp5 pctrl vdd vdd sky130_fd_pr__pfet_01v8 L={lstarve} W={wsp} nf=1 mult=1
+XIP5 r5  r4    sp5 vdd sky130_fd_pr__pfet_01v8 L={linv}    W={wp}  nf=1 mult=1
+XIN5 r5  r4    sn5 0   sky130_fd_pr__nfet_01v8 L={linv}    W={wn}  nf=1 mult=1
+XSN5 sn5 nctrl 0   0   sky130_fd_pr__nfet_01v8 L={lstarve} W={wsn} nf=1 mult=1
+C5   r5  0 {cload}
+
+* --- KICKING THE RING INTO OSCILLATION.
+* A noiseless simulator will happily sit on the ring's symmetric DC solution
+* forever: every stage biased at its own trip point is a perfectly valid
+* operating point, and with no noise source there is nothing to grow out of
+* it. Real silicon has thermal noise and a supply ramp and has no such
+* option. So the operating point is seeded with an explicit initial
+* condition -- one node at each rail -- which is the standard way to start a
+* ring oscillator in a deterministic transient run. This is a SIMULATION
+* device, not part of the circuit: it sets which phase the ring starts in,
+* and nothing measured below depends on that choice. ---
+.ic v(r1)=0 v(r2)=1.8 v(r3)=0 v(r4)=1.8 v(r5)=0
