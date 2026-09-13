@@ -1,0 +1,134 @@
+* Receiver front end: on-die termination (ODT) + trim bank + differential
+* input buffer.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/rx-front-end-termination-buffer.json's own
+* topology/sizing_approach text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "an on-die termination (ODT) resistor pair, matched to the incoming
+*    transmission line's characteristic impedance (either as a fixed resistor
+*    or, more commonly, a digitally-trimmed parallel resistor bank ...) sits
+*    directly at the receive pads ... the termination node feeds directly into
+*    a differential input buffer -- typically a resistively- or
+*    actively-loaded differential pair biased for wide common-mode input
+*    range"
+*
+* Node map:
+*   srcp, srcn   -- far-end driver (the transmit side of the link)
+*   Rlinep/n     -- the channel's characteristic impedance, 50 ohm per leg
+*                   (100 ohm differential), modelled as a lumped series
+*                   resistance rather than a distributed T-line (see below)
+*   padp, padn   -- the receive pads: the true termination point
+*   Rodt + trim  -- the on-die differential termination: one fixed 118 ohm
+*                   leg plus two switched trim legs (see "trim bank" below)
+*   outp, outn   -- the input buffer's resistively-loaded differential output
+*   tail, nbias  -- input pair's common source node / tail mirror gate
+*
+* What this testbench measures (see this directory's request.json):
+*   - the impedance match at the pads. With a 100 ohm differential source
+*     impedance driving a 100 ohm differential ODT, the pads see exactly half
+*     the far-end driver's amplitude -- so pad_atten_db = -6.02 dB is the
+*     match figure, and zin_diff_ohm is that attenuation solved back for the
+*     terminating impedance the pads actually present:
+*         Zin = Zline * 10^(a/20) / (1 - 10^(a/20)),  a = pad_atten_db
+*   - the buffer's small-signal differential gain (av_db) and bandwidth
+*     (f3db_hz / f_unity_hz) from the pads to the buffer output.
+*
+* Deliberate simplifications (all disclosed in this entry's artifacts.notes):
+*   1. The channel is a lumped 50 ohm/leg series resistance, not a
+*      distributed transmission line. A reflection-domain measurement (TDR,
+*      return loss vs. frequency) needs a real T-line model; what this
+*      testbench measures instead is the *terminating impedance* the front end
+*      presents, which is the quantity the ODT and its trim bank are sized to
+*      set. Placement-driven reflection (the entry's "termination as close to
+*      the pad as physically possible" layout idiom) is a layout property and
+*      cannot be measured from a schematic netlist at all.
+*   2. The ODT resistors, the trim legs' resistors, and the buffer's load
+*      resistors are ideal R elements, not sky130 poly/diffusion resistor
+*      models. That is on purpose: the entry's own pdk_portability says the
+*      trim bank's step size and range "must be re-derived from sky130's
+*      specific resistor-option process variation", i.e. from a corner/Monte
+*      Carlo run over real resistor models -- which is exactly the work this
+*      single-corner reference testbench does NOT do. The transistors (trim
+*      switches, buffer) are real sky130 devices.
+*   3. The trim bank's two legs are statically enabled by their own DC gate
+*      sources (Vtrim0/Vtrim0b, Vtrim1/Vtrim1b), i.e. one fixed trim code --
+*      code 11, both legs on. Measured on this netlist: code 11 gives
+*      Zin = 100 ohm (on target) and code 00 (both legs off) gives the fixed
+*      leg's own 118 ohm, i.e. the bank spans ~15% of the nominal impedance
+*      in 4 codes. The comparator-based
+*      calibration loop that would choose that code on silicon is out of scope
+*      here (it is a mixed-signal loop, not part of the analog front end this
+*      entry describes).
+*   4. The tail bias reference is an ideal current source (Iref) feeding a real
+*      NMOS mirror -- the same convention as examples/kb/five-transistor-ota.
+.param vdd=1.8
+* Receive common mode: ~1.2V, the output common mode a near-rail CML driver
+* (see kb/entries/cml-tx-line-driver.json, this entry's transmit-side
+* counterpart) presents to a DC-coupled link. High enough to keep the tail
+* mirror out of triode, low enough to leave the input pair saturated.
+.param vcm=1.2
+.param rline=50
+* Fixed ODT leg, deliberately ABOVE the 100 ohm differential target: the trim
+* legs below pull the parallel combination down onto target. This is the
+* digitally-trimmed-bank arrangement the entry's topology text describes,
+* with the fixed leg standing in for a resistor that has landed high.
+.param rodt=118
+.param rtrim0=800
+.param rtrim1=1600
+.param rl=10k
+.param ibias=100u
+* Pad capacitance: the input buffer's own gate load plus pad/ESD parasitics,
+* the "input capacitance low enough that it does not itself become a
+* significant reflection source" term in the entry's sizing_approach.
+.param cpad=50f
+.param cl=20f
+
+* --- supplies and trim-code gate drives (both legs enabled: trim code 11,
+* the code that lands the bank on the 100 ohm differential target) ---
+Vdd     vdd    0 DC {vdd}
+Vtrim0  trim0  0 DC {vdd}
+Vtrim0b trim0b 0 DC 0
+Vtrim1  trim1  0 DC {vdd}
+Vtrim1b trim1b 0 DC 0
+
+* --- far-end driver + channel: differential AC drive of magnitude 1 per leg
+* (so vdb(padp) reads directly as the per-leg attenuation in dB) ---
+Vsrcp srcp 0 DC {vcm} AC 1 0
+Vsrcn srcn 0 DC {vcm} AC 1 180
+Rlinep srcp padp {rline}
+Rlinen srcn padn {rline}
+
+* --- on-die differential termination: fixed leg + two switched trim legs.
+* Each trim leg's switch is a CMOS transmission gate (NMOS in parallel with
+* PMOS), not a bare NMOS: at the ~1.2V receive common mode a bare NMOS
+* switched from a 1.8V rail has only ~0.6V of overdrive and barely conducts,
+* which leaves the bank unable to move the termination at all (measured: the
+* bank's whole trim range collapses and Zin sits at the fixed leg's own
+* value). The PMOS half carries the leg at a high common mode; the NMOS half
+* keeps the leg conducting if the link's common mode drops. ---
+Rodt padp padn {rodt}
+Rt0  padp t0a   {rtrim0}
+XN0  t0a trim0  padn 0   sky130_fd_pr__nfet_01v8 L=0.15 W=20 nf=1 mult=1
+XP0  t0a trim0b padn vdd sky130_fd_pr__pfet_01v8 L=0.15 W=40 nf=1 mult=1
+Rt1  padp t1a   {rtrim1}
+XN1  t1a trim1  padn 0   sky130_fd_pr__nfet_01v8 L=0.15 W=20 nf=1 mult=1
+XP1  t1a trim1b padn vdd sky130_fd_pr__pfet_01v8 L=0.15 W=40 nf=1 mult=1
+
+* --- pad/input capacitance ---
+Cpadp padp 0 {cpad}
+Cpadn padn 0 {cpad}
+
+* --- tail current mirror (NMOS), ideal reference current ---
+Iref vdd   nbias DC {ibias}
+XMB  nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XMT  tail  nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+
+* --- resistively-loaded differential input buffer ---
+XM1 outn padp tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2 outp padn tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+RLp vdd outp {rl}
+RLn vdd outn {rl}
+CLp outp 0 {cl}
+CLn outn 0 {cl}

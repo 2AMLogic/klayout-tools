@@ -19,5 +19,52 @@
     "url": "https://doi.org/10.1109/4.668986",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its receiver front-end termination and input-buffering approach only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a widely-cited early CMOS serial-link transceiver paper whose receive front end (on-chip termination feeding a differential input buffer ahead of oversampled data recovery) established the front-end architecture that later serdes receiver designs continue to build on."
   },
-  "notes": "This entry covers only the analog front end (termination plus buffering); it hands off a full-swing differential signal to whatever clock-data-recovery/sampler architecture the rest of the PHY uses, which is out of scope here. See cml-tx-line-driver for the transmit-side counterpart whose matched output impedance this entry's termination is designed to receive into -- together they form a matched-impedance point-to-point link's two ends."
+  "notes": "This entry covers only the analog front end (termination plus buffering); it hands off a full-swing differential signal to whatever clock-data-recovery/sampler architecture the rest of the PHY uses, which is out of scope here. See cml-tx-line-driver for the transmit-side counterpart whose matched output impedance this entry's termination is designed to receive into -- together they form a matched-impedance point-to-point link's two ends.",
+  "artifacts": {
+    "netlist": "examples/kb/rx-front-end-termination-buffer/rx_frontend.spice",
+    "notes": "From-scratch netlist per this entry's own topology/sizing_approach text: a fixed ODT leg plus a 2-bit digitally-trimmed resistor bank (CMOS-transmission-gate-switched legs, statically enabled to one fixed trim code) sits at the receive pads, feeding a resistively-loaded differential input pair biased by a real sky130 NMOS mirror. The channel is a lumped 50-ohm/leg series resistance rather than a distributed transmission line, and the termination/trim/load resistors are ideal R elements rather than sky130 resistor-option models -- both disclosed simplifications are spelled out in the netlist's own header, including why a bare-NMOS trim switch fails at this receive common mode and requires a full transmission gate instead. See the header for the full node map and the derivation of zin_diff_ohm from pad_atten_db."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models for the trim-switch and input-pair transistors (volare-fetched, open_pdks); the ODT/trim/load resistors are ideal elements, not sky130 resistor-option models (see artifacts.notes). Reproduce with `klt sim examples/kb/rx-front-end-termination-buffer/request.json`. zin_diff_ohm is pad_atten_db algebraically solved back for the terminating impedance the pads present, given the netlist's 50-ohm-per-leg (100-ohm differential) channel source impedance.",
+    "figures": [
+      {
+        "name": "pad_atten_db",
+        "value": -6.02459,
+        "unit": "dB",
+        "analysis": "ac",
+        "testbench": "examples/kb/rx-front-end-termination-buffer/request.json"
+      },
+      {
+        "name": "zin_diff_ohm",
+        "value": 99.9083,
+        "unit": "ohm",
+        "analysis": "ac",
+        "testbench": "examples/kb/rx-front-end-termination-buffer/request.json"
+      },
+      {
+        "name": "av_db",
+        "value": 14.9404,
+        "unit": "dB",
+        "analysis": "ac",
+        "testbench": "examples/kb/rx-front-end-termination-buffer/request.json"
+      },
+      {
+        "name": "f3db_hz",
+        "value": 728783000.0,
+        "unit": "Hz",
+        "analysis": "ac",
+        "testbench": "examples/kb/rx-front-end-termination-buffer/request.json"
+      },
+      {
+        "name": "f_unity_hz",
+        "value": 1934440000.0,
+        "unit": "Hz",
+        "analysis": "ac",
+        "testbench": "examples/kb/rx-front-end-termination-buffer/request.json"
+      }
+    ]
+  }
 }
