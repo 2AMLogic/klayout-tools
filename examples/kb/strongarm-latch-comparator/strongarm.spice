@@ -1,0 +1,78 @@
+* StrongARM latch comparator -- dynamic, clocked regenerative comparator.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/strongarm-latch-comparator.json's own topology
+* text, realized as the standard "modern StrongARM" structure (as widely
+* taught/diagrammed, e.g. B. Razavi's 2015 "The StrongARM Latch" article
+* cited by this entry's own source field): a tail switch gates a single
+* differential pair whose drains (fn/fp -- this entry's "internal drain
+* nodes") are reset to VDD by clocked PMOS pull-ups during clk-low, and a
+* cross-coupled NMOS/PMOS latch pair (outp/outn, also independently reset
+* to VDD by their own clocked PMOS pull-ups so no static reset-phase
+* contention exists between the reset devices and the cross-coupled NMOS
+* pair) regenerates the fn/fp imbalance into a full-rail digital decision
+* once clk goes high and the tail switch turns on.
+*
+* Node map:
+*   clk        -- comparator clock (low = reset, high = evaluate/regenerate)
+*   inp, inn   -- differential input pair gates
+*   tail       -- input pair's common source node (XM0's drain)
+*   fn, fp     -- input pair's own drain nodes ("internal drain nodes" in
+*                 the entry's topology text); reset to VDD by XM3/XM4;
+*                 double as the cross-coupled NMOS latch pair's sources
+*   outp, outn -- the regenerated full-rail digital decision outputs;
+*                 reset to VDD by XM7/XM8 independently of fn/fp
+*
+* Decision polarity for this specific wiring (XM5's gate=outn/drain=outp/
+* source=fn, XM6's gate=outp/drain=outn/source=fp): v(inp) > v(inn) makes
+* XM1 conduct harder than XM2, so fn is pulled below fp during the brief
+* pre-regeneration interval; the lower fn raises XM5's Vgs (=outn-fn),
+* pulling outp down faster than XM6 pulls outn down, which cross-couples
+* into outn winning high and outp losing low. That is: v(inp) > v(inn)
+* -> outn settles high, outp settles low (see this directory's request.json
+* and this entry's own measured.notes for the reproduced figures).
+.param vdd=1.8
+.param vicm=0.9
+.param vid=20m
+.param wtail=6
+.param win=4
+.param wrst=2
+.param wxlatch=4
+.param wplatch=4
+
+* --- supplies, clock, and differential input ---
+Vdd  vdd 0 DC {vdd}
+Vclk clk 0 PULSE(0 {vdd} 1n 50p 50p 2n 4n)
+Vinp inp 0 DC {vicm+vid/2}
+Vinn inn 0 DC {vicm-vid/2}
+
+* --- tail switch: holds the input pair off during reset (clk low) ---
+XM0 tail clk 0 0 sky130_fd_pr__nfet_01v8 L=0.15 W={wtail} nf=1 mult=1
+
+* --- input differential pair ---
+XM1 fn inp tail 0 sky130_fd_pr__nfet_01v8 L=0.15 W={win} nf=1 mult=1
+XM2 fp inn tail 0 sky130_fd_pr__nfet_01v8 L=0.15 W={win} nf=1 mult=1
+
+* --- clocked PMOS reset of the input pair's own drain nodes (fn/fp) ---
+XM3 fn clk vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W={wrst} nf=1 mult=1
+XM4 fp clk vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W={wrst} nf=1 mult=1
+
+* --- clocked PMOS reset of the regenerated output nodes (outp/outn) ---
+XM7 outp clk vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W={wrst} nf=1 mult=1
+XM8 outn clk vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W={wrst} nf=1 mult=1
+
+* --- cross-coupled NMOS latch pair (sources tied to fn/fp, not ground --
+* this is what lets the fn/fp imbalance modulate each side's pull-down
+* strength instead of a plain static CMOS latch) ---
+XM5 outp outn fn 0 sky130_fd_pr__nfet_01v8 L=0.15 W={wxlatch} nf=1 mult=1
+XM6 outn outp fp 0 sky130_fd_pr__nfet_01v8 L=0.15 W={wxlatch} nf=1 mult=1
+
+* --- cross-coupled PMOS latch pair (back-to-back inverter pair, per the
+* entry's own topology text) ---
+XM9  outp outn vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W={wplatch} nf=1 mult=1
+XM10 outn outp vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W={wplatch} nf=1 mult=1
+
+* --- output node parasitic load (small, representative of local wiring) ---
+CLp outp 0 2f
+CLn outn 0 2f

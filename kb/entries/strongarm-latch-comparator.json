@@ -19,5 +19,38 @@
     "url": "https://doi.org/10.1109/MSSC.2015.2418155",
     "license_or_openness": "Peer-reviewed IEEE magazine article cited here for its topology description, offset/kickback analysis, and design considerations only (no figures or text reproduced), per the KB's open-sources sourcing rule (case 2, peer-reviewed paywalled literature cited for restated methodology only, in kb/SOURCING.md). This article is the standard modern reference for the topology and its history, tracing it to its original use in the DEC Alpha 21164 microprocessor's clock receiver."
   },
-  "notes": "Named after its origin in the DEC/Digital StrongARM and Alpha microprocessor clock-receiver circuits (via J. Montanaro et al., 'A 160-MHz, 32-b, 0.5-W CMOS RISC Microprocessor,' IEEE JSSC, vol. 31, no. 11, Nov. 1996, which this entry does not separately cite in detail but which the Razavi article above traces the topology to). The zero-static-current property makes it attractive versus a continuously-biased comparator (e.g. the five-transistor OTA used open-loop) whenever the application is inherently clocked, at the cost of comparatively higher offset and kickback than a statically-biased, offset-calibrated design."
+  "notes": "Named after its origin in the DEC/Digital StrongARM and Alpha microprocessor clock-receiver circuits (via J. Montanaro et al., 'A 160-MHz, 32-b, 0.5-W CMOS RISC Microprocessor,' IEEE JSSC, vol. 31, no. 11, Nov. 1996, which this entry does not separately cite in detail but which the Razavi article above traces the topology to). The zero-static-current property makes it attractive versus a continuously-biased comparator (e.g. the five-transistor OTA used open-loop) whenever the application is inherently clocked, at the cost of comparatively higher offset and kickback than a statically-biased, offset-calibrated design.",
+  "artifacts": {
+    "netlist": "examples/kb/strongarm-latch-comparator/strongarm.spice",
+    "notes": "From-scratch netlist, real sky130_fd_pr__nfet_01v8/pfet_01v8 devices (not behavioral), realizing this entry's topology as the standard 'modern StrongARM' structure independently reset for the input pair's own drain nodes (fn/fp) and the regenerated output nodes (outp/outn), avoiding reset-phase contention between the reset devices and the cross-coupled NMOS pair -- see the netlist's own header for the full node map and this specific wiring's decision polarity. `klt sim --op-lint`'s DC-biased findings (every device reported off/triode) are expected and not a defect: this is an inherently dynamic, clocked circuit with no meaningful static DC operating point (at clk=0 it is fully in reset) -- the transient regeneration behavior in this directory's request.json is the correct verification method, not a DC operating-point check."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. A 20 mV differential input (vicm=0.9V +/-10mV) is applied before a clk rising edge at t=1ns; regen_delay_s is the time from the clk 50%-point crossing to the losing output (outp, for this input polarity) crossing back through 0.9V, and voutp_final_v/voutn_final_v are the settled full-rail decision at the end of the 6ns transient. Reproduce with `klt sim examples/kb/strongarm-latch-comparator/request.json`. This single corner/input-polarity run demonstrates the regenerative decision mechanism, not a full offset/kickback characterization (which would sweep input differential voltage and clock frequency).",
+    "figures": [
+      {
+        "name": "regen_delay_s",
+        "value": 1.1161e-10,
+        "unit": "s",
+        "analysis": "tran",
+        "testbench": "examples/kb/strongarm-latch-comparator/request.json"
+      },
+      {
+        "name": "voutp_final_v",
+        "value": 1.10112e-06,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/strongarm-latch-comparator/request.json"
+      },
+      {
+        "name": "voutn_final_v",
+        "value": 1.8,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/strongarm-latch-comparator/request.json"
+      }
+    ]
+  }
 }
