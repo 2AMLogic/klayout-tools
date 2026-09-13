@@ -112,7 +112,12 @@ import time
 from typing import Any
 
 from . import env_provenance
-from ._paths import _load_request_json, _resolve_relative, validate_request_shape
+from ._paths import (
+    _fold_spice_continuations,
+    _load_request_json,
+    _resolve_relative,
+    validate_request_shape,
+)
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import (
@@ -308,18 +313,25 @@ def _strip_comment(line: str) -> str:
 
 def _logical_lines(text: str) -> list[str]:
     """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines."""
-    joined: list[str] = []
+    ``*`` comment lines.
+
+    A leading ``+`` line with nothing preceding it to fold onto (e.g. the
+    very first non-blank/non-comment line of ``text`` starts with ``+``) is
+    dropped, matching this function's pre-#1741 behaviour -- unlike
+    ``pex.py``/``netlist_normalize.py``, which keep such an orphan
+    continuation as a literal line. :func:`_fold_spice_continuations` keeps
+    an orphan verbatim (``+`` prefix intact) rather than dropping it, so the
+    post-pass below filters any still-``+``-prefixed entry it returns.
+    """
+    lines: list[str] = []
     for raw in text.splitlines():
         line = _strip_comment(raw.strip())
         if not line or line.startswith("*"):
             continue
-        if line.startswith("+"):
-            if joined:
-                joined[-1] = f"{joined[-1]} {line[1:].strip()}"
-            continue
-        joined.append(line)
-    return joined
+        lines.append(line)
+    return [
+        line for line in _fold_spice_continuations(lines) if not line.startswith("+")
+    ]
 
 
 def _positional_tokens(line: str) -> list[str]:
