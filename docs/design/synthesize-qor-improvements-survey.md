@@ -360,6 +360,11 @@ Yosys orchestration. Item 6 is a real lever this survey recommends
 **deferring** on correctness grounds. Item 7 is the one native-Rust
 recommendation, argued on measurement grounds rather than on beating ABC.
 
+§3.8 was **added after this survey was first written** (issue #1722) and is
+not part of the original seven-item ranking: it is the arithmetic-
+architecture lever the survey had no item for at all, and it is orthogonal
+to §3.4 rather than a re-ranking of it.
+
 ### 3.1 Consume `constraints.clock_period_ns` — pass `abc -D` and a `-constr` file (Priority 1)
 
 - **Technique:** translate the request's existing
@@ -648,6 +653,71 @@ recommendation, argued on measurement grounds rather than on beating ABC.
   measurable QoR sooner and at a fraction of the cost. It is ranked
   **first among native candidates**, and it is the item this survey would
   choose if Epic #704 asked "what is the first Rust thing to write."
+
+### 3.8 The arithmetic-architecture lever — generated prefix adders, picked by measurement (added post-survey; **shipped**)
+
+Added after the original seven items, by
+[issue #1722](https://github.com/2AMLogic/klayout-tools/issues/1722). The
+survey as first written had **no arithmetic-architecture lever at all**:
+§3.4's best-of-N sweep varies the *ABC script* and the *delay target*, but
+every one of those N runs still hands ABC whatever adder structure Yosys's
+own `alumacc`/`techmap` expansion produced. On the fleet's adder-bound
+canaries (`examples/functional-verification/modexp.v` — one interleaved-
+Montgomery add per cycle, widened to `WIDTH+2`) that structure *is* the
+critical path, so it is exactly the wrong thing to hold fixed while sweeping
+everything else.
+
+- **Technique:** represent an N-bit parallel-prefix adder as an N×N binary
+  **cell map** (which prefix cells `(i, j)` exist), emit Verilog from it, and
+  substitute it for the design's own `$add` cells via a Yosys
+  `techmap -map` rule file inserted between `hierarchy` and `synth`. Five
+  classical architectures — `ripple`, `brent-kung`, `han-carlson`,
+  `sklansky`, `kogge-stone` — plus an explicit cell map as the escape hatch.
+  Shipped as [`klt arith-gen`](../cli/arith-gen.md) (the generator) and
+  `klt synthesize`'s
+  [`arithmetic` request field](../cli/synthesize.md#arithmetic-architecture-adders)
+  (the selection).
+- **Provenance:** the representation and the measured-in-loop selection are
+  reimplemented from Lai et al., *Scalable and Effective Arithmetic Tree
+  Generation for Adder and Multiplier Designs* (NeurIPS 2024 spotlight,
+  [arXiv:2405.06758](https://arxiv.org/abs/2405.06758)) — **[EXTERNAL]**.
+  Their *search* is RL/MCTS and their repository is unlicensed; neither is
+  used. At the bit widths this repo's canaries need, the classical trees are
+  textbook and no search is required.
+- **QoR metric:** delay and area jointly, like §3.4 — this item *selects*
+  rather than trades. The selection rule is "smallest area among the
+  candidates meeting `constraints.clock_period_ns`", with an explicit,
+  reported fallback when none does.
+- **Rust vs. flow:** **flow/orchestration plus a pure-Python generator.** No
+  new algorithm, no new dependency; the cell-map → Verilog emitter is a few
+  hundred lines of string generation.
+- **Relationship to §3.4:** orthogonal and composable. §3.4 sweeps *how ABC
+  optimizes* a fixed structure; this sweeps *which structure ABC is given*.
+  A future best-of-N harness should treat the arithmetic architecture as one
+  more axis of its candidate space, not as a competing mechanism. It raises
+  the same bar §3.4 does: "beat Yosys's default adder" is a much weaker
+  claim than "beat the best of five measured prefix trees."
+- **Correctness:** every substituted adder is proven equivalent to a
+  behavioural `a + b + cin` of the same width by `klt equiv` before it is
+  kept — §4.2's own affordability finding (an 8×8 multiplier proof is
+  cheap; an N-bit adder is cheaper), applied. Scoping the proof to the
+  *adder module* rather than the whole design is what lets the gate run on
+  the sequential canaries that motivated the item, which §4.2's
+  combinational-only whole-design proof cannot cover.
+- **Determinism:** preserved, and in the same way §3.4 requires — the
+  selected architecture, the full per-candidate table, and every trial's
+  script/netlist path are recorded in the response.
+- **Measured result** (`modexp`, `WIDTH=16`, `gf180mcu_fd_sc_mcu9t5v0`,
+  Yosys 0.69+post, `clock_period_ns: 22`, **[RUN]**): Yosys's own expansion
+  missed the constraint at 23.79 ns / 28526 µm²; all five prefix
+  architectures met it, between 21.83 and 21.99 ns and between 27084 and
+  27510 µm². The selection kept `sklansky` (met the target, smallest area).
+  Absolute numbers are build-platform sensitive (see §1.3's own caveat); the
+  ordering is the result.
+- **Out of scope, deliberately:** multipliers (compressor trees) and any
+  search over cell maps — both named non-goals of #1722. Multipliers are the
+  obvious follow-on and would reuse the same generate → prove → measure
+  → select skeleton.
 
 ## 4. Measurement harness — common to every item above
 

@@ -8,9 +8,10 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import pdk_stackup
+from .. import arith_gen, pdk_stackup
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
+    arith_gen_cmd,
     cells_cmd,
     clip_cmd,
     components_cmd,
@@ -1669,6 +1670,84 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
+
+    arith_gen_parser = subparsers.add_parser(
+        "arith-gen",
+        help="generate a parallel-prefix adder (Verilog) from a cell map",
+        description=(
+            "Emit a parallel-prefix adder as Verilog RTL from a named "
+            "architecture (`ripple`, `brent-kung`, `han-carlson`, "
+            "`sklansky`, `kogge-stone`) or from an explicit N x N binary "
+            "cell map -- issue #1722, the arithmetic-architecture lever for "
+            "`klt synthesize`. Pure Python string generation: no Yosys, no "
+            "PDK, no engine. Writes five files next to each other: the "
+            "structural adder, a behavioural `a + b + cin` reference with "
+            "identical ports, a self-checking testbench, a Yosys `techmap "
+            "-map` rule file substituting the adder for `$add` cells of the "
+            "same width, and a ready-to-run `klt equiv` request pairing the "
+            "reference (gold) against the adder (gate) -- so proving the "
+            "emitted Verilog correct is one follow-up command. Deliberately "
+            "NOT named `klt gen-arith`/`klt gen ...`: `klt gen` is the "
+            "layout/PCell generator family, and this emits RTL. See "
+            "docs/cli/arith-gen.md."
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help=(
+            "adder width in bits (required with --arch; with --cell-map the "
+            "width comes from the matrix and this flag, if given, must match)"
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--arch",
+        default=None,
+        choices=list(arith_gen.ARCHITECTURES),
+        help=(
+            "prefix-adder architecture to build the cell map from. Mutually "
+            "exclusive with --cell-map."
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--cell-map",
+        dest="cell_map",
+        default=None,
+        help=(
+            "path to a JSON file holding the N x N cell map -- either a bare "
+            "matrix of 0/1 entries or an object with a `cell_map` key (the "
+            "shape `--format json --include-cell-map` emits, so a payload "
+            "round-trips). Mutually exclusive with --arch."
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--module-name",
+        dest="module_name",
+        default=None,
+        help=(
+            "Verilog module name for the generated adder "
+            "(default: klt_add_<architecture>_<width>)"
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default=None,
+        help="directory to write the generated files into (default: cwd)",
+    )
+    arith_gen_parser.add_argument(
+        "--include-cell-map",
+        dest="include_cell_map",
+        action="store_true",
+        help=(
+            "include the full N x N cell map in the output (the `cell_map` "
+            "field under --format json, an ASCII matrix under --format "
+            "text); omitted by default because it is O(N^2)"
+        ),
+    )
+    _add_format_arg(arith_gen_parser)
+    arith_gen_parser.set_defaults(func=arith_gen_cmd.run)
 
     techmap_parser = subparsers.add_parser(
         "techmap",
