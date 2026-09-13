@@ -24,6 +24,8 @@ from typing import Any
 
 import jsonschema
 
+from .sim import SimError, run_sim
+
 #: <repo root>/kb — this file lives at <repo root>/src/klayout_tools/kb.py.
 DEFAULT_KB_ROOT: Path = Path(__file__).resolve().parent.parent.parent / "kb"
 
@@ -316,8 +318,175 @@ def _measured_errors(entry: dict[str, Any], repo_root: Path) -> list[str]:
     return errors
 
 
+#: Relative tolerance :func:`_recheck_measured_errors` allows between a
+#: recorded ``measured.figures[].value`` and the closest value a fresh
+#: `klt sim` run of its ``testbench`` produces, per issue #1726's "a fixed
+#: relative tolerance, e.g. 1%, is a reasonable starting point". Exact
+#: floating-point equality is not the bar: re-running ngspice on a different
+#: machine/version can perturb the last few significant digits without the
+#: underlying circuit having drifted at all.
+_RECHECK_RELATIVE_TOLERANCE = 0.01
+
+
+def _sim_candidate_values(report: dict[str, Any]) -> set[float]:
+    """Every numeric value a fresh :func:`~klayout_tools.sim.run_sim` report
+    could plausibly correspond to a recorded ``measured.figures[].value``.
+
+    A KB figure's recorded value is not necessarily *the* raw value of a
+    same-named measurement -- e.g. ``vref_min_v``/``vref_max_v`` are the
+    min/max of one measurement's value across a corner sweep, and a
+    ``freq_hz`` figure alongside a ``period_s`` one is its reciprocal, not a
+    distinct measurement (see ``kb/entries/rc-relaxation-oscillator.json`` /
+    ``sky130-bandgap-reference.json`` for real examples of both). Rather than
+    require a schema change linking each figure to the exact
+    measurement/aggregation that produced it, the candidate pool is every
+    individual per-corner measurement value, every measurement's rolled-up
+    ``worst_case.value``, and the reciprocal of each of those (covering the
+    period/frequency duality) -- a figure "matches" this run when its
+    recorded value is within tolerance of *any* candidate.
+    """
+    values: set[float] = set()
+    for corner in report.get("corners") or []:
+        for measurement in corner.get("measurements") or []:
+            value = measurement.get("value")
+            if value is not None:
+                values.add(float(value))
+    for measurement in report.get("measurements") or []:
+        worst_case = measurement.get("worst_case")
+        if worst_case is not None and worst_case.get("value") is not None:
+            values.add(float(worst_case["value"]))
+    values |= {1.0 / value for value in values if value != 0.0}
+    return values
+
+
+def _sim_error_diagnostics(report: dict[str, Any], *, limit: int = 3) -> str:
+    """A short, human-readable summary of why a fresh
+    :func:`~klayout_tools.sim.run_sim` report carries no usable values --
+    the ``severity == "error"`` diagnostics its corners recorded, as
+    ``"<code>: <message>"``, at most ``limit`` of them.
+
+    ``run_sim`` does not raise for a corner that times out or whose
+    ``.meas`` statements produce nothing: it returns a report with
+    ``status == "error"`` and the reason in ``corners[].diagnostics``. Without
+    surfacing that reason, a nightly ``--recheck-measured`` failure reads only
+    as "no values to compare against", which is true but not actionable -- the
+    operator still has to re-run the testbench by hand to learn that (say) the
+    request's own ``options.timeout_s`` is smaller than the analysis takes on
+    the runner.
+    """
+    messages: list[str] = []
+    for corner in report.get("corners") or []:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("severity") != "error":
+                continue
+            code = diagnostic.get("code", "error")
+            message = diagnostic.get("message", "")
+            entry = f"{code}: {message}" if message else str(code)
+            if entry not in messages:
+                messages.append(entry)
+    if not messages:
+        return ""
+    shown = messages[:limit]
+    suffix = (
+        f" (+{len(messages) - len(shown)} more)" if len(messages) > len(shown) else ""
+    )
+    return "; ".join(shown) + suffix
+
+
+def _closest_relative_diff(value: float, candidates: set[float]) -> float | None:
+    """The smallest relative difference between ``value`` and any of
+    ``candidates``, or ``None`` when ``candidates`` is empty (nothing to
+    compare against)."""
+    if not candidates:
+        return None
+    if value == 0.0:
+        return min(abs(candidate) for candidate in candidates)
+    return min(abs(candidate - value) / abs(value) for candidate in candidates)
+
+
+def _recheck_measured_errors(
+    entry: dict[str, Any],
+    repo_root: Path,
+    *,
+    tolerance: float = _RECHECK_RELATIVE_TOLERANCE,
+    sim_cache: dict[str, dict[str, Any] | SimError] | None = None,
+) -> list[str]:
+    """Re-run every distinct ``measured.figures[].testbench`` referenced by
+    ``entry`` via :func:`~klayout_tools.sim.run_sim` and flag any figure
+    whose recorded ``value`` no longer matches the fresh run within
+    ``tolerance`` (see :func:`_sim_candidate_values` for what "matches"
+    means) -- the ``--recheck-measured`` extension of ``klt kb validate``
+    (issue #1726), which otherwise only checks that the ``testbench`` path
+    exists (:func:`_measured_errors`).
+
+    A figure whose ``testbench`` is missing, absolute, or escapes the repo is
+    silently skipped here -- :func:`_measured_errors` already reports that as
+    an error, and there is nothing to re-run. ``sim_cache`` -- keyed by
+    ``testbench`` path, populated across the whole ``validate_entries`` run
+    when passed in -- avoids re-running the same testbench once per figure
+    (e.g. ``period_s``/``freq_hz`` sharing one testbench) or once per entry
+    when more than one entry happens to reference the same testbench.
+    """
+    measured = entry.get("measured")
+    if not measured:
+        return []
+    if sim_cache is None:
+        sim_cache = {}
+
+    errors: list[str] = []
+    for index, figure in enumerate(measured.get("figures") or []):
+        rel_path = figure.get("testbench")
+        if not rel_path:
+            continue
+        candidate_path = Path(rel_path)
+        if candidate_path.is_absolute() or ".." in candidate_path.parts:
+            continue
+        abs_path = repo_root / candidate_path
+        if not abs_path.is_file():
+            continue
+
+        name = figure.get("name", "?")
+        label = f"measured/figures/{index}/{name}"
+
+        if rel_path not in sim_cache:
+            try:
+                sim_cache[rel_path] = run_sim(str(abs_path))
+            except SimError as exc:
+                sim_cache[rel_path] = exc
+        result = sim_cache[rel_path]
+
+        if isinstance(result, SimError):
+            errors.append(
+                f"{label}: klt sim {rel_path} failed to reproduce this "
+                f"testbench: {result}"
+            )
+            continue
+
+        candidates = _sim_candidate_values(result)
+        diff = _closest_relative_diff(float(figure["value"]), candidates)
+        if diff is None:
+            diagnostics = _sim_error_diagnostics(result)
+            detail = f" ({diagnostics})" if diagnostics else ""
+            errors.append(
+                f"{label}: klt sim {rel_path} produced no measurement "
+                f"values to recheck this figure against{detail}"
+            )
+        elif diff > tolerance:
+            errors.append(
+                f"{label}: recorded value {figure['value']!r} has drifted "
+                f"{diff:.2%} from the closest value klt sim {rel_path} "
+                f"produces now (tolerance {tolerance:.0%})"
+            )
+    return errors
+
+
 def _entry_errors(
-    path: Path, validator: jsonschema.protocols.Validator, repo_root: Path
+    path: Path,
+    validator: jsonschema.protocols.Validator,
+    repo_root: Path,
+    *,
+    recheck_measured: bool = False,
+    sim_cache: dict[str, dict[str, Any] | SimError] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     try:
         entry = _load_entry(path)
@@ -335,12 +504,17 @@ def _entry_errors(
 
     errors.extend(_artifact_errors(entry, repo_root))
     errors.extend(_measured_errors(entry, repo_root))
+    if recheck_measured:
+        errors.extend(_recheck_measured_errors(entry, repo_root, sim_cache=sim_cache))
 
     return entry, errors
 
 
 def validate_entries(
-    root: Path | None = None, repo_root: Path | None = None
+    root: Path | None = None,
+    repo_root: Path | None = None,
+    *,
+    recheck_measured: bool = False,
 ) -> dict[str, Any]:
     """Validate every entry: well-formed JSON, conforms to
     ``kb/schema/entry.schema.json``, ``id`` matches its filename stem, and
@@ -353,6 +527,15 @@ def validate_entries(
     at the top level). Pass it explicitly when the KB root is not a direct
     child of the tree the artifacts live in — e.g. a test that builds a
     throwaway ``kb/`` beside a throwaway ``examples/``.
+
+    ``recheck_measured`` (issue #1726, ``klt kb validate --recheck-measured``)
+    additionally re-runs every distinct ``measured.figures[].testbench`` via
+    ``klt sim`` and flags a figure whose recorded ``value`` has drifted from
+    what that testbench now produces (see :func:`_recheck_measured_errors`).
+    This is expensive (every measured entry's testbench is actually
+    simulated) and never runs by default -- it is the check the nightly
+    ``kb-drift-canary`` CI workflow opts into, not the plain ``klt kb
+    validate`` path/schema check ``ci.yml``'s ``test`` job runs on every PR.
 
     Never raises for entry-level problems (they show up as structured
     per-entry errors in the returned payload, per the issue's spec); still
@@ -367,9 +550,16 @@ def validate_entries(
     validator = validator_cls(schema)
 
     repo_root = repo_root if repo_root is not None else root.parent
+    sim_cache: dict[str, dict[str, Any] | SimError] = {}
     results = []
     for path in _entry_paths(root):
-        _entry, errors = _entry_errors(path, validator, repo_root)
+        _entry, errors = _entry_errors(
+            path,
+            validator,
+            repo_root,
+            recheck_measured=recheck_measured,
+            sim_cache=sim_cache,
+        )
         results.append({"id": path.stem, "valid": not errors, "errors": errors})
 
     return {
