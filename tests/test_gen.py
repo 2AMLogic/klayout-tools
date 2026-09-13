@@ -4969,6 +4969,137 @@ def test_sg13g2_res_array_unrecognised_flavor_error_lists_all_three(
     assert "supported flavours: generic, rhigh, rppd" in message
 
 
+# --- res_array metal-layer resistors on sg13g2 (issue #1758) ------------------ #
+
+#: One `(metal_level, device_class, sheet_rho_ohm_sq)` triple per sg13g2
+#: drawn metal-resistor device (`klayout_tools.decks.sg13g2.EXTRACTION_DECK
+#: .resistors`) -- mirrors sky130's own `_METAL_RES_LEVELS` table
+#: (`test_res_array_metal_level_draws_expected_device_class` above), scoped
+#: to the two levels this family's extraction deck actually recognises
+#: (`res_metal3`..`res_topmetal2` are still unrecognised -- see
+#: `_PDK_METAL_RES_LEVELS`'s own sg13g2 comment).
+_SG13G2_METAL_RES_LEVELS = (
+    (1, "res_metal1", 0.110),
+    (2, "res_metal2", 0.088),
+)
+
+
+@pytest.mark.parametrize(
+    ("level", "device_class", "sheet_rho"), _SG13G2_METAL_RES_LEVELS
+)
+def test_sg13g2_res_array_metal_level_draws_expected_device_class(
+    tmp_path, sg13g2_pdk_root, level, device_class, sheet_rho
+):
+    """`metal_level=1`/`2` (issue #1758) draws sg13g2's drawn metal-resistor
+    family -- `res_metal1`/`res_metal2` -- instead of `res_array`'s original
+    poly body: the output must pass `klt drc --deck sg13g2` cleanly and
+    round-trip through `klt extract --deck sg13g2` as exactly the expected
+    device class with `r_ohm = length_um / width_um * sheet_rho`."""
+    length_um = 4.0
+    width_um = 1.0
+    output = tmp_path / f"res_array_sg13g2_metal_m{level}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "length_um": length_um,
+                "width_um": width_um,
+                "num": 1,
+                "dummy": 0,
+                "metal_level": level,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    assert report["drc_hints"]["matched_group_id"] == "res_array:1"
+
+    drc_report = run_drc(str(output), "sg13g2")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    extract_report = run_extract(str(output), "sg13g2")
+    assert extract_report["device_counts"] == {device_class: 1}
+    (device,) = extract_report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(length_um / width_um * sheet_rho)
+
+
+def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
+    tmp_path, sg13g2_pdk_root
+):
+    """Omitting `metal_level` (or passing `metal_level=0` explicitly) must
+    reproduce `res_array`'s original poly-body geometry exactly on sg13g2
+    too -- the feature is purely additive."""
+    output_default = tmp_path / "res_array_sg13g2_metal_default.gds"
+    report_default = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"num": 3, "dummy": 1},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_explicit = tmp_path / "res_array_sg13g2_metal_level0.gds"
+    report_explicit = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"num": 3, "dummy": 1, "metal_level": 0},
+            "options": {"output": str(output_explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_explicit)
+    assert report_default["ports"] == report_explicit["ports"]
+
+    extract_report = run_extract(str(output_default), "sg13g2")
+    # `>= 3` (not `== 3`, unlike sky130's own version of this test above):
+    # sg13g2's `_PDK_ROLE_LAYERS` entry declares no `"dummy"` role layer at
+    # all (a pre-existing gap, out of this issue's scope -- see
+    # `test_sg13g2_res_array_default_params_recognised_as_rsil`'s own
+    # `> 0`, not `== num`, assertion above for the same reason), so this
+    # family's dummy units are not suppressed by `klt extract` and count as
+    # ordinary `"rsil"` devices alongside the `num` real ones.
+    assert extract_report["device_counts"].get("rsil", 0) >= 3
+
+
+def test_sg13g2_res_array_metal_level_3_rejected(tmp_path, sg13g2_pdk_root):
+    """sg13g2 only exposes `metal_level` `1`/`2` (`res_metal1`/`res_metal2`)
+    -- `res_metal3`..`res_topmetal2` are still unrecognised by this family's
+    extraction deck (see `_PDK_METAL_RES_LEVELS`'s own sg13g2 comment), so
+    `metal_level=3` must fail clearly rather than silently drawing an
+    unrecognised device."""
+    with pytest.raises(GenError, match="not a recognised metal-resistor level"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "params": {"metal_level": 3},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_sg13cmos5l_res_array_metal_level_rejected(tmp_path, sg13cmos5l_pdk_root):
+    """sg13cmos5l is deliberately out of this issue's scope (issue #1758's
+    own "Notes"): its extraction deck recognises no metal resistor at all
+    (unlike sg13g2's `res_metal1`/`res_metal2`), so a `metal_level` request
+    against it must keep failing clearly rather than resolve through
+    sg13g2's newly-populated table by name-prefix coincidence."""
+    with pytest.raises(GenError, match="metal_level"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {
+                    "variant": _SG13CMOS5L_VARIANT,
+                    "root": str(sg13cmos5l_pdk_root),
+                },
+                "params": {"metal_level": 1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
 def test_sg13g2_guard_ring_extracts_no_recognised_device(tmp_path, sg13g2_pdk_root):
     """`guard_ring`'s tap ring draws on `active` (sg13g2 declares no distinct
     tap mask, see `_PDK_ROLE_LAYERS`'s own `"tap"` entry) but is not itself a

@@ -1742,36 +1742,58 @@ def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
 #: ``res_generic_m1``..``res_generic_m5``,
 #: ``klayout_tools.decks.sky130.EXTRACTION_DECK.resistors``) swaps the body
 #: layer itself -- ``metal_level=0`` (the default) leaves ``res_array``'s
-#: original poly-body geometry byte-for-byte unchanged; ``1``..``5`` instead
-#: draw the body on ``metN.drawing``, its own resistor-ID marker
+#: original poly-body geometry byte-for-byte unchanged; sky130's ``1``..``5``
+#: instead draw the body on ``metN.drawing``, its own resistor-ID marker
 #: (``metN.res``), and an end via/landing-pad stack connecting *down* to the
 #: metal level immediately below (``li1`` for ``met1``, ``metN-1`` otherwise)
 #: -- the same "contact + local-metal landing pad at each end" shape
 #: :func:`_res_unit_layout` already draws for the poly case, just relocated
 #: one or more levels up the stack. Landing on the layer below (never above)
-#: keeps a single, uniform code path across all five levels: sky130 always has
-#: a metal level immediately below (down to ``li1``), while only ``met1``..
-#: ``met4`` have one immediately above.
+#: keeps a single, uniform code path across all five sky130 levels: sky130
+#: always has a metal level immediately below (down to ``li1``), while only
+#: ``met1``..``met4`` have one immediately above.
+#:
+#: ``sg13g2`` (issue #1758) picks the *opposite* landing direction -- up, not
+#: down -- because it has no sky130-``li1`` analogue: sg13g2's ``contact``
+#: role (``Cont`` 6/0, ``EXTRACTION_DECK.contact``) lands ``Metal1`` on
+#: poly/active, not on another routable metal, so there is no metal level
+#: below ``Metal1`` for a level-1 unit's end via to land on. Landing up
+#: instead (``Metal1`` -> ``Via1`` -> ``Metal2``, ``Metal2`` -> ``Via2`` ->
+#: ``Metal3``) also matches this deck's own single-sided via-enclosure
+#: convention: every ``vian.drc``-derived enclosure rule in
+#: ``klayout_tools.decks.sg13g2`` (``metal1.enclosing.via1.1``,
+#: ``metal2.enclosing.via2.1``, ...) checks only the *lower* metal's
+#: enclosure of the via, exactly the ``body``-encloses-``via`` relationship a
+#: landing-up level already draws, with no matching "upper metal encloses
+#: via" rule ever modelled to check the ``landing`` side against.
 #:
 #: Each entry's layer/datatype pairs are the *same* ones
-#: ``klayout_tools.decks.sky130.EXTRACTION_DECK`` already declares -- never a
-#: second, private map:
+#: ``klayout_tools.decks.sky130``/``.sg13g2.EXTRACTION_DECK`` already
+#: declare -- never a second, private map:
 #:
 #: - ``body``/``marker`` -- the exact ``ResistorDevice.body``/``.marker`` pair
-#:   for that level's ``res_generic_mN`` entry.
-#: - ``via`` -- ``EXTRACTION_DECK.vias[N - 1]``, the via connecting ``metN``
-#:   down to the level below (``mcon`` for ``met1``; ``via``/``via2``/
-#:   ``via3``/``via4`` for ``met2``..``met5``).
-#: - ``landing`` -- ``EXTRACTION_DECK.metals[N - 1]``, the conductor that via
-#:   lands on (``li1`` for ``met1``; ``met1``..``met4`` for ``met2``..
-#:   ``met5``).
+#:   for that level's device (sky130's ``res_generic_mN``; sg13g2's
+#:   ``res_metal1``/``res_metal2``).
+#: - ``via`` -- sky130: ``EXTRACTION_DECK.vias[N - 1]``, the via connecting
+#:   ``metN`` down to the level below (``mcon`` for ``met1``; ``via``/
+#:   ``via2``/``via3``/``via4`` for ``met2``..``met5``). sg13g2: the via
+#:   connecting the body level up to the landing level (``Via1`` for
+#:   ``Metal1``, ``Via2`` for ``Metal2``).
+#: - ``landing`` -- sky130: ``EXTRACTION_DECK.metals[N - 1]``, the conductor
+#:   that via lands on (``li1`` for ``met1``; ``met1``..``met4`` for
+#:   ``met2``..``met5``). sg13g2: ``EXTRACTION_DECK.metals[N]`` (the level
+#:   *above* the body -- ``Metal2`` for ``Metal1``, ``Metal3`` for
+#:   ``Metal2``).
 #:
-#: Only ``sky130`` is populated today -- neither gf180mcu's nor sg13g2's
-#: curated decks declare a drawn metal-resistor device class (see
-#: ``klayout_tools.decks.gf180mcu``/``.sg13g2``'s own ``resistors`` tuples), so
-#: a ``metal_level`` request against either raises :class:`GenError` via
-#: :func:`_metal_res_layers` rather than silently drawing unrecognised
-#: geometry.
+#: ``sky130`` and ``sg13g2`` are populated today. ``gf180mcu`` is not yet --
+#: its curated deck *does* now declare drawn metal-body resistors (``rm1``/
+#: ``rm2``/``rm3``, issue #1640) but populating its own
+#: ``_PDK_METAL_RES_LEVELS`` entry (and, unlike sg13g2's Metal1/Metal2-only
+#: increment, deciding whether its own top-metal ``tm6k``/``tm9k``/``tm11k``/
+#: ``tm30k`` family belongs in the same table) is tracked separately by issue
+#: #1731 -- a ``metal_level`` request against it still raises
+#: :class:`GenError` via :func:`_metal_res_layers` rather than silently
+#: drawing unrecognised geometry.
 _PDK_METAL_RES_LEVELS: dict[str, dict[int, dict[str, tuple[int, int]]]] = {
     "sky130": {
         1: {
@@ -1804,6 +1826,38 @@ _PDK_METAL_RES_LEVELS: dict[str, dict[int, dict[str, tuple[int, int]]]] = {
             "via": (71, 44),  # via4.drawing (met4<->met5)
             "landing": (71, 20),  # met4.drawing
         },
+    },
+    "sg13g2": {
+        # klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors' res_metal1
+        # (issue #1235), landing *up* through Via1 to Metal2 -- see this
+        # table's own docstring above for why sg13g2 lands up rather than
+        # down like sky130.
+        1: {
+            "body": (8, 0),  # Metal1.drawing
+            "marker": (8, 29),  # Metal1.res
+            "via": (19, 0),  # Via1.drawing (Metal1<->Metal2)
+            "landing": (10, 0),  # Metal2.drawing
+        },
+        # EXTRACTION_DECK.resistors' res_metal2 (issue #1235), landing up
+        # through Via2 to Metal3.
+        2: {
+            "body": (10, 0),  # Metal2.drawing
+            "marker": (10, 29),  # Metal2.res
+            "via": (29, 0),  # Via2.drawing (Metal2<->Metal3)
+            "landing": (30, 0),  # Metal3.drawing
+        },
+        # res_metal3..res_topmetal2 are not declared here: EXTRACTION_DECK
+        # .resistors itself does not recognise them yet (see
+        # klayout_tools.decks.sg13g2's own module docstring, "Still
+        # unrecognised" -- Metal3-TopMetal2 sit above this deck's curated
+        # resistor coverage even though EXTRACTION_DECK.metals/.vias reach
+        # TopMetal2, issue #1243). Adding levels 3-7 here ahead of that
+        # extraction-side recognition would let `res_array` draw a device
+        # `klt extract --deck sg13g2` cannot classify as anything but plain
+        # interconnect -- the same "recognised but not drawable" bar this
+        # table's own family-level GenError already enforces the other way
+        # around (see :func:`_metal_res_layers`), applied per-level instead
+        # of per-family.
     },
 }
 
@@ -1900,6 +1954,27 @@ def _metal_res_layers(family: str, level: int) -> dict[str, tuple[int, int]]:
 #:   entire unit including both end vias) -- 1.6um binds.
 #: - ``body_width_min_um`` 1.6um -- ``met5.width.1`` (``sky130A_mr.drc`` rule
 #:   ``m5.1``).
+#:
+#: sg13g2 (issue #1758) needs no entry for either of its two levels either,
+#: the same "generic floor already wins" reason as sky130's levels 1-4:
+#: every rule `klayout_tools.decks.sg13g2` declares for the Metal1/Via1/
+#: Metal2/Via2/Metal3 stack those two levels draw on is looser than the
+#: generic constants --
+#:
+#: - ``via_min_w_um``: ``via1.width.1``/``via2.width.1`` are both 0.19um,
+#:   under :data:`CONTACT_SIZE_UM` (0.22um).
+#: - ``via_enclosure_min_um``: ``metal1.enclosing.via1.1``/
+#:   ``metal2.enclosing.via2.1`` are 0.01um/0.005um, under
+#:   :data:`ENCLOSURE_MARGIN_UM` (0.1um) -- sg13g2's own via-enclosure rules
+#:   check only the *lower* metal (this table's ``body`` side for a
+#:   landing-up level, see :data:`_PDK_METAL_RES_LEVELS`'s own docstring), so
+#:   there is no second, ``landing``-side enclosure rule to compare against
+#:   at all.
+#: - ``via_space_min_um``: the stricter of ``via1.space.1``/``via2.space.1``
+#:   (0.22um both) and ``metal1.space.1``/``metal2.space.1`` (0.18um/0.21um)
+#:   is 0.22um, under :data:`MIN_SAME_LAYER_SPACING_UM` (0.4um).
+#: - ``body_width_min_um``: ``metal1.width.1``/``metal2.width.1`` are
+#:   0.16um/0.20um, under :data:`UNIT_MIN_W_UM` (0.42um).
 _PDK_METAL_RES_LEVEL_MIN_UM: dict[str, dict[int, dict[str, float]]] = {
     "sky130": {
         5: {
@@ -7225,10 +7300,13 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
             "(poly body + contact + local-metal pads at both ends) with "
             "dummy elements at each end, per the sky130-bandgap-reference KB "
             "entry's resistor-array layout idiom -- family 2. "
-            "params.metal_level (1..5 on sky130) instead draws that level's "
-            "drawn metal-layer resistor (met1..met5's res_generic_mN, issue "
-            "#1639) -- body + resistor-ID marker + an end via/landing-pad "
-            "stack down to the metal level below."
+            "params.metal_level (1..5 on sky130, 1..2 on sg13g2) instead "
+            "draws that level's drawn metal-layer resistor (sky130's "
+            "met1..met5 res_generic_mN, issue #1639; sg13g2's Metal1/Metal2 "
+            "res_metal1/res_metal2, issue #1758) -- body + resistor-ID "
+            "marker + an end via/landing-pad stack to an adjacent metal "
+            "level (down on sky130, up on sg13g2 -- see "
+            "_PDK_METAL_RES_LEVELS's own docstring)."
         ),
         dbu=0.001,
         validate=_res_array_validate,
