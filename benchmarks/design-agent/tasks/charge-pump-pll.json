@@ -1,0 +1,30 @@
+{
+  "id": "charge-pump-pll",
+  "title": "Charge-pump phase-locked loop (PFD + charge pump + VCO + feedback divider)",
+  "tier": "hard",
+  "pdk": "sky130",
+  "description": "Assemble a complete charge-pump PLL as one closed-loop netlist -- not separately-tested sub-blocks -- from a tri-state phase-frequency detector (PFD) and charge pump (the topology this benchmark's own pfd-charge-pump-tri-state KB entry documents), a passive 2nd-order loop filter, this benchmark's own relaxation VCO (relaxation-vco's vco_core design block, reused unmodified and driven by the loop filter instead of a fixed control voltage), and a divide-by-N feedback divider closing the loop from the VCO's output back to the PFD's second input. The design must acquire lock -- from a control-voltage initial condition well away from the eventual lock point -- within a declared settling time, and hold both frequency lock (the divided VCO frequency matching the reference frequency) and phase lock (the reference-to-feedback edge timing offset staying within a declared tolerance band) at two separate, widely-spaced checkpoints after that settling time, across the same sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C temperature matrix the other hard-tier tasks in this family use -- the third and final member of the oscillator/VCO/PLL family (issue #1735), completing the follow-up work opened by #1743 and tracked by #1752.",
+  "block_spec": {
+    "spec_class": "charge-pump phase-locked loop (PFD + charge pump + loop filter + VCO + feedback divider)",
+    "io_nodes": ["vdd", "gnd", "vctrl", "vout", "divclk_a"],
+    "target_specs": {
+      "reference_frequency_hz": 150000,
+      "divider_ratio": 4,
+      "locked_vco_frequency_hz": 600000,
+      "locked_period_s_min": 6.466667e-6,
+      "locked_period_s_max": 6.866667e-6,
+      "phase_error_s_min": -5e-7,
+      "phase_error_s_max": 5e-7,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/charge-pump-pll/eval_descriptor.json",
+    "netlists": ["benchmarks/design-agent/reference/charge-pump-pll/pll.spice"],
+    "notes": "Behavioral (PDK-model-free) realisation, same convention as this family's other two tasks: the VCO is relaxation-vco's own vco_core subcircuit, reused verbatim (only its control-voltage source is swapped for the loop filter's output) and locked at 600 kHz -- inside that block's own characterized 300 kHz-900 kHz range, so this task never extrapolates past a previously-verified operating point. The tri-state PFD and /4 feedback divider are built from ngspice's own XSPICE mixed-signal primitives (d_dff/d_and/adc_bridge/dac_bridge), not a device-level standard-cell netlist -- the PFD/charge-pump KB entry's own pdk_portability note already treats the PFD's flip-flop/AND-gate logic as fully standard-cell-portable and out of scope for transistor-level sizing, so a behavioral digital realization here draws the same idealized-front-end/real-device-physics line the KB entry itself draws. The charge pump is a single ideal behavioral current source/sink gated by the PFD's dac_bridge-converted UP/DOWN levels (no mirror mismatch, no charge injection modeled) -- not the KB entry's own device-level sky130 UP/DOWN current-source/sink netlist (examples/kb/pfd-charge-pump-tri-state/charge_pump.spice), which is sky130-specific per that entry's own pdk_portability note and out of scope for a PDK-model-free benchmark netlist. The loop filter (a standard passive 2nd-order charge-pump-PLL filter: a dominant integrating capacitor in parallel with a series R+C zero-forming branch) was tuned by direct transient simulation rather than the linearized continuous-loop-gain formula alone -- a divide-by-4, tri-state-PFD-sampled loop this close to its own reference rate settles measurably faster than the continuous small-signal approximation predicts once enough phase margin is added, so the final R1/C1/C2 values were arrived at empirically and verified to acquire lock (from a control-voltage initial condition of 0.1 V, well below the ~0.50-0.68 V lock point the corner matrix produces) within a few hundred microseconds and hold sub-140 ns steady-state phase error at both measurement checkpoints (696.7 us and 1363.3 us into a 1500 us transient run) across the full 18-point PVT corner matrix -- no reduction of that matrix was needed. A `.meas ... PARAM=(...)` expression that references an earlier `.meas`'s own result (the pattern this benchmark's other two tasks use for their period-to-frequency derivation) was found to silently fail once XSPICE mixed-signal ('A') devices are present anywhere in the netlist (verified against ngspice-46: the derived value computes correctly internally -- visible in the diagnostic 'insertnumber: fails' trailer -- but is reported as a missing measurement); this task's measurements are therefore expressed as direct `TRIG`/`TARG` delay/period measurements (which are unaffected) rather than chained `WHEN` + `PARAM` pairs, and report period (seconds) rather than a derived frequency (Hz) for the same reason. The two phase-error checkpoints are anchored at (n-0.5) reference periods (a fixed `.param`-only expression, not a chained measurement) rather than a literal wall-clock time, so the search window for each corner's nearest reference/feedback edge pair starts deterministically mid-cycle and never straddles the near-simultaneous edge pair itself (which would otherwise report a spurious near-full-period offset instead of the true near-zero phase error -- an artifact encountered and discarded during development, not a hazard in the shipped reference)."
+  },
+  "source": {
+    "citation": "F. M. Gardner, \"Charge-pump phase-lock loops,\" IEEE Transactions on Communications, vol. COM-28, no. 11, pp. 1849-1858, Nov. 1980.",
+    "url": "https://doi.org/10.1109/TCOM.1980.1094619"
+  }
+}

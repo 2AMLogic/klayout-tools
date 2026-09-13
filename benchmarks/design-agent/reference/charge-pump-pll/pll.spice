@@ -1,0 +1,152 @@
+* Reference solution for
+* benchmarks/design-agent/tasks/charge-pump-pll.json.
+*
+* Closed-loop charge-pump PLL: tri-state PFD + charge pump (topology from
+* kb/entries/pfd-charge-pump-tri-state.json), a passive 2nd-order loop
+* filter, this benchmark's own relaxation VCO
+* (benchmarks/design-agent/reference/relaxation-vco/vco.spice's vco_core
+* subcircuit, reproduced verbatim below -- see that file's own header for
+* the VCO topology writeup), and a /4 feedback divider closing the loop
+* back to the PFD -- the third and final member of the oscillator/VCO/PLL
+* family (issue #1735), the remainder of #1743 tracked by #1752.
+*
+* Digital blocks (PFD flip-flops, AND-gate reset, and the /4 divider) are
+* built from ngspice's own XSPICE mixed-signal primitives
+* (d_dff/d_and/adc_bridge/dac_bridge) rather than a device-level standard-
+* cell netlist: the KB entry's own pdk_portability note already treats the
+* PFD's flip-flop/AND-gate logic as fully standard-cell-portable digital
+* logic out of scope for transistor-level sizing, so a behavioral digital
+* realization here is the same "idealized front end, real VCO physics"
+* split the KB entry itself draws -- consistent with this benchmark's other
+* hard-tier tasks (rc-relaxation-oscillator, relaxation-vco) modeling
+* comparators/current sources behaviorally rather than at the device level.
+* XSPICE's d_dff pin order is (DATA CLK SET RESET -> Q QBAR); a toggle
+* flip-flop (D tied to QBAR) divides its clock by 2, and two cascaded
+* toggle flip-flops divide by 4.
+*
+* The charge pump is a single behavioral B-source current sink/source
+* (Bcp) gated by the PFD's dac_bridge-converted UP/UPN and DOWN/DN analog
+* levels -- an idealized ideal-switch charge pump (no mirror mismatch, no
+* charge injection), not the KB entry's own device-level UP/DOWN
+* current-source/sink netlist (examples/kb/pfd-charge-pump-tri-state/
+* charge_pump.spice), which is sky130-specific per that entry's own
+* pdk_portability note and out of scope for this PDK-model-free benchmark
+* (see this task's own reference.notes for the modeling-shortcut writeup).
+*
+* Loop filter: a standard passive 2nd-order charge-pump-PLL filter (C2
+* dominant integrating cap in parallel with an R1+C1 zero-forming branch,
+* both returned to ground from the charge-pump/VCO-control node) -- the
+* textbook topology from the same F. M. Gardner citation this task and the
+* KB entry both use (see this task's own source.citation).
+*
+* Testbench shape: reference clock Vref at fref, VCO free-running from an
+* arbitrary control-voltage IC well below lock (C2's own IC=0.1V, vs. an
+* expected ~0.5-0.7V lock point across corners) so the transient run
+* exercises real closed-loop acquisition, not just steady-state ripple.
+* Circuit body only: no .tran/.meas/.end cards (klt sim generates those
+* from sim_request.json's own analysis/measurements fields -- see
+* docs/cli/sim.md, "Netlist convention: a circuit body, not a full deck").
+* corner_cap / corner_iref come from models.lib.
+
+.param vdd=1.8
+.param vref_nom=0.9
+.param line_reg=0.002
+
+* VCO parameters, identical to relaxation-vco/vco.spice's own .param block
+* (cosc/kvco unmodified -- this is the same vco_core design block, reused
+* as-is with its control input driven by the loop filter instead of a
+* fixed DC source).
+.param cosc=10p
+.param kvco=18u
+
+* Reference frequency and /4 divider ratio: fref=150 kHz, N=4, so the VCO
+* locks at fvco=600 kHz -- inside relaxation-vco's own characterized
+* 300 kHz-900 kHz control range (vctrl roughly 0.3-0.9 V nominal), so this
+* task reuses that block entirely inside its own verified operating
+* window rather than extrapolating past it.
+.param fref=150k
+* Charge-pump current.
+.param icp=20u
+* Passive 2nd-order loop filter (C2 dominant integrator; R1+C1 zero
+* branch) -- hand-tuned by direct transient simulation (not the linearized
+* continuous-loop-gain formula alone: a divide-by-4, tri-state-PFD-sampled
+* loop this close to its reference rate settles measurably faster than the
+* continuous approximation predicts once R1/C1 add enough phase margin;
+* see this task's own reference.notes) to acquire lock within a few
+* hundred microseconds and hold sub-100 ns steady-state phase error across
+* the full PVT corner matrix.
+.param c2=0.5n
+.param c1=1n
+.param r1=20k
+
+Vdd vdd 0 DC {vdd}
+
+* Same stand-in bandgap-derived voltage reference as the other two
+* oscillator/VCO tasks (kb/entries/sky130-bandgap-reference.json).
+Bref vref 0 V = {vref_nom} * (1 + {line_reg} * (v(vdd) - 1.8))
+
+* --- VCO core: verbatim copy of relaxation-vco/vco.spice's vco_core
+* subcircuit (pins: vctrl, vout, vdd, gnd, vref) -- see that file's own
+* header for the full topology writeup (behavioral comparator + linear
+* voltage-to-current charge/discharge gain). Reproduced here rather than
+* included via a shared library file, matching this benchmark's existing
+* one-self-contained-netlist-per-task convention (see e.g.
+* differential-pair's two sim_request-only variants of one file, vs. no
+* precedent anywhere in this benchmark for a netlist spanning two files).
+.subckt vco_core vctrl vout vdd gnd vref
+Cosc cap gnd {cosc*corner_cap} tc1=60u
+Rleak cap gnd 1G
+Biosc gnd cap I = {kvco * corner_iref} * v(vctrl) * tanh(1000 * (v(vp) - v(cap)))
+Bcmp vc gnd V = v(vref) * (1 + tanh(1000 * (v(vp) - v(cap))))
+Rcmp vc vout 1k
+Ccmp vout gnd 1p
+R3 vout vp 100k
+R4 vp vref 100k
+Istart gnd cap PWL(0 0 1n 10u 50n 10u 51n 0)
+.ends vco_core
+
+Xvco vctrl vout vdd 0 vref vco_core
+
+* --- Digital blocks: XSPICE mixed-signal primitives ---
+.model adcb adc_bridge(in_low={vdd/2} in_high={vdd/2})
+.model dacb dac_bridge(out_low=0 out_high={vdd} out_undef={vdd/2} t_rise=1n t_fall=1n)
+.model dff1 d_dff(clk_delay=0.2n set_delay=0.2n reset_delay=0.2n ic=0)
+.model and1 d_and(rise_delay=0.2n fall_delay=0.2n)
+
+* Reference clock (fref) and a fixed digital-high rail (D input of both
+* PFD flip-flops is tied high, per the tri-state PFD's own topology --
+* each flip-flop just latches "1" on its own clock's rising edge until the
+* shared async reset clears it).
+Vref refclk 0 pulse(0 {vdd} 0 2n 2n {0.5/fref-2n} {1/fref})
+Vhigh dhigh 0 dc {vdd}
+
+a_adc_ref [refclk] [refclk_d] adcb
+a_adc_high [dhigh] [dhigh_d] adcb
+a_adc_vco [vout] [vco_d] adcb
+
+* --- /4 feedback divider: two cascaded toggle flip-flops (D=QBAR) ---
+adiv1 qb1_d vco_d 0 0 q1_d qb1_d dff1
+adiv2 qb2_d q1_d 0 0 divclk_d qb2_d dff1
+
+* --- Tri-state PFD: UP latches on refclk, DOWN latches on divclk, both
+* cleared by the AND-gate reset the instant both are high (the dead-zone-
+* cancellation reset this task's own PFD/charge-pump KB entry documents).
+apfd_up dhigh_d refclk_d 0 reset_d up_d upn_d dff1
+apfd_dn dhigh_d divclk_d 0 reset_d dn_d dnn_d dff1
+aand [up_d dn_d] reset_d and1
+
+a_dac_up [up_d] [up_a] dacb
+a_dac_dn [dn_d] [dn_a] dacb
+a_dac_div [divclk_d] [divclk_a] dacb
+
+* --- Charge pump: ideal current source/sink onto the loop-filter node,
+* gated by the PFD's dac_bridge-converted UP/DOWN analog levels. Node
+* order (0 vctrl) sources current INTO vctrl when UP is active (raising
+* the control voltage, per SPICE's "current flows from n+ through the
+* source to n-" convention) and sinks it when DOWN is active.
+Bcp 0 vctrl I = {icp} * (v(up_a)/{vdd}) - {icp} * (v(dn_a)/{vdd})
+
+* --- Passive 2nd-order loop filter ---
+C2 vctrl 0 {c2} IC=0.1
+R1 vctrl lf_a {r1}
+C1 lf_a 0 {c1}

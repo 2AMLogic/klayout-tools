@@ -1,0 +1,13 @@
+{
+  "gates": [
+    { "check": "sim", "name": "pll_lock_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.2.worst_case.margin",
+    "polarity": "maximize",
+    "name": "pll_phase_lock_margin_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": []
+}
