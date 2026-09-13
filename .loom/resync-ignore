@@ -132,6 +132,25 @@ scripts/tests/test-verdict-staleness-guard.sh
 scripts/dep-recheck-fingerprint.sh
 scripts/tests/test-dep-recheck-fingerprint.sh
 
+# #1749: champion-pr-merge.md carries a local-only propagation from a held
+# PR's `loom:operator` state onto the issue(s) it would close — when the
+# merge-risk hold (criterion #2) or the critical-file hold (criterion #3)
+# applies `loom:operator` to a PR, the linked issue(s) (via
+# `closingIssuesReferences`) are marked `loom:blocked` with a machine-
+# parseable `Blocked by #<PR>` comment, and the release paths remove it again.
+# Without this, the daemon's work-finder kept re-dispatching a no-op sweep on
+# the issue every cycle even though its sole open PR was already held for
+# human merge (`loom-daemon`'s `PARK_LABELS` hard-skips `loom:blocked`, but
+# had no signal that the issue was, transitively, also stuck on a human) —
+# confirmed recurring three times on issue #1651 / PR #1659 before this fix.
+# This was never upstreamed into rjwalters/loom's own champion-pr-merge.md /
+# label-state-machine.md templates, so an unpinned resync would silently drop
+# it — the same reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674.
+# If the upstream Loom project ever adopts an equivalent propagation, these
+# pins can be dropped and the files resynced normally.
+commands/loom/champion-pr-merge.md
+docs/label-state-machine.md
+
 # #1674: builder-pr.md carries a local-only "Quoting a `Closes #N`-shaped
 # example inside a PR body closes an UNRELATED issue" section (added after
 # the 2026-09-11 incident where PR #1671's inline-code-quoted illustrative
