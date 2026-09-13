@@ -1,0 +1,26 @@
+{
+  "gates": [
+    { "check": "sim", "name": "hysteresis_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.2.worst_case.margin",
+    "polarity": "maximize",
+    "name": "vhyst_v_worst_case_margin",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": [
+    {
+      "name": "vth_rising_v_worst_case",
+      "check": "sim",
+      "metric": "measurements.0.worst_case.value",
+      "args": { "request": "sim_request.json" }
+    },
+    {
+      "name": "vth_falling_v_worst_case",
+      "check": "sim",
+      "metric": "measurements.1.worst_case.value",
+      "args": { "request": "sim_request.json" }
+    }
+  ]
+}

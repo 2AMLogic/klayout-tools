@@ -1,0 +1,30 @@
+{
+  "id": "schmitt-trigger",
+  "title": "Inverting CMOS Schmitt trigger with output-driven feedback devices",
+  "tier": "medium",
+  "pdk": "sky130",
+  "description": "Design an inverting CMOS Schmitt trigger: a buffer whose rising-input switching threshold sits well above its falling-input threshold, so a slowly-moving or noisy input produces one clean output transition rather than a burst of them. Driven by a slow 0 -> 1.62 V -> 0 triangular ramp under transient analysis, and across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix, the input voltage at which the output falls must land in 0.8-1.5 V, the input voltage at which it rises again must land in 0.35-0.85 V, the gap between them (the hysteresis width) must be 0.30-0.80 V, and the output must still swing rail to rail. Unlike the amplifier tasks in this tier, the pass criterion is purely behavioral -- where the circuit switches, not what its operating point or small-signal gain is -- so a plain CMOS inverter (~0.002 V of hysteresis) and an under-sized-feedback variant (~0.09-0.12 V) both fail it while remaining perfectly functional inverters.",
+  "block_spec": {
+    "spec_class": "hysteretic comparator / input conditioning buffer",
+    "io_nodes": ["in", "out", "vdd", "gnd"],
+    "target_specs": {
+      "vth_rising_v": [0.8, 1.5],
+      "vth_falling_v": [0.35, 0.85],
+      "vhyst_v": [0.3, 0.8],
+      "vout_high_min_v": 1.55,
+      "vout_low_max_v": 0.05,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/schmitt-trigger/eval_descriptor.json",
+    "netlists": [
+      "benchmarks/design-agent/reference/schmitt-trigger/schmitt.spice"
+    ],
+    "notes": "Both trip points are read from a single transient ramp (the input voltage at the moment the output crosses 0.9 V on each edge); the hysteresis width itself is a derived `.meas tran ... param=` measurement over those two. The ramp's amplitude is a fixed 1.62 V rather than {vdd}, because `klt sim` applies a supply corner by `alter`ing the Vdd source at runtime and does not rewrite a PWL card's already-expanded `.param` values. Generic (non-PDK) NMOS *and* PMOS models stand in for sky130 devices -- this tier's models.lib adds the PMOS cards the easy tier never needed; see README.md's 'Known limitation' note."
+  },
+  "source": {
+    "citation": "The six-transistor CMOS Schmitt trigger is a standard digital/mixed-signal IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) medium-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

@@ -1,0 +1,58 @@
+* Reference solution for benchmarks/design-agent/tasks/schmitt-trigger.json.
+*
+* Classic six-transistor CMOS Schmitt trigger (inverting). Two series
+* stacks driven by the input -- MN1/MN2 pulling down, MP1/MP2 pulling up --
+* plus the two feedback devices that are the whole circuit:
+*
+*   MN3 (NMOS, gate on the output) holds the NMOS stack's internal node
+*   `na` up near Vdd-Vtn while the output is high, so the rising-input trip
+*   point is pushed ABOVE Vdd/2: MN1 has to fight MN3 before `na` can fall.
+*
+*   MP3 (PMOS, gate on the output) holds the PMOS stack's internal node
+*   `nb` down near |Vtp| while the output is low, so the falling-input trip
+*   point is pulled BELOW Vdd/2 for the mirror-image reason.
+*
+* The gap between those two trip points is the hysteresis this task gates
+* on, and it exists only because of MN3/MP3: delete them and the identical
+* stacks collapse into a plain CMOS inverter measuring ~2 mV of hysteresis
+* (numerical, not real). Shrink them to W=1u/2u and the hysteresis falls to
+* ~0.09-0.12 V. Both of those sizings fail this task's own gate, which is
+* the point -- the criterion is behavioral (where the circuit switches),
+* not a DC operating point any sizing would satisfy.
+*
+* Testbench: a slow triangular input ramp (0 -> 1.62 V -> 0 over 2 ms)
+* under transient analysis, so the rising-edge and falling-edge trip points
+* are both traversed in one run and can be read off as the input voltage at
+* the moment the output crosses 0.9 V. The ramp stops at 1.62 V (the lowest
+* supply corner) rather than at {vdd}, because `klt sim` applies a supply
+* corner by `alter`ing the Vdd source at runtime, which does NOT rewrite
+* the `.param vdd` a PWL card would have been expanded with -- driving the
+* input to a fixed 1.62 V keeps the stimulus at or below the rail in every
+* corner, and is still well above the highest trip point (~1.33 V).
+* CL is a small, physical load capacitance: it keeps the regenerative
+* output snap resolvable by the transient solver instead of a step between
+* solutions.
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md, "Netlist convention"). bench_nmos/bench_pmos come
+* from models.lib.
+
+.param vdd=1.8
+.param vin_hi=1.62
+.param tramp=1m
+.param cl=1p
+
+Vdd vdd 0 DC {vdd}
+Vin in 0 PWL(0 0 {tramp} {vin_hi} {2*tramp} 0)
+
+* --- NMOS pull-down stack + its output-driven feedback device ---
+MN1 na in 0 0 bench_nmos W=10u L=1u
+MN2 out in na 0 bench_nmos W=10u L=1u
+MN3 vdd out na 0 bench_nmos W=10u L=1u
+
+* --- PMOS pull-up stack + its output-driven feedback device ---
+MP1 nb in vdd vdd bench_pmos W=25u L=1u
+MP2 out in nb vdd bench_pmos W=25u L=1u
+MP3 0 out nb vdd bench_pmos W=25u L=1u
+
+CL out 0 {cl}

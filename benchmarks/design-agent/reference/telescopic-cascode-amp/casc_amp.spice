@@ -1,0 +1,70 @@
+* Reference solution for benchmarks/design-agent/tasks/telescopic-cascode-amp.json.
+*
+* Single-ended TELESCOPIC cascode gain stage: an NMOS common-source input
+* device (M1) with an NMOS cascode (M2) stacked directly on top of it, and
+* a PMOS cascode current-source load (M4 current source + M3 cascode)
+* stacked down from the supply -- "telescopic" precisely because the signal
+* current never leaves the M1->M2 stack (a folded cascode would instead
+* route it through an opposite-type device off a separate current-source
+* branch). Stacking both cascodes multiplies the output resistance by each
+* cascode device's own intrinsic gain, which is the whole point of the
+* topology and what this task's >= 85 dB gate is written to require: the
+* same stage with M2/M3 removed (plain common-source, same current, same
+* PMOS current-source load) measures ~46 dB here, far below the gate.
+*
+* Biasing, corner by corner:
+*   - Lfb closes a DC feedback loop from out back to the input gate (a
+*     short at DC, ~6e12 ohm at 1 kHz), so V(gate) = V(out) at DC and the
+*     stage self-biases to whatever Vgs M1 needs to carry the load branch's
+*     current -- no fixed external gate-bias generator that a Vt corner
+*     could push out of saturation. Cin AC-couples the stimulus in, so the
+*     AC drive never disturbs that operating point. Same trick as
+*     examples/kb/five-transistor-ota/ota_5t.spice's Lfb/Cfb pair, and the
+*     single-ended analogue of common-source-amp's Rf self-bias (a resistor
+*     is not usable here: any Rf small enough to bias would also swamp this
+*     stage's ~2e8 ohm output resistance at AC).
+*   - Mbn/Ibn set the NMOS cascode gate bias one Vgs above ground at a
+*     deliberately high overdrive (narrow device), so V(n1) lands ~0.1 V
+*     above M1's own Vdsat and tracks Vtn across corners.
+*   - Mbp1/Ibp1 set the PMOS current-source gate bias (M4 mirrors Ibp1 1:1
+*     at matched W/L); Mbp2/Ibp2 set the PMOS cascode gate bias from a
+*     deliberately narrower device, i.e. the textbook wide-swing cascode
+*     bias (Vsg = |Vtp| + ~2*Vov), which keeps M4's Vsd near its own
+*     overdrive instead of a full Vsg and leaves the output headroom the
+*     bias_gate below checks for.
+*
+* Two testbenches score this one body: sim_request_gain.json (AC, the
+* small-signal gain gate) and sim_request_bias.json, which reads the
+* self-biased operating point back out. The latter runs a `dc` sweep of
+* Vin -- deliberately a no-op sweep, since Cin blocks Vin at DC, so every
+* sweep point re-solves the same operating point and `.meas dc ... AT=0`
+* reads it. That is the only way to get a node's DC voltage through a
+* `.meas` card at all: ngspice implements no `.MEASURE OP` (see
+* docs/cli/sim.md's `measurements[]` note).
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md, "Netlist convention"). bench_nmos/bench_pmos come
+* from models.lib.
+
+.param vdd=1.8
+.param ibias=20u
+
+* --- supply and AC stimulus (AC-coupled onto the self-biased gate) ---
+Vdd vdd 0 DC {vdd}
+Vin in 0 DC 0 AC 1
+Cin in gate 1e3
+Lfb out gate 1e9
+
+* --- bias generators ---
+Ibn vdd nbc DC {ibias}
+Mbn nbc nbc 0 0 bench_nmos W=4u L=1u
+Ibp1 pbs 0 DC {ibias}
+Mbp1 pbs pbs vdd vdd bench_pmos W=100u L=1u
+Ibp2 pbc 0 DC {ibias}
+Mbp2 pbc pbc vdd vdd bench_pmos W=15u L=1u
+
+* --- telescopic cascode gain stage ---
+M1 n1 gate 0 0 bench_nmos W=40u L=1u
+M2 out nbc n1 0 bench_nmos W=40u L=1u
+M3 out pbc n2 vdd bench_pmos W=100u L=1u
+M4 n2 pbs vdd vdd bench_pmos W=100u L=1u

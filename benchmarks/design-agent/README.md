@@ -74,9 +74,35 @@ uv run python scripts/design_agent_benchmark.py run --provider live-agent --atte
 | `current-mirror` | Output current within the reference's declared limits (nominal 1:1 ratio) |
 | `differential-pair` | Differential-mode gain >= 8 dB *and* common-mode-driven output <= 0 dB, same PVT sweep — the differential-vs-common-mode comparison AnalogCoder's own diff-pair check calls for |
 
-Medium/hard tiers (5T OTA, two-stage Miller OTA, telescopic/folded cascode,
-integrator, Schmitt trigger, RC/Wien oscillators, VCO, PLL, per the original
-issue's proposal) are **not yet built** — see "Known limitations" below.
+## Current task set (medium tier)
+
+| Task | Pass criterion |
+| --- | --- |
+| `telescopic-cascode-amp` | >= 85 dB small-signal gain at 1 kHz *and* a 0.3–0.9 V self-biased output with <= 120 µA total supply current, same 18-corner PVT sweep |
+| `miller-integrator` | −2..+2 dB at 1 kHz (unity-gain frequency ≈ 1 kHz) *and* >= 15 dB at 100 Hz *and* an 18–22 dB fall over the 1 kHz → 10 kHz decade, same PVT sweep |
+| `schmitt-trigger` | 0.30–0.80 V of input hysteresis under a slow triangular ramp (rising trip point 0.8–1.5 V, falling 0.35–0.85 V), rail-to-rail output, same PVT sweep |
+
+Each medium-tier criterion is deliberately written so that a *plausible but
+wrong* answer fails it, not just a broken one. Measured against this repo's
+own reference netlists, deliberately degraded:
+
+| Task | Degradation | Result |
+| --- | --- | --- |
+| `telescopic-cascode-amp` | both cascode devices removed (plain common-source, identical current and PMOS current-source load) | 43.9 dB — fails the 85 dB gate, while the bias/power gate still passes, exactly as it should for a well-biased non-cascode stage |
+| `miller-integrator` | active stage replaced by a passive R-C low-pass of the same pole frequency | 0 dB at 100 Hz (needs >= 15) and a 17.1 dB decade slope — fails |
+| `miller-integrator` | integrating capacitor shrunk to 1 fF (plain gain stage) | 32.5 dB at 1 kHz and a flat 0.00 dB/decade slope — fails |
+| `schmitt-trigger` | both feedback devices deleted (plain CMOS inverter) | ~0.002 V of hysteresis — fails |
+| `schmitt-trigger` | feedback devices under-sized (W=1 µm / 2 µm) | ~0.09–0.12 V of hysteresis — fails |
+
+The Schmitt trigger's criterion in particular is *behavioral* — where the
+circuit switches on each edge of a transient ramp — rather than a DC
+operating point or a small-signal figure, which is why both degraded
+variants above still simulate as perfectly functional inverters and still
+fail the task.
+
+Hard-tier tasks (RC/Wien oscillators, VCO, PLL, per the original issue's
+proposal), and the 5T OTA / two-stage Miller OTA medium-tier amplifier
+tasks, are **not yet built** — see "Known limitations" below.
 
 ## Known limitations (read before citing a pass@k number from this harness)
 
@@ -110,21 +136,33 @@ This is a first milestone, not the full issue #1719 scope.
    agent quality.
 2. **Generic (non-PDK) device models, not real sky130 devices.** Every
    reference netlist under `reference/*/models.lib` uses hand-picked
-   `.model NMOS(LEVEL=1 ...)` corner cards, the same "runs anywhere ngspice
+   `.model NMOS(LEVEL=1 ...)`/`.model PMOS(LEVEL=1 ...)` corner cards, the
+   same "runs anywhere ngspice
    runs" precedent `examples/kb/rc-relaxation-oscillator` already
    establishes — not the real sky130 PDK model library. This keeps the
    harness runnable without a PDK fetch/`PDK_ROOT` setup, at the cost of the
    absolute gain/current numbers being illustrative rather than sky130-
-   accurate. Swapping in real sky130 devices (`models.pdk`/`models.lib`
+   accurate. It matters most for `telescopic-cascode-amp`: a LEVEL=1 device
+   has no short-channel output-conductance degradation, so the reference
+   solution's ~94–103 dB is well above what a real sky130 telescopic cascode
+   reaches. What that task's gate discriminates is the *cascoded-vs-
+   uncascoded contrast* on one fixed model set, not a sky130-accurate gain
+   figure. Swapping in real sky130 devices (`models.pdk`/`models.lib`
    pointing at `$PDK_ROOT`, per `docs/cli/sim.md`) is straightforward for a
-   future pass once the harness itself is validated end-to-end. The
-   live-agent provider's device-model contract (`bench_nmos`, no PMOS) is
-   part of its prompt, not the task set, so this swap needs no live-agent
-   provider changes of its own.
+   future pass once the harness itself is validated end-to-end, but the
+   medium-tier thresholds would have to be re-derived against the real
+   devices at the same time.
 
-Medium/hard-tier tasks and a fuller interactive/tool-using live-agent
-provider are filed as follow-up work — see the tracked issues linked from
-#1719/#1728.
+   The live-agent provider's device-model contract is derived **per task**
+   from whichever `models.lib` that task's own `klt sim` request names
+   (`_device_model_contract` in `scripts/design_agent_benchmark.py`), so the
+   easy tier's NMOS-only prompt and the medium tier's NMOS+PMOS prompt stay
+   correct without either being hardcoded — and a future real-sky130 swap
+   needs no live-agent provider change of its own.
+
+The 5T OTA / two-stage Miller OTA medium-tier tasks, hard-tier tasks, and a
+fuller interactive/tool-using live-agent provider are filed as follow-up
+work — see the tracked issues linked from #1719/#1728.
 
 ## CI
 

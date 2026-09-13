@@ -1,0 +1,27 @@
+{
+  "gates": [
+    { "check": "sim", "name": "cascode_gain_gate", "args": { "request": "sim_request_gain.json" } },
+    { "check": "sim", "name": "bias_and_power_gate", "args": { "request": "sim_request_bias.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.0.worst_case.value",
+    "polarity": "maximize",
+    "name": "gain_db_worst_case",
+    "args": { "request": "sim_request_gain.json" }
+  },
+  "metrics": [
+    {
+      "name": "vout_bias_worst_case",
+      "check": "sim",
+      "metric": "measurements.0.worst_case.value",
+      "args": { "request": "sim_request_bias.json" }
+    },
+    {
+      "name": "isupply_a_worst_case",
+      "check": "sim",
+      "metric": "measurements.1.worst_case.value",
+      "args": { "request": "sim_request_bias.json" }
+    }
+  ]
+}

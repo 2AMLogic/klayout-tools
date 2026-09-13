@@ -82,19 +82,30 @@ def test_pass_at_k_rejects_k_greater_than_n():
 def test_shipped_task_set_validates_against_schema():
     result = dab.validate_tasks(TASKS_DIR, SCHEMA_PATH, REPO_ROOT)
     assert result["valid"] is True, result
-    assert result["task_count"] >= 4
+    assert result["task_count"] >= 7
     assert {t["id"] for t in result["tasks"]} >= {
         "common-source-amp",
         "source-follower",
         "current-mirror",
         "differential-pair",
+        "telescopic-cascode-amp",
+        "miller-integrator",
+        "schmitt-trigger",
     }
 
 
-def test_shipped_tasks_are_all_easy_tier():
+def test_shipped_tasks_are_easy_or_medium_tier():
+    """No hard-tier task has been built yet (oscillators/VCO/PLL are
+    tracked follow-ups), so every shipped descriptor must declare `easy` or
+    `medium` -- a `hard` one appearing here without the rest of that tier's
+    work is a mis-tiered task, not a new tier."""
+    tiers = {}
     for path in dab._task_paths(TASKS_DIR):
         task = dab.load_task(path)
-        assert task["tier"] == "easy"
+        assert task["tier"] in ("easy", "medium"), task["id"]
+        tiers.setdefault(task["tier"], []).append(task["id"])
+    assert len(tiers["easy"]) >= 4
+    assert len(tiers["medium"]) >= 3
 
 
 def test_validate_rejects_task_missing_required_field():
@@ -193,7 +204,7 @@ def test_every_shipped_task_reference_solution_passes_its_own_gate():
     eval` -> `klt sim` -> `ngspice` chain for every shipped task."""
     result = dab.check_reference_solutions(TASKS_DIR, REPO_ROOT)
     assert result["valid"] is True, json.dumps(result, indent=2)
-    assert result["task_count"] >= 4
+    assert result["task_count"] >= 7
     for entry in result["tasks"]:
         assert entry["valid"] is True, entry
 
@@ -209,8 +220,12 @@ def test_reference_candidate_provider_run_reports_perfect_pass_rate():
     result = dab.run_benchmark(TASKS_DIR, REPO_ROOT, n_attempts=5, ks=[1, 5])
     assert result["overall"]["pass_at_k"]["1"] == 1.0
     assert result["overall"]["pass_at_k"]["5"] == 1.0
-    easy_tier = result["tiers"]["easy"]
-    assert easy_tier["solved_count"] == easy_tier["task_count"]
+    for tier_name in ("easy", "medium"):
+        tier = result["tiers"][tier_name]
+        assert tier["task_count"] > 0, tier_name
+        assert tier["solved_count"] == tier["task_count"], tier_name
+        assert tier["pass_at_k"]["1"] == 1.0, tier_name
+        assert tier["pass_at_k"]["5"] == 1.0, tier_name
 
 
 @_SKIP_NO_NGSPICE
@@ -265,6 +280,111 @@ def test_deliberately_broken_reference_netlist_fails_its_gate_and_drops_pass_rat
         )
         assert broken_run["overall"]["pass_at_k"]["1"] == 0.0
         assert broken_run["tiers"]["easy"]["solved_count"] == 0
+
+
+def _scratch_task_with_patched_netlist(
+    tmp_path: Path, task_id: str, netlist_name: str, replacements: list[tuple[str, str]]
+) -> tuple[Path, Path]:
+    """Copy one shipped task and its whole reference directory into a
+    scratch repo root, applying ``replacements`` to the named netlist.
+    Returns ``(scratch_tasks_dir, scratch_repo_root)`` ready to hand to
+    :func:`dab.check_reference_solutions`."""
+    scratch_repo = tmp_path / "repo"
+    scratch_tasks = scratch_repo / "benchmarks" / "design-agent" / "tasks"
+    ref_rel = Path("benchmarks", "design-agent", "reference", task_id)
+    scratch_tasks.mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / ref_rel, scratch_repo / ref_rel)
+
+    task = dab.load_task(TASKS_DIR / f"{task_id}.json")
+    (scratch_tasks / f"{task_id}.json").write_text(json.dumps(task))
+
+    netlist_path = scratch_repo / ref_rel / netlist_name
+    body = netlist_path.read_text()
+    for old, new in replacements:
+        assert old in body, f"{netlist_name}: pattern not found: {old!r}"
+        body = body.replace(old, new)
+    netlist_path.write_text(body)
+    return scratch_tasks, scratch_repo
+
+
+@_SKIP_NO_NGSPICE
+@pytest.mark.parametrize(
+    ("task_id", "netlist_name", "replacements", "why"),
+    [
+        pytest.param(
+            "telescopic-cascode-amp",
+            "casc_amp.spice",
+            [
+                (
+                    "M1 n1 gate 0 0 bench_nmos W=40u L=1u",
+                    "M1 out gate 0 0 bench_nmos W=40u L=1u",
+                ),
+                ("M2 out nbc n1 0 bench_nmos W=40u L=1u\n", ""),
+                ("M3 out pbc n2 vdd bench_pmos W=100u L=1u\n", ""),
+                (
+                    "M4 n2 pbs vdd vdd bench_pmos W=100u L=1u",
+                    "M4 out pbs vdd vdd bench_pmos W=100u L=1u",
+                ),
+            ],
+            "both cascode devices removed -> plain common-source stage",
+            id="cascode-devices-removed",
+        ),
+        pytest.param(
+            "miller-integrator",
+            "integrator.spice",
+            [("Cf gate out {cf}", "Cf gate out 1f")],
+            "integrating capacitor shrunk to 1 fF -> flat gain stage",
+            id="integrating-cap-removed",
+        ),
+        pytest.param(
+            "schmitt-trigger",
+            "schmitt.spice",
+            [
+                ("MN3 vdd out na 0 bench_nmos W=10u L=1u\n", ""),
+                ("MP3 0 out nb vdd bench_pmos W=25u L=1u\n", ""),
+            ],
+            "feedback devices deleted -> plain CMOS inverter",
+            id="schmitt-feedback-deleted",
+        ),
+        pytest.param(
+            "schmitt-trigger",
+            "schmitt.spice",
+            [
+                (
+                    "MN3 vdd out na 0 bench_nmos W=10u",
+                    "MN3 vdd out na 0 bench_nmos W=1u",
+                ),
+                (
+                    "MP3 0 out nb vdd bench_pmos W=25u",
+                    "MP3 0 out nb vdd bench_pmos W=2u",
+                ),
+            ],
+            "feedback devices under-sized -> ~0.1 V of hysteresis, not 0.3 V",
+            id="schmitt-feedback-undersized",
+        ),
+    ],
+)
+def test_medium_tier_gates_reject_a_plausible_but_wrong_topology(
+    task_id, netlist_name, replacements, why
+):
+    """Issue #1734's "thresholds actually discriminate correct from
+    incorrect sizing" check, as a regression test rather than a one-off
+    manual sweep.
+
+    Each mutation below leaves a circuit that still simulates cleanly and
+    still *looks* like an answer -- a well-biased common-source stage, a
+    working gain stage, a working CMOS inverter -- and differs from the
+    reference only in the property its task is actually about. A gate that
+    passed any of these would not be measuring the named circuit class. The
+    Schmitt trigger cases matter most: its criterion is behavioral
+    (hysteresis width under a transient ramp), so a DC- or small-signal-
+    shaped gate would wave both of them through."""
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch_tasks, scratch_repo = _scratch_task_with_patched_netlist(
+            Path(tmp), task_id, netlist_name, replacements
+        )
+        result = dab.check_reference_solutions(scratch_tasks, scratch_repo)
+        assert result["valid"] is False, f"{task_id} gate accepted: {why}"
 
 
 # --------------------------------------------------------------------------
@@ -336,6 +456,45 @@ def test_build_live_agent_prompt_multi_netlist_task_lists_both_stems():
     task = dab.load_task(TASKS_DIR / "differential-pair.json")
     _prompt, stems = dab._build_live_agent_prompt(task, REPO_ROOT)
     assert stems == ["diff_pair_diff", "diff_pair_cm"]
+
+
+@pytest.mark.parametrize(
+    ("task_id", "expect_pmos"),
+    [
+        ("common-source-amp", False),
+        ("miller-integrator", False),
+        ("telescopic-cascode-amp", True),
+        ("schmitt-trigger", True),
+    ],
+)
+def test_device_model_contract_tracks_each_tasks_own_models_lib(task_id, expect_pmos):
+    """The prompt's device list is read from whichever `models.lib` the
+    task's own `klt sim` request names -- never hardcoded. The medium tier's
+    complementary blocks (cascode load, CMOS Schmitt trigger) ship a PMOS
+    card the easy tier's library does not define, and telling an agent "no
+    PMOS model is defined" while handing it one of those testbenches would
+    be actively misleading it about the contract it is then scored against.
+    """
+    task = dab.load_task(TASKS_DIR / f"{task_id}.json")
+    testbenches = dab._reference_testbenches(task, REPO_ROOT)
+    contract = dab._device_model_contract(task, REPO_ROOT, testbenches)
+    assert "`bench_nmos`" in contract
+    if expect_pmos:
+        assert "PMOS: `bench_pmos`" in contract
+    else:
+        assert "PMOS: none defined" in contract
+        assert "bench_pmos" not in contract
+
+
+def test_device_model_contract_falls_back_when_no_model_library_is_readable():
+    """A task whose request points at a PDK model library (or an unreadable
+    path) must not have a device list asserted for it -- say nothing
+    specific rather than something wrong."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    testbenches = [{"netlist_stem": "x", "sim_request": {"models": {"pdk": "sky130"}}}]
+    contract = dab._device_model_contract(task, REPO_ROOT, testbenches)
+    assert "bench_nmos" not in contract
+    assert "do not write your own `.model` card" in contract
 
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,51 @@
+* Reference solution for benchmarks/design-agent/tasks/miller-integrator.json.
+*
+* Inverting (Miller) integrator: series input resistor R1 into the summing
+* node, integrating capacitor Cf wrapped from the output back to that same
+* node, around an inverting gain stage -- the textbook op-amp integrator,
+* with a single self-biased common-source stage (M1/Rd) standing in for the
+* op-amp. Above the lossy pole set by Rb, the closed-loop transfer is
+* -Zf/R1 = -1/(s*R1*Cf): a -20 dB/decade magnitude slope through a unity-
+* gain frequency of 1/(2*pi*R1*Cf) ~= 995 Hz, which is exactly what this
+* task's three gates pin down (gain at 100 Hz, at 1 kHz, and the decade
+* slope from 1 kHz to 10 kHz).
+*
+* Why those three gates and not just the slope: a bare passive R-C low-pass
+* also rolls off at -20 dB/decade, and a bare gain stage with no feedback
+* capacitor has a flat response. Only an *active* integrator can both roll
+* off at one decade per decade AND still be amplifying (>= 15 dB) a decade
+* below its unity-gain frequency, which is what separates a correct answer
+* from either degenerate one.
+*
+* Biasing: Rb is the only DC path onto M1's gate (Cin blocks the stimulus
+* at DC), so no DC current flows in it and V(gate) = V(out) -- the same
+* drain-to-gate self-bias common-source-amp.spice uses, which holds M1 in
+* saturation across the Vt/KP corner sweep without an external bias
+* generator. Rb also turns the ideal integrator into a lossy one with a
+* pole at 1/(2*pi*Rb*Cf) ~= 10 Hz, two decades below the lowest measured
+* frequency, so it costs the measured band nothing.
+*
+* Sizing note: M1 is run at a deliberately small overdrive against a large
+* Rd, because the stage's own gain (2*(Vdd-Vgs)/Vov ~= 35 dB here) is the
+* error term in the -Zf/R1 transfer -- it has to stay well above the
+* 20 dB of closed-loop gain asked for at 100 Hz.
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md, "Netlist convention"). bench_nmos comes from
+* models.lib.
+
+.param vdd=1.8
+.param rd=1meg
+.param r1=1meg
+.param cf=160p
+.param rb=100meg
+.param cin=1e3
+
+Vdd vdd 0 DC {vdd}
+Vin in 0 DC 0 AC 1
+Cin in sum_in {cin}
+R1 sum_in gate {r1}
+Cf gate out {cf}
+Rb gate out {rb}
+M1 out gate 0 0 bench_nmos W=10u L=1u
+Rd vdd out {rd}

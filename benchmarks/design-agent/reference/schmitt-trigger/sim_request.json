@@ -1,0 +1,44 @@
+{
+  "netlist": "schmitt.spice",
+  "engine": "ngspice",
+  "models": { "lib": "models.lib" },
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "tran", "args": "1u 2m" },
+  "measurements": [
+    {
+      "name": "vth_rising_v",
+      "spice": ".meas tran vth_rising_v FIND v(in) WHEN v(out)=0.9 FALL=1",
+      "unit": "V",
+      "limits": { "min": 0.8, "max": 1.5 }
+    },
+    {
+      "name": "vth_falling_v",
+      "spice": ".meas tran vth_falling_v FIND v(in) WHEN v(out)=0.9 RISE=1",
+      "unit": "V",
+      "limits": { "min": 0.35, "max": 0.85 }
+    },
+    {
+      "name": "vhyst_v",
+      "spice": ".meas tran vhyst_v param='vth_rising_v-vth_falling_v'",
+      "unit": "V",
+      "limits": { "min": 0.3, "max": 0.8 }
+    },
+    {
+      "name": "vout_high_v",
+      "spice": ".meas tran vout_high_v FIND v(out) AT=100u",
+      "unit": "V",
+      "limits": { "min": 1.55 }
+    },
+    {
+      "name": "vout_low_v",
+      "spice": ".meas tran vout_low_v FIND v(out) AT=1m",
+      "unit": "V",
+      "limits": { "max": 0.05 }
+    }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}
