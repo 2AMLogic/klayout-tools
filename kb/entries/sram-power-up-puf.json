@@ -19,5 +19,45 @@
     "url": "https://spqr.eecs.umich.edu/papers/holcomb-FERNS-IEEE-TC09.pdf",
     "license_or_openness": "Holcomb-Burleson-Fu is cited for its power-up-SRAM PUF/TRNG concept and methodology only (no figures or text reproduced); an author-hosted preprint is publicly available (case 1 open-access), with the IEEE Transactions version behind a subscription (case 2). Guajardo et al. is cited (case 2) for the intrinsic-PUF + fuzzy-extractor methodology. NIST SP 800-90B is a public-domain U.S. government standard. No proprietary or NDA'd data is recorded."
   },
-  "notes": "SRAM PUFs are attractive because they reuse an existing, well-characterized memory macro with no custom analog cell, but they REQUIRE a fuzzy extractor / error-correcting code to turn a noisy power-up response into a stable key, and the helper data must be designed to leak little entropy. Response drift over temperature, voltage, and aging sets the error-correction budget and must be measured on silicon. When the same array is used as a TRNG seed source, only the unstable (noise-dominated) cells count as entropy and their output is still subject to conditioning and SP 800-90B health testing. For an oscillator-based unclonable-identity alternative that avoids the power-up-read requirement, see ro-puf; for pure entropy sources see ring-oscillator-jitter-trng and metastability-trng."
+  "notes": "SRAM PUFs are attractive because they reuse an existing, well-characterized memory macro with no custom analog cell, but they REQUIRE a fuzzy extractor / error-correcting code to turn a noisy power-up response into a stable key, and the helper data must be designed to leak little entropy. Response drift over temperature, voltage, and aging sets the error-correction budget and must be measured on silicon. When the same array is used as a TRNG seed source, only the unstable (noise-dominated) cells count as entropy and their output is still subject to conditioning and SP 800-90B health testing. For an oscillator-based unclonable-identity alternative that avoids the power-up-read requirement, see ro-puf; for pure entropy sources see ring-oscillator-jitter-trng and metastability-trng.",
+  "artifacts": {
+    "netlist": "examples/kb/sram-power-up-puf/sram_cell_powerup.spice",
+    "notes": "From-scratch netlist per this entry's own topology text: one 6T bitcell (two cross-coupled inverters plus access devices) read across a 0-to-1.8V, 100ns power-up supply ramp with the wordline held off (no write path) and the bitlines left floating high-impedance. A single deterministic 5% width mismatch is injected on one pull-down device as a stand-in for the random per-instance Vt/geometry mismatch that a real array's cells rely on -- a noiseless single-corner SPICE run has no mismatch of its own, so without an injected asymmetry the cell rides a symmetric, metastable non-answer instead of resolving. This netlist demonstrates the resolution mechanism for one cell; it does not and cannot produce a bit-error-rate, min-entropy, or stable-cell-fraction claim, which the entry's own pdk_portability says requires Monte Carlo over sky130's mismatch models across temperature, ramp rate, and aging. See the netlist's own header for the full derivation and caveats."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 27C, power-up ramp 0-1.8V over 100ns",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks) at a uniform 0.42um/0.15um sizing, with one pull-down device drawn 5% wider than its twin as the injected mismatch that decides the resolved state (see artifacts.notes) -- the resolved polarity here (q high) is a property of that injected asymmetry's sign, not a prediction of any real cell's response, and no bit-error-rate/entropy claim is made. Reproduce with `klt sim examples/kb/sram-power-up-puf/request.json`.",
+    "figures": [
+      {
+        "name": "vq_final_v",
+        "value": 1.8,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sram-power-up-puf/request.json"
+      },
+      {
+        "name": "vqb_final_v",
+        "value": 3.0556e-08,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sram-power-up-puf/request.json"
+      },
+      {
+        "name": "t_resolve_s",
+        "value": 6.32819e-08,
+        "unit": "s",
+        "analysis": "tran",
+        "testbench": "examples/kb/sram-power-up-puf/request.json"
+      },
+      {
+        "name": "vdd_at_resolve_v",
+        "value": 1.13907,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sram-power-up-puf/request.json"
+      }
+    ]
+  }
 }

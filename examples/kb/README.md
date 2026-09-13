@@ -262,3 +262,63 @@ this entry's own swing = (tail current) x (termination resistance) sizing
 relation for the actual, headroom-limited tail current this netlist
 achieves — plus the four individual `voutp`/`voutn` sample points at
 `tt`, 1.8V, 27C.
+
+## `rx-front-end-termination-buffer/`
+
+Backs [`kb/entries/rx-front-end-termination-buffer.json`](../../kb/entries/rx-front-end-termination-buffer.json)
+— `rx_frontend.spice` is a from-scratch netlist per the entry's own
+topology text: a fixed on-die-termination (ODT) resistor leg plus a 2-bit
+digitally-trimmed parallel resistor bank sits at the receive pads, feeding
+a resistively-loaded differential input pair biased by a real
+`sky130_fd_pr__nfet_01v8` current mirror (the same bias pattern as
+`five-transistor-ota`). Each trim leg is switched by a CMOS transmission
+gate (NMOS + PMOS in parallel), not a bare NMOS — at this receive common
+mode a bare NMOS switch has only ~0.6V of overdrive and barely conducts,
+collapsing the trim bank's whole range; see the netlist's own header for
+the full derivation. The channel is modelled as a lumped 50-ohm/leg series
+resistance rather than a distributed transmission line, and the
+termination/trim/load resistors are ideal `R` elements rather than sky130
+resistor-option models — both disclosed in `artifacts.notes` on the entry
+itself, since a real reflection-domain (TDR) measurement and a
+process-variation-accurate trim range both need a fuller model this
+single-corner reference testbench does not build.
+
+```
+uv run klt sim examples/kb/rx-front-end-termination-buffer/request.json
+```
+
+Reproduces `pad_atten_db` (-6.02459 dB, matching the expected -6.02 dB for
+a 100 ohm differential channel driving into a 100 ohm differential
+termination) and the `zin_diff_ohm` it implies (99.9083 ohm, on the trim
+bank's fixed code-11 target), plus the input buffer's own `av_db`
+(14.9404 dB), `f3db_hz` (728.783 MHz), and `f_unity_hz` (1.93444 GHz) at
+`tt`, 1.8V, 27C.
+
+## `sram-power-up-puf/`
+
+Backs [`kb/entries/sram-power-up-puf.json`](../../kb/entries/sram-power-up-puf.json)
+— `sram_cell_powerup.spice` is a from-scratch netlist per the entry's own
+topology text: one 6T bitcell (a pair of cross-coupled
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` inverters plus access devices) read
+across a 0-to-1.8V, 100ns power-up supply ramp, with the wordline held off
+for the whole run (no write path, no read disturb) and the bitlines left
+at high impedance. A noiseless single-corner SPICE run has no per-instance
+random mismatch of its own, so this netlist injects one deterministic
+asymmetry — one pull-down device drawn 5% wider than its twin — as a
+stand-in for the real mismatch that decides a silicon cell's power-up
+state; see the netlist's own header for exactly what that does and does
+not let this testbench claim (no bit-error-rate, min-entropy, or
+stable-cell-fraction figure — that needs Monte Carlo over sky130's
+mismatch models, per the entry's own `pdk_portability`).
+
+```
+uv run klt sim examples/kb/sram-power-up-puf/request.json
+```
+
+Reproduces the cell's settled power-up decision — `vq_final_v` (1.8 V) vs.
+`vqb_final_v` (~31 nV) — resolving within `t_resolve_s` (63.28 ns) of the
+ramp's start, well before the supply ramp itself completes
+(`vdd_at_resolve_v` = 1.13907 V, i.e. the cell decides mid-ramp) at `tt`,
+27C. Flipping the injected mismatch's sign flips which node resolves high,
+which is the point: the outcome tracks the mismatch, exactly as the
+entry's topology describes.

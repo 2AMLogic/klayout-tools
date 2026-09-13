@@ -1,0 +1,84 @@
+* SRAM power-up PUF: one 6T bitcell, read as it comes out of a supply ramp.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/sram-power-up-puf.json's own topology text, not
+* imported from anywhere (kb/SOURCING.md):
+*
+*   "an array of standard 6T SRAM cells read immediately after power-up,
+*    before any value is written. Each cell is a pair of cross-coupled
+*    inverters; at power-up the cell resolves to 0 or 1 according to the sign
+*    of the manufacturing mismatch between its two halves."
+*
+* This netlist is ONE cell of that array -- the primitive whose power-up
+* resolution is the PUF's per-bit response. Node map:
+*   vddc      -- the cell's own supply, ramped 0 -> 1.8V over 100ns (the
+*                "controlled, repeatable power-up ... clean supply ramp"
+*                layout idiom, as a stimulus)
+*   q, qb     -- the two storage nodes (cross-coupled inverter outputs)
+*   wl        -- wordline, held at 0 for the whole run: the access devices
+*                never turn on, so nothing can write the cell and what is
+*                read out is purely the intrinsic power-up state (the
+*                entry's "guaranteed no-write read path" idiom)
+*   bl, blb   -- bitlines, left low through 1 Mohm leakage paths rather than
+*                precharged, so they cannot influence the resolution either
+*
+* HOW THE MISMATCH IS MODELLED -- read this before trusting any number here.
+* A single deterministic SPICE run has no per-instance random mismatch: with
+* two exactly-matched halves this cell has a symmetric solution and a
+* noiseless simulator will happily ride it to a metastable half-rail
+* non-answer. Real silicon has none of that symmetry, which is the entire
+* basis of the PUF. So this testbench injects ONE deterministic asymmetry --
+* the q-side pull-down NMOS is drawn 5% wider than its qb-side twin (`mism`
+* below) -- as a stand-in for the random Vt/geometry mismatch of all six
+* devices. Consequences, stated plainly:
+*   - The resolved value here (q high) is a property of THIS injected
+*     asymmetry's sign, not a prediction of any real cell's response. Mirror
+*     `mism` onto the other half and the resolved state flips, which is the
+*     point: the outcome tracks the mismatch, exactly as the entry describes.
+*   - A real per-cell response distribution needs Monte Carlo over sky130's
+*     mismatch models (the `tt_mm` lib section), across temperature, supply
+*     ramp rate, and aging -- i.e. the characterization the entry's
+*     pdk_portability calls for and this single-corner testbench does NOT do.
+*     Nothing here supports a bit-error-rate, min-entropy, or stable-cell-
+*     fraction claim.
+*   - 5% is a deliberately generous asymmetry chosen so the resolution is
+*     unambiguous in a fixed-corner reference run; it is not a claim about
+*     sky130's actual mismatch magnitude.
+*
+* The cell is drawn from plain sky130_fd_pr__nfet_01v8/pfet_01v8 devices at
+* a uniform 0.42um/0.15um rather than from an OpenRAM-generated bitcell
+* layout: the entry's sizing_approach says a PUF array uses the PDK's
+* standard bitcell unchanged, and this netlist's purpose is to show the
+* power-up resolution mechanism, not to stand in for a characterized macro.
+.param vddmax=1.8
+.param tramp=100n
+.param wpd=0.42
+.param wpu=0.42
+.param wpg=0.42
+.param mism=0.05
+
+* --- power-up supply ramp (the stimulus that makes this a power-up read) ---
+Vddc vddc 0 PWL(0 0 {tramp} {vddmax} 1u {vddmax})
+* --- wordline off for the entire run: no write path, no read disturb ---
+Vwl wl 0 DC 0
+* --- bitlines left low (not precharged) ---
+Rbl  bl  0 1meg
+Rblb blb 0 1meg
+
+* --- inverter 1: input qb, output q. Its pull-down carries the injected
+* mismatch (5% wider than the qb-side pull-down) ---
+XP1 q qb vddc vddc sky130_fd_pr__pfet_01v8 L=0.15 W={wpu} nf=1 mult=1
+XN1 q qb 0    0    sky130_fd_pr__nfet_01v8 L=0.15 W={wpd*(1+mism)} nf=1 mult=1
+
+* --- inverter 2: input q, output qb (nominal devices) ---
+XP2 qb q vddc vddc sky130_fd_pr__pfet_01v8 L=0.15 W={wpu} nf=1 mult=1
+XN2 qb q 0    0    sky130_fd_pr__nfet_01v8 L=0.15 W={wpd} nf=1 mult=1
+
+* --- access (pass-gate) devices, held off by wl=0 ---
+XN3 bl  wl q  0 sky130_fd_pr__nfet_01v8 L=0.15 W={wpg} nf=1 mult=1
+XN4 blb wl qb 0 sky130_fd_pr__nfet_01v8 L=0.15 W={wpg} nf=1 mult=1
+
+* --- storage-node wiring capacitance ---
+Cq  q  0 1f
+Cqb qb 0 1f

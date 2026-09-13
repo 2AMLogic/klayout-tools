@@ -1,0 +1,21 @@
+{
+  "netlist": "rx_frontend.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "ac", "args": "dec 20 1e5 1e11" },
+  "measurements": [
+    { "name": "vdb_pad", "spice": ".meas ac vdb_pad find vdb(padp) when frequency=1e6", "unit": "dB" },
+    { "name": "vdb_out", "spice": ".meas ac vdb_out find vdb(outp) when frequency=1e6", "unit": "dB" },
+    { "name": "pad_atten_db", "spice": ".meas ac pad_atten_db param='vdb_pad'", "unit": "dB", "limits": { "min": -6.5, "max": -5.5 } },
+    { "name": "zin_diff_ohm", "spice": ".meas ac zin_diff_ohm param='100 * 10**(vdb_pad/20) / (1 - 10**(vdb_pad/20))'", "unit": "ohm", "limits": { "min": 95, "max": 105 } },
+    { "name": "av_db", "spice": ".meas ac av_db param='vdb_out - vdb_pad'", "unit": "dB", "limits": { "min": 10 } },
+    { "name": "f3db_hz", "spice": ".meas ac f3db_hz when vdb(outp)=5.93 fall=1", "unit": "Hz", "limits": { "min": 3e8 } },
+    { "name": "f_unity_hz", "spice": ".meas ac f_unity_hz when vdb(outp)=0 fall=1", "unit": "Hz", "limits": { "min": 1e9 } }
+  ],
+  "options": { "timeout_s": 600, "keep_artifacts": false }
+}
