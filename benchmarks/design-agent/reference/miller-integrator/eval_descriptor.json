@@ -1,0 +1,26 @@
+{
+  "gates": [
+    { "check": "sim", "name": "integrator_response_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.0.worst_case.value",
+    "polarity": "maximize",
+    "name": "gain_100hz_db_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": [
+    {
+      "name": "gain_1khz_db_worst_case",
+      "check": "sim",
+      "metric": "measurements.1.worst_case.value",
+      "args": { "request": "sim_request.json" }
+    },
+    {
+      "name": "slope_db_per_decade_worst_case",
+      "check": "sim",
+      "metric": "measurements.3.worst_case.value",
+      "args": { "request": "sim_request.json" }
+    }
+  ]
+}

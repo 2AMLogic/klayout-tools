@@ -1,0 +1,26 @@
+{
+  "netlist": "casc_amp.spice",
+  "engine": "ngspice",
+  "models": { "lib": "models.lib" },
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "dc", "args": "Vin 0 0.2 0.1" },
+  "measurements": [
+    {
+      "name": "vout_bias",
+      "spice": ".meas dc vout_bias FIND v(out) AT=0",
+      "unit": "V",
+      "limits": { "min": 0.3, "max": 0.9 }
+    },
+    {
+      "name": "isupply_a",
+      "spice": ".meas dc isupply_a FIND vdd#branch AT=0",
+      "unit": "A",
+      "limits": { "min": -1.2e-4, "max": -4.0e-5 }
+    }
+  ],
+  "options": { "timeout_s": 30, "keep_artifacts": false }
+}

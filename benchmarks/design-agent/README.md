@@ -82,8 +82,11 @@ uv run python scripts/design_agent_benchmark.py run --provider live-agent --atte
 | --- | --- |
 | `five-transistor-ota` | Open-loop DC gain >= 30 dB, GBW >= 5 MHz, phase margin >= 60 deg, same 18-corner sky130-style PVT sweep as the easy tier |
 | `two-stage-miller-ota` | Open-loop DC gain >= 65 dB, GBW >= 7 MHz, phase margin >= 60 deg, same PVT sweep |
+| `telescopic-cascode-amp` | >= 85 dB small-signal gain at 1 kHz *and* a 0.3–0.9 V self-biased output with <= 120 µA total supply current, same PVT sweep |
+| `miller-integrator` | −2..+2 dB at 1 kHz (unity-gain frequency ≈ 1 kHz) *and* >= 15 dB at 100 Hz *and* an 18–22 dB fall over the 1 kHz → 10 kHz decade, same PVT sweep |
+| `schmitt-trigger` | 0.30–0.80 V of input hysteresis under a slow triangular ramp (rising trip point 0.8–1.5 V, falling 0.35–0.85 V), rail-to-rail output, same PVT sweep |
 
-Both amplifier-family medium-tier tasks (issue #1733) reuse the same
+The two amplifier-family tasks (issue #1733) reuse the same
 DC-feedback-closes/AC-feedback-opens open-loop-gain measurement trick as
 `examples/kb/five-transistor-ota/ota_5t.spice` (see each reference
 netlist's own header for why), adapted to this benchmark's generic
@@ -95,16 +98,34 @@ see `reference/two-stage-miller-ota/ota_2stage.spice`'s header for why
 its `inp`/`inn` pair is cross-connected relative to the single-stage
 `five-transistor-ota` reference (the extra stage inverts the loop's sign).
 
+The remaining three medium-tier tasks (issue #1734) are deliberately
+written so that a *plausible but wrong* answer fails them, not just a
+broken one. Measured against this repo's own reference netlists,
+deliberately degraded:
+
+| Task | Degradation | Result |
+| --- | --- | --- |
+| `telescopic-cascode-amp` | both cascode devices removed (plain common-source, identical current and PMOS current-source load) | 43.9 dB — fails the 85 dB gate, while the bias/power gate still passes, exactly as it should for a well-biased non-cascode stage |
+| `miller-integrator` | active stage replaced by a passive R-C low-pass of the same pole frequency | 0 dB at 100 Hz (needs >= 15) and a 17.1 dB decade slope — fails |
+| `miller-integrator` | integrating capacitor shrunk to 1 fF (plain gain stage) | 32.5 dB at 1 kHz and a flat 0.00 dB/decade slope — fails |
+| `schmitt-trigger` | both feedback devices deleted (plain CMOS inverter) | ~0.002 V of hysteresis — fails |
+| `schmitt-trigger` | feedback devices under-sized (W=1 µm / 2 µm) | ~0.09–0.12 V of hysteresis — fails |
+
+The Schmitt trigger's criterion in particular is *behavioral* — where the
+circuit switches on each edge of a transient ramp — rather than a DC
+operating point or a small-signal figure, which is why both degraded
+variants above still simulate as perfectly functional inverters and still
+fail the task.
+
 ### Hard tier
 
 | Task | Pass criterion |
 | --- | --- |
 | `rc-relaxation-oscillator` | Astable comparator-based RC relaxation oscillator (`kb/entries/rc-relaxation-oscillator.json` topology) actually oscillates — measured period between two rising edges of the output clock stays within 1.4-2.2 us (~455-715 kHz) across the same 18-corner sky130-style PVT sweep the easy tier uses. Reuses `examples/kb/rc-relaxation-oscillator`'s netlist/corner-library verbatim (issue #1735), the first of the oscillator/VCO/PLL family the original benchmark proposal (#1719) called for. |
 
-The remaining medium-tier tasks (telescopic/folded cascode, integrator,
-Schmitt trigger) and the remaining hard-tier tasks (VCO, PLL — tracked in
-#1743, the follow-up to #1735) are **not yet built** — see "Known
-limitations" below.
+All five medium-tier tasks are now built. The remaining hard-tier tasks
+(VCO, PLL — tracked in #1743, the follow-up to #1735) are **not yet
+built** — see "Known limitations" below.
 
 ## Known limitations (read before citing a pass@k number from this harness)
 
@@ -138,34 +159,38 @@ This is a first milestone, not the full issue #1719 scope.
    agent quality.
 2. **Generic (non-PDK) device models, not real sky130 devices.** Every
    reference netlist under `reference/*/models.lib` uses hand-picked
-   `.model NMOS(LEVEL=1 ...)` corner cards, the same "runs anywhere ngspice
+   `.model NMOS(LEVEL=1 ...)`/`.model PMOS(LEVEL=1 ...)` corner cards, the
+   same "runs anywhere ngspice
    runs" precedent `examples/kb/rc-relaxation-oscillator` already
    establishes — not the real sky130 PDK model library. This keeps the
    harness runnable without a PDK fetch/`PDK_ROOT` setup, at the cost of the
    absolute gain/current numbers being illustrative rather than sky130-
-   accurate. Swapping in real sky130 devices (`models.pdk`/`models.lib`
+   accurate. It matters most for `telescopic-cascode-amp`: a LEVEL=1 device
+   has no short-channel output-conductance degradation, so the reference
+   solution's ~94–103 dB is well above what a real sky130 telescopic cascode
+   reaches. What that task's gate discriminates is the *cascoded-vs-
+   uncascoded contrast* on one fixed model set, not a sky130-accurate gain
+   figure. Swapping in real sky130 devices (`models.pdk`/`models.lib`
    pointing at `$PDK_ROOT`, per `docs/cli/sim.md`) is straightforward for a
-   future pass once the harness itself is validated end-to-end. The
-   live-agent provider's device-model contract (`bench_nmos`, no PMOS) is
-   part of its prompt, not the task set, so this swap needs no live-agent
-   provider changes of its own.
-3. **The live-agent provider's device-model contract is stale for the
-   medium tier (issue #1733).** `_build_live_agent_prompt`'s fixed prompt
-   text ("this benchmark's model library defines exactly one NMOS model
-   ... no PMOS model is defined for this task set") predates
-   `five-transistor-ota`/`two-stage-miller-ota`, whose reference solutions
-   *do* need a `bench_pmos` (current-mirror load / common-source second
-   stage). `--provider live-agent` runs against these two tasks today with
-   a prompt that incorrectly tells the agent no PMOS model exists — a
-   real, but pre-existing-shape, limitation of the live-agent wiring
-   tracked as its own follow-up (out of scope for this issue's amplifier
-   task-content work; see #1732's tracked follow-ups), not something this
-   task-content change attempts to fix.
+   future pass once the harness itself is validated end-to-end, but the
+   medium-tier thresholds would have to be re-derived against the real
+   devices at the same time.
 
-The remaining medium-tier tasks, the remaining hard-tier tasks (VCO, PLL
-— tracked in #1743, the follow-up to #1735), and a fuller
-interactive/tool-using live-agent provider are filed as follow-up work —
-see the tracked issues linked from #1719/#1728.
+   The live-agent provider's device-model contract is derived **per task**
+   from whichever `models.lib` that task's own `klt sim` request names
+   (`_device_model_contract` in `scripts/design_agent_benchmark.py`), so the
+   easy tier's NMOS-only prompt and the medium tier's NMOS+PMOS prompt stay
+   correct without either being hardcoded — and a future real-sky130 swap
+   needs no live-agent provider change of its own. This supersedes the
+   previously tracked "device-model contract is stale for the medium tier"
+   limitation (issue #1733): `_build_live_agent_prompt`'s fixed no-PMOS
+   prompt text has been replaced by this per-task derivation, so
+   `--provider live-agent` now tells the agent the correct model set for
+   every shipped task, amplifier and non-amplifier alike.
+
+The remaining hard-tier tasks (VCO, PLL — tracked in #1743, the follow-up
+to #1735) and a fuller interactive/tool-using live-agent provider are
+filed as follow-up work — see the tracked issues linked from #1719/#1728.
 
 ## CI
 

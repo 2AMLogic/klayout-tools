@@ -1,0 +1,29 @@
+{
+  "id": "miller-integrator",
+  "title": "Inverting Miller integrator (R-C feedback around a self-biased gain stage)",
+  "tier": "medium",
+  "pdk": "sky130",
+  "description": "Design an inverting (Miller) integrator -- a series input resistor into the summing node, an integrating capacitor from the output back to that node, wrapped around an inverting gain stage -- with a unity-gain frequency of about 1 kHz. Across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix, the small-signal response must measure -2..+2 dB at 1 kHz, at least +15 dB at 100 Hz, and must fall by 18-22 dB over the 1 kHz -> 10 kHz decade. The three criteria are deliberately redundant: a passive R-C low-pass also rolls off at one decade per decade but can never amplify, and a plain gain stage with no feedback capacitor amplifies but never rolls off -- only an active integrator satisfies all three at once.",
+  "block_spec": {
+    "spec_class": "continuous-time integrator / active filter stage",
+    "io_nodes": ["in", "out", "vdd", "gnd"],
+    "target_specs": {
+      "unity_gain_frequency_hz": 1000,
+      "gain_db_at_1khz": [-2, 2],
+      "gain_db_min_at_100hz": 15,
+      "slope_db_per_decade_1khz_to_10khz": [18, 22],
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/miller-integrator/eval_descriptor.json",
+    "netlists": [
+      "benchmarks/design-agent/reference/miller-integrator/integrator.spice"
+    ],
+    "notes": "The decade-slope criterion is a derived measurement (`.meas ac ... param='gain_1khz_db-gain_10khz_db'`), so `gain_10khz_db` is declared without limits purely as its input -- reported, never failing on its own. A large drain-to-gate feedback resistor doubles as the DC self-bias path and as the lossy-integrator pole (~10 Hz, two decades below the measured band). Generic (non-PDK) NMOS model stands in for sky130 devices; see README.md's 'Known limitation' note."
+  },
+  "source": {
+    "citation": "The inverting R-C integrator is a standard analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) medium-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

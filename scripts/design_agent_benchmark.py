@@ -289,6 +289,15 @@ _NETLIST_FENCE_RE = re.compile(
     re.DOTALL,
 )
 
+#: A generic (non-PDK) ``.model <name> {NMOS|PMOS}(...)`` corner card in a
+#: task's own ``reference/<id>/models.lib`` -- what
+#: :func:`_device_model_contract` reads the live-agent prompt's device
+#: contract off of, rather than hardcoding one task set's device list.
+_MODEL_CARD_RE = re.compile(
+    r"^[ \t]*\.model[ \t]+(?P<name>[A-Za-z0-9_.]+)[ \t]+(?P<kind>nmos|pmos)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 class AgentInvocationError(Exception):
     """Raised when a live-agent invocation itself fails to run, times out, or
@@ -422,6 +431,70 @@ def _reference_testbenches(
     return testbenches
 
 
+def _device_model_contract(
+    task: dict[str, Any], repo_root: Path, testbenches: list[dict[str, Any]]
+) -> str:
+    """The live-agent prompt's device-model contract, **derived from the
+    task's own model library** rather than hardcoded.
+
+    The easy tier's `models.lib` defines a single NMOS card; the medium
+    tier's complementary blocks (cascode load, CMOS Schmitt trigger) cannot
+    be built without a PMOS, so their own `models.lib` adds one. Reading the
+    `.model` cards out of whichever library the task's `klt sim` request
+    names keeps the prompt from telling an agent "no PMOS model is defined"
+    while handing it a testbench whose library defines one -- a contract the
+    agent's candidate would then be scored against having been actively
+    misled about.
+    """
+    lib_refs: list[str] = []
+    for testbench in testbenches:
+        models = testbench["sim_request"].get("models") or {}
+        lib = models.get("lib")
+        if isinstance(lib, str) and lib not in lib_refs:
+            lib_refs.append(lib)
+
+    reference_dir = (repo_root / task["reference"]["eval_descriptor"]).parent
+    by_kind: dict[str, list[str]] = {"nmos": [], "pmos": []}
+    for lib in lib_refs:
+        path = Path(lib)
+        if not path.is_absolute():
+            path = reference_dir / path
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        for match in _MODEL_CARD_RE.finditer(text):
+            kind = match.group("kind").lower()
+            name = match.group("name")
+            if name not in by_kind[kind]:
+                by_kind[kind].append(name)
+
+    if not by_kind["nmos"] and not by_kind["pmos"]:
+        # No library to read (a PDK-model task, or an unreadable path) --
+        # say nothing specific rather than assert a device list that may be
+        # wrong.
+        return (
+            "Use only the device models this task's own `klt sim` request "
+            "document (below) points its model library at; do not write your "
+            "own `.model` card."
+        )
+
+    lines = []
+    for kind in ("nmos", "pmos"):
+        names = by_kind[kind]
+        rendered = ", ".join(f"`{name}`" for name in names) if names else "none defined"
+        lines.append(f"  {kind.upper()}: {rendered}")
+    return (
+        "This benchmark's model library defines exactly the SPICE models "
+        "below (LEVEL=1), already swept across this task's own process/"
+        "temperature/supply corner matrix:\n\n"
+        + "\n".join(lines)
+        + "\n\nUse only these model names for every MOSFET your netlist "
+        "instantiates; do not write your own `.model` card, and do not "
+        "reference any other model name."
+    )
+
+
 def _build_live_agent_prompt(
     task: dict[str, Any], repo_root: Path
 ) -> tuple[str, list[str]]:
@@ -435,6 +508,7 @@ def _build_live_agent_prompt(
     stems = [Path(p).stem for p in task["reference"]["netlists"]]
     testbenches = _reference_testbenches(task, repo_root)
     skill_chain_text = _load_skill_chain_text(repo_root)
+    device_model_contract = _device_model_contract(task, repo_root, testbenches)
 
     fence_block = "\n".join(
         f'```spice:{stem}\n<your netlist body for "{stem}">\n```' for stem in stems
@@ -462,12 +536,7 @@ Block spec (S3 output, your S4 input):
 
 === Device model contract (harness-provided, not part of your design) ===
 
-This benchmark's model library defines exactly one NMOS SPICE model,
-already swept across this task's own process/temperature/supply corner
-matrix below: `bench_nmos` (LEVEL=1). No PMOS model is defined for this
-task set. Use `bench_nmos` for every MOSFET your netlist instantiates; do
-not write your own `.model` card, and do not reference any other model
-name.
+{device_model_contract}
 
 === Testbench contract your netlist(s) must satisfy ===
 
