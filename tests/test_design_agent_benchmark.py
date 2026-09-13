@@ -91,10 +91,13 @@ def test_shipped_task_set_validates_against_schema():
     }
 
 
-def test_shipped_tasks_are_all_easy_tier():
+def test_shipped_tasks_are_easy_or_hard_tier():
+    """Easy-tier task set (issue #1719) plus the hard-tier oscillator/VCO/
+    PLL family's first task (issue #1735). No medium-tier task has shipped
+    yet -- see benchmarks/design-agent/README.md's "Known limitations"."""
     for path in dab._task_paths(TASKS_DIR):
         task = dab.load_task(path)
-        assert task["tier"] == "easy"
+        assert task["tier"] in {"easy", "hard"}
 
 
 def test_validate_rejects_task_missing_required_field():

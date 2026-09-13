@@ -1,0 +1,13 @@
+{
+  "gates": [
+    { "check": "sim", "name": "oscillator_period_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.2.worst_case.margin",
+    "polarity": "maximize",
+    "name": "oscillator_period_margin_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": []
+}

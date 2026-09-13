@@ -1,0 +1,25 @@
+{
+  "id": "rc-relaxation-oscillator",
+  "title": "Comparator-based RC relaxation oscillator",
+  "tier": "hard",
+  "pdk": "sky130",
+  "description": "Design an astable RC (comparator-based) relaxation oscillator: a timing capacitor charged and discharged by a fixed reference current between two reference-derived comparator thresholds, generating a clock whose period is set by C * delta-V / I (per kb/entries/rc-relaxation-oscillator.json's sizing_approach) rather than by any resonant LC or crystal element. The design must actually oscillate (not just DC-converge) with a period of 1.4-2.2 us (~455-715 kHz) across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix -- the hard-tier addition to this benchmark's easy-tier task set (issue #1719's proposed tier split), the first of the oscillator/VCO/PLL family (issue #1735).",
+  "block_spec": {
+    "spec_class": "low-cost, moderate-accuracy clock source (relaxation oscillator)",
+    "io_nodes": ["vo", "vdd", "gnd"],
+    "target_specs": {
+      "period_s_min": 1.4e-6,
+      "period_s_max": 2.2e-6,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/rc-relaxation-oscillator/eval_descriptor.json",
+    "netlists": ["benchmarks/design-agent/reference/rc-relaxation-oscillator/oscillator.spice"],
+    "notes": "Behavioral (PDK-model-free) realisation, reusing examples/kb/rc-relaxation-oscillator/oscillator.spice's own netlist/corner-library verbatim (see kb/entries/rc-relaxation-oscillator.json) -- same 'runs anywhere ngspice runs' precedent as this benchmark's easy-tier tasks. The comparator is a behavioral high-gain block with an explicit propagation-delay RC (Rcmp/Ccmp), not a device-level comparator, so this demonstrates the C*dV/I timing relation, not silicon-accurate comparator offset/delay."
+  },
+  "source": {
+    "citation": "K. Sundaresan, P. E. Allen, and F. Ayazi, \"Process and temperature compensation in a 7-MHz CMOS clock oscillator,\" IEEE Journal of Solid-State Circuits, vol. 41, no. 2, pp. 433-442, Feb. 2006 (same citation as kb/entries/rc-relaxation-oscillator.json, cited here for its topology/compensation-methodology framing only, no figures or text reproduced).",
+    "url": "https://doi.org/10.1109/JSSC.2005.863149"
+  }
+}
