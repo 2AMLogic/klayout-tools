@@ -1767,33 +1767,50 @@ def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
 #: landing-up level already draws, with no matching "upper metal encloses
 #: via" rule ever modelled to check the ``landing`` side against.
 #:
+#: ``gf180mcu`` (issue #1731) lands up too, for the same reason as sg13g2:
+#: its ``contact`` role (``Contact`` 33/0, ``EXTRACTION_DECK.contact``) lands
+#: ``Metal1`` on poly/active, not on another routable metal, so there is no
+#: metal level below ``Metal1`` to land a level-1 unit's end via on. Levels
+#: 1-3 (``rm1``/``rm2``/``rm3``, ``klayout_tools.decks.gf180mcu
+#: .EXTRACTION_DECK.resistors``, issue #1640) land ``Metal1`` -> ``Via1`` ->
+#: ``Metal2``, ``Metal2`` -> ``Via2`` -> ``Metal3``, ``Metal3`` -> ``Via3`` ->
+#: ``Metal4`` respectively. The ``tm6k``/``tm9k``/``tm11k``/``tm30k``
+#: top-metal thickness family (same deck, body on ``Metal5``) is deliberately
+#: *not* added as a level here: unlike ``rm1``..``rm3`` (plain two-terminal
+#: devices), that family is itself caller-selectable via its own
+#: ``flavour_option="metal_top"`` axis -- folding a second, independent
+#: flavour selector into ``metal_level`` (which already repurposes
+#: ``res_array``'s ``flavor`` param for the poly-body case, ignored entirely
+#: once ``metal_level`` is non-zero) is a genuine design question, not the
+#: mechanical table lookup the rest of this entry is, so it is left for a
+#: follow-up rather than folded into this table by convention alone.
+#:
 #: Each entry's layer/datatype pairs are the *same* ones
-#: ``klayout_tools.decks.sky130``/``.sg13g2.EXTRACTION_DECK`` already
-#: declare -- never a second, private map:
+#: ``klayout_tools.decks.sky130``/``.sg13g2``/``.gf180mcu.EXTRACTION_DECK``
+#: already declare -- never a second, private map:
 #:
 #: - ``body``/``marker`` -- the exact ``ResistorDevice.body``/``.marker`` pair
 #:   for that level's device (sky130's ``res_generic_mN``; sg13g2's
-#:   ``res_metal1``/``res_metal2``).
+#:   ``res_metal1``/``res_metal2``; gf180mcu's ``rm1``/``rm2``/``rm3``).
 #: - ``via`` -- sky130: ``EXTRACTION_DECK.vias[N - 1]``, the via connecting
 #:   ``metN`` down to the level below (``mcon`` for ``met1``; ``via``/
-#:   ``via2``/``via3``/``via4`` for ``met2``..``met5``). sg13g2: the via
-#:   connecting the body level up to the landing level (``Via1`` for
-#:   ``Metal1``, ``Via2`` for ``Metal2``).
+#:   ``via2``/``via3``/``via4`` for ``met2``..``met5``). sg13g2/gf180mcu: the
+#:   via connecting the body level up to the landing level (sg13g2's
+#:   ``Via1``/``Via2``; gf180mcu's ``Via1``/``Via2``/``Via3``, indexed the
+#:   same way -- ``EXTRACTION_DECK.vias[N - 1]`` connects ``metals[N - 1]``
+#:   to ``metals[N]``, so the *same* index expression that lands sky130 down
+#:   lands sg13g2/gf180mcu up).
 #: - ``landing`` -- sky130: ``EXTRACTION_DECK.metals[N - 1]``, the conductor
 #:   that via lands on (``li1`` for ``met1``; ``met1``..``met4`` for
-#:   ``met2``..``met5``). sg13g2: ``EXTRACTION_DECK.metals[N]`` (the level
-#:   *above* the body -- ``Metal2`` for ``Metal1``, ``Metal3`` for
-#:   ``Metal2``).
+#:   ``met2``..``met5``). sg13g2/gf180mcu: ``EXTRACTION_DECK.metals[N]`` (the
+#:   level *above* the body -- sg13g2's ``Metal2``/``Metal3``; gf180mcu's
+#:   ``Metal2``/``Metal3``/``Metal4``).
 #:
-#: ``sky130`` and ``sg13g2`` are populated today. ``gf180mcu`` is not yet --
-#: its curated deck *does* now declare drawn metal-body resistors (``rm1``/
-#: ``rm2``/``rm3``, issue #1640) but populating its own
-#: ``_PDK_METAL_RES_LEVELS`` entry (and, unlike sg13g2's Metal1/Metal2-only
-#: increment, deciding whether its own top-metal ``tm6k``/``tm9k``/``tm11k``/
-#: ``tm30k`` family belongs in the same table) is tracked separately by issue
-#: #1731 -- a ``metal_level`` request against it still raises
-#: :class:`GenError` via :func:`_metal_res_layers` rather than silently
-#: drawing unrecognised geometry.
+#: ``sky130``, ``sg13g2``, and ``gf180mcu`` are populated today. No other
+#: family exposes a drawn metal-resistor device class yet (sg13cmos5l's
+#: curated deck declares none at all), so a ``metal_level`` request against
+#: it still raises :class:`GenError` via :func:`_metal_res_layers` rather
+#: than silently drawing unrecognised geometry.
 _PDK_METAL_RES_LEVELS: dict[str, dict[int, dict[str, tuple[int, int]]]] = {
     "sky130": {
         1: {
@@ -1858,6 +1875,40 @@ _PDK_METAL_RES_LEVELS: dict[str, dict[int, dict[str, tuple[int, int]]]] = {
         # table's own family-level GenError already enforces the other way
         # around (see :func:`_metal_res_layers`), applied per-level instead
         # of per-family.
+    },
+    "gf180mcu": {
+        # klayout_tools.decks.gf180mcu.EXTRACTION_DECK.resistors' rm1 (issue
+        # #1640), landing *up* through Via1 to Metal2 -- see this table's own
+        # docstring above for why gf180mcu lands up rather than down like
+        # sky130. metals=(Metal1, Metal2, Metal3, Metal4, Metal5),
+        # vias=(Via1, Via2, Via3, Via4) -- vias[0] connects metals[0]
+        # (Metal1) to metals[1] (Metal2).
+        1: {
+            "body": (34, 0),  # Metal1
+            "marker": (110, 11),  # metal1_res
+            "via": (35, 0),  # Via1 (Metal1<->Metal2)
+            "landing": (36, 0),  # Metal2
+        },
+        # EXTRACTION_DECK.resistors' rm2, landing up through Via2 to Metal3
+        # (vias[1] connects metals[1]/Metal2 to metals[2]/Metal3).
+        2: {
+            "body": (36, 0),  # Metal2
+            "marker": (110, 12),  # metal2_res
+            "via": (38, 0),  # Via2 (Metal2<->Metal3)
+            "landing": (42, 0),  # Metal3
+        },
+        # EXTRACTION_DECK.resistors' rm3, landing up through Via3 to Metal4
+        # (vias[2] connects metals[2]/Metal3 to metals[3]/Metal4).
+        3: {
+            "body": (42, 0),  # Metal3
+            "marker": (110, 13),  # metal3_res
+            "via": (40, 0),  # Via3 (Metal3<->Metal4)
+            "landing": (46, 0),  # Metal4
+        },
+        # tm6k/tm9k/tm11k/tm30k (body on Metal5) are deliberately not added
+        # here -- see this table's own docstring above for why the
+        # top-metal thickness family needs its own design decision rather
+        # than a mechanical level-4 entry.
     },
 }
 
@@ -1975,6 +2026,28 @@ def _metal_res_layers(family: str, level: int) -> dict[str, tuple[int, int]]:
 #:   is 0.22um, under :data:`MIN_SAME_LAYER_SPACING_UM` (0.4um).
 #: - ``body_width_min_um``: ``metal1.width.1``/``metal2.width.1`` are
 #:   0.16um/0.20um, under :data:`UNIT_MIN_W_UM` (0.42um).
+#:
+#: gf180mcu (issue #1731) needs a ``via_min_w_um`` entry at all three of its
+#: levels -- unlike sky130's levels 1-4 and both sg13g2 levels, its via size
+#: rule is *stricter* than the generic floor:
+#:
+#: - ``via_min_w_um`` 0.26um at levels 1-3 -- ``via1.width.1``/
+#:   ``via2.width.1``/``via3.width.1`` (DRM 7.14 Vian rule ``Vn.1``) are all
+#:   0.26um, over :data:`CONTACT_SIZE_UM` (0.22um) -- so, unlike every other
+#:   populated family/level, drawing this generic 0.22um square here would be
+#:   DRC-dirty against gf180mcu's own via rule.
+#: - ``via_enclosure_min_um``: needs no entry -- ``metal1.enclosing.via1.1``/
+#:   ``metal2.enclosing.via1.1`` (0.0um/0.01um), ``metal2.enclosing.via2.1``/
+#:   ``metal3.enclosing.via2.1`` (0.01um/0.01um), and
+#:   ``metal3.enclosing.via3.1``/``metal4.enclosing.via3.1`` (0.01um/0.01um)
+#:   are all under :data:`ENCLOSURE_MARGIN_UM` (0.1um).
+#: - ``via_space_min_um``: needs no entry -- the stricter of
+#:   ``vian.space.1`` (0.26um, all three levels) and ``metalN.space.1``
+#:   (0.23um for Metal1, 0.28um for Metal2/Metal3) is 0.28um, under
+#:   :data:`MIN_SAME_LAYER_SPACING_UM` (0.4um).
+#: - ``body_width_min_um``: needs no entry -- ``metal1.width.1``/
+#:   ``metal2.width.1``/``metal3.width.1`` (0.23um/0.28um/0.28um) are all
+#:   under :data:`UNIT_MIN_W_UM` (0.42um).
 _PDK_METAL_RES_LEVEL_MIN_UM: dict[str, dict[int, dict[str, float]]] = {
     "sky130": {
         5: {
@@ -1983,6 +2056,11 @@ _PDK_METAL_RES_LEVEL_MIN_UM: dict[str, dict[int, dict[str, float]]] = {
             "via_space_min_um": 1.6,  # max(via4.space.1=0.8, met5.space.1=1.6)
             "body_width_min_um": 1.6,  # met5.width.1 (m5.1)
         },
+    },
+    "gf180mcu": {
+        1: {"via_min_w_um": 0.26},  # via1.width.1 (Vn.1)
+        2: {"via_min_w_um": 0.26},  # via2.width.1 (Vn.1)
+        3: {"via_min_w_um": 0.26},  # via3.width.1 (Vn.1)
     },
 }
 
@@ -2009,6 +2087,105 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
     call with ``level=0`` (the poly-body default, never in the table)."""
     floors = _PDK_METAL_RES_LEVEL_MIN_UM.get(family, {}).get(level, {})
     return {key: floors.get(key, 0.0) for key in _METAL_RES_GEOMETRY_MIN_KEYS}
+
+
+#: Per-PDK-family ``res_array`` ``metal_level`` -> the exact ``klt extract``
+#: device-class name that level draws (issue #1731) -- the class-*name*
+#: sibling of :data:`_PDK_METAL_RES_LEVELS` (which resolves the same
+#: ``family``/``level`` pair to *layers*, never a name). Used only by
+#: :func:`_resolve_expected_device_class` below, itself only consumed by
+#: ``layout_plan_execute.py``'s silent-substitution guard (issue #1731) --
+#: ``gen.py``'s own layout code never needs the class name, only the layers,
+#: to draw geometry, so this table is intentionally *not* threaded through
+#: :func:`_resistor_layer_params`. Every value here is the same
+#: ``ResistorDevice.name`` :data:`_PDK_METAL_RES_LEVELS`'s own docstring
+#: already cites per level -- never a second, independently-sourced name.
+_PDK_METAL_RES_DEVICE_CLASS: dict[str, dict[int, str]] = {
+    "sky130": {
+        1: "res_generic_m1",
+        2: "res_generic_m2",
+        3: "res_generic_m3",
+        4: "res_generic_m4",
+        5: "res_generic_m5",
+    },
+    "sg13g2": {
+        1: "res_metal1",
+        2: "res_metal2",
+    },
+    "gf180mcu": {
+        1: "rm1",
+        2: "rm2",
+        3: "rm3",
+    },
+}
+
+#: Per-PDK-family ``res_array`` ``flavor`` -> the exact ``klt extract``
+#: device-class name that flavour draws (issue #1731) when ``metal_level``
+#: is ``0`` (the poly-body path) -- the class-*name* sibling of
+#: :data:`_PDK_RES_FLAVOR_LAYERS` (which resolves the same ``family``/
+#: ``flavor`` pair to *masks*, never a name), for the same
+#: silent-substitution guard :data:`_PDK_METAL_RES_DEVICE_CLASS` serves.
+#: Every value is the same device-class name :data:`_PDK_RES_FLAVOR_LAYERS`'s
+#: own per-flavour comments already cite.
+_PDK_RES_FLAVOR_DEVICE_CLASS: dict[str, dict[str, str]] = {
+    "sky130": {
+        "generic": "res_generic_po",
+        "high": "res_high_po",
+        "xhigh": "res_xhigh_po",
+    },
+    "gf180mcu": {
+        "generic": "ppolyf_u",
+        "1k": "ppolyf_u_1k",
+        "2k": "ppolyf_u_2k",
+        "3k": "ppolyf_u_3k",
+    },
+    "sg13g2": {
+        "generic": "rsil",
+        "rppd": "rppd",
+        "rhigh": "rhigh",
+    },
+    "sg13cmos5l": {
+        "generic": "rsil",
+        "rsil": "rsil",
+        "rppd": "rppd",
+        "rhigh": "rhigh",
+    },
+}
+
+
+def _resolve_expected_device_class(
+    generator: str, family: str, params: dict[str, Any]
+) -> str | None:
+    """The device-class name ``generator`` draws for ``family`` under
+    ``params`` -- ``None`` when this generator/family/selector combination
+    has no static prediction available, which the caller (``layout_plan_
+    execute.py``'s silent-substitution guard, issue #1731) must treat as
+    "cannot determine," never as "confirmed mismatch."
+
+    Only ``res_array`` is covered today -- its two independent
+    device-class selectors (``flavor`` for the poly-body case,
+    ``metal_level`` for the metal-body case, see :data:`_PDK_RES_FLAVOR_
+    DEVICE_CLASS`/:data:`_PDK_METAL_RES_DEVICE_CLASS`) are the exact
+    reproduction issue #1731 reports: a ``device_groups[]`` entry naming a
+    metal-resistor ``device_class`` but routed through ``res_array`` with no
+    explicit ``metal_level`` override silently draws the poly-body default
+    instead. Dispatched on ``generator`` by name (mirroring
+    :data:`_SIZE_PARAM_TARGETS`'s own per-generator dispatch shape in
+    ``layout_plan_execute.py``) so a future generator with its own
+    device-class-selecting param can add an entry here without restructuring
+    this function -- no other generator's request params currently select
+    between distinct recognised device classes the way ``res_array``'s do
+    (``mos_array``/``diff_pair``/``bjt_array``'s ``flavor`` selects a
+    transistor polarity or voltage variant, not a distinct LVS device class;
+    ``cap_array``'s density flavour is a ``deck_options`` extraction-side
+    concern, never a ``klt gen`` request param)."""
+    if generator != "res_array":
+        return None
+    metal_level = params.get("metal_level", 0)
+    if metal_level:
+        return _PDK_METAL_RES_DEVICE_CLASS.get(family, {}).get(metal_level)
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    return _PDK_RES_FLAVOR_DEVICE_CLASS.get(family, {}).get(flavor)
 
 
 def _pdk_family(variant: str) -> str:
@@ -7300,13 +7477,14 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
             "(poly body + contact + local-metal pads at both ends) with "
             "dummy elements at each end, per the sky130-bandgap-reference KB "
             "entry's resistor-array layout idiom -- family 2. "
-            "params.metal_level (1..5 on sky130, 1..2 on sg13g2) instead "
-            "draws that level's drawn metal-layer resistor (sky130's "
-            "met1..met5 res_generic_mN, issue #1639; sg13g2's Metal1/Metal2 "
-            "res_metal1/res_metal2, issue #1758) -- body + resistor-ID "
-            "marker + an end via/landing-pad stack to an adjacent metal "
-            "level (down on sky130, up on sg13g2 -- see "
-            "_PDK_METAL_RES_LEVELS's own docstring)."
+            "params.metal_level (1..5 on sky130, 1..2 on sg13g2, 1..3 on "
+            "gf180mcu) instead draws that level's drawn metal-layer "
+            "resistor (sky130's met1..met5 res_generic_mN, issue #1639; "
+            "sg13g2's Metal1/Metal2 res_metal1/res_metal2, issue #1758; "
+            "gf180mcu's Metal1/Metal2/Metal3 rm1/rm2/rm3, issue #1731) -- "
+            "body + resistor-ID marker + an end via/landing-pad stack to "
+            "an adjacent metal level (down on sky130, up on sg13g2/"
+            "gf180mcu -- see _PDK_METAL_RES_LEVELS's own docstring)."
         ),
         dbu=0.001,
         validate=_res_array_validate,

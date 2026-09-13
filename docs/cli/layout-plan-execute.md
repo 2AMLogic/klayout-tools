@@ -323,7 +323,7 @@ execution's terminal step *is* a composition:
 | `nets[]` | array\<object\> | Straight from `gen-compose.compose()` — `net`, `pins[]`, `routed`, `route_length_um`, `status` (`"routed"`/`"partial"`/`"unrouted"`, issue #1169), `legs[]` (a 2-pin net is the degenerate one-leg case of the same shape a bundle net uses). |
 | `unrouted_nets[]` | array\<string\> | Straight from `gen-compose.compose()` — every placed group, but this net's pins could not all be connected (includes both `status: "partial"` and `status: "unrouted"` nets, #1169 — see [`gen-compose.md`](gen-compose.md) for the distinction). |
 | `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply/bulk net (`VDD`/`VSS`-style, or a MOS bulk/BJT collector terminal, both deliberately unmapped — see "Connectivity derivation"). Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
-| `warnings[]` | array\<string\> | Netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, and connectivity-derivation degradations (an index past a suffix's candidate list), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+| `warnings[]` | array\<string\> | Netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
 
 ## Exit codes
 
@@ -372,6 +372,29 @@ than only in a PR description:
   layer's own deck minimum and defaults it to that layer's own minimum when
   omitted. An unrecognised `request.routing` key is a usage error, mirroring
   `request.pdk`/`request.netlist`'s own unknown-key rejection.
+- **Resolved-generator-vs-declared-`device_class` consistency (issue
+  #1731).** Phase B only checks a `device_groups[].devices[].device_class`
+  against what the netlist digest itself declares for that device name — it
+  has no way to also confirm that the `flavor`/`metal_level` this phase
+  resolves for the group's generator call actually draws a device of that
+  same class. A metal-layer resistor `device_class` (e.g. `gf180mcu`'s
+  `rm1`/`rm2`/`rm3`, or sky130's `res_generic_m1`..`m5`) routed through
+  `res_array` with no explicit `metal_level` override used to silently draw
+  the poly-body default instead, with no diagnostic. This phase now checks
+  every group right after its `generate()` call succeeds (via a small,
+  explicit per-generator lookup — today only `res_array`, whose `flavor`/
+  `metal_level` are the only `klt gen` request params that select between
+  distinct recognised device classes) and appends a `warnings[]` entry for
+  every mismatching device — never a hard rejection, since this is a
+  netlist-vs-resolved-params disagreement, not the structurally-invalid-value
+  case `klt gen` itself already hard-rejects. Two cases are deliberately
+  skipped rather than warned on, both "cannot determine" rather than
+  "confirmed mismatch": a generator/family/selector combination with no
+  static prediction available, and a declared `device_class` that is one of
+  KLayout's own generic primitive-element names (`RES`/`RES3`/`CAP`/…, what
+  a `form: "plain-element"` netlist's bare `R1 A B 1k` digests to) — a
+  primitive element names a device *kind*, never a PDK device class, so it
+  can neither confirm nor contradict what the generator drew.
 
 ## See also
 

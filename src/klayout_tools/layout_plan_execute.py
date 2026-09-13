@@ -132,6 +132,34 @@ description alone):
    request field is untouched -- Phase B's validator already ignores
    unknown top-level keys (``additionalProperties: true``), so a document
    carrying ``routing`` still validates unchanged against Phase B's schema.
+8. **Resolved-generator-vs-declared-``device_class`` consistency (issue
+   #1731)**: Phase B's validator (``layout_plan.py``) only checks a
+   ``device_groups[].devices[].device_class`` against what the *netlist
+   digest* declares for that device name -- it has no way to also check
+   that the ``flavor``/``metal_level`` this module actually resolves for
+   the group's generator call draws a device of that same class. Left
+   unchecked, a metal-layer resistor ``device_class`` routed through
+   ``res_array`` with no explicit ``metal_level`` override used to silently
+   draw the poly-body default instead, with no error or ``warnings[]``
+   entry -- the drawn layout then extracts as the wrong device with no
+   diagnostic pointing at why. :func:`_device_class_mismatch_warnings`
+   closes this by calling :func:`klayout_tools.gen._resolve_expected_
+   device_class` (a small, explicit per-generator lookup -- today only
+   ``res_array``, whose ``flavor``/``metal_level`` are the only two
+   ``klt gen`` request params that select between distinct recognised
+   device classes; see that function's own docstring for why no other
+   generator needs an entry yet) right after each group's ``generate()``
+   call succeeds, and appends a ``warnings[]`` entry (never a hard
+   rejection -- this is a "the netlist and the resolved params disagree"
+   case, not the structurally-invalid-value case ``_metal_res_layers``/
+   ``_res_flavor_layers`` already hard-reject in ``gen.py`` itself) for
+   every device whose declared class does not match what was actually
+   drawn. A generator/family/selector pair with no static prediction
+   available (``_resolve_expected_device_class`` returns ``None``), or a
+   declared class that is one of KLayout's own generic primitive-element
+   names (``RES``/``CAP``/..., see
+   :data:`_GENERIC_PRIMITIVE_DEVICE_CLASSES`), is silently skipped --
+   "cannot determine" is deliberately not treated as "confirmed mismatch."
 
 **Exit-code trichotomy** (per the issue's acceptance criteria): this module
 raises :class:`LayoutPlanExecuteError` for every application-error condition
@@ -151,7 +179,7 @@ from typing import Any
 
 from . import layout_plan
 from ._paths import _resolve_relative
-from .gen import GenError, generate
+from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose, compute_row_offsets
 from .netlist_digest import build_netlist_digest
 from .pdk import PdkNotFoundError
@@ -485,6 +513,101 @@ def _resolve_group_params(
         # a value it cannot itself validate.
 
     return resolved, warnings
+
+
+#: Every device-class name KLayout's own SPICE reader assigns a *primitive*
+#: SPICE element (``R``/``C``/``L``/``D``/``M``/``Q`` lines in a
+#: ``form: "plain-element"`` netlist), rather than the PDK device name a
+#: ``form: "subckt-call"`` netlist resolves through its deck (issue #1731).
+#: Verified against the installed ``klayout.db`` via
+#: :func:`klayout_tools.netlist_digest.build_netlist_digest`: a bare
+#: ``R1 A B 1k`` digests as ``"RES"``, its bulk-terminal form ``RES3``, and
+#: the capacitor/inductor/diode/transistor equivalents likewise.
+#:
+#: :func:`_device_class_mismatch_warnings` skips these: a primitive element
+#: carries *no* flavour/level information at all (SPICE's ``R`` says
+#: "a resistor", never "a poly resistor" or "an ``rm1``"), so it can never
+#: contradict what a generator resolved to draw -- comparing it against a
+#: concrete recognised class name (``res_generic_po``, ``rm1``, ...) would
+#: warn on every plain-element plan, which is noise, not a finding. Only a
+#: declared class that genuinely *names a device* is checkable.
+_GENERIC_PRIMITIVE_DEVICE_CLASSES = frozenset(
+    {
+        "RES",
+        "RES3",
+        "CAP",
+        "CAP3",
+        "IND",
+        "DIODE",
+        "MOS3",
+        "MOS4",
+        "BJT3",
+        "BJT4",
+    }
+)
+
+
+def _device_class_mismatch_warnings(
+    group: dict[str, Any], resolved_params: dict[str, Any], family: str
+) -> list[str]:
+    """One ``warnings[]`` entry per ``group["devices"]`` entry whose declared
+    ``device_class`` does not match what ``group["generator"]`` actually
+    draws for ``family`` under ``resolved_params`` -- the module docstring's
+    scope decision 8 (issue #1731).
+
+    The comparison is case-insensitive (``str.casefold()``): a
+    ``device_groups[].devices[].device_class`` is validated (Phase B) against
+    :func:`klayout_tools.netlist_digest.build_netlist_digest`'s own
+    ``device_class``, which is always the *upper-cased* form KLayout's
+    ``kdb.NetlistSpiceReader`` assigns every device class it builds from SPICE
+    text (confirmed against the installed ``klayout.db`` module -- e.g. a
+    ``rm1``-model resistor call digests as ``"RM1"``, never ``"rm1"``) --
+    while :func:`klayout_tools.gen._resolve_expected_device_class` reports the
+    lower-case class names ``klt extract``/the curated decks
+    (``klayout_tools.decks.*.EXTRACTION_DECK``) actually use. These are the
+    same device class under two different naming conventions from two
+    different subsystems (netlist-side SPICE parsing vs. layout-side LVS
+    recognition) -- exact case is not meaningful for this comparison, so an
+    exact (case-sensitive) match here would false-positive on every
+    otherwise-consistent plan.
+
+    A declared class in :data:`_GENERIC_PRIMITIVE_DEVICE_CLASSES` is skipped
+    for the same "cannot determine" reason (see that constant's own note): a
+    plain-element SPICE ``R``/``C``/... line names a device *kind*, never a
+    PDK device class, so it can neither confirm nor contradict what the
+    generator drew.
+
+    Never raises: :func:`klayout_tools.gen._resolve_expected_device_class`
+    returning ``None`` (this generator/family/selector combination has no
+    static device-class prediction) is treated as "nothing to check," not a
+    mismatch, so this returns ``[]`` for every generator/family
+    :func:`klayout_tools.gen._resolve_expected_device_class` does not yet
+    cover -- no false positives for `mos_array`/`diff_pair`/`bjt_array`/
+    `cap_array`/`guard_ring`/`bond_pad`/`resistor_strip`/`esd_device`/
+    `well_island` groups today.
+    """
+    expected_class = _resolve_expected_device_class(
+        group["generator"], family, resolved_params
+    )
+    if expected_class is None:
+        return []
+    mismatch_warnings: list[str] = []
+    for device_ref in group["devices"]:
+        declared_class = device_ref["device_class"]
+        if declared_class.upper() in _GENERIC_PRIMITIVE_DEVICE_CLASSES:
+            continue
+        if declared_class.casefold() == expected_class.casefold():
+            continue
+        mismatch_warnings.append(
+            f"device_groups (id '{group['id']}'): device '{device_ref['name']}' "
+            f"declares device_class '{declared_class}', but the resolved "
+            f"params for generator '{group['generator']}' on PDK family "
+            f"'{family}' draw '{expected_class}' instead -- add an explicit "
+            "params.flavor/params.metal_level override that matches the "
+            "declared device_class, or the generated layout will not match "
+            "the netlist this plan was built from"
+        )
+    return mismatch_warnings
 
 
 def _device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -868,6 +991,14 @@ def execute_layout_plan(
                 ) from exc
             except PdkNotFoundError as exc:
                 raise LayoutPlanExecuteError(str(exc)) from exc
+
+            # Scope decision 8 (issue #1731): the PDK variant `generate()`
+            # actually resolved (never `None`, unlike `pdk_spec["variant"]`,
+            # which Phase B leaves optional) -- resolving `family` from it
+            # here, once per group, avoids a second, possibly-divergent PDK
+            # lookup.
+            family = _pdk_family(generated[group["id"]]["pdk"]["variant"])
+            warnings.extend(_device_class_mismatch_warnings(group, params, family))
 
         bboxes_um = {
             group["id"]: generated[group["id"]]["bbox_um"] for group in device_groups
