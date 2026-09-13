@@ -1,0 +1,29 @@
+{
+  "id": "relaxation-vco",
+  "title": "Voltage-controlled relaxation oscillator (VCO)",
+  "tier": "hard",
+  "pdk": "sky130",
+  "description": "Design a voltage-controlled relaxation oscillator: the comparator-based astable topology from this benchmark's rc-relaxation-oscillator hard-tier task, except the timing capacitor's charge/discharge current is now a linear function of a control voltage (Ictrl = kvco * vctrl) rather than a fixed reference current, so the output frequency is a monotonic, roughly linear function of vctrl. The design must produce a frequency that (a) increases monotonically between two declared control-voltage points (0.3 V and 0.9 V) and (b) has a Hz/V sensitivity between those two points within a declared band, both measured via .meas WHEN edge extraction (mirroring rc-relaxation-oscillator's own period measurement) across the same sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C temperature matrix the existing hard-tier task uses -- the second of the oscillator/VCO/PLL family (issue #1735), tracked by its own follow-up issue #1743.",
+  "block_spec": {
+    "spec_class": "voltage-controlled clock source (relaxation VCO)",
+    "io_nodes": ["vctrl", "vo", "vdd", "gnd"],
+    "target_specs": {
+      "freq_hz_at_vctrl_0v3_min": 230000,
+      "freq_hz_at_vctrl_0v3_max": 380000,
+      "freq_hz_at_vctrl_0v9_min": 700000,
+      "freq_hz_at_vctrl_0v9_max": 1150000,
+      "sensitivity_hz_per_v_min": 800000,
+      "sensitivity_hz_per_v_max": 1250000,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/relaxation-vco/eval_descriptor.json",
+    "netlists": ["benchmarks/design-agent/reference/relaxation-vco/vco.spice"],
+    "notes": "Behavioral (PDK-model-free) realisation, reusing rc-relaxation-oscillator's own charge/discharge/comparator topology with the fixed reference current replaced by a linear voltage-to-current gain block (kvco). The comparator is a behavioral high-gain block with an explicit propagation-delay RC (Rcmp/Ccmp), not a device-level comparator, and the voltage-to-current gain block is an idealised linear transconductance (a behavioral B-source), not a device-level current-starved inverter chain or ring -- both are documented modeling shortcuts, not silicon-accurate. The reference netlist instantiates the vco_core design block twice at fixed control voltages (0.3 V, 0.9 V) so a single transient run can extract both periods needed for the monotonicity/sensitivity check; see the netlist's own header."
+  },
+  "source": {
+    "citation": "K. Sundaresan, P. E. Allen, and F. Ayazi, \"Process and temperature compensation in a 7-MHz CMOS clock oscillator,\" IEEE Journal of Solid-State Circuits, vol. 41, no. 2, pp. 433-442, Feb. 2006 (same citation as rc-relaxation-oscillator's task descriptor, cited here for the same topology/compensation-methodology framing -- this task adds only the voltage-to-current control-voltage gain block).",
+    "url": "https://doi.org/10.1109/JSSC.2005.863149"
+  }
+}

@@ -122,10 +122,12 @@ fail the task.
 | Task | Pass criterion |
 | --- | --- |
 | `rc-relaxation-oscillator` | Astable comparator-based RC relaxation oscillator (`kb/entries/rc-relaxation-oscillator.json` topology) actually oscillates — measured period between two rising edges of the output clock stays within 1.4-2.2 us (~455-715 kHz) across the same 18-corner sky130-style PVT sweep the easy tier uses. Reuses `examples/kb/rc-relaxation-oscillator`'s netlist/corner-library verbatim (issue #1735), the first of the oscillator/VCO/PLL family the original benchmark proposal (#1719) called for. |
+| `relaxation-vco` | Voltage-controlled relaxation oscillator: same charge/discharge/comparator topology as `rc-relaxation-oscillator`, but the timing capacitor's charge current is a linear function of a control voltage (`Ictrl = kvco * vctrl`) instead of a fixed reference current. Output frequency at two declared control-voltage points (0.3 V, 0.9 V) both stay within their own declared bands *and* the Hz/V sensitivity between them stays within its own declared band (800 kHz/V-1.25 MHz/V) — a combined monotonicity-and-sensitivity check — across the same 18-corner sky130-style PVT sweep. The second of the oscillator/VCO/PLL family (issue #1743, the follow-up to #1735); the remaining PLL task is tracked separately (see below). |
 
-All five medium-tier tasks are now built. The remaining hard-tier tasks
-(VCO, PLL — tracked in #1743, the follow-up to #1735) are **not yet
-built** — see "Known limitations" below.
+All five medium-tier tasks are now built. The remaining hard-tier PLL
+task (issue #1752, the follow-up to #1743: PFD + charge pump + VCO +
+feedback divider achieving lock) is **not yet built** — see "Known
+limitations" below.
 
 ## Known limitations (read before citing a pass@k number from this harness)
 
@@ -188,9 +190,10 @@ This is a first milestone, not the full issue #1719 scope.
    `--provider live-agent` now tells the agent the correct model set for
    every shipped task, amplifier and non-amplifier alike.
 
-The remaining hard-tier tasks (VCO, PLL — tracked in #1743, the follow-up
-to #1735) and a fuller interactive/tool-using live-agent provider are
-filed as follow-up work — see the tracked issues linked from #1719/#1728.
+The remaining hard-tier PLL task (#1752, the follow-up to #1743, itself
+the follow-up to #1735) and a fuller interactive/tool-using live-agent
+provider are filed as follow-up work — see the tracked issues linked from
+#1719/#1728.
 
 ## CI
 

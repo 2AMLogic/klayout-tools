@@ -1,0 +1,92 @@
+{
+  "netlist": "vco.spice",
+  "engine": "ngspice",
+  "models": {
+    "lib": "models.lib"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "2n 25u"
+  },
+  "measurements": [
+    {
+      "name": "t_edge3_lo",
+      "spice": ".meas tran t_edge3_lo WHEN v(vo_lo)=0.9 RISE=3",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge4_lo",
+      "spice": ".meas tran t_edge4_lo WHEN v(vo_lo)=0.9 RISE=4",
+      "unit": "s"
+    },
+    {
+      "name": "period_lo",
+      "spice": ".meas tran period_lo PARAM=(t_edge4_lo-t_edge3_lo)",
+      "unit": "s"
+    },
+    {
+      "name": "freq_lo",
+      "spice": ".meas tran freq_lo PARAM=(1/period_lo)",
+      "unit": "Hz",
+      "limits": {
+        "min": 230000,
+        "max": 380000
+      }
+    },
+    {
+      "name": "t_edge3_hi",
+      "spice": ".meas tran t_edge3_hi WHEN v(vo_hi)=0.9 RISE=3",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge4_hi",
+      "spice": ".meas tran t_edge4_hi WHEN v(vo_hi)=0.9 RISE=4",
+      "unit": "s"
+    },
+    {
+      "name": "period_hi",
+      "spice": ".meas tran period_hi PARAM=(t_edge4_hi-t_edge3_hi)",
+      "unit": "s"
+    },
+    {
+      "name": "freq_hi",
+      "spice": ".meas tran freq_hi PARAM=(1/period_hi)",
+      "unit": "Hz",
+      "limits": {
+        "min": 700000,
+        "max": 1150000
+      }
+    },
+    {
+      "name": "vco_sensitivity",
+      "spice": ".meas tran vco_sensitivity PARAM=((freq_hi-freq_lo)/(vctrl_hi-vctrl_lo))",
+      "unit": "Hz/V",
+      "limits": {
+        "min": 800000,
+        "max": 1250000
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 60,
+    "keep_artifacts": false
+  }
+}
