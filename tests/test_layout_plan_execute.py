@@ -52,6 +52,13 @@ def pdk_root(tmp_path):
     return root
 
 
+@pytest.fixture()
+def gf180mcu_pdk_root(tmp_path):
+    root = tmp_path / "gf180mcu_pdk_install"
+    _make_install(root, "gf180mcuD")
+    return root
+
+
 def _write(tmp_path, name: str, text: str) -> str:
     path = tmp_path / name
     path.write_text(text)
@@ -60,6 +67,10 @@ def _write(tmp_path, name: str, text: str) -> str:
 
 def _pdk_spec(pdk_root) -> dict:
     return {"variant": "sky130A", "root": str(pdk_root)}
+
+
+def _gf180mcu_pdk_spec(gf180mcu_pdk_root) -> dict:
+    return {"variant": "gf180mcuD", "root": str(gf180mcu_pdk_root)}
 
 
 # A gate-rail netlist (mirrors `test_gen_compose.py`'s own
@@ -507,6 +518,141 @@ M1 D G VSS VSS nfet L=0.5U W=2U
         "params.w_um override" in warning and "diverges" in warning
         for warning in response["warnings"]
     )
+
+
+# --- device_class vs. resolved-generator-output consistency (issue #1731) --- #
+
+
+#: `rm1`/`ppolyf_u` (unlike sky130's `res_generic_m1`/`res_generic_po`) are
+#: themselves real gf180mcu subcircuit names `netlist_normalize.py` already
+#: auto-resolves with no `reference.deck`/`device_map` override needed (see
+#: `klayout_tools.decks.gf180mcu`'s own `ResistorDevice(name="rm1", ...)`
+#: comment -- "gf180mcu_fd_pr__rm1 (subckt \"rm1\")") -- using them keeps
+#: these fixtures minimal.
+def _one_res_request(
+    tmp_path, gf180mcu_pdk_root, model: str, params: dict | None = None
+) -> dict:
+    netlist = f"""
+.subckt one_res A B
+XR1 A B {model} l=4u w=1u
+.ends
+"""
+    netlist_path = _write(tmp_path, "one_res.spice", netlist)
+    group: dict = {
+        "id": "r1",
+        "devices": [{"name": "1", "device_class": model.upper()}],
+        "generator": "res_array",
+    }
+    if params:
+        group["params"] = params
+    return {
+        "netlist": {"path": netlist_path, "top": "one_res", "form": "subckt-call"},
+        "pdk": _gf180mcu_pdk_spec(gf180mcu_pdk_root),
+        "device_groups": [group],
+        "rows": [{"order": ["r1"], "spacing_um": 0.0}],
+        "options": {"output": str(tmp_path / "one_res_0.gds")},
+    }
+
+
+def test_metal_resistor_device_class_with_no_metal_level_override_warns(
+    tmp_path, gf180mcu_pdk_root
+):
+    """A `device_groups[]` entry declaring a metal-layer resistor
+    `device_class` (`rm1`, gf180mcu's `metal_level=1` device) but routed
+    through `res_array` with no `params.metal_level` override used to
+    silently draw the generator's default poly-body resistor (`ppolyf_u`)
+    instead -- no error, no `warnings[]` entry (issue #1731). This must now
+    surface a `warnings[]` entry naming both the declared and the
+    actually-drawn class."""
+    request = _one_res_request(tmp_path, gf180mcu_pdk_root, "rm1")
+
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert any(
+        "device_class 'RM1'" in w and "draw 'ppolyf_u' instead" in w
+        for w in response["warnings"]
+    )
+    # The layout really was drawn poly-body (the silent-substitution bug's
+    # own symptom) -- confirms the warning describes the *actual* mismatch,
+    # not a false alarm.
+    assert "metal_level" not in response["device_groups"][0]["resolved_params"]
+
+
+def test_metal_resistor_device_class_with_matching_metal_level_no_warning(
+    tmp_path, gf180mcu_pdk_root
+):
+    """The same plan as above, but with the required `params.metal_level: 1`
+    override -- the resolved generator output now matches the declared
+    `device_class`, so no mismatch warning fires."""
+    request = _one_res_request(
+        tmp_path, gf180mcu_pdk_root, "rm1", params={"metal_level": 1}
+    )
+
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert not any("device_class" in w and "draw" in w for w in response["warnings"])
+    assert response["device_groups"][0]["resolved_params"]["metal_level"] == 1
+
+
+def test_poly_device_class_with_default_params_no_warning(tmp_path, gf180mcu_pdk_root):
+    """A plan whose declared `device_class` already matches the default
+    poly-body device (`ppolyf_u`, `params.metal_level` omitted) must not
+    warn -- the guard only fires on a genuine mismatch."""
+    request = _one_res_request(tmp_path, gf180mcu_pdk_root, "ppolyf_u")
+
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert not any("device_class" in w and "draw" in w for w in response["warnings"])
+
+
+def test_plain_element_resistor_device_class_never_warns(tmp_path, gf180mcu_pdk_root):
+    """A `form: "plain-element"` netlist's bare `R1 A B 1k` digests to
+    KLayout's own generic `"RES"` class, which names a device *kind*, not a
+    PDK device class -- it can neither confirm nor contradict what
+    `res_array` drew, so the issue-#1731 guard must stay silent rather than
+    warn "declares RES, draws ppolyf_u" on every plain-element plan."""
+    netlist_path = _write(
+        tmp_path,
+        "plain_res.spice",
+        """
+.subckt plain_res A B
+R1 A B 1k
+.ends
+""",
+    )
+    request = {
+        "netlist": {"path": netlist_path, "top": "plain_res"},
+        "pdk": _gf180mcu_pdk_spec(gf180mcu_pdk_root),
+        "device_groups": [
+            {
+                "id": "r1",
+                "devices": [{"name": "1", "device_class": "RES"}],
+                "generator": "res_array",
+            }
+        ],
+        "rows": [{"order": ["r1"], "spacing_um": 0.0}],
+        "options": {"output": str(tmp_path / "plain_res_0.gds")},
+    }
+
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert not any("device_class" in w and "draw" in w for w in response["warnings"])
+
+
+def test_metal_level_explicit_invalid_override_still_hard_rejects(
+    tmp_path, gf180mcu_pdk_root
+):
+    """An explicitly-invalid `params.metal_level` override must continue to
+    hard-reject exactly as before this issue's guard was added (no
+    regression to `gen.py`'s own `_metal_res_layers`/structural-bound
+    checks) -- the new warnings[]-based guard is additive, never a
+    replacement for an existing hard error."""
+    request = _one_res_request(
+        tmp_path, gf180mcu_pdk_root, "rm1", params={"metal_level": 99}
+    )
+
+    with pytest.raises(LayoutPlanExecuteError, match="metal_level"):
+        execute_layout_plan_document(request, request_dir=str(tmp_path))
 
 
 def test_diff_pair_group_with_declared_topology_executes_successfully(

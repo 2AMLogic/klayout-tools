@@ -2116,17 +2116,111 @@ def test_res_array_metal_level_multi_unit_rows_is_drc_clean(tmp_path, pdk_root):
     assert extract_report["dummy_devices_dropped"] == 2
 
 
-def test_res_array_metal_level_unsupported_family_rejected(tmp_path, both_pdk_root):
-    """`metal_level` requires a PDK family with a drawn metal-resistor
-    device class -- gf180mcu's curated deck declares none, so a request
-    against it must fail clearly rather than silently drawing unrecognised
-    geometry."""
-    with pytest.raises(GenError, match="metal_level"):
+#: One `(metal_level, device_class, sheet_rho_ohm_sq)` triple per gf180mcu
+#: drawn metal-resistor device (`klayout_tools.decks.gf180mcu.EXTRACTION_DECK
+#: .resistors`' `rm1`/`rm2`/`rm3`, issue #1640) -- mirrors sky130's own
+#: `_METAL_RES_LEVELS` table above, scoped to the three levels this family's
+#: extraction deck recognises (its `tm6k`/`tm9k`/`tm11k`/`tm30k` top-metal
+#: flavour set is deliberately out of scope here -- see
+#: `_PDK_METAL_RES_LEVELS`'s own gf180mcu comment in `gen.py`).
+_GF180MCU_METAL_RES_LEVELS = (
+    (1, "rm1", 0.09),
+    (2, "rm2", 0.09),
+    (3, "rm3", 0.09),
+)
+
+
+@pytest.mark.parametrize(
+    ("level", "device_class", "sheet_rho"), _GF180MCU_METAL_RES_LEVELS
+)
+def test_gf180mcu_res_array_metal_level_draws_expected_device_class(
+    tmp_path, both_pdk_root, level, device_class, sheet_rho
+):
+    """`metal_level=1`/`2`/`3` (issue #1731) draws gf180mcu's drawn
+    metal-resistor family -- `rm1`/`rm2`/`rm3` -- instead of `res_array`'s
+    original poly body: the output must pass `klt drc --deck gf180mcu`
+    cleanly and round-trip through `klt extract --deck gf180mcu` as exactly
+    the expected device class with `r_ohm = length_um / width_um *
+    sheet_rho`."""
+    length_um = 4.0
+    width_um = 1.0
+    output = tmp_path / f"res_array_gf180mcu_metal_m{level}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "length_um": length_um,
+                "width_um": width_um,
+                "num": 1,
+                "dummy": 0,
+                "metal_level": level,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    assert report["drc_hints"]["matched_group_id"] == "res_array:1"
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    extract_report = run_extract(str(output), "gf180mcu")
+    assert extract_report["device_counts"] == {device_class: 1}
+    (device,) = extract_report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(length_um / width_um * sheet_rho)
+
+
+def test_gf180mcu_res_array_metal_level_default_zero_is_poly_body_unchanged(
+    tmp_path, both_pdk_root
+):
+    """Omitting `metal_level` (or passing `metal_level=0` explicitly) must
+    reproduce `res_array`'s original poly-body geometry exactly on gf180mcu
+    too -- the feature is purely additive."""
+    output_default = tmp_path / "res_array_gf180mcu_metal_default.gds"
+    report_default = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 3, "dummy": 1},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_explicit = tmp_path / "res_array_gf180mcu_metal_level0.gds"
+    report_explicit = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": 3, "dummy": 1, "metal_level": 0},
+            "options": {"output": str(output_explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_explicit)
+    assert report_default["ports"] == report_explicit["ports"]
+
+    extract_report = run_extract(str(output_default), "gf180mcu")
+    # `>= 3` (not `== 3`): gf180mcu's `_PDK_ROLE_LAYERS` entry declares no
+    # `"dummy"` role layer at all (the same pre-existing gap
+    # `test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged`
+    # documents for sg13g2, out of this issue's scope), so this family's
+    # dummy units are not suppressed by `klt extract` and count as ordinary
+    # `"ppolyf_u"` devices alongside the `num` real ones.
+    assert extract_report["device_counts"].get("ppolyf_u", 0) >= 3
+
+
+def test_gf180mcu_res_array_metal_level_4_rejected(tmp_path, both_pdk_root):
+    """gf180mcu only exposes `metal_level` `1`-`3` (`rm1`/`rm2`/`rm3`) --
+    `tm6k`/`tm9k`/`tm11k`/`tm30k` (this deck's own top-metal thickness
+    family, body on Metal5) is deliberately not wired up as a fourth level
+    (see `_PDK_METAL_RES_LEVELS`'s own gf180mcu comment), so `metal_level=4`
+    must fail clearly rather than silently drawing an unrecognised device."""
+    with pytest.raises(GenError, match="not a recognised metal-resistor level"):
         generate(
             {
                 "generator": "res_array",
                 "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-                "params": {"metal_level": 1},
+                "params": {"metal_level": 4},
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
