@@ -126,3 +126,84 @@ actual use (auto-zero, then open-loop comparator evaluation) has no
 negative-feedback loop to be stable against, unlike `five-transistor-ota`,
 so a `pm_deg`-style number here would not mean what it means for that
 entry — see `measured.notes` on the KB entry itself.
+
+## `pfd-charge-pump-tri-state/`
+
+Backs [`kb/entries/pfd-charge-pump-tri-state.json`](../../kb/entries/pfd-charge-pump-tri-state.json).
+
+| File | What it is |
+|---|---|
+| `charge_pump.spice` | Transistor-level (real `sky130_fd_pr__pfet_01v8`/`nfet_01v8` devices) UP/DOWN current-source/sink stage only — the PFD's own flip-flop/AND-gate reset logic is standard-cell-portable digital logic (see the entry's `pdk_portability.notes`) and out of scope for this artifact. Originally authored for issue #1325's `klt size` reproduction test (`tests/test_size.py`); `request.json` wraps it for `klt sim` as this entry's own reference figures. |
+| `charge_pump_recentered.spice` / `charge_pump.sizing.json` / `design-centering-validation/` | Related `klt size` sizing-reproduction artifacts, not consumed by `request.json` directly. |
+| `request.json` | The `klt sim` request: a single `tt`, 27C transient measuring the UP/DOWN branch currents and their mismatch. |
+
+```
+uv run klt sim examples/kb/pfd-charge-pump-tri-state/request.json
+```
+
+Reproduces `icp_up_a` (19.7971 µA), `icp_down_a` (20.2665 µA), and
+`icp_mismatch_pct` (-2.34316%) at `tt`, 27C, `vdd`=1.8V (fixed by the
+netlist's own `.param`, not swept) — the UP/DOWN mirror-current match this
+entry's `sizing_approach` calls out as the dominant spur mechanism. Unlike
+this KB's other three `measured` entries at the time this section was
+written (`sky130-bandgap-reference`, `ldo-pmos-pass-error-amp`,
+`rc-relaxation-oscillator`, which use behavioral/ideal elements), this
+testbench uses real sky130A device models throughout.
+
+## `two-stage-miller-ota/`
+
+Backs [`kb/entries/two-stage-miller-ota.json`](../../kb/entries/two-stage-miller-ota.json)
+— `two_stage_miller.spice` is a from-scratch netlist (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, not behavioral) built per
+the entry's own `sizing_approach`: stage 1 reuses the
+`five-transistor-ota`'s NMOS-diff-pair/PMOS-mirror-load/NMOS-tail
+structure; stage 2 adds a common-source NMOS gain device loaded by a
+diode-mirrored PMOS current source; a nulling resistor in series with the
+Miller capacitor bridges stage 2's output back to stage 1's output for
+pole-splitting plus RHP-zero cancellation. See the netlist's own header for
+why the AC drive/DC-feedback terminal assignment is swapped relative to
+`five-transistor-ota/ota_5t.spice` — this two-stage amplifier's overall
+input-to-output polarity is inverted relative to the single stage, so the
+feedback network must close onto the opposite input terminal to stay
+negative feedback (closing it onto the same terminal as the single-stage
+case would be positive feedback and never settle to a valid bias point).
+
+```
+uv run klt sim examples/kb/two-stage-miller-ota/request.json
+```
+
+Reproduces `av_db` (75.4539 dB), `gbw_hz` (86.2085 MHz), and `pm_deg`
+(69.1986°) at `tt`, 1.8V, 27C — `klt sim --op-lint` reports every device in
+saturation at this corner (no findings). The DC gain is roughly two stages'
+worth higher than `five-transistor-ota`'s single-stage 39.6 dB, and the
+compensation network gives a healthy phase margin, matching the entry's
+own "high-gain... at the cost of a slower-settling, more
+compensation-sensitive loop" trade-off description.
+
+## `strongarm-latch-comparator/`
+
+Backs [`kb/entries/strongarm-latch-comparator.json`](../../kb/entries/strongarm-latch-comparator.json)
+— `strongarm.spice` is a from-scratch netlist (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, not behavioral) realizing
+the entry's topology as the standard "modern StrongARM" structure: a
+clocked tail switch gates a differential input pair whose own drain nodes
+(the entry's "internal drain nodes") are reset to VDD by clocked PMOS
+pull-ups, and a cross-coupled NMOS/PMOS latch pair (independently reset to
+VDD, to avoid reset-phase contention with the cross-coupled NMOS pair)
+regenerates the resulting imbalance into a full-rail digital decision. See
+the netlist's own header for the full node map and this specific wiring's
+decision polarity.
+
+```
+uv run klt sim examples/kb/strongarm-latch-comparator/request.json
+```
+
+Reproduces `regen_delay_s` (111.61 ps from the clock's 50%-point crossing
+to the losing output's decision), and the settled full-rail decision
+(`voutp_final_v` ≈ 1.1 µV, `voutn_final_v` = 1.8 V) for a 20 mV
+differential input at `tt`, 1.8V, 27C. `klt sim --op-lint`'s DC-biased
+findings (every device reported off/triode) are expected, not a defect:
+this is an inherently dynamic, clocked circuit with no meaningful static
+operating point at `clk`=0 (fully in reset) — the transient regeneration
+behavior this `request.json` measures is the correct verification method
+for this topology, not a DC operating-point check.
