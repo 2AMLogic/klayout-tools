@@ -2,10 +2,12 @@ name: Design-agent benchmark
 
 # Issue #1719: task-set schema validation + "every reference solution passes
 # its own gate" check for benchmarks/design-agent/ -- the harness's own
-# self-check, not yet the live-agent pass@k run (see
-# benchmarks/design-agent/README.md, "Known limitations": the shipped
-# `run` mode's default candidate provider is a deterministic stand-in, not
-# a live S4->S5->S6 skill-driven agent).
+# self-check via the deterministic `reference` candidate provider. Issue
+# #1732 adds a second, additive job below that runs the same task set
+# through the live-agent provider (`--provider live-agent`) instead, driving
+# the S4->S5->S6 skill chain for a real regression signal on the design
+# pipeline itself -- see benchmarks/design-agent/README.md's "Known
+# limitations" for what that provider does and does not do.
 #
 # `workflow_dispatch`/`schedule` only, mirroring `equiv-canary.yml`'s
 # posture: every task's reference solution is an 18-corner `ngspice` sweep
@@ -79,4 +81,91 @@ jobs:
           path: |
             design-agent-benchmark-validate.json
             design-agent-benchmark-run.json
+          retention-days: 90
+
+  design-agent-benchmark-live:
+    name: Live-agent S4->S5->S6 pass@k (issue #1732)
+    runs-on: ubuntu-latest
+    # Additive alongside the job above -- never replaces its deterministic
+    # `reference`-provider self-check. Bounded well under this ceiling in
+    # the common case (3 attempts x 4 easy-tier tasks, 120s/attempt agent
+    # timeout below); the ceiling itself is the backstop against a genuinely
+    # hung `claude` invocation the per-attempt timeout somehow missed.
+    timeout-minutes: 45
+    env:
+      # A repository secret this project does not provision by default (see
+      # benchmarks/design-agent/README.md's "Known limitations" and the
+      # tracked follow-up issue for provisioning it) -- the same headless-
+      # auth env var `.loom/scripts/spawn-claude.sh`'s own token-pool
+      # convention sets for the `claude` CLI. The run step below degrades to
+      # a documented, non-failing skip when this is empty, exactly the way
+      # a fork's build (which never has repo secrets) would see it.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install ngspice
+        # See .github/workflows/ci.yml's step of the same name for the
+        # per-package/timeout rationale -- identical install path.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh ngspice
+
+      - name: Verify ngspice runs headlessly
+        run: ngspice -v
+
+      - name: Install the claude CLI
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run the harness (live-agent candidate provider, pass@1/pass@3)
+        # Drives one headless `claude -p` invocation per attempt through
+        # the S4->S5->S6 skill chain (scripts/design_agent_benchmark.py's
+        # `make_live_agent_provider` -- see its docstring and
+        # benchmarks/design-agent/README.md for the deliberate single-turn
+        # scope-narrowing) and scores the agent's own proposed netlist(s),
+        # never the reference solution -- a real regression signal for the
+        # design pipeline, not just this harness's own plumbing. 3
+        # attempts/task (not the default job's 5) and a 120s per-attempt
+        # agent timeout keep this bounded well under the job's own ceiling
+        # above.
+        run: |
+          set -e
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo '{"schema_version": 1, "provider": "live-agent", "skipped": true, "reason": "CLAUDE_CODE_OAUTH_TOKEN secret not provisioned"}' \
+              | tee design-agent-benchmark-live-run.json
+            echo "design-agent-benchmark (live-agent): SKIPPED - CLAUDE_CODE_OAUTH_TOKEN secret not provisioned (see benchmarks/design-agent/README.md's Known limitations)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          uv run --frozen python scripts/design_agent_benchmark.py run \
+            --provider live-agent --attempts 3 --k 1 3 --agent-timeout-s 120 \
+            --out design-agent-benchmark-live-run.json
+          pass1=$(jq -r '.overall.pass_at_k["1"] // "null"' design-agent-benchmark-live-run.json)
+          solved=$(jq -r '.overall.solved_count' design-agent-benchmark-live-run.json)
+          total=$(jq -r '.overall.task_count' design-agent-benchmark-live-run.json)
+          tiers=$(jq -r '
+            .tiers
+            | to_entries
+            | map(select(.value.task_count > 0))
+            | map("\(.key)=\(.value.solved_count)/\(.value.task_count)")
+            | join(", ")
+          ' design-agent-benchmark-live-run.json)
+          echo "design-agent-benchmark (live-agent): overall pass@1=${pass1} solved=${solved}/${total} (${tiers})" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: design-agent-benchmark-live-report
+          path: design-agent-benchmark-live-run.json
           retention-days: 90
