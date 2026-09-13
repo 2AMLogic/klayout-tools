@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import statistics
@@ -3023,17 +3024,15 @@ def _run_corner(
             try:
                 artifacts["waveform"] = _parse_and_persist_waveform(raw_path)
             except (SimError, ValueError) as exc:
-                # Defensive, not a fix for the underlying gap: an `ac`/`sp`
-                # rawfile carries ngspice's own complex (`real,imag` per
-                # value) encoding, which `parse_ascii_rawfile` does not
-                # understand yet (raises a raw `ValueError` from its own
-                # float-parsing loop) -- tracked as its own follow-up rather
-                # than fixed here (issue #1723 is plotting, not waveform-
-                # capture correctness). Left as a diagnostic rather than
-                # re-raising either way: `_run_corner`'s own contract is
-                # "never raises", and a corner that ran its analysis
-                # successfully should not have its `status` invalidated
-                # just because one *optional* artifact could not be parsed.
+                # Generic defensive catch, not expected in normal operation:
+                # `parse_ascii_rawfile` understands both plain-real (`tran`/
+                # `dc`) and `Flags: complex` (`ac`/`sp`) rawfiles (issue
+                # #1756), but a still-malformed or otherwise unrecognised
+                # rawfile should degrade to a diagnostic rather than crash
+                # the whole corner. `_run_corner`'s own contract is "never
+                # raises", and a corner that ran its analysis successfully
+                # should not have its `status` invalidated just because one
+                # *optional* artifact could not be parsed.
                 diagnostics.append(
                     {
                         "severity": "warning",
@@ -3834,6 +3833,17 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
     frequency for ``.ac``, the swept source for ``.dc``). Raises
     :class:`SimError` if the file is not a recognisable ngspice ASCII
     rawfile.
+
+    ``ac``/``sp`` analyses declare ``Flags: complex`` in the header, and
+    every value in the ``Values:`` section is then written as a
+    comma-separated ``real,imag`` pair rather than a bare float (verified
+    against ngspice 46). Per the JSON contract's additive-only convention,
+    ``points[]`` always holds plain real-valued floats -- for a ``Flags:
+    complex`` rawfile, each column's magnitude (``hypot(real, imag)``) is
+    emitted instead of the raw pair, applied uniformly across all columns
+    including the sweep variable (whose imaginary part is always ``0``, so
+    its magnitude equals its real part). See ``docs/cli/sim.md``'s waveform
+    JSON shape section for the documented representation.
     """
     try:
         with open(raw_path, encoding="utf-8", errors="replace") as handle:
@@ -3845,6 +3855,9 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
     if header_match is None:
         raise SimError(f"not a recognisable ngspice rawfile: {raw_path}")
     plotname = header_match.group(1).strip()
+
+    flags_match = re.search(r"^Flags:\s*(.*)$", text, re.MULTILINE)
+    is_complex = flags_match is not None and "complex" in flags_match.group(1).lower()
 
     var_count_match = re.search(r"^No\. Variables:\s*(\d+)$", text, re.MULTILINE)
     if var_count_match is None:
@@ -3868,6 +3881,17 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
             f"parsed {len(variables)}"
         )
 
+    def _parse_value(token: str) -> float:
+        if not is_complex:
+            return float(token)
+        # "real,imag" -- reduce to a single real-valued magnitude, applied
+        # uniformly to every column (including the sweep variable, whose
+        # imaginary part is always 0 so its magnitude equals its real part).
+        real_str, _, imag_str = token.partition(",")
+        real = float(real_str)
+        imag = float(imag_str) if imag_str else 0.0
+        return math.hypot(real, imag)
+
     values_text = text[variables_block_match.end() :]
     points: list[list[float]] = []
     current: list[float] = []
@@ -3878,9 +3902,9 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
         tokens = line.split()
         if len(tokens) == 2 and current == []:
             # "<point_index> <value0>" -- start of a new point.
-            current = [float(tokens[1])]
+            current = [_parse_value(tokens[1])]
         elif len(tokens) == 1:
-            current.append(float(tokens[0]))
+            current.append(_parse_value(tokens[0]))
         else:
             continue
         if len(current) == var_count:

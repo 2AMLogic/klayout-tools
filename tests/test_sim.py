@@ -1124,6 +1124,49 @@ def test_parse_ascii_rawfile(tmp_path):
     ]
 
 
+_ASCII_RAWFILE_COMPLEX = """Title: * rawfile test
+Date: Fri Jul 31 12:00:00  2026
+Plotname: AC Analysis
+Flags: complex
+No. Variables: 2
+No. Points: 2
+Variables:
+\t0\tfrequency\tfrequency
+\t1\tv(out)\tvoltage
+Values:
+ 0\t1.000000000000000e+00,0.000000000000000e+00
+\t1.000000000000000e+00,0.000000000000000e+00
+
+ 1\t1.000000000000000e+01,0.000000000000000e+00
+\t3.000000000000000e+00,4.000000000000000e+00
+
+"""
+
+
+def test_parse_ascii_rawfile_complex(tmp_path):
+    path = tmp_path / "waveform_ac.raw"
+    path.write_text(_ASCII_RAWFILE_COMPLEX)
+
+    waveform = sim.parse_ascii_rawfile(str(path))
+
+    assert waveform["plotname"] == "AC Analysis"
+    assert waveform["variables"] == [
+        {"index": 0, "name": "frequency", "type": "frequency"},
+        {"index": 1, "name": "v(out)", "type": "voltage"},
+    ]
+    # frequency's imaginary part is always 0, so its magnitude equals its
+    # real part; v(out)'s (3, 4) pair has a non-zero imaginary part, so its
+    # magnitude (5.0) differs from either component -- confirming the parser
+    # isn't accidentally truncating to the real part.
+    assert waveform["points"] == [
+        [1.0, 1.0],
+        [10.0, 5.0],
+    ]
+    for point in waveform["points"]:
+        for value in point:
+            assert isinstance(value, float)
+
+
 def test_parse_ascii_rawfile_not_a_rawfile_raises(tmp_path):
     path = tmp_path / "notraw.txt"
     path.write_text("hello world\n")
@@ -5125,14 +5168,12 @@ def test_run_sim_without_plot_dir_measurements_rollup_has_no_plot_key(
 def test_run_sim_plot_ac_analysis_uses_log_axis(tmp_path, monkeypatch):
     """`analysis.kind == "ac"` selects the log-scaled frequency axis (issue
     #1723's "log axes for ac" acceptance criterion). Stubbed rather than run
-    against real `ngspice`: a genuine `ac` rawfile carries ngspice's own
-    complex (`real,imag` per value) encoding that
-    `sim.parse_ascii_rawfile` does not understand yet (see
-    https://github.com/2AMLogic/klayout-tools/issues/1756, filed as this
-    PR's own out-of-scope follow-up) -- this test fakes a plain-real rawfile
-    on the `ac` code path instead, so it exercises this issue's own
-    `log_x = analysis_kind == "ac"` wiring without depending on that
-    unrelated, pre-existing gap."""
+    against real `ngspice` so this test exercises only the
+    `log_x = analysis_kind == "ac"` wiring in isolation, independent of
+    rawfile parsing; see `test_integration_plot_ac_waveform_parses_complex_rawfile`
+    for the real-`ngspice` end-to-end coverage of `ac`'s complex (`real,imag`
+    per value) rawfile encoding, handled by `parse_ascii_rawfile` since issue
+    #1756."""
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -5154,11 +5195,14 @@ def test_run_sim_plot_ac_analysis_uses_log_axis(tmp_path, monkeypatch):
 
 
 @_SKIP_NO_NGSPICE
-def test_integration_plot_ac_waveform_parse_failure_does_not_crash_sweep(tmp_path):
-    """A real `ac` analysis's own rawfile is currently unparseable (see the
-    stubbed test above's docstring) -- `run_sim` must degrade to no plots
-    for that corner rather than raising, per `_run_corner`'s own "never
-    raises" contract."""
+def test_integration_plot_ac_waveform_parses_complex_rawfile(tmp_path):
+    """A real `ac` analysis's rawfile declares `Flags: complex` and encodes
+    every value as a `real,imag` pair (issue #1756) -- `parse_ascii_rawfile`
+    now reduces each column to its magnitude instead of raising, so
+    `run_sim` produces a real waveform artifact and a real (non-empty),
+    log-frequency-axis plot for this corner rather than degrading to the
+    `"unknown"`-diagnostic fallback `_run_corner` uses for a genuinely
+    unparseable rawfile."""
     path = tmp_path / "body.spice"
     path.write_text(".param vdd=1.0\nVin in 0 DC 0 AC 1\nR1 in out 1k\nC1 out 0 1n\n")
     request = _write_request(
@@ -5170,9 +5214,18 @@ def test_integration_plot_ac_waveform_parse_failure_does_not_crash_sweep(tmp_pat
     report = sim.run_sim(str(request), plot_dir=str(plot_dir))  # must not raise
 
     (corner,) = report["corners"]
-    assert corner["artifacts"]["waveform"] is None
-    assert any(d["code"] == "unknown" for d in corner["diagnostics"])
-    assert report["plots"] == []
+    assert not any(d["code"] == "unknown" for d in corner["diagnostics"])
+    assert corner["artifacts"]["waveform"] is not None
+    waveform = json.loads(Path(corner["artifacts"]["waveform"]).read_text())
+    assert waveform["variables"][0]["name"] == "frequency"
+    for point in waveform["points"]:
+        for value in point:
+            assert isinstance(value, float)
+
+    assert report["plots"]
+    for plot in report["plots"]:
+        svg = Path(plot["path"]).read_text()
+        assert "(log)" in svg
 
 
 @_SKIP_NO_NGSPICE
