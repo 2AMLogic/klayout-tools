@@ -1,0 +1,25 @@
+{
+  "netlist": "multi_ro_xor.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "5p 55n" },
+  "measurements": [
+    { "name": "t8_5", "spice": ".meas tran t8_5 TRIG v(r1_5) VAL=0.9 TD=1n RISE=1 TARG v(r1_5) VAL=0.9 TD=1n RISE=9", "unit": "s" },
+    { "name": "t8_7", "spice": ".meas tran t8_7 TRIG v(r1_7) VAL=0.9 TD=1n RISE=1 TARG v(r1_7) VAL=0.9 TD=1n RISE=9", "unit": "s" },
+    { "name": "t8_9", "spice": ".meas tran t8_9 TRIG v(r1_9) VAL=0.9 TD=1n RISE=1 TARG v(r1_9) VAL=0.9 TD=1n RISE=9", "unit": "s" },
+    { "name": "f_ring5_hz", "spice": ".meas tran f_ring5_hz param='8 / t8_5'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "f_ring7_hz", "spice": ".meas tran f_ring7_hz param='8 / t8_7'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "f_ring9_hz", "spice": ".meas tran f_ring9_hz param='8 / t8_9'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "sampled_bit_1", "spice": ".meas tran sampled_bit_1 find v(y) at=5.35n", "unit": "V" },
+    { "name": "sampled_bit_2", "spice": ".meas tran sampled_bit_2 find v(y) at=16.35n", "unit": "V" },
+    { "name": "sampled_bit_3", "spice": ".meas tran sampled_bit_3 find v(y) at=27.35n", "unit": "V" },
+    { "name": "sampled_bit_4", "spice": ".meas tran sampled_bit_4 find v(y) at=38.35n", "unit": "V" },
+    { "name": "sampled_bit_5", "spice": ".meas tran sampled_bit_5 find v(y) at=49.35n", "unit": "V" }
+  ],
+  "options": { "timeout_s": 300, "keep_artifacts": false }
+}

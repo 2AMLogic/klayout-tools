@@ -588,3 +588,32 @@ that ngspice measured any jitter/phase-noise figure at all (it has no
 periodic-steady-state/noise analysis) — see the entry's own
 `artifacts.notes` for the full disclosure, including why the flip-flop
 sampler itself is not modeled here.
+
+## `multi-ro-xor-entropy-source/`
+
+Backs [`kb/entries/multi-ro-xor-entropy-source.json`](../../kb/entries/multi-ro-xor-entropy-source.json)
+— `multi_ro_xor.spice` is a from-scratch netlist per the entry's own
+topology text: three free-running CMOS ring oscillators of different stage
+counts (5/7/9, real `sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices
+throughout, chosen for mutually incommensurate free-running periods per
+the entry's own "vary stage counts... so they do not injection-lock"
+layout idiom), combined by a 2-stage transmission-gate XOR tree and
+sampled by the same transparent-latch sampler `ring-oscillator-jitter-trng`
+uses. N=3, not a larger array — the smallest N that exercises an actual
+XOR *tree* (two XOR2 gates) rather than a single XOR gate.
+
+```
+uv run klt sim examples/kb/multi-ro-xor-entropy-source/request.json
+```
+
+Reproduces three distinct free-running frequencies (`f_ring5_hz` =
+473.688 MHz, `f_ring7_hz` = 339.684 MHz, `f_ring9_hz` = 265.624 MHz) and
+the XOR-combined, strobed output at five successive strobes
+(`sampled_bit_1`…`sampled_bit_5` = 0.0502957V, 0.0502967V, 0.0502970V,
+1.76227V, 0.0537216V — digital 0, 0, 0, 1, 0) at `tt`, 1.8V, 27C. Same
+disclosure as `ring-oscillator-jitter-trng`: this is not a claim of
+statistical randomness, and three of the five samples cluster within
+~0.001V of each other (a property of this specific strobe-period/ring-period
+combination, not a defect in the combining mechanism) — a longer
+observation window or different strobe period would show more variety, at
+the cost of a slower testbench.
