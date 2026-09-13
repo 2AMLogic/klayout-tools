@@ -951,6 +951,11 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
   # but the concern is genuinely new/different from the one on record (#7048)
   # — the operator has not seen this reason, so it is fair to re-flag it.
   gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
+
+  # Propagate the hold onto any issue(s) this PR would close (#1749) — see
+  # "Propagating a hold to linked issues" below, at the end of this
+  # criterion's material (functions defined there).
+  propagate_pr_hold "$PR_NUMBER"
 fi
 
 # Do NOT merge this PR this pass. But do NOT drop it from the pass either
@@ -988,6 +993,138 @@ its critical-file caveat, or its role as sticky-hold release path (a).
 **Rationale**: A raw line count is a poor risk proxy. Every substantive change-plus-tests PR exceeds any tolerable numeric threshold, so a ceiling holds *all* real work while letting through small changes to exactly the high-blast-radius files that most need human eyes (on 2026-07-30 the 200-line ceiling stalled four consecutive Judge-approved, CI-green PRs: #4551, #4558, #4560, #4562). Champion is an LLM agent that has already read the diff and the Judge's review — it can assess actual risk directly. The four axes keep that judgment concrete and checkable rather than a vague "use your best judgment".
 
 **Migration note (retired config knob)**: `champion.auto_merge_max_lines` is **no longer read**. If your repo's `.loom/config.json` sets it, the key is now inert — delete it (leaving it does no harm, but it no longer has any effect). Repos that used a low value to keep Champion conservative should instead rely on this criterion's conservative bias, hold individual PRs by removing `loom:pr`, or stop running Champion's auto-merge pass. Repos that set a high value to work *around* the ceiling can simply drop the key.
+
+#### Propagating a hold to linked issues (#1749)
+
+Both criterion #2's merge-risk hold and criterion #3's critical-file hold
+(below) apply `loom:operator` to the **PR** — but the issue(s) that PR would
+close stay in their normal queue, with nothing marking them as, transitively,
+also stuck on a human. Left alone, this makes the daemon's work-finder keep
+re-dispatching a no-op sweep on that issue every cycle: the sweep correctly
+re-derives "sole open PR is held, skip" each time, but nothing tells the
+work-finder to stop offering the issue in the first place (confirmed
+recurring three times on issue #1651 / PR #1659 before this fix).
+
+The fix reuses an existing mechanism rather than inventing a new one:
+`loom-daemon`'s `PARK_LABELS` already hard-skips `loom:blocked` issues
+unconditionally, so mirroring the PR-side `loom:operator` hold onto the
+linked issue(s) as `loom:blocked` — with the same `Blocked by #<PR>`
+machine-parseable phrasing `detect-dependency-cycle.sh`'s
+`parse_dependency_refs()` and `warn-operator-gated.sh` already regex-match
+(`(Blocked by|Depends on|Requires)[*_:[:space:]]*#N`) — is enough, with zero
+daemon-side change.
+
+Both hold sites (criterion #2's "Hold behavior" above and criterion #3's
+"Durable hold on FAIL" below) call these two functions, defined once here:
+
+```bash
+# Sourced once per invoking block — each Safety Criteria code block in this
+# file is independently runnable, so this reuses the same sourcing pattern as
+# Step 4 ("Verify Issue Auto-Close").
+source "$(git rev-parse --show-toplevel)/.loom/scripts/lib/forge-helpers.sh"
+forge_detect
+
+# propagate_pr_hold(PR_NUMBER)
+#
+# For every issue the PR's closingIssuesReferences names (GitHub's own parse
+# of the PR body — see forge_pr_close_targets's header for why this beats a
+# regex over the PR body), apply loom:blocked with a `Blocked by #<PR>`
+# comment. A PR with no closingIssuesReferences makes forge_pr_close_targets
+# return an empty list, so this is a silent no-op — no error, nothing
+# propagated.
+#
+# Ownership rule (edge case: an issue already loom:blocked for an unrelated
+# reason before this hold): only claim — and later release — an issue this
+# hold itself moves INTO loom:blocked. An issue that already carries
+# loom:blocked when this runs is left completely alone: no comment, no label
+# churn, no provenance marker. That is what lets release_pr_hold() below tell
+# "this hold's block" apart from "some other mechanism's block" without
+# misattributing or clobbering it.
+#
+# Idempotent: a repeated tick while the hold still stands re-checks for the
+# `champion:pr-hold-block:$PR_NUMBER` marker (startswith match — #5371's
+# rationale applies here too: a later comment merely quoting the marker in
+# prose must never be mistaken for the state-owning comment) before posting
+# again.
+propagate_pr_hold() {
+  local pr_number="$1"
+  local issue
+  for issue in $(forge_pr_close_targets "$pr_number"); do
+    local marker="<!-- champion:pr-hold-block:$pr_number -->"
+    local has_marker
+    has_marker=$(gh issue view "$issue" --json comments --jq \
+      --arg m "$marker" '[.comments[].body] | any(startswith($m))')
+    if [ "$has_marker" = "true" ]; then
+      echo "Hold already propagated from #$pr_number to #$issue — no change"
+      continue
+    fi
+
+    local already_blocked
+    already_blocked=$(gh issue view "$issue" --json labels --jq \
+      '[.labels[].name] | any(. == "loom:blocked")')
+    if [ "$already_blocked" = "true" ]; then
+      # Not ours to claim — some other mechanism (a Dependencies section, the
+      # Doctor-cycle cap, ...) already blocked this issue. No marker comment,
+      # so release_pr_hold() correctly leaves it untouched too.
+      echo "Issue #$issue already loom:blocked for an unrelated reason — not claiming ownership on behalf of #$pr_number"
+      continue
+    fi
+
+    gh issue edit "$issue" --add-label "loom:blocked"
+    gh issue comment "$issue" --body "$marker
+**Champion: Blocked on a Held PR**
+
+This issue's closing PR, #$pr_number, is held for human merge and cannot
+proceed automatically (see #$pr_number for the specific hold reason).
+Marking this issue blocked until the hold clears.
+
+Blocked by #$pr_number
+
+---
+*Automated by Champion role*"
+    echo "Propagated hold from #$pr_number to #$issue (loom:blocked applied)"
+  done
+}
+
+# release_pr_hold(PR_NUMBER)
+#
+# The inverse of propagate_pr_hold(), called from each hold's release path.
+# Removes loom:blocked from an issue ONLY when this same PR's hold is what put
+# it there: evidence is the `champion:pr-hold-block:$PR_NUMBER` marker comment
+# with no later `champion:pr-hold-unblock:$PR_NUMBER` comment reversing it
+# (last-marker-wins, the same convention criterion #3's hold/cleared marker
+# pair already uses). An issue with no such marker — because it was already
+# loom:blocked for an unrelated reason when propagate_pr_hold() ran, or
+# because this hold was already released once — is left untouched.
+release_pr_hold() {
+  local pr_number="$1"
+  local issue
+  for issue in $(forge_pr_close_targets "$pr_number"); do
+    local block_marker="<!-- champion:pr-hold-block:$pr_number -->"
+    local unblock_marker="<!-- champion:pr-hold-unblock:$pr_number -->"
+
+    local last_state
+    last_state=$(gh issue view "$issue" --json comments --jq \
+      --arg b "$block_marker" --arg u "$unblock_marker" \
+      '[.comments[] | select((.body | startswith($b)) or (.body | startswith($u)))] | last | .body // ""')
+
+    if [[ "$last_state" != "$block_marker"* ]]; then
+      continue
+    fi
+
+    gh issue edit "$issue" --remove-label "loom:blocked"
+    gh issue comment "$issue" --body "$unblock_marker
+**Champion: Hold Released**
+
+The hold on this issue's closing PR, #$pr_number, has cleared. Removing
+\`loom:blocked\`.
+
+---
+*Automated by Champion role*"
+    echo "Released hold from #$pr_number on #$issue (loom:blocked removed)"
+  done
+}
+```
 
 ### 3. Critical File Exclusion Check
 - [ ] No changes to critical configuration or infrastructure files, **except** a version-only diff hunk in one of the 6 version-bearing files (see "Version-only diff carve-out" below)
@@ -1178,6 +1315,11 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
   # --add-label is idempotent), never in place of loom:pr, never making
   # sweep/shepherd skip the PR.
   gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
+
+  # Propagate the hold onto any issue(s) this PR would close (#1749) — see
+  # "Propagating a hold to linked issues" above criterion #2 (functions
+  # defined there).
+  propagate_pr_hold "$PR_NUMBER"
 elif [ "$CURRENTLY_HELD" = true ]; then
   # PASS this tick, but the latest marker is still the hold — a later push
   # narrowed the diff so it no longer touches any critical-file pattern.
@@ -1188,6 +1330,11 @@ elif [ "$CURRENTLY_HELD" = true ]; then
   # attach a reversal block to), and fall through to the rest of the
   # criteria as an ordinary PASS.
   gh pr edit "$PR_NUMBER" --remove-label "loom:operator" 2>/dev/null || true
+
+  # Release the propagated hold on any linked issue(s) (#1749) — see
+  # "Propagating a hold to linked issues" above criterion #2 (functions
+  # defined there).
+  release_pr_hold "$PR_NUMBER"
   gh pr comment "$PR_NUMBER" --body "$CLEARED_MARKER
 **Champion: Critical-File Hold Cleared**
 
@@ -2011,6 +2158,13 @@ EOF
 # and always fires in the same pass as the reversal comment.
 if [ -n "$HOLD_REVERSAL_BLOCK" ]; then
   gh pr edit "$PR_NUMBER" --remove-label "loom:operator" 2>/dev/null || true
+
+  # Release the propagated hold on any linked issue(s) (#1749) — see
+  # "Propagating a hold to linked issues" above criterion #2. release_pr_hold
+  # (and forge_pr_close_targets it depends on) is defined/sourced there; if
+  # running this step in isolation, source
+  # .loom/scripts/lib/forge-helpers.sh and forge_detect first.
+  release_pr_hold "$PR_NUMBER"
 fi
 "$GH_READ" --clear-cache   # your own write must not be masked by your own cache
 ```

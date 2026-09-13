@@ -48,6 +48,7 @@ having to remember to remove it.
 | Champion (PR merge) | Posts a merge-risk hold (`champion:merge-risk-hold`) because a safety axis is red (criterion #2) | **Wired** — `defaults/.claude/commands/loom/champion-pr-merge.md`, "Hold behavior" |
 | Champion (PR merge) | Posts a critical-file hold (`champion:critical-file-hold`) because criterion #3 matched a critical-file pattern | **Wired** (#6879) — `defaults/.claude/commands/loom/champion-pr-merge.md`, Safety Criteria → 3 → "Durable hold on FAIL" |
 | Champion (issue close) | Holds a merged PR's linked **issue** open because one of its acceptance criteria needs out-of-band verification (live source, real scheduled run, observation over time) and no `loom:ac-verified` marker attests it | **Wired** (#6883) — `defaults/.claude/commands/loom/champion-pr-merge.md`, Step 4 → "Out-of-Band Acceptance-Criteria Gate" |
+| Champion (PR merge, klayout-tools-local) | Mirrors a held PR's `loom:operator` (criterion #2 or #3) onto the issue(s) that PR would close, as `loom:blocked` | **Wired** (#1749, klayout-tools-local — see below) — `.claude/commands/loom/champion-pr-merge.md`, "Propagating a hold to linked issues" |
 | Builder / Doctor | Encounters work that needs credentials, infra, or a policy ruling outside automation (today's `loom:operator-only` use case) | Not yet wired — follow-up work |
 | Judge | A review surfaces a question only a human can answer | Not yet wired — follow-up work |
 | Human | Applies the label directly to any issue or PR | Always available (labels are always human-writable) |
@@ -111,6 +112,61 @@ hold comment therefore states the exit path explicitly rather than implying a
 later pass will notice. `loom:operator`'s defining property still holds — the
 issue stays in every normal queue and is never skipped — so a human, a Curator
 re-read, or a fresh sweep can all still act on it.
+
+### PR→issue derived propagation: `loom:blocked` (#1749, klayout-tools-local)
+
+The two PR-side holds above (criterion #2's merge-risk hold, criterion #3's
+critical-file hold) apply `loom:operator` to the **PR**, not to the issue(s)
+that PR would close. Left alone, that is an invisible gap on the issue side:
+`loom-daemon`'s work-finder has no signal that the issue is, transitively,
+also stuck on a human, so it kept re-offering a dispatch that could only ever
+re-derive "sole open PR is held, skip" — a real, confirmed recurrence on
+issue #1651 / PR #1659 (three separate no-op sweeps before this fix).
+
+This is a **second, PR→issue-derived** use of the `loom:operator` state —
+distinct from the issue-level out-of-band AC hold above (#6883), which
+Champion applies directly to an issue it is evaluating. Here Champion instead
+*mirrors* a hold that already exists on the PR onto the issue(s) the PR
+closes, and does so as `loom:blocked` rather than `loom:operator` itself:
+`loom-daemon`'s `PARK_LABELS` already hard-skips `loom:blocked` issues
+unconditionally, so reusing it needs zero daemon-side change, whereas
+`loom:operator` is explicitly defined (see "Relationship to `loom:blocked`…"
+above) to **never** cause sweep/shepherd to skip the item it is on — applying
+it to the issue would have been the wrong label for the desired effect.
+
+| Event | `loom:blocked` on the linked issue |
+|---|---|
+| PR held (criterion #2 or #3 applies `loom:operator` to the PR) AND the issue was not already `loom:blocked` | Applied, with a `Blocked by #<PR>` comment (the same machine-parseable phrasing `detect-dependency-cycle.sh`'s `parse_dependency_refs()` and `warn-operator-gated.sh` already regex-match) |
+| PR held, but the issue already carried `loom:blocked` for an unrelated reason | **Left untouched** — no label churn, no comment, no provenance marker. This propagation never claims an issue it did not itself block, so the later release path cannot misattribute or clobber that unrelated block either |
+| PR hold released (criterion #2's `$HOLD_REVERSAL_BLOCK`, or criterion #3's cleared branch) AND this propagation is what applied `loom:blocked` | Removed, with a reversal comment |
+| PR hold released, but this propagation never claimed the issue | No-op — the unrelated block reason is undisturbed |
+| PR carries no `closingIssuesReferences` | No-op — nothing to propagate |
+
+Ownership (which issue this propagation is allowed to touch on release) is
+tracked the same way criterion #3 tracks hold/cleared state — "last matching
+marker wins" — via a pair of HTML comment markers on the issue itself
+(`champion:pr-hold-block:<PR>` / `champion:pr-hold-unblock:<PR>`), rather than
+re-deriving "did we cause this" from label state alone. This mirrors the
+"superseding block" caution `curator.md` documents for the *inverse*
+direction (an issue's own Dependencies section closing does not mean the
+issue's *current* `loom:blocked` justification has cleared, if something else
+re-blocked it since) — the shared principle in both directions is: never let
+one blocking mechanism assume it owns a label state it did not itself set.
+
+**This is a klayout-tools-local customization, not upstream Loom behavior.**
+It was never upstreamed into `rjwalters/loom`'s own `champion-pr-merge.md` /
+`label-state-machine.md` templates, so both files are pinned in
+`.loom/resync-ignore` (see the `#1749` entry there) — without the pin, an
+unpinned `resync-installed.sh` run would silently revert this section and the
+implementation it documents, the same reversion pattern documented for
+`#606`/`#662`/`#1292`/`#1316`/`#1356`/`#1546`/`#1674`. If upstream Loom ever
+adopts an equivalent PR→issue propagation, these pins can be dropped and both
+files resynced normally.
+
+Entry/exit implementation: `.claude/commands/loom/champion-pr-merge.md`,
+"Propagating a hold to linked issues" (the `propagate_pr_hold()` /
+`release_pr_hold()` functions), called from criterion #2's "Hold behavior",
+criterion #3's "Durable hold on FAIL", and both holds' release paths.
 
 ### The stale-PR route out of `loom:pr` (#5802, narrowed by #6720)
 
@@ -189,6 +245,14 @@ Two Champion entry/exit pairs are wired today, both in the same file:
     "same diff scores differently on a later read" case to guard against —
     the FAIL/PASS verdict itself, recomputed fresh every tick, is the release
     signal.
+- **PR→issue propagation (`loom:blocked`, #1749, klayout-tools-local)**:
+  - **Entry/exit** — `.claude/commands/loom/champion-pr-merge.md`,
+    "Propagating a hold to linked issues" (`propagate_pr_hold()` /
+    `release_pr_hold()`), called from both criterion #2's "Hold behavior" and
+    criterion #3's "Durable hold on FAIL" (entry), and from both criteria's
+    release paths (exit).
+  - See "PR→issue derived propagation: `loom:blocked`" above for the full
+    entry/exit table and the ownership-marker mechanism.
 
 **One consumer honors the hold without ever setting it (#5686)**: the
 stale-verdict machinery (`defaults/scripts/verdict-staleness-guard.sh` and
