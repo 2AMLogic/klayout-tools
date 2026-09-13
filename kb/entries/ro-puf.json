@@ -19,5 +19,45 @@
     "url": "https://people.csail.mit.edu/devadas/pubs/puf-dac07.pdf",
     "license_or_openness": "Suh-Devadas is cited for its ring-oscillator PUF (pairwise frequency-comparison) topology and methodology only (no figures or text reproduced); an author-hosted (MIT CSAIL) preprint is publicly available (case 1 open-access), with the ACM/IEEE DAC proceedings version behind a subscription (case 2). Guajardo et al. is cited (case 2) for the fuzzy-extractor methodology. No proprietary or NDA'd data is recorded."
   },
-  "notes": "The RO-PUF's stability advantage comes entirely from the pairwise, difference-based readout — comparing two on-die oscillators cancels the environmental drift that would wreck an absolute-frequency measurement. As with the SRAM PUF, a fuzzy extractor / error-correcting code is required to turn the noisy response into a reproducible key, and helper data must be designed to leak little entropy; response drift over temperature, voltage, and aging sets the error-correction budget and must be measured on silicon. This entry shares the ring-oscillator building block with ring-oscillator-jitter-trng and multi-ro-xor-entropy-source, but there the exploited signal is stochastic jitter, whereas here it is the deterministic per-ring frequency mismatch; see sram-power-up-puf for the memory-based unclonable-identity alternative."
+  "notes": "The RO-PUF's stability advantage comes entirely from the pairwise, difference-based readout — comparing two on-die oscillators cancels the environmental drift that would wreck an absolute-frequency measurement. As with the SRAM PUF, a fuzzy extractor / error-correcting code is required to turn the noisy response into a reproducible key, and helper data must be designed to leak little entropy; response drift over temperature, voltage, and aging sets the error-correction budget and must be measured on silicon. This entry shares the ring-oscillator building block with ring-oscillator-jitter-trng and multi-ro-xor-entropy-source, but there the exploited signal is stochastic jitter, whereas here it is the deterministic per-ring frequency mismatch; see sram-power-up-puf for the memory-based unclonable-identity alternative.",
+  "artifacts": {
+    "netlist": "examples/kb/ro-puf/ro_puf.spice",
+    "notes": "From-scratch netlist (real sky130_fd_pr__nfet_01v8/pfet_01v8 devices, not behavioral), two free-running 5-stage ring oscillators built per this entry's own topology text. Because a single deterministic SPICE run has no per-instance random mismatch, ring B's five stages are all drawn a deterministic 5% wider (both NMOS and PMOS) than ring A's as a stand-in for the random manufacturing mismatch a real RO-PUF exploits -- exactly the same simplification sram-power-up-puf/sram_cell_powerup.spice uses for its own bistable-resolution mismatch. The measured sign of the frequency difference (ring B faster) is a property of this injected asymmetry's sign, not a prediction of any real device pair's response; mirroring the asymmetry onto ring A instead flips the sign. This testbench also measures each ring's period directly via SPICE .meas TRIG/TARG timing rather than building the entry's own counter+comparator digital back-end, which would add digital complexity without changing what is being verified here (that a small drawn-width mismatch resolves to a measurable, repeatable frequency ordering). A real bit-error-rate/response-stability distribution needs Monte Carlo over sky130's mismatch models across temperature/voltage/aging, which this single deterministic corner does not do."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. Reproduce with `klt sim examples/kb/ro-puf/request.json`. freq_a_hz/freq_b_hz are each ring's own frequency, counted over 8 oscillation periods starting 5ns after the transient begins (letting both rings settle out of their seeded startup transient). freq_diff_hz and freq_diff_pct are ring B minus ring A: positive, as expected, since ring B's devices are drawn 5% wider (more drive current, shorter per-stage delay) -- this is the deterministic mismatch stand-in described in artifacts.notes, not a measured statistic over a random device population. NO bit-error-rate, min-entropy, or response-stability claim is made -- see artifacts.notes for what a real characterization would require (Monte Carlo over sky130's mismatch models across temperature/voltage/aging).",
+    "figures": [
+      {
+        "name": "freq_a_hz",
+        "value": 3161340000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/ro-puf/request.json"
+      },
+      {
+        "name": "freq_b_hz",
+        "value": 3213560000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/ro-puf/request.json"
+      },
+      {
+        "name": "freq_diff_hz",
+        "value": 52221300.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/ro-puf/request.json"
+      },
+      {
+        "name": "freq_diff_pct",
+        "value": 1.65187,
+        "unit": "1",
+        "analysis": "tran",
+        "testbench": "examples/kb/ro-puf/request.json"
+      }
+    ]
+  }
 }

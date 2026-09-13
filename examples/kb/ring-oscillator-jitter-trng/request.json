@@ -1,0 +1,32 @@
+{
+  "netlist": "ro_jitter_trng.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "2p 8.5n" },
+  "measurements": [
+    { "name": "t8_ro", "spice": ".meas tran t8_ro TRIG v(ro1) VAL=0.9 TD=1n RISE=1 TARG v(ro1) VAL=0.9 TD=1n RISE=9", "unit": "s" },
+    { "name": "period_ro_s", "spice": ".meas tran period_ro_s param='t8_ro / 8'", "unit": "s" },
+    { "name": "sample_1_v", "spice": ".meas tran sample_1_v find v(ro1) at=1n", "unit": "V" },
+    { "name": "sample_2_v", "spice": ".meas tran sample_2_v find v(ro1) at=2.05n", "unit": "V" },
+    { "name": "sample_3_v", "spice": ".meas tran sample_3_v find v(ro1) at=3.1n", "unit": "V" },
+    { "name": "sample_4_v", "spice": ".meas tran sample_4_v find v(ro1) at=4.15n", "unit": "V" },
+    { "name": "sample_5_v", "spice": ".meas tran sample_5_v find v(ro1) at=5.2n", "unit": "V" },
+    { "name": "sample_6_v", "spice": ".meas tran sample_6_v find v(ro1) at=6.25n", "unit": "V" },
+    { "name": "sample_7_v", "spice": ".meas tran sample_7_v find v(ro1) at=7.3n", "unit": "V" },
+    { "name": "sample_8_v", "spice": ".meas tran sample_8_v find v(ro1) at=8.35n", "unit": "V" },
+    { "name": "toggle_1_2", "spice": ".meas tran toggle_1_2 param='abs(sample_2_v - sample_1_v)'", "unit": "V" },
+    { "name": "toggle_2_3", "spice": ".meas tran toggle_2_3 param='abs(sample_3_v - sample_2_v)'", "unit": "V" },
+    { "name": "toggle_3_4", "spice": ".meas tran toggle_3_4 param='abs(sample_4_v - sample_3_v)'", "unit": "V" },
+    { "name": "toggle_4_5", "spice": ".meas tran toggle_4_5 param='abs(sample_5_v - sample_4_v)'", "unit": "V" },
+    { "name": "toggle_5_6", "spice": ".meas tran toggle_5_6 param='abs(sample_6_v - sample_5_v)'", "unit": "V" },
+    { "name": "toggle_6_7", "spice": ".meas tran toggle_6_7 param='abs(sample_7_v - sample_6_v)'", "unit": "V" },
+    { "name": "toggle_7_8", "spice": ".meas tran toggle_7_8 param='abs(sample_8_v - sample_7_v)'", "unit": "V" },
+    { "name": "toggle_sum_v", "spice": ".meas tran toggle_sum_v param='toggle_1_2 + toggle_2_3 + toggle_3_4 + toggle_4_5 + toggle_5_6 + toggle_6_7 + toggle_7_8'", "unit": "V", "limits": { "min": 1.0 } }
+  ],
+  "options": { "timeout_s": 120, "keep_artifacts": false }
+}

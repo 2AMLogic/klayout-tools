@@ -1,0 +1,118 @@
+* Ring-oscillator PUF -- pairwise oscillator-frequency-comparison reference
+* testbench: two nominally identical 5-stage ring oscillators, one of them
+* built from deliberately widened devices as a stand-in for manufacturing
+* mismatch, with each ring's frequency measured directly.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/ro-puf.json's own topology text, not imported from
+* anywhere (kb/SOURCING.md):
+*
+*   "A bank of nominally identical ring oscillators laid out identically
+*    across the die; a challenge selects a pair of oscillators, their
+*    frequencies are counted over a fixed interval, and a comparator emits
+*    one response bit from the sign of the frequency difference. Because
+*    each ring's frequency is set by its own manufacturing mismatch, which of
+*    a pair is faster is device-unique, repeatable, and unclonable."
+*
+* HOW THE MISMATCH IS MODELLED -- read this before trusting any number here.
+* Exactly the same caveat as examples/kb/sram-power-up-puf/sram_cell_powerup.spice:
+* a single deterministic SPICE run has no per-instance random mismatch. Real
+* silicon's RO-PUF response comes from RANDOM Vt/geometry mismatch between
+* two otherwise-identical rings; this testbench instead injects ONE
+* deterministic asymmetry -- ring B's five inverter stages are all drawn
+* `mism` (5%) wider (both NMOS and PMOS) than ring A's -- as a stand-in for
+* that random mismatch. Consequences, stated plainly:
+*   - The measured sign of the frequency difference here (ring B faster) is
+*     a property of THIS injected asymmetry, not a prediction of any real
+*     device pair's response. Swap which ring gets the wider devices and the
+*     sign flips, which is the point: the response tracks the injected
+*     mismatch, exactly as the entry describes.
+*   - A real bit-error-rate / response-stability distribution needs Monte
+*     Carlo over sky130's mismatch models (the `tt_mm` lib section) across
+*     temperature/voltage/aging, which the entry's own pdk_portability and
+*     sizing_approach both call for and this single deterministic corner
+*     does NOT do.
+*   - This testbench also does not implement the counter + comparator
+*     digital back-end the entry's topology describes ("frequencies are
+*     counted over a fixed interval, and a comparator emits one response
+*     bit"); it measures each ring's oscillation period directly via SPICE
+*     .meas TRIG/TARG timing (the analog equivalent of what a real edge
+*     counter would report) rather than building an edge-counter/comparator
+*     circuit, which would add digital complexity without changing what is
+*     actually being verified: that a small drawn-width mismatch between two
+*     otherwise-identical rings resolves to a measurable, repeatable
+*     frequency ordering. See artifacts.notes for the same disclosure.
+*
+* Node map:
+*   ra1..ra5 -- ring A (nominal-width devices) stage outputs; ra5 feeds ra1
+*   rb1..rb5 -- ring B (mism-widened devices) stage outputs; rb5 feeds rb1
+*
+* SIZING. Both rings are minimum-length (L=0.15), 5-stage (odd, matching
+* this entry's shared ring-oscillator building block with
+* cmos-ring-vco-current-starved and ring-oscillator-jitter-trng), free-
+* running (no current starving -- a PUF wants each ring's own natural
+* frequency, not a controlled tuning range). cload is an explicit per-stage
+* load capacitance standing in for wiring + next-stage gate load.
+.param wn=1
+.param wp=2
+.param linv=0.15
+.param cload=3f
+.param mism=0.05
+
+* --- supply ---
+Vdd vdd 0 DC 1.8
+
+* --- RING A: nominal sizing ---
+XIPA1 ra1 ra5 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XINA1 ra1 ra5 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+Ca1   ra1 0 {cload}
+
+XIPA2 ra2 ra1 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XINA2 ra2 ra1 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+Ca2   ra2 0 {cload}
+
+XIPA3 ra3 ra2 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XINA3 ra3 ra2 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+Ca3   ra3 0 {cload}
+
+XIPA4 ra4 ra3 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XINA4 ra4 ra3 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+Ca4   ra4 0 {cload}
+
+XIPA5 ra5 ra4 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp} nf=1 mult=1
+XINA5 ra5 ra4 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn} nf=1 mult=1
+Ca5   ra5 0 {cload}
+
+* --- RING B: every device `mism` (5%) wider than ring A's -- the injected
+* mismatch stand-in described above ---
+XIPB1 rb1 rb5 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp*(1+mism)} nf=1 mult=1
+XINB1 rb1 rb5 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn*(1+mism)} nf=1 mult=1
+Cb1   rb1 0 {cload}
+
+XIPB2 rb2 rb1 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp*(1+mism)} nf=1 mult=1
+XINB2 rb2 rb1 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn*(1+mism)} nf=1 mult=1
+Cb2   rb2 0 {cload}
+
+XIPB3 rb3 rb2 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp*(1+mism)} nf=1 mult=1
+XINB3 rb3 rb2 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn*(1+mism)} nf=1 mult=1
+Cb3   rb3 0 {cload}
+
+XIPB4 rb4 rb3 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp*(1+mism)} nf=1 mult=1
+XINB4 rb4 rb3 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn*(1+mism)} nf=1 mult=1
+Cb4   rb4 0 {cload}
+
+XIPB5 rb5 rb4 vdd vdd sky130_fd_pr__pfet_01v8 L={linv} W={wp*(1+mism)} nf=1 mult=1
+XINB5 rb5 rb4 0   0   sky130_fd_pr__nfet_01v8 L={linv} W={wn*(1+mism)} nf=1 mult=1
+Cb5   rb5 0 {cload}
+
+* --- KICKING BOTH RINGS INTO OSCILLATION.
+* Same reasoning as cmos-ring-vco-current-starved.spice: a noiseless
+* simulator will happily sit on either ring's symmetric DC solution forever
+* with no noise source to grow out of it, so each ring is seeded with an
+* explicit alternating initial condition -- a standard, deterministic way to
+* start a ring oscillator in a transient run. This is a SIMULATION device,
+* not part of the circuit, and does not affect either ring's steady-state
+* frequency. ---
+.ic v(ra1)=0 v(ra2)=1.8 v(ra3)=0 v(ra4)=1.8 v(ra5)=0
+.ic v(rb1)=0 v(rb2)=1.8 v(rb3)=0 v(rb4)=1.8 v(rb5)=0

@@ -1,0 +1,22 @@
+{
+  "netlist": "metastability_latch.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "1p 6n" },
+  "measurements": [
+    { "name": "vmeta_q_v", "spice": ".meas tran vmeta_q_v find v(q) at=1.9n", "unit": "V" },
+    { "name": "vmeta_qb_v", "spice": ".meas tran vmeta_qb_v find v(qb) at=1.9n", "unit": "V" },
+    { "name": "vmeta_sep_v", "spice": ".meas tran vmeta_sep_v param='abs(vmeta_q_v - vmeta_qb_v)'", "unit": "V", "limits": { "max": 0.2 } },
+    { "name": "t_release", "spice": ".meas tran t_release when v(hold)=0.9 fall=1", "unit": "s" },
+    { "name": "t_resolve_qb", "spice": ".meas tran t_resolve_qb when v(qb)=0.9 rise=1 td=2n", "unit": "s" },
+    { "name": "resolve_delay_s", "spice": ".meas tran resolve_delay_s param='t_resolve_qb - t_release'", "unit": "s", "limits": { "max": 4e-9 } },
+    { "name": "vq_final_v", "spice": ".meas tran vq_final_v find v(q) at=5.9n", "unit": "V", "limits": { "max": 0.1 } },
+    { "name": "vqb_final_v", "spice": ".meas tran vqb_final_v find v(qb) at=5.9n", "unit": "V", "limits": { "min": 1.7 } }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

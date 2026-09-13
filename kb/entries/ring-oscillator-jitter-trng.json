@@ -19,5 +19,52 @@
     "url": "https://eprint.iacr.org/2010/007",
     "license_or_openness": "Baudet et al. is cited for its stochastic jitter-entropy model and methodology only (no figures or text reproduced); an author/IACR ePrint preprint is publicly available (case 1 open-access), with the Journal of Cryptology version behind a subscription (case 2). NIST SP 800-90B is a U.S. government standard in the public domain and freely downloadable. No proprietary or NDA'd data is recorded."
   },
-  "notes": "This single-RO sampler is the baseline every richer entropy source builds on; on its own the raw bitstream is biased and correlated and MUST be conditioned (e.g. a vetted cryptographic conditioning function or a von Neumann / XOR extractor) and continuously health-tested before the output is treated as random. Per SP 800-90B, pair it with the Repetition Count Test (RCT) and Adaptive Proportion Test (APT) as always-on health tests operating on the raw noise-source samples, and expose a raw-tap access path so the noise source can be validated independently of the conditioner. For the parallel-array evolution of this baseline that hardens entropy against a single oscillator's jitter failing, see the multi-ro-xor-entropy-source entry; for a resolution-time-based alternative see metastability-trng."
+  "notes": "This single-RO sampler is the baseline every richer entropy source builds on; on its own the raw bitstream is biased and correlated and MUST be conditioned (e.g. a vetted cryptographic conditioning function or a von Neumann / XOR extractor) and continuously health-tested before the output is treated as random. Per SP 800-90B, pair it with the Repetition Count Test (RCT) and Adaptive Proportion Test (APT) as always-on health tests operating on the raw noise-source samples, and expose a raw-tap access path so the noise source can be validated independently of the conditioner. For the parallel-array evolution of this baseline that hardens entropy against a single oscillator's jitter failing, see the multi-ro-xor-entropy-source entry; for a resolution-time-based alternative see metastability-trng.",
+  "artifacts": {
+    "netlist": "examples/kb/ring-oscillator-jitter-trng/ro_jitter_trng.spice",
+    "notes": "From-scratch netlist (real sky130_fd_pr__nfet_01v8/pfet_01v8 devices, not behavioral): a free-running 5-stage ring oscillator, the same building block as ro-puf's ring A. This testbench does NOT inject noise and claims no entropy/jitter figure -- ngspice has no periodic-steady-state/noise analysis, and a transient-noise Monte Carlo campaign is beyond a single reference run (same disclosure as cmos-ring-vco-current-starved's own testbench). It also does NOT instantiate a transistor-level D flip-flop sampler: an earlier version of this file built a transmission-gate latch (input pass gate + two-inverter regenerative loop + feedback pass gate) and found that, with a track window narrow enough to sample a specific ring phase, the external drive could not reliably overpower the already-latched regenerative feedback within the window -- a genuine flip-flop aperture/setup-time problem, not a netlist bug, and a separate concern from what this entry's topology is about. Instead, this directory's request.json reads the ring's own ro1 node directly at 8 successive instants spaced 1.05ns apart (deliberately not a whole multiple of the ring's own ~316-332ps free-running period), demonstrating the identical phase-sensitivity mechanism a real flip-flop sampler exploits, without claiming to model the sampler circuit itself."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. Reproduce with `klt sim examples/kb/ring-oscillator-jitter-trng/request.json`. period_ro_s (315.857ps) is the ring's own free-running period, measured over 8 oscillation cycles starting 1ns in (after the seeded startup transient settles). sample_1_v..sample_8_v are v(ro1) read directly at t = 1ns + n*1.05ns for n=0..7 -- a sampling period deliberately not a whole multiple of period_ro_s, so each successive sample lands at a different, walking phase of the ring's own waveform. The resulting sequence (1.68, 1.79, 0.006, 1.60, 1.91, 0.007, 1.45, 1.89 V) visibly swings between near-0V and near/above-VDD across the walk (sample_5_v's 1.91V and similar mid-transition values are switching overshoot/ringing, the same effect cmos-ring-vco-current-starved's vpp figures note, not a modeling error) -- exactly the 'small timing difference flips the sampled level' mechanism this entry's topology describes real jitter as exploiting. toggle_1_2..toggle_7_8 and toggle_sum_v quantify how much the sampled level moves between successive samples; toggle_sum_v's pass limit (>1.0V cumulative movement over 7 steps) is a sanity check that the phase walk is real and not degenerate (i.e. not landing on the same value repeatedly, which an earlier, discarded flip-flop-based version of this testbench did -- see artifacts.notes). NO ENTROPY OR JITTER FIGURE IS CLAIMED: this deterministic phase walk demonstrates the sampling mechanism only, not measured randomness -- see artifacts.notes for what a real characterization would require (thermal-noise transient-noise Monte Carlo, or silicon measurement, plus SP 800-90B min-entropy estimation).",
+    "figures": [
+      {
+        "name": "period_ro_s",
+        "value": 3.15857e-10,
+        "unit": "s",
+        "analysis": "tran",
+        "testbench": "examples/kb/ring-oscillator-jitter-trng/request.json"
+      },
+      {
+        "name": "sample_1_v",
+        "value": 1.67861,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/ring-oscillator-jitter-trng/request.json"
+      },
+      {
+        "name": "sample_3_v",
+        "value": 0.0058044,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/ring-oscillator-jitter-trng/request.json"
+      },
+      {
+        "name": "sample_6_v",
+        "value": 0.00667888,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/ring-oscillator-jitter-trng/request.json"
+      },
+      {
+        "name": "toggle_sum_v",
+        "value": 7.58424,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/ring-oscillator-jitter-trng/request.json"
+      }
+    ]
+  }
 }

@@ -1,0 +1,20 @@
+{
+  "netlist": "ro_puf.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "5p 30n" },
+  "measurements": [
+    { "name": "ta8", "spice": ".meas tran ta8 TRIG v(ra1) VAL=0.9 TD=5n RISE=1 TARG v(ra1) VAL=0.9 TD=5n RISE=9", "unit": "s" },
+    { "name": "tb8", "spice": ".meas tran tb8 TRIG v(rb1) VAL=0.9 TD=5n RISE=1 TARG v(rb1) VAL=0.9 TD=5n RISE=9", "unit": "s" },
+    { "name": "freq_a_hz", "spice": ".meas tran freq_a_hz param='8 / ta8'", "unit": "Hz", "limits": { "min": 1e6 } },
+    { "name": "freq_b_hz", "spice": ".meas tran freq_b_hz param='8 / tb8'", "unit": "Hz", "limits": { "min": 1e6 } },
+    { "name": "freq_diff_hz", "spice": ".meas tran freq_diff_hz param='freq_b_hz - freq_a_hz'", "unit": "Hz", "limits": { "min": 0 } },
+    { "name": "freq_diff_pct", "spice": ".meas tran freq_diff_pct param='100 * (freq_b_hz - freq_a_hz) / freq_a_hz'", "unit": "1", "limits": { "min": 0 } }
+  ],
+  "options": { "timeout_s": 300, "keep_artifacts": false }
+}
