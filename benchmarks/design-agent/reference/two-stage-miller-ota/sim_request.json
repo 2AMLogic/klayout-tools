@@ -1,0 +1,36 @@
+{
+  "netlist": "ota_2stage.spice",
+  "engine": "ngspice",
+  "models": { "lib": "models.lib" },
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "ac", "args": "dec 20 1 1g" },
+  "measurements": [
+    {
+      "name": "gain_db",
+      "spice": ".meas ac gain_db FIND vdb(out) AT=10",
+      "unit": "dB",
+      "limits": { "min": 65 }
+    },
+    {
+      "name": "gbw_hz",
+      "spice": ".meas ac gbw_hz WHEN vdb(out)=0 CROSS=1",
+      "unit": "Hz",
+      "limits": { "min": 7e6 }
+    },
+    {
+      "name": "ph_ugf_rad",
+      "spice": ".meas ac ph_ugf_rad FIND vp(out) WHEN vdb(out)=0 CROSS=1"
+    },
+    {
+      "name": "pm_deg",
+      "spice": ".meas ac pm_deg PARAM='180 + ph_ugf_rad * 57.29578'",
+      "unit": "deg",
+      "limits": { "min": 60 }
+    }
+  ],
+  "options": { "timeout_s": 30, "keep_artifacts": false }
+}

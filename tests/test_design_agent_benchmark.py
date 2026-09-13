@@ -91,13 +91,33 @@ def test_shipped_task_set_validates_against_schema():
     }
 
 
-def test_shipped_tasks_are_easy_or_hard_tier():
-    """Easy-tier task set (issue #1719) plus the hard-tier oscillator/VCO/
-    PLL family's first task (issue #1735). No medium-tier task has shipped
-    yet -- see benchmarks/design-agent/README.md's "Known limitations"."""
+def test_shipped_tasks_use_only_known_tiers():
+    # As of issue #1733 (medium-tier amplifiers) and issue #1735 (hard-tier
+    # oscillator), the shipped task set spans easy, medium, and hard tiers --
+    # this only asserts every task declares one of the schema's recognized
+    # tiers, not that they're all "easy" anymore.
     for path in dab._task_paths(TASKS_DIR):
         task = dab.load_task(path)
-        assert task["tier"] in {"easy", "hard"}
+        assert task["tier"] in dab.TIERS
+
+
+def test_shipped_task_set_includes_medium_tier_amplifier_tasks():
+    tasks_by_id = {
+        dab.load_task(path)["id"]: dab.load_task(path)
+        for path in dab._task_paths(TASKS_DIR)
+    }
+    for task_id in ("five-transistor-ota", "two-stage-miller-ota"):
+        assert task_id in tasks_by_id
+        assert tasks_by_id[task_id]["tier"] == "medium"
+
+
+def test_shipped_task_set_includes_hard_tier_oscillator_task():
+    tasks_by_id = {
+        dab.load_task(path)["id"]: dab.load_task(path)
+        for path in dab._task_paths(TASKS_DIR)
+    }
+    assert "rc-relaxation-oscillator" in tasks_by_id
+    assert tasks_by_id["rc-relaxation-oscillator"]["tier"] == "hard"
 
 
 def test_validate_rejects_task_missing_required_field():

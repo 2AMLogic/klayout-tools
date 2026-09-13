@@ -1,0 +1,77 @@
+* Reference solution for benchmarks/design-agent/tasks/two-stage-miller-ota.json.
+*
+* Two-stage Miller-compensated op-amp: stage 1 is a 5T-style NMOS
+* differential pair (M1/M2) with a PMOS current-mirror load (M3/M4) and an
+* NMOS tail current source (M5), exactly like
+* benchmarks/design-agent/reference/five-transistor-ota/ota_5t.spice's
+* topology; stage 2 is a PMOS common-source device (M6) with an NMOS
+* current-source load (M7) that mirrors the same bias reference at a
+* different ratio. A Miller capacitor (Cc) in series with a nulling
+* resistor (Rz) connects the output back to the stage-1/stage-2 junction
+* (vo1), splitting the two dominant poles apart for stability and using Rz
+* to push the feedforward-path right-half-plane zero out of band, per the
+* classic Gray/Meyer two-stage pole-splitting technique this task's KB
+* entry (kb/entries/two-stage-miller-ota.json) cites.
+*
+* Both the tail current source (M5) and the second stage's current-source
+* load (M7) mirror the same external bias-generator diode (M5b, driven by
+* an ideal reference current) at different W/L ratios -- one shared
+* corner/Vt-tracking bias reference rather than two independent ones. M5b
+* is bias-generation plumbing external to the amplifier core (same
+* convention as the 5T OTA reference), so the amplifier core itself is the
+* 7 transistors M1-M4, M6, M7 plus the tail M5.
+*
+* Open-loop gain/GBW/phase margin are measured with the same DC-feedback-
+* closes/AC-feedback-opens trick as ota_5t.spice: Lfb is a DC short so the
+* loop self-biases to its own natural single-ended operating point (a
+* stable point exists precisely because DC loop gain is large -- see this
+* file's header discussion in the task's README entry), while Cfb pins inn
+* to the AC-quiet cm rail once the DC path's low-frequency roll-off has
+* passed, leaving inp as the single-ended open-loop AC drive.
+*
+* Circuit body only -- klt sim appends analysis/control. bench_nmos/
+* bench_pmos come from models.lib.
+
+.param vdd=1.8
+.param vcm=0.9
+.param ibias=20u
+.param cc=3p
+.param rz=6k
+.param cl=2p
+
+Vdd  vdd 0 DC {vdd}
+Vcm  cm  0 DC {vcm}
+Vin  inp cm DC 0 AC 1
+Iref vdd nbias DC {ibias}
+CL   out 0 {cl}
+
+* DC feedback: closes at DC (Lfb) to self-bias out; opens at AC. Cfb pins
+* inn to the AC-quiet cm rail once the DC path's low-frequency roll-off has
+* passed.
+Lfb  out inn 1e9
+Cfb  inn cm  1e3
+
+* --- tail/stage-2 bias generator (external to the amplifier core) ---
+M5b nbias nbias 0 0 bench_nmos W=10u L=2u
+
+* --- stage 1: NMOS differential pair (2), PMOS mirror load (2), NMOS tail (1) ---
+* NOTE: inp/inn are cross-connected relative to ota_5t.spice's single-stage
+* pairing (M1's gate is inn, M2's gate is inp here) -- stage 2 below adds a
+* second inversion, so which input ends up non-inverting-vs-inverting *at
+* the final output* flips relative to the single-stage 5T case. This
+* keeps "inn" the inverting input (so the Lfb/Cfb DC-feedback loop below,
+* which ties out back to inn, is genuine negative feedback and converges
+* to a stable bias point instead of railing to a supply).
+M5  tail nbias 0 0 bench_nmos W=10u  L=2u
+M1  n1   inn   tail 0 bench_nmos W=20u L=1u
+M2  vo1  inp   tail 0 bench_nmos W=20u L=1u
+M3  n1   n1    vdd  vdd bench_pmos W=40u L=2u
+M4  vo1  n1    vdd  vdd bench_pmos W=40u L=2u
+
+* --- stage 2: PMOS common-source (1), NMOS current-source load (1) ---
+M6  out  vo1   vdd  vdd bench_pmos W=80u L=1u
+M7  out  nbias 0    0   bench_nmos W=40u L=2u
+
+* --- Miller compensation with RHP-zero-nulling resistor ---
+Cc  out cz {cc}
+Rz  cz  vo1 {rz}

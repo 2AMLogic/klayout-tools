@@ -1,0 +1,27 @@
+* Generic (non-PDK) NMOS+PMOS corner models standing in for sky130's own
+* tt/ss/ff process split -- identical to
+* benchmarks/design-agent/reference/five-transistor-ota/models.lib (same
+* "runs anywhere ngspice runs" precedent as examples/kb/rc-relaxation-
+* oscillator/corners.lib). VTO/KP/LAMBDA move together within each corner
+* section the way a real sky130 corner split would move both devices'
+* drive strength and output resistance together. Replace with a real
+* sky130 model library (models.pdk / models.lib pointing at $PDK_ROOT) once
+* this task is re-run against real devices -- see README.md "Known
+* limitation" note.
+.model bench_nmos NMOS(LEVEL=1 VTO=0.55 KP=100u LAMBDA=0.04)
+.model bench_pmos PMOS(LEVEL=1 VTO=-0.55 KP=40u LAMBDA=0.05)
+
+.lib tt
+.model bench_nmos NMOS(LEVEL=1 VTO=0.50 KP=120u LAMBDA=0.05)
+.model bench_pmos PMOS(LEVEL=1 VTO=-0.50 KP=48u LAMBDA=0.06)
+.endl tt
+
+.lib ss
+.model bench_nmos NMOS(LEVEL=1 VTO=0.60 KP=95u LAMBDA=0.04)
+.model bench_pmos PMOS(LEVEL=1 VTO=-0.60 KP=38u LAMBDA=0.05)
+.endl ss
+
+.lib ff
+.model bench_nmos NMOS(LEVEL=1 VTO=0.40 KP=145u LAMBDA=0.06)
+.model bench_pmos PMOS(LEVEL=1 VTO=-0.40 KP=58u LAMBDA=0.07)
+.endl ff

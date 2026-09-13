@@ -1,0 +1,26 @@
+{
+  "gates": [
+    { "check": "sim", "name": "ota_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.0.worst_case.value",
+    "polarity": "maximize",
+    "name": "gain_db_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": [
+    {
+      "name": "gbw_worst_case",
+      "check": "sim",
+      "metric": "measurements.1.worst_case.value",
+      "args": { "request": "sim_request.json" }
+    },
+    {
+      "name": "pm_worst_case",
+      "check": "sim",
+      "metric": "measurements.3.worst_case.value",
+      "args": { "request": "sim_request.json" }
+    }
+  ]
+}
