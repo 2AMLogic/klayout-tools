@@ -48,10 +48,21 @@ gate" check):
 uv run python scripts/design_agent_benchmark.py validate
 ```
 
-Run the harness (default: 5 attempts/task, pass@1 and pass@5):
+Run the harness (default: 5 attempts/task, pass@1 and pass@5, the
+deterministic `reference` candidate provider):
 
 ```
 uv run python scripts/design_agent_benchmark.py run --attempts 5 --k 1 5
+```
+
+Run it against a **live agent** instead — driving the S4 (topology
+selection) -> S5 (sizing) -> S6 (netlist authoring) skill chain and scoring
+the agent's own proposed netlist(s), rather than the answer key (issue
+#1732; needs the `claude` CLI on `PATH` and an authenticated session, see
+"Known limitations" below):
+
+```
+uv run python scripts/design_agent_benchmark.py run --provider live-agent --attempts 5 --k 1 5
 ```
 
 ## Current task set (easy tier)
@@ -69,21 +80,34 @@ issue's proposal) are **not yet built** — see "Known limitations" below.
 
 ## Known limitations (read before citing a pass@k number from this harness)
 
-This is a first milestone, not the full issue #1719 scope. Two things this
-harness does **not** yet do:
+This is a first milestone, not the full issue #1719 scope.
 
-1. **The candidate provider is a stand-in, not a live agent.**
-   `scripts/design_agent_benchmark.py`'s default provider
-   (`reference_candidate_provider`) always hands back each task's own known-
-   good reference solution, unmodified, for every attempt. Running `run`
-   today proves the attempt loop, `klt eval` invocation, and pass@k
+1. **The live-agent provider is a single-turn text completion, not a
+   multi-turn tool-using agent session (issue #1732).**
+   `--provider live-agent` (`make_live_agent_provider` /
+   `live_agent_candidate_provider` in `scripts/design_agent_benchmark.py`)
+   drives one headless `claude -p` invocation per attempt, seeded with the
+   full text of `.claude/skills/design-{topology-selection,sizing,netlist-
+   authoring}/SKILL.md` and the task's own testbench contract (block spec +
+   `klt sim` request documents, never the reference netlist body), and
+   scores the agent's own returned netlist(s) — never the answer key. This
+   is a real regression signal for the S4->S5->S6 skill chain's quality
+   (a pass rate below 100% here can mean the design pipeline regressed, not
+   just this harness), but it is a deliberate scope-narrowing relative to a
+   fully interactive agent: the invoked model has no live `klt kb`/`klt sim`
+   tool access in this call, and cannot iterate against simulator feedback
+   the way `.claude/skills/design-sizing/SKILL.md`'s own Loop A describes —
+   see `scripts/design_agent_benchmark.py`'s `_default_invoke_agent`
+   docstring for the full rationale, and the tracked follow-up issue for a
+   fuller interactive/tool-using implementation.
+
+   The **deterministic `reference_candidate_provider`** (`run`'s default,
+   no `--provider` flag needed) still exists alongside it and always hands
+   back each task's own known-good reference solution unmodified — useful
+   on its own for proving the attempt loop/`klt eval` invocation/pass@k
    aggregation are wired correctly end-to-end (a regression *in this
-   harness* would show up as a pass-rate drop below 100%) — it does **not**
-   yet measure the actual S4->S5->S6 skill chain's quality, since no skill
-   is invoked. Wiring a candidate provider that drives a live design-agent
-   through those skills, and returns each attempt's own proposed netlist as
-   the `klt eval` candidate substitution, is the tracked follow-up before
-   this becomes a real regression signal for the design pipeline.
+   harness* shows up as a pass-rate drop below 100% there), independent of
+   agent quality.
 2. **Generic (non-PDK) device models, not real sky130 devices.** Every
    reference netlist under `reference/*/models.lib` uses hand-picked
    `.model NMOS(LEVEL=1 ...)` corner cards, the same "runs anywhere ngspice
@@ -93,16 +117,27 @@ harness does **not** yet do:
    absolute gain/current numbers being illustrative rather than sky130-
    accurate. Swapping in real sky130 devices (`models.pdk`/`models.lib`
    pointing at `$PDK_ROOT`, per `docs/cli/sim.md`) is straightforward for a
-   future pass once the harness itself is validated end-to-end.
+   future pass once the harness itself is validated end-to-end. The
+   live-agent provider's device-model contract (`bench_nmos`, no PMOS) is
+   part of its prompt, not the task set, so this swap needs no live-agent
+   provider changes of its own.
 
-Medium/hard-tier tasks, a live-agent candidate provider, and scheduled CI
-wiring for a full agent-driven pass@k run are filed as follow-up work — see
-the tracked issues linked from #1719.
+Medium/hard-tier tasks and a fuller interactive/tool-using live-agent
+provider are filed as follow-up work — see the tracked issues linked from
+#1719/#1728.
 
 ## CI
 
-`.github/workflows/design-agent-benchmark.yml` runs `validate` (schema +
-every reference solution's own gate) on `workflow_dispatch`/`schedule`,
-mirroring `equiv-canary.yml`'s "not on every push" posture for an
-ngspice-per-corner-heavy job. It does not yet run the live-agent `run` mode
-described above (see "Known limitations").
+`.github/workflows/design-agent-benchmark.yml` runs, on
+`workflow_dispatch`/`schedule` (mirroring `equiv-canary.yml`'s "not on every
+push" posture for an ngspice-per-corner-heavy job):
+
+- `validate` (schema + every reference solution's own gate).
+- `run` with the deterministic `reference` provider (the harness's own
+  self-check, expected to always report 100%).
+- `run --provider live-agent` (issue #1732) — a real S4->S5->S6 pass@k
+  measurement, additive alongside the two checks above (neither is
+  removed). This job needs `claude` CLI credentials it does not always
+  have provisioned (see the workflow file's own comment on that step) and
+  is allowed to report its result without failing the overall workflow —
+  its JSON artifact and one-line summary are still published either way.
