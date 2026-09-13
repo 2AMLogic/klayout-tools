@@ -1064,6 +1064,24 @@ def test_run_synthesize_stubbed_missing_binary(tmp_path, monkeypatch):
         run_synthesize(request_path)
 
 
+def test_run_synthesize_stubbed_yosys_timeout(tmp_path, monkeypatch):
+    """A hung ``yosys -s`` run (issue #1775) raises `SynthesizeError` naming
+    the timeout, not a bare `subprocess.TimeoutExpired`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        assert cmd[:2] == ["yosys", "-s"]
+        assert kwargs.get("timeout") == synthesize.DEFAULT_YOSYS_TIMEOUT_S
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    with pytest.raises(SynthesizeError, match="did not complete within"):
+        run_synthesize(request_path)
+
+
 def test_run_synthesize_stubbed_missing_netlist_output(tmp_path, monkeypatch):
     """Defensive check: a `yosys -s` run that exits 0 but never wrote the
     declared netlist output is still a failure, not a silent partial

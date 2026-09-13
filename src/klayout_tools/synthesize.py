@@ -1926,13 +1926,22 @@ def _abc_supports_dont_use() -> bool:
     error. Older builds therefore degrade to a run with no exclusion list
     (mapped exactly as before issue #807) rather than failing outright --
     the same graceful-degradation posture ``sequential_area_um2`` already
-    takes toward those builds (#560). Never raises.
+    takes toward those builds (#560). Never raises -- including on a
+    timeout (issue #1775): bounded by the same
+    :data:`DEFAULT_YOSYS_TIMEOUT_S` :func:`_run_yosys` uses, since this is
+    still a Yosys invocation that could in principle hang, but a stuck
+    capability probe degrades to "assume unsupported" rather than raising,
+    exactly like the missing-binary (``OSError``) and nonzero-exit cases
+    right below.
     """
     try:
         completed = subprocess.run(
-            ["yosys", "-p", "help abc"], capture_output=True, text=True
+            ["yosys", "-p", "help abc"],
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_YOSYS_TIMEOUT_S,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
     if completed.returncode != 0:
         return False
@@ -2053,9 +2062,30 @@ def _write_script(
         ) from exc
 
 
-def _run_yosys(script_path: str) -> str:
+#: Default per-invocation wall-clock timeout for a single ``yosys -s
+#: <script>`` run (:func:`_run_yosys`), overridable per call via its own
+#: ``timeout_s`` keyword. Mirrors ``klayout_tools.equiv.DEFAULT_TIMEOUT_S``'s
+#: role (bound a hang, not a slow-but-legitimate run) but is deliberately
+#: more generous: a full ``synth``/``dfflibmap``/``abc`` mapping pass over a
+#: real design does substantially more work than ``equiv``'s SAT proof, and
+#: in ``"auto"`` arithmetic-architecture mode (issue #1775, following
+#: #1772) this same budget is paid up to ~10+ times per ``klt synthesize``
+#: request, so it must not be so tight that a legitimately-slow-but-healthy
+#: trial synthesis is mistaken for a hang. A fixed module constant (no
+#: request-level override/CLI flag) was chosen over threading a new
+#: ``yosys_timeout_s`` end-to-end alongside the existing ``equiv_timeout_s``
+#: precedent -- lower churn, and every call site already goes through this
+#: one function.
+DEFAULT_YOSYS_TIMEOUT_S = 300.0
+
+
+def _run_yosys(
+    script_path: str, *, timeout_s: float | None = DEFAULT_YOSYS_TIMEOUT_S
+) -> str:
     """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
-    on any failure to run (missing binary, timeout-free run exits nonzero).
+    on any failure to run (missing binary, non-zero exit, or a run that
+    exceeds ``timeout_s`` -- default :data:`DEFAULT_YOSYS_TIMEOUT_S`, pass
+    ``None`` for no timeout).
 
     Never raises on a *successful* (exit 0) run -- the caller is responsible
     for validating the declared output files actually appeared. Returns the
@@ -2065,15 +2095,28 @@ def _run_yosys(script_path: str) -> str:
     ``ERROR:`` lines) -- so :func:`_compute_structural`/
     :func:`_summarize_warnings` (issue #1588) can parse it without a second
     Yosys invocation.
+
+    A timed-out run raises :class:`SynthesizeError` exactly like any other
+    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this is
+    what lets :func:`_measure_candidate` (issue #1775) treat one hung
+    arithmetic-architecture candidate's trial synthesis the same way it
+    already treats any other failed trial: disqualified, not fatal to the
+    rest of the ``"auto"`` sweep.
     """
     try:
         completed = subprocess.run(
             ["yosys", "-s", script_path],
             capture_output=True,
             text=True,
+            timeout=timeout_s,
         )
     except OSError as exc:
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SynthesizeError(
+            f"yosys did not complete within {timeout_s}s (script "
+            f"'{script_path}') -- process killed"
+        ) from exc
 
     if completed.returncode != 0:
         raise SynthesizeError(_synthesis_error_message(completed))
