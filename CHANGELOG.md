@@ -16,6 +16,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt sim --plot <dir>` — renders one self-contained,
+  dependency-free waveform SVG per non-sweep signal per corner (issue
+  #1723), reusing `klt trajectory --plot`'s no-plotting-library, string-
+  built SVG approach (new module `klayout_tools/sim_plot.py`). Forces
+  `options.waveforms`/`keep_artifacts` on for the run regardless of the
+  request's own settings — a waveform can only be plotted once captured.
+  `ac` plots use a log10-scaled sweep axis; a `tran` measurement whose
+  `.meas` card's own signal matches a rendered signal additionally gets its
+  `from=`/`to=` window shaded and its `WHEN <signal>=<value>` threshold
+  drawn as a reference line. Every written file is listed in the response's
+  new `plots` field and each corner's `artifacts.plots`; a measurement's
+  rollup entry additionally gets a `plot` field (the SVG for its own
+  `worst_case` corner, or `null`) — so a miss report names the picture to
+  open next, without the numeric threshold-crossing extraction that #56
+  covers separately. All additive/optional (present only when `--plot` is
+  used); `schema_version` unchanged. Also hardens the pre-existing
+  `options.waveforms` capture path: a corner whose rawfile
+  `parse_ascii_rawfile` cannot parse (currently `ac`/`sp`'s complex
+  `real,imag`-encoded values — tracked as issue #1756, out of this issue's
+  own scope) now reports a `"warning"` diagnostic and leaves
+  `artifacts.waveform`/plots empty instead of raising and aborting the
+  whole sweep. See `docs/cli/sim.md`'s "Waveform plots" section.
 - **Added**: `klt kb validate --recheck-measured` — re-runs every distinct
   `measured.figures[].testbench` in `kb/entries/*.json` via `klt sim` and
   fails validation when a recorded `figures[].value` has drifted beyond a

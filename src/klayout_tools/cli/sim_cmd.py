@@ -53,6 +53,7 @@ def run(args: argparse.Namespace) -> int:
             hosts=args.hosts,
             budget_s=args.budget_s,
             resume=args.resume,
+            plot_dir=args.plot,
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)
@@ -168,6 +169,12 @@ def _print_text(report: dict) -> None:
             f"path={render_path_field(resume['checkpoint_path'])}"
         )
 
+    plots = report.get("plots")
+    if plots is not None:
+        # Issue #1723 (`--plot`): additive/optional -- only present at all
+        # when `--plot` was requested.
+        print(f"plots: {len(plots)} SVG(s) written")
+
     measurements = report["measurements"]
     if measurements:
         print()
@@ -182,6 +189,11 @@ def _print_text(report: dict) -> None:
             else:
                 worst_desc = "worst=-"
             print(f"  {m['name']} [{m['status']}]  {worst_desc}")
+            plot = m.get("plot")
+            if plot is not None:
+                # Issue #1723: name the SVG next to the failing measurement
+                # so an agent (or a human) knows exactly what to open.
+                print(f"    plot: {plot}")
             mc = m.get("monte_carlo")
             if mc is not None:
                 stats = f"n={mc['n']} mean={mc['mean']!r} sigma={mc['stddev']!r}"

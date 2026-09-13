@@ -4885,6 +4885,355 @@ def test_integration_waveform_artifact(tmp_path):
     assert len(waveform["points"]) > 0
 
 
+# --------------------------------------------------------------------------- #
+# Waveform plots (`--plot`, issue #1723)
+# --------------------------------------------------------------------------- #
+
+
+def test_measurement_diagnostic_hints_extracts_signal_window_and_target():
+    hints = sim._measurement_diagnostic_hints(
+        ".meas tran vout_avg AVG v(out) FROM=100n TO=900n"
+    )
+    assert hints["signal"] == "v(out)"
+    assert hints["window"] == pytest.approx((1e-7, 9e-7))
+    assert hints["target"] is None
+
+
+def test_measurement_diagnostic_hints_extracts_when_target():
+    hints = sim._measurement_diagnostic_hints(
+        ".meas tran startup_time WHEN v(out)=1.5 RISE=1"
+    )
+    assert hints["signal"] == "v(out)"
+    assert hints["window"] is None
+    assert hints["target"] == pytest.approx(1.5)
+
+
+def test_measurement_diagnostic_hints_unrecognised_card_returns_all_none():
+    """A `TRIG`/`TARG` delay measurement has no single window/target this
+    simple parser understands, and no `v(...)`/`i(...)` token at all when
+    both endpoints are parameters -- must degrade to all-`None`, never
+    raise."""
+    hints = sim._measurement_diagnostic_hints(".meas tran tphl PARAM='a+b'")
+    assert hints == {"signal": None, "window": None, "target": None}
+
+
+def test_measurement_diagnostic_hints_is_case_insensitive_and_lowercases_signal():
+    hints = sim._measurement_diagnostic_hints(
+        ".MEAS TRAN VOUT FIND V(OUT) WHEN V(OUT)=1"
+    )
+    assert hints["signal"] == "v(out)"
+
+
+@pytest.mark.parametrize(
+    ("corner_id", "expected"),
+    [
+        ("tt/1.800V/27C", "tt_1p800V_27C"),
+        ("ss/1.620V/-40C", "ss_1p620V_n40C"),
+        ("tt/1.800V/27C/mc3", "tt_1p800V_27C_mc3"),
+    ],
+)
+def test_slugify_corner_id_matches_cornerpoint_slug(corner_id, expected):
+    """Mirrors :attr:`sim.CornerPoint.slug`'s own transform exactly -- a
+    plain corner report dict has no live `CornerPoint` to ask, so this is a
+    deliberate, tested duplication of that same string transform."""
+    assert sim._slugify_corner_id(corner_id) == expected
+
+
+def test_slugify_signal_produces_filesystem_safe_name():
+    assert sim._slugify_signal("v(out)") == "v_out"
+    assert sim._slugify_signal("I(Vdd)") == "i_vdd"
+    assert sim._slugify_signal("") == "signal"
+
+
+def _write_ascii_rawfile(
+    path: Path, *, plotname: str, sweep_name: str, signal_name: str, points
+) -> None:
+    lines = [
+        f"Plotname: {plotname}",
+        "Flags: real",
+        "No. Variables: 2",
+        f"No. Points: {len(points)}",
+        "Variables:",
+        f"\t0\t{sweep_name}\ttime",
+        f"\t1\t{signal_name}\tvoltage",
+        "Values:",
+    ]
+    for index, (x, y) in enumerate(points):
+        lines.append(f" {index}\t{x!r}")
+        lines.append(f"\t{y!r}")
+        lines.append("")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _stub_subprocess_run_with_waveform(monkeypatch, *, points, log_text="clean run\n"):
+    """Like :func:`_stub_subprocess_run`, but also writes a synthetic ASCII
+    rawfile at the corner's own `waveform.raw` path -- the real `ngspice`
+    binary is stubbed out entirely (see `_stub_subprocess_run`), so nothing
+    actually executes the deck's `.control` block `write` command; this
+    fakes that side effect so the plot-writing code under test has a real
+    waveform artifact to read."""
+
+    def fake_run(cmd, capture_output, text, timeout):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(log_text)
+        corner_dir = os.path.dirname(log_path)
+        raw_path = os.path.join(corner_dir, "waveform.raw")
+        _write_ascii_rawfile(
+            Path(raw_path),
+            plotname="Transient Analysis",
+            sweep_name="time",
+            signal_name="v(out)",
+            points=points,
+        )
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+def test_run_sim_plot_forces_waveforms_and_keep_artifacts_even_when_unset(
+    tmp_path, monkeypatch
+):
+    """`--plot`/`plot_dir` must force `options.waveforms`/`keep_artifacts` on
+    for this run even though the request declares neither -- a waveform
+    cannot be plotted without first being captured and persisted (see
+    `run_sim`'s `plot_dir` docstring)."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run_with_waveform(
+        monkeypatch, points=[(0.0, 1.0), (1e-9, 1.0), (2e-9, 1.0)]
+    )
+    plot_dir = tmp_path / "plots"
+
+    report = sim.run_sim(
+        str(request), artifacts_dir=str(tmp_path / "artifacts"), plot_dir=str(plot_dir)
+    )
+
+    (corner,) = report["corners"]
+    # keep_artifacts was forced on: the log/waveform artifacts are populated
+    # even though the request never set `options.keep_artifacts`.
+    assert corner["artifacts"]["log"] is not None
+    assert corner["artifacts"]["waveform"] is not None
+
+
+def test_run_sim_plot_writes_one_svg_per_signal_and_lists_them_in_json(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run_with_waveform(
+        monkeypatch, points=[(0.0, 0.0), (1e-9, 0.5), (2e-9, 1.0)]
+    )
+    plot_dir = tmp_path / "plots"
+
+    report = sim.run_sim(str(request), plot_dir=str(plot_dir))
+
+    (corner,) = report["corners"]
+    corner_plots = corner["artifacts"]["plots"]
+    assert corner_plots == [{"signal": "v(out)", "path": corner_plots[0]["path"]}]
+    plot_path = Path(corner_plots[0]["path"])
+    assert plot_path.is_relative_to(plot_dir)
+    assert plot_path.read_text().startswith("<svg")
+
+    # Deterministic, listed at the top level too (issue #1723's "file names
+    # are deterministic and listed in the JSON" acceptance criterion).
+    assert report["plots"] == [
+        {
+            "corner_id": corner["corner_id"],
+            "signal": "v(out)",
+            "path": str(plot_path),
+        }
+    ]
+
+
+def test_run_sim_plot_links_svg_next_to_a_failing_measurement(tmp_path, monkeypatch):
+    """The core acceptance criterion: a deliberately non-starting (flat)
+    signal's `WHEN` measurement never crosses its threshold -- the resulting
+    miss report must name the SVG path next to that measurement, and the SVG
+    itself must show the flat line."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "startup_time",
+                    "spice": ".meas tran startup_time WHEN v(out)=1.5 RISE=1",
+                }
+            ],
+        },
+    )
+    flat_points = [(0.0, 1.0), (1e-9, 1.0), (2e-9, 1.0)]
+    _stub_subprocess_run_with_waveform(
+        monkeypatch,
+        points=flat_points,
+        # ngspice's own "out of interval" failure text for a `WHEN`
+        # threshold that a flat signal never crosses.
+        log_text=(
+            "Error: measure  startup_time  when(WHEN) : out of interval\n"
+            " .meas tran startup_time when v(out)=1.5 rise=1 failed!\n"
+        ),
+    )
+    plot_dir = tmp_path / "plots"
+
+    report = sim.run_sim(str(request), plot_dir=str(plot_dir))
+
+    (entry,) = report["measurements"]
+    assert entry["status"] == "error"
+    assert entry["plot"] is not None
+    svg = Path(entry["plot"]).read_text()
+    # The flat line: every y-value is 1.0, so the curve is horizontal.
+    assert "v(out)" in svg
+    # The WHEN target (1.5) is drawn as a dashed reference line.
+    assert "target=1.5" in svg
+
+
+def test_run_sim_without_plot_dir_measurements_rollup_has_no_plot_key(
+    tmp_path, monkeypatch
+):
+    """Additive-only: a plain (non-`--plot`) run's rollup entries must keep
+    their exact pre-#1723 shape (locked by
+    `test_rollup_measurements_without_monte_carlo_config_is_unchanged`)."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="vout = 1.0\n")
+
+    report = sim.run_sim(str(request))
+
+    assert "plot" not in report["measurements"][0]
+    assert "plots" not in report
+    assert "plots" not in report["corners"][0]["artifacts"]
+
+
+def test_run_sim_plot_ac_analysis_uses_log_axis(tmp_path, monkeypatch):
+    """`analysis.kind == "ac"` selects the log-scaled frequency axis (issue
+    #1723's "log axes for ac" acceptance criterion). Stubbed rather than run
+    against real `ngspice`: a genuine `ac` rawfile carries ngspice's own
+    complex (`real,imag` per value) encoding that
+    `sim.parse_ascii_rawfile` does not understand yet (see
+    https://github.com/2AMLogic/klayout-tools/issues/1756, filed as this
+    PR's own out-of-scope follow-up) -- this test fakes a plain-real rawfile
+    on the `ac` code path instead, so it exercises this issue's own
+    `log_x = analysis_kind == "ac"` wiring without depending on that
+    unrelated, pre-existing gap."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "ac", "args": "dec 10 1 1meg"}},
+    )
+    _stub_subprocess_run_with_waveform(
+        monkeypatch, points=[(1.0, 1.0), (10.0, 0.99), (100.0, 0.9)]
+    )
+    plot_dir = tmp_path / "plots"
+
+    report = sim.run_sim(str(request), plot_dir=str(plot_dir))
+
+    (corner,) = report["corners"]
+    corner_plots = corner["artifacts"]["plots"]
+    assert corner_plots
+    for plot in corner_plots:
+        svg = Path(plot["path"]).read_text()
+        assert "(log)" in svg
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_plot_ac_waveform_parse_failure_does_not_crash_sweep(tmp_path):
+    """A real `ac` analysis's own rawfile is currently unparseable (see the
+    stubbed test above's docstring) -- `run_sim` must degrade to no plots
+    for that corner rather than raising, per `_run_corner`'s own "never
+    raises" contract."""
+    path = tmp_path / "body.spice"
+    path.write_text(".param vdd=1.0\nVin in 0 DC 0 AC 1\nR1 in out 1k\nC1 out 0 1n\n")
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "ac", "args": "dec 10 1 1meg"}},
+    )
+    plot_dir = tmp_path / "plots"
+
+    report = sim.run_sim(str(request), plot_dir=str(plot_dir))  # must not raise
+
+    (corner,) = report["corners"]
+    assert corner["artifacts"]["waveform"] is None
+    assert any(d["code"] == "unknown" for d in corner["diagnostics"])
+    assert report["plots"] == []
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_plot_tran_shades_measurement_window(tmp_path):
+    """Real `ngspice`, the issue's own worked example: a `PP` (peak-to-peak)
+    measurement over a `FROM=`/`TO=` window, on a signal that never
+    oscillates (a plain RC settling response) -- both the shaded window and
+    the failing-measurement-links-to-SVG behavior, end to end."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "ring_amplitude",
+                    "spice": (".meas tran ring_amplitude PP v(out) FROM=100n TO=900n"),
+                    "limits": {"min": 0.3},
+                }
+            ],
+        },
+    )
+    plot_dir = tmp_path / "plots"
+
+    report = sim.run_sim(str(request), plot_dir=str(plot_dir))
+
+    (entry,) = report["measurements"]
+    assert entry["status"] == "fail"  # a non-oscillating signal has ~0 PP
+    assert entry["plot"] is not None
+    svg = Path(entry["plot"]).read_text()
+    assert 'fill="#fde68a"' in svg  # the shaded measurement window
+
+
+@_SKIP_NO_NGSPICE
+def test_cli_sim_plot_flag_writes_svgs_and_prints_plot_path(tmp_path, capsys):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "startup_time",
+                    "spice": ".meas tran startup_time WHEN v(out)=99 RISE=1",
+                }
+            ],
+        },
+    )
+    plot_dir = tmp_path / "plots"
+
+    exit_code = main(["sim", str(request), "--plot", str(plot_dir), "--format", "json"])
+
+    assert exit_code == 4  # the measurement never crosses -- a corner error
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plots"]
+    assert payload["measurements"][0]["plot"] is not None
+    assert Path(payload["measurements"][0]["plot"]).is_file()
+
+
 @_SKIP_NO_NGSPICE
 def test_integration_exit_codes(tmp_path):
     _write_body(tmp_path)
