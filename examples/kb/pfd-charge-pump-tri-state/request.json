@@ -31,7 +31,7 @@
     }
   ],
   "options": {
-    "timeout_s": 60,
+    "timeout_s": 900,
     "keep_artifacts": false
   }
 }

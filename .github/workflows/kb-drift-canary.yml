@@ -30,6 +30,16 @@ name: KB measured-figures drift canary
 # should investigate -- see docs/cli/kb.md for what to do about it. This job
 # never auto-fixes a drifted figure; flagging it is the whole point.
 #
+# NOTE for whoever adds the next `measured` entry: each testbench is run
+# through `klt sim` exactly as checked in, so its own `options.timeout_s`
+# (per corner) must be large enough for the analysis to finish on a
+# GitHub-hosted runner, which is slower than a development box. A too-small
+# `timeout_s` fails this job with "produced no measurement values to recheck
+# this figure against (timeout: ...)" -- that is a broken reproduction
+# recipe, not drift. (`pfd-charge-pump-tri-state`'s request carried
+# `timeout_s: 60` for a transient that takes ~4 minutes; issue #1726 raised
+# it to 900.)
+#
 # PDK provisioning below is deliberately NOT reinvented: it copies the same
 # pinned volare + full sky130A PDK fetch `equiv-canary.yml` /
 # `place-and-route-smoke.yml` already established (same pinned open_pdks
@@ -55,7 +65,11 @@ jobs:
   kb-drift-canary:
     name: Recheck kb/entries/*.json measured figures against a fresh klt sim
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Headroom for the worst case: a PDK cache miss (up to 20 min of volare
+    # fetch) plus the measured corpus itself (the sky130-model
+    # `pfd-charge-pump-tri-state` transient alone runs for minutes). Matches
+    # equiv-canary.yml's 60.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 

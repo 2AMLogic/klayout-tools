@@ -359,6 +359,40 @@ def _sim_candidate_values(report: dict[str, Any]) -> set[float]:
     return values
 
 
+def _sim_error_diagnostics(report: dict[str, Any], *, limit: int = 3) -> str:
+    """A short, human-readable summary of why a fresh
+    :func:`~klayout_tools.sim.run_sim` report carries no usable values --
+    the ``severity == "error"`` diagnostics its corners recorded, as
+    ``"<code>: <message>"``, at most ``limit`` of them.
+
+    ``run_sim`` does not raise for a corner that times out or whose
+    ``.meas`` statements produce nothing: it returns a report with
+    ``status == "error"`` and the reason in ``corners[].diagnostics``. Without
+    surfacing that reason, a nightly ``--recheck-measured`` failure reads only
+    as "no values to compare against", which is true but not actionable -- the
+    operator still has to re-run the testbench by hand to learn that (say) the
+    request's own ``options.timeout_s`` is smaller than the analysis takes on
+    the runner.
+    """
+    messages: list[str] = []
+    for corner in report.get("corners") or []:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("severity") != "error":
+                continue
+            code = diagnostic.get("code", "error")
+            message = diagnostic.get("message", "")
+            entry = f"{code}: {message}" if message else str(code)
+            if entry not in messages:
+                messages.append(entry)
+    if not messages:
+        return ""
+    shown = messages[:limit]
+    suffix = (
+        f" (+{len(messages) - len(shown)} more)" if len(messages) > len(shown) else ""
+    )
+    return "; ".join(shown) + suffix
+
+
 def _closest_relative_diff(value: float, candidates: set[float]) -> float | None:
     """The smallest relative difference between ``value`` and any of
     ``candidates``, or ``None`` when ``candidates`` is empty (nothing to
@@ -431,9 +465,11 @@ def _recheck_measured_errors(
         candidates = _sim_candidate_values(result)
         diff = _closest_relative_diff(float(figure["value"]), candidates)
         if diff is None:
+            diagnostics = _sim_error_diagnostics(result)
+            detail = f" ({diagnostics})" if diagnostics else ""
             errors.append(
                 f"{label}: klt sim {rel_path} produced no measurement "
-                "values to recheck this figure against"
+                f"values to recheck this figure against{detail}"
             )
         elif diff > tolerance:
             errors.append(

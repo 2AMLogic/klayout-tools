@@ -878,6 +878,91 @@ def test_recheck_measured_fails_when_value_drifted(tmp_path, monkeypatch):
     ), result["errors"]
 
 
+def test_recheck_measured_reports_corner_diagnostics_when_run_yields_no_values(
+    tmp_path, monkeypatch
+):
+    """`run_sim` does not raise for a corner that times out or whose `.meas`
+    statements produce nothing -- it returns `status: "error"` with the
+    reason in `corners[].diagnostics`. The recheck error must quote that
+    reason, or a nightly failure reads as "no values" and the operator has to
+    re-run the testbench by hand to learn the request's own
+    `options.timeout_s` was too small (exactly what
+    `examples/kb/pfd-charge-pump-tri-state/request.json` did)."""
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path)})
+    errored_report = {
+        "status": "error",
+        "corners": [
+            {
+                "corner_id": "tt/1.8V/27C",
+                "measurements": [{"name": "av_db", "value": None}],
+                "diagnostics": [
+                    {
+                        "severity": "error",
+                        "code": "timeout",
+                        "message": "ngspice did not complete within 60s, killed",
+                    },
+                    {
+                        "severity": "error",
+                        "code": "measurement",
+                        "message": "measurement 'av_db' produced no value",
+                    },
+                ],
+            }
+        ],
+        "measurements": [{"name": "av_db", "worst_case": {"value": None}}],
+    }
+    monkeypatch.setattr(kb, "run_sim", lambda *a, **k: errored_report)
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    (error,) = [e for e in result["errors"] if "produced no measurement" in e]
+    assert "timeout: ngspice did not complete within 60s" in error, error
+
+
+def test_sim_error_diagnostics_dedupes_and_caps_the_message_list():
+    report = {
+        "corners": [
+            {
+                "diagnostics": [
+                    {
+                        "severity": "warning",
+                        "code": "convergence",
+                        "message": "retried",
+                    },
+                    {"severity": "error", "code": "measurement", "message": "a"},
+                    {"severity": "error", "code": "measurement", "message": "a"},
+                    {"severity": "error", "code": "measurement", "message": "b"},
+                    {"severity": "error", "code": "measurement", "message": "c"},
+                    {"severity": "error", "code": "measurement", "message": "d"},
+                ]
+            }
+        ]
+    }
+
+    summary = kb._sim_error_diagnostics(report)
+
+    # Warnings excluded, the duplicate 'a' collapsed, the 4th of 4 rolled up.
+    assert summary == ("measurement: a; measurement: b; measurement: c (+1 more)")
+
+
+def test_recheck_measured_no_values_without_diagnostics_omits_detail(
+    tmp_path, monkeypatch
+):
+    rel_path = _write_testbench(tmp_path)
+    root = _make_kb(tmp_path, {"entry-a": _entry_with_one_figure(rel_path)})
+    monkeypatch.setattr(kb, "run_sim", lambda *a, **k: _fake_sim_report({}))
+
+    report = kb.validate_entries(root=root, recheck_measured=True)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    (error,) = [e for e in result["errors"] if "produced no measurement" in e]
+    assert error.endswith("to recheck this figure against"), error
+
+
 def test_recheck_measured_matches_via_reciprocal_duality(tmp_path, monkeypatch):
     """A `freq_hz` figure recorded alongside a `period_s` one (see
     `kb/entries/rc-relaxation-oscillator.json`) is the *reciprocal* of a raw

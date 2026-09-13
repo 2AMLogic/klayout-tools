@@ -205,6 +205,16 @@ the recorded `figures[].value`, adding an error (so `valid` is `false`) when:
 - the fresh `klt sim` run itself fails (a `SimError` — bad request, missing
   PDK/model library, engine crash) — reported as `measured/figures/<index>/
   <name>: klt sim <testbench> failed to reproduce this testbench: <reason>`.
+- the fresh run completes but yields no value to compare against — reported
+  as `measured/figures/<index>/<name>: klt sim <testbench> produced no
+  measurement values to recheck this figure against (<diagnostics>)`, where
+  `<diagnostics>` quotes the error-severity `corners[].diagnostics` entries
+  the run recorded. A per-corner `timeout` is the common cause: each
+  testbench runs exactly as checked in, so its own `options.timeout_s` must
+  be large enough for the analysis to finish on the machine doing the
+  recheck (a CI runner is slower than a development box). That is a broken
+  reproduction recipe rather than drift — fix the request, don't edit the
+  recorded figure.
 - the recorded value has drifted beyond a **fixed 1% relative tolerance**
   from the closest value the fresh run produces — reported as
   `measured/figures/<index>/<name>: recorded value <value> has drifted

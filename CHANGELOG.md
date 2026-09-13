@@ -16,6 +16,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt kb validate --recheck-measured` — re-runs every distinct
+  `measured.figures[].testbench` in `kb/entries/*.json` via `klt sim` and
+  fails validation when a recorded `figures[].value` has drifted beyond a
+  fixed 1% relative tolerance from what that testbench produces now, instead
+  of only checking that the testbench path exists (issue #1726). Off by
+  default and absent from the every-PR `klt kb validate` CI gate — actually
+  simulating every measured entry is expensive — it is what the new nightly
+  `.github/workflows/kb-drift-canary.yml` workflow
+  (`schedule` + `workflow_dispatch` only, mirroring `equiv-canary.yml`'s
+  posture for an expensive non-blocking-on-PRs simulation gate) runs. A
+  drifted figure fails that job and is never auto-corrected. `klt kb
+  validate`'s JSON payload shape is unchanged (drift shows up as additional
+  `entries[].errors[]` strings, so no `schema_version` bump). Also raises
+  `examples/kb/pfd-charge-pump-tri-state/request.json`'s
+  `options.timeout_s` from `60` to `900`: that transient needs ~4 minutes of
+  wall clock, so its own checked-in request could not reproduce the figures
+  the KB entry records from it. See `docs/cli/kb.md`'s "Recheck measured
+  figures" section.
 - **Added**: `klt sim --op-lint` — a per-device operating-point sanity lint
   ("op-sanity") that answers "which MOSFET is not doing its job, and why?"
   instead of running the corner sweep (issue #1718). It takes the *same*
