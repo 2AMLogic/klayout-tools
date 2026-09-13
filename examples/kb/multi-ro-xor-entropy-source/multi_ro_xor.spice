@@ -1,0 +1,206 @@
+* Multi-ring-oscillator XOR entropy source: three free-running CMOS ring
+* oscillators of different stage counts (so their nominal frequencies
+* differ, per the entry's own layout idiom), combined by a 2-stage XOR tree
+* and sampled by a slow reference strobe through the same transmission-gate
+* sampling latch ring-oscillator-jitter-trng uses.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/multi-ro-xor-entropy-source.json's own topology/
+* sizing_approach text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "N independent free-running ring oscillators whose outputs are combined
+*    by a single XOR tree ... and then sampled by a slow reference clock.
+*    Each ring contributes independent phase jitter; XOR-ing many nominally
+*    independent jittery edges accumulates their entropy..."
+*
+*   "physically separate the N rings and vary their stage counts/
+*    orientations so they do not injection-lock into a common frequency"
+*
+* N=3 HERE, NOT A LARGER N. The entry leaves N general ("N independent...
+* rings"); three is the smallest N that actually exercises a "tree" (two
+* XOR2 gates, not one) while keeping the netlist a from-scratch reference
+* rather than an arbitrarily large array. Stage counts 5/7/9 are chosen
+* specifically so their free-running periods are mutually incommensurate
+* (no small-integer ratio between any pair), directly implementing the
+* "vary their stage counts... so they do not injection-lock" layout idiom
+* above at the schematic level (this testbench has no substrate/supply
+* coupling model, so "injection-lock" isn't literally at risk here -- the
+* frequency SPACING is what the incommensurate stage counts buy).
+*
+* WHAT THIS TESTBENCH CAN AND CANNOT SHOW -- same disclosure as
+* ring-oscillator-jitter-trng's netlist header, restated for N=3: ngspice's
+* transient analysis is deterministic (no thermal noise to accumulate), so
+* this testbench cannot demonstrate real accumulated entropy or an actual
+* min-entropy improvement from XOR-combining N=3 independent noise sources
+* over N=1. What it verifies is the SENSITIVITY/COMBINING MECHANISM: each
+* ring's own free-running frequency (f_ring5_hz/f_ring7_hz/f_ring9_hz below)
+* is distinct, and the XOR-combined, strobed output is not a constant bit
+* across samples -- the deterministic skeleton real (noise-driven) jitter
+* would ride on top of to become unpredictable. See
+* ring-oscillator-jitter-trng's header for the single-ring baseline this
+* entry's own notes say it generalizes.
+*
+* THE SAMPLER IS A TRANSPARENT LATCH WITH A NARROW ENABLE WINDOW, same
+* simplification (and same rationale) as ring-oscillator-jitter-trng's.
+*
+* THE XOR TREE IS BUILT FROM TRANSMISSION-GATE 2:1 MULTIPLEXERS, THE
+* SMALLEST STANDARD CMOS XOR2 CONSTRUCTION: XOR2(a,b) = a ? b : NOT(b),
+* implemented as one inverter (b -> b_bar) feeding two complementary
+* transmission gates gated by a/a_bar, tied together at the output. Two
+* XOR2 stages combine three rings: xor_ab = ring5 XOR ring7;
+* xor_out = xor_ab XOR ring9. No output buffering between XOR2 stages --
+* a real implementation would buffer a TG-mux output before using it as
+* another gate's select input; skipped here because a MOSFET gate draws no
+* DC current, so the unbuffered node still settles to a valid logic level
+* between ring transitions, at the cost of using a slightly slower-settling
+* signal to drive the second XOR2's controls than a real design would want.
+*
+* Node map:
+*   r1_5..r5_5    -- 5-stage ring ("ring5") stage outputs
+*   r1_7..r7_7    -- 7-stage ring ("ring7") stage outputs
+*   r1_9..r9_9    -- 9-stage ring ("ring9") stage outputs
+*   xor_ab        -- ring5 XOR ring7 (first XOR2 stage's output)
+*   xor_out       -- xor_ab XOR ring9 (combined entropy source output)
+*   smp/smp_b     -- slow reference strobe and its complement
+*   samp, y_b, y  -- sampler internal/held nodes; y is the sampled output
+*
+* SIZING
+*   All three rings: the same plain (unstarved) CMOS inverter stage as
+*   ring-oscillator-jitter-trng's (wn=1/wp=2/L=0.15, 50fF per-stage load).
+*   Measured free-running frequencies: f_ring5_hz/f_ring7_hz/f_ring9_hz
+*   below (ring5 matches ring-oscillator-jitter-trng's single ring exactly).
+*   XOR2 transmission gates: wtg=1/L=0.15, the same drive strength as the
+*   sampler's own pass gate.
+*   Sampler: identical construction and sizing to
+*   ring-oscillator-jitter-trng's (see that netlist's header for the
+*   pass-gate/hold-inverter/weak-feedback-keeper sizing rationale).
+.param wn=1 wp=2 l=0.15 cload=50f
+.param wtg=1 wtgfb=1 ltg=0.15 ltgfb=1.0
+
+Vdd vdd 0 DC 1.8
+
+* --- ring5 (5-stage) ---
+XIP1_5 r1_5 r5_5 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN1_5 r1_5 r5_5 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C1_5 r1_5 0 {cload}
+XIP2_5 r2_5 r1_5 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN2_5 r2_5 r1_5 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C2_5 r2_5 0 {cload}
+XIP3_5 r3_5 r2_5 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN3_5 r3_5 r2_5 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C3_5 r3_5 0 {cload}
+XIP4_5 r4_5 r3_5 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN4_5 r4_5 r3_5 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C4_5 r4_5 0 {cload}
+XIP5_5 r5_5 r4_5 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN5_5 r5_5 r4_5 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C5_5 r5_5 0 {cload}
+
+* --- ring7 (7-stage) ---
+XIP1_7 r1_7 r7_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN1_7 r1_7 r7_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C1_7 r1_7 0 {cload}
+XIP2_7 r2_7 r1_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN2_7 r2_7 r1_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C2_7 r2_7 0 {cload}
+XIP3_7 r3_7 r2_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN3_7 r3_7 r2_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C3_7 r3_7 0 {cload}
+XIP4_7 r4_7 r3_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN4_7 r4_7 r3_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C4_7 r4_7 0 {cload}
+XIP5_7 r5_7 r4_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN5_7 r5_7 r4_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C5_7 r5_7 0 {cload}
+XIP6_7 r6_7 r5_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN6_7 r6_7 r5_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C6_7 r6_7 0 {cload}
+XIP7_7 r7_7 r6_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN7_7 r7_7 r6_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C7_7 r7_7 0 {cload}
+
+* --- ring9 (9-stage) ---
+XIP1_9 r1_9 r9_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN1_9 r1_9 r9_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C1_9 r1_9 0 {cload}
+XIP2_9 r2_9 r1_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN2_9 r2_9 r1_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C2_9 r2_9 0 {cload}
+XIP3_9 r3_9 r2_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN3_9 r3_9 r2_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C3_9 r3_9 0 {cload}
+XIP4_9 r4_9 r3_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN4_9 r4_9 r3_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C4_9 r4_9 0 {cload}
+XIP5_9 r5_9 r4_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN5_9 r5_9 r4_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C5_9 r5_9 0 {cload}
+XIP6_9 r6_9 r5_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN6_9 r6_9 r5_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C6_9 r6_9 0 {cload}
+XIP7_9 r7_9 r6_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN7_9 r7_9 r6_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C7_9 r7_9 0 {cload}
+XIP8_9 r8_9 r7_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN8_9 r8_9 r7_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C8_9 r8_9 0 {cload}
+XIP9_9 r9_9 r8_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XIN9_9 r9_9 r8_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+C9_9 r9_9 0 {cload}
+
+.ic v(r1_5)=0 v(r2_5)=1.8 v(r3_5)=0 v(r4_5)=1.8 v(r5_5)=0
+.ic v(r1_7)=0 v(r2_7)=1.8 v(r3_7)=0 v(r4_7)=1.8 v(r5_7)=0 v(r6_7)=1.8 v(r7_7)=0
+.ic v(r1_9)=0 v(r2_9)=1.8 v(r3_9)=0 v(r4_9)=1.8 v(r5_9)=0 v(r6_9)=1.8 v(r7_9)=0 v(r8_9)=1.8 v(r9_9)=0
+
+* ============================================================
+* XOR TREE: xor_ab = ring5 XOR ring7 ; xor_out = xor_ab XOR ring9
+* XOR2(a,b,y): b_bar = NOT b; TG_hi passes b when a=1; TG_lo passes b_bar
+* when a=0. y = a?b:NOT(b) = a XOR b.
+* ============================================================
+
+* --- b_bar for stage 1 (b = r1_7) ---
+XBB1P bbar1 r1_7 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XBB1N bbar1 r1_7 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+* --- a_bar for stage 1 (a = r1_5) ---
+XAB1P abar1 r1_5 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XAB1N abar1 r1_5 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+* --- TG_hi: passes r1_7 to xor_ab when r1_5=1 ---
+XTGHI1N r1_7 r1_5 xor_ab 0   sky130_fd_pr__nfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+XTGHI1P r1_7 abar1 xor_ab vdd sky130_fd_pr__pfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+* --- TG_lo: passes bbar1 to xor_ab when r1_5=0 ---
+XTGLO1N bbar1 abar1 xor_ab 0   sky130_fd_pr__nfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+XTGLO1P bbar1 r1_5 xor_ab vdd sky130_fd_pr__pfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+
+* --- b_bar for stage 2 (b = r1_9) ---
+XBB2P bbar2 r1_9 vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XBB2N bbar2 r1_9 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+* --- a_bar for stage 2 (a = xor_ab) ---
+XAB2P abar2 xor_ab vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XAB2N abar2 xor_ab 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+* --- TG_hi: passes r1_9 to xor_out when xor_ab=1 ---
+XTGHI2N r1_9 xor_ab xor_out 0   sky130_fd_pr__nfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+XTGHI2P r1_9 abar2  xor_out vdd sky130_fd_pr__pfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+* --- TG_lo: passes bbar2 to xor_out when xor_ab=0 ---
+XTGLO2N bbar2 abar2 xor_out 0   sky130_fd_pr__nfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+XTGLO2P bbar2 xor_ab xor_out vdd sky130_fd_pr__pfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+
+* ============================================================
+* SAMPLER (identical construction to ring-oscillator-jitter-trng's; see
+* that netlist's header for the design rationale). Samples xor_out.
+* ============================================================
+Vsmp smp 0 PULSE(0 1.8 5n 50p 50p 200p 11n)
+
+XSMBP smp_b smp vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XSMBN smp_b smp 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+
+XTGN xor_out smp   samp 0   sky130_fd_pr__nfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+XTGP xor_out smp_b samp vdd sky130_fd_pr__pfet_01v8 L={ltg} W={wtg} nf=1 mult=1
+
+XHAP y_b samp vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XHAN y_b samp 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+XHBP y y_b vdd vdd sky130_fd_pr__pfet_01v8 L={l} W={wp} nf=1 mult=1
+XHBN y y_b 0   0   sky130_fd_pr__nfet_01v8 L={l} W={wn} nf=1 mult=1
+
+XFBN y smp_b samp 0   sky130_fd_pr__nfet_01v8 L={ltgfb} W={wtgfb} nf=1 mult=1
+XFBP y smp   samp vdd sky130_fd_pr__pfet_01v8 L={ltgfb} W={wtgfb} nf=1 mult=1
