@@ -65,7 +65,9 @@ the agent's own proposed netlist(s), rather than the answer key (issue
 uv run python scripts/design_agent_benchmark.py run --provider live-agent --attempts 5 --k 1 5
 ```
 
-## Current task set (easy tier)
+## Current task set
+
+### Easy tier
 
 | Task | Pass criterion |
 | --- | --- |
@@ -74,15 +76,34 @@ uv run python scripts/design_agent_benchmark.py run --provider live-agent --atte
 | `current-mirror` | Output current within the reference's declared limits (nominal 1:1 ratio) |
 | `differential-pair` | Differential-mode gain >= 8 dB *and* common-mode-driven output <= 0 dB, same PVT sweep — the differential-vs-common-mode comparison AnalogCoder's own diff-pair check calls for |
 
-## Current task set (hard tier)
+### Medium tier
+
+| Task | Pass criterion |
+| --- | --- |
+| `five-transistor-ota` | Open-loop DC gain >= 30 dB, GBW >= 5 MHz, phase margin >= 60 deg, same 18-corner sky130-style PVT sweep as the easy tier |
+| `two-stage-miller-ota` | Open-loop DC gain >= 65 dB, GBW >= 7 MHz, phase margin >= 60 deg, same PVT sweep |
+
+Both amplifier-family medium-tier tasks (issue #1733) reuse the same
+DC-feedback-closes/AC-feedback-opens open-loop-gain measurement trick as
+`examples/kb/five-transistor-ota/ota_5t.spice` (see each reference
+netlist's own header for why), adapted to this benchmark's generic
+(non-PDK) NMOS/PMOS models rather than real sky130 devices. The
+two-stage task's reference solution reuses the five-transistor task's own
+first-stage topology, adding a PMOS common-source second stage and a
+Miller compensation network (capacitor + RHP-zero-nulling resistor) —
+see `reference/two-stage-miller-ota/ota_2stage.spice`'s header for why
+its `inp`/`inn` pair is cross-connected relative to the single-stage
+`five-transistor-ota` reference (the extra stage inverts the loop's sign).
+
+### Hard tier
 
 | Task | Pass criterion |
 | --- | --- |
 | `rc-relaxation-oscillator` | Astable comparator-based RC relaxation oscillator (`kb/entries/rc-relaxation-oscillator.json` topology) actually oscillates — measured period between two rising edges of the output clock stays within 1.4-2.2 us (~455-715 kHz) across the same 18-corner sky130-style PVT sweep the easy tier uses. Reuses `examples/kb/rc-relaxation-oscillator`'s netlist/corner-library verbatim (issue #1735), the first of the oscillator/VCO/PLL family the original benchmark proposal (#1719) called for. |
 
-Medium tier (5T OTA, two-stage Miller OTA, telescopic/folded cascode,
-integrator, Schmitt trigger, per the original issue's proposal) and the
-remaining hard-tier tasks (VCO, PLL) are **not yet built** — see "Known
+The remaining medium-tier tasks (telescopic/folded cascode, integrator,
+Schmitt trigger) and the remaining hard-tier tasks (VCO, PLL — tracked in
+#1743, the follow-up to #1735) are **not yet built** — see "Known
 limitations" below.
 
 ## Known limitations (read before citing a pass@k number from this harness)
@@ -128,11 +149,23 @@ This is a first milestone, not the full issue #1719 scope.
    live-agent provider's device-model contract (`bench_nmos`, no PMOS) is
    part of its prompt, not the task set, so this swap needs no live-agent
    provider changes of its own.
+3. **The live-agent provider's device-model contract is stale for the
+   medium tier (issue #1733).** `_build_live_agent_prompt`'s fixed prompt
+   text ("this benchmark's model library defines exactly one NMOS model
+   ... no PMOS model is defined for this task set") predates
+   `five-transistor-ota`/`two-stage-miller-ota`, whose reference solutions
+   *do* need a `bench_pmos` (current-mirror load / common-source second
+   stage). `--provider live-agent` runs against these two tasks today with
+   a prompt that incorrectly tells the agent no PMOS model exists — a
+   real, but pre-existing-shape, limitation of the live-agent wiring
+   tracked as its own follow-up (out of scope for this issue's amplifier
+   task-content work; see #1732's tracked follow-ups), not something this
+   task-content change attempts to fix.
 
-Medium-tier tasks, the remaining hard-tier tasks (VCO, PLL — tracked in
-#1743, the follow-up to #1735), and a fuller interactive/tool-using
-live-agent provider are filed as follow-up work — see the tracked issues
-linked from #1719/#1728.
+The remaining medium-tier tasks, the remaining hard-tier tasks (VCO, PLL
+— tracked in #1743, the follow-up to #1735), and a fuller
+interactive/tool-using live-agent provider are filed as follow-up work —
+see the tracked issues linked from #1719/#1728.
 
 ## CI
 

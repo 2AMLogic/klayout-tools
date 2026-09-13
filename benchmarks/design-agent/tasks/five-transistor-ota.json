@@ -1,0 +1,28 @@
+{
+  "id": "five-transistor-ota",
+  "title": "Five-transistor OTA (differential pair with current-mirror load)",
+  "tier": "medium",
+  "pdk": "sky130",
+  "description": "Design a single-stage operational transconductance amplifier built from five transistors: an NMOS source-coupled differential input pair biased by a single tail current source, loaded by a PMOS current mirror that folds one side's drain current onto the other side's output node. Open-loop DC gain must be at least 30 dB, gain-bandwidth product at least 5 MHz, and phase margin at least 60 degrees, all across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix.",
+  "block_spec": {
+    "spec_class": "general-purpose single-stage transconductance amplifier",
+    "io_nodes": ["inp", "inn", "out", "vdd", "gnd"],
+    "target_specs": {
+      "gain_db_min": 30,
+      "gbw_hz_min": 5000000,
+      "pm_deg_min": 60,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/five-transistor-ota/eval_descriptor.json",
+    "netlists": [
+      "benchmarks/design-agent/reference/five-transistor-ota/ota_5t.spice"
+    ],
+    "notes": "Open-loop gain/GBW/phase margin measured with the same DC-feedback-closes/AC-feedback-opens trick as kb/entries/five-transistor-ota.json's own reused netlist (examples/kb/five-transistor-ota/ota_5t.spice), adapted to this benchmark's generic (non-PDK) NMOS/PMOS models rather than real sky130 devices -- see README.md's 'Known limitation' note. The eval_descriptor's own gain/GBW/PM thresholds are this benchmark's own (loosely, not identically, related to the KB entry's measured figures at a single corner), tuned so a correctly-sized 5T OTA passes across the full corner sweep with headroom while a poorly-sized one (e.g. missing the current-mirror load, or an inadequately biased tail) would not."
+  },
+  "source": {
+    "citation": "D. A. Johns, K. Martin, and A. Chan Carusone, \"Analog Integrated Circuit Design,\" 2nd ed., Wiley, 2012, Ch. 4 \"Basic Current Mirrors and Single-Stage Amplifiers.\" Framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) medium-tier task set, not reproduced from that (unlicensed) repo.",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

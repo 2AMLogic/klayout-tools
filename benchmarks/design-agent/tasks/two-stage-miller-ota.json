@@ -1,0 +1,28 @@
+{
+  "id": "two-stage-miller-ota",
+  "title": "Two-stage Miller-compensated OTA",
+  "tier": "medium",
+  "pdk": "sky130",
+  "description": "Design a two-stage operational amplifier: a first stage (an NMOS differential pair with a PMOS current-mirror load and an NMOS tail current source) providing most of the DC gain, followed by a second common-source gain stage, with a Miller compensation capacitor and RHP-zero-nulling resistor connecting the second stage's output back to its input for pole-splitting stability. Open-loop DC gain must be at least 65 dB, gain-bandwidth product at least 7 MHz, and phase margin at least 60 degrees, all across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix.",
+  "block_spec": {
+    "spec_class": "high-gain, wide-output-swing op-amp core",
+    "io_nodes": ["inp", "inn", "out", "vdd", "gnd"],
+    "target_specs": {
+      "gain_db_min": 65,
+      "gbw_hz_min": 7000000,
+      "pm_deg_min": 60,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/two-stage-miller-ota/eval_descriptor.json",
+    "netlists": [
+      "benchmarks/design-agent/reference/two-stage-miller-ota/ota_2stage.spice"
+    ],
+    "notes": "First stage reuses the five-transistor-ota task's own topology (see that reference's ota_5t.spice); a PMOS common-source second stage with an NMOS current-source load adds the extra gain/swing, with a Miller cap + nulling resistor for pole-splitting compensation. Open-loop gain/GBW/PM measured with the same DC-feedback-closes/AC-feedback-opens trick used across this benchmark's reference solutions -- see ota_2stage.spice's own header for why the stage-2 inversion means inp/inn are cross-connected relative to the single-stage five-transistor-ota reference. kb/entries/two-stage-miller-ota.json has no reference netlist of its own as of this task's authoring (2026-09-13) -- this is an original reference solution, not adapted from an existing KB artifact."
+  },
+  "source": {
+    "citation": "P. R. Gray and R. G. Meyer, \"MOS operational amplifier design-a tutorial overview,\" IEEE Journal of Solid-State Circuits, vol. 17, no. 6, pp. 969-982, Dec. 1982. Framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) medium-tier task set, not reproduced from that (unlicensed) repo.",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}
