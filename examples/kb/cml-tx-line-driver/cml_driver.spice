@@ -1,0 +1,58 @@
+* CML (current-mode logic) TX line driver: NMOS differential pair, tail
+* current source, resistive pull-up termination.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention: D G S B).
+*
+* Topology (matches kb/entries/cml-tx-line-driver.json's own topology
+* text): a differential pair (M1/M2) steered by a tail current source
+* (MNBT/MN0, same diode-mirror bias pattern as five-transistor-ota) drives
+* a pair of pull-up termination resistors (Rp/Rn). The tail current
+* switches fully between the two output legs as the differential data
+* input (inp/inn) swings past the pair's input-referred switching range,
+* producing a swing of (tail current) x (termination resistance) per this
+* entry's own sizing_approach -- independent of supply rail swing, unlike
+* a push-pull CMOS driver.
+*
+* Rterm here is 200 ohm at a 1 mA tail current (not the 50 ohm/several-mA
+* a real line-matched SERDES driver would use) -- a real 50 ohm/mA-scale
+* design point pushed this reference netlist's tail current source into
+* triode (the current mirror's own headroom couldn't sustain that much
+* current at these device sizes), so this entry scales both down together
+* to keep (tail current) x (termination resistance) -- and hence the
+* ~300 mV differential swing -- in the same realistic CML range while
+* keeping every device comfortably in saturation. artifacts.notes says so
+* explicitly; a real 50 ohm line-matched instance would re-size the tail
+* device (and re-run headroom checks) for the higher current, not just
+* change this one .param.
+.param vdd=1.8
+.param vcm=0.9
+.param itail=1m
+.param rterm=200
+.param cl=200f
+
+Vdd vdd 0 DC {vdd}
+CLp outp 0 {cl}
+CLn outn 0 {cl}
+
+* --- tail current sink (NMOS, same bias-mirror pattern as five-transistor-ota) ---
+Iref_tail vdd nbias_tail DC {itail}
+XMNBT nbias_tail nbias_tail 0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=40 nf=4 mult=1
+XMN0  tail       nbias_tail 0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=40 nf=4 mult=1
+
+* --- differential pair (NMOS) ---
+XM1 outp inp tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=40 nf=4 mult=1
+XM2 outn inn tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=40 nf=4 mult=1
+
+* --- termination / pull-up resistors (line-impedance-matched) ---
+Rp vdd outp {rterm}
+Rn vdd outn {rterm}
+
+* --- differential data stimulus: a single full-swing bit transition ---
+* inp/inn start at one static differential polarity, then fully swing to
+* the other at t=2n (well past the pair's own input-referred switching
+* range, so the tail current fully steers from one leg to the other) --
+* the standard way to characterize output swing/common-mode without
+* needing a PRBS pattern generator for this reference figure.
+Vinp inp cm PWL(0 0.2 1.9n 0.2 2n -0.2 10n -0.2)
+Vinn inn cm PWL(0 -0.2 1.9n -0.2 2n 0.2 10n 0.2)
+Vcm cm 0 DC {vcm}
