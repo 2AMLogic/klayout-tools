@@ -79,3 +79,50 @@ no met4/met5 rules yet (see `src/klayout_tools/decks/sky130.py`, "Scope
 guard"), so those layers are drawn for structural realism and are not
 checked; `generate.py` documents that, and the one place the drawn shield
 simplifies the radial slotting the entry's `layout_idioms` call for.
+
+## `five-transistor-ota/`
+
+Backs [`kb/entries/five-transistor-ota.json`](../../kb/entries/five-transistor-ota.json)
+— `ota_5t.spice` is a byte-for-byte reuse of
+[`examples/design-pipeline/ota_5t.spice`](../design-pipeline/ota_5t.spice)
+(the Epic #105 Phase 3 staged-pipeline worked example, S10-simulation-verified
+across a 20-corner process/supply/temperature sweep — see that directory's
+`sim-ac.result.json`/`sim-op.result.json`). `request.json` re-runs it at one
+named corner from that sweep (`tt`, 1.62V, -40C) rather than re-authoring a
+new netlist, since this entry's own topology matches the reused block
+exactly (real `sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, not behavioral).
+
+```
+uv run klt sim examples/kb/five-transistor-ota/request.json
+```
+
+Reproduces `av_db` (39.6352 dB), `gbw_hz` (30.6189 MHz), and `pm_deg`
+(86.1776°) — the same values as the `tt/1.620V/-40C` row of the reused
+block's own `sim-ac.result.json`, since it is the identical netlist run at
+the identical corner. Open-loop gain/phase are measured with the DC
+feedback network (`Lfb`/`Cfb`) documented in the netlist's own header,
+which biases the output to the common-mode point at DC while opening the
+loop at AC.
+
+## `inverter-based-comparator/`
+
+Backs [`kb/entries/inverter-based-comparator.json`](../../kb/entries/inverter-based-comparator.json)
+— `inverter_ota.spice` is a single CMOS inverter (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices, longer-than-minimum `L` for
+gain), self-biased to its own switching threshold by tying its output back
+to its input, adapting the same `Lfb`/`Cfb` DC-feedback-loop-opening
+technique `five-transistor-ota/ota_5t.spice` uses (there, across a
+differential pair's two gates; here, across this inverter's single gate
+node) — see the netlist's own header for the node-by-node walkthrough.
+
+```
+uv run klt sim examples/kb/inverter-based-comparator/request.json
+```
+
+Reproduces `av_db` (46.6068 dB) and `gbw_hz` (22.9561 MHz) at `tt`, 1.8V,
+27C — the open-loop small-signal AC response around the inverter's own
+self-found DC trip point. No phase-margin figure is reported: this entry's
+actual use (auto-zero, then open-loop comparator evaluation) has no
+negative-feedback loop to be stable against, unlike `five-transistor-ota`,
+so a `pm_deg`-style number here would not mean what it means for that
+entry — see `measured.notes` on the KB entry itself.
