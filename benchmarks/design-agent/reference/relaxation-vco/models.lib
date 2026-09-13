@@ -1,0 +1,27 @@
+* Process corners for
+* benchmarks/design-agent/reference/relaxation-vco/vco.spice.
+*
+* Self-contained, PDK-free stand-in for a real .lib -- a copy of
+* benchmarks/design-agent/reference/rc-relaxation-oscillator/models.lib's
+* own corner_cap/corner_iref knobs (see that file's own header): the same
+* two process knobs that set the RC relaxation oscillator's period also
+* set both control points' periods here, since vco.spice's charge current
+* is corner_iref-scaled and its timing capacitor is corner_cap-scaled
+* identically for both vco_core instances. Replace this file with a real
+* PDK model library (e.g. sky130's sky130.lib.spice) once the VCO is
+* built out of real devices -- see README.md's "Known limitations" note.
+
+.lib tt
+.param corner_cap=1.00
+.param corner_iref=1.00
+.endl tt
+
+.lib ss
+.param corner_cap=1.10
+.param corner_iref=0.95
+.endl ss
+
+.lib ff
+.param corner_cap=0.90
+.param corner_iref=1.05
+.endl ff

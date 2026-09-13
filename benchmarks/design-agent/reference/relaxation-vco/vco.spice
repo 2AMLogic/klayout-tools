@@ -1,0 +1,110 @@
+* Reference solution for
+* benchmarks/design-agent/tasks/relaxation-vco.json.
+*
+* Voltage-controlled relaxation oscillator: the same comparator-based
+* charge/discharge topology as
+* benchmarks/design-agent/reference/rc-relaxation-oscillator/oscillator.spice
+* (see kb/entries/rc-relaxation-oscillator.json for the topology writeup),
+* except the timing capacitor's charge/discharge current is now a linear
+* function of a control voltage (Ictrl = kvco * vctrl) instead of a fixed
+* reference current -- the textbook "voltage-to-current, then C*dV/I"
+* relaxation-oscillator VCO (the behavioral cousin of a current-starved
+* ring VCO: same monotonic Hz/V transfer function, without committing to
+* a specific inverter-chain implementation). Written with behavioral
+* elements only (no PDK device models), same "runs anywhere ngspice runs"
+* precedent as the RC relaxation oscillator reference.
+*
+* Testbench shape: the vco_core subcircuit below is the actual design
+* block (pins: vctrl, vout, vdd, gnd, vref) -- the two X-instances that
+* follow it, Xvco_lo/Xvco_hi, bias that *same* block at two fixed control
+* voltages simultaneously so a single transient run's .meas WHEN edges
+* (klt sim's own gate shape, see sim_request.json) can extract both
+* periods and score monotonicity + sensitivity in one sweep, mirroring
+* how the amplifier-tier tasks' testbenches wrap a single DUT stage in
+* whatever bias/feedback network the measurement needs.
+*
+* Both instances share the same corner_cap/corner_iref/vref, so every
+* corner-induced gain/timing shift (see models.lib) applies identically
+* to both control points -- the frequency *ratio* between them is
+* invariant across the PVT matrix, only the absolute frequencies (and the
+* Hz/V sensitivity derived from them) move. This is what lets the
+* monotonicity check hold everywhere the magnitude gate does.
+*
+* Circuit body only: no .tran/.meas/.end cards (klt sim generates those
+* from sim_request.json's own analysis/measurements fields -- see
+* docs/cli/sim.md, "Netlist convention: a circuit body, not a full deck").
+* corner_cap / corner_iref come from models.lib.
+
+.param vdd=1.8
+.param vref_nom=0.9
+* Finite line regulation of the reference (0.2 %/V), same as the RC
+* relaxation oscillator reference -- gives the supply corner axis
+* something to move.
+.param line_reg=0.002
+.param cosc=10p
+* Vctrl-to-Ictrl gain: 18 uA/V. Nominal at vctrl_lo=0.3V/vctrl_hi=0.9V
+* below, this puts the two measured frequencies at ~300 kHz/~900 kHz
+* (a 3x span, matching the 3x control-voltage span) -- see
+* eval_descriptor.json's sim_request.json for the swept corner matrix
+* that keeps both frequencies, and their difference, within their
+* declared bands.
+.param kvco=18u
+.param vctrl_lo=0.3
+.param vctrl_hi=0.9
+
+Vdd vdd 0 DC {vdd}
+
+* Reference: same stand-in bandgap-derived voltage reference as the RC
+* relaxation oscillator (kb/entries/sky130-bandgap-reference.json) --
+* shared by both vco_core instances below, so the comparator threshold
+* spacing (dV = vref) is identical for both control points.
+Bref vref 0 V = {vref_nom} * (1 + {line_reg} * (v(vdd) - 1.8))
+
+.subckt vco_core vctrl vout vdd gnd vref
+* Timing capacitor, same 60 ppm/C tempco as the RC relaxation oscillator
+* reference -- the temperature corner axis moves both instances' periods
+* identically (by construction, they share corner_cap).
+Cosc cap gnd {cosc*corner_cap} tc1=60u
+
+* DC path so the operating point is not singular (same 1 Gohm leak as the
+* RC relaxation oscillator reference).
+Rleak cap gnd 1G
+
+* Charge/discharge current source: +/-Ictrl depending on comparator
+* polarity, where Ictrl = kvco * v(vctrl) -- the control-voltage-to-
+* current gain that makes this a VCO rather than a fixed-reference
+* relaxation oscillator. tanh() is a smooth sign(), same solver-friendly
+* trick as the RC relaxation oscillator reference's Biosc.
+Biosc gnd cap I = {kvco * corner_iref} * v(vctrl) * tanh(1000 * (v(vp) - v(cap)))
+
+* Comparator core: same reference-derived-rail, high-gain shape as the RC
+* relaxation oscillator reference, so the threshold spacing (dV = vref)
+* tracks the same reference the charge current's magnitude is defined
+* against (Ictrl already reflects that decoupling separately, via kvco).
+Bcmp vc gnd V = v(vref) * (1 + tanh(1000 * (v(vp) - v(cap))))
+* Rcmp/Ccmp set the comparator propagation delay (~1 ns), same as the RC
+* relaxation oscillator reference.
+Rcmp vc vout 1k
+Ccmp vout gnd 1p
+
+* Positive-feedback divider sets the two thresholds either side of vref,
+* same as the RC relaxation oscillator reference:
+*   vout = 2*vref -> vp = 1.5*vref   (upper threshold)
+*   vout = 0       -> vp = 0.5*vref   (lower threshold)
+R3 vout vp 100k
+R4 vp vref 100k
+
+* Startup kick: an astable has a metastable DC operating point, and SPICE
+* has no noise to leave it. A 50 ns, 10 uA pulse breaks it deterministically
+* (same shape as the RC relaxation oscillator reference's Istart).
+Istart gnd cap PWL(0 0 1n 10u 50n 10u 51n 0)
+.ends vco_core
+
+* Fixed DC control-voltage sources for the two measurement points --
+* sim_request.json's measurements section extracts a period at each via
+* independent .meas WHEN edges on vo_lo/vo_hi.
+Vctrl_lo vctrl_lo 0 DC {vctrl_lo}
+Vctrl_hi vctrl_hi 0 DC {vctrl_hi}
+
+Xvco_lo vctrl_lo vo_lo vdd 0 vref vco_core
+Xvco_hi vctrl_hi vo_hi vdd 0 vref vco_core

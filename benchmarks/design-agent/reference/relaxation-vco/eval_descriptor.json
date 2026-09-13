@@ -1,0 +1,13 @@
+{
+  "gates": [
+    { "check": "sim", "name": "vco_frequency_gate", "args": { "request": "sim_request.json" } }
+  ],
+  "objective": {
+    "check": "sim",
+    "metric": "measurements.8.worst_case.margin",
+    "polarity": "maximize",
+    "name": "vco_sensitivity_margin_worst_case",
+    "args": { "request": "sim_request.json" }
+  },
+  "metrics": []
+}
