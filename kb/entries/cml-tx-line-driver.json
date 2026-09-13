@@ -19,5 +19,38 @@
     "url": "https://doi.org/10.1109/4.509864",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its MOS current-mode logic (MCML) differential-pair-plus-load topology and sizing tradeoffs only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a foundational reference establishing MOS current-mode logic as a practical CMOS circuit family; the resistively-terminated differential-pair driver used here for line driving is the same current-steering core circuit generalized to a transmit-driver application."
   },
-  "notes": "Framed here specifically as a line driver (resistors sized to the channel impedance for source-series termination) rather than MCML's original use as an internal high-speed logic family, since PHY transmit drivers are the most common place this circuit reappears; the sizing methodology (tail-current-to-termination-resistance swing relationship) carries over directly. See rx-front-end-termination-buffer for the receive-side counterpart that this driver's matched line impedance is designed to terminate into."
+  "notes": "Framed here specifically as a line driver (resistors sized to the channel impedance for source-series termination) rather than MCML's original use as an internal high-speed logic family, since PHY transmit drivers are the most common place this circuit reappears; the sizing methodology (tail-current-to-termination-resistance swing relationship) carries over directly. See rx-front-end-termination-buffer for the receive-side counterpart that this driver's matched line impedance is designed to terminate into.",
+  "artifacts": {
+    "netlist": "examples/kb/cml-tx-line-driver/cml_driver.spice",
+    "notes": "From-scratch netlist: a real sky130_fd_pr__nfet_01v8 differential pair (M1/M2) with a diode-mirrored NMOS tail current sink (same bias pattern as five-transistor-ota) drives two plain resistor pull-ups. Rterm=200 ohm at a 1 mA tail current, not a literal 50 ohm/several-mA line-matched instance -- a 50 ohm/mA-scale design point pushed the tail mirror into triode at these device sizes (insufficient headroom), so both were scaled down together to keep every device saturated while preserving a realistic ~300 mV CML differential swing. See the netlist's own header for the full derivation."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. A single full-swing differential data transition (+/-0.2V around a 0.9V common mode) is applied at t=2ns; voutp/voutn are sampled at t=1ns (before) and t=9ns (after) the transition. vswing_diff_v is the change in differential output between the two steered states, matching this entry's own swing = (tail current) x (termination resistance) sizing relation (the achieved swing reflects the actual, headroom-limited tail current rather than the full nominal 1 mA -- see artifacts.notes). Reproduce with `klt sim examples/kb/cml-tx-line-driver/request.json`.",
+    "figures": [
+      {
+        "name": "vswing_diff_v",
+        "value": 0.307355,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cml-tx-line-driver/request.json"
+      },
+      {
+        "name": "voutp_t1_v",
+        "value": 1.64614,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cml-tx-line-driver/request.json"
+      },
+      {
+        "name": "voutn_t1_v",
+        "value": 1.79982,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/cml-tx-line-driver/request.json"
+      }
+    ]
+  }
 }

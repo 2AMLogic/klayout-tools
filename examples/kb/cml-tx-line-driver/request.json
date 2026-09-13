@@ -1,0 +1,19 @@
+{
+  "netlist": "cml_driver.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "10p 10n" },
+  "measurements": [
+    { "name": "voutp_t1_v", "spice": ".meas tran voutp_t1_v FIND v(outp) AT=1n", "unit": "V" },
+    { "name": "voutn_t1_v", "spice": ".meas tran voutn_t1_v FIND v(outn) AT=1n", "unit": "V" },
+    { "name": "voutp_t2_v", "spice": ".meas tran voutp_t2_v FIND v(outp) AT=9n", "unit": "V" },
+    { "name": "voutn_t2_v", "spice": ".meas tran voutn_t2_v FIND v(outn) AT=9n", "unit": "V" },
+    { "name": "vswing_diff_v", "spice": ".meas tran vswing_diff_v param='abs((voutp_t1_v-voutn_t1_v) - (voutp_t2_v-voutn_t2_v))'", "unit": "V", "limits": { "min": 0.3 } }
+  ],
+  "options": { "timeout_s": 200, "keep_artifacts": false }
+}
