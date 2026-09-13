@@ -1,6 +1,7 @@
 """Tests for `scripts/design_agent_benchmark.py` -- the design-agent
-benchmark harness (issue #1719) and its live-agent candidate provider
-(issue #1732).
+benchmark harness (issue #1719), its single-turn live-agent candidate
+provider (issue #1732), and its multi-turn tool-using *interactive* agent
+provider (issue #1739).
 
 Two tiers, mirroring `tests/test_gallery_signals.py`:
 
@@ -25,9 +26,13 @@ Two tiers, mirroring `tests/test_gallery_signals.py`:
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -733,3 +738,566 @@ def test_cli_run_with_live_agent_provider_selects_it_end_to_end(
     payload = json.loads(capsys.readouterr().out)
     assert payload["provider"] == "live-agent"
     assert payload["overall"]["pass_at_k"]["1"] == 1.0
+
+
+# --------------------------------------------------------------------------
+# Interactive (multi-turn, tool-using) agent provider (issue #1739)
+# --------------------------------------------------------------------------
+#
+# These never invoke a real agent: every test either stubs the session
+# boundary (`invoke_agent`) or points `AGENT_CLI_ENV` at the fake
+# stream-json CLI below, so the sandbox seeding, tool-call/wall-clock
+# bounding, transcript capture, and netlist-collection plumbing are all
+# exercised without network credentials.
+
+_FAKE_INTERACTIVE_CLI = r'''#!/usr/bin/env python3
+"""Fake `claude` CLI speaking `--output-format stream-json`.
+
+Behavior is picked by the KLT_FAKE_AGENT_MODE env var so one stub covers
+every interactive-session test.
+"""
+import json
+import os
+import pathlib
+import shutil
+import sys
+import time
+
+argv = sys.argv[1:]
+prompt = argv[argv.index("-p") + 1]
+mode = os.environ.get("KLT_FAKE_AGENT_MODE", "ok")
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def tool_use(name, cmd):
+    emit(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t",
+                        "name": name,
+                        "input": {"command": cmd},
+                    }
+                ]
+            },
+        }
+    )
+
+
+emit({"type": "system", "subtype": "init", "cwd": os.getcwd()})
+
+if mode == "fail":
+    sys.stderr.write("stub interactive failure\n")
+    sys.exit(1)
+
+if mode == "sleep":
+    time.sleep(30)
+    sys.exit(0)
+
+if mode == "api-error":
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "num_turns": 1,
+            "result": "Not logged in \u00b7 Please run /login",
+        }
+    )
+    sys.exit(0)
+
+if mode == "many-tools":
+    for i in range(40):
+        tool_use("Bash", "klt sim sim_request.json --format json")
+    time.sleep(30)
+    sys.exit(0)
+
+if mode == "probe":
+    pathlib.Path("probe.json").write_text(
+        json.dumps(
+            {
+                "cwd": os.getcwd(),
+                "klt": shutil.which("klt"),
+                "argv": argv,
+                "prompt": prompt,
+            }
+        )
+    )
+
+if mode == "write":
+    for stem, body in json.loads(os.environ["KLT_FAKE_AGENT_NETLISTS"]).items():
+        pathlib.Path(f"{stem}.spice").write_text(body)
+
+if mode == "tamper":
+    request = pathlib.Path(os.environ["KLT_FAKE_AGENT_TAMPER_REQUEST"])
+    payload = json.loads(request.read_text())
+    payload["measurements"] = []
+    payload["corners"] = {"process": ["tt"]}
+    request.write_text(json.dumps(payload))
+    for stem, body in json.loads(os.environ["KLT_FAKE_AGENT_NETLISTS"]).items():
+        pathlib.Path(f"{stem}.spice").write_text(body)
+
+tool_use("Bash", "klt kb search --where av_db>=6 --format json")
+tool_use("Bash", "klt sim sim_request.json --format json")
+emit(
+    {
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "sized it"}]},
+    }
+)
+emit(
+    {
+        "type": "result",
+        "subtype": "success",
+        "num_turns": 3,
+        "result": os.environ.get("KLT_FAKE_AGENT_RESULT", "done"),
+    }
+)
+'''
+
+
+def _fake_interactive_cli(tmp_path: Path) -> Path:
+    script = tmp_path / "fake-claude-interactive"
+    script.write_text(_FAKE_INTERACTIVE_CLI)
+    script.chmod(0o755)
+    return script
+
+
+def _sandbox(task: dict, tmp_path: Path) -> dict:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    return dab._seed_agent_sandbox(task, REPO_ROOT, sandbox)
+
+
+# --- sandbox seeding ------------------------------------------------------
+
+
+def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    layout = _sandbox(task, tmp_path)
+    sandbox = layout["workdir"]
+
+    assert layout["stems"] == ["cs_amp"]
+    assert (sandbox / "skills" / "design-topology-selection.md").is_file()
+    assert (sandbox / "skills" / "design-sizing.md").is_file()
+    assert (sandbox / "skills" / "design-netlist-authoring.md").is_file()
+    assert (sandbox / "models.lib").is_file()
+    assert (sandbox / "TASK.md").is_file()
+
+    request = json.loads((sandbox / "sim_request.json").read_text())
+    # The netlist the agent is asked to author, as a sandbox-relative path.
+    assert request["netlist"] == "cs_amp.spice"
+    assert request["models"]["lib"] == "models.lib"
+    # The measurement contract is carried over verbatim from the reference.
+    reference_request = json.loads(
+        (
+            REPO_ROOT
+            / "benchmarks/design-agent/reference/common-source-amp/sim_request.json"
+        ).read_text()
+    )
+    assert request["measurements"] == reference_request["measurements"]
+    assert request["corners"] == reference_request["corners"]
+
+
+def test_seed_agent_sandbox_never_seeds_the_reference_netlist(tmp_path):
+    """The sandbox is a working area, not an answer key: the reference
+    solution's own netlist body must not be reachable from inside it."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    layout = _sandbox(task, tmp_path)
+    reference_netlist = (REPO_ROOT / task["reference"]["netlists"][0]).read_text()
+    seeded = "\n".join(
+        path.read_text()
+        for path in layout["workdir"].rglob("*")
+        if path.is_file() and path.suffix in {".spice", ".json", ".md", ".lib"}
+    )
+    for line in reference_netlist.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("*"):
+            assert stripped not in seeded, f"leaked reference line: {stripped!r}"
+
+
+def test_seed_agent_sandbox_multi_testbench_task_writes_every_request(tmp_path):
+    task = dab.load_task(TASKS_DIR / "differential-pair.json")
+    layout = _sandbox(task, tmp_path)
+    sandbox = layout["workdir"]
+    assert sorted(layout["stems"]) == ["diff_pair_cm", "diff_pair_diff"]
+    assert {"sim_request_diff.json", "sim_request_cm.json"} <= {
+        path.name for path in sandbox.glob("*.json")
+    }
+    diff = json.loads((sandbox / "sim_request_diff.json").read_text())
+    assert diff["netlist"] == "diff_pair_diff.spice"
+
+
+def test_sandbox_klt_shim_runs_kb_against_the_repo_corpus(tmp_path):
+    """The whole point of the sandbox is live `klt kb`/`klt sim` access:
+    `klt kb` resolves its corpus relative to the *package* it is imported
+    from, so an installed-elsewhere `klt` on PATH cannot see this repo's
+    `kb/`. The seeded `bin/klt` shim must, from a working directory that is
+    nowhere near the checkout."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    layout = _sandbox(task, tmp_path)
+    shim = layout["workdir"] / "bin" / "klt"
+    assert os.access(shim, os.X_OK)
+    proc = subprocess.run(
+        [str(shim), "kb", "list", "--format", "json"],
+        cwd=str(layout["workdir"]),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["count"] > 0
+
+
+# --- prompt ---------------------------------------------------------------
+
+
+def test_build_interactive_agent_prompt_advertises_live_tools_and_deliverable(tmp_path):
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    layout = _sandbox(task, tmp_path)
+    prompt = dab._build_interactive_agent_prompt(task, layout)
+    assert "klt kb search" in prompt
+    assert "klt sim" in prompt
+    assert "--op-lint" in prompt
+    assert "skills/design-sizing.md" in prompt
+    assert "cs_amp.spice" in prompt
+    assert "sim_request.json" in prompt
+    assert task["description"] in prompt
+    # Bounds are stated to the agent, not just enforced behind its back.
+    assert str(int(layout["timeout_s"])) in prompt
+    assert str(layout["tool_call_budget"]) in prompt
+
+
+def test_build_interactive_agent_prompt_never_leaks_reference_netlist_body(tmp_path):
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    layout = _sandbox(task, tmp_path)
+    prompt = dab._build_interactive_agent_prompt(task, layout)
+    reference_netlist = (REPO_ROOT / task["reference"]["netlists"][0]).read_text()
+    for line in reference_netlist.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("*"):
+            assert stripped not in prompt, f"leaked reference line: {stripped!r}"
+
+
+# --- netlist collection ---------------------------------------------------
+
+
+def test_interactive_provider_scores_the_netlist_written_into_the_sandbox(tmp_path):
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    body = "* written by the session\nVdd vdd 0 DC 1.8\n"
+
+    def _session(request: dab.AgentSessionRequest) -> dab.AgentSessionResult:
+        (request.workdir / "cs_amp.spice").write_text(body)
+        return dab.AgentSessionResult(text="no fences here, I wrote the file")
+
+    provider = dab.make_interactive_agent_provider(
+        invoke_agent=_session, sandbox_root=tmp_path
+    )
+    descriptor_arg, candidate_arg = provider(task, 0, REPO_ROOT)
+    assert candidate_arg is None
+    descriptor = json.loads(descriptor_arg)
+    request = json.loads(Path(descriptor["gates"][0]["args"]["request"]).read_text())
+    assert Path(request["netlist"]).read_text() == body
+
+
+def test_interactive_provider_falls_back_to_a_labeled_fence(tmp_path):
+    """A session that never manages to write a file, but names its netlist
+    in a labeled fence, is still scoreable -- same fence contract the
+    single-turn provider uses."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+
+    def _session(request: dab.AgentSessionRequest) -> dab.AgentSessionResult:
+        del request
+        return dab.AgentSessionResult(text="```spice:cs_amp\nVdd vdd 0 DC 1.8\n```")
+
+    provider = dab.make_interactive_agent_provider(
+        invoke_agent=_session, sandbox_root=tmp_path
+    )
+    descriptor = json.loads(provider(task, 0, REPO_ROOT)[0])
+    request = json.loads(Path(descriptor["gates"][0]["args"]["request"]).read_text())
+    assert "Vdd vdd 0 DC 1.8" in Path(request["netlist"]).read_text()
+
+
+def test_interactive_provider_raises_when_session_produced_no_netlist(tmp_path):
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+
+    def _session(request: dab.AgentSessionRequest) -> dab.AgentSessionResult:
+        del request
+        return dab.AgentSessionResult(text="I thought about it and gave up")
+
+    provider = dab.make_interactive_agent_provider(
+        invoke_agent=_session, sandbox_root=tmp_path
+    )
+    with pytest.raises(dab.AgentInvocationError, match="cs_amp"):
+        provider(task, 0, REPO_ROOT)
+
+
+def test_interactive_provider_records_session_failure_as_failed_attempt(tmp_path):
+    """A blown wall-clock/tool budget inside the session must be a scored
+    attempt failure, never a crashed sweep."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+
+    def _session(request: dab.AgentSessionRequest) -> dab.AgentSessionResult:
+        del request
+        raise dab.AgentInvocationError(
+            "interactive agent session timed out after 1800s"
+        )
+
+    provider = dab.make_interactive_agent_provider(
+        invoke_agent=_session, sandbox_root=tmp_path
+    )
+    result = dab.run_attempt(task, 0, provider, REPO_ROOT)
+    assert result["valid"] is False
+    assert "timed out" in result["error"]
+
+
+# --- per-attempt isolation ------------------------------------------------
+
+
+def test_interactive_provider_isolates_concurrent_attempts(tmp_path):
+    """Two attempts running at the same time must not see each other's
+    files -- the per-attempt sandbox is what makes a multi-turn,
+    file-writing session safe to run more than once per task."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    started = threading.Barrier(2, timeout=30)
+    workdirs: dict[int, Path] = {}
+
+    def _make_session(index: int):
+        def _session(request: dab.AgentSessionRequest) -> dab.AgentSessionResult:
+            workdirs[index] = request.workdir
+            (request.workdir / "cs_amp.spice").write_text(f"* attempt {index}\n")
+            (request.workdir / f"scratch-{index}.txt").write_text("mine")
+            started.wait()  # both sessions are live simultaneously here
+            peer = 1 - index
+            assert not (request.workdir / f"scratch-{peer}.txt").exists()
+            return dab.AgentSessionResult(text="")
+
+        return _session
+
+    results: dict[int, str] = {}
+
+    def _run(index: int) -> None:
+        provider = dab.make_interactive_agent_provider(
+            invoke_agent=_make_session(index), sandbox_root=tmp_path
+        )
+        results[index] = provider(task, index, REPO_ROOT)[0]
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in (0, 1)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert set(results) == {0, 1}
+    assert workdirs[0] != workdirs[1]
+    for index in (0, 1):
+        descriptor = json.loads(results[index])
+        request = json.loads(
+            Path(descriptor["gates"][0]["args"]["request"]).read_text()
+        )
+        assert Path(request["netlist"]).read_text() == f"* attempt {index}\n"
+
+
+def test_interactive_provider_scoring_ignores_sandbox_testbench_edits(tmp_path):
+    """The sandbox copy of the `klt sim` request is the agent's *feedback*
+    loop, not the grading contract: a session that weakens its local copy
+    (drops the measurements, shrinks the corner matrix) must still be scored
+    against the benchmark's own frozen reference request."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+
+    def _session(request: dab.AgentSessionRequest) -> dab.AgentSessionResult:
+        local = request.workdir / "sim_request.json"
+        payload = json.loads(local.read_text())
+        payload["measurements"] = []
+        payload["corners"] = {"process": ["tt"]}
+        local.write_text(json.dumps(payload))
+        (request.workdir / "cs_amp.spice").write_text("Vdd vdd 0 DC 1.8\n")
+        return dab.AgentSessionResult(text="")
+
+    provider = dab.make_interactive_agent_provider(
+        invoke_agent=_session, sandbox_root=tmp_path
+    )
+    descriptor = json.loads(provider(task, 0, REPO_ROOT)[0])
+    scored_request = json.loads(
+        Path(descriptor["gates"][0]["args"]["request"]).read_text()
+    )
+    reference_request = json.loads(
+        (
+            REPO_ROOT
+            / "benchmarks/design-agent/reference/common-source-amp/sim_request.json"
+        ).read_text()
+    )
+    assert scored_request["measurements"] == reference_request["measurements"]
+    assert scored_request["corners"] == reference_request["corners"]
+
+
+# --- the real streaming session boundary ----------------------------------
+
+
+def _session_request(tmp_path: Path, **overrides) -> dab.AgentSessionRequest:
+    workdir = overrides.pop("workdir", None) or (tmp_path / "work")
+    workdir.mkdir(parents=True, exist_ok=True)
+    kwargs = {
+        "prompt": "design it",
+        "workdir": workdir,
+        "timeout_s": 30.0,
+        "tool_call_budget": 20,
+    }
+    kwargs.update(overrides)
+    return dab.AgentSessionRequest(**kwargs)
+
+
+def test_default_interactive_session_counts_tool_calls_and_writes_transcript(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_RESULT", "final answer")
+    request = _session_request(tmp_path)
+    result = dab._default_invoke_interactive_agent(request)
+    assert result.text == "final answer"
+    assert result.tool_calls == 2
+    assert result.turns >= 1
+    transcript = (request.workdir / dab.TRANSCRIPT_FILENAME).read_text().splitlines()
+    assert len(transcript) >= 4
+    assert json.loads(transcript[0])["type"] == "system"
+
+
+def test_default_interactive_session_enforces_tool_call_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "many-tools")
+    request = _session_request(tmp_path, tool_call_budget=3, timeout_s=60.0)
+    start = time.monotonic()
+    with pytest.raises(dab.AgentInvocationError, match="tool-call budget"):
+        dab._default_invoke_interactive_agent(request)
+    # Killed on the budget, not by waiting out the stub's 30 s sleep.
+    assert time.monotonic() - start < 25
+
+
+def test_default_interactive_session_enforces_wall_clock(tmp_path, monkeypatch):
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "sleep")
+    request = _session_request(tmp_path, timeout_s=1.0)
+    with pytest.raises(dab.AgentInvocationError, match="timed out"):
+        dab._default_invoke_interactive_agent(request)
+
+
+def test_default_interactive_session_raises_on_nonzero_exit(tmp_path, monkeypatch):
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "fail")
+    with pytest.raises(dab.AgentInvocationError, match="stub interactive failure"):
+        dab._default_invoke_interactive_agent(_session_request(tmp_path))
+
+
+def test_default_interactive_session_raises_on_is_error_result(tmp_path, monkeypatch):
+    """The real `claude` CLI reports an unusable session (no credentials, an
+    API error) as a `{"type": "result", "is_error": true}` event and still
+    exits 0 -- observed directly against `claude` 2.1.221. Without this the
+    attempt would be misreported as "the agent produced no netlist" rather
+    than "the agent never ran"."""
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "api-error")
+    with pytest.raises(dab.AgentInvocationError, match="Not logged in"):
+        dab._default_invoke_interactive_agent(_session_request(tmp_path))
+
+
+def test_default_interactive_session_raises_on_missing_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, "/no/such/binary-does-not-exist")
+    with pytest.raises(dab.AgentInvocationError, match="not found"):
+        dab._default_invoke_interactive_agent(_session_request(tmp_path))
+
+
+def test_default_interactive_session_runs_in_the_sandbox_with_its_klt_on_path(
+    tmp_path, monkeypatch
+):
+    """The session's own cwd is the per-attempt sandbox, and the sandbox's
+    `bin/klt` shim shadows any other `klt` on PATH -- otherwise `klt kb`
+    inside the session would resolve against whatever install happens to be
+    first on the runner's PATH, not this checkout."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    layout = _sandbox(task, tmp_path)
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "probe")
+    dab._default_invoke_interactive_agent(
+        _session_request(tmp_path, workdir=layout["workdir"])
+    )
+    probe = json.loads((layout["workdir"] / "probe.json").read_text())
+    assert Path(probe["cwd"]).resolve() == layout["workdir"].resolve()
+    assert Path(probe["klt"]).resolve() == (layout["workdir"] / "bin" / "klt").resolve()
+    assert "--output-format" in probe["argv"]
+    assert "stream-json" in probe["argv"]
+    # Tool access is declared explicitly rather than left wide open.
+    joined = " ".join(probe["argv"])
+    assert "Bash(klt kb:*)" in joined
+    assert "Bash(klt sim:*)" in joined
+
+
+# --- CLI wiring -----------------------------------------------------------
+
+
+def test_resolve_agent_timeout_defaults_per_provider():
+    assert dab._resolve_agent_timeout("live-agent", None) == dab.DEFAULT_AGENT_TIMEOUT_S
+    assert (
+        dab._resolve_agent_timeout("interactive-agent", None)
+        == dab.DEFAULT_INTERACTIVE_TIMEOUT_S
+    )
+    assert dab._resolve_agent_timeout("interactive-agent", 42.0) == 42.0
+
+
+def test_cli_run_with_interactive_agent_provider_is_selectable(tmp_path, monkeypatch):
+    """`run --provider interactive-agent` reaches `run_benchmark` with the
+    interactive provider, and the existing `live-agent` choice is untouched
+    (its own end-to-end test above still passes)."""
+    captured: dict = {}
+
+    def _fake_run_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {
+            "schema_version": 1,
+            "provider": kwargs["provider_name"],
+            "tasks": [],
+            "tiers": {},
+            "overall": {"task_count": 0, "solved_count": 0, "pass_at_k": {}},
+        }
+
+    monkeypatch.setattr(dab, "run_benchmark", _fake_run_benchmark)
+    exit_code = dab.main(
+        [
+            "run",
+            "--provider",
+            "interactive-agent",
+            "--agent-tool-budget",
+            "7",
+            "--agent-sandbox-root",
+            str(tmp_path),
+        ]
+    )
+    assert exit_code == 0
+    assert captured["provider_name"] == "interactive-agent"
+    assert callable(captured["provider"])
+
+
+@_SKIP_NO_NGSPICE
+def test_interactive_provider_end_to_end_with_stubbed_cli(tmp_path, monkeypatch):
+    """Full path with only the agent binary stubbed: sandbox seeding ->
+    streamed session (which writes a netlist into its own sandbox) ->
+    collection -> synthesized descriptor -> real `klt eval`/`ngspice`."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    reference_body = (REPO_ROOT / task["reference"]["netlists"][0]).read_text()
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "write")
+    monkeypatch.setenv(
+        "KLT_FAKE_AGENT_NETLISTS", json.dumps({"cs_amp": reference_body})
+    )
+    provider = dab.make_interactive_agent_provider(
+        sandbox_root=tmp_path / "sandboxes", agent_timeout_s=300.0
+    )
+    result = dab.run_attempt(task, 0, provider, REPO_ROOT)
+    assert result["valid"] is True, result

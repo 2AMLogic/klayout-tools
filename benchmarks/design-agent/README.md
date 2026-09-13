@@ -65,6 +65,61 @@ the agent's own proposed netlist(s), rather than the answer key (issue
 uv run python scripts/design_agent_benchmark.py run --provider live-agent --attempts 5 --k 1 5
 ```
 
+Or run it against a **live agent with live tools** — a bounded multi-turn
+session per attempt, in a private sandbox seeded with the skill files, the
+task's model library, and a working copy of its `klt sim` request(s), so S4
+can run real `klt kb search` queries and S5's Loop A can iterate against
+real `klt sim` corner feedback instead of guessing once (issue #1739; same
+`claude` CLI/authentication requirement):
+
+```
+uv run python scripts/design_agent_benchmark.py run --provider interactive-agent \
+  --attempts 5 --k 1 5 --agent-timeout-s 1800 --agent-tool-budget 80 \
+  --agent-sandbox-root .klt/design-agent-sandboxes
+```
+
+The three providers are additive, not alternatives: `reference` proves the
+harness's own plumbing, `live-agent` measures single-shot design judgment,
+and `interactive-agent` measures what the skill chain achieves *with* its
+own tools in the loop. See "Known limitations" for what each one does and
+does not establish.
+
+### What the interactive provider gives the agent
+
+Each attempt gets a fresh directory (never shared with another attempt, and
+never the repo checkout the benchmark is running from) containing:
+
+| Seeded | Purpose |
+| --- | --- |
+| `bin/klt` | This checkout's CLI, first on the session's `PATH`. Required: `klt kb` resolves its corpus relative to the package it was imported from, so an installed-elsewhere `klt` reports "kb entries directory not found" from a sandbox |
+| `skills/design-{topology-selection,sizing,netlist-authoring}.md` | The S4/S5/S6 procedures, for the agent to `Read` itself rather than have pasted into a prompt |
+| `models.lib` (as named by the task's own request) | The device cards it must size against |
+| `<request>.json` | A **working copy** of each `klt sim` request, already pointed at the `<stem>.spice` the agent is asked to author — so `klt sim <request>.json` runs the real corner sweep the moment a netlist exists |
+| `TASK.md` | The same brief the opening prompt carries, on disk for a long session to re-read |
+
+Tool access is an explicit allow-list (`Bash(klt kb:*)`, `Bash(klt sim:*)`,
+`Read`/`Write`/`Edit`/`Glob`/`Grep`, `cat`/`ls`); anything else is denied by
+the CLI rather than prompted for, so a headless run can never block on a
+permission prompt. The reference *solution* is never seeded — only the
+testbench contract.
+
+Two bounds end a runaway attempt: `--agent-timeout-s` (wall clock) and
+`--agent-tool-budget` (tool calls, counted from the session's streamed
+event log as they happen). Either one tripping kills the session and
+records a **failed attempt**, exactly like any other
+`AgentInvocationError` — it never aborts the sweep.
+
+Sandboxes are deliberately left on disk. `agent-transcript.jsonl` (the raw
+streamed session), `agent-session.json` (tool-call/turn counts), the
+netlist the agent actually wrote, and `klt sim`'s own artifacts are the
+evidence for what an attempt did when a pass rate looks wrong.
+
+Scoring never reads the sandbox's request copy: the `klt eval` descriptor
+is re-synthesized from the repo's frozen reference request and pointed at
+the agent's netlist, so a session that weakens its local testbench (drops
+measurements, shrinks the corner matrix) only blinds its own feedback loop
+— it cannot move its score.
+
 ## Current task set
 
 ### Easy tier
@@ -133,8 +188,12 @@ limitations" below.
 
 This is a first milestone, not the full issue #1719 scope.
 
-1. **The live-agent provider is a single-turn text completion, not a
-   multi-turn tool-using agent session (issue #1732).**
+1. **`--provider live-agent` is a single-turn text completion (issue
+   #1732); `--provider interactive-agent` (issue #1739) is the tool-using
+   one.** Both ship, and which limitation applies depends on which you ran —
+   a pass@k number from this harness is meaningless without saying which
+   provider produced it (the report's own `provider` field records it).
+
    `--provider live-agent` (`make_live_agent_provider` /
    `live_agent_candidate_provider` in `scripts/design_agent_benchmark.py`)
    drives one headless `claude -p` invocation per attempt, seeded with the
@@ -149,8 +208,33 @@ This is a first milestone, not the full issue #1719 scope.
    tool access in this call, and cannot iterate against simulator feedback
    the way `.claude/skills/design-sizing/SKILL.md`'s own Loop A describes —
    see `scripts/design_agent_benchmark.py`'s `_default_invoke_agent`
-   docstring for the full rationale, and the tracked follow-up issue for a
-   fuller interactive/tool-using implementation.
+   docstring for the full rationale. It is kept (not replaced) because a
+   single-shot number is the cheaper, lower-variance regression signal for
+   the same skill chain's *judgment*, and because it needs neither `ngspice`
+   nor a sandbox to run.
+
+   `--provider interactive-agent` (`make_interactive_agent_provider` /
+   `interactive_agent_candidate_provider`) closes the tool-access gap: a
+   bounded multi-turn session per attempt with live `klt kb`
+   `list`/`show`/`search` for S4 and live `klt sim` / `klt sim --op-lint`
+   for S5's Loop A, in a private per-attempt sandbox (see "What the
+   interactive provider gives the agent" above). **Limitations it still
+   carries:**
+   - It measures the agent *plus* its tools, so a pass-rate move can come
+     from either. When a number moves, compare against the single-turn
+     provider on the same commit before attributing it to the skill files.
+   - Each attempt is far more expensive than a single-turn one (several
+     real corner sweeps, each 18 `ngspice` processes for the easy tier), so
+     `--attempts 5` across the whole task set is a long job, not a
+     per-push check. Budget with `--agent-timeout-s`/`--agent-tool-budget`.
+   - The session's own tool use is bounded but not *replayable*: the
+     transcript records what happened, and nothing pins the model version,
+     so two runs of the same commit are not expected to agree exactly.
+   - The scored path still only supports `"sim"`-check gates
+     (`_build_live_agent_descriptor`), matching the shipped task set; a
+     DRC/LVS-gated task would need that function extended.
+   - Limitation 2 below (generic LEVEL=1 devices, not real sky130) applies
+     unchanged — the sandbox seeds whatever `models.lib` the task names.
 
    The **deterministic `reference_candidate_provider`** (`run`'s default,
    no `--provider` flag needed) still exists alongside it and always hands
@@ -191,9 +275,10 @@ This is a first milestone, not the full issue #1719 scope.
    every shipped task, amplifier and non-amplifier alike.
 
 The remaining hard-tier PLL task (#1752, the follow-up to #1743, itself
-the follow-up to #1735) and a fuller interactive/tool-using live-agent
-provider are filed as follow-up work — see the tracked issues linked from
-#1719/#1728.
+the follow-up to #1735) is filed as follow-up work — see the tracked
+issues linked from #1719/#1728. The fuller interactive/tool-using provider
+that limitation 1 used to point forward to now ships as
+`--provider interactive-agent` (issue #1739).
 
 ## CI
 
@@ -210,3 +295,10 @@ push" posture for an ngspice-per-corner-heavy job):
   have provisioned (see the workflow file's own comment on that step) and
   is allowed to report its result without failing the overall workflow —
   its JSON artifact and one-line summary are still published either way.
+- `run --provider interactive-agent` (issue #1739) — a **one-task, two-
+  attempt smoke run** of the tool-using provider, additive alongside all
+  three checks above, with the same credential-gated skip. Deliberately not
+  a full-task-set pass@k: each attempt is a multi-turn session that may run
+  several 18-corner sweeps of its own. It answers "does the tool-using loop
+  still work end to end", and uploads each attempt's
+  `agent-session.json`/`agent-transcript.jsonl`/netlist as the artifact.
