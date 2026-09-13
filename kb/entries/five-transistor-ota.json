@@ -19,5 +19,38 @@
     "url": "https://search.worldcat.org/search?q=Analog+Integrated+Circuit+Design+Johns+Martin",
     "license_or_openness": "Standard graduate-level analog IC design textbook cited here for its topology, terminology, and sizing methodology only (no figures or text reproduced), per the KB's open-sources-only rule (case 4, textbook-level common knowledge, in kb/SOURCING.md). This is the textbook whose terminology ('five-transistor OTA') this entry's id/title follow."
   },
-  "notes": "Also called a 'single-stage OTA' or 'differential-pair-with-current-mirror-load OTA'. It is the simplest practical OTA topology and the usual starting point before adding cascoding (for higher gain at the same power) or a second gain stage (for still higher gain, at the cost of stability/compensation). Single-ended-output DC gain is limited to roughly one stage's gm*ro (tens of dB in a bulk CMOS process at practical lengths), so it is normally used inside a closed feedback loop, or cascaded with additional gain stages, rather than deployed as a stand-alone high-gain amplifier."
+  "notes": "Also called a 'single-stage OTA' or 'differential-pair-with-current-mirror-load OTA'. It is the simplest practical OTA topology and the usual starting point before adding cascoding (for higher gain at the same power) or a second gain stage (for still higher gain, at the cost of stability/compensation). Single-ended-output DC gain is limited to roughly one stage's gm*ro (tens of dB in a bulk CMOS process at practical lengths), so it is normally used inside a closed feedback loop, or cascaded with additional gain stages, rather than deployed as a stand-alone high-gain amplifier.",
+  "artifacts": {
+    "netlist": "examples/kb/five-transistor-ota/ota_5t.spice",
+    "notes": "Reused verbatim from examples/design-pipeline/ota_5t.spice, the Epic #105 Phase 3 staged-pipeline worked example (see blocks/sky130-ota-5t/NOTE.md), which is S10-simulation-verified across a 20-corner process/supply/temperature sweep (examples/design-pipeline/sim-ac.result.json, sim-op.result.json). This entry's request.json re-runs it at one named corner from that sweep, rather than re-authoring a new netlist, per this entry's own topology matching the reused block exactly (real sky130_fd_pr__nfet_01v8/pfet_01v8 devices, not behavioral)."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.62V, -40C (one corner from the reused block's own verified 20-corner sweep; request.json sweeps only this corner)",
+    "supply_v": 1.62,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. Open-loop gain/phase are measured with a DC feedback network (Lfb/Cfb) that biases the output to the common-mode point at DC while opening the loop at AC -- see ota_5t.spice's own header. Reproduce with `klt sim examples/kb/five-transistor-ota/request.json`; these figures match the tt/1.620V/-40C row of examples/design-pipeline/sim-ac.result.json exactly, since it is the same netlist run at the same corner.",
+    "figures": [
+      {
+        "name": "av_db",
+        "value": 39.6352,
+        "unit": "dB",
+        "analysis": "ac",
+        "testbench": "examples/kb/five-transistor-ota/request.json"
+      },
+      {
+        "name": "gbw_hz",
+        "value": 30618900.0,
+        "unit": "Hz",
+        "analysis": "ac",
+        "testbench": "examples/kb/five-transistor-ota/request.json"
+      },
+      {
+        "name": "pm_deg",
+        "value": 86.1776,
+        "unit": "deg",
+        "analysis": "ac",
+        "testbench": "examples/kb/five-transistor-ota/request.json"
+      }
+    ]
+  }
 }

@@ -1,0 +1,33 @@
+* Self-biased CMOS-inverter amplifier/comparator front end.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* A single CMOS inverter (XM_P/XM_N) is self-biased to its own switching
+* threshold by tying its output back to its input (the "feedback switch
+* during an auto-zero phase" this entry's topology describes), then probed
+* open-loop for small-signal gain around that self-found bias point.
+*
+* Same DC-feedback-loop-opening trick as examples/kb/five-transistor-ota's
+* ota_5t.spice, adapted from a differential pair (inp/inn) to this single
+* inverter's one gate node:
+*   - Lfb (out -> vx, huge L): DC short, so vx tracks out at DC.
+*   - Cfb (vx -> 0, huge C): AC short, so vx is signal ground at AC.
+*   - Vin (in -> vx, DC 0 / AC 1): at DC, in = vx = out (the auto-zero
+*     condition -- input tied to output through the loop); at AC, Lfb opens
+*     and Cfb grounds vx, so v(in) is the AC test signal directly and
+*     v(out)/v(in) is the open-loop small-signal gain around the self-found
+*     trip point.
+.param vdd=1.8
+.param cl=1p
+
+Vdd  vdd 0 DC {vdd}
+CL   out 0 {cl}
+
+* --- self-bias feedback: closes at DC (auto-zero), opens at AC ---
+Lfb  out vx 1e9
+Cfb  vx  0  1e3
+Vin  in  vx DC 0 AC 1
+
+* --- CMOS inverter, longer-than-minimum length for higher intrinsic gain ---
+XM_P out in vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XM_N out in 0   0   sky130_fd_pr__nfet_01v8 L=1 W=4 nf=1 mult=1

@@ -1,0 +1,16 @@
+{
+  "netlist": "inverter_ota.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "ac", "args": "dec 20 1 1g" },
+  "measurements": [
+    { "name": "gain_db", "spice": ".meas ac gain_db find vdb(out) when frequency=10", "unit": "dB", "limits": { "min": 15 } },
+    { "name": "gbw_hz", "spice": ".meas ac gbw_hz when vdb(out)=0 cross=1", "unit": "Hz" }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

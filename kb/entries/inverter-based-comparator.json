@@ -19,5 +19,31 @@
     "url": "https://doi.org/10.1109/JSSC.2008.2010975",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its inverter-based amplifier topology and auto-zeroing/sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a widely-cited reference establishing the self-biased inverter as a practical replacement for a differential-pair OTA in low-voltage switched-capacitor design."
   },
-  "notes": "Framed here as a reusable amplifier/comparator building block rather than the full delta-sigma modulator the source paper builds; the auto-zeroing/self-biasing technique generalizes directly to standalone dynamic comparators (sample the offset at the inverter's own trip point, then evaluate). Since it draws no static bias current outside switching transients, this idiom is attractive for area- and power-constrained PHY comparator applications on sky130."
+  "notes": "Framed here as a reusable amplifier/comparator building block rather than the full delta-sigma modulator the source paper builds; the auto-zeroing/self-biasing technique generalizes directly to standalone dynamic comparators (sample the offset at the inverter's own trip point, then evaluate). Since it draws no static bias current outside switching transients, this idiom is attractive for area- and power-constrained PHY comparator applications on sky130.",
+  "artifacts": {
+    "netlist": "examples/kb/inverter-based-comparator/inverter_ota.spice",
+    "notes": "Single-stage CMOS inverter (real sky130_fd_pr__nfet_01v8/pfet_01v8 devices, longer-than-minimum L for gain), self-biased by tying output to input through the same DC-feedback-loop-opening technique examples/kb/five-transistor-ota/ota_5t.spice uses (Lfb closes the loop at DC for auto-zero, Cfb grounds the probe node at AC), adapted from that entry's differential pair to this single inverter's one gate node. This models the entry's 'auto-zero via feedback switch, then open-loop evaluation' self-bias mechanism as a linear small-signal feedback loop rather than a literal switched-capacitor transient -- see measured.notes."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. gain_db/gbw_hz are the open-loop small-signal AC response around the inverter's own self-found DC trip point (input tied to output via the Lfb/Cfb auto-zero loop, opened at AC) -- not a closed-loop phase margin, since this entry's actual use (open-loop comparator evaluation after auto-zero) has no negative-feedback loop to be stable against, so no phase-margin figure is reported here (unlike five-transistor-ota, which is used inside feedback). Reproduce with `klt sim examples/kb/inverter-based-comparator/request.json`.",
+    "figures": [
+      {
+        "name": "av_db",
+        "value": 46.6068,
+        "unit": "dB",
+        "analysis": "ac",
+        "testbench": "examples/kb/inverter-based-comparator/request.json"
+      },
+      {
+        "name": "gbw_hz",
+        "value": 22956100.0,
+        "unit": "Hz",
+        "analysis": "ac",
+        "testbench": "examples/kb/inverter-based-comparator/request.json"
+      }
+    ]
+  }
 }
