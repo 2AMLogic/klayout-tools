@@ -1,0 +1,28 @@
+{
+  "id": "telescopic-cascode-amp",
+  "title": "Telescopic cascode gain stage with PMOS cascode current-source load",
+  "tier": "medium",
+  "pdk": "sky130",
+  "description": "Design a single-ended telescopic cascode gain stage -- an NMOS common-source input device with an NMOS cascode stacked directly on it, loaded by a PMOS cascode current source -- whose small-signal voltage gain at 1 kHz is at least 85 dB across the full sky130-style tt/ss/ff process corner, 1.62-1.98 V supply, and -40..125 C temperature matrix, while the output node self-biases into the 0.3-0.9 V window and the whole stage (gain branch plus every bias branch) draws no more than 120 uA from the supply. The gain target is what makes the cascode load-bearing rather than decorative: the same stage with both cascode devices removed measures roughly 46 dB on this model set, so no plain common-source stage can reach the gate, however it is sized, without blowing the current budget.",
+  "block_spec": {
+    "spec_class": "single-ended high-gain voltage amplifier / cascode gain stage",
+    "io_nodes": ["in", "out", "vdd", "gnd"],
+    "target_specs": {
+      "gain_db_min_at_1khz": 85,
+      "vout_bias_window_v": [0.3, 0.9],
+      "isupply_max_a": 1.2e-4,
+      "corners": "sky130-style tt/ss/ff process x 1.62-1.98V supply x -40..125C"
+    }
+  },
+  "reference": {
+    "eval_descriptor": "benchmarks/design-agent/reference/telescopic-cascode-amp/eval_descriptor.json",
+    "netlists": [
+      "benchmarks/design-agent/reference/telescopic-cascode-amp/casc_amp.spice"
+    ],
+    "notes": "One netlist body, two testbenches over it: an AC gain sweep and a DC-operating-point readout (a deliberately no-op `dc` sweep of the AC-coupled stimulus source, since ngspice implements no `.MEASURE OP`). Generic (non-PDK) NMOS *and* PMOS models stand in for sky130 devices -- this tier's models.lib adds the PMOS cards the easy tier never needed; see README.md's 'Known limitation' note. LEVEL=1 devices have no short-channel output-conductance degradation, so the absolute gain (~94-103 dB) is higher than a real sky130 telescopic cascode would reach; what the gate discriminates is the cascoded-vs-uncascoded contrast, not a sky130-accurate figure."
+  },
+  "source": {
+    "citation": "The cascode gain stage is a standard analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) medium-tier task set, not reproduced from that repo (unlicensed).",
+    "url": "https://arxiv.org/abs/2405.14918"
+  }
+}

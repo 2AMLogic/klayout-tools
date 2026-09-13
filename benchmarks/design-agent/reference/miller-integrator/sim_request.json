@@ -1,0 +1,37 @@
+{
+  "netlist": "integrator.spice",
+  "engine": "ngspice",
+  "models": { "lib": "models.lib" },
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "ac", "args": "dec 5 1 100meg" },
+  "measurements": [
+    {
+      "name": "gain_100hz_db",
+      "spice": ".meas ac gain_100hz_db FIND vdb(out) AT=100",
+      "unit": "dB",
+      "limits": { "min": 15 }
+    },
+    {
+      "name": "gain_1khz_db",
+      "spice": ".meas ac gain_1khz_db FIND vdb(out) AT=1k",
+      "unit": "dB",
+      "limits": { "min": -2, "max": 2 }
+    },
+    {
+      "name": "gain_10khz_db",
+      "spice": ".meas ac gain_10khz_db FIND vdb(out) AT=10k",
+      "unit": "dB"
+    },
+    {
+      "name": "slope_db_per_decade",
+      "spice": ".meas ac slope_db_per_decade param='gain_1khz_db-gain_10khz_db'",
+      "unit": "dB",
+      "limits": { "min": 18, "max": 22 }
+    }
+  ],
+  "options": { "timeout_s": 30, "keep_artifacts": false }
+}
