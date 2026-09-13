@@ -1,0 +1,62 @@
+{
+  "netlist": "pll.spice",
+  "engine": "ngspice",
+  "models": {
+    "lib": "models.lib"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "20n 1500u uic"
+  },
+  "measurements": [
+    {
+      "name": "period_div",
+      "spice": ".meas tran period_div TRIG V(divclk_a) VAL=0.9 RISE=140 TARG V(divclk_a) VAL=0.9 RISE=141",
+      "unit": "s",
+      "limits": {
+        "min": 6.466667e-6,
+        "max": 6.866667e-6
+      }
+    },
+    {
+      "name": "phase_err_a",
+      "spice": ".meas tran phase_err_a TRIG V(refclk) VAL=0.9 RISE=1 TD={104.5/fref} TARG V(divclk_a) VAL=0.9 RISE=1 TD={104.5/fref}",
+      "unit": "s",
+      "limits": {
+        "min": -5e-7,
+        "max": 5e-7
+      }
+    },
+    {
+      "name": "phase_err_b",
+      "spice": ".meas tran phase_err_b TRIG V(refclk) VAL=0.9 RISE=1 TD={204.5/fref} TARG V(divclk_a) VAL=0.9 RISE=1 TD={204.5/fref}",
+      "unit": "s",
+      "limits": {
+        "min": -5e-7,
+        "max": 5e-7
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 60,
+    "keep_artifacts": false
+  }
+}

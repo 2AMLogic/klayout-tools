@@ -177,12 +177,11 @@ fail the task.
 | Task | Pass criterion |
 | --- | --- |
 | `rc-relaxation-oscillator` | Astable comparator-based RC relaxation oscillator (`kb/entries/rc-relaxation-oscillator.json` topology) actually oscillates — measured period between two rising edges of the output clock stays within 1.4-2.2 us (~455-715 kHz) across the same 18-corner sky130-style PVT sweep the easy tier uses. Reuses `examples/kb/rc-relaxation-oscillator`'s netlist/corner-library verbatim (issue #1735), the first of the oscillator/VCO/PLL family the original benchmark proposal (#1719) called for. |
-| `relaxation-vco` | Voltage-controlled relaxation oscillator: same charge/discharge/comparator topology as `rc-relaxation-oscillator`, but the timing capacitor's charge current is a linear function of a control voltage (`Ictrl = kvco * vctrl`) instead of a fixed reference current. Output frequency at two declared control-voltage points (0.3 V, 0.9 V) both stay within their own declared bands *and* the Hz/V sensitivity between them stays within its own declared band (800 kHz/V-1.25 MHz/V) — a combined monotonicity-and-sensitivity check — across the same 18-corner sky130-style PVT sweep. The second of the oscillator/VCO/PLL family (issue #1743, the follow-up to #1735); the remaining PLL task is tracked separately (see below). |
+| `relaxation-vco` | Voltage-controlled relaxation oscillator: same charge/discharge/comparator topology as `rc-relaxation-oscillator`, but the timing capacitor's charge current is a linear function of a control voltage (`Ictrl = kvco * vctrl`) instead of a fixed reference current. Output frequency at two declared control-voltage points (0.3 V, 0.9 V) both stay within their own declared bands *and* the Hz/V sensitivity between them stays within its own declared band (800 kHz/V-1.25 MHz/V) — a combined monotonicity-and-sensitivity check — across the same 18-corner sky130-style PVT sweep. The second of the oscillator/VCO/PLL family (issue #1743, the follow-up to #1735). |
+| `charge-pump-pll` | Closed-loop charge-pump PLL: a tri-state PFD + charge pump (`kb/entries/pfd-charge-pump-tri-state.json` topology), a passive 2nd-order loop filter, `relaxation-vco`'s own `vco_core` design block (reused unmodified, locked at 600 kHz), and a /4 feedback divider closing the loop — all one netlist, not separately-tested sub-blocks. Starting from a control-voltage initial condition well below the eventual lock point, the design must reach both frequency lock (divided VCO period within 6.467-6.867 us of the 150 kHz reference) and phase lock (reference-to-feedback edge offset within +/-500 ns) at two widely-spaced checkpoints (696.7 us and 1363.3 us into a 1500 us transient), across the same 18-corner sky130-style PVT sweep. The third and final member of the oscillator/VCO/PLL family (issue #1735), completing the follow-up opened by #1743 (issue #1752). |
 
-All five medium-tier tasks are now built. The remaining hard-tier PLL
-task (issue #1752, the follow-up to #1743: PFD + charge pump + VCO +
-feedback divider achieving lock) is **not yet built** — see "Known
-limitations" below.
+All five medium-tier tasks and all three hard-tier tasks are now built —
+the oscillator/VCO/PLL family (issue #1735) is complete.
 
 ## Known limitations (read before citing a pass@k number from this harness)
 
@@ -274,11 +273,10 @@ This is a first milestone, not the full issue #1719 scope.
    `--provider live-agent` now tells the agent the correct model set for
    every shipped task, amplifier and non-amplifier alike.
 
-The remaining hard-tier PLL task (#1752, the follow-up to #1743, itself
-the follow-up to #1735) is filed as follow-up work — see the tracked
-issues linked from #1719/#1728. The fuller interactive/tool-using provider
-that limitation 1 used to point forward to now ships as
-`--provider interactive-agent` (issue #1739).
+A fuller interactive/tool-using live-agent provider (see limitation 1
+above) now ships as `--provider interactive-agent` (issue #1739). The
+oscillator/VCO/PLL family itself (#1735 -> #1743 -> #1752) is complete
+as of `charge-pump-pll` landing.
 
 ## CI
 
