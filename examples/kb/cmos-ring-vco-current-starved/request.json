@@ -1,0 +1,38 @@
+{
+  "netlist": "ring_vco.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "20p 2400n" },
+  "measurements": [
+    { "name": "t8_a", "spice": ".meas tran t8_a TRIG v(r1) VAL=0.9 TD=150n RISE=1 TARG v(r1) VAL=0.9 TD=150n RISE=9", "unit": "s" },
+    { "name": "t8_b", "spice": ".meas tran t8_b TRIG v(r1) VAL=0.9 TD=750n RISE=1 TARG v(r1) VAL=0.9 TD=750n RISE=9", "unit": "s" },
+    { "name": "t8_c", "spice": ".meas tran t8_c TRIG v(r1) VAL=0.9 TD=1350n RISE=1 TARG v(r1) VAL=0.9 TD=1350n RISE=9", "unit": "s" },
+    { "name": "t8_d", "spice": ".meas tran t8_d TRIG v(r1) VAL=0.9 TD=1950n RISE=1 TARG v(r1) VAL=0.9 TD=1950n RISE=9", "unit": "s" },
+    { "name": "f_vctrl_0p7_hz", "spice": ".meas tran f_vctrl_0p7_hz param='8 / t8_a'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "f_vctrl_0p9_hz", "spice": ".meas tran f_vctrl_0p9_hz param='8 / t8_b'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "f_vctrl_1p1_hz", "spice": ".meas tran f_vctrl_1p1_hz param='8 / t8_c'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "f_vctrl_1p3_hz", "spice": ".meas tran f_vctrl_1p3_hz param='8 / t8_d'", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "step_lo_hz", "spice": ".meas tran step_lo_hz param='f_vctrl_0p9_hz - f_vctrl_0p7_hz'", "unit": "Hz", "limits": { "min": 0 } },
+    { "name": "step_mid_hz", "spice": ".meas tran step_mid_hz param='f_vctrl_1p1_hz - f_vctrl_0p9_hz'", "unit": "Hz", "limits": { "min": 0 } },
+    { "name": "step_hi_hz", "spice": ".meas tran step_hi_hz param='f_vctrl_1p3_hz - f_vctrl_1p1_hz'", "unit": "Hz", "limits": { "min": 0 } },
+    { "name": "tuning_ratio", "spice": ".meas tran tuning_ratio param='f_vctrl_1p3_hz / f_vctrl_0p7_hz'", "unit": "1", "limits": { "min": 4 } },
+    { "name": "kvco_low_hz_per_v", "spice": ".meas tran kvco_low_hz_per_v param='(f_vctrl_0p9_hz - f_vctrl_0p7_hz) / 0.2'", "unit": "Hz/V" },
+    { "name": "kvco_high_hz_per_v", "spice": ".meas tran kvco_high_hz_per_v param='(f_vctrl_1p3_hz - f_vctrl_1p1_hz) / 0.2'", "unit": "Hz/V" },
+    { "name": "kvco_avg_hz_per_v", "spice": ".meas tran kvco_avg_hz_per_v param='(f_vctrl_1p3_hz - f_vctrl_0p7_hz) / 0.6'", "unit": "Hz/V" },
+    { "name": "kvco_spread_ratio", "spice": ".meas tran kvco_spread_ratio param='kvco_low_hz_per_v / kvco_high_hz_per_v'", "unit": "1" },
+    { "name": "vmax_slow", "spice": ".meas tran vmax_slow max v(r1) from=150n to=590n", "unit": "V" },
+    { "name": "vmin_slow", "spice": ".meas tran vmin_slow min v(r1) from=150n to=590n", "unit": "V" },
+    { "name": "vpp_slow_v", "spice": ".meas tran vpp_slow_v param='vmax_slow - vmin_slow'", "unit": "V", "limits": { "min": 1.6 } },
+    { "name": "vmax_fast", "spice": ".meas tran vmax_fast max v(r1) from=1950n to=2390n", "unit": "V" },
+    { "name": "vmin_fast", "spice": ".meas tran vmin_fast min v(r1) from=1950n to=2390n", "unit": "V" },
+    { "name": "vpp_fast_v", "spice": ".meas tran vpp_fast_v param='vmax_fast - vmin_fast'", "unit": "V", "limits": { "min": 1.6 } },
+    { "name": "idd_avg_raw", "spice": ".meas tran idd_avg_raw avg i(Vdd) from=1950n to=2390n", "unit": "A" },
+    { "name": "idd_fast_a", "spice": ".meas tran idd_fast_a param='-1 * idd_avg_raw'", "unit": "A", "limits": { "max": 2e-3 } }
+  ],
+  "options": { "timeout_s": 900, "keep_artifacts": false }
+}

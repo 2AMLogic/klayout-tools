@@ -1,0 +1,171 @@
+* BJT-free CMOS voltage reference: subthreshold-MOSFET dVgs (PTAT) summed
+* against a threshold-derived Vgs (CTAT). No bipolar devices anywhere.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/cmos-subthreshold-voltage-reference.json's own
+* topology/sizing_approach text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "Two subthreshold-biased MOSFETs are run at different current densities
+*    (via a mirrored-current ratio and/or a device area ratio), producing a
+*    delta-Vgs term that is proportional-to-absolute-temperature (PTAT) ...
+*    This PTAT term is summed ... against a complementary-to-absolute-
+*    temperature (CTAT) term derived from a MOSFET's threshold voltage Vt"
+*
+*   "... the resulting delta-Vgs between the two devices is PTAT with a
+*    coefficient set by (nkT/q)*ln(ratio) ... weight and sum the PTAT and
+*    CTAT branches (typically as currents through a resistor summing node)
+*    so the first-order temperature terms cancel at the target output level"
+*
+* HOW THE TWO TERMS ARE BUILT AND SUMMED
+*   PTAT core (nodes n1a/nbias/pbias/nsrc): a self-biased loop, PMOS mirror
+*   on top forcing equal currents in two branches, NMOS half running one
+*   unit device against NRATIO unit devices in parallel. Both NMOS halves
+*   are deliberately biased in WEAK INVERSION (see sizing below), so their
+*   Vgs difference is the weak-inversion log law
+*       dVgs = n * (kT/q) * ln(NRATIO)
+*   -- the MOSFET analogue of a bipolar dVbe, scaled by the subthreshold
+*   slope factor n instead of by 1. That dVgs is dropped across R1, so
+*       I_ptat = n * (kT/q) * ln(NRATIO) / R1,
+*   which is PTAT to the extent R1's own temperature coefficient allows.
+*   Measured below as dvgs_v.
+*
+*   CTAT + summing (nodes vref/vg): the PMOS mirror delivers a copy of
+*   I_ptat into the output branch, which is R2 in series with a
+*   diode-connected NMOS to ground. So
+*       Vref = Vgs_ctat(I_ptat, T)   +   I_ptat * R2
+*              \__ CTAT: falls with T  \__ PTAT: rises with T, weighted by
+*                 through dVth/dT          the resistor RATIO R2/R1
+*   R2/R1 is the single knob that sets the first-order cancellation, and
+*   because both resistors are the same sky130 flavour their own TCs cancel
+*   in the ratio -- which is exactly why the summing is done in the current
+*   domain over a resistor ratio rather than with an absolute resistor.
+*   Measured below as vctat_v (= v(vg)) and vptat_v (= v(vref) - v(vg)).
+*
+* SIZING (per the entry's sizing_approach)
+*   Target dVth/dT for sky130's nfet_01v8 is about -1 mV/K, so the PTAT
+*   branch must contribute about +1 mV/K:
+*       (n k/q) * ln(NRATIO) * (R2/R1) = 1 mV/K
+*   With n ~ 1.4 (the entry's own "typically 1.2-1.5 for bulk CMOS") and
+*   NRATIO = 8, (n k/q) ln(8) = 1.4 * 86.17uV/K * 2.079 = 251 uV/K, so
+*   R2/R1 ~ 4. The ratio is then trimmed against the real models by the
+*   segment counts n_r1/n_r2 below -- the hand value is a starting point,
+*   not the answer, exactly as the entry's sizing_approach instructs (weak
+*   inversion is far from a BSIM model's primary fitting region, so the
+*   achieved n is whatever sky130's models say it is, not 1.4).
+*
+*   WEAK-INVERSION CHECK -- the load-bearing assumption of this whole entry.
+*   A MOSFET is in weak inversion below roughly I_wi = 2 n u Cox Vt^2 (W/L),
+*   about 1.9e-7 * (W/L) A for sky130's nfet_01v8 at room temperature. The
+*   PTAT core devices are W=40/L=2 (W/L = 20), giving I_wi ~ 3.8 uA, and the
+*   loop is sized for ~1 uA -- about a quarter of that, i.e. genuinely in
+*   weak inversion rather than merely "low current". Those wide, long
+*   geometries are also the entry's own layout idiom ("wide, low-aspect-ratio
+*   device geometries ... to reduce the impact of random Vt mismatch").
+*
+*   RESISTOR FLAVOUR: sky130_fd_pr__res_xhigh_po (~2 kohm/sq), not the
+*   ~320 ohm/sq res_high_po that examples/kb/beta-multiplier-bias-cell and
+*   examples/kb/sky130-bandgap-reference use. At the sub-uA-to-low-uA
+*   currents this entry is specifically about, the summing resistor is
+*   hundreds of kohm; the extra-high-sheet flavour is the one that makes
+*   that a sane amount of poly. This is a real sky130 device model, not an
+*   ideal R -- the resistors' own TC is inside the measured tc_ppm_per_c.
+*
+* WHAT THIS TESTBENCH DOES AND DOES NOT SHOW (also in artifacts.notes):
+*   1. It sweeps TEMPERATURE at a fixed 1.8V supply, because temperature
+*      coefficient is the figure that distinguishes this entry (the entry's
+*      own notes put its expected TC in the "tens-of-ppm/C to low-hundreds-
+*      of-ppm/C range"). It says nothing about line regulation or PSRR. The
+*      complementary supply sweep, on the sibling bias cell, is
+*      examples/kb/beta-multiplier-bias-cell.
+*   2. Single process corner (tt), no mismatch, no Monte Carlo. The entry's
+*      pdk_portability is explicit that weak-inversion corner/Monte-Carlo
+*      behaviour "should be validated empirically rather than assumed" and
+*      that this topology needs "a wider trim range" than a bipolar bandgap
+*      -- none of which this single-corner run establishes. Nothing here
+*      supports a spread, trim-range, or absolute-accuracy claim.
+*   3. NO BIPOLAR DEVICES are used, which is the entry's whole point versus
+*      kb/entries/sky130-bandgap-reference.json. Every active device here is
+*      sky130_fd_pr__nfet_01v8 or sky130_fd_pr__pfet_01v8.
+.param nratio=8
+* PTAT-core NMOS: wide and long, biased in weak inversion (see check above).
+.param wn=40
+.param lnm=2
+* PMOS mirror: long channel for output resistance, since every bit of mirror
+* mismatch between the two core branches shows up directly in dVgs.
+.param wp=20
+.param lpm=4
+* CTAT device: narrow, so at the same ~1uA it sits in moderate/strong
+* inversion and its Vgs is dominated by Vth (and therefore by dVth/dT).
+.param wctat=2
+.param lctat=1
+* Resistors: W=1um strings of 5um unit segments (the entry's "string of unit
+* resistor elements" idiom), in the xhigh_po flavour.
+.param r_w=1
+.param r_lseg=5
+.param n_r1=8
+.param n_r2=12
+
+* --- supply ---
+Vdd vdd 0 DC 1.8
+
+* --- PMOS mirror: three equal legs (two core branches + the output branch),
+* so the output branch carries a 1:1 copy of I_ptat ---
+XMP1 n1a   pbias vdd vdd sky130_fd_pr__pfet_01v8 L={lpm} W={wp} nf=1 mult=1
+XMP2 pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L={lpm} W={wp} nf=1 mult=1
+XMP3 vrefa pbias vdd vdd sky130_fd_pr__pfet_01v8 L={lpm} W={wp} nf=1 mult=1
+
+* --- 0V sense source so I_ptat can be read directly ---
+Vsense1 n1a nbias DC 0
+
+* --- weak-inversion NMOS pair. XMN1 is the single unit device (diode-
+* connected, so its drain is the mirror gate nbias); XMN2 is NRATIO unit
+* devices in parallel, degenerated by R1.
+* NGSPICE GOTCHA: the parallel count must ride on `m=`, not on `mult=`.
+* sky130's .subckt declares a `mult` parameter but never passes it to the
+* enclosed BSIM device line, so `mult=8` alone is silently a 1x device --
+* which here would collapse dVgs to zero and the whole reference with it.
+* Both are written (matching examples/kb/sky130-bandgap-reference's
+* `mult=N m=N` pairing) so the intent survives a port to a simulator that
+* does honour `mult`. ---
+XMN1 nbias nbias 0    0 sky130_fd_pr__nfet_01v8 L={lnm} W={wn} nf=1 mult=1
+XMN2 pbias nbias nsrc 0 sky130_fd_pr__nfet_01v8 L={lnm} W={wn} nf=1 mult={nratio} m={nratio}
+XR1  nsrc  0     0      sky130_fd_pr__res_xhigh_po W={r_w} L='r_lseg*n_r1' mult=1 m=1
+
+* --- output branch: the current-domain PTAT/CTAT summing node.
+* v(vref) = v(vg) + I_ptat*R2 = Vgs_ctat + I_ptat*R2 ---
+Vsense_out vrefa vref DC 0
+XR2  vref vg 0 sky130_fd_pr__res_xhigh_po W={r_w} L='r_lseg*n_r2' mult=1 m=1
+XMCT vg   vg 0 0 sky130_fd_pr__nfet_01v8 L={lctat} W={wctat} nf=1 mult=1
+
+* --- START-UP CIRCUIT ---
+* The entry's sizing_approach calls this out by name: "weak-inversion
+* self-biased loops can have a degenerate zero-current solution ... validate
+* stability of the operating point ... with an explicit startup circuit".
+*
+* WHY THIS DETECTOR DIFFERS FROM THE ONE IN
+* examples/kb/beta-multiplier-bias-cell. That sibling cell detects start-up
+* with a skewed inverter on nbias, which works because its strong-inversion
+* loop settles at nbias ~ 0.63V -- comfortably above any CMOS inverter's
+* trip point. A WEAK-INVERSION loop cannot use that trick: it settles at
+* nbias ~ Vth (measured below as vnbias_v), and an inverter's trip point is
+* itself pinned near Vthn no matter how hard the devices are skewed, so the
+* detector would sit permanently half-on, bleeding current into the loop and
+* corrupting the very dVgs the reference is built from. (That is not
+* hypothetical -- it is what an inverter detector actually did here before
+* this one replaced it.)
+*
+* So the detector used instead is the classic single-device one, and it
+* keys off pbias rather than nbias, because pbias is the node with an
+* unambiguous zero-current signature: at rest nothing pulls it down, so it
+* sits at the rail.
+*   - at rest  pbias = vdd = 1.8V, XMSU's Vgs = 1.8V: hard on, so it pulls
+*     nbias up, turning on the NMOS half, which pulls pbias down and starts
+*     the loop.
+*   - running  pbias settles ~0.15V above nbias, i.e. XMSU's Vgs is a small
+*     fraction of a threshold, so XMSU is off and injects nothing.
+* Being a source follower from the rail into nbias, it has no standing DC
+* path of its own -- off means off, not "a small trickle". Vsense_su exists
+* so the residual is measured (i_startup_a), not asserted.
+XMSU sud pbias nbias 0 sky130_fd_pr__nfet_01v8 L=1 W=2 nf=1 mult=1
+Vsense_su vdd sud DC 0

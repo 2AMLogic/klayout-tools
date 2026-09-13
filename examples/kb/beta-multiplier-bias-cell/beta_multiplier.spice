@@ -1,0 +1,176 @@
+* Beta-multiplier (constant-gm) current-reference bias cell, with start-up.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/beta-multiplier-bias-cell.json's own
+* topology/sizing_approach text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "two current-mirrored branches: a PMOS current mirror at the top forces
+*    equal currents in both branches, while the NMOS half of one branch is
+*    scaled by a ratio K ... In equilibrium, the gate-source voltage
+*    difference the mirror ratio K creates between the two NMOS devices is
+*    forced entirely across that resistor ... Because the all-zero-current
+*    state is also a stable equilibrium of this feedback loop, a start-up
+*    circuit is required"
+*
+* ONE DELIBERATE DEPARTURE FROM THE ENTRY'S PROSE. The entry's topology
+* sentence puts the degeneration resistor in the *unscaled* branch. That
+* orientation cannot settle anywhere but zero: at equal branch currents the
+* K-times-wider device always carries the *smaller* Vgs, so
+* Vgs(Kx) - Vgs(1x) is negative and no positive current can be forced across
+* a resistor in the 1x branch. The resistor therefore has to sit in the
+* source of the K-times-wider device, so that
+*     I * Rbias = Vgs(1x) - Vgs(Kx) = dVgs > 0,
+* which is the orientation Allen & Holberg's Ch. 4 derivation (this entry's
+* own cited source) uses, and the one built here. Measured below as vr_v,
+* the voltage the loop actually develops across Rbias.
+*
+* Node map:
+*   vdd          -- supply (swept 1.2V -> 2.0V by this directory's request.json)
+*   pbias        -- PMOS mirror gate (= branch-2 drain node, MP2 diode-connected)
+*   nbias        -- NMOS mirror gate (= branch-1 drain node, MN1 diode-connected)
+*   n1a / nbias  -- branch 1, split by the 0V sense source Vsense1 so the
+*                   reference current itself can be measured directly
+*   nsrc         -- source of the K-times-wider NMOS, i.e. the top of Rbias
+*   su           -- start-up detector output (see "start-up" below)
+*
+* SIZING (per the entry's sizing_approach: pick K, derive Rbias from the
+* square-law beta-multiplier relation, then correct against the real models).
+*   K = 4, expressed as K unit devices in parallel rather than as one
+*   K-times-wider device -- "built from unit devices repeated K times rather
+*   than a single K-times-wider transistor, so the mirror ratio is set by
+*   device count rather than by a hard-to-match single wide device", straight
+*   out of the entry's own layout_idioms.
+*   NGSPICE GOTCHA, worth stating because it silently produces a K=1 cell:
+*   the parallel count must be carried by `m=`, NOT by `mult=`. sky130's
+*   `.subckt sky130_fd_pr__nfet_01v8` DECLARES a `mult` parameter but never
+*   passes it down to the enclosed BSIM device line, so `mult=4` alone is
+*   accepted without warning and does nothing. `m=` is ngspice's own subckt
+*   instance multiplier and is the one that actually replicates the device.
+*   Both are written below (the same `mult=N m=N` pairing
+*   examples/kb/sky130-bandgap-reference uses) so the intent survives a
+*   translation to a simulator that does honour `mult`.
+*   Square-law estimate:  I = (2 / (u_n Cox (W/L)_1 Rbias^2)) * (1 - 1/sqrt(K))^2
+*   With K=4 the (1 - 1/sqrt(K))^2 factor is 0.25, (W/L)_1 = 10/2 = 5 and
+*   u_n Cox ~ 100 uA/V^2, giving Rbias ~ 10 kohm for a ~10 uA reference.
+*   That hand value is then corrected against the actual sky130 models --
+*   the real devices are nowhere near square-law at this overdrive -- by
+*   choosing the segment count n_r of the poly resistor below. The achieved
+*   current is reported as iref_a; the hand estimate is not asserted as the
+*   answer, exactly as the entry's sizing_approach instructs.
+*
+* WHAT IS AND IS NOT MODELLED HERE (also stated in this entry's
+* artifacts.notes):
+*   1. Rbias is a REAL sky130 device (sky130_fd_pr__res_high_po), not an
+*      ideal R element. That is on purpose: the entry's pdk_portability
+*      singles out the resistor's absolute value and temperature coefficient
+*      as the sky130-specific part of this cell, so modelling it as an ideal
+*      resistor would erase precisely the PDK-dependent term. Note that this
+*      testbench still only sweeps SUPPLY, at a fixed 27C -- it substantiates
+*      the supply-insensitivity claim, not a temperature-drift claim. A
+*      tempco figure needs a temperature sweep over this same cell, which is
+*      what examples/kb/cmos-subthreshold-voltage-reference does for the
+*      reference it backs.
+*   2. The mirrors are plain (non-cascoded). The entry lists cascoding both
+*      branches as an OPTIONAL improvement to supply rejection; the plain
+*      mirror is the base topology the entry describes, and it is what the
+*      line-sensitivity figure below is measured on. A cascoded variant would
+*      report a smaller line_reg_pct_per_v at the cost of headroom.
+*   3. Single corner (tt, 27C). No mismatch, no Monte Carlo -- so nothing
+*      here supports a spread/trim-range claim, only a nominal operating
+*      point and its supply sensitivity.
+.param wn=10
+.param lnm=2
+.param kratio=4
+.param wp=40
+.param lpm=4
+* Poly resistor, W=1um, built from n_r unit segments of 5um each with the
+* entry's "string of unit resistor elements" idiom in mind. res_high_po is
+* sky130's high-sheet poly flavour (the lowest-TC resistor option of the
+* three the entry's pdk_portability names), the same flavour
+* examples/kb/sky130-bandgap-reference uses.
+.param r_w=1
+.param r_lseg=5
+.param n_r=6
+
+* --- supply ---
+Vdd vdd 0 DC 1.8
+
+* --- PMOS mirror: equal-sized devices, so both branches carry equal current.
+* MP2 is the diode-connected half, so its drain IS the mirror gate (pbias). ---
+XMP1 n1a  pbias vdd vdd sky130_fd_pr__pfet_01v8 L={lpm} W={wp} nf=1 mult=1
+XMP2 pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L={lpm} W={wp} nf=1 mult=1
+
+* --- 0V sense source: splits branch 1 so the reference current can be read
+* directly as i(Vsense1) rather than inferred from the total supply current
+* (which also carries branch 2 and the start-up detector). ---
+Vsense1 n1a nbias DC 0
+
+* --- NMOS half. MN1 is the unscaled (1x) diode-connected device whose drain
+* is the mirror gate nbias; MN2 is the K-times device, built as K unit
+* devices in parallel (m={kratio}), degenerated by Rbias. ---
+XMN1 nbias nbias 0    0 sky130_fd_pr__nfet_01v8 L={lnm} W={wn} nf=1 mult=1
+XMN2 pbias nbias nsrc 0 sky130_fd_pr__nfet_01v8 L={lnm} W={wn} nf=1 mult={kratio} m={kratio}
+XRB  nsrc  0     0      sky130_fd_pr__res_high_po W={r_w} L='r_lseg*n_r' mult=1 m=1
+
+* --- START-UP CIRCUIT ---
+* The zero-current state satisfies the loop equations exactly as well as the
+* intended state does (nbias=0 keeps both NMOS off, pbias=vdd keeps both PMOS
+* off, and nothing moves), so the cell needs an explicit kick. This one is a
+* deliberately SKEWED inverter used as a threshold detector on nbias:
+*   - weak PMOS (narrow, long) + strong NMOS (wide, short) puts the trip
+*     point near ~0.5-0.6V, comfortably BELOW the ~0.8V nbias the running
+*     loop settles at, so the detector is unambiguously in its low state once
+*     the cell is alive.
+*   - at power-up nbias=0, so su=vdd, which turns on the injector XMSU and
+*     pulls pbias down, switching the PMOS mirror on and starting the loop.
+*   - as nbias rises past the trip point su collapses to 0, the injector
+*     turns off, and BOTH inverter devices are off in their settled state --
+*     so the start-up branch draws no static current once the main loop is
+*     at its operating point, which is the self-extinguishing behaviour the
+*     entry's sizing_approach requires. Vsense_su below exists purely so that
+*     residual current can be measured (i_startup_a) rather than asserted.
+XMSUP su nbias vdd vdd sky130_fd_pr__pfet_01v8 L=8    W=0.5 nf=1 mult=1
+XMSUN su nbias 0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=10  nf=1 mult=1
+Vsense_su pbias sud DC 0
+XMSU sud su 0 0 sky130_fd_pr__nfet_01v8 L=1 W=2 nf=1 mult=1
+
+* --- a downstream consumer's leg, showing the cell doing its job: a 1x NMOS
+* mirror device off nbias delivers a copy of the reference current into a
+* diode-connected PMOS, which turns it back into a distributable PMOS bias
+* voltage. That is literally the entry's own description of what this cell is
+* for -- "a current (and, via appropriately sized mirror-diode devices
+* elsewhere on the die, a bias voltage or gm)" -- and it is the half of the
+* spec_class that says this block "supplies bias currents and cascode/tail
+* bias voltages to OTAs, comparators, and other analog PHY building blocks".
+* Measured as i_copy_a (the delivered copy) and vbias_out_v (the delivered
+* voltage). i_copy_a sits slightly ABOVE iref_a rather than exactly on it:
+* XMOUT's drain sits near mid-supply while the diode-connected XMN1 it copies
+* sits at its own Vgs, and that Vds difference is channel-length modulation,
+* not a sizing error. It is the reason the entry's layout_idioms call for
+* matched, unit-device mirrors and the reason cascoding the mirrors is the
+* listed remedy. ---
+XMOUTP outd outd vdd vdd sky130_fd_pr__pfet_01v8 L={lpm} W={wp} nf=1 mult=1
+Vsense_out outd outn DC 0
+XMOUT outn nbias 0 0 sky130_fd_pr__nfet_01v8 L={lnm} W={wn} nf=1 mult=1
+
+* --- BASELINE COMPARISON LEG (not part of the cell under test) ---
+* The entry's topology text makes a comparative claim -- this cell gives a
+* current "far less sensitive to supply variation than a simple resistor-
+* divider bias". This leg exists so that claim is MEASURED here rather than
+* asserted: a plain resistor from the supply into a diode-connected NMOS,
+* sized for the same ~6uA operating current as the cell above, so the two
+* line-sensitivity figures are directly comparable at equal bias current.
+* Its current is (Vdd - Vgs)/Rsimple, which tracks the supply almost
+* one-for-one -- and that contrast is exactly the point of the whole
+* beta-multiplier topology.
+* Rsimple is an IDEAL R element, unlike Rbias in the cell above. Deliberate:
+* a ~195 kohm res_high_po is ~610 squares of poly, a serpentine whose layout
+* (not its topology) would dominate any discussion of this leg, and this leg
+* is a topology baseline, not a circuit being proposed. Making it ideal keeps
+* the comparison about the topology rather than about which sky130 resistor
+* flavour you would reach for to build 195 kohm.
+.param rsimple=195k
+Rsimple vdd nsimp_a {rsimple}
+Vsense_simple nsimp_a nsimp DC 0
+XMSIMP nsimp nsimp 0 0 sky130_fd_pr__nfet_01v8 L={lnm} W={wn} nf=1 mult=1

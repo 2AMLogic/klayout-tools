@@ -1,0 +1,29 @@
+{
+  "netlist": "beta_multiplier.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "dc", "args": "Vdd 1.2 2.0 0.02" },
+  "measurements": [
+    { "name": "iref_a", "spice": ".meas dc iref_a find i(Vsense1) at=1.8", "unit": "A", "limits": { "min": 3e-6, "max": 1e-5 } },
+    { "name": "iref_lo", "spice": ".meas dc iref_lo find i(Vsense1) at=1.6", "unit": "A" },
+    { "name": "iref_hi", "spice": ".meas dc iref_hi find i(Vsense1) at=2.0", "unit": "A" },
+    { "name": "line_sens_pct_per_v", "spice": ".meas dc line_sens_pct_per_v param='100 * (iref_hi - iref_lo) / iref_a / 0.4'", "unit": "%/V", "limits": { "max": 20 } },
+    { "name": "isimp_a", "spice": ".meas dc isimp_a find i(Vsense_simple) at=1.8", "unit": "A" },
+    { "name": "isimp_lo", "spice": ".meas dc isimp_lo find i(Vsense_simple) at=1.6", "unit": "A" },
+    { "name": "isimp_hi", "spice": ".meas dc isimp_hi find i(Vsense_simple) at=2.0", "unit": "A" },
+    { "name": "simple_bias_line_sens_pct_per_v", "spice": ".meas dc simple_bias_line_sens_pct_per_v param='100 * (isimp_hi - isimp_lo) / isimp_a / 0.4'", "unit": "%/V", "limits": { "min": 40 } },
+    { "name": "vr_v", "spice": ".meas dc vr_v find v(nsrc) at=1.8", "unit": "V", "limits": { "min": 0.02 } },
+    { "name": "vnbias_v", "spice": ".meas dc vnbias_v find v(nbias) at=1.8", "unit": "V", "limits": { "min": 0.4, "max": 1.2 } },
+    { "name": "vbias_out_v", "spice": ".meas dc vbias_out_v find v(outd) at=1.8", "unit": "V", "limits": { "min": 0.4, "max": 1.2 } },
+    { "name": "i_copy_a", "spice": ".meas dc i_copy_a find i(Vsense_out) at=1.8", "unit": "A", "limits": { "min": 3e-6, "max": 1e-5 } },
+    { "name": "i_startup_a", "spice": ".meas dc i_startup_a find i(Vsense_su) at=1.8", "unit": "A", "limits": { "max": 1e-9 } },
+    { "name": "vsu_v", "spice": ".meas dc vsu_v find v(su) at=1.8", "unit": "V", "limits": { "max": 0.1 } },
+    { "name": "idd_raw", "spice": ".meas dc idd_raw find i(Vdd) at=1.8", "unit": "A" },
+    { "name": "idd_cell_a", "spice": ".meas dc idd_cell_a param='-1 * idd_raw - isimp_a'", "unit": "A", "limits": { "max": 5e-5 } }
+  ],
+  "options": { "timeout_s": 600, "keep_artifacts": false }
+}
