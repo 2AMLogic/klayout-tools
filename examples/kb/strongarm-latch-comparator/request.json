@@ -1,0 +1,19 @@
+{
+  "netlist": "strongarm.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "1p 6n" },
+  "measurements": [
+    { "name": "t_clk", "spice": ".meas tran t_clk when v(clk)=0.9 rise=1", "unit": "s" },
+    { "name": "t_outp", "spice": ".meas tran t_outp when v(outp)=0.9 fall=1", "unit": "s" },
+    { "name": "regen_delay_s", "spice": ".meas tran regen_delay_s param='t_outp - t_clk'", "unit": "s", "limits": { "max": 5e-10 } },
+    { "name": "voutp_final_v", "spice": ".meas tran voutp_final_v find v(outp) at=5.9n", "unit": "V", "limits": { "max": 0.1 } },
+    { "name": "voutn_final_v", "spice": ".meas tran voutn_final_v find v(outn) at=5.9n", "unit": "V", "limits": { "min": 1.7 } }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

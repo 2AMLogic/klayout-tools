@@ -19,5 +19,38 @@
     "url": "https://doi.org/10.1109/JSSC.1982.1051851",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its two-stage Miller-compensated op-amp topology and pole-splitting/RHP-zero-cancellation methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule (case 2, peer-reviewed paywalled literature cited for restated methodology only, in kb/SOURCING.md). This is a foundational, widely-cited tutorial establishing Miller pole-splitting compensation as the standard technique for two-stage CMOS op amps."
   },
-  "notes": "The classic, most general-purpose op-amp topology when a single stage's DC gain is insufficient; the trade-off versus a folded-cascode OTA is higher achievable DC gain and output swing at the cost of a slower-settling, more compensation-sensitive loop (extra non-dominant pole and RHP zero to manage). sky130's comparatively modest intrinsic device gain (gm*ro) at minimum length makes the two-stage approach attractive whenever a single stage's gain is not enough, provided the design budgets area and simulation effort for corner/temperature verification of the compensation network's phase margin."
+  "notes": "The classic, most general-purpose op-amp topology when a single stage's DC gain is insufficient; the trade-off versus a folded-cascode OTA is higher achievable DC gain and output swing at the cost of a slower-settling, more compensation-sensitive loop (extra non-dominant pole and RHP zero to manage). sky130's comparatively modest intrinsic device gain (gm*ro) at minimum length makes the two-stage approach attractive whenever a single stage's gain is not enough, provided the design budgets area and simulation effort for corner/temperature verification of the compensation network's phase margin.",
+  "artifacts": {
+    "netlist": "examples/kb/two-stage-miller-ota/two_stage_miller.spice",
+    "notes": "From-scratch netlist per this entry's own sizing_approach: stage 1 reuses the five-transistor-ota's NMOS-diff-pair/PMOS-mirror-load/NMOS-tail structure (real sky130_fd_pr__nfet_01v8/pfet_01v8 devices, not behavioral); stage 2 adds a common-source NMOS gain device loaded by a diode-mirrored PMOS current source; a nulling resistor in series with the Miller capacitor bridges stage 2's output back to stage 1's output for pole-splitting plus RHP-zero cancellation. See the netlist's own header for why the AC drive/feedback terminal assignment differs from the single-stage five-transistor-ota (this two-stage amplifier's overall input-to-output polarity is inverted relative to the single stage, so the feedback network closes onto the opposite input terminal to stay negative feedback)."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models (volare-fetched, open_pdks), not behavioral elements. `klt sim --op-lint` reports every device in saturation at this corner (no findings). Open-loop gain/phase are measured with the same DC-feedback-loop-opening technique as five-transistor-ota's testbench, adapted for this amplifier's inverted overall polarity -- see two_stage_miller.spice's own header. Reproduce with `klt sim examples/kb/two-stage-miller-ota/request.json`.",
+    "figures": [
+      {
+        "name": "av_db",
+        "value": 75.4539,
+        "unit": "dB",
+        "analysis": "ac",
+        "testbench": "examples/kb/two-stage-miller-ota/request.json"
+      },
+      {
+        "name": "gbw_hz",
+        "value": 86208500.0,
+        "unit": "Hz",
+        "analysis": "ac",
+        "testbench": "examples/kb/two-stage-miller-ota/request.json"
+      },
+      {
+        "name": "pm_deg",
+        "value": 69.1986,
+        "unit": "deg",
+        "analysis": "ac",
+        "testbench": "examples/kb/two-stage-miller-ota/request.json"
+      }
+    ]
+  }
 }

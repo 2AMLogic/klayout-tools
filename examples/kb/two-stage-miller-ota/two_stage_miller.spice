@@ -1,0 +1,77 @@
+* Two-stage Miller-compensated OTA (NMOS-input first stage with PMOS
+* current-mirror load, NMOS common-source second stage with PMOS
+* current-source load, Rz+Cc pole-splitting compensation with an
+* RHP-zero-nulling resistor).
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Authored from kb/entries/two-stage-miller-ota.json's own topology/
+* sizing_approach text: first stage is the same NMOS-diff-pair,
+* PMOS-mirror-load, NMOS-tail-source structure as
+* examples/kb/five-transistor-ota/ota_5t.spice; the second stage adds a
+* common-source NMOS gain device (XM6) loaded by a diode-mirrored PMOS
+* current source (XM7b/XM7), with the compensation network (Rz in series
+* with Cc) bridging the second stage's output back to the first stage's
+* output node -- textbook pole-splitting plus nulling-resistor RHP-zero
+* cancellation, per the entry's sizing_approach.
+*
+* Open-loop gain is characterized with the same DC-feedback-loop-opening
+* technique as ota_5t.spice, adapted to this amplifier's actual signal
+* polarity: two inverting-ish stages combine so that, for this device
+* assignment, `out` is non-inverting with respect to `inn` and inverting
+* with respect to `inp` (opposite of the single-stage 5T OTA, where `out`
+* is non-inverting w.r.t. `inp`) -- so the AC drive goes on `inn` and the
+* DC feedback (Lfb/Cfb) closes onto `inp`, keeping the feedback negative
+* (closing DC feedback onto the *positive*-transfer terminal instead would
+* be positive feedback and never settle to a valid bias point). At DC, Lfb
+* is a short so inp tracks out (closing the loop, biasing `out` near vcm);
+* at AC, Lfb is open and Cfb ties inp to the AC ground, so vid = v(inn) -
+* v(inp) is the differential AC drive and v(out)/vac is the open-loop
+* transfer.
+.param vdd=1.8
+.param vcm=0.9
+.param ibias1=20u
+.param ibias2=100u
+.param cl=2p
+.param cc=300f
+.param rz=8k
+
+* --- supplies and stimulus ---
+Vdd  vdd 0 DC {vdd}
+Vcm  cm  0 DC {vcm}
+* single-ended AC drive on inn (magnitude 1 so v(out) magnitude == open-loop gain)
+Vin  inn cm DC 0 AC 1
+* ideal bias reference currents for the two stages' current sources
+Iref1 vdd nbias1 DC {ibias1}
+Iref2 nbias2 0   DC {ibias2}
+* output load
+CL   out 0 {cl}
+
+* --- DC feedback: closes at DC to bias out=vcm, opens at AC ---
+Lfb  out inp 1e9
+Cfb  inp cm  1e3
+
+* --- stage 1: tail current source (NMOS) ---
+XM5b nbias1 nbias1 0 0 sky130_fd_pr__nfet_01v8 L=1   W=10 nf=1 mult=1
+XM5  tail   nbias1 0 0 sky130_fd_pr__nfet_01v8 L=1   W=10 nf=1 mult=1
+
+* --- stage 1: input differential pair (NMOS) ---
+XM1  n1a inp tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8  nf=1 mult=1
+XM2  vo1 inn tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8  nf=1 mult=1
+
+* --- stage 1: PMOS current-mirror load ---
+XM3  n1a n1a vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1
+XM4  vo1 n1a vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1
+
+* --- stage 2: PMOS current-source load, diode-mirrored from its own reference ---
+XM7b nbias2 nbias2 vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XM7  out    nbias2 vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+
+* --- stage 2: common-source NMOS gain device (second gain stage) ---
+XM6  out vo1 0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+
+* --- Miller compensation: Rz (nulling resistor) in series with Cc,
+* bridging stage 2's output back to stage 1's output (pole splitting,
+* per the entry's sizing_approach) ---
+Rz   out  cczw {rz}
+Cc   cczw vo1  {cc}
