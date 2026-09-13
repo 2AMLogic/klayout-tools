@@ -424,6 +424,46 @@ def test_classify_sat_result_unrecognized_is_inconclusive_not_equivalent():
     assert diagnostics[0]["code"] == "unrecognized_solver_output"
 
 
+def test_yosys_error_message_wasi_sandbox_script_not_found_hint(tmp_path):
+    """When yosys reports it could not read a script file that verifiably
+    exists on the host filesystem, the raised error names the WASI-sandbox
+    (e.g. yowasp-yosys) hypothesis -- see issue #1368/#1755."""
+    existing_script = tmp_path / "equiv_seq_stage1.ys"
+    existing_script.write_text("read_verilog gold.v\n", encoding="utf-8")
+
+    stderr = (
+        f"ERROR: Can't open script file `{existing_script}' for "
+        "reading: No such file or directory\n"
+    )
+
+    message = equiv._yosys_error_message("", stderr, 1)
+
+    assert "yosys equivalence check failed:" in message
+    assert "WASI-sandboxed build" in message
+    assert "yowasp-yosys" in message
+    assert "$PATH" in message
+
+
+def test_yosys_error_message_missing_script_no_hint(tmp_path):
+    """The same 'script file ... for reading' message is left unchanged --
+    no WASI-sandbox hint appended -- when the referenced path genuinely does
+    not exist on the host filesystem (a different failure)."""
+    missing_script = tmp_path / "does-not-exist" / "equiv_seq_stage1.ys"
+
+    stderr = (
+        f"ERROR: Can't open script file `{missing_script}' for "
+        "reading: No such file or directory\n"
+    )
+
+    message = equiv._yosys_error_message("", stderr, 1)
+
+    assert message == (
+        "yosys equivalence check failed: ERROR: Can't open script file "
+        f"`{missing_script}' for reading: No such file or directory"
+    )
+    assert "WASI" not in message
+
+
 def test_parse_signal_table():
     signals = equiv._parse_signal_table(_SAT_FAIL_TEXT)
     assert signals == {
