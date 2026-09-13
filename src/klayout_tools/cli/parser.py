@@ -2258,6 +2258,22 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     sim_parser.add_argument(
+        "--plot",
+        dest="plot",
+        default=None,
+        help=(
+            "write one self-contained, dependency-free waveform SVG per "
+            "non-sweep signal per corner to this directory -- forces "
+            "options.waveforms/keep_artifacts on for this run regardless of "
+            "the request's own settings (a waveform can only be plotted "
+            "once captured). Deterministic filenames, listed in the JSON "
+            "response's `plots` field; a measurement whose `.meas` card "
+            "names a plotted signal gets that path attached to its own "
+            "`measurements[].plot` entry too -- see docs/cli/sim.md's "
+            "'Waveform plots' section."
+        ),
+    )
+    sim_parser.add_argument(
         "--op-lint",
         dest="op_lint",
         action="store_true",

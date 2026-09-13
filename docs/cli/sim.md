@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -37,6 +37,10 @@ this document (and the code) win.
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
   orphan safety, and resume" below.
+- `--plot` — write one self-contained, dependency-free waveform SVG per
+  non-sweep signal per corner to this directory, forcing
+  `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
+  plots" below.
 - `--op-lint` — **run the per-device operating-point sanity lint instead of
   the corner sweep**, on the same request document: every MOS instance's
   off/triode region, wiring smells, and netlist hygiene. Run it first when a
@@ -985,6 +989,64 @@ per declared variable, in `variables[].index` order. Waveform data is never
 inlined into the response — only `artifacts.raw` (the rawfile itself) and
 `artifacts.waveform` (its parsed JSON) paths are.
 
+Known gap: an `ac`/`sp` rawfile carries ngspice's own complex (`real,imag`
+per value) encoding, which this parser does not understand yet — capturing
+`options.waveforms` (or `--plot`, below) against an `ac`/`sp` analysis leaves
+that corner's `artifacts.waveform`/plots `null`/empty with a `"warning"`
+diagnostic rather than the parsed data, instead of raising. `tran`/`dc`
+waveforms are real-valued and unaffected.
+
+## Waveform plots (`--plot <dir>`, issue #1723)
+
+`--plot <dir>` renders one self-contained, dependency-free SVG per
+non-sweep signal per corner to `<dir>` — the same no-plotting-library,
+string-built SVG approach `klt trajectory --plot` uses for its
+objective-vs-turn plot, applied to a `tran`/`ac`/`dc` waveform instead. It is
+the *visual* half of diagnosing a measurement miss (a stuck comparator, a
+saturating integrator, a ring oscillator that never starts) — issue #56
+covers the *numeric* half (threshold-crossing extraction) separately.
+
+`--plot` forces `options.waveforms`/`options.keep_artifacts` on for the
+run, regardless of the request's own settings — a waveform can only be
+plotted once captured and persisted to disk. Filenames are deterministic:
+`<plot_dir>/<corner_slug>__<signal_slug>.svg`, where `<corner_slug>` mirrors
+a corner's own artifact-directory slug (e.g. `ss/1.620V/125C` →
+`ss_1p620V_125C`) and `<signal_slug>` is the waveform variable name with
+non-alphanumeric characters collapsed to `_` (e.g. `v(out)` → `v_out`).
+
+Every written file is listed in the response's top-level `plots` field and
+in each corner's own `artifacts.plots`:
+
+```json
+{
+  "plots": [
+    { "corner_id": "tt/1.800V/27C", "signal": "v(out)", "path": "/abs/plots/tt_1p800V_27C__v_out.svg" }
+  ]
+}
+```
+
+`ac` plots use a log10-scaled sweep (frequency) axis; `tran`/`dc` use a
+linear one. On a `tran` analysis, a measurement whose `.meas` card's own
+signal matches a rendered signal additionally gets that measurement's
+`from=`/`to=` extraction window shaded on the plot, and its `WHEN
+<signal>=<value>` threshold drawn as a dashed reference line — the two
+pieces of visual context a flat/stuck signal's plot needs to explain why it
+missed.
+
+**On a measurement miss, the miss report names the plot.** Every entry in
+the top-level `measurements[]` rollup gets a `plot` field (a path, or
+`null` when no rendered plot matches that measurement's own signal) —
+present only when `--plot` was used, pointing at the SVG for that
+measurement's own `worst_case` corner:
+
+```json
+{ "name": "startup_time", "status": "error", "worst_case": { "corner_id": "tt/1.800V/27C", "value": null, "margin": null }, "plot": "/abs/plots/tt_1p800V_27C__v_out.svg" }
+```
+
+so an agent (or a skill, e.g. `design-sizing`'s Loop A) reading a miss knows
+exactly which picture to open next, without re-deriving which signal a
+`.meas` card was even about.
+
 ## Post-layout verification (`netlist_source`)
 
 `request.netlist_source` (optional, `"schematic"` | `"extracted"`) lets a
@@ -1254,6 +1316,7 @@ the *response* echoes back.
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag. |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
+| *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 
 ### Response
@@ -1353,8 +1416,9 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case; see "Timeout-budget preflight" above. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
-| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. |
+| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
+| `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
 
 #### `corners[]` entries
 
@@ -1368,7 +1432,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`), `margin`.               |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` only occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`); every other code is always `"error"`. Empty for a clean run.       |
-| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. |
+| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 
 ### Semantics and guarantees
