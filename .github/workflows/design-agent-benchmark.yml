@@ -7,7 +7,10 @@ name: Design-agent benchmark
 # through the live-agent provider (`--provider live-agent`) instead, driving
 # the S4->S5->S6 skill chain for a real regression signal on the design
 # pipeline itself -- see benchmarks/design-agent/README.md's "Known
-# limitations" for what that provider does and does not do.
+# limitations" for what that provider does and does not do. Issue #1739
+# adds a third, also-additive job: a one-task smoke run of the *interactive*
+# provider (`--provider interactive-agent`), where each attempt is a bounded
+# multi-turn session with live `klt kb`/`klt sim` access in its own sandbox.
 #
 # `workflow_dispatch`/`schedule` only, mirroring `equiv-canary.yml`'s
 # posture: every task's reference solution is an 18-corner `ngspice` sweep
@@ -168,4 +171,85 @@ jobs:
         with:
           name: design-agent-benchmark-live-report
           path: design-agent-benchmark-live-run.json
+          retention-days: 90
+
+  design-agent-benchmark-interactive:
+    name: Interactive tool-using S4->S5->S6 smoke (issue #1739)
+    runs-on: ubuntu-latest
+    # Additive alongside BOTH jobs above -- neither is replaced. A single
+    # easy-tier task, 2 attempts, because each attempt here is a multi-turn
+    # session that may run several real 18-corner `ngspice` sweeps of its
+    # own (the whole point of the provider). This is a "the tool-using loop
+    # still works end to end" smoke signal, not a pass@k measurement; the
+    # single-turn job above remains the cheap full-task-set number.
+    timeout-minutes: 60
+    env:
+      # Same never-provisioned-by-default secret, same documented skip, as
+      # the live-agent job above.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install ngspice
+        # See .github/workflows/ci.yml's step of the same name for the
+        # per-package/timeout rationale -- identical install path.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh ngspice
+
+      - name: Verify ngspice runs headlessly
+        run: ngspice -v
+
+      - name: Install the claude CLI
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run the harness (interactive tool-using provider, one task)
+        # Each attempt gets a private sandbox seeded with the S4/S5/S6 skill
+        # files, the task's model library, a working copy of its `klt sim`
+        # request, and a `bin/klt` bound to this checkout -- so the session
+        # runs real `klt kb`/`klt sim` calls (scripts/design_agent_benchmark.py's
+        # `make_interactive_agent_provider`). Bounded per attempt by both
+        # --agent-timeout-s and --agent-tool-budget; the job ceiling above is
+        # only the backstop.
+        run: |
+          set -e
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo '{"schema_version": 1, "provider": "interactive-agent", "skipped": true, "reason": "CLAUDE_CODE_OAUTH_TOKEN secret not provisioned"}' \
+              | tee design-agent-benchmark-interactive-run.json
+            echo "design-agent-benchmark (interactive-agent): SKIPPED - CLAUDE_CODE_OAUTH_TOKEN secret not provisioned (see benchmarks/design-agent/README.md's Known limitations)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          mkdir -p .klt/interactive-smoke-tasks
+          cp benchmarks/design-agent/tasks/common-source-amp.json .klt/interactive-smoke-tasks/
+          uv run --frozen python scripts/design_agent_benchmark.py run \
+            --provider interactive-agent --tasks-dir .klt/interactive-smoke-tasks \
+            --attempts 2 --k 1 2 --agent-timeout-s 900 --agent-tool-budget 40 \
+            --agent-sandbox-root .klt/interactive-smoke-sandboxes \
+            --out design-agent-benchmark-interactive-run.json
+          pass1=$(jq -r '.overall.pass_at_k["1"] // "null"' design-agent-benchmark-interactive-run.json)
+          solved=$(jq -r '.overall.solved_count' design-agent-benchmark-interactive-run.json)
+          total=$(jq -r '.overall.task_count' design-agent-benchmark-interactive-run.json)
+          echo "design-agent-benchmark (interactive-agent): overall pass@1=${pass1} solved=${solved}/${total}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: design-agent-benchmark-interactive-report
+          path: |
+            design-agent-benchmark-interactive-run.json
+            .klt/interactive-smoke-sandboxes/**/agent-session.json
+            .klt/interactive-smoke-sandboxes/**/agent-transcript.jsonl
+            .klt/interactive-smoke-sandboxes/**/*.spice
           retention-days: 90
