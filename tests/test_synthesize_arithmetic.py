@@ -26,6 +26,8 @@ from klayout_tools.synthesize import (
     DEFAULT_ADDER_MIN_WIDTH,
     SynthesizeError,
     _candidate_measurement,
+    _EngineOptions,
+    _measure_candidate,
     _parse_yosys_param_int,
     _resolve_arithmetic,
     _select_arithmetic_candidate,
@@ -256,6 +258,44 @@ def test_measurement_never_fabricates_a_delay():
 )
 def test_parse_yosys_param_int(value, expected):
     assert _parse_yosys_param_int(value) == expected
+
+
+# --------------------------------------------------------------------------- #
+# One candidate's trial synthesis timing out (issue #1775): must disqualify
+# only that candidate, never abort the rest of the `"auto"` sweep.
+# --------------------------------------------------------------------------- #
+
+
+def test_measure_candidate_disqualifies_on_yosys_timeout(tmp_path, monkeypatch):
+    """A hung trial-synthesis `yosys -s` run raises `SynthesizeError` inside
+    `_run_yosys` (issue #1775) -- `_measure_candidate` already catches any
+    `SynthesizeError` from a failed trial and reports `None` (disqualified,
+    not fatal), exactly as it does for a Yosys/ABC elaboration error."""
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["yosys", "-s"]
+        raise synthesize.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    engine_options = _EngineOptions(
+        liberty_path="/abs/lib.lib",
+        cell_library="sky130_fd_sc_hd",
+        delay_target_ps=None,
+        dont_use_globs=(),
+        tie_cells=None,
+        constr_inputs=None,
+    )
+    result = _measure_candidate(
+        label="kogge-stone",
+        trial_dir=str(tmp_path / "trial"),
+        resolved_sources=["/abs/design.v"],
+        hdl_toplevel="top",
+        engine_options=engine_options,
+        adder_sources=(),
+        adder_techmap_path=None,
+    )
+    assert result is None
 
 
 # --------------------------------------------------------------------------- #
