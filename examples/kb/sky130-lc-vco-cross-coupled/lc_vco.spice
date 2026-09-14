@@ -1,0 +1,196 @@
+* Complementary (NMOS+PMOS) cross-coupled LC-tank VCO, current-reuse bias,
+* with its tuning curve swept in a single transient run.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention: D G S B).
+*
+* Authored from kb/entries/sky130-lc-vco-cross-coupled.json's own
+* topology/sizing_approach text, not imported from anywhere (kb/SOURCING.md):
+*
+*   "A parallel LC tank ... driven by a cross-coupled transistor pair whose
+*    negative resistance cancels the tank's loss resistance to sustain
+*    oscillation. The complementary (NMOS-and-PMOS cross-coupled) variant
+*    stacks an NMOS cross-coupled pair and a PMOS cross-coupled pair across
+*    the same tank ... a tail current source (or, in a current-reuse
+*    variant, direct rail connection) sets the total bias current."
+*
+*   "Choose the tank inductance L to set a practical varactor/capacitor bank
+*    size at the target center frequency (f = 1/(2*pi*sqrt(LC))) ... size
+*    the cross-coupled NMOS/PMOS pair's transconductance to provide negative
+*    resistance safely exceeding the tank's loss resistance across PVT
+*    corners (a startup-gain margin, typically 3x-4x) ... size the tail
+*    current ... to set the oscillation amplitude at the edge of the tank's
+*    linear voltage swing."
+*
+* THE CURRENT-REUSE VARIANT IS BUILT: the PMOS cross-coupled pair's sources
+* tie directly to vdd (no separate PMOS tail), and the NMOS cross-coupled
+* pair's sources tie to a single tail current source to ground. Total bias
+* current therefore flows vdd -> PMOS pair -> tank -> NMOS pair -> tail ->
+* gnd, reused by both pairs' transconductance rather than split across two
+* independent tails -- the entry's own text offers this as the option that
+* "improves the achievable phase noise for a given power budget," and it is
+* the conventional choice for this topology (Andreani & Mattisson-style
+* complementary cross-coupled VCOs).
+*
+* THE TANK CAPACITOR BANK IS A REAL SKY130 DEVICE, NOT AN IDEAL ELEMENT.
+* sky130A ships a real, vendor-characterized accumulation-mode nwell MOS
+* varactor subcircuit, sky130_fd_pr__cap_var_lvt (found under
+* libs.ref/sky130_fd_pr/spice/ -- NOT exposed as a KLayout PCell, which is
+* what this entry's own pdk_portability.notes means by "no characterized
+* ... varactor PCell": there is no *layout* generator for it, but the
+* *schematic* SPICE model is real and used verbatim here, unlike the ideal
+* inductor below). Two instances (Xvarp/Xvarn) tie the differential tank
+* nodes to the common control voltage vtune, so they appear in SERIES
+* across the differential tank as vtune moves relative to the tank's own
+* DC bias point (~vdd/2 for this symmetric current-reuse topology) --
+* characterized empirically while sizing this netlist: vm=8 (an 8x
+* multiplier on the single-device model) gives a single-device C(V) that
+* swings roughly 56fF (vtune far below tank DC) to 340fF (vtune far above)
+* against a tank sitting near 0.9V DC, i.e. differential series C roughly
+* 28fF-170fF across the 0-1.8V control range -- confirmed against the full
+* circuit's own tuning-curve figures below.
+*
+* THE TANK INDUCTOR IS THE ONE IDEAL ELEMENT, DELIBERATELY. Per this
+* entry's own pdk_portability.notes and the sky130-spiral-inductor entry it
+* points to, sky130 (open-MPW variant) has no vendor-characterized inductor
+* model at all -- physical sizing needs the Yue & Wong pi-model plus an EM
+* field solver, which is that OTHER entry's own concern (and explicitly out
+* of scope there: "sky130-spiral-inductor ... gain/phase/bias-point figures
+* don't apply to a passive inductor," per #1725's own note). This entry is
+* the one that needs the inductor to actually behave like an inductor in a
+* SPICE run, so ltank below is an ideal L, sized to land the tank at a
+* plausible multi-GHz center frequency (see SIZING) rather than at any
+* specific silicon-validated inductance.
+*
+* TANK LOSS IS MODELED EXPLICITLY, NOT LEFT AT ZERO. An ideal lossless L
+* would let the cross-coupled pair's negative resistance and the transistor
+* nonlinearity alone set the amplitude, which would silently skip the very
+* thing this entry's sizing_approach asks to be verified: "negative
+* resistance safely exceeding the tank's loss resistance ... a startup-gain
+* margin." rtank below is a parallel resistor standing in for finite tank
+* Q (inductor series loss plus varactor own loss, lumped together) so that
+* startup margin is a real, checkable circuit property here, not vacuously
+* true. See SIZING for the resulting (low, deliberately conservative)
+* implied Q.
+*
+* Node map:
+*   vtune                    -- the control voltage (the staircase below)
+*   tank_p / tank_n          -- the differential tank nodes: L1, Rtank, the
+*                                two varactors, and both cross-coupled pairs
+*                                all land here
+*   tail                     -- NMOS cross-coupled pair's common source /
+*                                tail current source drain
+*   nbias_tail                -- tail current mirror's diode-connected bias
+*
+* SIZING (per the entry's own sizing_approach)
+*   ltank = 8nH: chosen (not derived from any specific target frequency --
+*     this entry states none) to land the tank at a multi-GHz center
+*     frequency together with the varactor bank's tens-to-low-hundreds-of-fF
+*     range above, which is squarely the regime this entry's own spec_class
+*     names ("serdes/PHY reference clock multiplication, RF frequency
+*     synthesis"), rather than the sub-GHz range a ring VCO already covers
+*     (see kb/entries/cmos-ring-vco-current-starved.json, this entry's ring
+*     counterpart).
+*   rtank = 500 ohm: an assumed tank loss resistance, NOT a silicon-derived
+*     Q. Measured against this circuit's own ~4.2GHz center frequency, 500
+*     ohm implies Q = Rtank/(2*pi*f*Ltank) ~ 2.3-2.5 -- deliberately on the
+*     low/pessimistic end of what real integrated spiral inductors achieve
+*     (a few to ~15 at GHz frequencies in comparable open-shuttle
+*     processes), chosen so the cross-coupled pair's startup margin is
+*     exercised honestly against a skeptical loss assumption rather than an
+*     optimistic one that would make startup trivially easy to satisfy.
+*   Cross-coupled devices sized wide (10um per finger, both NMOS and PMOS)
+*     and biased at a multi-mA tail reference specifically to clear the
+*     "typically 3x-4x" startup-gain margin this entry's sizing_approach
+*     asks for: measured at the symmetric (zero-differential) DC operating
+*     point, gm_n + gm_p ~ 14.1 mS, giving |negative resistance| =
+*     2/(gm_n+gm_p) ~ 142 ohm against the 500 ohm tank loss above -- a
+*     ~3.5x margin, in the entry's own target band. (nf on every device
+*     here is deliberately kept at per-finger widths >=5um: an ngspice/
+*     sky130-model binning quirk was found empirically where two instances
+*     of certain small-per-finger-width, minimum-length bins in the same
+*     netlist trip a spurious BSIM4 fatal parameter-range error on the
+*     SECOND instance only -- non-reproducible at nf=1/2 or at wider
+*     per-finger widths. Filed as #1804 rather than worked around
+*     silently; see this entry's own artifacts.notes.)
+*   itail = 3mA (nominal reference): the diode-connected mirror device
+*     (XMNBT) carries this exactly, but the mirrored tail device (XMN0) is
+*     measured to actually deliver ~1.39mA once the loop's own tail-node
+*     voltage settles (XMN0 lands in triode, short of its nominal
+*     saturation target) -- the gm/margin numbers above are measured at
+*     this REAL delivered current, not the nominal 3mA, so the startup
+*     margin claim is not inflated by an unmet current target.
+.param vdd=1.8
+.param ltank=8n
+.param rtank=500
+.param wvar=20
+.param lvar=0.5
+.param mvar=8
+.param lcc=0.15
+.param wnc=40
+.param nfnc=4
+.param wpc=80
+.param nfpc=8
+.param ltail=0.5
+.param wtail=80
+.param nftail=8
+.param itail=3m
+
+* --- supply ---
+Vdd vdd 0 DC {vdd}
+
+* --- control-voltage staircase: four 10ns dwells at 0.2/0.7/1.2/1.7V, with
+* 0.2ns transitions. This directory's request.json counts multiple
+* oscillation periods inside each dwell, well after the step, exactly as
+* kb/entries/cmos-ring-vco-current-starved.json's ring_vco.spice does for
+* its own (much slower) tuning curve -- the difference here is only that
+* this oscillator's periods are ~50-100x shorter, so the same "settle, then
+* count periods" structure fits inside much shorter dwells. ---
+Vtune vtune 0 PWL(0 0.2 10n 0.2 10.2n 0.7 20n 0.7 20.2n 1.2 30n 1.2 30.2n 1.7 40n 1.7)
+
+* --- LC tank: ideal inductor + explicit loss resistor + real sky130
+* varactor bank (see the big comment block above for why each element is
+* modeled the way it is) ---
+L1 tank_p tank_n {ltank}
+Rtank tank_p tank_n {rtank}
+Xvarp vtune tank_p 0 sky130_fd_pr__cap_var_lvt w={wvar} l={lvar} vm={mvar}
+Xvarn vtune tank_n 0 sky130_fd_pr__cap_var_lvt w={wvar} l={lvar} vm={mvar}
+
+* --- cross-coupled NMOS pair (tail-referenced) ---
+XMN1 tank_p tank_n tail 0 sky130_fd_pr__nfet_01v8 L={lcc} W={wnc} nf={nfnc} mult=1
+XMN2 tank_n tank_p tail 0 sky130_fd_pr__nfet_01v8 L={lcc} W={wnc} nf={nfnc} mult=1
+
+* --- cross-coupled PMOS pair (current-reuse, sources at vdd directly) ---
+XMP1 tank_p tank_n vdd vdd sky130_fd_pr__pfet_01v8 L={lcc} W={wpc} nf={nfpc} mult=1
+XMP2 tank_n tank_p vdd vdd sky130_fd_pr__pfet_01v8 L={lcc} W={wpc} nf={nfpc} mult=1
+
+* --- tail current source (same diode-mirror bias pattern used throughout
+* this KB, e.g. cml-tx-line-driver's tail sink) ---
+Iref_tail vdd nbias_tail DC {itail}
+XMNBT nbias_tail nbias_tail 0 0 sky130_fd_pr__nfet_01v8 L={ltail} W={wtail} nf={nftail} mult=1
+XMN0  tail       nbias_tail 0 0 sky130_fd_pr__nfet_01v8 L={ltail} W={wtail} nf={nftail} mult=1
+
+* --- KICKING THE TANK INTO OSCILLATION.
+* Same reasoning as ring_vco.spice's own .ic: a noiseless simulator will
+* happily sit on the tank's symmetric DC solution (tank_p = tank_n) forever
+* with no noise source to grow an imbalance out of. Real silicon starts
+* from thermal noise and a supply ramp; here a small explicit differential
+* initial condition stands in for that. This is a SIMULATION device, not
+* part of the circuit, and nothing measured below depends on which phase it
+* starts the oscillation in. ---
+.ic v(tank_p)=0.95 v(tank_n)=0.85
+
+* --- WHAT THIS TESTBENCH DOES AND DOES NOT SHOW (also in artifacts.notes):
+*   1. NO PHASE-NOISE FIGURE -- the headline spec an LC VCO is normally
+*      judged on, and the entry's own notes claim an LC tank's phase noise
+*      advantage over the ring counterpart (kb/entries/
+*      cmos-ring-vco-current-starved.json). That claim remains UNVERIFIED
+*      here, same as it is left unverified on the ring side: ngspice has no
+*      PSS/pnoise analysis, and jitter needs either that or a
+*      transient-noise campaign over many periods, neither of which this
+*      testbench attempts.
+*   2. Single corner (tt, 1.8V, 27C), schematic-level, ideal inductor. See
+*      the artifacts.notes prose for the full list of what that leaves
+*      unverified against this entry's own sizing_approach/pdk_portability
+*      (PVT-swept startup margin; a physically-sized, EM-validated tank).
+*   3. rtank is an ASSUMED loss resistance, not a measured or
+*      silicon-derived tank Q -- see the SIZING comment above.

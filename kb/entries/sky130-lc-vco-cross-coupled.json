@@ -19,5 +19,80 @@
     "url": "https://doi.org/10.1109/4.760384",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its cross-coupled LC-tank oscillator design methodology and phase-noise analysis only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is one of the foundational references establishing the design tradeoffs (tank Q, negative-resistance margin, bias current vs. phase noise) that essentially all subsequent CMOS LC-VCO literature builds on."
   },
-  "notes": "This entry is the LC-tank counterpart to cmos-ring-vco-current-starved: pick this topology when phase-noise spec dominates and the area/complexity cost of a custom-drawn spiral inductor is acceptable, and pick the ring VCO when area, tuning range, or the absence of a characterized inductor process option dominates instead. The tank inductor is exactly the sky130-spiral-inductor entry's octagonal patterned-ground-shield spiral -- consult that entry directly for the inductor's own sizing methodology (Yue & Wong pi-model), Q/self-resonant-frequency tradeoffs, and sky130-specific layout/shuttle caveats before laying out this VCO's tank."
+  "notes": "This entry is the LC-tank counterpart to cmos-ring-vco-current-starved: pick this topology when phase-noise spec dominates and the area/complexity cost of a custom-drawn spiral inductor is acceptable, and pick the ring VCO when area, tuning range, or the absence of a characterized inductor process option dominates instead. The tank inductor is exactly the sky130-spiral-inductor entry's octagonal patterned-ground-shield spiral -- consult that entry directly for the inductor's own sizing methodology (Yue & Wong pi-model), Q/self-resonant-frequency tradeoffs, and sky130-specific layout/shuttle caveats before laying out this VCO's tank.",
+  "artifacts": {
+    "netlist": "examples/kb/sky130-lc-vco-cross-coupled/lc_vco.spice",
+    "notes": "From-scratch netlist per this entry's own topology/sizing_approach text: a complementary (NMOS+PMOS) cross-coupled pair in the current-reuse arrangement (PMOS pair sources tied directly to vdd, NMOS pair sources tied to a single tail current source), across an LC tank. The tank's varactor bank uses the REAL sky130A device sky130_fd_pr__cap_var_lvt (a vendor-characterized accumulation-mode nwell MOS varactor with a real SPICE model, found under libs.ref/sky130_fd_pr/ -- not third-party, not ideal), so only the tank INDUCTOR is an ideal SPICE element; this entry's own pdk_portability.notes about 'no characterized ... varactor PCell' refers to the absence of a KLayout PCell/layout generator for it, not the absence of a usable schematic model, and that distinction is exactly what this testbench exploits. Simplifications and omissions, all disclosed: (a) no phase-noise figure is claimed -- ngspice has no PSS/pnoise analysis, so this entry's own notes about an LC-vs-ring phase-noise advantage remain unverified here, same as they are left unverified on the ring VCO side (kb/entries/cmos-ring-vco-current-starved.json); (b) the tank inductor (ltank=8nH) is an ideal SPICE L with no physical sizing or EM validation behind it -- that is the sky130-spiral-inductor entry's own concern, explicitly out of scope there; (c) the tank loss is modeled as an assumed parallel resistor (rtank=500 ohm, implying Q~2.3-2.5 at this circuit's own ~4.2GHz center frequency), a deliberately conservative assumption rather than a silicon-derived Q, chosen so the cross-coupled pair's startup-gain margin is exercised against a skeptical loss assumption; (d) single corner (tt, 1.8V, 27C), whereas this entry's own sizing_approach asks for the startup margin to be checked 'across process/voltage/temperature corners'; (e) schematic-level only, no layout parasitics; (f) the tank is kicked into oscillation by an explicit `.ic` seeding a small differential imbalance, the same simulation-only device ring_vco.spice uses, because a noiseless simulator otherwise sits on the tank's symmetric DC solution forever. One tool-level finding surfaced while sizing this netlist, filed as #1804 rather than worked around silently: instantiating the SAME (L, W, nf) sky130_fd_pr__nfet_01v8/pfet_01v8 binned-model geometry TWICE in one netlist spuriously triggers a BSIM4 'u0 is not positive' fatal parameter-range error on the SECOND instance only, reproducible at L=0.15/W=10/nf=3-or-4 but NOT at nf=1-or-2 or at wider (>=5um) per-finger widths -- this netlist's device sizing avoids the trigger condition (every device here uses >=10um-per-finger widths) rather than papering over it."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models throughout, including the real sky130_fd_pr__cap_var_lvt varactor subcircuit for the tank's tuning capacitance (volare-fetched, open_pdks). Reproduce with `klt sim examples/kb/sky130-lc-vco-cross-coupled/request.json`. The four f_vtune_* figures are the tuning curve at 0.2/0.7/1.2/1.7V of control voltage, measured in one transient run (the same 'staircase, count N periods per dwell' structure ring_vco.spice uses, scaled to this oscillator's much shorter ~230-320ps periods). Frequency DECREASES monotonically as vtune INCREASES here (4.3324 GHz at vtune=0.2V down to 3.10003 GHz at vtune=1.7V) -- the opposite polarity from the ring VCO's vctrl, and a direct consequence of how the two varactors are wired (control voltage vtune vs. the tank's own ~vdd/2 DC bias: raising vtune raises the varactor's Vgs, moving it toward its higher-capacitance accumulation region, and more tank capacitance means a lower resonant frequency). tuning_ratio (1.39753x) is the highest-over-lowest frequency ratio across the swept range -- a real but modest tuning range, well short of the ring VCO's >10x, which matches the entry's own tradeoff note that an LC tank trades tuning range for phase-noise performance. kvco_avg_hz_per_v (-821.578 MHz/V) is reported as a signed average slope, not split into low/high-range figures the way the ring VCO's kvco_low/kvco_high are, because this sweep only has four points rather than a documented linearity claim to test. vpp_fast_v (1.4313 V, measured at vtune=0.2V, the smallest tank capacitance and therefore largest circulating tank current) and vpp_slow_v (0.415437 V, at vtune=1.7V, the largest tank capacitance) show the amplitude shrinking substantially as vtune rises -- consistent with the added varactor loading reducing the achievable negative-resistance margin at that end of the tuning range, and worth noting against this entry's own sizing_approach, which asks for amplitude to sit 'at the edge of the tank's linear voltage swing': that holds at the fast/low-vtune end (1.43V of 1.8V supply) but not at the slow/high-vtune end. idd_fast_a (5.4246 mA, measured at the vtune=0.2V dwell) is the supply current actually drawn -- notably higher than the itail=3mA nominal reference, because the tail mirror device lands in triode rather than saturation at the loop's actual operating point (also disclosed in artifacts.notes' sizing discussion), so the real bias current exceeds the nominal target rather than falling short of it. NO PHASE-NOISE FIGURE IS CLAIMED -- see artifacts.notes. Single corner, no mismatch, no Monte Carlo, ideal tank inductor: this establishes a nominal tuning curve and startup-margin demonstration only, not the PVT-corner or physically-sized-tank behavior this entry's sizing_approach and pdk_portability both ask for.",
+    "figures": [
+      {
+        "name": "f_vtune_0p2_hz",
+        "value": 4332400000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "f_vtune_0p7_hz",
+        "value": 4267710000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "f_vtune_1p2_hz",
+        "value": 3937510000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "f_vtune_1p7_hz",
+        "value": 3100030000.0,
+        "unit": "Hz",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "tuning_ratio",
+        "value": 1.39753,
+        "unit": "1",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "kvco_avg_hz_per_v",
+        "value": -821578000.0,
+        "unit": "Hz/V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "vpp_fast_v",
+        "value": 1.4313,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "vpp_slow_v",
+        "value": 0.415437,
+        "unit": "V",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      },
+      {
+        "name": "idd_fast_a",
+        "value": 0.0054246,
+        "unit": "A",
+        "analysis": "tran",
+        "testbench": "examples/kb/sky130-lc-vco-cross-coupled/request.json"
+      }
+    ]
+  }
 }
