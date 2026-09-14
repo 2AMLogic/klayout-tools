@@ -617,3 +617,63 @@ statistical randomness, and three of the five samples cluster within
 combination, not a defect in the combining mechanism) — a longer
 observation window or different strobe period would show more variety, at
 the cost of a slower testbench.
+
+## `sky130-lc-vco-cross-coupled/`
+
+Backs [`kb/entries/sky130-lc-vco-cross-coupled.json`](../../kb/entries/sky130-lc-vco-cross-coupled.json)
+— `lc_vco.spice` is a from-scratch netlist per the entry's own topology
+text: a complementary (NMOS+PMOS) cross-coupled pair in the **current-reuse**
+arrangement — the PMOS pair's sources tie directly to `vdd` (no separate
+PMOS tail), and the NMOS pair's sources tie to a single tail current
+source — across an LC tank. The tank's tuning capacitance uses the *real*
+sky130A device `sky130_fd_pr__cap_var_lvt`, a vendor-characterized
+accumulation-mode MOS varactor with a genuine SPICE model (found under
+`libs.ref/sky130_fd_pr/`, not exposed as a KLayout PCell — the entry's own
+`pdk_portability.notes` about "no characterized varactor PCell" means no
+*layout* generator, not no usable schematic model). Only the tank
+*inductor* is an ideal SPICE element, since sky130 has no vendor
+inductor model at all (see `sky130-spiral-inductor`, the entry this one's
+own notes points to for the inductor's physical sizing methodology). Tank
+loss is modeled explicitly as a parallel resistor (`rtank` = 500 ohm) so
+the entry's own "startup-gain margin, typically 3x-4x" claim is a real,
+checkable circuit property rather than vacuously true against a lossless
+tank.
+
+```
+uv run klt sim examples/kb/sky130-lc-vco-cross-coupled/request.json
+```
+
+Reproduces a four-point tuning curve — `f_vtune_0p2_hz` = 4.3324 GHz,
+`f_vtune_0p7_hz` = 4.26771 GHz, `f_vtune_1p2_hz` = 3.93751 GHz,
+`f_vtune_1p7_hz` = 3.10003 GHz — with a `tuning_ratio` of 1.39753× and
+`kvco_avg_hz_per_v` = −821.578 MHz/V. Frequency *decreases* as `vtune`
+*increases* here — the opposite polarity from `cmos-ring-vco-current-starved`'s
+`vctrl` — because raising `vtune` raises the varactor's `Vgs` relative to
+the tank's own ~`vdd`/2 DC bias, moving it toward its higher-capacitance
+accumulation region. The 1.4× tuning range is real but modest, well short
+of the ring VCO's >10×, matching the entry's own tradeoff note that an LC
+tank trades tuning range for phase-noise performance. `vpp_fast_v`
+(1.4313 V, at `vtune`=0.2V) against `vpp_slow_v` (0.415437 V, at
+`vtune`=1.7V) shows the oscillation amplitude shrinking substantially at
+the high-`vtune`/high-capacitance end of the range — the added varactor
+loading reduces the achievable negative-resistance margin there, so the
+entry's own "amplitude at the edge of the tank's linear swing" claim holds
+at the fast end (1.43V of a 1.8V supply) but not the slow end.
+`idd_fast_a` (5.4246 mA) is measured *above* the `itail`=3mA nominal
+reference, because the tail mirror device lands in triode rather than
+saturation at the loop's real operating point — disclosed in
+`artifacts.notes` along with every other simplification (no phase-noise
+figure — ngspice has no PSS/pnoise analysis, so this entry's own claimed
+LC-vs-ring phase-noise advantage remains as unverified here as it is on the
+ring side; an ideal, physically-unsized tank inductor; a single `tt`/1.8V/27C
+corner; schematic-level only).
+
+One tool-level finding surfaced while sizing this netlist, filed as
+[#1804](https://github.com/2AMLogic/klayout-tools/issues/1804) rather than
+silently worked around: instantiating the *same*
+`(L, W, nf)` binned `sky130_fd_pr__nfet_01v8`/`pfet_01v8` geometry *twice*
+in one netlist spuriously triggers a BSIM4 "u0 is not positive" fatal
+parameter-range error on the *second* instance only — reproducible at
+`L=0.15`/`W=10`/`nf=3-or-4`, but not at `nf=1-or-2` or at wider
+(≥5µm) per-finger widths. This netlist's own device sizing avoids the
+trigger condition (every device here uses ≥10µm-per-finger widths).

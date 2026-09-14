@@ -1,0 +1,32 @@
+{
+  "netlist": "lc_vco.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt"],
+    "supply_v": { "vdd": [1.8] },
+    "temperature_c": [27]
+  },
+  "analysis": { "kind": "tran", "args": "1p 40n uic" },
+  "measurements": [
+    { "name": "t8_a", "spice": ".meas tran t8_a TRIG v(tank_p) VAL=0.9 TD=3n RISE=1 TARG v(tank_p) VAL=0.9 TD=3n RISE=9", "unit": "s" },
+    { "name": "t8_b", "spice": ".meas tran t8_b TRIG v(tank_p) VAL=0.9 TD=13n RISE=1 TARG v(tank_p) VAL=0.9 TD=13n RISE=9", "unit": "s" },
+    { "name": "t8_c", "spice": ".meas tran t8_c TRIG v(tank_p) VAL=0.9 TD=23n RISE=1 TARG v(tank_p) VAL=0.9 TD=23n RISE=9", "unit": "s" },
+    { "name": "t8_d", "spice": ".meas tran t8_d TRIG v(tank_p) VAL=0.9 TD=33n RISE=1 TARG v(tank_p) VAL=0.9 TD=33n RISE=9", "unit": "s" },
+    { "name": "f_vtune_0p2_hz", "spice": ".meas tran f_vtune_0p2_hz param='8 / t8_a'", "unit": "Hz", "limits": { "min": 1e9 } },
+    { "name": "f_vtune_0p7_hz", "spice": ".meas tran f_vtune_0p7_hz param='8 / t8_b'", "unit": "Hz", "limits": { "min": 1e9 } },
+    { "name": "f_vtune_1p2_hz", "spice": ".meas tran f_vtune_1p2_hz param='8 / t8_c'", "unit": "Hz", "limits": { "min": 1e9 } },
+    { "name": "f_vtune_1p7_hz", "spice": ".meas tran f_vtune_1p7_hz param='8 / t8_d'", "unit": "Hz", "limits": { "min": 1e9 } },
+    { "name": "tuning_ratio", "spice": ".meas tran tuning_ratio param='f_vtune_0p2_hz / f_vtune_1p7_hz'", "unit": "1", "limits": { "min": 1.05 } },
+    { "name": "kvco_avg_hz_per_v", "spice": ".meas tran kvco_avg_hz_per_v param='(f_vtune_1p7_hz - f_vtune_0p2_hz) / 1.5'", "unit": "Hz/V" },
+    { "name": "vmax_fast", "spice": ".meas tran vmax_fast max v(tank_p) from=3n to=10n", "unit": "V" },
+    { "name": "vmin_fast", "spice": ".meas tran vmin_fast min v(tank_p) from=3n to=10n", "unit": "V" },
+    { "name": "vpp_fast_v", "spice": ".meas tran vpp_fast_v param='vmax_fast - vmin_fast'", "unit": "V", "limits": { "min": 0.5 } },
+    { "name": "vmax_slow", "spice": ".meas tran vmax_slow max v(tank_p) from=33n to=40n", "unit": "V" },
+    { "name": "vmin_slow", "spice": ".meas tran vmin_slow min v(tank_p) from=33n to=40n", "unit": "V" },
+    { "name": "vpp_slow_v", "spice": ".meas tran vpp_slow_v param='vmax_slow - vmin_slow'", "unit": "V", "limits": { "min": 0.1 } },
+    { "name": "idd_avg_raw", "spice": ".meas tran idd_avg_raw avg i(Vdd) from=3n to=10n", "unit": "A" },
+    { "name": "idd_fast_a", "spice": ".meas tran idd_fast_a param='-1 * idd_avg_raw'", "unit": "A", "limits": { "max": 20e-3 } }
+  ],
+  "options": { "timeout_s": 900, "keep_artifacts": false }
+}
