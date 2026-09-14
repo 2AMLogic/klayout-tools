@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -85,7 +86,10 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from klayout_tools._paths import _resolve_relative  # noqa: E402
+from klayout_tools._provenance import sha256_file  # noqa: E402
 from klayout_tools.eval import EvalError, run_eval  # noqa: E402
+from klayout_tools.sim import SimError, _resolve_models_lib  # noqa: E402
 
 DEFAULT_TASKS_DIR = REPO_ROOT / "benchmarks" / "design-agent" / "tasks"
 DEFAULT_SCHEMA_PATH = (
@@ -202,6 +206,16 @@ def check_reference_solutions(
     good reference netlist that passes its own criterion" acceptance check
     from issue #1719 -- it is what keeps a task from being unsatisfiable by
     construction.
+
+    Also populates the cross-step reference-solution cache (issue #1783,
+    :func:`_write_reference_cache`) for every task it evaluates. The `run`
+    subcommand's deterministic :func:`reference_candidate_provider` path
+    reads this cache before re-simulating (see :func:`run_attempt`), so a
+    `run` step that shares a checkout with a `validate` step that already
+    ran (``.github/workflows/design-agent-benchmark.yml`` runs both as
+    steps of the same job) does not pay for the same real ``ngspice``
+    corner sweep twice. A cache write failure is swallowed -- it is purely
+    a CI cost optimization, never a reason to fail this check.
     """
     results = []
     for path in _task_paths(tasks_dir):
@@ -215,6 +229,14 @@ def check_reference_solutions(
             valid = False
             report = None
             error = str(exc)
+        _write_reference_cache(
+            repo_root,
+            task["id"],
+            _reference_solution_fingerprint(task, repo_root),
+            valid=valid,
+            error=error,
+            eval_report=report,
+        )
         results.append(
             {
                 "id": task["id"],
@@ -230,6 +252,198 @@ def check_reference_solutions(
         "task_count": len(results),
         "tasks": results,
     }
+
+
+# --------------------------------------------------------------------------
+# Cross-step reference-solution cache (issue #1783)
+#
+# `validate` and `run` each independently pay the full "run this task's
+# reference solution through a real, sky130A-backed ngspice corner sweep"
+# cost when invoked as separate steps of the same CI job (see
+# `.github/workflows/design-agent-benchmark.yml`) -- `validate`'s
+# `check_reference_solutions` calls `run_eval` per task, and `run`'s
+# deterministic `reference_candidate_provider` calls the exact same
+# `run_eval` per task, in a *separate* process. This cache lets the second
+# call reuse the first call's already-paid-for result instead of
+# re-simulating, as long as nothing about the reference solution changed in
+# between (fingerprint mismatch => cache miss => re-simulate, never a
+# silently-stale reuse -- mirrors `klayout_tools.sim`'s own `--resume`
+# checkpoint-fingerprint convention, see `sim._checkpoint_fingerprint`).
+# --------------------------------------------------------------------------
+
+
+def _reference_descriptor_check_entries(descriptor: dict[str, Any]) -> list[Any]:
+    """Every ``gates``/``objective``/``metrics`` entry in an ``eval``
+    descriptor -- the three places a descriptor can carry a check's
+    ``args`` (see ``klayout_tools.eval``'s module docstring for the
+    descriptor shape)."""
+    entries: list[Any] = list(descriptor.get("gates") or [])
+    objective = descriptor.get("objective")
+    if isinstance(objective, dict):
+        entries.append(objective)
+    entries.extend(descriptor.get("metrics") or [])
+    return entries
+
+
+def _reference_solution_dependency_files(
+    task: dict[str, Any], repo_root: Path
+) -> list[Path]:
+    """Every on-disk file that determines whether ``task``'s reference
+    solution passes its own ``eval_descriptor`` gate: the descriptor file
+    itself, every ``sim``-check request JSON file it names (a string
+    ``args.request`` across ``gates``/``objective``/``metrics``), and --
+    for each of those -- the netlist and resolved model-library file it in
+    turn names. Content-hashing this exact file set (see
+    :func:`_reference_solution_fingerprint`) is what lets an edit to any of
+    them (netlist, model deck, corner list, analysis, measurements,
+    timeout -- every one of those fields lives inside one of these files)
+    invalidate a cached reference-solution result.
+
+    Best-effort and never raises: a descriptor/request that cannot be
+    parsed, or a model library that cannot be resolved, simply contributes
+    no further files past the point of failure -- :func:`sha256_file`
+    hashes a missing file as ``None``, so the overall fingerprint still
+    changes if a file up to that point changes, and a reference solution
+    this function cannot fully walk is exactly the case where a cache
+    should be most conservative (see the fingerprint's own docstring).
+    """
+    descriptor_path = repo_root / task["reference"]["eval_descriptor"]
+    files = [descriptor_path]
+    try:
+        descriptor = json.loads(descriptor_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return files
+    if not isinstance(descriptor, dict):
+        return files
+
+    request_names: set[str] = set()
+    for entry in _reference_descriptor_check_entries(descriptor):
+        if not isinstance(entry, dict):
+            continue
+        args = entry.get("args")
+        if not isinstance(args, dict):
+            continue
+        request = args.get("request")
+        if (
+            isinstance(request, str)
+            and request != "-"
+            and not request.lstrip().startswith("{")
+        ):
+            request_names.add(request)
+
+    for name in sorted(request_names):
+        request_path = descriptor_path.parent / name
+        files.append(request_path)
+        try:
+            request_doc = json.loads(request_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(request_doc, dict):
+            continue
+        request_dir = str(request_path.parent)
+
+        netlist = request_doc.get("netlist")
+        if isinstance(netlist, str):
+            files.append(Path(_resolve_relative(netlist, request_dir)))
+
+        models = request_doc.get("models")
+        if isinstance(models, dict):
+            try:
+                files.append(Path(_resolve_models_lib(models, request_dir)))
+            except SimError:
+                pass
+
+    return files
+
+
+def _reference_solution_fingerprint(task: dict[str, Any], repo_root: Path) -> str:
+    """SHA-256 fingerprint of every file
+    :func:`_reference_solution_dependency_files` finds for ``task`` -- the
+    basis for deciding whether a cached reference-solution result still
+    applies. Content-hashes file bytes (not paths), so an edited-in-place
+    file at the same path invalidates the cache, exactly like
+    ``sim._checkpoint_fingerprint``."""
+    files = _reference_solution_dependency_files(task, repo_root)
+    payload = {
+        "schema": 1,
+        "files": {str(path): sha256_file(str(path)) for path in files},
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _reference_cache_dir(repo_root: Path) -> Path:
+    """Where the cross-step reference-solution cache lives: one JSON file
+    per task under ``<repo_root>/.klt/design-agent-benchmark-cache/``.
+    ``.klt/`` is already this repo's own scratch-directory convention
+    (gitignored -- see ``.gitignore``), and `validate`/`run` already share
+    a checkout when run as steps of the same CI job
+    (``.github/workflows/design-agent-benchmark.yml``), so a plain on-disk
+    cache needs no extra artifact-passing wiring between them."""
+    return repo_root / ".klt" / "design-agent-benchmark-cache"
+
+
+def _reference_cache_path(repo_root: Path, task_id: str) -> Path:
+    return _reference_cache_dir(repo_root) / f"{task_id}.json"
+
+
+def _write_reference_cache(
+    repo_root: Path,
+    task_id: str,
+    fingerprint: str,
+    *,
+    valid: bool,
+    error: str | None,
+    eval_report: dict[str, Any] | None,
+) -> None:
+    """Persist ``check_reference_solutions``'s own `klt eval` result for
+    ``task_id``, fingerprinted per :func:`_reference_solution_fingerprint`,
+    so :func:`run_attempt`'s reference-provider path can skip re-simulating
+    the identical reference solution in a later process within the same
+    job. Best-effort: a write failure (read-only filesystem, disk full) is
+    swallowed rather than failing the caller -- the next reader just gets a
+    cache miss, exactly like today's uncached behaviour. Writes via a
+    temp-file-plus-``replace`` so a concurrent reader never observes a
+    partially-written file, mirroring ``sim._Checkpoint``'s own atomic
+    write.
+    """
+    path = _reference_cache_path(repo_root, task_id)
+    payload = {
+        "schema_version": 1,
+        "fingerprint": fingerprint,
+        "valid": valid,
+        "error": error,
+        "eval_report": eval_report,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload))
+        tmp_path.replace(path)
+    except OSError:
+        pass
+
+
+def _load_reference_cache(
+    repo_root: Path, task_id: str, fingerprint: str
+) -> dict[str, Any] | None:
+    """Read back a cache entry :func:`_write_reference_cache` wrote for
+    ``task_id``, or ``None`` on a miss -- a missing file, unreadable or
+    malformed JSON, or (critically) a fingerprint that no longer matches
+    ``fingerprint`` (the reference solution changed since the cache was
+    written -- a stale cache is never silently reused, per issue #1783's
+    own acceptance criteria). Never raises: mirrors
+    ``sim._load_checkpoint``'s never-raises, fingerprint-gated shape."""
+    path = _reference_cache_path(repo_root, task_id)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
+    return data
 
 
 # --------------------------------------------------------------------------
@@ -900,7 +1114,21 @@ def run_attempt(
     response. Catching ``Exception`` here (rather than enumerating every
     provider's own exception types) is what makes "an agent invocation that
     fails/times out is recorded as a failed attempt, not a crash" hold for
-    *any* provider, present or future, per issue #1732's Test Plan."""
+    *any* provider, present or future, per issue #1732's Test Plan.
+
+    When ``provider`` is the deterministic :func:`reference_candidate_provider`
+    (identity check -- every attempt hands back the same fixed reference
+    solution, so a per-attempt cache lookup is meaningful; the agent-backed
+    providers each produce a genuinely new candidate per attempt, so no
+    cache lookup applies to them), the cross-step reference-solution cache
+    (issue #1783) is consulted before calling `klt eval`: a fingerprint
+    match (see :func:`_reference_solution_fingerprint`) means some earlier
+    process already paid for this exact reference solution's corner sweep
+    (typically `validate`'s :func:`check_reference_solutions`, run as an
+    earlier step of the same CI job) and the cached report is reused
+    verbatim instead of re-simulating; a miss (no cache yet, or the
+    reference solution changed since it was written) falls through to the
+    normal `run_eval` call, exactly like today's uncached behaviour."""
     start = time.monotonic()
     report: dict[str, Any] | None = None
     valid = False
@@ -910,11 +1138,20 @@ def run_attempt(
     except Exception as exc:  # noqa: BLE001 -- see docstring: any provider failure is a scored attempt failure, never a crash
         error = f"candidate provider failed: {exc}"
     else:
-        try:
-            report = run_eval(descriptor_arg, candidate_arg)
-            valid = bool(report.get("valid"))
-        except EvalError as exc:
-            error = str(exc)
+        cached = None
+        if provider is reference_candidate_provider:
+            fingerprint = _reference_solution_fingerprint(task, repo_root)
+            cached = _load_reference_cache(repo_root, task["id"], fingerprint)
+        if cached is not None:
+            report = cached.get("eval_report")
+            valid = bool(cached.get("valid"))
+            error = cached.get("error")
+        else:
+            try:
+                report = run_eval(descriptor_arg, candidate_arg)
+                valid = bool(report.get("valid"))
+            except EvalError as exc:
+                error = str(exc)
     wall_clock_s = time.monotonic() - start
     return {
         "attempt": attempt_index,

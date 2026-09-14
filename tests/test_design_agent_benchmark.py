@@ -372,6 +372,266 @@ def test_summarize_tier_empty_is_zero():
 
 
 # --------------------------------------------------------------------------
+# Unit tests: cross-step reference-solution cache (issue #1783)
+#
+# These stub `run_eval` (a spy counting calls) rather than running real
+# `ngspice` -- what matters here is the cache-hit/-miss *decision*, not the
+# simulation itself (already covered by the real-ngspice integration tests
+# below and by `test_sim.py`). A fixture task/descriptor/request/netlist/
+# model-library tree is built fresh per test under `tmp_path`.
+# --------------------------------------------------------------------------
+
+
+def _write_reference_cache_fixture(
+    repo_root: Path,
+    *,
+    corners: dict | None = None,
+    timeout_s: float = 60.0,
+    netlist_body: str = "* fixture netlist v1\n",
+    models_body: str = "* fixture models v1\n",
+) -> dict:
+    """Build a minimal reference-solution tree (descriptor -> sim request ->
+    netlist + model library) under ``repo_root``, matching the shape every
+    shipped task's own ``reference/<id>/`` directory uses, and return the
+    task dict `check_reference_solutions`/`run_attempt` expect. Uses a
+    plain ``{"lib": "models.lib"}`` (no ``pdk``/``pdk_root`` key) so
+    `_resolve_models_lib` resolves it as a local file, never touching the
+    real PDK discovery path -- these tests must not depend on a PDK being
+    installed."""
+    ref_dir = repo_root / "ref"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "netlist.spice").write_text(netlist_body)
+    (ref_dir / "models.lib").write_text(models_body)
+    request = {
+        "netlist": "netlist.spice",
+        "engine": "ngspice",
+        "models": {"lib": "models.lib"},
+        "corners": corners or {"process": ["tt"]},
+        "analysis": {"kind": "op"},
+        "measurements": [],
+        "options": {"timeout_s": timeout_s},
+    }
+    (ref_dir / "sim_request.json").write_text(json.dumps(request))
+    descriptor = {
+        "gates": [
+            {
+                "check": "sim",
+                "name": "fixture_gate",
+                "args": {"request": "sim_request.json"},
+            }
+        ],
+    }
+    (ref_dir / "descriptor.json").write_text(json.dumps(descriptor))
+
+    tasks_dir = repo_root / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    task = {
+        "id": "fixture-task",
+        "tier": "easy",
+        "reference": {
+            "eval_descriptor": "ref/descriptor.json",
+            "netlists": ["ref/netlist.spice"],
+        },
+    }
+    (tasks_dir / "fixture-task.json").write_text(json.dumps(task))
+    return task
+
+
+def _stub_run_eval(monkeypatch, *, valid: bool = True):
+    """Replace `dab.run_eval` with a call-counting stub that never touches
+    `ngspice`, returning a fixed report shaped like a real one. Returns the
+    call-count list (mutated in place) so a test can assert exactly how
+    many times -- if any -- the "real" simulation was invoked."""
+    calls: list[tuple[str, str | None]] = []
+
+    def _fake_run_eval(descriptor_arg, candidate_arg=None):
+        calls.append((descriptor_arg, candidate_arg))
+        return {
+            "schema_version": 1,
+            "valid": valid,
+            "gates": [],
+            "objective": {"name": "obj", "value": 1.0, "polarity": "maximize"},
+            "metrics": {},
+        }
+
+    monkeypatch.setattr(dab, "run_eval", _fake_run_eval)
+    return calls
+
+
+def test_check_reference_solutions_writes_cache_after_eval(tmp_path, monkeypatch):
+    task = _write_reference_cache_fixture(tmp_path)
+    calls = _stub_run_eval(monkeypatch, valid=True)
+
+    result = dab.check_reference_solutions(tmp_path / "tasks", tmp_path)
+
+    assert result["valid"] is True
+    assert len(calls) == 1
+
+    cache_path = dab._reference_cache_path(tmp_path, task["id"])
+    assert cache_path.is_file()
+    cached = json.loads(cache_path.read_text())
+    assert cached["valid"] is True
+    assert cached["fingerprint"] == dab._reference_solution_fingerprint(task, tmp_path)
+
+
+def test_run_attempt_reference_provider_cache_hit_skips_run_eval(tmp_path, monkeypatch):
+    task = _write_reference_cache_fixture(tmp_path)
+    calls = _stub_run_eval(monkeypatch, valid=True)
+
+    # `validate` (or whichever step runs first) populates the cache.
+    dab.check_reference_solutions(tmp_path / "tasks", tmp_path)
+    assert len(calls) == 1
+    calls.clear()
+
+    # `run`'s deterministic provider must now hit the cache -- `run_eval`
+    # must NOT be called a second time.
+    attempt = dab.run_attempt(task, 0, dab.reference_candidate_provider, tmp_path)
+
+    assert calls == []  # the real simulation was never re-invoked
+    assert attempt["valid"] is True
+    assert attempt["error"] is None
+
+
+def test_run_attempt_reference_provider_cache_miss_calls_run_eval(
+    tmp_path, monkeypatch
+):
+    """No prior `validate` run -> no cache yet -> `run` must still work
+    exactly like today (a cache miss is transparent, not an error)."""
+    task = _write_reference_cache_fixture(tmp_path)
+    calls = _stub_run_eval(monkeypatch, valid=True)
+
+    attempt = dab.run_attempt(task, 0, dab.reference_candidate_provider, tmp_path)
+
+    assert len(calls) == 1
+    assert attempt["valid"] is True
+
+
+def test_run_attempt_non_reference_provider_never_consults_cache(tmp_path, monkeypatch):
+    """The cache is only meaningful for the deterministic reference
+    provider -- an agent-backed provider produces a genuinely different
+    candidate per attempt, so it must always call `run_eval` even after
+    the cache has been populated for this task."""
+    task = _write_reference_cache_fixture(tmp_path)
+    calls = _stub_run_eval(monkeypatch, valid=True)
+    dab.check_reference_solutions(tmp_path / "tasks", tmp_path)
+    calls.clear()
+
+    def _agent_stub(_task, _attempt_index, _repo_root):
+        return str(tmp_path / "ref" / "descriptor.json"), None
+
+    attempt = dab.run_attempt(task, 0, _agent_stub, tmp_path)
+
+    assert len(calls) == 1  # never served from the reference-provider cache
+    assert attempt["valid"] is True
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda tmp_path: (tmp_path / "ref" / "netlist.spice").write_text(
+                "* fixture netlist v2 -- edited\n"
+            ),
+            id="netlist-edit",
+        ),
+        pytest.param(
+            lambda tmp_path: (tmp_path / "ref" / "models.lib").write_text(
+                "* fixture models v2 -- edited\n"
+            ),
+            id="model-library-edit",
+        ),
+        pytest.param(
+            lambda tmp_path: (tmp_path / "ref" / "sim_request.json").write_text(
+                json.dumps(
+                    {
+                        **json.loads(
+                            (tmp_path / "ref" / "sim_request.json").read_text()
+                        ),
+                        "corners": {"process": ["tt", "ss", "ff"]},
+                    }
+                )
+            ),
+            id="corner-list-change",
+        ),
+        pytest.param(
+            lambda tmp_path: (tmp_path / "ref" / "sim_request.json").write_text(
+                json.dumps(
+                    {
+                        **json.loads(
+                            (tmp_path / "ref" / "sim_request.json").read_text()
+                        ),
+                        "options": {"timeout_s": 999.0},
+                    }
+                )
+            ),
+            id="timeout-change",
+        ),
+    ],
+)
+def test_cache_invalidated_when_reference_solution_changes(
+    tmp_path, monkeypatch, mutate
+):
+    task = _write_reference_cache_fixture(tmp_path)
+    calls = _stub_run_eval(monkeypatch, valid=True)
+    dab.check_reference_solutions(tmp_path / "tasks", tmp_path)
+    assert len(calls) == 1
+    calls.clear()
+
+    mutate(tmp_path)
+
+    attempt = dab.run_attempt(task, 0, dab.reference_candidate_provider, tmp_path)
+
+    # A fingerprint mismatch must force a real re-simulation -- a stale
+    # cache entry is never silently reused.
+    assert len(calls) == 1
+    assert attempt["valid"] is True
+
+
+def test_reference_solution_fingerprint_stable_for_unchanged_files(tmp_path):
+    task = _write_reference_cache_fixture(tmp_path)
+    first = dab._reference_solution_fingerprint(task, tmp_path)
+    second = dab._reference_solution_fingerprint(task, tmp_path)
+    assert first == second
+
+
+def test_load_reference_cache_returns_none_when_no_cache_file_exists(tmp_path):
+    task = _write_reference_cache_fixture(tmp_path)
+    fingerprint = dab._reference_solution_fingerprint(task, tmp_path)
+    assert dab._load_reference_cache(tmp_path, task["id"], fingerprint) is None
+
+
+def test_load_reference_cache_returns_none_on_malformed_json(tmp_path):
+    task = _write_reference_cache_fixture(tmp_path)
+    fingerprint = dab._reference_solution_fingerprint(task, tmp_path)
+    cache_path = dab._reference_cache_path(tmp_path, task["id"])
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text("{not valid json")
+    assert dab._load_reference_cache(tmp_path, task["id"], fingerprint) is None
+
+
+def test_check_reference_solutions_cache_write_failure_is_swallowed(
+    tmp_path, monkeypatch
+):
+    """A cache write failure (read-only filesystem, disk full, or -- as
+    forced here -- a plain file sitting where the cache directory needs to
+    be created) must not fail the `validate` step itself; it is purely a
+    CI cost optimization, never a correctness requirement."""
+    task = _write_reference_cache_fixture(tmp_path)
+    _stub_run_eval(monkeypatch, valid=True)
+
+    # `.klt` existing as a regular file (not a directory) forces
+    # `_write_reference_cache`'s own `mkdir(parents=True)` to raise
+    # `OSError` when it tries to create `.klt/design-agent-benchmark-cache`
+    # underneath it.
+    (tmp_path / ".klt").write_text("not a directory")
+
+    result = dab.check_reference_solutions(tmp_path / "tasks", tmp_path)
+    assert result["valid"] is True
+    assert result["tasks"][0]["id"] == task["id"]
+    assert not dab._reference_cache_path(tmp_path, task["id"]).exists()
+
+
+# --------------------------------------------------------------------------
 # Integration: real ngspice against the shipped reference solutions
 # --------------------------------------------------------------------------
 

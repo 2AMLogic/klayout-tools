@@ -322,6 +322,24 @@ This is a first milestone, not the full issue #1719 scope.
    240) sized for a PDK cache miss plus runner variance, not a defensive
    guess.
 
+   Issue #1783 addresses a second, independent instance of the same
+   double-payment: `validate` and `run` are two steps of the *same*
+   `design-agent-benchmark.yml` job, so `validate`'s
+   `check_reference_solutions` and `run`'s deterministic
+   `reference_candidate_provider` path were each separately paying for
+   the exact same real `ngspice` corner sweep per task. A fingerprinted,
+   on-disk cache (`.klt/design-agent-benchmark-cache/<task-id>.json`,
+   `_write_reference_cache`/`_load_reference_cache` in
+   `scripts/design_agent_benchmark.py`) written by the former and read by
+   the latter now lets `run`'s reference-provider attempts skip
+   re-simulating a reference solution `validate` already evaluated in the
+   same job, invalidated (mirroring `klayout_tools.sim`'s own `--resume`
+   checkpoint convention) whenever the descriptor, sim request, netlist,
+   or resolved model library it depends on changes. Item 2 from the same
+   issue (a persistent `ngspice` session reusing one loaded sky130 model
+   deck across corners, instead of one subprocess per corner) remains a
+   separate, unimplemented spike -- see issue #1783 for that half.
+
 A fuller interactive/tool-using live-agent provider (see limitation 1
 above) now ships as `--provider interactive-agent` (issue #1739). The
 oscillator/VCO/PLL family itself (#1735 -> #1743 -> #1752) is complete
