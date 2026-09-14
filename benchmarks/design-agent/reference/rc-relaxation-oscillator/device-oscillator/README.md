@@ -175,9 +175,12 @@ Reasons, in order of weight:
    `benchmarks/design-agent/README.md`'s "Known limitations" #2 records as
    a deliberate property of the oscillator/VCO/PLL family, not an
    oversight.
-2. **Runtime.** The behavioral reference's 18-corner gate runs in seconds;
-   this one takes ~5 minutes on 4 workers, and the reference-solution gate
-   runs on every `validate` and on every uncached `run`.
+2. **Runtime.** Measured: the behavioral reference's whole
+   `check_reference_solutions` gate for this task completes in **5.8 s**;
+   this netlist's own 18-corner sweep takes **~5 minutes** on 4 workers.
+   The reference-solution gate runs on every `validate` and every uncached
+   `run`, so that is a ~50x cost increase on a hot path, for a task whose
+   point is the `C*dV/I` timing relation rather than silicon accuracy.
 3. **Margin.** The behavioral reference sits comfortably mid-band by
    construction; this one holds the band with ~6% margin on each side
    because its period carries the poly resistor's real tempco. Making it

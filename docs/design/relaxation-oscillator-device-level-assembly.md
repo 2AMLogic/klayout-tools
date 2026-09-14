@@ -211,8 +211,9 @@ resistor device and no nodeset.
 rc-relaxation-oscillator/oscillator.spice` (behavioral, PDK-model-free)
 remains what `tasks/rc-relaxation-oscillator.json` scores against. The
 full reasoning — the benchmark's "runs anywhere `ngspice` runs" property,
-the ~5-minute vs. seconds gate runtime, the ~6% vs. comfortable band
-margin, and the `eval_descriptor` contract change a swap would imply — is
+the measured 5.8 s vs. ~5 min reference-gate runtime, the ~6% vs.
+comfortable band margin, and the `eval_descriptor` contract change a swap
+would imply — is
 recorded in
 [the artifact directory's `README.md`](../../benchmarks/design-agent/reference/rc-relaxation-oscillator/device-oscillator/README.md#decision-ship-alongside-do-not-replace),
 along with the conditions under which the decision should be revisited.
