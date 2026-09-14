@@ -866,133 +866,9 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
-    arith_gen_parser = subparsers.add_parser(
-        "arith-gen",
-        help="generate a parallel-prefix adder (Verilog) from a cell map",
-        description=(
-            "Emit a parallel-prefix adder as Verilog RTL from a named "
-            "architecture (`ripple`, `brent-kung`, `han-carlson`, "
-            "`sklansky`, `kogge-stone`) or from an explicit N x N binary "
-            "cell map -- issue #1722, the arithmetic-architecture lever for "
-            "`klt synthesize`. Pure Python string generation: no Yosys, no "
-            "PDK, no engine. Writes five files next to each other: the "
-            "structural adder, a behavioural `a + b + cin` reference with "
-            "identical ports, a self-checking testbench, a Yosys `techmap "
-            "-map` rule file substituting the adder for `$add` cells of the "
-            "same width, and a ready-to-run `klt equiv` request pairing the "
-            "reference (gold) against the adder (gate) -- so proving the "
-            "emitted Verilog correct is one follow-up command. Deliberately "
-            "NOT named `klt gen-arith`/`klt gen ...`: `klt gen` is the "
-            "layout/PCell generator family, and this emits RTL. See "
-            "docs/cli/arith-gen.md."
-        ),
-    )
-    arith_gen_parser.add_argument(
-        "--width",
-        type=int,
-        default=None,
-        help=(
-            "adder width in bits (required with --arch; with --cell-map the "
-            "width comes from the matrix and this flag, if given, must match)"
-        ),
-    )
-    arith_gen_parser.add_argument(
-        "--arch",
-        default=None,
-        choices=list(arith_gen.ARCHITECTURES),
-        help=(
-            "prefix-adder architecture to build the cell map from. Mutually "
-            "exclusive with --cell-map."
-        ),
-    )
-    arith_gen_parser.add_argument(
-        "--cell-map",
-        dest="cell_map",
-        default=None,
-        help=(
-            "path to a JSON file holding the N x N cell map -- either a bare "
-            "matrix of 0/1 entries or an object with a `cell_map` key (the "
-            "shape `--format json --include-cell-map` emits, so a payload "
-            "round-trips). Mutually exclusive with --arch."
-        ),
-    )
-    arith_gen_parser.add_argument(
-        "--module-name",
-        dest="module_name",
-        default=None,
-        help=(
-            "Verilog module name for the generated adder "
-            "(default: klt_add_<architecture>_<width>)"
-        ),
-    )
-    arith_gen_parser.add_argument(
-        "--output-dir",
-        dest="output_dir",
-        default=None,
-        help="directory to write the generated files into (default: cwd)",
-    )
-    arith_gen_parser.add_argument(
-        "--include-cell-map",
-        dest="include_cell_map",
-        action="store_true",
-        help=(
-            "include the full N x N cell map in the output (the `cell_map` "
-            "field under --format json, an ASCII matrix under --format "
-            "text); omitted by default because it is O(N^2)"
-        ),
-    )
-    _add_format_arg(arith_gen_parser)
-    arith_gen_parser.set_defaults(func=arith_gen_cmd.run)
+    _add_arith_gen_parser(subparsers)
 
-    techmap_parser = subparsers.add_parser(
-        "techmap",
-        help="Liberty-driven technology mapping of a generic netlist (native Rust)",
-        description=(
-            "Map a `klt.synth.generic-netlist/1` (a small, technology-"
-            "independent 10-primitive gate netlist -- see "
-            "docs/design/synth-techmap-stage-contract.md section 2) onto a "
-            "resolved standard-cell Liberty via `native/techmap`'s own "
-            "Liberty-driven cell selection (issue #874), reporting instance "
-            "count, area, and cell-type breakdown -- Phase 2 of Epic #704. "
-            "Invokes the standalone `klt-techmap` binary as a subprocess "
-            "(built via `cargo build --release` inside native/techmap/); "
-            "never re-implements the mapping algorithm in Python. Takes a "
-            "request-document path (like `klt lvs`/`klt sim`/`klt "
-            "synthesize`), not positional netlist file args. "
-            "`--verify-equivalence` optionally gates the mapped netlist "
-            "through `klt equiv` against the pre-mapping generic netlist "
-            "before returning -- a hard failure on a non-equivalent "
-            "verdict, never a silent warning (#704 Phase 2c, issue #875)."
-        ),
-    )
-    techmap_parser.add_argument(
-        "request", help="path to a klt.synth.techmap.request/1 JSON file"
-    )
-    techmap_parser.add_argument(
-        "--verify-equivalence",
-        dest="verify_equivalence",
-        action="store_true",
-        help=(
-            "gate the mapped netlist through `klt equiv` against the "
-            "pre-mapping generic netlist before returning -- a non-"
-            "equivalent or inconclusive verdict is a hard failure (exit "
-            "1), never a silent warning. Combinational designs only (klt "
-            "equiv's own Phase 0 scope, #707); off by default."
-        ),
-    )
-    techmap_parser.add_argument(
-        "--equiv-timeout-s",
-        dest="equiv_timeout_s",
-        type=float,
-        default=None,
-        help=(
-            "overall wall-clock timeout in seconds for the `--verify-"
-            "equivalence` proof (default: klt equiv's own 60s default); "
-            "has no effect unless `--verify-equivalence` is given."
-        ),
-    )
-    _add_format_arg(techmap_parser)
-    techmap_parser.set_defaults(func=techmap_cmd.run)
+    _add_techmap_parser(subparsers)
 
     _add_equiv_parser(subparsers)
 
@@ -1145,164 +1021,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_eval_parser(subparsers)
 
-    gen_parser = subparsers.add_parser(
-        "gen",
-        help="generate a parametrized layout cell (headless PCell harness)",
-        description=(
-            "Run a named layout generator against a JSON params object and "
-            "PDK reference, producing a GDS/OASIS stream plus a structured "
-            "report -- see docs/design/layout-generator-spike.md section 2 "
-            "for the request/response contract. Runs fully headless via "
-            "KLayout's native pya.PCellDeclarationHelper -- no GUI, no Qt. "
-            "PDK resolution reuses `klt pdk find`'s resolver. Note: every "
-            "generator except resistor_strip only supports the sky130/"
-            "gf180mcu PDK families today (any other resolved family is an "
-            "application error) -- see docs/cli/gen.md's 'PDK-family "
-            "support' section. --list-pdk-pcells/--pdk-pcell reach the "
-            "resolved PDK's *own* shipped PCell library instead of a klt "
-            "built-in generator."
-        ),
-    )
-    gen_parser.add_argument(
-        "generator",
-        nargs="?",
-        default=None,
-        help="generator to run (see --list for available generators)",
-    )
-    # `--list`, `--list-pdk-pcells` and `--pdk-pcell` each select a different
-    # mode for this one verb, so argparse rejects any pair of them itself
-    # (usage error, exit 2 -- see docs/cli/gen.md's exit-code table).
-    gen_mode = gen_parser.add_mutually_exclusive_group()
-    gen_mode.add_argument(
-        "--list",
-        action="store_true",
-        help="list available generators and their params, then exit",
-    )
-    gen_mode.add_argument(
-        "--list-pdk-pcells",
-        dest="list_pdk_pcells",
-        action="store_true",
-        help=(
-            "list the PCell libraries the resolved PDK itself ships under "
-            "libs.tech/klayout/python/ (with each cell's params), then exit"
-        ),
-    )
-    gen_mode.add_argument(
-        "--pdk-pcell",
-        dest="pdk_pcell",
-        default=None,
-        metavar="LIBRARY/CELL",
-        help=(
-            "instantiate a PCell the resolved PDK itself ships, named "
-            "'<library>/<cell>' as reported by --list-pdk-pcells, instead of "
-            "a klt built-in generator"
-        ),
-    )
-    gen_parser.add_argument(
-        "--params",
-        default=None,
-        help=(
-            "generator params as a path to a JSON file, or an inline JSON "
-            "object (e.g. '{\"num\": 8}'); omit to use every param's default"
-        ),
-    )
-    _add_pdk_args(gen_parser)
-    gen_parser.add_argument(
-        "--cell-name",
-        dest="cell_name",
-        default=None,
-        help="name for the generated top cell (default: <generator>_0)",
-    )
-    gen_parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="output GDS/OASIS path (default: <cell_name>.gds)",
-    )
-    _add_format_arg(gen_parser)
-    gen_parser.set_defaults(func=gen_cmd.run)
+    _add_gen_parser(subparsers)
 
-    gen_compose_parser = subparsers.add_parser(
-        "gen-compose",
-        help="place already-generated blocks and library cells into one composed cell",
-        description=(
-            "Place a set of already-generated `klt gen` blocks (each block's "
-            "own JSON response, read from a file path or embedded inline) "
-            "and/or existing library cells (blocks[].cell -- an existing cell "
-            "in a stream, named by gds_path/cell_name, with its bbox read from "
-            "the stream when not declared) into "
-            "one composed GDS/OASIS stream, per a request document's "
-            "blocks[]/placement/connectivity[]/routing/options shape -- see "
-            "docs/design/gen-composition-spike.md section 2 for the contract "
-            "and docs/cli/gen-compose.md for the CLI surface. Supports "
-            'placement.strategy: "row" (single left-to-right strip), '
-            '"explicit" (each block at its own declared origin), and "array" '
-            "(one block repeated on a regular rows x cols grid, emitted as a "
-            "single hierarchical instance); "
-            "connectivity[] is always validated, and routed when `routing` "
-            "is supplied (omitting/emptying `routing` is a declare-only "
-            "validate-without-drawing request, #1188). Its own response is a "
-            "valid blocks[].generator_report for a further run (generator: "
-            "'gen-compose', plus a ports[] promoted from pins[]), so "
-            "compositions nest. A distinct top-level "
-            "verb (not a "
-            "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
-            "'CLI shape' note for why. Runs fully headless via KLayout's "
-            "native pya -- no GUI, no Qt. Takes a request-document path (like "
-            "`klt sim`/`klt lvs`), not positional block file args. "
-            "`nets[].legs[].routed: true` is NOT a DRC-clean guarantee -- "
-            "it means this command's own routability heuristics found no "
-            "problem, not that none exists; always re-run `klt drc` on the "
-            "composed output before treating it as sign-off ready, see "
-            "docs/cli/gen-compose.md's 'Geometry is advisory' note."
-        ),
-    )
-    gen_compose_parser.add_argument(
-        "request", help="path to a klt gen-compose request JSON file"
-    )
-    _add_format_arg(gen_compose_parser)
-    gen_compose_parser.set_defaults(func=gen_compose_cmd.run)
+    _add_gen_compose_parser(subparsers)
 
-    draw_parser = subparsers.add_parser(
-        "draw",
-        help="write a primitive GDSII/OASIS stream from a JSON shape description",
-        description=(
-            "Write a GDSII/OASIS stream verbatim from a JSON description of "
-            "polygons and labels on explicit (layer, datatype) pairs. The "
-            "deliberately-dumb write-side counterpart to the read-side verbs: "
-            "no PDK awareness and no rule checking -- so a DRC flow's negative "
-            "case (a known-bad fixture that must come back flagged) can be "
-            "produced with klt alone, along with minimal deck-bug reproducers "
-            "and layer-map sanity checks. Unlike `klt gen`, it will happily "
-            "emit rule-violating geometry; every response is stamped with a "
-            "loud not-design-legal warning. See docs/cli/draw.md for the "
-            "request/response contract. Runs fully headless via klayout.db -- "
-            "no GUI, no Qt."
-        ),
-    )
-    draw_parser.add_argument(
-        "--params",
-        default=None,
-        help=(
-            "shape/label description as a path to a JSON file, or an inline "
-            'JSON object (e.g. \'{"shapes": [{"layer": [66, 20], '
-            '"rect_um": [0, 0, 1, 0.15]}]}\'); required'
-        ),
-    )
-    draw_parser.add_argument(
-        "--cell-name",
-        dest="cell_name",
-        default=None,
-        help="name for the written top cell (default: TOP)",
-    )
-    draw_parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="output GDS/OASIS path (default: <cell_name>.gds)",
-    )
-    _add_format_arg(draw_parser)
-    draw_parser.set_defaults(func=draw_cmd.run)
+    _add_draw_parser(subparsers)
 
     _add_sim_parser(subparsers)
 
@@ -2161,6 +1884,330 @@ def _add_design_centering_parser(subparsers: argparse._SubParsersAction) -> None
     )
     _add_format_arg(design_centering_parser)
     design_centering_parser.set_defaults(func=design_centering_cmd.run)
+
+
+def _add_arith_gen_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``arith-gen`` verb for generating parallel-prefix adders.
+
+    Emit a parallel-prefix adder as Verilog RTL from a named architecture or
+    an explicit cell map. See docs/cli/arith-gen.md for full details.
+    """
+    arith_gen_parser = subparsers.add_parser(
+        "arith-gen",
+        help="generate a parallel-prefix adder (Verilog) from a cell map",
+        description=(
+            "Emit a parallel-prefix adder as Verilog RTL from a named "
+            "architecture (`ripple`, `brent-kung`, `han-carlson`, "
+            "`sklansky`, `kogge-stone`) or from an explicit N x N binary "
+            "cell map -- issue #1722, the arithmetic-architecture lever for "
+            "`klt synthesize`. Pure Python string generation: no Yosys, no "
+            "PDK, no engine. Writes five files next to each other: the "
+            "structural adder, a behavioural `a + b + cin` reference with "
+            "identical ports, a self-checking testbench, a Yosys `techmap "
+            "-map` rule file substituting the adder for `$add` cells of the "
+            "same width, and a ready-to-run `klt equiv` request pairing the "
+            "reference (gold) against the adder (gate) -- so proving the "
+            "emitted Verilog correct is one follow-up command. Deliberately "
+            "NOT named `klt gen-arith`/`klt gen ...`: `klt gen` is the "
+            "layout/PCell generator family, and this emits RTL. See "
+            "docs/cli/arith-gen.md."
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help=(
+            "adder width in bits (required with --arch; with --cell-map the "
+            "width comes from the matrix and this flag, if given, must match)"
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--arch",
+        default=None,
+        choices=list(arith_gen.ARCHITECTURES),
+        help=(
+            "prefix-adder architecture to build the cell map from. Mutually "
+            "exclusive with --cell-map."
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--cell-map",
+        dest="cell_map",
+        default=None,
+        help=(
+            "path to a JSON file holding the N x N cell map -- either a bare "
+            "matrix of 0/1 entries or an object with a `cell_map` key (the "
+            "shape `--format json --include-cell-map` emits, so a payload "
+            "round-trips). Mutually exclusive with --arch."
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--module-name",
+        dest="module_name",
+        default=None,
+        help=(
+            "Verilog module name for the generated adder "
+            "(default: klt_add_<architecture>_<width>)"
+        ),
+    )
+    arith_gen_parser.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default=None,
+        help="directory to write the generated files into (default: cwd)",
+    )
+    arith_gen_parser.add_argument(
+        "--include-cell-map",
+        dest="include_cell_map",
+        action="store_true",
+        help=(
+            "include the full N x N cell map in the output (the `cell_map` "
+            "field under --format json, an ASCII matrix under --format "
+            "text); omitted by default because it is O(N^2)"
+        ),
+    )
+    _add_format_arg(arith_gen_parser)
+    arith_gen_parser.set_defaults(func=arith_gen_cmd.run)
+
+
+def _add_techmap_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``techmap`` verb for Liberty-driven technology mapping.
+
+    Map a generic gate netlist onto a resolved standard-cell Liberty via the
+    native `klt-techmap` binary. See docs/cli/techmap.md for full details.
+    """
+    techmap_parser = subparsers.add_parser(
+        "techmap",
+        help="Liberty-driven technology mapping of a generic netlist (native Rust)",
+        description=(
+            "Map a `klt.synth.generic-netlist/1` (a small, technology-"
+            "independent 10-primitive gate netlist -- see "
+            "docs/design/synth-techmap-stage-contract.md section 2) onto a "
+            "resolved standard-cell Liberty via `native/techmap`'s own "
+            "Liberty-driven cell selection (issue #874), reporting instance "
+            "count, area, and cell-type breakdown -- Phase 2 of Epic #704. "
+            "Invokes the standalone `klt-techmap` binary as a subprocess "
+            "(built via `cargo build --release` inside native/techmap/); "
+            "never re-implements the mapping algorithm in Python. Takes a "
+            "request-document path (like `klt lvs`/`klt sim`/`klt "
+            "synthesize`), not positional netlist file args. "
+            "`--verify-equivalence` optionally gates the mapped netlist "
+            "through `klt equiv` against the pre-mapping generic netlist "
+            "before returning -- a hard failure on a non-equivalent "
+            "verdict, never a silent warning (#704 Phase 2c, issue #875)."
+        ),
+    )
+    techmap_parser.add_argument(
+        "request", help="path to a klt.synth.techmap.request/1 JSON file"
+    )
+    techmap_parser.add_argument(
+        "--verify-equivalence",
+        dest="verify_equivalence",
+        action="store_true",
+        help=(
+            "gate the mapped netlist through `klt equiv` against the "
+            "pre-mapping generic netlist before returning -- a non-"
+            "equivalent or inconclusive verdict is a hard failure (exit "
+            "1), never a silent warning. Combinational designs only (klt "
+            "equiv's own Phase 0 scope, #707); off by default."
+        ),
+    )
+    techmap_parser.add_argument(
+        "--equiv-timeout-s",
+        dest="equiv_timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds for the `--verify-"
+            "equivalence` proof (default: klt equiv's own 60s default); "
+            "has no effect unless `--verify-equivalence` is given."
+        ),
+    )
+    _add_format_arg(techmap_parser)
+    techmap_parser.set_defaults(func=techmap_cmd.run)
+
+
+def _add_gen_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``gen`` verb for running a headless PCell layout generator.
+
+    Run a named layout generator against a JSON params object and PDK
+    reference, producing a GDS/OASIS stream. See docs/cli/gen.md for full
+    details.
+    """
+    gen_parser = subparsers.add_parser(
+        "gen",
+        help="generate a parametrized layout cell (headless PCell harness)",
+        description=(
+            "Run a named layout generator against a JSON params object and "
+            "PDK reference, producing a GDS/OASIS stream plus a structured "
+            "report -- see docs/design/layout-generator-spike.md section 2 "
+            "for the request/response contract. Runs fully headless via "
+            "KLayout's native pya.PCellDeclarationHelper -- no GUI, no Qt. "
+            "PDK resolution reuses `klt pdk find`'s resolver. Note: every "
+            "generator except resistor_strip only supports the sky130/"
+            "gf180mcu PDK families today (any other resolved family is an "
+            "application error) -- see docs/cli/gen.md's 'PDK-family "
+            "support' section. --list-pdk-pcells/--pdk-pcell reach the "
+            "resolved PDK's *own* shipped PCell library instead of a klt "
+            "built-in generator."
+        ),
+    )
+    gen_parser.add_argument(
+        "generator",
+        nargs="?",
+        default=None,
+        help="generator to run (see --list for available generators)",
+    )
+    # `--list`, `--list-pdk-pcells` and `--pdk-pcell` each select a different
+    # mode for this one verb, so argparse rejects any pair of them itself
+    # (usage error, exit 2 -- see docs/cli/gen.md's exit-code table).
+    gen_mode = gen_parser.add_mutually_exclusive_group()
+    gen_mode.add_argument(
+        "--list",
+        action="store_true",
+        help="list available generators and their params, then exit",
+    )
+    gen_mode.add_argument(
+        "--list-pdk-pcells",
+        dest="list_pdk_pcells",
+        action="store_true",
+        help=(
+            "list the PCell libraries the resolved PDK itself ships under "
+            "libs.tech/klayout/python/ (with each cell's params), then exit"
+        ),
+    )
+    gen_mode.add_argument(
+        "--pdk-pcell",
+        dest="pdk_pcell",
+        default=None,
+        metavar="LIBRARY/CELL",
+        help=(
+            "instantiate a PCell the resolved PDK itself ships, named "
+            "'<library>/<cell>' as reported by --list-pdk-pcells, instead of "
+            "a klt built-in generator"
+        ),
+    )
+    gen_parser.add_argument(
+        "--params",
+        default=None,
+        help=(
+            "generator params as a path to a JSON file, or an inline JSON "
+            "object (e.g. '{\"num\": 8}'); omit to use every param's default"
+        ),
+    )
+    _add_pdk_args(gen_parser)
+    gen_parser.add_argument(
+        "--cell-name",
+        dest="cell_name",
+        default=None,
+        help="name for the generated top cell (default: <generator>_0)",
+    )
+    gen_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="output GDS/OASIS path (default: <cell_name>.gds)",
+    )
+    _add_format_arg(gen_parser)
+    gen_parser.set_defaults(func=gen_cmd.run)
+
+
+def _add_gen_compose_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``gen-compose`` verb for composing generated blocks.
+
+    Place already-generated `klt gen` blocks and/or existing library cells
+    into one composed GDS/OASIS stream. See docs/cli/gen-compose.md for full
+    details.
+    """
+    gen_compose_parser = subparsers.add_parser(
+        "gen-compose",
+        help="place already-generated blocks and library cells into one composed cell",
+        description=(
+            "Place a set of already-generated `klt gen` blocks (each block's "
+            "own JSON response, read from a file path or embedded inline) "
+            "and/or existing library cells (blocks[].cell -- an existing cell "
+            "in a stream, named by gds_path/cell_name, with its bbox read from "
+            "the stream when not declared) into "
+            "one composed GDS/OASIS stream, per a request document's "
+            "blocks[]/placement/connectivity[]/routing/options shape -- see "
+            "docs/design/gen-composition-spike.md section 2 for the contract "
+            "and docs/cli/gen-compose.md for the CLI surface. Supports "
+            'placement.strategy: "row" (single left-to-right strip), '
+            '"explicit" (each block at its own declared origin), and "array" '
+            "(one block repeated on a regular rows x cols grid, emitted as a "
+            "single hierarchical instance); "
+            "connectivity[] is always validated, and routed when `routing` "
+            "is supplied (omitting/emptying `routing` is a declare-only "
+            "validate-without-drawing request, #1188). Its own response is a "
+            "valid blocks[].generator_report for a further run (generator: "
+            "'gen-compose', plus a ports[] promoted from pins[]), so "
+            "compositions nest. A distinct top-level "
+            "verb (not a "
+            "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
+            "'CLI shape' note for why. Runs fully headless via KLayout's "
+            "native pya -- no GUI, no Qt. Takes a request-document path (like "
+            "`klt sim`/`klt lvs`), not positional block file args. "
+            "`nets[].legs[].routed: true` is NOT a DRC-clean guarantee -- "
+            "it means this command's own routability heuristics found no "
+            "problem, not that none exists; always re-run `klt drc` on the "
+            "composed output before treating it as sign-off ready, see "
+            "docs/cli/gen-compose.md's 'Geometry is advisory' note."
+        ),
+    )
+    gen_compose_parser.add_argument(
+        "request", help="path to a klt gen-compose request JSON file"
+    )
+    _add_format_arg(gen_compose_parser)
+    gen_compose_parser.set_defaults(func=gen_compose_cmd.run)
+
+
+def _add_draw_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``draw`` verb for writing a primitive GDSII/OASIS stream.
+
+    Write a GDSII/OASIS stream verbatim from a JSON description of polygons
+    and labels. See docs/cli/draw.md for full details.
+    """
+    draw_parser = subparsers.add_parser(
+        "draw",
+        help="write a primitive GDSII/OASIS stream from a JSON shape description",
+        description=(
+            "Write a GDSII/OASIS stream verbatim from a JSON description of "
+            "polygons and labels on explicit (layer, datatype) pairs. The "
+            "deliberately-dumb write-side counterpart to the read-side verbs: "
+            "no PDK awareness and no rule checking -- so a DRC flow's negative "
+            "case (a known-bad fixture that must come back flagged) can be "
+            "produced with klt alone, along with minimal deck-bug reproducers "
+            "and layer-map sanity checks. Unlike `klt gen`, it will happily "
+            "emit rule-violating geometry; every response is stamped with a "
+            "loud not-design-legal warning. See docs/cli/draw.md for the "
+            "request/response contract. Runs fully headless via klayout.db -- "
+            "no GUI, no Qt."
+        ),
+    )
+    draw_parser.add_argument(
+        "--params",
+        default=None,
+        help=(
+            "shape/label description as a path to a JSON file, or an inline "
+            'JSON object (e.g. \'{"shapes": [{"layer": [66, 20], '
+            '"rect_um": [0, 0, 1, 0.15]}]}\'); required'
+        ),
+    )
+    draw_parser.add_argument(
+        "--cell-name",
+        dest="cell_name",
+        default=None,
+        help="name for the written top cell (default: TOP)",
+    )
+    draw_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="output GDS/OASIS path (default: <cell_name>.gds)",
+    )
+    _add_format_arg(draw_parser)
+    draw_parser.set_defaults(func=draw_cmd.run)
 
 
 def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
