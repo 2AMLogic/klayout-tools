@@ -1,0 +1,111 @@
+{
+  "netlist": "oscillator_device.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "5n 20u"
+  },
+  "measurements": [
+    {
+      "name": "vth_lo_v",
+      "spice": ".meas tran vth_lo_v AVG v(vth_lo) FROM=6u TO=18u",
+      "unit": "V"
+    },
+    {
+      "name": "vth_hi_v",
+      "spice": ".meas tran vth_hi_v AVG v(vth_hi) FROM=6u TO=18u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_eff_v",
+      "spice": ".meas tran dv_eff_v param='vth_hi_v-vth_lo_v'",
+      "unit": "V"
+    },
+    {
+      "name": "t_edge1",
+      "spice": ".meas tran t_edge1 WHEN v(q)=0.75 RISE=1 TD=6u",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge2",
+      "spice": ".meas tran t_edge2 WHEN v(q)=0.75 RISE=2 TD=6u",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge4",
+      "spice": ".meas tran t_edge4 WHEN v(q)=0.75 RISE=4 TD=6u",
+      "unit": "s"
+    },
+    {
+      "name": "period",
+      "spice": ".meas tran period param='t_edge2-t_edge1'",
+      "unit": "s",
+      "limits": {
+        "min": 1.4e-6,
+        "max": 2.2e-6
+      }
+    },
+    {
+      "name": "period_avg",
+      "spice": ".meas tran period_avg param='(t_edge4-t_edge1)/3'",
+      "unit": "s",
+      "limits": {
+        "min": 1.4e-6,
+        "max": 2.2e-6
+      }
+    },
+    {
+      "name": "period_drift_pct",
+      "spice": ".meas tran period_drift_pct param='100*(period_avg-period)/period_avg'",
+      "unit": "%",
+      "limits": {
+        "min": -1.0,
+        "max": 1.0
+      }
+    },
+    {
+      "name": "vo_high_v",
+      "spice": ".meas tran vo_high_v MAX v(vo) FROM=6u TO=18u",
+      "unit": "V",
+      "limits": {
+        "max": 1.55
+      }
+    },
+    {
+      "name": "vo_low_v",
+      "spice": ".meas tran vo_low_v MIN v(vo) FROM=6u TO=18u",
+      "unit": "V",
+      "limits": {
+        "min": 0.15
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 300,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
+}

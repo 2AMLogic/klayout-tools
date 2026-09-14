@@ -170,3 +170,11 @@ This is a comparator *core* on its own testbench, not a full oscillator:
   next-step-4 ordering.
 
 These are the shape of the follow-on issue this spike hands off to.
+
+**Update (issue #1814):** all but the last of those have since been built
+around this core, and the assembled circuit oscillates inside the task's
+own 1.4-2.2 us band at all 18 corners — see
+[`relaxation-oscillator-device-level-assembly.md`](relaxation-oscillator-device-level-assembly.md).
+#1795's regenerative-feedback / PTAT-CTAT work remains open; that document
+identifies the reference resistor's temperature coefficient as the single
+term owning essentially all of the assembled oscillator's PVT spread.
