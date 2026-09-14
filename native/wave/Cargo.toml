@@ -1,0 +1,65 @@
+[package]
+name = "klt-wave-native"
+version = "0.1.0"
+edition = "2021"
+description = "Native-Rust FST waveform query engine for `klt wave query` (2AMLogic/klayout-tools, issue #1599 -- Epic #1585 Phase 2a), against the contract docs/design/waveform-query-contract-spike.md"
+license = "MIT"
+publish = false
+
+# Deliberately a plain `cargo build`/`cargo test` binary crate -- no
+# `pyo3`/`maturin` wiring, matching `native/techmap/Cargo.toml`'s and
+# `native/statime/Cargo.toml`'s own documented rationale ("no
+# pyo3/maturin wiring... remain open, deferred until a 'Go' verdict
+# warrants them"). `klt wave query`'s own contract
+# (`klt wave query <request.json> [--format text|json]`, per
+# docs/design/waveform-query-contract-spike.md) is request-document-in,
+# response-document-out -- the same shape `klt-techmap <request.json>`
+# already uses as a subprocess invocation from `klayout_tools/techmap.py`
+# -- so the plain-binary-plus-subprocess pattern is a direct fit.
+#
+# This crate's own original code (the CLI/envelope/query-op layer under
+# `src/`) is MIT, matching the rest of this repo. It also incorporates
+# portions ported and adapted from `boldaxolotl/booley`
+# (`crates/bwave/src/{fst,cache,signal,format}.rs`, Apache-2.0) -- see
+# `/NOTICE` at the repository root and the file-header comment on every
+# file under `src/` that carries ported content. Incorporating a
+# permissively-licensed (Apache-2.0) component into an MIT crate does not
+# change this crate's own license field -- see
+# docs/design/waveform-query-contract-spike.md section 12c.
+
+[[bin]]
+name = "klt-wave"
+path = "src/main.rs"
+
+[lib]
+name = "klt_wave_native"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# FST reader -- a normal crates.io build dependency (BSD-3-Clause, Kevin
+# Laeufer / `ekiwi`), never vendored or path-overridden -- per
+# docs/design/waveform-query-contract-spike.md section 11's decision to
+# depend on stock `fst-reader`/`fst-writer` rather than port booley's own
+# vendored-and-modified copy.
+fst-reader = "0.17"
+
+# Glob matching for signal-name patterns (ported `signal.rs` depends on
+# this crate upstream too; same normal-dependency treatment).
+globset = "0.4"
+
+# `provenance.input.content_hash` (docs/json-contract.md's shared
+# provenance block) -- sha256 of the store file this query actually read.
+sha2 = "0.10"
+
+[dev-dependencies]
+# Used only by `tests/` to synthesize the small committed FST fixture at
+# test-build time (see tests/fixtures/README.md) -- a normal crates.io
+# dependency, not the vendored/modified copy booley carries in
+# `crates/bwave/vendor/fst-writer/` (decision record section 11).
+fst-writer = "0.3"
+
+[profile.release]
+lto = true
