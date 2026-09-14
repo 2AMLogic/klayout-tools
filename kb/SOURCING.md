@@ -174,3 +174,110 @@ formalizes. The only gap was that the discipline wasn't written down
 anywhere until now; this file closes that gap. Future entries should still
 prefer an open-access/preprint source when an equivalent one exists (case 1
 above beats case 2 when both are available).
+
+## Known ngspice/sky130 simulation footguns (for `examples/kb/*.spice` authors)
+
+Sourcing content is only half of what lands in `kb/entries/`; the
+`examples/kb/<id>/*.spice` reference netlists that back an entry's
+`artifacts` must actually simulate cleanly (`klt sim`). This section
+documents a reproducible toolchain footgun found while sizing
+`examples/kb/sky130-lc-vco-cross-coupled/lc_vco.spice` (issue #1804) so
+future authors sizing small-per-finger-width binned devices see it before
+losing time to it.
+
+**Symptom**: `sky130_fd_pr__nfet_01v8` at `L=0.15` (the model's smallest
+length bin) with `nf>=3` and a small per-instance `W` (`W=10` reproduces it)
+can fail ngspice's own BSIM4 parameter-range check with a fatal error, even
+though the instance parses and elaborates fine:
+
+```
+Checking parameters for BSIM 4.5 model xm1:sky130_fd_pr__nfet_01v8__model.8
+Fatal: u0 at current temperature = -0.00756489 is not positive.
+Fatal: Pclm = -0.597778 is not positive.
+Fatal error: detected during BSIM4v5.5.0 parameter checking for
+    model xm1:sky130_fd_pr__nfet_01v8__model.8 of device instance m.xm1.msky130_fd_pr__nfet_01v8
+```
+
+**Verified against this repo's pinned toolchain** — ngspice-46, sky130A at
+the exact commit `scripts/aws/build-remote-sim-ami.sh` pins
+(`c6d73a35f524070e85faff4a6a9eef49553ebc2b`), resolved via a normal
+`PDK_ROOT`/`volare` install (the same resolution `klt sim`/`klt pdk` use) —
+2026-09-14, `ngspice -b` on a standalone `.op` deck:
+
+```spice
+.lib "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice" tt
+Vdd vdd 0 DC 1.8
+Vg g 0 DC 0.9
+XM1 vdd g 0 0 sky130_fd_pr__nfet_01v8 L=0.15 W=10 nf=4 mult=1
+.control
+op
+.endc
+.end
+```
+
+reproduces the fatal above 100% of the time (`u0`/`Pclm` values match
+byte-for-byte). `nf=1`/`nf=2` at the same `L`/`W` (per-finger width 10um/5um)
+pass; `nf=3`/`nf=4` (per-finger width 3.33um/2.5um) fault, matching the
+originally reported trigger window.
+
+**Root-cause investigation, with what was checked and what was ruled out**
+(this is the honest state of the investigation, not a settled conclusion):
+
+- **Not the originally suspected `MC_MM_SWITCH*AGAUSS(...)` mismatch
+  terms.** `grep -rn MC_MM_SWITCH` over the installed `sky130A` ngspice deck
+  shows those terms only in the SONOS flash-cell (`sonos*`) and `r+c`
+  mismatch-corner models — `sky130_fd_pr__nfet_01v8`'s own model cards
+  contain no `MC_MM_SWITCH`-gated term at all, so that mechanism cannot be
+  what is producing the negative `u0`/`Pclm` here. This hypothesis from the
+  original report is refuted by direct inspection of the model file, not
+  just by `MC_MM_SWITCH=0` (which the `tt` corner already sets by default).
+- **Not specific to the *second* instantiation of a repeated bin.** A
+  netlist with only `XM1` (no second instance at all) at the identical
+  fault geometry (`L=0.15 W=10 nf=4`) reproduces the exact same fatal,
+  labeled against `xm1` instead of `xm2`. Instantiating the same safe
+  geometry twice (`nf=2`, confirmed pass) also stays clean. The fault
+  correlates with geometry alone, not with instance count or repetition —
+  this refutes the "idempotency across repeated instantiation" framing the
+  original report led with.
+- **Correlates with the BSIM4 model bin actually selected, not simply
+  per-finger width.** ngspice's own binned-model selection for this device
+  uses the netlist's literal `W=` value (`10` in the repro above) against
+  each bin's own `wmin`/`wmax` — *not* an already-per-finger or
+  already-total-width-adjusted value. `W=10` for `L=0.15` always selects
+  `sky130_fd_pr__nfet_01v8__model.8` (`wmin=7um`, `wmax=100um`) regardless
+  of `nf`, while `W=5, nf=3` (the same nominal per-finger width as the
+  faulting `W=10, nf=3` case) selects a *different* bin
+  (`sky130_fd_pr__nfet_01v8__model.26`, `wmin=3um, wmax=5um`) and passes
+  cleanly. So the fault is specific to bin `.8`'s own length/width-scaling
+  coefficients evaluated at `nf>=3` — not a general "small per-finger width"
+  rule that would apply uniformly across bins. **This part is not fully
+  root-caused**: which BSIM4 term inside bin `.8`'s card is responsible, and
+  why it flips sign specifically at `nf>=3` rather than scaling smoothly
+  with `nf`, was not tracked down further.
+- **`sky130_fd_pr__pfet_01v8` did not reproduce** at the identical geometry
+  (`L=0.15 W=10 nf=4`) in a single quick check — this is a narrower check
+  than the nfet sweep above, not an exhaustive search of the pfet's own bins.
+- Net effect: this looks like a **sky130 model-card characterization edge
+  case** (bin `.8`'s own parameter derivation going out of its valid range
+  for `nf>=3`), not an ngspice-46 bug or something specific to this host's
+  build — but the exact BSIM4 term at fault is unverified.
+
+**Practical guidance (the actual mitigation, independent of root cause)**:
+when sizing a binned `sky130_fd_pr__nfet_01v8`/`pfet_01v8` device at
+`L=0.15` with `nf>=3`, keep the per-finger `W` comfortably above the
+observed fault window (5um was clean in this investigation; 10um is what
+`examples/kb/sky130-lc-vco-cross-coupled/lc_vco.spice` and
+`examples/kb/cml-tx-line-driver/cml_driver.spice` already use for their
+binned small-`L` devices) rather than relying on `nf` alone to hit a target
+width. This is cheap and already the pattern these two reference netlists
+follow.
+
+**No automated lint was added for this.** The fault is specific to one
+BSIM4 model bin's own coefficients at a given `nf`, not a simple
+per-finger-width formula (the `W=5, nf=3` counterexample above selects a
+different, safe bin at the *same* nominal per-finger width) — a netlist-text
+check general enough to catch this accurately, without false-positiving on
+safe geometries that happen to route through a different bin, would need
+its own per-bin characterization across sky130's ~1500 fingered-device model
+bins. That is not a cheap check; documenting the trigger window here is the
+practical mitigation for now.
