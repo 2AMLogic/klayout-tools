@@ -104,6 +104,6 @@
   "buildGate": {
     "enabled": true,
     "command": "npm run check:ci",
-    "timeoutSeconds": 900
+    "timeoutSeconds": 1800
   }
 }

@@ -34,6 +34,7 @@ Tests skip (never fail) when ngspice is not installed, matching
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -47,7 +48,12 @@ from klayout_tools.power import run_power
 CORPUS_DIR = Path(__file__).parent / "corpus"
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
-HAVE_NGSPICE = shutil.which("ngspice") is not None
+#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
+#: by CI) opts a host with ngspice installed out of this slow tier too; see
+#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
+HAVE_NGSPICE = shutil.which("ngspice") is not None and (
+    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
+)
 _SKIP_NO_NGSPICE = pytest.mark.skipif(
     not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
 )
