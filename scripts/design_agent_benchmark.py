@@ -269,6 +269,22 @@ def reference_candidate_provider(
     return str(descriptor_path), None
 
 
+#: Marks :func:`reference_candidate_provider` as safe for
+#: :func:`run_task_attempts`'s attempt-caching shortcut (issue #1781): a
+#: provider carrying ``is_deterministic = True`` is documented (like this
+#: one) to return byte-identical output regardless of ``attempt_index``, so
+#: rerunning `klt eval` against it ``n_attempts`` times can never change the
+#: scored outcome -- only multiply cost. A plain function attribute (rather
+#: than a new provider-registry abstraction) so the opt-in stays visible
+#: right next to the provider it describes, and so a future deterministic
+#: provider can opt in the same way without touching `run_task_attempts`
+#: itself. Deliberately **not** set on `live_agent_candidate_provider` /
+#: `interactive_agent_candidate_provider` (issue #1732/#1739): those drive a
+#: real agent invocation per attempt and are genuinely non-deterministic --
+#: every attempt must still run for real.
+reference_candidate_provider.is_deterministic = True  # type: ignore[attr-defined]
+
+
 # --------------------------------------------------------------------------
 # Live-agent candidate provider (issue #1732)
 # --------------------------------------------------------------------------
@@ -915,7 +931,44 @@ def run_task_attempts(
     provider: CandidateProvider,
     repo_root: Path,
 ) -> list[dict[str, Any]]:
-    return [run_attempt(task, i, provider, repo_root) for i in range(n_attempts)]
+    """Run ``n_attempts`` attempts for ``task`` through ``provider``.
+
+    **Deterministic-provider caching (issue #1781)**: when ``provider`` is
+    marked ``is_deterministic = True`` (see
+    :func:`reference_candidate_provider`), every attempt is documented to
+    return byte-identical output regardless of ``attempt_index`` -- so
+    running `klt eval` against it more than once per task adds zero pass@k
+    signal, only cost. This runs attempt 0 for real and replicates that one
+    real result across the remaining ``n_attempts - 1`` slots rather than
+    re-invoking the provider/`klt eval` chain again: each replicated
+    attempt keeps its own ``attempt`` index (so :func:`summarize_task`'s
+    ``n``/``c`` counts, and therefore pass@k, are identical to what a real
+    ``n_attempts``-deep rerun against an unmodified deterministic provider
+    would have produced) but is tagged ``"cached": True`` with
+    ``wall_clock_s: 0.0``, so :func:`summarize_task`'s wall-clock total
+    reflects the one real run's actual cost rather than a tautological
+    n-times multiple of it.
+
+    A provider that does not opt in (the default; every non-deterministic
+    provider, e.g. ``live-agent``/``interactive-agent``, issues #1732/#1739)
+    runs every attempt for real, unchanged from before this caching was
+    added.
+    """
+    if n_attempts <= 0:
+        return []
+    if not getattr(provider, "is_deterministic", False):
+        return [run_attempt(task, i, provider, repo_root) for i in range(n_attempts)]
+
+    first = run_attempt(task, 0, provider, repo_root)
+    first["cached"] = False
+    attempts = [first]
+    for i in range(1, n_attempts):
+        cached = dict(first)
+        cached["attempt"] = i
+        cached["wall_clock_s"] = 0.0
+        cached["cached"] = True
+        attempts.append(cached)
+    return attempts
 
 
 # --------------------------------------------------------------------------

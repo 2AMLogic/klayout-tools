@@ -298,17 +298,29 @@ This is a first milestone, not the full issue #1719 scope.
    derivation itself needed no further change for the swap to stay correct.
 
 3. **The sky130 swap (limitation 2) made this harness's own CI meaningfully
-   slower, tracked separately (issue #1781).** `ngspice` parsing the full
-   `sky130.lib.spice` deck adds a fixed ~45-120s overhead per corner
-   regardless of circuit complexity -- `"backend": "local-parallel"` +
-   `"options.max_workers": 4` was added to every real-device
-   `sim_request*.json` as an immediate mitigation, and `--attempts` for the
-   deterministic reference-provider self-check was reduced from 5 to 2 in
-   `design-agent-benchmark.yml` (since that provider is byte-identical
-   every attempt -- 5x is now 5x a much larger number for zero additional
-   signal). Issue #1781 tracks a real fix (caching a deterministic
-   provider's repeated attempts, or defaulting the harness's own `klt sim`
-   calls to a parallel backend) and restoring `--attempts 5`.
+   slower (issue #1736); fixed by caching, not a bigger timeout (issue
+   #1781).** `ngspice` parsing the full `sky130.lib.spice` deck adds a fixed
+   ~45-120s overhead per corner regardless of circuit complexity --
+   `"backend": "local-parallel"` + `"options.max_workers": 4` was added to
+   every real-device `sim_request*.json` as an immediate mitigation
+   (#1736). The deterministic reference-provider self-check's `--attempts`
+   was temporarily dropped from 5 to 2 as a stopgap, since that provider is
+   byte-identical every attempt -- re-running `klt eval` against it more
+   than once per task multiplied the new, higher per-corner cost for zero
+   additional pass@k signal. Issue #1781's real fix: `run_task_attempts`
+   now runs any provider marked `is_deterministic = True` (only
+   `reference_candidate_provider`) for real exactly once per task and
+   replicates that one scored result across the remaining attempt slots,
+   so `--attempts 5` is back in `design-agent-benchmark.yml` at no extra
+   cost over `--attempts 1`. Measured end to end on a full CI run (workflow
+   run 34806989777, 2026-09-14, PDK cache warm): the main job's "Validate
+   task set + reference solutions" step took 13m27s and the (now
+   attempts-independent) "Run the harness" step took 13m29s -- essentially
+   the same cost, confirming the caching eliminated the `--attempts`
+   multiplier. Total job time (including the pytest regression step and
+   setup) was 35m53s, against a re-tuned `timeout-minutes: 90` (down from
+   240) sized for a PDK cache miss plus runner variance, not a defensive
+   guess.
 
 A fuller interactive/tool-using live-agent provider (see limitation 1
 above) now ships as `--provider interactive-agent` (issue #1739). The

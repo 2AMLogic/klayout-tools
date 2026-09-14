@@ -113,6 +113,117 @@ def test_pass_at_k_rejects_k_greater_than_n():
 
 
 # --------------------------------------------------------------------------
+# Unit tests: deterministic-provider attempt caching (issue #1781)
+# --------------------------------------------------------------------------
+#
+# The deterministic `reference_candidate_provider` returns byte-identical
+# output for every `attempt_index` by construction (its own docstring: "del
+# attempt_index -- every attempt is identical for this provider"), so
+# `run_task_attempts` running it (and scoring it via `klt eval`) more than
+# once per task multiplies wall-clock cost for zero additional pass@k
+# signal -- issue #1781's core waste. These tests exercise
+# `run_task_attempts`'s caching shortcut directly, with `klt eval` itself
+# stubbed out (`dab.run_eval` monkeypatched), so they run everywhere
+# without `ngspice`/a real sky130A PDK.
+
+
+def _counting_provider(call_log: list[int]):
+    def provider(_task: dict, attempt_index: int, _repo_root: Path):
+        call_log.append(attempt_index)
+        return f"descriptor-{attempt_index}", None
+
+    return provider
+
+
+def test_run_task_attempts_runs_a_deterministic_provider_exactly_once(monkeypatch):
+    """A provider opted into `is_deterministic = True` must be invoked (and
+    scored) for real exactly once per task, regardless of `n_attempts` --
+    every remaining attempt slot is a replicated copy of that one real
+    result, not a fresh `klt eval` run."""
+    monkeypatch.setattr(
+        dab, "run_eval", lambda *_a, **_k: {"valid": True, "objective": {"v": 1}}
+    )
+    call_log: list[int] = []
+    provider = _counting_provider(call_log)
+    provider.is_deterministic = True
+
+    task = {"id": "fake-task", "tier": "easy"}
+    attempts = dab.run_task_attempts(task, 5, provider, Path("/repo"))
+
+    assert call_log == [0]  # the provider itself only ran for attempt 0
+    assert [a["attempt"] for a in attempts] == [0, 1, 2, 3, 4]
+    assert all(a["valid"] for a in attempts)
+    assert attempts[0]["cached"] is False
+    assert all(a["cached"] is True for a in attempts[1:])
+    assert all(a["wall_clock_s"] == 0.0 for a in attempts[1:])
+
+
+def test_run_task_attempts_caching_preserves_a_failing_outcome(monkeypatch):
+    """The cached copies must replicate whatever the one real attempt
+    scored -- including a failure -- so pass@k for a deterministic provider
+    against a broken reference is unaffected by this shortcut (matches
+    `test_deliberately_broken_reference_netlist_fails_its_gate_and_drops_
+    pass_rate`'s real-ngspice integration coverage of the same claim)."""
+    monkeypatch.setattr(dab, "run_eval", lambda *_a, **_k: {"valid": False})
+    call_log: list[int] = []
+    provider = _counting_provider(call_log)
+    provider.is_deterministic = True
+
+    task = {"id": "fake-task", "tier": "easy"}
+    attempts = dab.run_task_attempts(task, 3, provider, Path("/repo"))
+
+    assert call_log == [0]
+    assert all(not a["valid"] for a in attempts)
+    summary = dab.summarize_task(task, attempts, ks=[1, 3])
+    assert summary["solved"] == 0
+    assert summary["pass_at_k"]["1"] == 0.0
+
+
+def test_run_task_attempts_runs_every_attempt_for_a_non_deterministic_provider(
+    monkeypatch,
+):
+    """A provider that does not opt in (the default -- every agent-backed
+    provider, issues #1732/#1739) must run every attempt for real; the
+    caching shortcut above must never engage for it, since a genuinely
+    non-deterministic provider's later attempts can legitimately differ
+    from its first."""
+    monkeypatch.setattr(
+        dab, "run_eval", lambda *_a, **_k: {"valid": True, "objective": {"v": 1}}
+    )
+    call_log: list[int] = []
+    provider = _counting_provider(call_log)  # is_deterministic left unset
+
+    task = {"id": "fake-task", "tier": "easy"}
+    attempts = dab.run_task_attempts(task, 3, provider, Path("/repo"))
+
+    assert call_log == [0, 1, 2]
+    assert not any(a.get("cached") for a in attempts)
+
+
+def test_run_task_attempts_zero_attempts_returns_empty_list():
+    task = {"id": "fake-task", "tier": "easy"}
+    attempts = dab.run_task_attempts(
+        task, 0, dab.reference_candidate_provider, Path("/repo")
+    )
+    assert attempts == []
+
+
+def test_reference_candidate_provider_is_marked_deterministic():
+    assert dab.reference_candidate_provider.is_deterministic is True
+
+
+def test_live_and_interactive_agent_providers_are_not_marked_deterministic():
+    """The agent-backed providers must never opt into the caching shortcut
+    above -- each attempt drives a genuinely non-deterministic live
+    invocation."""
+    assert getattr(dab.make_live_agent_provider(), "is_deterministic", False) is False
+    assert (
+        getattr(dab.make_interactive_agent_provider(), "is_deterministic", False)
+        is False
+    )
+
+
+# --------------------------------------------------------------------------
 # Unit tests: schema validation
 # --------------------------------------------------------------------------
 
