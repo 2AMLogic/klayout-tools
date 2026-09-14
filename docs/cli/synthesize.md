@@ -280,20 +280,29 @@ cross-checked against that same install's liberty/LEF files directly. See
 each table's own docstring in `synthesize.py` for the full per-value
 citation.
 
-**Known limitation.** Unlike `sky130_fd_sc_hd`/`gf180mcu_fd_sc_mcu9t5v0`,
-`sg13g2_stdcell` is not yet verified end to end against a real install: a
-real IHP-Open-PDK v0.3.0 fetch names its standard-cell liberty views
-`sg13g2_stdcell_typ_1p20V_25C.lib` (a single underscore before the corner
-tag, no `techlef/` subdirectory for its tech LEF), while `pdk.py`'s generic
-`list_cell_libraries()`/`lef_files()` resolution — and this module's own
-`_resolve_liberty`'s literal `f"{cell_library}__{corner}.lib"` pattern —
-assume the open_pdks-wide `_fd_sc_`-marker/double-underscore convention
-`sky130_fd_sc_hd`/`gf180mcu_fd_sc_mcu9t5v0` both follow. So
-`klt synthesize --platform sg13g2_stdcell` against a real IHP install
-still fails at liberty/LEF resolution today, before ever reaching the
-platform tables documented above. This is a distinct gap in the generic
-PDK-resolution layer (`pdk.py`), not a gap in this module's own per-library
-tables — tracked in issue #1790.
+**Naming convention (resolved, issue #1790).** A real IHP-Open-PDK v0.3.0
+fetch does not follow the open_pdks-wide `_fd_sc_`-marker/double-underscore
+convention `sky130_fd_sc_hd`/`gf180mcu_fd_sc_mcu9t5v0` both do: it names its
+standard-cell liberty views `sg13g2_stdcell_typ_1p20V_25C.lib` (a single
+underscore before the corner tag) and ships no `techlef/` subdirectory for
+its tech LEF. That gap — in the generic PDK-resolution layer (`pdk.py`'s
+`list_cell_libraries()`/`lef_files()`) and in this module's own
+`_resolve_liberty`, never in the per-library tables above — was **fixed in
+#1796**: `_resolve_liberty` now tries the single-underscore
+`<cell_library>_<corner>.lib` form when the double-underscore one is absent
+(see "PDK / liberty resolution" above), so `klt synthesize` reaches these
+tables against a real IHP install.
+
+**Verified end to end.** `klt synthesize` against a real fetched
+IHP-Open-PDK v0.3.0 install (`--pdk ihp-sg13g2`, `cell_library:
+"sg13g2_stdcell"`, nominal corner `typ_1p20V_25C`) synthesizes the repo's
+own `gcd.v` to a `status: "ok"` response — 369 instances, 5831.48 µm² area,
+71.63 nW leakage, `provenance.deck.name`
+`sg13g2_stdcell__typ_1p20V_25C` — mapping only `sg13g2_*` cells, with the
+`_ABC_DONT_USE_GLOBS` exclusions honored (no `sg13g2_dfrbp_2`/`sg13g2_lgcp_1`
+in the mapped netlist) and leakage totalled through the existing
+`_LEAKAGE_UNIT_TO_NW["pw"]` entry this library's `"1pW"` liberty unit already
+matched.
 
 ## `timing`: ABC's own pre-layout estimate, **not** signoff STA
 

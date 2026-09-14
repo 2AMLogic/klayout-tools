@@ -163,15 +163,15 @@ separately (issue #1329).
 
 ## Live verification
 
-Both supported standard-cell libraries have now been driven through this
-command end to end against a real `openroad` binary and a real PDK install.
-Neither run is PR-gating, and only one of the two has a CI equivalent at
-all: the sky130 pipeline is reproducible on demand via the
+All three supported standard-cell libraries have now been driven through
+this command end to end against a real `openroad` binary and a real PDK
+install. None of the runs is PR-gating, and only one of the three has a CI
+equivalent at all: the sky130 pipeline is reproducible on demand via the
 `workflow_dispatch`-only `place-and-route-smoke.yml` job (see "CI" above),
 which provisions `openroad` and fetches a real sky130A install; the
-gf180mcu run is not reproducible in CI, since that workflow fetches sky130A
-only. Each is recorded here so a reader can tell which claims rest on a
-live tool run and which rest on stubbed tests.
+gf180mcu and IHP sg13g2 runs are not reproducible in CI, since that
+workflow fetches sky130A only. Each is recorded here so a reader can tell
+which claims rest on a live tool run and which rest on stubbed tests.
 
 ### `sky130_fd_sc_hd` (issue #425)
 
@@ -250,21 +250,43 @@ in **#1336**.
 
 ### `sg13g2_stdcell` (issue #1784)
 
-Unlike the two entries above, this platform is **not yet live-verified end
-to end** — `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/`_ANTENNA_DIODE_CELLS`/
-`_POWER_PIN_PATTERNS`/`_FILLER_CELLS`/`_EXTRACT_DECK_FOR_CELL_LIBRARY` (and
-`synthesize.py`'s own `_ABC_CONSTR_INPUTS`/`_ABC_DONT_USE_GLOBS`/
-`_TIE_CELLS`) all carry a real `sg13g2_stdcell` entry, each cross-checked
-against a real fetched IHP-Open-PDK v0.3.0 install's own LibreLane platform
-config and liberty/LEF files directly (see each table's own docstring for
-the full citation), but an actual `klt synthesize`/`klt place-and-route` run
-against that same real install cannot reach these tables yet: liberty/LEF
-resolution itself fails first, for the reason documented under "PDK / LEF /
-liberty resolution" below (IHP's own `<cell_library>_<corner>.lib` naming,
-single underscore, versus the open_pdks `<cell_library>__<corner>.lib`
-convention every resolver in this codebase currently assumes). Closing that
-gap is tracked in issue #1790; this platform's tables are ready for the
-moment it lands.
+Run 2026-09-14 with `openroad 26Q3-1278-g4421880472` (from
+`openroad/orfs:latest` via the wrapper recipe above) against a real fetched
+IHP-Open-PDK v0.3.0 install (`--pdk ihp-sg13g2`), on the same GCD worked
+example — `klt synthesize` → `klt place-and-route`, floorplan through a full
+detailed route, `seed: 1`, nominal corner `typ_1p20V_25C`, `site:
+"CoreSite"`, `io.layer_h`/`layer_v` `Metal3`/`Metal2`. Not automated as an
+integration test: unlike sky130A/gf180mcu, IHP-Open-PDK is fetched by a
+manual/local `scripts/fetch-ihp-sg13g2.sh` step into this repo's gitignored
+`pdks/`, and is not provisioned by any CI workflow.
+
+**Routing result**: `status: "ok"`, `stage_reached: "route"`,
+`route_drc_violation_count: 0`, `antenna_violation_count: 0`,
+`setup_violation_count`/`hold_violation_count` both `0`, 389 placed
+components over 418 nets on a 17392.3 µm² die (14455.3 µm² core, 42.95%
+utilization), 13383 µm routed wirelength, and a valid merged GDS at the
+response's own `gds_path`.
+
+This is what makes the tables below live-verified rather than
+config-derived: each value reaches the real tool run verbatim —
+`clock_tree_synthesis -root_buf sg13g2_buf_16` (`_CTS_BUFFER_CELLS`),
+`set_routing_layers -signal Metal2-TopMetal2` (`_ROUTING_LAYER_RANGE`), and
+`repair_antennas sg13g2_antennanp` (`_ANTENNA_DIODE_CELLS`) all appear in
+the generated Tcl of the run above.
+
+Two scope notes specific to this platform:
+
+- **`request.power` is still unsupported**, deliberately — this library
+  ships no tap or endcap cells at all, so `_TAPCELL_CELLS` has no entry and
+  a PDN run raises the existing clear "no tapcell master known" error. See
+  "Power delivery" below. The run above omitted `request.power`, so the
+  response's `power` block reports that nothing there ran.
+- **The merged GDS was not DRC-checked.** Unlike the gf180mcu entry above,
+  no `klt drc` pass was run against this run's output — the routed-GDS
+  claim here is OpenROAD's own `route__drc_errors`, not a KLayout
+  signoff-deck result.
+
+## Stage granularity and invocation shape
 
 The contract names exactly four stages, in execution order:
 `"floorplan"` → `"place"` → `"cts"` → `"route"`. `klt place-and-route` runs
@@ -352,23 +374,23 @@ stage (e.g. `interconnect_corner: "max"` against an install that only ships
 a `"nom"` tech LEF): this raises the same clear error rather than silently
 falling back to `"nom"`.
 
-**Known limitation (issue #1784).** Both resolvers assume the open_pdks-wide
-`<cell_library>__<corner>` naming convention (a literal double underscore,
-plus a `techlef/` subdirectory for the tech LEF) that `sky130_fd_sc_hd`/
-`gf180mcu_fd_sc_mcu9t5v0` both follow. IHP-Open-PDK's `sg13g2_stdcell`
-library (`libs.ref/sg13g2_stdcell/`) does not: its liberty views are named
+**Naming conventions beyond open_pdks (issue #1790, resolved).** Neither
+resolver is limited to the open_pdks-wide `<cell_library>__<corner>`
+convention (a literal double underscore, plus a `techlef/` subdirectory for
+the tech LEF) that `sky130_fd_sc_hd`/`gf180mcu_fd_sc_mcu9t5v0` both follow.
+IHP-Open-PDK's `sg13g2_stdcell` library (`libs.ref/sg13g2_stdcell/`) does
+not follow it: its liberty views are named
 `sg13g2_stdcell_typ_1p20V_25C.lib` (a single underscore before the corner
 tag), and its tech LEF is a single, corner-invariant
 `libs.ref/sg13g2_stdcell/lef/sg13g2_tech.lef` with no `techlef/`
-subdirectory at all. So `klt place-and-route --pdk sg13g2_stdcell` against a
-real IHP-Open-PDK install still fails at liberty/LEF resolution today, even
-though the per-library reference-data tables below (CTS buffer, routing
-range, antenna-diode cell, power-pin patterns, filler cells, extraction
-deck) already carry a verified `sg13g2_stdcell` entry each. This is a gap in
-the generic resolvers above (`pdk.py`'s `lef_files()`/`list_cell_
-libraries()`, and each of `synthesize.py`'s/`place_and_route.py`'s own
-`_resolve_liberty`), not in the per-library tables themselves — tracked in
-issue #1790, separately from the table additions this section documents.
+subdirectory at all. Both shapes are handled: `_resolve_liberty` falls back
+to the single-underscore form, and `lef_files()` falls back to the
+corner-invariant `lef/` tech LEF (both described above). So
+`klt place-and-route` against a real IHP-Open-PDK install resolves its
+liberty/LEF and reaches the per-library reference-data tables below (CTS
+buffer, routing range, antenna-diode cell, power-pin patterns, filler
+cells, extraction deck), each of which carries a verified `sg13g2_stdcell`
+entry — live-verified end to end under "Live verification" above.
 
 Neither resolver is restricted to a single PDK family — any standard-cell
 library the resolved install ships `libs_ref`/LEF assets for resolves the
