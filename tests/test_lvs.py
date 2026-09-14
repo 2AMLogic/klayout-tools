@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import lvs, pdk
+from klayout_tools import lvs, lvs_netgen, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -9236,8 +9236,9 @@ def _stub_netgen_subprocess(
     side_effect: BaseException | None = None,
     captured_cmds: list | None = None,
 ):
-    """Stub `lvs.subprocess.run` for the netgen engine path -- mirrors
-    `tests/test_sim.py`'s `_stub_subprocess_run` for the ngspice wrap.
+    """Stub `lvs_netgen.subprocess.run` for the netgen engine path
+    (`_run_netgen_lvs` lives in `klayout_tools.lvs_netgen`, issue #1803) --
+    mirrors `tests/test_sim.py`'s `_stub_subprocess_run` for the ngspice wrap.
 
     The real `_run_netgen_lvs` derives its log path itself (a temp dir it
     owns), so the fake reads it back off `cmd[-1]` (the last positional
@@ -9256,7 +9257,7 @@ def _stub_netgen_subprocess(
                 handle.write(log_text)
         return fake_completed(stdout)
 
-    monkeypatch.setattr(lvs.subprocess, "run", fake_run)
+    monkeypatch.setattr(lvs_netgen.subprocess, "run", fake_run)
 
 
 def _netgen_request(tmp_path: Path, **extra) -> str:
