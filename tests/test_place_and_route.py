@@ -25,8 +25,11 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
   example end to end -- this is the acceptance criterion's "verified end to
   end against a real install" check. There is one per supported
   standard-cell library: `sky130_fd_sc_hd` (issue #425) and
-  `gf180mcu_fd_sc_mcu9t5v0` (issue #637), both gated the same way via
-  `_find_real_pnr_variant()`. Neither is required for CI (`ci.yml`'s
+  `gf180mcu_fd_sc_mcu9t5v0` (issue #637), gated via `_find_real_pnr_variant()`,
+  and `sg13g2_stdcell` (issue #1784), gated via the separate
+  `_find_real_ihp_pnr_variant()` -- IHP-Open-PDK ships no `techlef/`
+  subdirectory at all, so it cannot be found by the open_pdks-shaped probe
+  the other two share. None is required for CI (`ci.yml`'s
   PR-gating `test` job installs neither `openroad` nor a real
   standard-cell PDK; the `workflow_dispatch`-only
   `place-and-route-smoke.yml` job added by issue #1328 does provision
@@ -3606,15 +3609,18 @@ def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
 #: real sg13g2_stdcell run rather than carrying sky130's values under an
 #: sg13g2_stdcell name. The fabricated fixture still uses this test file's
 #: own `_make_pdk_install` open_pdks-shaped layout (`<cell_library>__
-#: <corner>.lib`/`techlef/<cell_library>__<corner>.tlef`) -- **not** a real
+#: <corner>.lib`/`techlef/<cell_library>__<corner>.tlef`) rather than a real
 #: IHP-Open-PDK install's own single-underscore, no-`techlef/`-directory
-#: naming, which `_resolve_liberty`/`lef_files` do not yet support (a
-#: distinct, tracked gap; see this table's own module docstring and
-#: issue #1784's PR discussion). These tests exercise the platform tables
-#: themselves -- `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/
-#: `_ANTENNA_DIODE_CELLS`/etc -- in isolation from that separate resolver
-#: gap, the same way every other non-sky130 platform test in this file
-#: already does.
+#: naming -- `single_underscore_naming=True`/`ihp_style_lef=True` fabricate
+#: that real shape instead, exercised directly by
+#: `test_resolve_liberty_nominal_corner_default_ihp_stdcell_shape`/
+#: `test_resolve_lef_ihp_stdcell_shape` above (issue #1790, since resolved)
+#: and by the real-install-gated
+#: `test_integration_real_openroad_gcd_worked_example_sg13g2` integration
+#: test below. These tests exercise the platform tables themselves --
+#: `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/`_ANTENNA_DIODE_CELLS`/etc --
+#: in isolation from that separate resolver concern, the same way every
+#: other non-sky130 platform test in this file already does.
 _SG13G2_CELL_LIBRARY = "sg13g2_stdcell"
 _SG13G2_CORNER = "typ_1p20V_25C"
 
@@ -6259,6 +6265,54 @@ _REAL_GF180MCU_PNR_VARIANT = _find_real_pnr_variant(
 )
 
 
+def _find_real_ihp_pnr_variant(cell_library: str) -> tuple[str, str] | None:
+    """IHP-Open-PDK-shaped twin of `_find_real_pnr_variant` (issue #1784).
+
+    `_find_real_pnr_variant` cannot find a real IHP-Open-PDK install: its
+    presence probe hardcodes open_pdks' `techlef/<cell_library>__<corner>
+    .tlef` layout, and IHP ships a single, corner-invariant tech LEF
+    (named after the *process*, not `cell_library`) directly under `lef/`
+    instead -- no `techlef/` subdirectory at all (issue #1790's
+    `pdk._resolve_tech_lef` fallback, verified live against a real fetched
+    IHP-Open-PDK v0.3.0 install). Rather than re-implement that structural
+    "the other `.lef` file in `lef/`" resolution a second time here, this
+    probe delegates to the real `pdk.lef_files()` resolver directly and
+    only checks the result -- so it can never drift out of sync with what
+    `_resolve_lef` itself will actually resolve at run time.
+
+    Skips any variant that *does* ship a `techlef/` subdirectory (that
+    shape is already covered by `_find_real_pnr_variant` above) so the two
+    probes never double-count the same open_pdks-shaped install."""
+    try:
+        result = pdk_module.list_pdks()
+    except Exception:
+        return None
+    for install in result["installs"]:
+        for variant in install["variants"]:
+            lib_dir = os.path.join(
+                install["root"], variant["name"], "libs.ref", cell_library
+            )
+            if not os.path.isdir(os.path.join(lib_dir, "lib")):
+                continue
+            if not os.path.isfile(os.path.join(lib_dir, "gds", f"{cell_library}.gds")):
+                continue
+            if os.path.isdir(os.path.join(lib_dir, "techlef")):
+                continue
+            try:
+                lefs = pdk_module.lef_files(
+                    cell_library, variant=variant["name"], root=install["root"]
+                )
+            except Exception:
+                continue
+            if lefs["tech_lef"] is None or lefs["cell_lef"] is None:
+                continue
+            return install["root"], variant["name"]
+    return None
+
+
+_REAL_SG13G2_PNR_VARIANT = _find_real_ihp_pnr_variant(_SG13G2_CELL_LIBRARY)
+
+
 @pytest.mark.skipif(
     not HAVE_OPENROAD, reason="openroad is not installed on this machine"
 )
@@ -6369,6 +6423,93 @@ def test_integration_real_openroad_gcd_worked_example_gf180mcu(tmp_path, monkeyp
                 "site": "GF018hv5v_green_sc9",
             },
             io={"layer_h": "Metal3", "layer_v": "Metal4"},
+            constraints={"clock_port": "clk", "clock_period_ns": 10.0},
+        ),
+    )
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert report["die_area_um2"] is not None
+    assert report["core_area_um2"] is not None
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SG13G2_PNR_VARIANT is None,
+    reason=(
+        "no real sg13g2_stdcell LEF/liberty/GDS set resolves via "
+        "_find_real_ihp_pnr_variant()"
+    ),
+)
+def test_integration_real_openroad_gcd_worked_example_sg13g2(tmp_path, monkeypatch):
+    """The same GCD worked example as above, on IHP's `sg13g2_stdcell`
+    instead of sky130hd/gf180mcu (issue #1784) -- `klt synthesize` -> `klt
+    place-and-route`, floorplan through a full detailed route, against a
+    real `openroad` binary and a real host-resolved IHP-Open-PDK install
+    (fetched locally via `scripts/fetch-ihp-sg13g2.sh`).
+
+    This is the automated form of this issue's "Integration test: gate a
+    full synthesize -> place-and-route run behind a real-PDK-install check
+    ... mirroring the existing `_integration_real_openroad_*` gf180mcu
+    pattern" test-plan item -- gated by `_find_real_ihp_pnr_variant`
+    (IHP's own no-`techlef/`-directory layout; `_find_real_pnr_variant`
+    itself cannot see a real ihp-sg13g2 install) and skipped, never failed,
+    on a machine without both halves of the toolchain.
+
+    Verified live 2026-09-14 against `openroad 26Q3-1278-g4421880472` +
+    a real fetched IHP-Open-PDK v0.3.0 install: `status: "ok"`,
+    `stage_reached: "route"`, 0 setup/hold violations, and a valid merged
+    GDS -- see `docs/cli/place-and-route.md`'s "Live verification" section
+    for the full transcript.
+
+    `request.pdk.corner` is deliberately omitted so `_resolve_liberty`
+    resolves the install's own nominal corner (`typ_1p20V_25C`), rather
+    than this test hard-coding one. Floorplan site and IO layers are IHP's
+    own LibreLane `libs.tech/librelane/sg13g2_stdcell/config.tcl` /
+    `libs.tech/librelane/config.tcl` values (`PLACE_SITE "CoreSite"`,
+    `FP_IO_HLAYER "Metal3"` / `FP_IO_VLAYER "Metal2"`); the 10 ns clock
+    mirrors the gf180mcu worked example's own conservative choice rather
+    than sky130hd's aggressive 1.1 ns target."""
+    root, variant = _REAL_SG13G2_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.synthesize import run_synthesize
+
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text(_GCD_RTL, encoding="utf-8")
+    synth_request = _write_request(
+        tmp_path / "synth_request.json",
+        {
+            "engine": "yosys",
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": _SG13G2_CELL_LIBRARY},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(
+            netlist=synth_report["netlist_path"],
+            pdk={"cell_library": _SG13G2_CELL_LIBRARY},
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "aspect_ratio": 1.0,
+                "core_margin_um": 2.0,
+                "site": "CoreSite",
+            },
+            io={"layer_h": "Metal3", "layer_v": "Metal2"},
             constraints={"clock_port": "clk", "clock_period_ns": 10.0},
         ),
     )

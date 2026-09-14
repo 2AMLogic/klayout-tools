@@ -255,10 +255,14 @@ Run 2026-09-14 with `openroad 26Q3-1278-g4421880472` (from
 IHP-Open-PDK v0.3.0 install (`--pdk ihp-sg13g2`), on the same GCD worked
 example — `klt synthesize` → `klt place-and-route`, floorplan through a full
 detailed route, `seed: 1`, nominal corner `typ_1p20V_25C`, `site:
-"CoreSite"`, `io.layer_h`/`layer_v` `Metal3`/`Metal2`. Not automated as an
-integration test: unlike sky130A/gf180mcu, IHP-Open-PDK is fetched by a
-manual/local `scripts/fetch-ihp-sg13g2.sh` step into this repo's gitignored
-`pdks/`, and is not provisioned by any CI workflow.
+"CoreSite"`, `io.layer_h`/`layer_v` `Metal3`/`Metal2`. Automated as
+`tests/test_place_and_route.py::test_integration_real_openroad_gcd_worked_example_sg13g2`,
+gated by its own `_find_real_ihp_pnr_variant()` (IHP ships no `techlef/`
+subdirectory at all, so the sky130A/gf180mcu pair's shared
+`_find_real_pnr_variant()` probe cannot see a real ihp-sg13g2 install); like
+the other two, skipped rather than failed when either `openroad` or the PDK
+install is absent, and — same as gf180mcu — has no CI equivalent, since
+`place-and-route-smoke.yml` provisions sky130A only.
 
 **Routing result**: `status: "ok"`, `stage_reached: "route"`,
 `route_drc_violation_count: 0`, `antenna_violation_count: 0`,
