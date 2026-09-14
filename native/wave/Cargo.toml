@@ -2,27 +2,29 @@
 name = "klt-wave-native"
 version = "0.1.0"
 edition = "2021"
-description = "Native-Rust FST waveform query engine for `klt wave query` (2AMLogic/klayout-tools, issue #1599 -- Epic #1585 Phase 2a), against the contract docs/design/waveform-query-contract-spike.md"
+description = "Native-Rust waveform build/query engine for `klt wave build` / `klt wave query` (2AMLogic/klayout-tools, issues #1599/#1600 -- Epic #1585 Phases 2a/2b), against the contract docs/design/waveform-query-contract-spike.md defines"
 license = "MIT"
 publish = false
 
 # Deliberately a plain `cargo build`/`cargo test` binary crate -- no
-# `pyo3`/`maturin` wiring, matching `native/techmap/Cargo.toml`'s and
-# `native/statime/Cargo.toml`'s own documented rationale ("no
-# pyo3/maturin wiring... remain open, deferred until a 'Go' verdict
-# warrants them"). `klt wave query`'s own contract
-# (`klt wave query <request.json> [--format text|json]`, per
-# docs/design/waveform-query-contract-spike.md) is request-document-in,
-# response-document-out -- the same shape `klt-techmap <request.json>`
-# already uses as a subprocess invocation from `klayout_tools/techmap.py`
-# -- so the plain-binary-plus-subprocess pattern is a direct fit.
+# `pyo3`/`maturin` wiring -- following `native/techmap/`'s and
+# `native/statime/`'s precedent (issues #874/#809) rather than
+# `native/mom/`'s production `pyo3`-extension shape. Per
+# `docs/design/waveform-query-contract-spike.md` section 13 (the
+# port-vs-build decision record): `klt wave build <request.json>` / `klt
+# wave query <request.json>` is request-document-in, response-document-out,
+# the same shape `klt-techmap <request.json>` already uses as a subprocess
+# invocation from `klayout_tools/techmap.py` -- the plain-binary-plus-
+# subprocess pattern is a direct fit, not a stretch. Folding this into a
+# `pyo3` extension module remains open, deferred until a later issue
+# actually needs the in-process latency a subprocess boundary costs.
 #
-# This crate's own original code (the CLI/envelope/query-op layer under
-# `src/`) is MIT, matching the rest of this repo. It also incorporates
-# portions ported and adapted from `boldaxolotl/booley`
-# (`crates/bwave/src/{fst,cache,signal,format}.rs`, Apache-2.0) -- see
-# `/NOTICE` at the repository root and the file-header comment on every
-# file under `src/` that carries ported content. Incorporating a
+# This crate's own original code (the CLI/envelope/query-op/build layer
+# under `src/`) is MIT, matching the rest of this repo. It also
+# incorporates portions ported and adapted from `boldaxolotl/booley`
+# (`crates/bwave/src/{parser,fst,cache,signal,format}.rs`, Apache-2.0) --
+# see `/NOTICE` at the repository root and the file-header comment on
+# every file under `src/` that carries ported content. Incorporating a
 # permissively-licensed (Apache-2.0) component into an MIT crate does not
 # change this crate's own license field -- see
 # docs/design/waveform-query-contract-spike.md section 12c.
@@ -38,28 +40,37 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+memchr = "2"
+rustc-hash = "2"
 
-# FST reader -- a normal crates.io build dependency (BSD-3-Clause, Kevin
-# Laeufer / `ekiwi`), never vendored or path-overridden -- per
-# docs/design/waveform-query-contract-spike.md section 11's decision to
-# depend on stock `fst-reader`/`fst-writer` rather than port booley's own
-# vendored-and-modified copy.
-fst-reader = "0.17"
+# `provenance.input.content_hash` (docs/json-contract.md's shared
+# provenance block) -- sha256 of the store file `query` read / `build`
+# wrote.
+sha2 = "0.10"
 
 # Glob matching for signal-name patterns (ported `signal.rs` depends on
 # this crate upstream too; same normal-dependency treatment).
 globset = "0.4"
 
-# `provenance.input.content_hash` (docs/json-contract.md's shared
-# provenance block) -- sha256 of the store file this query actually read.
-sha2 = "0.10"
+# Stock, unmodified crates.io releases (BSD-3-Clause, Kevin Laeufer /
+# `ekiwi`) -- NOT booley's vendored, modified `fst-writer` fork (parallel
+# per-signal block packing, path-dependency in `crates/bwave/Cargo.toml`).
+# Decision record section 11: depend on stock `fst-reader`/`fst-writer`
+# first; revisit only if a documented Phase 2 throughput measurement on
+# `klt wave build` shows it is the bottleneck. No such measurement exists
+# yet, so no such revisit has happened.
+#
+# Both are normal (not dev-only) dependencies: `build` writes the store
+# with `fst-writer`, and an FST-format input trace (Verilator's native
+# `--trace-fst` output, per docs/design/waveform-query-survey.md section
+# 6.4) builds directly with no VCD-parse step (`build_fst.rs`), so
+# *reading* an already-FST trace is part of `build`'s own production path
+# -- and `query` (#1599) reads the store through `fst-reader` too.
+fst-writer = "0.3"
+fst-reader = "0.17"
 
 [dev-dependencies]
-# Used only by `tests/` to synthesize the small committed FST fixture at
-# test-build time (see tests/fixtures/README.md) -- a normal crates.io
-# dependency, not the vendored/modified copy booley carries in
-# `crates/bwave/vendor/fst-writer/` (decision record section 11).
-fst-writer = "0.3"
+tempfile = "3"
 
 [profile.release]
 lto = true

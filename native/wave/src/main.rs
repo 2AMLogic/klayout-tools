@@ -1,26 +1,42 @@
-//! `klt-wave` -- the standalone CLI for issue #1599's FST waveform query
-//! engine crate (2AMLogic/klayout-tools, Epic #1585 Phase 2a). Not (yet) a
-//! `klt` subcommand -- wiring `klt wave query`/`klt wave build` into the
-//! Python `klt` CLI (a subprocess call, mirroring
-//! `klayout_tools.techmap.run_techmap`'s own invocation of `klt-techmap`)
-//! is left to a follow-on issue, matching `native/techmap/src/main.rs`'s
-//! own documented precedent.
+//! `klt-wave` -- the standalone CLI backing `klt wave build` / `klt wave
+//! query` (2AMLogic/klayout-tools, Epic #1585). Not (yet) a `klt`
+//! subcommand's own in-process implementation -- a Python wrapper module
+//! invoking this binary as a subprocess (mirroring `native/techmap`'s own
+//! `klt-techmap <request.json>` pattern, `klayout_tools.techmap.run_techmap`)
+//! is issue #1601's job (Epic #1585 Phase 2c), not this crate's, matching
+//! `native/techmap/src/main.rs`'s own documented precedent.
 //!
-//! Usage: `klt-wave query <request.json> [--format text|json]` -- a
-//! `klt.wave_query.request/1` document
-//! (docs/design/waveform-query-contract-spike.md section 5). Prints the
-//! `klt.wave_query.response/1` JSON to stdout on success.
+//! Usage:
 //!
-//! Exit codes (contract section 5):
-//!   0 -- every op ran and every declared predicate (if any) is satisfied.
-//!   1 -- failed to run (unreadable/malformed request file, bad request,
-//!        unreadable/corrupt store, an op naming a signal absent from the
-//!        store, cycle addressing against a store with no clock declared, a
-//!        predicate on an op that does not define one, or an empty `ops`
-//!        array).
-//!   2 -- usage error (missing argument / bad `--format` value).
-//!   3 -- every op ran successfully, but at least one declared predicate
-//!        was not satisfied.
+//! - `klt-wave build <request.json> [--format text|json]` -- a
+//!   `klt.wave_build.request/1` document
+//!   (`docs/design/waveform-query-contract-spike.md` section 4). Prints the
+//!   full `klt.wave_build.response/1` JSON (including `provenance`, using
+//!   this crate's own `CARGO_PKG_VERSION` as `klt_version` -- a Python
+//!   wrapper layer, once #1601 lands, may override that field with the
+//!   installed `klayout-tools` package's own version instead, the same way
+//!   `klayout_tools/techmap.py` post-processes `klt-techmap`'s own response)
+//!   to stdout on success. `--format text` (the default) prints a short
+//!   human-readable summary instead.
+//! - `klt-wave query <request.json> [--format text|json]` -- a
+//!   `klt.wave_query.request/1` document (contract section 5). Prints the
+//!   `klt.wave_query.response/1` JSON to stdout on success.
+//!
+//! Exit codes (contract sections 4 and 5):
+//!   0 -- `build`: store built successfully. `query`: every op ran and
+//!        every declared predicate (if any) is satisfied.
+//!   1 -- `build`: failed to build (unreadable/malformed trace,
+//!        unresolvable `trace.format`, a named `clock.signal`/
+//!        `reset.signal`/`signals` entry absent from the trace, empty
+//!        `signals`, an unwritable `store.path`). `query`: failed to run
+//!        (unreadable/malformed request file, bad request, unreadable/
+//!        corrupt store, an op naming a signal absent from the store, cycle
+//!        addressing against a store with no clock declared, a predicate on
+//!        an op that does not define one, or an empty `ops` array).
+//!   2 -- usage error (missing argument, unknown mode, bad `--format`
+//!        value; for `build`, also an unreadable/malformed request file).
+//!   3 -- `query` only: every op ran successfully, but at least one
+//!        declared predicate was not satisfied.
 
 use std::env;
 use std::fs;
@@ -29,31 +45,27 @@ use std::process::ExitCode;
 
 use sha2::{Digest, Sha256};
 
+use klt_wave_native::build;
 use klt_wave_native::cache::ColumnCache;
 use klt_wave_native::query;
 use klt_wave_native::request::{InputRef, Provenance, QueryRequest, QueryResponse, StoreRef};
 
+#[derive(Debug)]
 struct Args {
+    mode: String,
     request_path: PathBuf,
     format: String,
 }
 
-fn program_name() -> String {
-    env::args().next().unwrap_or_else(|| "klt-wave".to_string())
-}
-
-fn parse_args() -> Result<Args, (u8, String)> {
-    let argv: Vec<String> = env::args().collect();
-    if argv.len() < 2 || argv[1] != "query" {
+fn parse_args(argv: &[String]) -> Result<Args, (u8, String)> {
+    if argv.len() < 3 {
         return Err((
             2,
-            format!(
-                "usage: {} query <request.json> [--format text|json]",
-                program_name()
-            ),
+            "usage: <build|query> <request.json> [--format text|json]".to_string(),
         ));
     }
-    let mut request_path: Option<PathBuf> = None;
+    let mode = argv[1].clone();
+    let mut request_path = None;
     let mut format = "text".to_string();
     let mut i = 2;
     while i < argv.len() {
@@ -86,10 +98,15 @@ fn parse_args() -> Result<Args, (u8, String)> {
     let request_path =
         request_path.ok_or_else(|| (2, "missing <request.json> argument".to_string()))?;
     Ok(Args {
+        mode,
         request_path,
         format,
     })
 }
+
+// ---------------------------------------------------------------------------
+// `query` (issue #1599, Phase 2a)
+// ---------------------------------------------------------------------------
 
 fn resolve(base_dir: &Path, path_str: &str) -> PathBuf {
     let p = Path::new(path_str);
@@ -110,7 +127,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// completion (`exit_code` is `0` or `3`); an `Err` is a run that failed to
 /// execute at all (exit `1`, per contract section 5's partial-failure
 /// design: one bad op fails the whole batch, no envelope).
-fn run(args: &Args) -> Result<(QueryResponse, u8), (u8, String)> {
+fn run_query(args: &Args) -> Result<(QueryResponse, u8), (u8, String)> {
     let request_text = fs::read_to_string(&args.request_path).map_err(|e| {
         (
             1,
@@ -183,7 +200,7 @@ fn run(args: &Args) -> Result<(QueryResponse, u8), (u8, String)> {
     Ok((response, exit_code))
 }
 
-fn print_text(resp: &QueryResponse) {
+fn print_query_text(resp: &QueryResponse) {
     println!("store: {} (status: {})", resp.store.path, resp.status);
     for result in &resp.results {
         let op = result.get("op").and_then(|v| v.as_str()).unwrap_or("?");
@@ -209,34 +226,165 @@ fn print_text(resp: &QueryResponse) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `build` (issue #1600, Phase 2b)
+// ---------------------------------------------------------------------------
+
+fn print_build_text(resp: &build::Response) {
+    println!(
+        "store: {} ({} bytes, {})",
+        resp.store.path, resp.store.size_bytes, resp.store.content_hash
+    );
+    println!(
+        "trace: {} ({}, {} bytes)",
+        resp.trace.path, resp.trace.format, resp.trace.size_bytes
+    );
+    if let Some(clock) = &resp.clock {
+        let period = clock
+            .period_ns
+            .map(|p| format!("{p}ns"))
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("clock: {} ({}, period {period})", clock.signal, clock.edge);
+    }
+    if let Some(reset) = &resp.reset {
+        let release = reset
+            .release
+            .map(|r| format!("{}ns (cycle {})", r.time_ns, r.cycle.unwrap_or(0)))
+            .unwrap_or_else(|| "not observed".to_string());
+        println!(
+            "reset: {} ({}, release {release})",
+            reset.signal, reset.active
+        );
+    }
+    println!(
+        "timescale: {} {}",
+        resp.timescale.value, resp.timescale.unit
+    );
+    println!(
+        "time range: {}ns .. {}ns",
+        resp.time_range.from.time_ns, resp.time_range.to.time_ns
+    );
+    println!(
+        "signals: {}, value changes: {}",
+        resp.signal_count, resp.value_change_count
+    );
+}
+
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let argv: Vec<String> = env::args().collect();
+    let program = argv.first().map(|s| s.as_str()).unwrap_or("klt-wave");
+
+    let args = match parse_args(&argv) {
         Ok(a) => a,
         Err((code, msg)) => {
-            eprintln!("{}: {msg}", program_name());
+            eprintln!("{program}: {msg}");
             return ExitCode::from(code);
         }
     };
-    match run(&args) {
-        Ok((resp, code)) => {
-            if args.format == "json" {
-                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
-            } else {
-                print_text(&resp);
+
+    match args.mode.as_str() {
+        "build" => match build::run(&args.request_path) {
+            Ok(response) => {
+                if args.format == "json" {
+                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                } else {
+                    print_build_text(&response);
+                }
+                ExitCode::SUCCESS
             }
-            ExitCode::from(code)
-        }
-        Err((code, msg)) => {
-            if args.format == "json" {
-                let err = serde_json::json!({
-                    "schema_version": 1,
-                    "error": { "command": "wave query", "message": msg },
-                });
-                eprintln!("{}", serde_json::to_string_pretty(&err).unwrap());
-            } else {
-                eprintln!("{}: {msg}", program_name());
+            Err((code, msg)) => {
+                if args.format == "json" {
+                    let err = serde_json::json!({
+                        "schema_version": 1,
+                        "error": { "command": "wave build", "message": msg },
+                    });
+                    eprintln!("{}", serde_json::to_string_pretty(&err).unwrap());
+                } else {
+                    eprintln!("error: {msg}");
+                }
+                ExitCode::from(code)
             }
-            ExitCode::from(code)
+        },
+        "query" => match run_query(&args) {
+            Ok((resp, code)) => {
+                if args.format == "json" {
+                    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                } else {
+                    print_query_text(&resp);
+                }
+                ExitCode::from(code)
+            }
+            Err((code, msg)) => {
+                if args.format == "json" {
+                    let err = serde_json::json!({
+                        "schema_version": 1,
+                        "error": { "command": "wave query", "message": msg },
+                    });
+                    eprintln!("{}", serde_json::to_string_pretty(&err).unwrap());
+                } else {
+                    eprintln!("{program}: {msg}");
+                }
+                ExitCode::from(code)
+            }
+        },
+        other => {
+            eprintln!(
+                "{program}: unknown mode '{other}' (usage: {program} <build|query> \
+                 <request.json> [--format text|json])"
+            );
+            ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn parse_args_defaults_format_to_text() {
+        let argv = vec![
+            "klt-wave".to_string(),
+            "build".to_string(),
+            "req.json".to_string(),
+        ];
+        let args = parse_args(&argv).unwrap();
+        assert_eq!(args.mode, "build");
+        assert_eq!(args.format, "text");
+        assert_eq!(args.request_path, Path::new("req.json"));
+    }
+
+    #[test]
+    fn parse_args_accepts_format_json() {
+        let argv = vec![
+            "klt-wave".to_string(),
+            "build".to_string(),
+            "req.json".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        let args = parse_args(&argv).unwrap();
+        assert_eq!(args.format, "json");
+    }
+
+    #[test]
+    fn parse_args_rejects_bad_format_value() {
+        let argv = vec![
+            "klt-wave".to_string(),
+            "build".to_string(),
+            "req.json".to_string(),
+            "--format".to_string(),
+            "xml".to_string(),
+        ];
+        let err = parse_args(&argv).unwrap_err();
+        assert_eq!(err.0, 2);
+    }
+
+    #[test]
+    fn parse_args_requires_request_path() {
+        let argv = vec!["klt-wave".to_string(), "build".to_string()];
+        let err = parse_args(&argv).unwrap_err();
+        assert_eq!(err.0, 2);
     }
 }

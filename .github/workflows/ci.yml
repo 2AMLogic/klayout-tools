@@ -380,16 +380,18 @@ jobs:
         run: cargo test
 
   native-wave:
-    name: Native engines (Rust) — waveform query
-    # `native/wave/` (issue #1599, Epic #1585 Phase 2a) is a plain `cargo
-    # build`/`cargo test` binary crate -- no `pyo3` extension -- following
-    # `native/techmap/`'s and `native/statime/`'s own precedent (see that
-    # job's comment above), so this job only needs the Rust-only checks
-    # (fmt/clippy/test). `cargo test` covers the full `klt wave query` op
-    # vocabulary end to end against the committed FST fixtures under
-    # `native/wave/tests/fixtures/` -- no external tool/PDK dependency, so
-    # unlike `native-techmap` there is no companion Python-side job here
-    # (this issue does not wire `klt-wave` into the Python `klt` CLI).
+    name: Native engines (Rust) — waveform build/query
+    # `native/wave/` (issues #1599/#1600, Epic #1585 Phases 2a/2b) is a
+    # plain `cargo build`/`cargo test` binary crate -- no `pyo3` extension
+    # -- following `native/techmap/`'s and `native/statime/`'s own
+    # precedent (see that job's comment above), so this job only needs the
+    # Rust-only checks (fmt/clippy/test). `cargo test` covers the full
+    # `klt wave query` op vocabulary end to end against the committed FST
+    # fixtures under `native/wave/tests/fixtures/`, plus `klt wave build`'s
+    # own committed VCD/FST fixtures + response assertions -- no external
+    # tool/PDK dependency, so unlike `native-techmap` there is no companion
+    # Python-side job here (neither issue wires `klt-wave` into the Python
+    # `klt` CLI; that is #1601's job).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
