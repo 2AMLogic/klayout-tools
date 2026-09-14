@@ -19,7 +19,7 @@
       "benchmarks/design-agent/reference/differential-pair/diff_pair_diff.spice",
       "benchmarks/design-agent/reference/differential-pair/diff_pair_cm.spice"
     ],
-    "notes": "Two netlists for the identical topology (differential-drive and common-mode-drive excitation), gated together by one eval_descriptor -- see diff_pair_diff.spice's header for why. Generic (non-PDK) NMOS model stands in for sky130 devices; see README.md's 'Known limitation' note."
+    "notes": "Two netlists for the identical topology (differential-drive and common-mode-drive excitation), gated together by one eval_descriptor -- see diff_pair_diff.spice's header for why. Real sky130 device (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md."
   },
   "source": {
     "citation": "Differential pair is a standard first analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) easy-tier task set, not reproduced from that repo (unlicensed).",

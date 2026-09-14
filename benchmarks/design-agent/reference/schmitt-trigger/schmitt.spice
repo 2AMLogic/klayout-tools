@@ -34,8 +34,11 @@
 * solutions.
 *
 * Circuit body only: no .control/.end cards (klt sim generates those --
-* see docs/cli/sim.md, "Netlist convention"). bench_nmos/bench_pmos come
-* from models.lib.
+* see docs/cli/sim.md, "Netlist convention"). Real sky130 devices
+* (sky130_fd_pr__nfet_01v8 / sky130_fd_pr__pfet_01v8) via $PDK_ROOT, per
+* docs/cli/sim.md -- see sim_request.json's "models" field. Device W/L
+* are in microns (sky130_fd_pr subckt convention, bare numbers not
+* "u"-suffixed).
 
 .param vdd=1.8
 .param vin_hi=1.62
@@ -46,13 +49,13 @@ Vdd vdd 0 DC {vdd}
 Vin in 0 PWL(0 0 {tramp} {vin_hi} {2*tramp} 0)
 
 * --- NMOS pull-down stack + its output-driven feedback device ---
-MN1 na in 0 0 bench_nmos W=10u L=1u
-MN2 out in na 0 bench_nmos W=10u L=1u
-MN3 vdd out na 0 bench_nmos W=10u L=1u
+XMN1 na in 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XMN2 out in na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
 
 * --- PMOS pull-up stack + its output-driven feedback device ---
-MP1 nb in vdd vdd bench_pmos W=25u L=1u
-MP2 out in nb vdd bench_pmos W=25u L=1u
-MP3 0 out nb vdd bench_pmos W=25u L=1u
+XMP1 nb in vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1
+XMP2 out in nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1
+XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1
 
 CL out 0 {cl}

@@ -15,7 +15,7 @@
   "reference": {
     "eval_descriptor": "benchmarks/design-agent/reference/common-source-amp/eval_descriptor.json",
     "netlists": ["benchmarks/design-agent/reference/common-source-amp/cs_amp.spice"],
-    "notes": "Generic (non-PDK) NMOS models stand in for sky130 devices -- same PDK-free-reference-artifact precedent as examples/kb/rc-relaxation-oscillator; see cs_amp.spice/models.lib headers and README.md's 'Known limitation' note."
+    "notes": "Real sky130 device (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md -- see cs_amp.spice's header."
   },
   "source": {
     "citation": "Common-source amplifier is a standard first analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) easy-tier task set, not reproduced from that repo (unlicensed).",

@@ -3,17 +3,35 @@
 * NMOS source follower (common-drain): drain tied to the supply rail, gate
 * driven directly by the input, tail current source biasing the source
 * node -- the ideal current-source tail gives a very high output
-* impedance, which is what pushes voltage gain close to (but just under)
-* unity across every corner below.
+* impedance, which pushes gain close to gm/(gm+gmb) once channel-length
+* modulation is a negligible fraction of the loss.
 *
-* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
-* from models.lib.
+* Circuit body only -- klt sim appends analysis/control. Real sky130
+* devices (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md --
+* see sim_request.json's "models" field. Device W/L are in microns
+* (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
+*
+* Known limitation carried over from the generic-model reference this
+* replaces: this device's bulk is tied to ground (0), not to `out` --
+* sky130's bulk nfet_01v8 has no isolated/triple-well body option, so a
+* real single-transistor NMOS follower on this PDK cannot avoid body
+* effect (gmb) at all, unlike the LEVEL=1 generic stand-in this file
+* replaces, which had GAMMA=0 (no body effect) by default. Measured
+* worst-case gain across the full corner matrix below sits at ~0.828
+* V/V, well short of the original 0.90-0.999 V/V band written for the
+* generic model -- neither sizing (W/L) nor the DC bias point (vbias)
+* meaningfully close that gap, since gmb/gm depends on Vsb through a
+* square root and every corner-safe vbias still leaves gmb/gm ~ 0.15-0.2.
+* sim_request.json's gain_v limits are re-derived (0.80-0.90) to match
+* what a real sky130 NMOS follower actually achieves, rather than a
+* figure the LEVEL=1 stand-in could hit but no real single-NMOS-device
+* sky130 buffer can.
 
 .param vdd=1.8
-.param vbias=1.0
+.param vbias=1.2
 .param itail=100u
 
 Vdd vdd 0 DC {vdd}
 Vin gate 0 DC {vbias} AC 1
-Mn vdd gate out 0 bench_nmos W=40u L=1u
+XMn vdd gate out 0 sky130_fd_pr__nfet_01v8 L=1 W=40 nf=1 mult=1
 Itail out 0 DC {itail}

@@ -29,8 +29,14 @@
 * to the AC-quiet cm rail once the DC path's low-frequency roll-off has
 * passed, leaving inp as the single-ended open-loop AC drive.
 *
-* Circuit body only -- klt sim appends analysis/control. bench_nmos/
-* bench_pmos come from models.lib.
+* Circuit body only -- klt sim appends analysis/control. Real sky130
+* devices (sky130_fd_pr__nfet_01v8 / sky130_fd_pr__pfet_01v8) via
+* $PDK_ROOT, per docs/cli/sim.md -- see sim_request.json's "models"
+* field. Device W/L are in microns (sky130_fd_pr subckt convention, bare
+* numbers not "u"-suffixed). Stage 1 sizing reused from the
+* S10-validated examples/kb/five-transistor-ota/ota_5t.spice reference
+* (same first-stage topology); stage 2 device sizes are freshly derived
+* for this task's own PMOS-common-source/NMOS-current-source-load stage.
 
 .param vdd=1.8
 .param vcm=0.9
@@ -52,7 +58,7 @@ Lfb  out inn 1e9
 Cfb  inn cm  1e3
 
 * --- tail/stage-2 bias generator (external to the amplifier core) ---
-M5b nbias nbias 0 0 bench_nmos W=10u L=2u
+XM5b nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
 
 * --- stage 1: NMOS differential pair (2), PMOS mirror load (2), NMOS tail (1) ---
 * NOTE: inp/inn are cross-connected relative to ota_5t.spice's single-stage
@@ -62,15 +68,22 @@ M5b nbias nbias 0 0 bench_nmos W=10u L=2u
 * keeps "inn" the inverting input (so the Lfb/Cfb DC-feedback loop below,
 * which ties out back to inn, is genuine negative feedback and converges
 * to a stable bias point instead of railing to a supply).
-M5  tail nbias 0 0 bench_nmos W=10u  L=2u
-M1  n1   inn   tail 0 bench_nmos W=20u L=1u
-M2  vo1  inp   tail 0 bench_nmos W=20u L=1u
-M3  n1   n1    vdd  vdd bench_pmos W=40u L=2u
-M4  vo1  n1    vdd  vdd bench_pmos W=40u L=2u
+XM5  tail nbias 0 0 sky130_fd_pr__nfet_01v8 L=1   W=10 nf=1 mult=1
+XM1  n1   inn   tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  vo1  inp   tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM3  n1   n1    vdd  vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1
+XM4  vo1  n1    vdd  vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1
 
 * --- stage 2: PMOS common-source (1), NMOS current-source load (1) ---
-M6  out  vo1   vdd  vdd bench_pmos W=80u L=1u
-M7  out  nbias 0    0   bench_nmos W=40u L=2u
+* XM6 is widened well past a first-pass sizing (W=32) once the full
+* 18-corner sweep showed the low-vdd/cold-temp/slow corners (e.g.
+* ss/1.62V/-40C) collapsing to ~44 dB against the 65 dB gate -- W=100
+* buys back headroom the way telescopic-cascode-amp's cascode devices
+* needed a longer L for, not a longer L here (L on this device made the
+* low-vdd corners *worse*, not better -- empirically verified, not
+* extrapolated).
+XM6  out  vo1   vdd  vdd sky130_fd_pr__pfet_01v8 L=1 W=100 nf=1 mult=1
+XM7  out  nbias 0    0   sky130_fd_pr__nfet_01v8 L=1 W=40 nf=1 mult=1
 
 * --- Miller compensation with RHP-zero-nulling resistor ---
 Cc  out cz {cc}

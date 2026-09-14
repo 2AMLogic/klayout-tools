@@ -3,8 +3,10 @@
 * differential-drive companion and the full circuit rationale (identical
 * topology; only Vinp/Vinn's AC phase differs here: in-phase, AC 1V each).
 *
-* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
-* from models.lib.
+* Circuit body only -- klt sim appends analysis/control. Real sky130
+* devices (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md --
+* see sim_request_cm.json's "models" field. Device W/L are in microns
+* (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
 
 .param vdd=1.8
 .param vbias=0.9
@@ -14,8 +16,8 @@
 Vdd vdd 0 DC {vdd}
 Vinp inp 0 DC {vbias} AC 1 0
 Vinn inn 0 DC {vbias} AC 1 0
-Mp outp inp tail 0 bench_nmos W=20u L=1u
-Mn outn inn tail 0 bench_nmos W=20u L=1u
+XMp outp inp tail 0 sky130_fd_pr__nfet_01v8 L=1 W=20 nf=1 mult=1
+XMn outn inn tail 0 sky130_fd_pr__nfet_01v8 L=1 W=20 nf=1 mult=1
 Itail tail 0 DC {itail}
 Rdp vdd outp {rd}
 * Same deliberate 0.5% "n" branch load mismatch as diff_pair_diff.spice --

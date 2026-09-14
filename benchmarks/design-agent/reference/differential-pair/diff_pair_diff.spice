@@ -10,8 +10,10 @@
 * `.meas ac ... FIND` does not accept a two-node `vdb(a,b)` expression
 * directly, so the difference is formed explicitly as its own node.
 *
-* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
-* from models.lib.
+* Circuit body only -- klt sim appends analysis/control. Real sky130
+* devices (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md --
+* see sim_request_diff.json's "models" field. Device W/L are in microns
+* (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
 
 .param vdd=1.8
 .param vbias=0.9
@@ -21,8 +23,8 @@
 Vdd vdd 0 DC {vdd}
 Vinp inp 0 DC {vbias} AC 0.5 0
 Vinn inn 0 DC {vbias} AC 0.5 180
-Mp outp inp tail 0 bench_nmos W=20u L=1u
-Mn outn inn tail 0 bench_nmos W=20u L=1u
+XMp outp inp tail 0 sky130_fd_pr__nfet_01v8 L=1 W=20 nf=1 mult=1
+XMn outn inn tail 0 sky130_fd_pr__nfet_01v8 L=1 W=20 nf=1 mult=1
 Itail tail 0 DC {itail}
 Rdp vdd outp {rd}
 * Deliberate 0.5% mismatch on the "n" branch load -- real layouts never

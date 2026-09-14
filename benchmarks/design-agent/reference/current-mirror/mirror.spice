@@ -6,14 +6,16 @@
 * a fixed operating point mid-swing so the mirrored current can be read
 * directly as the current through Vout across the whole corner matrix.
 *
-* Circuit body only -- klt sim appends analysis/control. bench_nmos comes
-* from models.lib.
+* Circuit body only -- klt sim appends analysis/control. Real sky130
+* devices (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md --
+* see sim_request.json's "models" field. Device W/L are in microns
+* (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
 
 .param vdd=1.8
 .param iref=50u
 
 Vdd vdd 0 DC {vdd}
 Iref vdd ref DC {iref}
-Mref ref ref 0 0 bench_nmos W=10u L=2u
-Mout out ref 0 0 bench_nmos W=10u L=2u
+XMref ref ref 0 0 sky130_fd_pr__nfet_01v8 L=2 W=10 nf=1 mult=1
+XMout out ref 0 0 sky130_fd_pr__nfet_01v8 L=2 W=10 nf=1 mult=1
 Vout out 0 DC 0.9

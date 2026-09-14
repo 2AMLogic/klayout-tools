@@ -14,12 +14,16 @@ name: Design-agent benchmark
 #
 # `workflow_dispatch`/`schedule` only, mirroring `equiv-canary.yml`'s
 # posture: every task's reference solution is an 18-corner `ngspice` sweep
-# per `klt sim` call, which is minutes of simulator time in aggregate --
-# judged too heavy to gate every PR for a check whose task set changes
-# rarely. Trigger manually from the Actions tab, or `gh workflow run
-# design-agent-benchmark.yml`, whenever a task/reference solution changes,
-# or on the weekly schedule below to catch a `klt eval`/`klt sim` engine
-# regression even when the benchmark tree itself is untouched.
+# per `klt sim` call -- tens of minutes of simulator time in aggregate as of
+# issue #1736 (every real-device task now parses a full sky130A model deck
+# per corner, `"backend": "local-parallel"` in each affected sim_request.json
+# notwithstanding), up from the low single-digit minutes the earlier generic
+# (non-PDK) LEVEL=1 stand-in cost -- judged too heavy to gate every PR for a
+# check whose task set changes rarely. Trigger manually from the Actions
+# tab, or `gh workflow run design-agent-benchmark.yml`, whenever a
+# task/reference solution changes, or on the weekly schedule below to catch
+# a `klt eval`/`klt sim` engine regression even when the benchmark tree
+# itself is untouched.
 
 on:
   workflow_dispatch:
@@ -39,7 +43,15 @@ jobs:
   design-agent-benchmark:
     name: Task-set validation + reference-solution self-check
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 180
+    env:
+      # Issue #1736: every reference solution's own klt sim request resolves
+      # its device models against a real sky130A PDK now (models.pdk/lib,
+      # via docs/cli/sim.md's $PDK_ROOT convention) instead of a repo-local
+      # generic-model models.lib -- same full-PDK fetch equiv-canary.yml
+      # already pins, reused here for reproducibility.
+      PDK: sky130A
+      PDK_ROOT: ${{ github.workspace }}/.pdk-cache
     steps:
       - uses: actions/checkout@v7
 
@@ -62,20 +74,51 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
+      - name: Install volare
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: Cache full sky130A PDK (volare, pinned)
+        id: pdk-cache
+        uses: actions/cache@v6
+        with:
+          path: .pdk-cache
+          # Same pinned open_pdks build equiv-canary.yml/place-and-route-
+          # smoke.yml pin, reused here for reproducibility rather than
+          # "whatever volare's latest is at run time".
+          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Fetch full sky130A PDK (volare, cache miss only)
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
       - name: Validate task set + reference solutions
         run: |
           uv run --frozen python scripts/design_agent_benchmark.py validate \
             | tee design-agent-benchmark-validate.json
 
-      - name: Run the harness (reference candidate provider, pass@1/pass@5)
+      - name: Run the harness (reference candidate provider, pass@1/pass@2)
         # Deterministic reference-provider proof-of-concept -- see
         # benchmarks/design-agent/README.md "Known limitations". Always
         # reports 100% pass while the harness itself is healthy; a drop
         # below 100% here is a regression in the harness's own klt
         # eval/klt sim wiring, not (yet) in the design pipeline.
+        #
+        # --attempts 2 (down from 5, issue #1736): every reference netlist
+        # now resolves a real sky130A device library per corner instead of
+        # a cheap generic LEVEL=1 stand-in, and this provider's attempts are
+        # byte-identical (same fixed reference solution every time) -- 5x
+        # identical, now much more expensive, corner sweeps measure nothing
+        # a 2x re-run doesn't already show. See issue #1781 (tracked in
+        # benchmarks/design-agent/README.md's "Known limitations") for
+        # restoring a higher k once the harness itself can dedupe/cache a
+        # deterministic provider's repeated attempts.
         run: |
           uv run --frozen python scripts/design_agent_benchmark.py run \
-            --attempts 5 --k 1 5 --out design-agent-benchmark-run.json
+            --attempts 2 --k 1 2 --out design-agent-benchmark-run.json
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -94,7 +137,7 @@ jobs:
     # the common case (3 attempts x 4 easy-tier tasks, 120s/attempt agent
     # timeout below); the ceiling itself is the backstop against a genuinely
     # hung `claude` invocation the per-attempt timeout somehow missed.
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       # A repository secret this project does not provision by default (see
       # benchmarks/design-agent/README.md's "Known limitations" and the
@@ -104,6 +147,10 @@ jobs:
       # a documented, non-failing skip when this is empty, exactly the way
       # a fork's build (which never has repo secrets) would see it.
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # Issue #1736: see the design-agent-benchmark job's own env block above
+      # for why every klt sim call now needs a real sky130A PDK.
+      PDK: sky130A
+      PDK_ROOT: ${{ github.workspace }}/.pdk-cache
     steps:
       - uses: actions/checkout@v7
 
@@ -125,6 +172,24 @@ jobs:
 
       - name: Verify ngspice runs headlessly
         run: ngspice -v
+
+      - name: Install volare
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: Cache full sky130A PDK (volare, pinned)
+        id: pdk-cache
+        uses: actions/cache@v6
+        with:
+          path: .pdk-cache
+          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Fetch full sky130A PDK (volare, cache miss only)
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
 
       - name: Install the claude CLI
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
@@ -182,11 +247,15 @@ jobs:
     # own (the whole point of the provider). This is a "the tool-using loop
     # still works end to end" smoke signal, not a pass@k measurement; the
     # single-turn job above remains the cheap full-task-set number.
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       # Same never-provisioned-by-default secret, same documented skip, as
       # the live-agent job above.
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # Issue #1736: see the design-agent-benchmark job's own env block above
+      # for why every klt sim call now needs a real sky130A PDK.
+      PDK: sky130A
+      PDK_ROOT: ${{ github.workspace }}/.pdk-cache
     steps:
       - uses: actions/checkout@v7
 
@@ -208,6 +277,24 @@ jobs:
 
       - name: Verify ngspice runs headlessly
         run: ngspice -v
+
+      - name: Install volare
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: Cache full sky130A PDK (volare, pinned)
+        id: pdk-cache
+        uses: actions/cache@v6
+        with:
+          path: .pdk-cache
+          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Fetch full sky130A PDK (volare, cache miss only)
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
 
       - name: Install the claude CLI
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}

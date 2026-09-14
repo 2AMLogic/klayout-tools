@@ -43,8 +43,17 @@
 * docs/cli/sim.md's `measurements[]` note).
 *
 * Circuit body only: no .control/.end cards (klt sim generates those --
-* see docs/cli/sim.md, "Netlist convention"). bench_nmos/bench_pmos come
-* from models.lib.
+* see docs/cli/sim.md, "Netlist convention"). Real sky130 devices
+* (sky130_fd_pr__nfet_01v8 / sky130_fd_pr__pfet_01v8) via $PDK_ROOT, per
+* docs/cli/sim.md -- see sim_request_*.json's "models" field. Device
+* W/L are in microns (sky130_fd_pr subckt convention, bare numbers not
+* "u"-suffixed). All four cascode-stack devices (M1-M4) are run at a
+* longer channel length (4 um) than the generic-model reference to buy
+* back output-resistance headroom a real short-channel device needs to
+* clear this task's 85 dB gate -- empirically, gain vs. L is
+* non-monotonic for this stack (L=2 measures ~82 dB, L=4 ~90 dB, L=6
+* ~82 dB again at the nominal corner), so L=4 was chosen by direct
+* measurement, not extrapolated from a monotonic ro-vs-L assumption.
 
 .param vdd=1.8
 .param ibias=20u
@@ -57,14 +66,14 @@ Lfb out gate 1e9
 
 * --- bias generators ---
 Ibn vdd nbc DC {ibias}
-Mbn nbc nbc 0 0 bench_nmos W=4u L=1u
+XMbn nbc nbc 0 0 sky130_fd_pr__nfet_01v8 L=1 W=4 nf=1 mult=1
 Ibp1 pbs 0 DC {ibias}
-Mbp1 pbs pbs vdd vdd bench_pmos W=100u L=1u
+XMbp1 pbs pbs vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=100 nf=1 mult=1
 Ibp2 pbc 0 DC {ibias}
-Mbp2 pbc pbc vdd vdd bench_pmos W=15u L=1u
+XMbp2 pbc pbc vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=15 nf=1 mult=1
 
 * --- telescopic cascode gain stage ---
-M1 n1 gate 0 0 bench_nmos W=40u L=1u
-M2 out nbc n1 0 bench_nmos W=40u L=1u
-M3 out pbc n2 vdd bench_pmos W=100u L=1u
-M4 n2 pbs vdd vdd bench_pmos W=100u L=1u
+XM1 n1  gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 mult=1
+XM2 out nbc  n1  0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 mult=1
+XM3 out pbc  n2  vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 mult=1
+XM4 n2  pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 mult=1
