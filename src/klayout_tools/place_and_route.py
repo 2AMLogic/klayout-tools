@@ -631,10 +631,24 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
 #:   (``libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef``,
 #:   gf180mcuA variant), and not excluded by the platform's
 #:   ``DONT_USE_CELLS = *_1``.
+#: - ``sg13g2_stdcell`` (issue #1784) -> ``sg13g2_buf_16``: IHP ships no
+#:   ORFS platform config, so the source of truth is its own LibreLane
+#:   platform config (``libs.tech/librelane/sg13g2_stdcell/config.tcl``,
+#:   IHP-Open-PDK v0.3.0), whose own dedicated ``CTS_ROOT_BUFFER`` field
+#:   names this cell -- the closest direct analog to
+#:   :func:`clock_tree_synthesis`'s ``-root_buf`` this table's single-cell
+#:   shape needs (that same config's ``CTS_CLK_BUFFERS`` additionally names
+#:   a ``sg13g2_buf_8``/``sg13g2_buf_4``/``sg13g2_buf_2`` size ladder for
+#:   ``-buf_list``, which this table has no field for -- this module passes
+#:   the same single cell to both flags, matching every existing entry's
+#:   own shape rather than inventing a ladder field). Confirmed present as
+#:   ``MACRO sg13g2_buf_16`` in the installed
+#:   ``libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef``.
 _CTS_BUFFER_CELLS: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130_fd_sc_hd__buf_4",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu_fd_sc_mcu9t5v0__buf_4",
     "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu_fd_sc_mcu7t5v0__buf_4",
+    "sg13g2_stdcell": "sg13g2_buf_16",
 }
 
 #: Per-cell-library ``set_routing_layers -signal`` range for the ``"route"``
@@ -682,10 +696,24 @@ _CTS_BUFFER_CELLS: dict[str, str] = {
 #: library: its own ``buf_4``'s ``I``/``Z`` are both ``LAYER Metal1`` in
 #: ``libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef``
 #: (gf180mcuA variant).
+#:
+#: ``sg13g2_stdcell`` (issue #1784) -> ``Metal2-TopMetal2``. IHP ships no
+#: ORFS platform config; the source of truth is its own LibreLane platform
+#: config (``libs.tech/librelane/config.tcl``, IHP-Open-PDK v0.3.0):
+#: ``RT_MIN_LAYER "Metal2"`` / ``RT_MAX_LAYER "TopMetal2"`` verbatim. Same
+#: "``Metal1`` reserved for pin access" rationale as both gf180mcu entries
+#: above: this library's own ``buf_4``'s ``A``/``X`` pins are both ``LAYER
+#: Metal1`` in the installed ``libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef``.
+#: The upper bound reaches all the way to ``TopMetal2`` -- this stack's own
+#: ``libs.ref/sg13g2_stdcell/lef/sg13g2_tech.lef`` declares exactly seven
+#: routing layers (``Metal1``..``Metal5``, ``TopMetal1``, ``TopMetal2``,
+#: confirmed live via ``grep '^LAYER '``), matching that same LibreLane
+#: config's own ``RT_MAX_LAYER``.
 _ROUTING_LAYER_RANGE: dict[str, str] = {
     "sky130_fd_sc_hd": "met1-met5",
     "gf180mcu_fd_sc_mcu9t5v0": "Metal2-Metal5",
     "gf180mcu_fd_sc_mcu7t5v0": "Metal2-Metal5",
+    "sg13g2_stdcell": "Metal2-TopMetal2",
 }
 
 #: Per-cell-library fallback "row rail" ``-followpins`` PDN stripe, emitted
@@ -720,6 +748,12 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
 #: verified gf180mcu row-rail geometry to add here regardless (this table
 #: follows the same "not derivable from the install, verified not guessed"
 #: posture as every other per-library table in this module).
+#:
+#: ``sg13g2_stdcell`` (issue #1784) is unaffected for the same structural
+#: reason: its own :data:`_ROUTING_LAYER_RANGE` entry also starts one layer
+#: above where its row rail lives -- IHP's own LibreLane platform config
+#: (``libs.tech/librelane/config.tcl``, IHP-Open-PDK v0.3.0) names
+#: ``PDN_RAIL_LAYER "Metal1"`` while ``RT_MIN_LAYER`` is ``"Metal2"``.
 #:
 #: Values sourced 2026-08-26 from the real ``openroad/orfs:latest``
 #: container's own vendored ORFS checkout (``The-OpenROAD-Project/
@@ -779,6 +813,26 @@ _ROW_RAIL_STRAP: dict[str, tuple[str, float, float, float, str, str]] = {
 #:   ANTENNACELL``), with exactly one non-power/ground pin (``I``,
 #:   ``DIRECTION INPUT``; ``VDD``/``VNW`` are ``USE POWER``, ``VSS``/``VPW``
 #:   are ``USE GROUND``) -- the same shape as the ``9t`` sibling above.
+#: - ``sg13g2_stdcell`` (issue #1784) -> ``sg13g2_antennanp``, pin ``A`` --
+#:   IHP's own LibreLane platform config
+#:   (``libs.tech/librelane/sg13g2_stdcell/config.tcl``, IHP-Open-PDK
+#:   v0.3.0) names this cell/pin explicitly, as ``DIODE_CELL =
+#:   "sg13g2_antennanp/A"`` (its own ``"<cell>/<pin>"`` shape for this
+#:   field) -- so unlike the sky130/gf180mcu entries above (each derived
+#:   from the LEF alone, since neither ORFS platform names a diode cell),
+#:   this one has a direct platform-config citation. Cross-checked against
+#:   the installed ``libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef``:
+#:   ``sg13g2_antennanp`` is that LEF's only ``CLASS CORE ANTENNACELL``
+#:   macro, with exactly one non-power/ground pin (``A``, ``USE SIGNAL``;
+#:   ``VDD``/``VSS`` are ``USE POWER``/``USE GROUND``) -- the same
+#:   one-signal-pin shape every other entry in this table has. Its own
+#:   liberty (``sg13g2_stdcell_typ_1p20V_25C.lib``) additionally marks it
+#:   ``dont_touch : true; dont_use : true;``, matching a diode cell's
+#:   intended use (inserted post-route by ``repair_antennas`` only, never
+#:   synthesis-mapped) -- not carried into :data:`_ABC_DONT_USE_GLOBS`
+#:   since that table's job is excluding cells from *synthesis* mapping,
+#:   which this cell would never reach regardless (no combinational
+#:   function to map to).
 #:
 #: The pin is recorded here for verification/documentation only (confirming
 #: each cell has exactly one signal pin, matching what OpenROAD's own
@@ -796,6 +850,7 @@ _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__diode_2", "DIODE"),
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__antenna", "I"),
     "gf180mcu_fd_sc_mcu7t5v0": ("gf180mcu_fd_sc_mcu7t5v0__antenna", "I"),
+    "sg13g2_stdcell": ("sg13g2_antennanp", "A"),
 }
 
 #: Per-cell-library ``add_global_connection`` pin-pattern rules for the
@@ -830,6 +885,17 @@ _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
 #:   $(TRACK_OPTION)_6M.cfg` selects the sibling file per `TRACK_OPTION`, but
 #:   both files' global-connection rules are identical), fetched 2026-09-11
 #:   from the same `OpenROAD-flow-scripts` @ `master`.
+#: - `sg13g2_stdcell` (issue #1784) -> IHP's own LibreLane platform config
+#:   (`libs.tech/librelane/config.tcl`, IHP-Open-PDK v0.3.0) names exactly
+#:   `SCL_POWER_PINS "VDD"` / `SCL_GROUND_PINS "VSS"` -- no macro/IO-ring
+#:   pin-alias list at all, unlike sky130/gf180mcu's `VDDPE`/`VDDCE`/etc
+#:   families (this platform's own PDN config has no macro-power-domain
+#:   convention to alias). Cross-checked against the installed
+#:   `libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef`: every standard cell's
+#:   only power/ground pins are `VDD` (`USE POWER`) / `VSS` (`USE GROUND`),
+#:   with no other `USE POWER`/`USE GROUND` pin name anywhere in the file --
+#:   so this entry is deliberately just the two primary patterns, no
+#:   `is_primary=False` aliases.
 _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
     "sky130_fd_sc_hd": (
         ("power", "^VDD$", True),
@@ -866,6 +932,10 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("ground", "^VSSC$", False),
         ("ground", "^VPW$", False),
     ),
+    "sg13g2_stdcell": (
+        ("power", "^VDD$", True),
+        ("ground", "^VSS$", True),
+    ),
 }
 
 #: Per-cell-library `tapcell` call arguments for the optional
@@ -894,6 +964,26 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
 #:   shared by both track options. Confirmed present as
 #:   `MACRO gf180mcu_fd_sc_mcu7t5v0__filltie`/`__endcap` in that library's own
 #:   LEF (gf180mcuA variant).
+#:
+#: `sg13g2_stdcell` (issue #1784) has **no entry, deliberately** -- this
+#: standard-cell library ships no tap or endcap cells at all. Confirmed two
+#: ways: (1) `sg13g2_stdcell.lef`/`.lib` contain no cell whose footprint or
+#: name suggests a well/substrate tie (no `tap`/`fill*tie`/`endcap`-shaped
+#: macro anywhere in either file, `grep`-verified against the installed
+#: IHP-Open-PDK v0.3.0 files); (2) IHP's own LibreLane platform config says
+#: so explicitly -- `libs.tech/librelane/sg13g2_stdcell/config.tcl`'s own
+#: comment: `"Welltap and endcap cells / There are no endcap and welltie
+#: cells in ihp-sg13g2 / thus set to undefined to skip insertion"`
+#: (`WELLTAP_CELL`/`ENDCAP_CELL` are both left commented out), and the
+#: sibling `libs.tech/librelane/config.tcl` sets `FP_TAPCELL_DIST 0` with
+#: its own `"No tap cells"` comment. Inventing a tapcell entry here would be
+#: exactly the guess this table's docstring convention exists to avoid --
+#: so `request.power` correctly raises "no tapcell master known for
+#: standard-cell library 'sg13g2_stdcell'" (this module's own validation,
+#: above) rather than silently skipping the well-tie step a caller asked
+#: for. A `klt place-and-route` run that never sets `request.power`, or
+#: that reaches only the `"floorplan"`/`"place"`/`"cts"`/`"route"` stages
+#: without it, is unaffected -- none of those paths consult this table.
 _TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__tapvpwrvgnd_1", None, 14),
     "gf180mcu_fd_sc_mcu9t5v0": (
@@ -923,6 +1013,15 @@ _TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
 #: seven sizes in the same order. Confirmed present as `MACRO
 #: gf180mcu_fd_sc_mcu7t5v0__fill_{1,2,4,8,16,32,64}` in that library's own
 #: LEF (gf180mcuA variant).
+#:
+#: `sg13g2_stdcell` (issue #1784) -> `sg13g2_fill_1`, `sg13g2_fill_2`,
+#: copied verbatim (same order) from IHP's own LibreLane platform config
+#: (`libs.tech/librelane/sg13g2_stdcell/config.tcl`, IHP-Open-PDK v0.3.0):
+#: `FILL_CELLS "sg13g2_fill_1 sg13g2_fill_2"`. The installed
+#: `libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef` additionally ships
+#: larger `sg13g2_fill_4`/`sg13g2_fill_8` masters, but the platform's own
+#: curated list deliberately uses only the two smallest -- mirrored as-is
+#: rather than widened by analogy to sky130hd's four-size list.
 _FILLER_CELLS: dict[str, tuple[str, ...]] = {
     "sky130_fd_sc_hd": (
         "sky130_fd_sc_hd__fill_1",
@@ -948,6 +1047,10 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
         "gf180mcu_fd_sc_mcu7t5v0__fill_2",
         "gf180mcu_fd_sc_mcu7t5v0__fill_1",
     ),
+    "sg13g2_stdcell": (
+        "sg13g2_fill_1",
+        "sg13g2_fill_2",
+    ),
 }
 
 #: Per-cell-library ``klt extract --deck`` name (issue #948, Epic #700
@@ -961,9 +1064,15 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #: conventions this module has to bridge explicitly. Matches
 #: :func:`klayout_tools.decks.get_extraction_deck`'s/``get_parasitics_deck``'s
 #: own accepted names exactly (``"sky130"``/``"gf180mcu"``).
+#:
+#: ``sg13g2_stdcell`` (issue #1784) -> ``"sg13g2"`` -- the IHP SG13G2 deck
+#: family already registered in ``klayout_tools.decks.__init__`` (used
+#: today by ``klt extract``/``klt drc``/``klt lvs`` for this same PDK); no
+#: new deck family is introduced here, this table just bridges to it.
 _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu",
+    "sg13g2_stdcell": "sg13g2",
 }
 
 #: Fixed internal `global_placement -density` target -- not an exposed

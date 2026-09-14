@@ -1973,11 +1973,23 @@ def test_tie_cell_table_entries_are_hi_then_lo(tmp_path):
     """Each `_TIE_CELLS` entry is `((hi_cell, hi_port), (lo_cell, lo_port))`
     -- guards against an entry being written the other way round, which
     `hilomap` would happily accept while inverting every constant in the
-    design."""
+    design.
+
+    The cell-name prefix check uses each `cell_library`'s own leading
+    ``<family>_`` token (e.g. ``sky130``/``gf180mcu``/``sg13g2``) rather
+    than the fuller ``f"{cell_library}__"`` open_pdks convention: that
+    double-underscore prefix is a sky130/gf180mcu naming convention, not a
+    universal one -- IHP's `sg13g2_stdcell` (issue #1784) names its own
+    cells `sg13g2_tiehi`/`sg13g2_tielo`, a single underscore with no
+    `stdcell` segment at all. The looser, family-prefix check still catches
+    the failure mode this test guards against (a cross-library copy/paste
+    typo), just without assuming a naming convention this table's newest
+    entry does not follow."""
     for cell_library, entry in synthesize._TIE_CELLS.items():
         (hi_cell, hi_port), (lo_cell, lo_port) = entry
+        family_prefix = f"{cell_library.split('_')[0]}_"
         for cell in (hi_cell, lo_cell):
-            assert cell.startswith(f"{cell_library}__"), cell
+            assert cell.startswith(family_prefix), cell
         assert hi_port and lo_port
         assert (hi_cell, hi_port) != (lo_cell, lo_port)
 

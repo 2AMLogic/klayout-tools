@@ -248,7 +248,23 @@ note). There is no
 failing LVS run to report — there is no available code path to run. Tracked
 in **#1336**.
 
-## Stage granularity and invocation shape
+### `sg13g2_stdcell` (issue #1784)
+
+Unlike the two entries above, this platform is **not yet live-verified end
+to end** — `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/`_ANTENNA_DIODE_CELLS`/
+`_POWER_PIN_PATTERNS`/`_FILLER_CELLS`/`_EXTRACT_DECK_FOR_CELL_LIBRARY` (and
+`synthesize.py`'s own `_ABC_CONSTR_INPUTS`/`_ABC_DONT_USE_GLOBS`/
+`_TIE_CELLS`) all carry a real `sg13g2_stdcell` entry, each cross-checked
+against a real fetched IHP-Open-PDK v0.3.0 install's own LibreLane platform
+config and liberty/LEF files directly (see each table's own docstring for
+the full citation), but an actual `klt synthesize`/`klt place-and-route` run
+against that same real install cannot reach these tables yet: liberty/LEF
+resolution itself fails first, for the reason documented under "PDK / LEF /
+liberty resolution" below (IHP's own `<cell_library>_<corner>.lib` naming,
+single underscore, versus the open_pdks `<cell_library>__<corner>.lib`
+convention every resolver in this codebase currently assumes). Closing that
+gap is tracked in issue #1790; this platform's tables are ready for the
+moment it lands.
 
 The contract names exactly four stages, in execution order:
 `"floorplan"` → `"place"` → `"cts"` → `"route"`. `klt place-and-route` runs
@@ -336,6 +352,24 @@ stage (e.g. `interconnect_corner: "max"` against an install that only ships
 a `"nom"` tech LEF): this raises the same clear error rather than silently
 falling back to `"nom"`.
 
+**Known limitation (issue #1784).** Both resolvers assume the open_pdks-wide
+`<cell_library>__<corner>` naming convention (a literal double underscore,
+plus a `techlef/` subdirectory for the tech LEF) that `sky130_fd_sc_hd`/
+`gf180mcu_fd_sc_mcu9t5v0` both follow. IHP-Open-PDK's `sg13g2_stdcell`
+library (`libs.ref/sg13g2_stdcell/`) does not: its liberty views are named
+`sg13g2_stdcell_typ_1p20V_25C.lib` (a single underscore before the corner
+tag), and its tech LEF is a single, corner-invariant
+`libs.ref/sg13g2_stdcell/lef/sg13g2_tech.lef` with no `techlef/`
+subdirectory at all. So `klt place-and-route --pdk sg13g2_stdcell` against a
+real IHP-Open-PDK install still fails at liberty/LEF resolution today, even
+though the per-library reference-data tables below (CTS buffer, routing
+range, antenna-diode cell, power-pin patterns, filler cells, extraction
+deck) already carry a verified `sg13g2_stdcell` entry each. This is a gap in
+the generic resolvers above (`pdk.py`'s `lef_files()`/`list_cell_
+libraries()`, and each of `synthesize.py`'s/`place_and_route.py`'s own
+`_resolve_liberty`), not in the per-library tables themselves — tracked in
+issue #1790, separately from the table additions this section documents.
+
 Neither resolver is restricted to a single PDK family — any standard-cell
 library the resolved install ships `libs_ref`/LEF assets for resolves the
 same way. Reaching `target_stage: "cts"` or `"route"` additionally needs a
@@ -344,12 +378,13 @@ verified entry in `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/
 clock-tree buffer cell name, a signal routing-layer range, and an antenna-
 diode cell are not derivable from the resolved PDK install itself, so each
 supported cell library needs its own verified entry (never a runtime
-dependency; never guessed). Two libraries have entries today:
+dependency; never guessed). Three libraries have entries today:
 
 | `cell_library` | CTS buffer | `set_routing_layers -signal` | Antenna-diode cell |
 | --- | --- | --- | --- |
 | `sky130_fd_sc_hd` | `sky130_fd_sc_hd__buf_4` | `met1-met5` | `sky130_fd_sc_hd__diode_2` |
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__buf_4` | `Metal2-Metal5` | `gf180mcu_fd_sc_mcu9t5v0__antenna` |
+| `sg13g2_stdcell` | `sg13g2_buf_16` | `Metal2-TopMetal2` | `sg13g2_antennanp` |
 
 A `cell_library` with no entry in any of the three tables is a clear error,
 not a guess. Unlike the CTS-buffer/routing-range pair, neither ORFS platform's
@@ -361,19 +396,30 @@ one macro each platform's LEF marks `CLASS CORE/core ANTENNACELL` (see
 `_ANTENNA_DIODE_CELLS`'s own docstring in `place_and_route.py` for the full
 verification trail).
 
-Both rows are read from ORFS's own platform reference data — `platforms/
-sky130hd/config.mk` and `platforms/gf180/config.mk` (whose defaults
-`TRACK_OPTION ?= 9t`/`POWER_OPTION ?= 5v0` resolve to exactly
+The sky130/gf180mcu rows are read from ORFS's own platform reference data —
+`platforms/sky130hd/config.mk` and `platforms/gf180/config.mk` (whose
+defaults `TRACK_OPTION ?= 9t`/`POWER_OPTION ?= 5v0` resolve to exactly
 `gf180mcu_fd_sc_mcu9t5v0`) — cross-checked against those platforms' own
-open-source LEFs, and never a runtime dependency on an ORFS checkout. Two
+open-source LEFs, and never a runtime dependency on an ORFS checkout. IHP
+ships no ORFS platform config at all; the `sg13g2_stdcell` row (issue #1784)
+is instead read from IHP-Open-PDK's own LibreLane platform config
+(`libs.tech/librelane/{,sg13g2_stdcell/}config.tcl`, IHP-Open-PDK v0.3.0:
+`CTS_ROOT_BUFFER`, `RT_MIN_LAYER`/`RT_MAX_LAYER`, `DIODE_CELL`), the direct
+analog for a PDK whose own upstream never published an ORFS platform. A few
 asymmetries in that table are deliberate, not typos:
 
-- **gf180mcu's routing range starts at `Metal2`, not `Metal1`**, matching
-  `platforms/gf180/config.mk`'s `MIN_ROUTING_LAYER ?= Metal2`. That
-  library's standard cells pin out on `Metal1` itself, so `Metal1` is left
+- **gf180mcu's and sg13g2_stdcell's routing ranges both start at `Metal2`,
+  not `Metal1`**, matching `platforms/gf180/config.mk`'s `MIN_ROUTING_LAYER
+  ?= Metal2` and IHP's own `RT_MIN_LAYER "Metal2"` respectively. Both
+  libraries' standard cells pin out on `Metal1` itself, so `Metal1` is left
   to pin access and intra-cell/power-rail geometry. sky130hd has no
   equivalent constraint — its cells pin out on `li1`, below `met1`
   entirely — hence `met1-met5` there.
+- **sg13g2_stdcell's routing range reaches `TopMetal2`**, the topmost of
+  this stack's seven routing layers (`Metal1`..`Metal5`, `TopMetal1`,
+  `TopMetal2`), matching IHP's own `RT_MAX_LAYER "TopMetal2"` -- i.e. this
+  stack's full routing-layer set, above the one-layer-reserved-for-pin-
+  -access floor.
 - **The layer-name case differs** (`Metal1` vs `met1`) because each PDK's
   own LEF uses that convention; the string is passed through to OpenROAD
   verbatim.
@@ -381,7 +427,9 @@ asymmetries in that table are deliberate, not typos:
 Neither ORFS platform pins a CTS buffer of its own (`CTS_BUF_LIST` is
 optional and unset in both; there is no `CTS_BUF_CELL` variable in ORFS at
 all), so ORFS lets OpenROAD auto-select. `klt place-and-route` names one
-explicitly instead, for a run-to-run reproducible clock tree — see
+explicitly instead, for a run-to-run reproducible clock tree. IHP's own
+LibreLane config *does* name a CTS root buffer (`CTS_ROOT_BUFFER
+sg13g2_buf_16`), which the `sg13g2_stdcell` row above uses directly — see
 `_CTS_BUFFER_CELLS`' own docstring in `place_and_route.py` for each entry's
 exact source.
 
@@ -1573,6 +1621,19 @@ antenna-repair loop, before `write_def`):
 This insertion ordering mirrors OpenROAD-flow-scripts' own stage sequence
 exactly (`flow/scripts/tapcell.tcl` → `pdn.tcl` → global placement;
 `detail_route.tcl` → `fillcell.tcl` → `final_connect.tcl`).
+
+**`sg13g2_stdcell` (issue #1784): `request.power` is not supported.**
+`_POWER_PIN_PATTERNS`/`_FILLER_CELLS` each carry a verified `sg13g2_stdcell`
+entry (`VDD`/`VSS`, and IHP's own LibreLane `FILL_CELLS` list
+respectively), but `_TAPCELL_CELLS` deliberately does not: this
+standard-cell library ships no tap or endcap cells at all — IHP's own
+LibreLane config says so explicitly (`sg13g2_stdcell/config.tcl`'s own
+comment, `"There are no endcap and welltie cells in ihp-sg13g2"`, and the
+sibling `config.tcl`'s `FP_TAPCELL_DIST 0`). A `request.power` run against
+`sg13g2_stdcell` therefore still raises the existing "no tapcell master
+known" error (step 1 above) rather than inventing a tapcell master or
+silently skipping well-tie insertion. `klt place-and-route` runs against
+this library that omit `request.power` are unaffected by this.
 
 `request.power` omitted (the default) preserves prior behavior for this
 full, caller-configured PDN exactly — no tapcells/fillers, and the
