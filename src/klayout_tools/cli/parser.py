@@ -1141,110 +1141,9 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
 
-    sta_parser = subparsers.add_parser(
-        "sta",
-        help=(
-            "standalone timing/power analysis of an already-implemented "
-            "(placed & routed) design via OpenSTA"
-        ),
-        description=(
-            "Run a standalone OpenSTA timing/power analysis over an "
-            "already-routed DEF, independent of `klt place-and-route`'s own "
-            "in-flow STA (issue #1099). Unlike `klt place-and-route`, this "
-            "command never places, routes, or runs CTS -- there is no "
-            "`target_stage`, no netlist, no `link_design`; the `def` handed "
-            "in is the one and only geometry analysed. This is what makes "
-            "correct corner characterization possible: analysing one fixed "
-            "piece of geometry at N corners, rather than re-running "
-            "`place-and-route` N times (which produces N different "
-            "placements/routings, since global placement and detailed "
-            "routing are not corner-invariant). `pdk.cell_library`/`corner` "
-            "resolve via the same `find_pdk()`/`libs_ref` discovery `klt "
-            "place-and-route` uses; `constraints.clock_port`/"
-            "`clock_period_ns` are required (a standalone STA run has no "
-            "meaning without a clock). An optional `spef` path feeds a "
-            "caller-supplied SPEF (e.g. from `klt extract --parasitics`) in "
-            "via `read_spef`, with the same net-name-correlation sanity "
-            "check `klt place-and-route`'s own `post_route_spef` pass runs. "
-            "See docs/cli/sta.md for the full request/response contract. "
-            "Runs `openroad` as a subprocess -- requires an `openroad` "
-            "binary on `$PATH`. Takes a request-document path (like `klt "
-            "place-and-route`/`klt synthesize`), not positional file args."
-        ),
-    )
-    sta_parser.add_argument("request", help="path to a klt sta request JSON file")
-    _add_pdk_args(sta_parser)
-    _add_format_arg(sta_parser)
-    sta_parser.set_defaults(func=sta_cmd.run)
+    _add_sta_parser(subparsers)
 
-    eval_parser = subparsers.add_parser(
-        "eval",
-        help="score a candidate against a per-block gate/objective descriptor",
-        description=(
-            "Orchestrate `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` "
-            "per a per-block descriptor and reconcile their four separate "
-            "exit-code vocabularies into one envelope: a hard `valid` gate "
-            "plus a single scalar `objective` with a declared polarity, so "
-            "an agent can compare two candidates without hand-rolling the "
-            "scoring across four subprocess calls (issue #387). Pure "
-            "orchestration -- calls the same library entry points those "
-            "verbs use, never re-implements their logic."
-        ),
-    )
-    eval_parser.add_argument(
-        "descriptor",
-        help=(
-            "klt eval descriptor: a path to a JSON file, '-' to read the "
-            "descriptor from stdin, or an inline JSON object string -- see "
-            "docs/cli/eval.md"
-        ),
-    )
-    eval_parser.add_argument(
-        "--candidate",
-        default=None,
-        help=(
-            "candidate substitution values for the descriptor's `${name}` "
-            "placeholders: a path to a JSON file, '-' for stdin, or an "
-            "inline JSON object string. Omit when the descriptor's `args` "
-            "need no substitution."
-        ),
-    )
-    _add_format_arg(eval_parser)
-    eval_parser.add_argument(
-        "--trajectory-log",
-        default=None,
-        help=(
-            "append this evaluation as one record to an optimization "
-            "trajectory JSONL log (#388) -- requires --turn and "
-            "--candidate-ref; see docs/cli/eval.md"
-        ),
-    )
-    eval_parser.add_argument(
-        "--turn",
-        type=int,
-        default=None,
-        help="the evaluation/iteration index for --trajectory-log's record",
-    )
-    eval_parser.add_argument(
-        "--candidate-ref",
-        default=None,
-        help="a path or identifier for this candidate, for --trajectory-log's record",
-    )
-    eval_parser.add_argument(
-        "--description",
-        default=None,
-        help="a human note for --trajectory-log's record (optional)",
-    )
-    eval_parser.add_argument(
-        "--wall-clock-s",
-        type=float,
-        default=None,
-        help=(
-            "wall-clock seconds this evaluation took, for "
-            "--trajectory-log's record (optional)"
-        ),
-    )
-    eval_parser.set_defaults(func=eval_cmd.run)
+    _add_eval_parser(subparsers)
 
     gen_parser = subparsers.add_parser(
         "gen",
@@ -1405,6 +1304,164 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(draw_parser)
     draw_parser.set_defaults(func=draw_cmd.run)
 
+    _add_sim_parser(subparsers)
+
+    _add_pex_parser(subparsers)
+
+    _add_size_parser(subparsers)
+
+    _add_report_parser(subparsers)
+
+    _add_signoff_parser(subparsers)
+
+    _add_trajectory_parser(subparsers)
+
+    _add_kb_parser(subparsers)
+
+    _add_mom_parser(subparsers)
+
+    _add_power_parser(subparsers)
+
+    _add_yield_parser(subparsers)
+
+    _add_yield_campaign_parser(subparsers)
+
+    _add_yield_sensitivity_parser(subparsers)
+
+    _add_design_centering_parser(subparsers)
+
+    return parser
+
+
+def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sta`` verb for standalone OpenSTA timing/power analysis.
+
+    Analyses one fixed placed-and-routed DEF at a declared corner via
+    OpenSTA, independent of `klt place-and-route`'s own in-flow STA (issue
+    #1099). See docs/cli/sta.md for the request/response contract.
+    """
+    sta_parser = subparsers.add_parser(
+        "sta",
+        help=(
+            "standalone timing/power analysis of an already-implemented "
+            "(placed & routed) design via OpenSTA"
+        ),
+        description=(
+            "Run a standalone OpenSTA timing/power analysis over an "
+            "already-routed DEF, independent of `klt place-and-route`'s own "
+            "in-flow STA (issue #1099). Unlike `klt place-and-route`, this "
+            "command never places, routes, or runs CTS -- there is no "
+            "`target_stage`, no netlist, no `link_design`; the `def` handed "
+            "in is the one and only geometry analysed. This is what makes "
+            "correct corner characterization possible: analysing one fixed "
+            "piece of geometry at N corners, rather than re-running "
+            "`place-and-route` N times (which produces N different "
+            "placements/routings, since global placement and detailed "
+            "routing are not corner-invariant). `pdk.cell_library`/`corner` "
+            "resolve via the same `find_pdk()`/`libs_ref` discovery `klt "
+            "place-and-route` uses; `constraints.clock_port`/"
+            "`clock_period_ns` are required (a standalone STA run has no "
+            "meaning without a clock). An optional `spef` path feeds a "
+            "caller-supplied SPEF (e.g. from `klt extract --parasitics`) in "
+            "via `read_spef`, with the same net-name-correlation sanity "
+            "check `klt place-and-route`'s own `post_route_spef` pass runs. "
+            "See docs/cli/sta.md for the full request/response contract. "
+            "Runs `openroad` as a subprocess -- requires an `openroad` "
+            "binary on `$PATH`. Takes a request-document path (like `klt "
+            "place-and-route`/`klt synthesize`), not positional file args."
+        ),
+    )
+    sta_parser.add_argument("request", help="path to a klt sta request JSON file")
+    _add_pdk_args(sta_parser)
+    _add_format_arg(sta_parser)
+    sta_parser.set_defaults(func=sta_cmd.run)
+
+
+def _add_eval_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``eval`` verb for descriptor-driven candidate scoring.
+
+    Orchestrates `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` per a
+    per-block gate/objective descriptor and reconciles their four separate
+    exit-code vocabularies into one `valid` gate plus a single scalar
+    `objective` (issue #387). See docs/cli/eval.md.
+    """
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="score a candidate against a per-block gate/objective descriptor",
+        description=(
+            "Orchestrate `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` "
+            "per a per-block descriptor and reconcile their four separate "
+            "exit-code vocabularies into one envelope: a hard `valid` gate "
+            "plus a single scalar `objective` with a declared polarity, so "
+            "an agent can compare two candidates without hand-rolling the "
+            "scoring across four subprocess calls (issue #387). Pure "
+            "orchestration -- calls the same library entry points those "
+            "verbs use, never re-implements their logic."
+        ),
+    )
+    eval_parser.add_argument(
+        "descriptor",
+        help=(
+            "klt eval descriptor: a path to a JSON file, '-' to read the "
+            "descriptor from stdin, or an inline JSON object string -- see "
+            "docs/cli/eval.md"
+        ),
+    )
+    eval_parser.add_argument(
+        "--candidate",
+        default=None,
+        help=(
+            "candidate substitution values for the descriptor's `${name}` "
+            "placeholders: a path to a JSON file, '-' for stdin, or an "
+            "inline JSON object string. Omit when the descriptor's `args` "
+            "need no substitution."
+        ),
+    )
+    _add_format_arg(eval_parser)
+    eval_parser.add_argument(
+        "--trajectory-log",
+        default=None,
+        help=(
+            "append this evaluation as one record to an optimization "
+            "trajectory JSONL log (#388) -- requires --turn and "
+            "--candidate-ref; see docs/cli/eval.md"
+        ),
+    )
+    eval_parser.add_argument(
+        "--turn",
+        type=int,
+        default=None,
+        help="the evaluation/iteration index for --trajectory-log's record",
+    )
+    eval_parser.add_argument(
+        "--candidate-ref",
+        default=None,
+        help="a path or identifier for this candidate, for --trajectory-log's record",
+    )
+    eval_parser.add_argument(
+        "--description",
+        default=None,
+        help="a human note for --trajectory-log's record (optional)",
+    )
+    eval_parser.add_argument(
+        "--wall-clock-s",
+        type=float,
+        default=None,
+        help=(
+            "wall-clock seconds this evaluation took, for "
+            "--trajectory-log's record (optional)"
+        ),
+    )
+    eval_parser.set_defaults(func=eval_cmd.run)
+
+
+def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim`` verb for headless SPICE PVT corner sweeps.
+
+    Runs a SPICE process/voltage/temperature corner matrix declared by a
+    request JSON file via `ngspice -b`, one subprocess per corner. See
+    docs/cli/sim.md for the request/response contract.
+    """
     sim_parser = subparsers.add_parser(
         "sim",
         help="run a headless SPICE PVT corner matrix (ngspice)",
@@ -1534,8 +1591,14 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
 
-    _add_pex_parser(subparsers)
 
+def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``size`` verb for single-device gm/Id operating-point sizing.
+
+    Solves a single device's channel width from a gm/Id target and current
+    budget, scoring every candidate against the real PDK models with
+    ngspice (Phase 0 of the analog-sizing epic #705). See docs/cli/size.md.
+    """
     size_parser = subparsers.add_parser(
         "size",
         help="solve a single device's operating point from a gm/Id target (ngspice)",
@@ -1573,6 +1636,14 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(size_parser)
     size_parser.set_defaults(func=size_cmd.run)
 
+
+def _add_report_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``report`` verb for rendering klt JSON envelopes as reports.
+
+    Reads one or more `klt` JSON envelope files (or stdin) and renders
+    them into a single combined report, auto-detecting each envelope's
+    kind from its own JSON structure. See docs/cli/report.md.
+    """
     report_parser = subparsers.add_parser(
         "report",
         help="render one or more klt JSON envelopes into a text/markdown report",
@@ -1603,8 +1674,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
     report_parser.set_defaults(func=report_cmd.run)
 
-    _add_signoff_parser(subparsers)
 
+def _add_trajectory_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``trajectory`` verb for rendering optimization trajectory logs.
+
+    Reads an append-only JSONL optimization trajectory log and renders a
+    markdown milestone table plus a self-contained objective-vs-turn SVG
+    plot. See docs/cli/trajectory.md.
+    """
     trajectory_parser = subparsers.add_parser(
         "trajectory",
         help="render an optimization trajectory JSONL log to a milestone table + plot",
@@ -1646,8 +1723,15 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(trajectory_parser)
     trajectory_parser.set_defaults(func=trajectory_cmd.run)
 
-    _add_kb_parser(subparsers)
 
+def _add_mom_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``mom`` verb for Method-of-Moments capacitance extraction.
+
+    Discretises conductor surfaces from a layout per a stackup spec and
+    solves for the Maxwell capacitance matrix (issue #718, Phase 0/1 of the
+    Method-of-Moments epic #701). Numerics run in the klt_mom_native Rust
+    extension. See docs/cli/mom.md.
+    """
     mom_parser = subparsers.add_parser(
         "mom",
         help="quasi-static capacitance extraction (Method of Moments)",
@@ -1696,6 +1780,15 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(mom_parser)
     mom_parser.set_defaults(func=mom_cmd.run)
 
+
+def _add_power_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``power`` verb for power-grid IR-drop + EM signoff.
+
+    Extracts a routed layout's power/ground nets into a resistive network
+    and, when the spec declares pads/current_model, solves for static IR
+    drop and reports a per-net EM current-density verdict (epic #712). See
+    docs/cli/power.md.
+    """
     power_parser = subparsers.add_parser(
         "power",
         help=(
@@ -1743,6 +1836,16 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(power_parser)
     power_parser.set_defaults(func=power_cmd.run)
 
+
+def _add_yield_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield`` verb for Monte Carlo yield estimation.
+
+    Turns a Monte Carlo sample set and its spec limits into a yield
+    estimate that always carries its confidence interval, Cpk/sigma-to-spec,
+    and a sample-size verdict (issue #816, Phase 1a of the statistical/
+    yield epic #710). Requires the klt_yield_native Rust extension -- see
+    docs/cli/yield.md#building-the-native-extension.
+    """
     yield_parser = subparsers.add_parser(
         "yield",
         help=(
@@ -1830,6 +1933,16 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(yield_parser)
     yield_parser.set_defaults(func=yield_cmd.run)
 
+
+def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-campaign`` verb for launching Monte Carlo yield campaigns.
+
+    Launches and manages a Monte Carlo yield campaign directly from a spec,
+    dispatching via `klt sim`'s own --backend/--hosts sharding and
+    analysing the result with `klt yield`'s unmodified Phase 1 pipeline
+    (issue #906, Phase 2a of epic #710). See docs/cli/yield.md's 'Campaign
+    orchestration' section.
+    """
     yield_campaign_parser = subparsers.add_parser(
         "yield-campaign",
         help=(
@@ -1941,6 +2054,14 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(yield_campaign_parser)
     yield_campaign_parser.set_defaults(func=yield_campaign_cmd.run)
 
+
+def _add_yield_sensitivity_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-sensitivity`` verb for parameter contribution ranking.
+
+    Ranks a completed Monte Carlo campaign's device/process parameters by
+    their contribution to an output metric's variance (issue #923, Phase 3
+    of the statistical/yield epic #710). See docs/cli/yield-sensitivity.md.
+    """
     yield_sensitivity_parser = subparsers.add_parser(
         "yield-sensitivity",
         help=(
@@ -1992,6 +2113,15 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(yield_sensitivity_parser)
     yield_sensitivity_parser.set_defaults(func=yield_sensitivity_cmd.run)
 
+
+def _add_design_centering_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``design-centering`` verb for yield-sensitivity-driven re-centering.
+
+    Turns a `klt yield-sensitivity` parameter ranking into re-centering
+    candidates against a `klt size` sized device's own geometry via
+    Pelgrom's mismatch-scaling law (issue #924, Phase 3 of epic #710). See
+    docs/cli/design-centering.md.
+    """
     design_centering_parser = subparsers.add_parser(
         "design-centering",
         help=("yield-sensitivity ranking + sized device -> re-centering candidates"),
@@ -2031,8 +2161,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(design_centering_parser)
     design_centering_parser.set_defaults(func=design_centering_cmd.run)
-
-    return parser
 
 
 def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
