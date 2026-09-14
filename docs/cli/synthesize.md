@@ -141,10 +141,12 @@ anywhere in this flow.
 - **`-constr <top>_abc.constr`** is passed whenever the resolved
   `pdk.cell_library` has an entry in `synthesize.py`'s own
   `_ABC_CONSTR_INPUTS` table (`sky130_fd_sc_hd`,
-  `gf180mcu_fd_sc_mcu9t5v0` today). Its `set_driving_cell`/`set_load`
-  values are ORFS's own `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` for that
-  platform, cross-checked against the installed liberty — the same
-  "verified, never guessed" per-library reference-data posture
+  `gf180mcu_fd_sc_mcu9t5v0`, `sg13g2_stdcell` today). Its `set_driving_cell`/
+  `set_load` values are ORFS's own `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` for
+  that platform (IHP's own LibreLane platform config's `SYNTH_DRIVING_CELL`/
+  `OUTPUT_CAP_LOAD` for `sg13g2_stdcell`, which ships no ORFS platform
+  config of its own), cross-checked against the installed liberty — the
+  same "verified, never guessed" per-library reference-data posture
   `place_and_route.py`'s `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE` tables
   already use. Each entry cites its source in that table's own docstring.
 - **`-D <picoseconds>`** is passed **only** when the request supplies
@@ -156,7 +158,12 @@ anywhere in this flow.
   power-domain isolation and test-probe cells ORFS's own sky130hd
   `DONT_USE_CELLS` excludes (the two globs match that 36-cell list exactly
   against the installed liberty). Without them, a plain `gcd` synthesis maps
-  19 `lpflow_*` isolation cells into a design with no power domains.
+  19 `lpflow_*` isolation cells into a design with no power domains. For
+  `sg13g2_stdcell` (issue #1784) it is five literal cell names —
+  `sg13g2_lgcp_1`, `sg13g2_sighold`, `sg13g2_slgcp_1`, `sg13g2_sdfbbp_1`,
+  `sg13g2_dfrbp_2` — IHP's own LibreLane platform config's
+  `SYNTH_EXCLUDED_CELL_FILE` list of clock-gate/scan/sign-hold sequential
+  cells its own flow keeps out of mapping.
 
 A `cell_library` in **neither** table is never given a guessed driving cell
 or exclusion list: its generated script keeps exactly the pre-#807 shape
@@ -196,13 +203,17 @@ table:
 | --- | --- | --- |
 | `sky130_fd_sc_hd` | `sky130_fd_sc_hd__conb_1` `HI` | `sky130_fd_sc_hd__conb_1` `LO` |
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
+| `sg13g2_stdcell` | `sg13g2_tiehi` `L_HI` | `sg13g2_tielo` `L_LO` |
 
-Both rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT` for
-that platform, cross-checked against the installed liberty (the sky130 cell
-drives both constants from one instance; gf180mcu has two distinct cells,
-and its `__filltie` is a well-tie filler, not a logic constant driver — the
-sky130 shape is deliberately **not** carried over by analogy). This mirrors
-where ORFS runs the same pass, at the end of its own `synth.tcl`.
+The first two rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
+for that platform, cross-checked against the installed liberty (the sky130
+cell drives both constants from one instance; gf180mcu has two distinct
+cells, and its `__filltie` is a well-tie filler, not a logic constant driver
+— the sky130 shape is deliberately **not** carried over by analogy). IHP
+ships no ORFS platform config; the `sg13g2_stdcell` row (issue #1784) is
+IHP's own LibreLane platform config's `SYNTH_TIEHI_PORT`/`SYNTH_TIELO_PORT`
+verbatim, the same two-distinct-cells shape as gf180mcu. This mirrors where
+ORFS runs the same pass, at the end of its own `synth.tcl`.
 
 Two consequences worth knowing:
 
@@ -257,6 +268,41 @@ present under it, or the requested (or nominal-default) corner has no
 matching `.lib` file — this is a clear **"liberty not found for deck"**
 application error (exit 1), matching `klt drc`'s existing "deck requires an
 asset the resolved install doesn't ship" posture.
+
+### `sg13g2_stdcell` (IHP SG13G2, issue #1784)
+
+The `_ABC_CONSTR_INPUTS`/`_ABC_DONT_USE_GLOBS`/`_TIE_CELLS` tables above
+each carry a verified `sg13g2_stdcell` entry, sourced from a real fetched
+IHP-Open-PDK v0.3.0 install's own LibreLane platform config
+(`libs.tech/librelane/{,sg13g2_stdcell/}config.tcl` — IHP ships no ORFS
+platform config to cross-check against, unlike sky130/gf180mcu) and
+cross-checked against that same install's liberty/LEF files directly. See
+each table's own docstring in `synthesize.py` for the full per-value
+citation.
+
+**Naming convention (resolved, issue #1790).** A real IHP-Open-PDK v0.3.0
+fetch does not follow the open_pdks-wide `_fd_sc_`-marker/double-underscore
+convention `sky130_fd_sc_hd`/`gf180mcu_fd_sc_mcu9t5v0` both do: it names its
+standard-cell liberty views `sg13g2_stdcell_typ_1p20V_25C.lib` (a single
+underscore before the corner tag) and ships no `techlef/` subdirectory for
+its tech LEF. That gap — in the generic PDK-resolution layer (`pdk.py`'s
+`list_cell_libraries()`/`lef_files()`) and in this module's own
+`_resolve_liberty`, never in the per-library tables above — was **fixed in
+#1796**: `_resolve_liberty` now tries the single-underscore
+`<cell_library>_<corner>.lib` form when the double-underscore one is absent
+(see "PDK / liberty resolution" above), so `klt synthesize` reaches these
+tables against a real IHP install.
+
+**Verified end to end.** `klt synthesize` against a real fetched
+IHP-Open-PDK v0.3.0 install (`--pdk ihp-sg13g2`, `cell_library:
+"sg13g2_stdcell"`, nominal corner `typ_1p20V_25C`) synthesizes the repo's
+own `gcd.v` to a `status: "ok"` response — 369 instances, 5831.48 µm² area,
+71.63 nW leakage, `provenance.deck.name`
+`sg13g2_stdcell__typ_1p20V_25C` — mapping only `sg13g2_*` cells, with the
+`_ABC_DONT_USE_GLOBS` exclusions honored (no `sg13g2_dfrbp_2`/`sg13g2_lgcp_1`
+in the mapped netlist) and leakage totalled through the existing
+`_LEAKAGE_UNIT_TO_NW["pw"]` entry this library's `"1pW"` liberty unit already
+matched.
 
 ## `timing`: ABC's own pre-layout estimate, **not** signoff STA
 

@@ -301,6 +301,20 @@ _ABC_STIME_RE = re.compile(
 #:   farads, three orders of magnitude below any real pin in that library,
 #:   so the unit-consistent value for Yosys's femtofarad-denominated
 #:   ``set_load`` is 13.43 fF -- ORFS's own number, converted, not a guess.
+#: - ``sg13g2_stdcell`` (issue #1784) -> ``sg13g2_buf_4`` / ``6.0`` fF. IHP
+#:   ships no ORFS platform config of its own; the source of truth here is
+#:   IHP-Open-PDK's own LibreLane platform config
+#:   (``libs.tech/librelane/sg13g2_stdcell/config.tcl``, IHP-Open-PDK
+#:   v0.3.0), the direct analog of ORFS's ``config.mk`` for this PDK:
+#:   ``SYNTH_DRIVING_CELL = sg13g2_buf_4`` / ``OUTPUT_CAP_LOAD = 6.0``.
+#:   Liberty cross-check against the installed
+#:   ``sg13g2_stdcell_typ_1p20V_25C.lib`` (``capacitive_load_unit(1,pf)``):
+#:   ``sg13g2_buf_4``'s own input pin ``A`` has ``capacitance : 0.00370215``
+#:   -- 3.70 fF -- so ``6.0`` is ~1.6 single-input loads, the same
+#:   unit-consistent (femtofarad) shape as the two entries above, not the
+#:   picofarad figure (which would be a physically implausible 6000 fF,
+#:   5x the driving cell's own ``pin (X) { max_capacitance : 1.2; }``, i.e.
+#:   1200 fF).
 #:
 #: ORFS is **reference data only**, never a runtime dependency -- nothing
 #: here shells out to, reads, or requires an ORFS checkout, and no ORFS file
@@ -310,6 +324,7 @@ _ABC_STIME_RE = re.compile(
 _ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__buf_1", 5.0),
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__buf_4", 13.43),
+    "sg13g2_stdcell": ("sg13g2_buf_4", 6.0),
 }
 
 #: Per-cell-library ``abc -dont_use`` glob list: the non-logic cell classes
@@ -354,6 +369,19 @@ _ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
 #:   guess dressed as sourcing. gf180 still gets its ``-constr`` entry
 #:   above; a caller wanting ORFS's P&R-oriented exclusion can be served
 #:   later by an explicit request field, measured on its own terms.
+#: - ``sg13g2_stdcell`` (issue #1784) -> the five literal cell names IHP's
+#:   own LibreLane platform config names as its
+#:   ``SYNTH_EXCLUDED_CELL_FILE``
+#:   (``libs.tech/librelane/sg13g2_stdcell/synth_exclude.cells``,
+#:   IHP-Open-PDK v0.3.0): ``sg13g2_lgcp_1``, ``sg13g2_sighold``,
+#:   ``sg13g2_slgcp_1``, ``sg13g2_sdfbbp_1``, ``sg13g2_dfrbp_2`` -- clock-
+#:   gate/scan/sign-hold sequential cells this PDK's own flow keeps out of
+#:   mapping, the same "keep non-logic/special-purpose cells out of the
+#:   netlist" intent as the sky130hd entry above (not a drive-strength
+#:   policy like gf180mcu's deliberately-omitted one). ``abc -dont_use``'s
+#:   glob support degrades gracefully to an exact match for a pattern with
+#:   no wildcard, so these plain cell names are passed through unchanged
+#:   rather than turned into an invented glob.
 #:
 #: A ``cell_library`` with no entry gets no ``-dont_use`` flags at all --
 #: this command's pre-#807 behaviour -- rather than a guessed exclusion.
@@ -361,6 +389,13 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
     "sky130_fd_sc_hd": (
         "sky130_fd_sc_hd__lpflow_*",
         "sky130_fd_sc_hd__probe*",
+    ),
+    "sg13g2_stdcell": (
+        "sg13g2_lgcp_1",
+        "sg13g2_sighold",
+        "sg13g2_slgcp_1",
+        "sg13g2_sdfbbp_1",
+        "sg13g2_dfrbp_2",
     ),
 }
 
@@ -403,6 +438,18 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:   Deliberately **not** sky130's single dual-output shape carried over by
 #:   analogy -- this library has no ``conb``-equivalent, and its own
 #:   ``__filltie`` cell is a well-tie filler, not a logic constant driver.
+#: - ``sg13g2_stdcell`` (issue #1784) -> two distinct cells,
+#:   ``sg13g2_tiehi`` port ``L_HI`` and ``sg13g2_tielo`` port ``L_LO`` --
+#:   IHP's own LibreLane platform config's ``SYNTH_TIEHI_PORT``/
+#:   ``SYNTH_TIELO_PORT`` values verbatim
+#:   (``libs.tech/librelane/sg13g2_stdcell/config.tcl``, IHP-Open-PDK
+#:   v0.3.0: ``"sg13g2_tiehi L_HI"`` / ``"sg13g2_tielo L_LO"``), confirmed in
+#:   the installed ``sg13g2_stdcell_typ_1p20V_25C.lib``: ``sg13g2_tiehi``'s
+#:   only non-power pin is ``L_HI`` (``function : "1"``, ``driver_type :
+#:   open_drain``) and ``sg13g2_tielo``'s only non-power pin is ``L_LO``
+#:   (``function : "0"``, ``driver_type : open_source``). Same
+#:   two-distinct-cells shape as gf180mcu, not sky130's single dual-output
+#:   cell -- this library has no ``conb``-equivalent either.
 #:
 #: **Deviation from ORFS: no ``-singleton``.** ORFS collapses every constant
 #: in the design onto one tie-hi and one tie-lo instance, then splits that
@@ -428,6 +475,10 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "gf180mcu_fd_sc_mcu9t5v0": (
         ("gf180mcu_fd_sc_mcu9t5v0__tieh", "Z"),
         ("gf180mcu_fd_sc_mcu9t5v0__tiel", "ZN"),
+    ),
+    "sg13g2_stdcell": (
+        ("sg13g2_tiehi", "L_HI"),
+        ("sg13g2_tielo", "L_LO"),
     ),
 }
 

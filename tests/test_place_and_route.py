@@ -3593,6 +3593,138 @@ def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
     assert not any("sky130_fd_sc_hd__diode_2" in line for line in route_lines)
 
 
+# --------------------------------------------------------------------------- #
+# sg13g2_stdcell (IHP SG13G2, issue #1784)
+# --------------------------------------------------------------------------- #
+
+#: The nominal liberty corner, placement site and IO layers IHP's own
+#: LibreLane platform config names for this library
+#: (`libs.tech/librelane/config.tcl`/`libs.tech/librelane/sg13g2_stdcell/
+#: config.tcl`, IHP-Open-PDK v0.3.0: `DEFAULT_CORNER "nom_typ_1p20V_25C"`,
+#: `PLACE_SITE "CoreSite"`, `FP_IO_HLAYER "Metal3"` / `FP_IO_VLAYER
+#: "Metal2"`) -- used so the fabricated install and request below mirror a
+#: real sg13g2_stdcell run rather than carrying sky130's values under an
+#: sg13g2_stdcell name. The fabricated fixture still uses this test file's
+#: own `_make_pdk_install` open_pdks-shaped layout (`<cell_library>__
+#: <corner>.lib`/`techlef/<cell_library>__<corner>.tlef`) -- **not** a real
+#: IHP-Open-PDK install's own single-underscore, no-`techlef/`-directory
+#: naming, which `_resolve_liberty`/`lef_files` do not yet support (a
+#: distinct, tracked gap; see this table's own module docstring and
+#: issue #1784's PR discussion). These tests exercise the platform tables
+#: themselves -- `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/
+#: `_ANTENNA_DIODE_CELLS`/etc -- in isolation from that separate resolver
+#: gap, the same way every other non-sky130 platform test in this file
+#: already does.
+_SG13G2_CELL_LIBRARY = "sg13g2_stdcell"
+_SG13G2_CORNER = "typ_1p20V_25C"
+
+
+def _setup_sg13g2_success_env(tmp_path, monkeypatch, **request_overrides) -> str:
+    """`_setup_success_env`'s sg13g2_stdcell twin: a fabricated `ihp-sg13g2C`
+    install shipping a `sg13g2_stdcell` liberty/LEF/GDS set, plus a request
+    whose floorplan site and IO layers match IHP's own LibreLane platform
+    config."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2C",
+        cell_library=_SG13G2_CELL_LIBRARY,
+        corner=_SG13G2_CORNER,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    request = _base_request(
+        pdk={"cell_library": _SG13G2_CELL_LIBRARY, "corner": _SG13G2_CORNER},
+        io={"layer_h": "Metal3", "layer_v": "Metal2"},
+        **request_overrides,
+    )
+    request["floorplan"]["site"] = "CoreSite"
+    return _write_request(tmp_path / "request.json", request)
+
+
+def test_stubbed_full_route_success_sg13g2_stdcell(tmp_path, monkeypatch):
+    """A third, non-sky130/gf180mcu cell library reaches the `route` stage
+    the same way the others do -- `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/
+    `_ANTENNA_DIODE_CELLS`/`_FILLER_CELLS`/`_EXTRACT_DECK_FOR_CELL_LIBRARY`
+    now each carry a real, verified `sg13g2_stdcell` entry (issue #1784)."""
+    request_path = _setup_sg13g2_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    merge_calls = _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert report["verilog_path"] is not None
+    assert os.path.isfile(report["verilog_path"])
+    assert len(merge_calls) == 1
+
+    provenance = report["provenance"]
+    assert provenance["pdk"]["name"] == "ihp-sg13g2C"
+    assert provenance["deck"]["name"] == f"sg13g2_stdcell__{_SG13G2_CORNER}"
+
+
+def test_sg13g2_cts_and_route_scripts_carry_verified_reference_data(
+    tmp_path, monkeypatch
+):
+    """Issue #1784: both per-cell-library reference-data tables must reach
+    the generated Tcl verbatim, with the values IHP's own LibreLane platform
+    config pins -- in particular `Metal2-TopMetal2` (`RT_MIN_LAYER`/
+    `RT_MAX_LAYER`), **not** sky130's `met1-met5` or gf180mcu's
+    `Metal2-Metal5`, and `sg13g2_buf_16` (`CTS_ROOT_BUFFER`), not either
+    other platform's `buf_4`."""
+    request_path = _setup_sg13g2_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    assert (
+        "clock_tree_synthesis -root_buf sg13g2_buf_16 "
+        "-buf_list sg13g2_buf_16 "
+        "-sink_clustering_enable -obstruction_aware"
+    ) in cts_lines
+    assert not any("buf_4" in line for line in cts_lines)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "set_routing_layers -signal Metal2-TopMetal2" in route_lines
+    assert not any("Metal2-Metal5" in line for line in route_lines)
+    assert not any("met1-met5" in line for line in route_lines)
+    # Issue #1784: the sg13g2_stdcell antenna-diode cell
+    # (`_ANTENNA_DIODE_CELLS`), verified against
+    # `libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef`'s only `CLASS CORE
+    # ANTENNACELL`-marked macro, and IHP's own LibreLane `DIODE_CELL`
+    # platform-config field.
+    assert "repair_antennas sg13g2_antennanp" in route_lines
+    assert not any("sky130_fd_sc_hd__diode_2" in line for line in route_lines)
+    assert not any("gf180mcu_fd_sc_mcu9t5v0__antenna" in line for line in route_lines)
+
+
+def test_sg13g2_stdcell_has_no_tapcell_entry(tmp_path, monkeypatch):
+    """Issue #1784: `sg13g2_stdcell` deliberately has no `_TAPCELL_CELLS`
+    entry -- this standard-cell library ships no tap/endcap cells at all
+    (IHP's own LibreLane config: `"There are no endcap and welltie cells in
+    ihp-sg13g2"`). A `request.power` PDN run therefore still fails with the
+    existing clear error rather than inventing a tapcell master or silently
+    skipping well-tie insertion."""
+    request_path = _setup_sg13g2_success_env(
+        tmp_path,
+        monkeypatch,
+        power={"straps": _BASE_STRAPS},
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=("no tapcell master known for standard-cell library 'sg13g2_stdcell'"),
+    ):
+        run_place_and_route(request_path)
+
+
 #: The `7t` track-option twin of `_GF180MCU_CELL_LIBRARY`/`_GF180MCU_CORNER`
 #: above (issue #1649): same platform, same nominal corner and IO layers --
 #: `platforms/gf180/config.mk` only varies `PLACE_SITE` by `TRACK_OPTION`
