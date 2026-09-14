@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 #: changing anything on this side: KLayout only ever stamps it onto the routed
 #: geometry it draws, so an *unrouted single-pin* net (a tie-cell output with
 #: nothing to route to) had no carrier at all, and
-#: :func:`klayout_tools.place_and_route._stamp_single_pin_def_net_names` now
+#: :func:`klayout_tools.place_and_route_gds_merge._stamp_single_pin_def_net_names` now
 #: synthesizes one during the merge -- a tiny marker shape drawn inside the
 #: standard cell's own already-drawn pin metal, in the top cell, carrying this
 #: same property id. :func:`_def_net_name_probes` below therefore finds it on
