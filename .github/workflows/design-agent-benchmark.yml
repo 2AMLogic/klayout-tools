@@ -43,9 +43,17 @@ jobs:
   design-agent-benchmark:
     name: Task-set validation + reference-solution self-check
     runs-on: ubuntu-latest
-    # 180 (validate + run) + ~40 (the pytest regression step added below,
-    # issue #1736) rounded up with margin.
-    timeout-minutes: 240
+    # Measured, not guessed (issue #1781): a full run of this job on this
+    # branch (workflow run 34806989777, 2026-09-14, PDK cache hit) took
+    # 35m53s end to end -- "Regression-test..." 8m22s, "Validate task set +
+    # reference solutions" 13m27s, "Run the harness" 13m29s (now
+    # attempts-independent thanks to the deterministic-provider caching
+    # this issue adds, so it costs about the same as the single-pass
+    # validate step rather than 5x it). Budgeted at ~2.5x that measured
+    # total (90 min) to comfortably absorb a PDK cache miss (the "Fetch
+    # full sky130A PDK" step below is itself bounded at 20 min) plus normal
+    # runner variance, without falling back to a defensive multi-hour guess.
+    timeout-minutes: 90
     env:
       # Issue #1736: every reference solution's own klt sim request resolves
       # its device models against a real sky130A PDK now (models.pdk/lib,
