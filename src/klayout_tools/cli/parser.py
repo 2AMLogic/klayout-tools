@@ -172,144 +172,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_cells_parser(subparsers)
 
-    clip_parser = subparsers.add_parser(
-        "clip",
-        help="write a bbox region or a named cell's subtree out as its own stream",
-        description=(
-            "Write a subset of a GDSII or OASIS layout file back out as its "
-            "own top-cell stream: either a micrometre bounding-box region "
-            "(--region, flattened per layer) or a named cell's full subtree "
-            "(--cell, via kdb.Cell.copy_tree -- hierarchy preserved). Useful "
-            "for handing a single device or region to an external tool (EM "
-            "extraction, third-party meshing) or isolating it for review."
-        ),
-    )
-    clip_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    clip_mode = clip_parser.add_mutually_exclusive_group(required=True)
-    clip_mode.add_argument(
-        "--region",
-        default=None,
-        help=(
-            "bbox region to clip out, as an inline JSON array of four "
-            "micrometre coordinates [left, bottom, right, top] (e.g. "
-            "'[0, 0, 100, 100]') -- the same shape `klt ring-check`/`klt "
-            "components` accept for their own --region. Every layer of the "
-            "resolved top cell (see --top) is flattened and intersected "
-            "with this window; mutually exclusive with --cell."
-        ),
-    )
-    clip_mode.add_argument(
-        "--cell",
-        default=None,
-        help=(
-            "name of a cell anywhere in the stream (top-level or nested) "
-            "whose full subtree is copied verbatim into the output's fresh "
-            "top cell of the same name; mutually exclusive with --region"
-        ),
-    )
-    clip_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to clip --region against when the stream has more "
-            "than one; omit to require exactly one top cell. Ignored (and "
-            "should be left unset) with --cell."
-        ),
-    )
-    clip_parser.add_argument(
-        "-o",
-        "--output",
-        required=True,
-        help="output GDS/OASIS path for the clipped/extracted stream",
-    )
-    _add_format_arg(clip_parser)
-    clip_parser.set_defaults(func=clip_cmd.run)
-
-    components_parser = subparsers.add_parser(
-        "components",
-        help="report connected components across a caller-selected conductor/via stack",
-        description=(
-            "Report which shapes form one electrically connected geometric "
-            "component across a caller-selected set of conductor and via "
-            "layers -- no PDK deck, no device recognition. Same-layer "
-            "touching shapes on one conductor always merge; two different "
-            "conductors join only where an explicit via is declared and "
-            "actually lands on both -- bare XY overlap between un-via'd "
-            "conductors never joins two components. Useful for inspecting "
-            "unnamed, device-free metal, annotation geometry, an incomplete "
-            "layout, or a deliberately limited layer subset that `klt "
-            "extract`'s curated, PDK-specific decks are not a fit for. Runs "
-            "fully headless via KLayout's native batch database API -- no "
-            "GUI, no Qt. See docs/cli/components.md."
-        ),
-    )
-    components_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    components_parser.add_argument(
-        "--conductors",
-        required=True,
-        help=(
-            "conductor layer set as a path to a JSON file, or an inline JSON "
-            'array of {"name": str, "layer": [layer, datatype]} objects '
-            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'). Not '
-            "validated by argparse -- an empty/malformed value exits 1 with "
-            "a clean error, per docs/cli/components.md's exit-code contract, "
-            "rather than argparse's usage-error exit 2."
-        ),
-    )
-    components_parser.add_argument(
-        "--vias",
-        default=None,
-        help=(
-            "optional via mapping as a path to a JSON file, or an inline "
-            'JSON array of {"name": str, "layer": [layer, datatype], '
-            '"between": [conductor_name_a, conductor_name_b]} objects '
-            '(e.g. \'[{"name": "mcon", "layer": [67, 44], "between": '
-            '["li", "m1"]}]\'); each via joins the two named --conductors '
-            "entries only where its own shapes actually land on both. Omit "
-            "for a purely same-layer connectivity report."
-        ),
-    )
-    components_parser.add_argument(
-        "--label-layers",
-        dest="label_layers",
-        default=None,
-        help=(
-            "optional GDS text layers to scan for names/labels/pins, as a "
-            'path to a JSON file or an inline JSON array of {"name": str, '
-            '"layer": [layer, datatype], "conductor": str} objects. When '
-            "'conductor' names one of the --conductors entries, that label "
-            "layer's texts are only matched against that conductor's own "
-            "shapes, so a text sitting on a lower conductor's pin/label "
-            "layer is never attributed to a different, upper-layer "
-            "component whose geometry merely crosses over it in XY with no "
-            "via joining them. 'conductor' is optional; omit it to keep the "
-            "original any-layer behaviour, matching a text against every "
-            "conductor/via layer present in a component. A matched text is "
-            "reported in that component's 'labels' list. Omit --label-layers "
-            "entirely to skip name/label/pin detection."
-        ),
-    )
-    components_parser.add_argument(
-        "--region",
-        default=None,
-        help=(
-            "optional crop window as an inline JSON array of four micrometre "
-            "coordinates [left, bottom, right, top] (e.g. '[0, 0, 100, "
-            "100]'); every conductor/via/label-layer shape is clipped to "
-            "this window before components are computed. Omit to report "
-            "every shape on the given layers."
-        ),
-    )
-    components_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to report on when the stream has more than one; omit "
-            "to report every top cell"
-        ),
-    )
-    _add_format_arg(components_parser)
-    components_parser.set_defaults(func=components_cmd.run)
+    _add_clip_parser(subparsers)
+    _add_components_parser(subparsers)
 
     drc_parser = subparsers.add_parser(
         "drc",
@@ -549,86 +413,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(socket_check_parser)
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
 
-    lef_abstract_parser = subparsers.add_parser(
-        "lef-abstract",
-        help="emit a LEF abstract (MACRO/PIN/OBS) from a layout + socket descriptor",
-        description=(
-            "Emit a LEF abstract -- a MACRO block with PIN and OBS sections "
-            "-- from a GDSII/OASIS block layout plus its `klt socket-check` "
-            "socket descriptor, so OpenROAD (`klt place-and-route`) can "
-            "place it as a hard macro alongside standard cells. Issue #438, "
-            "Epic #393 Phase 2 Capability A. Pin geometry is read from real "
-            "drawn shapes when the layout has metal at a pin's declared "
-            "position, falling back to a synthesized placeholder box "
-            "otherwise (reported per pin as `geometry_source`); OBS "
-            "geometry is every routing-layer shape not already claimed by a "
-            "declared pin. `--cell-library` resolves the tech LEF (via the "
-            "same PDK resolver `klt synthesize`/`klt place-and-route` use) "
-            "whose SITE/routing-layer header this command reads via "
-            "`klayout_tools.lef_header` -- no external LEF-parsing "
-            "dependency. See docs/cli/socket-check.md's LEF translation "
-            "section for the field-by-field mapping. Runs fully headless "
-            "via KLayout's native batch database API -- no GUI, no Qt."
-        ),
-    )
-    lef_abstract_parser.add_argument(
-        "file", help="path to a GDSII or OASIS layout file"
-    )
-    lef_abstract_parser.add_argument(
-        "--socket",
-        required=True,
-        help=(
-            "path to a socket descriptor JSON file (see "
-            "docs/schemas/socket.schema.json). Not validated by argparse -- "
-            "a missing/malformed descriptor exits 1 with a clean error "
-            "rather than argparse's usage-error exit 2."
-        ),
-    )
-    lef_abstract_parser.add_argument(
-        "--macro-name",
-        dest="macro_name",
-        required=True,
-        help="name for the emitted LEF MACRO block",
-    )
-    lef_abstract_parser.add_argument(
-        "--cell-library",
-        dest="cell_library",
-        required=True,
-        help=(
-            "standard-cell library whose tech LEF supplies the routing-"
-            "layer/SITE header this command reads (e.g. sky130_fd_sc_hd) -- "
-            "not the macro's own library; resolved via the same PDK "
-            "discovery `klt pdk find`/`klt synthesize` use"
-        ),
-    )
-    lef_abstract_parser.add_argument(
-        "--top",
-        default=None,
-        help="top cell to read when the stream has more than one",
-    )
-    lef_abstract_parser.add_argument(
-        "--class",
-        dest="macro_class",
-        default="BLOCK",
-        help="LEF MACRO CLASS value (default: BLOCK, a hard macro)",
-    )
-    lef_abstract_parser.add_argument(
-        "--symmetry",
-        default=None,
-        help=(
-            "space-separated LEF SYMMETRY axes, e.g. 'X Y' or 'X Y R90'; "
-            "omit to emit no SYMMETRY statement"
-        ),
-    )
-    _add_pdk_args(lef_abstract_parser)
-    lef_abstract_parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="output LEF path (default: <macro-name>.lef)",
-    )
-    _add_format_arg(lef_abstract_parser)
-    lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
+    _add_lef_abstract_parser(subparsers)
 
     ring_check_parser = subparsers.add_parser(
         "ring-check",
@@ -698,77 +483,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_layout_metrics_parser(subparsers)
 
-    render_parser = subparsers.add_parser(
-        "render",
-        help="render per-layer PNG images from a GDSII/OASIS stream",
-        description=(
-            "Render one PNG per non-empty layer of a GDSII or OASIS layout "
-            "file, built on the same layer enumeration as `klt layers`. "
-            "Runs fully headless via KLayout's offscreen LayoutView -- no "
-            "GUI, no Qt, no X server."
-        ),
-    )
-    render_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    render_parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help=(
-            "output directory for the rendered PNGs "
-            "(default: a `renders/` subdirectory next to <file>, e.g. "
-            "`<block>/output/renders/` for a file at `<block>/output/<name>.gds`)"
-        ),
-    )
-    render_parser.add_argument(
-        "--width",
-        type=int,
-        default=DEFAULT_WIDTH,
-        help=f"image width in pixels (default: {DEFAULT_WIDTH})",
-    )
-    render_parser.add_argument(
-        "--height",
-        type=int,
-        default=DEFAULT_HEIGHT,
-        help=f"image height in pixels (default: {DEFAULT_HEIGHT})",
-    )
-    render_parser.add_argument(
-        "--background",
-        default="#ffffff",
-        help="canvas color as #rrggbb/#rgb hex (default: #ffffff)",
-    )
-    render_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to render when the stream has more than one; omit to "
-            "render every top cell"
-        ),
-    )
-    render_parser.add_argument(
-        "--layers",
-        default=None,
-        help=(
-            "layer set to restrict rendering to: a path to a JSON file, or "
-            "an inline JSON array, of [layer, datatype] pairs (e.g. "
-            "'[[67, 20], [66, 44]]'); omit to render every non-empty layer "
-            "(today's default, unchanged). Not validated by argparse -- a "
-            "malformed value exits 1 with a clean error rather than "
-            "argparse's usage-error exit 2."
-        ),
-    )
-    render_parser.add_argument(
-        "--bbox",
-        default=None,
-        help=(
-            "physical crop window as four comma-separated micrometre "
-            "coordinates 'xmin,ymin,xmax,ymax' (e.g. '0,0,50,50'); omit to "
-            "fit the whole layout (today's default, unchanged). The "
-            "physical aspect ratio is preserved -- the viewport is padded, "
-            "not stretched, to match --width/--height."
-        ),
-    )
-    _add_format_arg(render_parser)
-    render_parser.set_defaults(func=render_cmd.run)
+    _add_render_parser(subparsers)
 
     _add_pdk_parser(subparsers)
     _add_deck_parser(subparsers)
@@ -778,93 +493,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_extract_parser(subparsers)
     _add_lvs_parser(subparsers)
 
-    synthesize_parser = subparsers.add_parser(
-        "synthesize",
-        help="synthesize RTL against a standard-cell liberty via Yosys",
-        description=(
-            "Synthesize RTL sources against a resolved standard-cell "
-            "liberty via Yosys + bundled ABC (`read_verilog` -> `hierarchy` "
-            "-> `synth` -> `dfflibmap` -> `abc -liberty` -> `clean` -> "
-            "`stat`/`write_verilog`), reporting instance count, area, and "
-            "cell-type breakdown -- see "
-            "docs/design/digital-flow-contracts-spike.md section 4 for the "
-            "request/response contract and docs/cli/synthesize.md for the "
-            "CLI surface. Phase 2 of Epic #391. `pdk.cell_library`/`corner` "
-            "are resolved to a liberty file via the same `find_pdk()`/ "
-            "`libs_ref` discovery `klt pdk`/`klt cells` already use -- no "
-            "new PDK-fetch mechanism; any standard-cell library the "
-            "resolved PDK install ships resolves the same way (sky130 is "
-            "the first proven example, not the only one). `timing` is "
-            "always `null` in this contract, deferred to a future "
-            "OpenROAD/OpenSTA step. Runs Yosys as a subprocess -- requires "
-            "a `yosys` binary on `$PATH`. Takes a request-document path "
-            "(like `klt lvs`/`klt sim`), not positional RTL file args. "
-            "`--verify-equivalence` optionally gates the produced netlist "
-            "through `klt equiv` against its own source RTL before "
-            "returning -- a hard failure on a non-equivalent verdict, "
-            "never a silent warning (#704 Phase 1)."
-        ),
-    )
-    synthesize_parser.add_argument(
-        "request", help="path to a klt synthesize request JSON file"
-    )
-    _add_pdk_args(synthesize_parser)
-    synthesize_parser.add_argument(
-        "--verify-equivalence",
-        dest="verify_equivalence",
-        action="store_true",
-        help=(
-            "gate the produced netlist through `klt equiv` against its own "
-            "source RTL before returning -- a non-equivalent or "
-            "inconclusive verdict is a hard failure (exit 1), never a "
-            "silent warning. Combinational designs only (klt equiv's own "
-            "Phase 0 scope, #707); off by default. See docs/cli/"
-            "synthesize.md's 'Equivalence gate' section."
-        ),
-    )
-    synthesize_parser.add_argument(
-        "--equiv-timeout-s",
-        dest="equiv_timeout_s",
-        type=float,
-        default=None,
-        help=(
-            "overall wall-clock timeout in seconds for the `--verify-"
-            "equivalence` proof (default: klt equiv's own 60s default); "
-            "has no effect unless `--verify-equivalence` is given. Also "
-            "bounds the `klt equiv` check `--restructure-timing` runs."
-        ),
-    )
-    synthesize_parser.add_argument(
-        "--restructure-timing",
-        dest="restructure_timing",
-        action="store_true",
-        help=(
-            "close (or reduce) a setup violation on the native `sta` "
-            "critical path via a bounded cell-resizing loop, when it "
-            "exceeds `constraints.clock_period_ns`. Requires "
-            "`constraints.clock_period_ns` and a working `sta` stage (the "
-            "optional `klt_statime_native` extension) -- either missing is "
-            "a hard failure. Any applied resize is validated by `klt "
-            "equiv` before returning (combinational designs only, same "
-            "scope as `--verify-equivalence`); off by default (#926, Epic "
-            "#704 Phase 3). See docs/cli/synthesize.md's 'Timing-driven "
-            "restructuring' section."
-        ),
-    )
-    synthesize_parser.add_argument(
-        "--restructure-max-iterations",
-        dest="restructure_max_iterations",
-        type=int,
-        default=None,
-        help=(
-            "cap on the number of resize attempts `--restructure-timing` "
-            "makes (default: klayout_tools.restructure's own "
-            "DEFAULT_MAX_ITERATIONS); has no effect unless "
-            "`--restructure-timing` is given."
-        ),
-    )
-    _add_format_arg(synthesize_parser)
-    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+    _add_synthesize_parser(subparsers)
 
     _add_arith_gen_parser(subparsers)
 
@@ -930,92 +559,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(erc_parser)
     erc_parser.set_defaults(func=erc_cmd.run)
 
-    functional_verification_parser = subparsers.add_parser(
-        "functional-verification",
-        help="run a cocotb regression against Icarus/Verilator",
-        description=(
-            "Run a cocotb testbench against RTL sources through Icarus "
-            "Verilog (default) or Verilator, reporting a per-test "
-            "passed/failed/skipped breakdown plus optional Verilator "
-            "coverage -- see docs/design/cocotb-verification-spike.md "
-            "section 7 for the request/response contract and "
-            "docs/cli/functional-verification.md for the CLI surface. Phase "
-            "3 of Epic #391, and the hard gate behind `klt eval`'s `valid` "
-            "field (#387). Invoked exclusively through cocotb 2.0's "
-            "first-party Python `Runner` API, never a generated Makefile; "
-            "the verdict is always derived from the run's own `results.xml`, "
-            "never from a simulator's exit code. Requires cocotb (`pip "
-            "install cocotb`) plus an `iverilog` or `verilator` binary on "
-            '`$PATH`. `options.coverage` requires `engine: "verilator"`. '
-            "Takes a request document (like `klt lvs`/`klt sim`), not "
-            "positional RTL file args."
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "request",
-        help=(
-            "klt functional-verification request: a path to a JSON file, '-' "
-            "to read the request from stdin, or an inline JSON object string"
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "--mutations",
-        metavar="PROPOSALS_PATH",
-        help=(
-            "run mutation testing (issue #1592): a path to a <proposals> "
-            "JSON document (schema "
-            "klt.functional_verification.mutation_proposals/1) naming "
-            "byte-exact source mutations to apply, one at a time, to an "
-            "isolated build+test of the same <request>. Aborts with exit 1 "
-            "if the request's own baseline run fails first -- see "
-            "docs/cli/functional-verification.md, '--mutations'"
-        ),
-    )
-    _add_format_arg(functional_verification_parser)
-    functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
-
-    place_and_route_parser = subparsers.add_parser(
-        "place-and-route",
-        help=(
-            "place and route a synthesized netlist against a resolved PDK via OpenROAD"
-        ),
-        description=(
-            "Place and route a gate-level netlist (`klt synthesize`'s own "
-            "`netlist_path` output) against a resolved standard-cell "
-            "LEF/liberty deck via OpenROAD's native Tcl API, stage by stage "
-            "(floorplan -> global/detailed placement -> clock-tree synthesis "
-            "-> global/detailed routing) -- see "
-            "docs/design/digital-flow-contracts-spike.md section 5 for the "
-            "request/response contract and docs/cli/place-and-route.md for "
-            "the CLI surface. Phase 4 of Epic #391. `pdk.cell_library`/ "
-            "`corner` resolve via the same `find_pdk()`/`libs_ref` "
-            "discovery `klt synthesize` uses -- any standard-cell library "
-            "the resolved PDK install ships resolves the same way (sky130 "
-            "is the first proven example, not the only one); reaching the "
-            "`cts`/`route` stages additionally needs a verified "
-            "clock-buffer/routing-layer table entry for that cell library. "
-            "`target_stage` (default `route`) controls how far the run "
-            "goes; a run that reaches (or exceeds) the requested stage is "
-            "always a success, even short of a full route. `def_path` is "
-            "populated once `write_def` has run; `gds_path` only once the "
-            "DEF is also merged with the standard-cell GDS views via "
-            "KLayout's `pya`, in-process -- never a `klayout` subprocess; "
-            "`verilog_path` is the matching `write_verilog` as-built "
-            "gate-level netlist (CTS buffers, resizes, and antenna diodes "
-            "included), the netlist a golden-reference LVS run should use "
-            "as its reference instead of `klt synthesize`'s pre-CTS one. "
-            "Runs `openroad` as a subprocess (once per stage) -- requires "
-            "an `openroad` binary on `$PATH`. Takes a request-document path "
-            "(like `klt synthesize`/`klt lvs`/`klt sim`), not positional "
-            "file args."
-        ),
-    )
-    place_and_route_parser.add_argument(
-        "request", help="path to a klt place-and-route request JSON file"
-    )
-    _add_pdk_args(place_and_route_parser)
-    _add_format_arg(place_and_route_parser)
-    place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
+    _add_functional_verification_parser(subparsers)
+    _add_place_and_route_parser(subparsers)
 
     _add_sta_parser(subparsers)
 
@@ -3147,6 +2692,510 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(signoff_parser)
     signoff_parser.set_defaults(func=signoff_cmd.run)
+
+
+def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``clip`` verb: write a bbox region or a named cell's
+    subtree out as its own stream.
+    """
+    clip_parser = subparsers.add_parser(
+        "clip",
+        help="write a bbox region or a named cell's subtree out as its own stream",
+        description=(
+            "Write a subset of a GDSII or OASIS layout file back out as its "
+            "own top-cell stream: either a micrometre bounding-box region "
+            "(--region, flattened per layer) or a named cell's full subtree "
+            "(--cell, via kdb.Cell.copy_tree -- hierarchy preserved). Useful "
+            "for handing a single device or region to an external tool (EM "
+            "extraction, third-party meshing) or isolating it for review."
+        ),
+    )
+    clip_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    clip_mode = clip_parser.add_mutually_exclusive_group(required=True)
+    clip_mode.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "bbox region to clip out, as an inline JSON array of four "
+            "micrometre coordinates [left, bottom, right, top] (e.g. "
+            "'[0, 0, 100, 100]') -- the same shape `klt ring-check`/`klt "
+            "components` accept for their own --region. Every layer of the "
+            "resolved top cell (see --top) is flattened and intersected "
+            "with this window; mutually exclusive with --cell."
+        ),
+    )
+    clip_mode.add_argument(
+        "--cell",
+        default=None,
+        help=(
+            "name of a cell anywhere in the stream (top-level or nested) "
+            "whose full subtree is copied verbatim into the output's fresh "
+            "top cell of the same name; mutually exclusive with --region"
+        ),
+    )
+    clip_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to clip --region against when the stream has more "
+            "than one; omit to require exactly one top cell. Ignored (and "
+            "should be left unset) with --cell."
+        ),
+    )
+    clip_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="output GDS/OASIS path for the clipped/extracted stream",
+    )
+    _add_format_arg(clip_parser)
+    clip_parser.set_defaults(func=clip_cmd.run)
+
+
+def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``components`` verb: report connected components across
+    a caller-selected conductor/via stack.
+    """
+    components_parser = subparsers.add_parser(
+        "components",
+        help="report connected components across a caller-selected conductor/via stack",
+        description=(
+            "Report which shapes form one electrically connected geometric "
+            "component across a caller-selected set of conductor and via "
+            "layers -- no PDK deck, no device recognition. Same-layer "
+            "touching shapes on one conductor always merge; two different "
+            "conductors join only where an explicit via is declared and "
+            "actually lands on both -- bare XY overlap between un-via'd "
+            "conductors never joins two components. Useful for inspecting "
+            "unnamed, device-free metal, annotation geometry, an incomplete "
+            "layout, or a deliberately limited layer subset that `klt "
+            "extract`'s curated, PDK-specific decks are not a fit for. Runs "
+            "fully headless via KLayout's native batch database API -- no "
+            "GUI, no Qt. See docs/cli/components.md."
+        ),
+    )
+    components_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    components_parser.add_argument(
+        "--conductors",
+        required=True,
+        help=(
+            "conductor layer set as a path to a JSON file, or an inline JSON "
+            'array of {"name": str, "layer": [layer, datatype]} objects '
+            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'). Not '
+            "validated by argparse -- an empty/malformed value exits 1 with "
+            "a clean error, per docs/cli/components.md's exit-code contract, "
+            "rather than argparse's usage-error exit 2."
+        ),
+    )
+    components_parser.add_argument(
+        "--vias",
+        default=None,
+        help=(
+            "optional via mapping as a path to a JSON file, or an inline "
+            'JSON array of {"name": str, "layer": [layer, datatype], '
+            '"between": [conductor_name_a, conductor_name_b]} objects '
+            '(e.g. \'[{"name": "mcon", "layer": [67, 44], "between": '
+            '["li", "m1"]}]\'); each via joins the two named --conductors '
+            "entries only where its own shapes actually land on both. Omit "
+            "for a purely same-layer connectivity report."
+        ),
+    )
+    components_parser.add_argument(
+        "--label-layers",
+        dest="label_layers",
+        default=None,
+        help=(
+            "optional GDS text layers to scan for names/labels/pins, as a "
+            'path to a JSON file or an inline JSON array of {"name": str, '
+            '"layer": [layer, datatype], "conductor": str} objects. When '
+            "'conductor' names one of the --conductors entries, that label "
+            "layer's texts are only matched against that conductor's own "
+            "shapes, so a text sitting on a lower conductor's pin/label "
+            "layer is never attributed to a different, upper-layer "
+            "component whose geometry merely crosses over it in XY with no "
+            "via joining them. 'conductor' is optional; omit it to keep the "
+            "original any-layer behaviour, matching a text against every "
+            "conductor/via layer present in a component. A matched text is "
+            "reported in that component's 'labels' list. Omit --label-layers "
+            "entirely to skip name/label/pin detection."
+        ),
+    )
+    components_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "optional crop window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top] (e.g. '[0, 0, 100, "
+            "100]'); every conductor/via/label-layer shape is clipped to "
+            "this window before components are computed. Omit to report "
+            "every shape on the given layers."
+        ),
+    )
+    components_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one; omit "
+            "to report every top cell"
+        ),
+    )
+    _add_format_arg(components_parser)
+    components_parser.set_defaults(func=components_cmd.run)
+
+
+def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``lef-abstract`` verb: emit a LEF abstract (MACRO/PIN/OBS)
+    from a layout + socket descriptor.
+    """
+    lef_abstract_parser = subparsers.add_parser(
+        "lef-abstract",
+        help="emit a LEF abstract (MACRO/PIN/OBS) from a layout + socket descriptor",
+        description=(
+            "Emit a LEF abstract -- a MACRO block with PIN and OBS sections "
+            "-- from a GDSII/OASIS block layout plus its `klt socket-check` "
+            "socket descriptor, so OpenROAD (`klt place-and-route`) can "
+            "place it as a hard macro alongside standard cells. Issue #438, "
+            "Epic #393 Phase 2 Capability A. Pin geometry is read from real "
+            "drawn shapes when the layout has metal at a pin's declared "
+            "position, falling back to a synthesized placeholder box "
+            "otherwise (reported per pin as `geometry_source`); OBS "
+            "geometry is every routing-layer shape not already claimed by a "
+            "declared pin. `--cell-library` resolves the tech LEF (via the "
+            "same PDK resolver `klt synthesize`/`klt place-and-route` use) "
+            "whose SITE/routing-layer header this command reads via "
+            "`klayout_tools.lef_header` -- no external LEF-parsing "
+            "dependency. See docs/cli/socket-check.md's LEF translation "
+            "section for the field-by-field mapping. Runs fully headless "
+            "via KLayout's native batch database API -- no GUI, no Qt."
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "file", help="path to a GDSII or OASIS layout file"
+    )
+    lef_abstract_parser.add_argument(
+        "--socket",
+        required=True,
+        help=(
+            "path to a socket descriptor JSON file (see "
+            "docs/schemas/socket.schema.json). Not validated by argparse -- "
+            "a missing/malformed descriptor exits 1 with a clean error "
+            "rather than argparse's usage-error exit 2."
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "--macro-name",
+        dest="macro_name",
+        required=True,
+        help="name for the emitted LEF MACRO block",
+    )
+    lef_abstract_parser.add_argument(
+        "--cell-library",
+        dest="cell_library",
+        required=True,
+        help=(
+            "standard-cell library whose tech LEF supplies the routing-"
+            "layer/SITE header this command reads (e.g. sky130_fd_sc_hd) -- "
+            "not the macro's own library; resolved via the same PDK "
+            "discovery `klt pdk find`/`klt synthesize` use"
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to read when the stream has more than one",
+    )
+    lef_abstract_parser.add_argument(
+        "--class",
+        dest="macro_class",
+        default="BLOCK",
+        help="LEF MACRO CLASS value (default: BLOCK, a hard macro)",
+    )
+    lef_abstract_parser.add_argument(
+        "--symmetry",
+        default=None,
+        help=(
+            "space-separated LEF SYMMETRY axes, e.g. 'X Y' or 'X Y R90'; "
+            "omit to emit no SYMMETRY statement"
+        ),
+    )
+    _add_pdk_args(lef_abstract_parser)
+    lef_abstract_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="output LEF path (default: <macro-name>.lef)",
+    )
+    _add_format_arg(lef_abstract_parser)
+    lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
+
+
+def _add_render_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``render`` verb: render per-layer PNG images from a
+    GDSII/OASIS stream.
+    """
+    render_parser = subparsers.add_parser(
+        "render",
+        help="render per-layer PNG images from a GDSII/OASIS stream",
+        description=(
+            "Render one PNG per non-empty layer of a GDSII or OASIS layout "
+            "file, built on the same layer enumeration as `klt layers`. "
+            "Runs fully headless via KLayout's offscreen LayoutView -- no "
+            "GUI, no Qt, no X server."
+        ),
+    )
+    render_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    render_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "output directory for the rendered PNGs "
+            "(default: a `renders/` subdirectory next to <file>, e.g. "
+            "`<block>/output/renders/` for a file at `<block>/output/<name>.gds`)"
+        ),
+    )
+    render_parser.add_argument(
+        "--width",
+        type=int,
+        default=DEFAULT_WIDTH,
+        help=f"image width in pixels (default: {DEFAULT_WIDTH})",
+    )
+    render_parser.add_argument(
+        "--height",
+        type=int,
+        default=DEFAULT_HEIGHT,
+        help=f"image height in pixels (default: {DEFAULT_HEIGHT})",
+    )
+    render_parser.add_argument(
+        "--background",
+        default="#ffffff",
+        help="canvas color as #rrggbb/#rgb hex (default: #ffffff)",
+    )
+    render_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to render when the stream has more than one; omit to "
+            "render every top cell"
+        ),
+    )
+    render_parser.add_argument(
+        "--layers",
+        default=None,
+        help=(
+            "layer set to restrict rendering to: a path to a JSON file, or "
+            "an inline JSON array, of [layer, datatype] pairs (e.g. "
+            "'[[67, 20], [66, 44]]'); omit to render every non-empty layer "
+            "(today's default, unchanged). Not validated by argparse -- a "
+            "malformed value exits 1 with a clean error rather than "
+            "argparse's usage-error exit 2."
+        ),
+    )
+    render_parser.add_argument(
+        "--bbox",
+        default=None,
+        help=(
+            "physical crop window as four comma-separated micrometre "
+            "coordinates 'xmin,ymin,xmax,ymax' (e.g. '0,0,50,50'); omit to "
+            "fit the whole layout (today's default, unchanged). The "
+            "physical aspect ratio is preserved -- the viewport is padded, "
+            "not stretched, to match --width/--height."
+        ),
+    )
+    _add_format_arg(render_parser)
+    render_parser.set_defaults(func=render_cmd.run)
+
+
+def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``synthesize`` verb: synthesize RTL against a
+    standard-cell liberty via Yosys.
+    """
+    synthesize_parser = subparsers.add_parser(
+        "synthesize",
+        help="synthesize RTL against a standard-cell liberty via Yosys",
+        description=(
+            "Synthesize RTL sources against a resolved standard-cell "
+            "liberty via Yosys + bundled ABC (`read_verilog` -> `hierarchy` "
+            "-> `synth` -> `dfflibmap` -> `abc -liberty` -> `clean` -> "
+            "`stat`/`write_verilog`), reporting instance count, area, and "
+            "cell-type breakdown -- see "
+            "docs/design/digital-flow-contracts-spike.md section 4 for the "
+            "request/response contract and docs/cli/synthesize.md for the "
+            "CLI surface. Phase 2 of Epic #391. `pdk.cell_library`/`corner` "
+            "are resolved to a liberty file via the same `find_pdk()`/ "
+            "`libs_ref` discovery `klt pdk`/`klt cells` already use -- no "
+            "new PDK-fetch mechanism; any standard-cell library the "
+            "resolved PDK install ships resolves the same way (sky130 is "
+            "the first proven example, not the only one). `timing` is "
+            "always `null` in this contract, deferred to a future "
+            "OpenROAD/OpenSTA step. Runs Yosys as a subprocess -- requires "
+            "a `yosys` binary on `$PATH`. Takes a request-document path "
+            "(like `klt lvs`/`klt sim`), not positional RTL file args. "
+            "`--verify-equivalence` optionally gates the produced netlist "
+            "through `klt equiv` against its own source RTL before "
+            "returning -- a hard failure on a non-equivalent verdict, "
+            "never a silent warning (#704 Phase 1)."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "request", help="path to a klt synthesize request JSON file"
+    )
+    _add_pdk_args(synthesize_parser)
+    synthesize_parser.add_argument(
+        "--verify-equivalence",
+        dest="verify_equivalence",
+        action="store_true",
+        help=(
+            "gate the produced netlist through `klt equiv` against its own "
+            "source RTL before returning -- a non-equivalent or "
+            "inconclusive verdict is a hard failure (exit 1), never a "
+            "silent warning. Combinational designs only (klt equiv's own "
+            "Phase 0 scope, #707); off by default. See docs/cli/"
+            "synthesize.md's 'Equivalence gate' section."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--equiv-timeout-s",
+        dest="equiv_timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds for the `--verify-"
+            "equivalence` proof (default: klt equiv's own 60s default); "
+            "has no effect unless `--verify-equivalence` is given. Also "
+            "bounds the `klt equiv` check `--restructure-timing` runs."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--restructure-timing",
+        dest="restructure_timing",
+        action="store_true",
+        help=(
+            "close (or reduce) a setup violation on the native `sta` "
+            "critical path via a bounded cell-resizing loop, when it "
+            "exceeds `constraints.clock_period_ns`. Requires "
+            "`constraints.clock_period_ns` and a working `sta` stage (the "
+            "optional `klt_statime_native` extension) -- either missing is "
+            "a hard failure. Any applied resize is validated by `klt "
+            "equiv` before returning (combinational designs only, same "
+            "scope as `--verify-equivalence`); off by default (#926, Epic "
+            "#704 Phase 3). See docs/cli/synthesize.md's 'Timing-driven "
+            "restructuring' section."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--restructure-max-iterations",
+        dest="restructure_max_iterations",
+        type=int,
+        default=None,
+        help=(
+            "cap on the number of resize attempts `--restructure-timing` "
+            "makes (default: klayout_tools.restructure's own "
+            "DEFAULT_MAX_ITERATIONS); has no effect unless "
+            "`--restructure-timing` is given."
+        ),
+    )
+    _add_format_arg(synthesize_parser)
+    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+
+
+def _add_functional_verification_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    """Register the ``functional-verification`` verb: run a cocotb
+    regression against Icarus/Verilator.
+    """
+    functional_verification_parser = subparsers.add_parser(
+        "functional-verification",
+        help="run a cocotb regression against Icarus/Verilator",
+        description=(
+            "Run a cocotb testbench against RTL sources through Icarus "
+            "Verilog (default) or Verilator, reporting a per-test "
+            "passed/failed/skipped breakdown plus optional Verilator "
+            "coverage -- see docs/design/cocotb-verification-spike.md "
+            "section 7 for the request/response contract and "
+            "docs/cli/functional-verification.md for the CLI surface. Phase "
+            "3 of Epic #391, and the hard gate behind `klt eval`'s `valid` "
+            "field (#387). Invoked exclusively through cocotb 2.0's "
+            "first-party Python `Runner` API, never a generated Makefile; "
+            "the verdict is always derived from the run's own `results.xml`, "
+            "never from a simulator's exit code. Requires cocotb (`pip "
+            "install cocotb`) plus an `iverilog` or `verilator` binary on "
+            '`$PATH`. `options.coverage` requires `engine: "verilator"`. '
+            "Takes a request document (like `klt lvs`/`klt sim`), not "
+            "positional RTL file args."
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "request",
+        help=(
+            "klt functional-verification request: a path to a JSON file, '-' "
+            "to read the request from stdin, or an inline JSON object string"
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "--mutations",
+        metavar="PROPOSALS_PATH",
+        help=(
+            "run mutation testing (issue #1592): a path to a <proposals> "
+            "JSON document (schema "
+            "klt.functional_verification.mutation_proposals/1) naming "
+            "byte-exact source mutations to apply, one at a time, to an "
+            "isolated build+test of the same <request>. Aborts with exit 1 "
+            "if the request's own baseline run fails first -- see "
+            "docs/cli/functional-verification.md, '--mutations'"
+        ),
+    )
+    _add_format_arg(functional_verification_parser)
+    functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
+
+
+def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``place-and-route`` verb: place and route a synthesized
+    netlist against a resolved PDK via OpenROAD.
+    """
+    place_and_route_parser = subparsers.add_parser(
+        "place-and-route",
+        help=(
+            "place and route a synthesized netlist against a resolved PDK via OpenROAD"
+        ),
+        description=(
+            "Place and route a gate-level netlist (`klt synthesize`'s own "
+            "`netlist_path` output) against a resolved standard-cell "
+            "LEF/liberty deck via OpenROAD's native Tcl API, stage by stage "
+            "(floorplan -> global/detailed placement -> clock-tree synthesis "
+            "-> global/detailed routing) -- see "
+            "docs/design/digital-flow-contracts-spike.md section 5 for the "
+            "request/response contract and docs/cli/place-and-route.md for "
+            "the CLI surface. Phase 4 of Epic #391. `pdk.cell_library`/ "
+            "`corner` resolve via the same `find_pdk()`/`libs_ref` "
+            "discovery `klt synthesize` uses -- any standard-cell library "
+            "the resolved PDK install ships resolves the same way (sky130 "
+            "is the first proven example, not the only one); reaching the "
+            "`cts`/`route` stages additionally needs a verified "
+            "clock-buffer/routing-layer table entry for that cell library. "
+            "`target_stage` (default `route`) controls how far the run "
+            "goes; a run that reaches (or exceeds) the requested stage is "
+            "always a success, even short of a full route. `def_path` is "
+            "populated once `write_def` has run; `gds_path` only once the "
+            "DEF is also merged with the standard-cell GDS views via "
+            "KLayout's `pya`, in-process -- never a `klayout` subprocess; "
+            "`verilog_path` is the matching `write_verilog` as-built "
+            "gate-level netlist (CTS buffers, resizes, and antenna diodes "
+            "included), the netlist a golden-reference LVS run should use "
+            "as its reference instead of `klt synthesize`'s pre-CTS one. "
+            "Runs `openroad` as a subprocess (once per stage) -- requires "
+            "an `openroad` binary on `$PATH`. Takes a request-document path "
+            "(like `klt synthesize`/`klt lvs`/`klt sim`), not positional "
+            "file args."
+        ),
+    )
+    place_and_route_parser.add_argument(
+        "request", help="path to a klt place-and-route request JSON file"
+    )
+    _add_pdk_args(place_and_route_parser)
+    _add_format_arg(place_and_route_parser)
+    place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
 
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
