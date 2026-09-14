@@ -39,7 +39,7 @@ from ..extract import (
     run_extract,
 )
 from ._parsing import parse_deck_options, parse_declared_pins
-from .output import emit_error, emit_success
+from .output import emit_error, emit_success, render_rerun_drift
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
@@ -314,7 +314,7 @@ def _run_check(args: argparse.Namespace) -> int:
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
 
-    text_renderer = _print_rerun_text if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else _print_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
@@ -460,17 +460,3 @@ def _print_check_text(result: dict) -> None:
         if not check["match"]:
             print(f"      expected: {check['expected']}")
             print(f"      actual:   {check['actual']}")
-
-
-def _print_rerun_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    drift = result["drift"]
-    if not drift:
-        return
-    print()
-    print("drift:")
-    for entry in drift:
-        print(f"  {entry['field']}:")
-        print(f"      committed: {entry['committed']!r}")
-        print(f"      fresh:     {entry['fresh']!r}")

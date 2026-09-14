@@ -96,6 +96,29 @@ def render_table(
         print(fmt(row))
 
 
+def render_rerun_drift(result: dict) -> None:
+    """Print the ``--format text`` rendering of a ``--rerun`` drift report.
+
+    Shared across ``klt drc``, ``klt extract``, and ``klt lvs`` --check
+    --rerun (issue #1785): all three commands report the same ``--rerun``
+    envelope shape -- ``result["report"]``, ``result["status"]``, and
+    ``result["drift"]`` as a list of ``{"field", "committed", "fresh"}``
+    entries -- so this renderer is not verb-specific formatting that happens
+    to coincide, but one shared drift-report shape across the three verbs.
+    """
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    drift = result["drift"]
+    if not drift:
+        return
+    print()
+    print("drift:")
+    for entry in drift:
+        print(f"  {entry['field']}:")
+        print(f"      committed: {entry['committed']!r}")
+        print(f"      fresh:     {entry['fresh']!r}")
+
+
 def emit_error(command: str, message: str, format: str) -> int:
     """Emit an application-level error and return the exit code to use.
 
