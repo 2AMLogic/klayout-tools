@@ -47,8 +47,41 @@ TASKS_DIR = REPO_ROOT / "benchmarks" / "design-agent" / "tasks"
 SCHEMA_PATH = REPO_ROOT / "benchmarks" / "design-agent" / "schema" / "task.schema.json"
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None
+
+
+def _have_sky130_ngspice_pdk() -> bool:
+    """Whether a real, full sky130A ngspice model deck (not just the
+    liberty-only timing view `.github/workflows/ci.yml`'s main `test` job
+    provisions via `PDK_ROOT`/`PDK`, per that job's own `pytest` step
+    comment) is resolvable right now. Every reference solution that has
+    real MOSFETs resolves `sky130_fd_pr__nfet_01v8`/`pfet_01v8` via
+    `models.pdk`/`models.lib` (issue #1736), and every `@_SKIP_NO_NGSPICE`-
+    gated test in this module runs `klt sim`/`klt eval` against at least
+    one such task (directly, or transitively via the full shipped task
+    set) -- so `_SKIP_NO_NGSPICE` below folds this check in rather than
+    gating each test individually."""
+    try:
+        from klayout_tools.pdk import find_pdk
+
+        resolution = find_pdk(variant="sky130A")
+    except Exception:  # noqa: BLE001 -- any resolution failure means "no"
+        return False
+    variant_dir = Path(resolution["root"]) / resolution["variant"]
+    return (variant_dir / "libs.tech" / "ngspice" / "sky130.lib.spice").is_file()
+
+
+HAVE_SKY130_NGSPICE_PDK = HAVE_NGSPICE and _have_sky130_ngspice_pdk()
 _SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
+    not HAVE_SKY130_NGSPICE_PDK,
+    reason=(
+        "ngspice is not installed, or no full sky130A ngspice model deck is "
+        "resolvable via $PDK_ROOT/$PDK -- the latter is expected in ci.yml's "
+        "main `test` job, which deliberately provisions only the "
+        "sky130_fd_sc_hd liberty timing view, not the full ngspice PDK "
+        "every reference solution with real MOSFETs needs as of issue "
+        "#1736; .github/workflows/design-agent-benchmark.yml provisions "
+        "the real thing and runs these tests there"
+    ),
 )
 
 
@@ -922,7 +955,16 @@ def _sandbox(task: dict, tmp_path: Path) -> dict:
 # --- sandbox seeding ------------------------------------------------------
 
 
-def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
+def test_seed_agent_sandbox_writes_skills_and_testbench_for_pdk_backed_task(
+    tmp_path,
+):
+    """common-source-amp's `models` is PDK-backed (issue #1736:
+    `{"pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice"}`) --
+    there is no repo-local model file to copy into the sandbox, so
+    `_seed_agent_sandbox` must leave `models` untouched (never invent a
+    local `models.lib` copy that would resolve to nothing) rather than
+    rewriting it the way it does for a repo-local library (see the sibling
+    test below, against a still-local-library oscillator-family task)."""
     task = dab.load_task(TASKS_DIR / "common-source-amp.json")
     layout = _sandbox(task, tmp_path)
     sandbox = layout["workdir"]
@@ -931,13 +973,17 @@ def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
     assert (sandbox / "skills" / "design-topology-selection.md").is_file()
     assert (sandbox / "skills" / "design-sizing.md").is_file()
     assert (sandbox / "skills" / "design-netlist-authoring.md").is_file()
-    assert (sandbox / "models.lib").is_file()
+    assert not (sandbox / "models.lib").exists()
+    assert layout["model_libs"] == []
     assert (sandbox / "TASK.md").is_file()
 
     request = json.loads((sandbox / "sim_request.json").read_text())
     # The netlist the agent is asked to author, as a sandbox-relative path.
     assert request["netlist"] == "cs_amp.spice"
-    assert request["models"]["lib"] == "models.lib"
+    assert request["models"] == {
+        "pdk": "sky130A",
+        "lib": "libs.tech/ngspice/sky130.lib.spice",
+    }
     # The measurement contract is carried over verbatim from the reference.
     reference_request = json.loads(
         (
@@ -947,6 +993,25 @@ def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
     )
     assert request["measurements"] == reference_request["measurements"]
     assert request["corners"] == reference_request["corners"]
+
+
+def test_seed_agent_sandbox_copies_a_repo_local_model_library(tmp_path):
+    """The oscillator/VCO/PLL family's `models` is still a repo-local file
+    (issue #1736 left it untouched -- those reference netlists are
+    behavioral-only, no device model to swap), so `_seed_agent_sandbox`
+    must still copy it into the sandbox and rewrite `models.lib` to the
+    sandbox-relative copy -- the pre-#1736 behavior every task exercised,
+    now only exercised by this family."""
+    task = dab.load_task(TASKS_DIR / "rc-relaxation-oscillator.json")
+    layout = _sandbox(task, tmp_path)
+    sandbox = layout["workdir"]
+
+    assert (sandbox / "models.lib").is_file()
+    assert layout["model_libs"] == ["models.lib"]
+
+    request = json.loads((sandbox / "sim_request.json").read_text())
+    assert request["netlist"] == "oscillator.spice"
+    assert request["models"]["lib"] == "models.lib"
 
 
 def test_seed_agent_sandbox_never_seeds_the_reference_netlist(tmp_path):
