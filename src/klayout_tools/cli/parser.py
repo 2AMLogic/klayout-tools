@@ -175,311 +175,15 @@ def create_parser() -> argparse.ArgumentParser:
     _add_clip_parser(subparsers)
     _add_components_parser(subparsers)
 
-    drc_parser = subparsers.add_parser(
-        "drc",
-        help="run a headless DRC deck against a GDSII/OASIS stream",
-        description=(
-            "Run a DRC rule deck against a GDSII or OASIS layout file and "
-            "report violations as structured data. By default (--engine "
-            "curated), runs fully headless via KLayout's native Region "
-            "check primitives — no GUI, no Qt, no standalone klayout "
-            "binary. --engine klayout opts into shelling out to a "
-            "standalone klayout binary to run a PDK-native DRC-DSL deck "
-            "instead (issue #565)."
-        ),
-    )
-    # `file` (positional) and `--check` (issue #1106) are mutually exclusive
-    # input sources -- exactly one is required. Grouping them this way lets
-    # argparse itself enforce both "one is required" and "not both at once"
-    # as usage errors (exit 2), preserving the pre-#1106 contract that
-    # omitting `file` entirely is a usage error, not an application-level
-    # one (see `test_cli_missing_request_arg_is_usage_error`'s `klt lvs`
-    # sibling in tests/test_lvs.py).
-    drc_input_group = drc_parser.add_mutually_exclusive_group(required=True)
-    drc_input_group.add_argument(
-        "file",
-        nargs="?",
-        default=None,
-        help=(
-            "path to a GDSII or OASIS layout file. Omit when using --check "
-            "(the input path is read from the committed report instead)"
-        ),
-    )
-    drc_parser.add_argument(
-        "--deck",
-        default=None,
-        help=(
-            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
-            "--engine curated (the default); ignored for --engine klayout. "
-            "Not validated by argparse -- an unknown deck name exits 1 with "
-            "a clean error, per docs/cli/drc.md's exit-code contract, "
-            "rather than argparse's usage-error exit 2."
-        ),
-    )
-    drc_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to check when the stream has more than one; omit to "
-            "check every top cell. Not supported yet for --engine klayout."
-        ),
-    )
-    drc_parser.add_argument(
-        "--engine",
-        choices=("curated", "klayout"),
-        default="curated",
-        help=(
-            "'curated' (default): klt's own pip-only Region-primitive deck "
-            "(--deck required). 'klayout' (issue #565, opt-in): shells out "
-            "to a standalone klayout binary on PATH to run a PDK-native "
-            "DRC-DSL script (.lydrc/.drc), resolved via --pdk/--pdk-root or "
-            "given directly via --deck-file. See docs/cli/drc.md, 'Engine'."
-        ),
-    )
-    drc_parser.add_argument(
-        "--deck-file",
-        dest="deck_file",
-        default=None,
-        help=(
-            "explicit path to a KLayout DRC-DSL script (.lydrc/.drc) to run "
-            "with --engine klayout, overriding --pdk/--pdk-root resolution"
-        ),
-    )
-    _add_pdk_args(
-        drc_parser,
-        pdk_help=(
-            "PDK variant to resolve the native deck from (e.g. sky130A), "
-            "for --engine klayout; overrides $PDK"
-        ),
-    )
-    drc_parser.add_argument(
-        "--timeout-s",
-        dest="timeout_s",
-        type=float,
-        default=300.0,
-        help=(
-            "wall-clock budget in seconds for the klayout subprocess "
-            "(--engine klayout only)"
-        ),
-    )
-    drc_parser.add_argument(
-        "--deck-var",
-        dest="deck_var",
-        action="append",
-        metavar="NAME=VALUE",
-        default=None,
-        help=(
-            "extra '-rd NAME=VALUE' script global to pass to the klayout "
-            "subprocess, beyond the always-set 'input'/'report' (--engine "
-            "klayout only; ignored for --engine curated). Repeatable -- "
-            "pass once per variable. Some PDK-native decks gate every rule "
-            "behind additional globals (FEOL/BEOL enable flags, a "
-            "metal-stack selector, etc.) their PDK's own run wrapper would "
-            "normally set; without this, such a deck silently checks "
-            "nothing and still reports a clean, empty report. Not needed "
-            "for a self-contained deck (e.g. sky130A's sky130A.lydrc). "
-            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
-        ),
-    )
-    drc_input_group.add_argument(
-        "--check",
-        default=None,
-        metavar="REPORT",
-        help=(
-            "verify a previously committed 'klt drc --format json' report "
-            "(REPORT) instead of running a fresh check: mutually exclusive "
-            "with the positional 'file' argument, since the input path is "
-            "read from REPORT itself (issue #1106). Cheap mode (default): "
-            "re-hash the input layout and deck named in REPORT's "
-            "provenance block and compare against the recorded "
-            "content_hash values, no DRC engine re-run. Combine with "
-            "--rerun for full mode (re-run the deck and diff "
-            "verdict-bearing fields). Exits 0 if still consistent, 3 if "
-            "drifted -- see docs/cli/drc.md, '--check'"
-        ),
-    )
-    drc_parser.add_argument(
-        "--rerun",
-        action="store_true",
-        help=(
-            "full mode for --check (issue #1106): re-run the DRC deck "
-            "named in REPORT and diff verdict-bearing fields against the "
-            "committed report, excluding provenance.klt_version/"
-            "klayout_version/pdk.version (fields that legitimately vary "
-            "between runs of identical inputs). Requires --check; a clean "
-            "error (exit 1) otherwise"
-        ),
-    )
-    _add_format_arg(drc_parser)
-    drc_parser.set_defaults(func=drc_cmd.run)
+    _add_drc_parser(subparsers)
 
-    precheck_parser = subparsers.add_parser(
-        "precheck",
-        help="run a named battery of layout-hygiene checks",
-        description=(
-            "Run an ordered battery of independently-named layout-hygiene "
-            "checks (off-grid geometry, zero-area polygons, cell-name "
-            "hygiene, an optional layer whitelist, and pin labels landing "
-            "on drawn geometry) against a GDSII or OASIS layout file, and "
-            "report each check's own pass/fail/skipped result -- distinct "
-            "from `klt drc`'s width/space/enclosure design-rule deck. Runs "
-            "fully headless via KLayout's native batch database API -- no "
-            "GUI, no Qt."
-        ),
-    )
-    precheck_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    precheck_parser.add_argument(
-        "--grid-um",
-        dest="grid_um",
-        type=float,
-        default=None,
-        help=(
-            "manufacturing grid in micrometres for the `offgrid` check "
-            "(e.g. 0.005); omit to skip that check -- this repo curates no "
-            "per-PDK grid table"
-        ),
-    )
-    precheck_parser.add_argument(
-        "--allowed-layers",
-        dest="allowed_layers",
-        default=None,
-        help=(
-            "layer whitelist for the `layer_whitelist` check: a path to a "
-            "JSON file, or an inline JSON array, of [layer, datatype] pairs "
-            "(e.g. '[[65, 20], [66, 20]]'); omit to skip that check"
-        ),
-    )
-    precheck_parser.add_argument(
-        "--deck",
-        default=None,
-        help=(
-            "extraction deck to source label/drawing layer pairs from for "
-            "the `pin_labels_over_drawing` check (currently: sky130, "
-            "gf180mcu); omit to skip that check"
-        ),
-    )
-    precheck_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to check when the stream has more than one; omit to "
-            "check every top cell"
-        ),
-    )
-    _add_format_arg(precheck_parser)
-    precheck_parser.set_defaults(func=precheck_cmd.run)
+    _add_precheck_parser(subparsers)
 
-    socket_check_parser = subparsers.add_parser(
-        "socket-check",
-        help="check a GDSII/OASIS stream against a socket/template descriptor",
-        description=(
-            "Check a GDSII or OASIS layout file against a socket/template "
-            "descriptor -- a JSON contract declaring the block's outline "
-            "(bounding box), named pins (position, layer, informational "
-            "size), reserved layers, and numeric interface budgets. Reports "
-            "missing/misplaced/wrong-layer pins, geometry outside the "
-            "outline, and reserved-layer usage as structured violations; "
-            "budgets are reported back declared-but-unverified, since "
-            "verifying an R/C/current budget needs simulation/extraction "
-            "data this checker doesn't have. See "
-            "docs/schemas/socket.schema.json for the descriptor shape and "
-            "docs/cli/socket-check.md for the CLI surface. Runs fully "
-            "headless via KLayout's native batch database API -- no GUI, "
-            "no Qt."
-        ),
-    )
-    socket_check_parser.add_argument(
-        "file", help="path to a GDSII or OASIS layout file"
-    )
-    socket_check_parser.add_argument(
-        "--socket",
-        required=True,
-        help=(
-            "path to a socket descriptor JSON file (see "
-            "docs/schemas/socket.schema.json). Not validated by argparse -- "
-            "a missing/malformed descriptor exits 1 with a clean error, per "
-            "docs/cli/socket-check.md's exit-code contract, rather than "
-            "argparse's usage-error exit 2."
-        ),
-    )
-    socket_check_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to check when the stream has more than one; omit to "
-            "check every top cell"
-        ),
-    )
-    _add_format_arg(socket_check_parser)
-    socket_check_parser.set_defaults(func=socket_check_cmd.run)
+    _add_socket_check_parser(subparsers)
 
     _add_lef_abstract_parser(subparsers)
 
-    ring_check_parser = subparsers.add_parser(
-        "ring-check",
-        help="assert a layer set forms a single closed annulus (guard/tap ring)",
-        description=(
-            "Assert that a caller-specified layer set forms a single closed "
-            "annulus -- a guard ring, tap ring, or seam moat -- and report "
-            "the break location when it does not. Purely geometric: the "
-            "shapes on the given layers are merged and the result must be "
-            "exactly one polygon with exactly one hole. A plain connectivity "
-            "check is insufficient (a ring is redundant by construction, so a "
-            "single break still leaves one connected group) -- this asserts "
-            "the annulus, not just connectedness, catching a gap cut into one "
-            "segment that every width/spacing/enclosure rule passes. No "
-            "extraction or netlist needed. Runs fully headless via KLayout's "
-            "native batch database API -- no GUI, no Qt. See "
-            "docs/cli/ring-check.md."
-        ),
-    )
-    ring_check_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    ring_check_parser.add_argument(
-        "--layers",
-        required=True,
-        help=(
-            "ring layer set as a path to a JSON file, or an inline JSON array "
-            "of [layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); the "
-            "shapes on these layers are merged and their union must form the "
-            "annulus. Not validated by argparse -- an empty/malformed value "
-            "exits 1 with a clean error, per docs/cli/ring-check.md's "
-            "exit-code contract, rather than argparse's usage-error exit 2."
-        ),
-    )
-    ring_check_parser.add_argument(
-        "--region",
-        default=None,
-        help=(
-            "optional clip window as an inline JSON array of four micrometre "
-            "coordinates [left, bottom, right, top] (e.g. '[0, 0, 100, 100]') "
-            "used to isolate one ring in a stream with other geometry on the "
-            "same layers; omit to check every shape on the layer set"
-        ),
-    )
-    ring_check_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to check when the stream has more than one; omit to "
-            "check every top cell"
-        ),
-    )
-    ring_check_parser.add_argument(
-        "--ignore-enclosed",
-        action="store_true",
-        default=False,
-        help=(
-            "ignore polygons enclosed within the ring's own hole when "
-            "asserting the annulus -- use this when the ring encloses "
-            "geometry on the same layer set (e.g. a guard/tap ring around a "
-            "device), which otherwise merges to a second, disjoint polygon "
-            "and trips a spurious 'fragmented' violation. A genuine break in "
-            "the ring's own perimeter still fails with this flag set. "
-            "Off by default (backward compatible)."
-        ),
-    )
-    _add_format_arg(ring_check_parser)
-    ring_check_parser.set_defaults(func=ring_check_cmd.run)
+    _add_ring_check_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
 
@@ -501,63 +205,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_equiv_parser(subparsers)
 
-    erc_parser = subparsers.add_parser(
-        "erc",
-        help=(
-            "build a per-gate layer-by-layer connectivity model and "
-            "antenna-ratio verdict (antenna/ERC signoff)"
-        ),
-        description=(
-            "Build the klt erc layer-by-layer connectivity model (issue "
-            "#859, Phase 1a) and the per-gate antenna-ratio verdict (issue "
-            "#860, Phase 1b) of the antenna + ERC signoff epic #713. For "
-            "every net whose geometry includes the declared gate-role "
-            "layer, accumulate that net's connected conductor area at each "
-            "fabrication step (the spec's stackup order), and, when --pdk "
-            "is given, compare each level's cumulative-area/gate-area "
-            "ratio against that PDK's real antenna-ratio limit. Also "
-            "reports the ERC finding list (issue #861, Phase 1c) and, for "
-            "every antenna violation, a diode-insertion/layer-jumping "
-            "remedy naming the specific net and layer (issue #908, "
-            "Phase 3). See docs/cli/erc.md for the spec-file schema and "
-            "the JSON contract."
-        ),
-    )
-    erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
-    erc_parser.add_argument(
-        "spec",
-        help=(
-            "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
-            "mapping GDS layer/datatype pairs to fabrication-order "
-            'conductor roles -- stackup[0] sets "role": "gate" -- and '
-            "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section"
-        ),
-    )
-    erc_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to analyse when the stream has more than one "
-            "(required in that case -- klt erc operates on exactly one "
-            "top cell, unlike klt layers' default of summing across all)"
-        ),
-    )
-    erc_parser.add_argument(
-        "--pdk",
-        default=None,
-        help=(
-            "PDK antenna-ratio limit table to check each level's "
-            "antenna_ratio against (currently: sky130). Optional -- omit "
-            "to still report every level's antenna_ratio, just with "
-            "verdict 'unchecked' everywhere. Not validated by argparse -- "
-            "an unknown name exits 1 with a clean error, per "
-            "docs/cli/erc.md's exit-code contract, rather than argparse's "
-            "usage-error exit 2."
-        ),
-    )
-    _add_format_arg(erc_parser)
-    erc_parser.set_defaults(func=erc_cmd.run)
+    _add_erc_parser(subparsers)
 
     _add_functional_verification_parser(subparsers)
     _add_place_and_route_parser(subparsers)
@@ -4061,3 +3709,380 @@ def _add_layout_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(layout_metrics_parser)
     layout_metrics_parser.set_defaults(func=layout_metrics_cmd.run)
+
+
+def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``drc`` verb: run a headless DRC deck against a layout."""
+    drc_parser = subparsers.add_parser(
+        "drc",
+        help="run a headless DRC deck against a GDSII/OASIS stream",
+        description=(
+            "Run a DRC rule deck against a GDSII or OASIS layout file and "
+            "report violations as structured data. By default (--engine "
+            "curated), runs fully headless via KLayout's native Region "
+            "check primitives — no GUI, no Qt, no standalone klayout "
+            "binary. --engine klayout opts into shelling out to a "
+            "standalone klayout binary to run a PDK-native DRC-DSL deck "
+            "instead (issue #565)."
+        ),
+    )
+    # `file` (positional) and `--check` (issue #1106) are mutually exclusive
+    # input sources -- exactly one is required. Grouping them this way lets
+    # argparse itself enforce both "one is required" and "not both at once"
+    # as usage errors (exit 2), preserving the pre-#1106 contract that
+    # omitting `file` entirely is a usage error, not an application-level
+    # one (see `test_cli_missing_request_arg_is_usage_error`'s `klt lvs`
+    # sibling in tests/test_lvs.py).
+    drc_input_group = drc_parser.add_mutually_exclusive_group(required=True)
+    drc_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a GDSII or OASIS layout file. Omit when using --check "
+            "(the input path is read from the committed report instead)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
+            "--engine curated (the default); ignored for --engine klayout. "
+            "Not validated by argparse -- an unknown deck name exits 1 with "
+            "a clean error, per docs/cli/drc.md's exit-code contract, "
+            "rather than argparse's usage-error exit 2."
+        ),
+    )
+    drc_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell. Not supported yet for --engine klayout."
+        ),
+    )
+    drc_parser.add_argument(
+        "--engine",
+        choices=("curated", "klayout"),
+        default="curated",
+        help=(
+            "'curated' (default): klt's own pip-only Region-primitive deck "
+            "(--deck required). 'klayout' (issue #565, opt-in): shells out "
+            "to a standalone klayout binary on PATH to run a PDK-native "
+            "DRC-DSL script (.lydrc/.drc), resolved via --pdk/--pdk-root or "
+            "given directly via --deck-file. See docs/cli/drc.md, 'Engine'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        help=(
+            "explicit path to a KLayout DRC-DSL script (.lydrc/.drc) to run "
+            "with --engine klayout, overriding --pdk/--pdk-root resolution"
+        ),
+    )
+    _add_pdk_args(
+        drc_parser,
+        pdk_help=(
+            "PDK variant to resolve the native deck from (e.g. sky130A), "
+            "for --engine klayout; overrides $PDK"
+        ),
+    )
+    drc_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=300.0,
+        help=(
+            "wall-clock budget in seconds for the klayout subprocess "
+            "(--engine klayout only)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' script global to pass to the klayout "
+            "subprocess, beyond the always-set 'input'/'report' (--engine "
+            "klayout only; ignored for --engine curated). Repeatable -- "
+            "pass once per variable. Some PDK-native decks gate every rule "
+            "behind additional globals (FEOL/BEOL enable flags, a "
+            "metal-stack selector, etc.) their PDK's own run wrapper would "
+            "normally set; without this, such a deck silently checks "
+            "nothing and still reports a clean, empty report. Not needed "
+            "for a self-contained deck (e.g. sky130A's sky130A.lydrc). "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt drc --format json' report "
+            "(REPORT) instead of running a fresh check: mutually exclusive "
+            "with the positional 'file' argument, since the input path is "
+            "read from REPORT itself (issue #1106). Cheap mode (default): "
+            "re-hash the input layout and deck named in REPORT's "
+            "provenance block and compare against the recorded "
+            "content_hash values, no DRC engine re-run. Combine with "
+            "--rerun for full mode (re-run the deck and diff "
+            "verdict-bearing fields). Exits 0 if still consistent, 3 if "
+            "drifted -- see docs/cli/drc.md, '--check'"
+        ),
+    )
+    drc_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1106): re-run the DRC deck "
+            "named in REPORT and diff verdict-bearing fields against the "
+            "committed report, excluding provenance.klt_version/"
+            "klayout_version/pdk.version (fields that legitimately vary "
+            "between runs of identical inputs). Requires --check; a clean "
+            "error (exit 1) otherwise"
+        ),
+    )
+    _add_format_arg(drc_parser)
+    drc_parser.set_defaults(func=drc_cmd.run)
+
+
+def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``precheck`` verb: a named battery of layout-hygiene checks."""
+    precheck_parser = subparsers.add_parser(
+        "precheck",
+        help="run a named battery of layout-hygiene checks",
+        description=(
+            "Run an ordered battery of independently-named layout-hygiene "
+            "checks (off-grid geometry, zero-area polygons, cell-name "
+            "hygiene, an optional layer whitelist, and pin labels landing "
+            "on drawn geometry) against a GDSII or OASIS layout file, and "
+            "report each check's own pass/fail/skipped result -- distinct "
+            "from `klt drc`'s width/space/enclosure design-rule deck. Runs "
+            "fully headless via KLayout's native batch database API -- no "
+            "GUI, no Qt."
+        ),
+    )
+    precheck_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    precheck_parser.add_argument(
+        "--grid-um",
+        dest="grid_um",
+        type=float,
+        default=None,
+        help=(
+            "manufacturing grid in micrometres for the `offgrid` check "
+            "(e.g. 0.005); omit to skip that check -- this repo curates no "
+            "per-PDK grid table"
+        ),
+    )
+    precheck_parser.add_argument(
+        "--allowed-layers",
+        dest="allowed_layers",
+        default=None,
+        help=(
+            "layer whitelist for the `layer_whitelist` check: a path to a "
+            "JSON file, or an inline JSON array, of [layer, datatype] pairs "
+            "(e.g. '[[65, 20], [66, 20]]'); omit to skip that check"
+        ),
+    )
+    precheck_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "extraction deck to source label/drawing layer pairs from for "
+            "the `pin_labels_over_drawing` check (currently: sky130, "
+            "gf180mcu); omit to skip that check"
+        ),
+    )
+    precheck_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    _add_format_arg(precheck_parser)
+    precheck_parser.set_defaults(func=precheck_cmd.run)
+
+
+def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``socket-check`` verb: check a layout against a socket contract."""
+    socket_check_parser = subparsers.add_parser(
+        "socket-check",
+        help="check a GDSII/OASIS stream against a socket/template descriptor",
+        description=(
+            "Check a GDSII or OASIS layout file against a socket/template "
+            "descriptor -- a JSON contract declaring the block's outline "
+            "(bounding box), named pins (position, layer, informational "
+            "size), reserved layers, and numeric interface budgets. Reports "
+            "missing/misplaced/wrong-layer pins, geometry outside the "
+            "outline, and reserved-layer usage as structured violations; "
+            "budgets are reported back declared-but-unverified, since "
+            "verifying an R/C/current budget needs simulation/extraction "
+            "data this checker doesn't have. See "
+            "docs/schemas/socket.schema.json for the descriptor shape and "
+            "docs/cli/socket-check.md for the CLI surface. Runs fully "
+            "headless via KLayout's native batch database API -- no GUI, "
+            "no Qt."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "file", help="path to a GDSII or OASIS layout file"
+    )
+    socket_check_parser.add_argument(
+        "--socket",
+        required=True,
+        help=(
+            "path to a socket descriptor JSON file (see "
+            "docs/schemas/socket.schema.json). Not validated by argparse -- "
+            "a missing/malformed descriptor exits 1 with a clean error, per "
+            "docs/cli/socket-check.md's exit-code contract, rather than "
+            "argparse's usage-error exit 2."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    _add_format_arg(socket_check_parser)
+    socket_check_parser.set_defaults(func=socket_check_cmd.run)
+
+
+def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``ring-check`` verb: assert a layer set forms a closed annulus."""
+    ring_check_parser = subparsers.add_parser(
+        "ring-check",
+        help="assert a layer set forms a single closed annulus (guard/tap ring)",
+        description=(
+            "Assert that a caller-specified layer set forms a single closed "
+            "annulus -- a guard ring, tap ring, or seam moat -- and report "
+            "the break location when it does not. Purely geometric: the "
+            "shapes on the given layers are merged and the result must be "
+            "exactly one polygon with exactly one hole. A plain connectivity "
+            "check is insufficient (a ring is redundant by construction, so a "
+            "single break still leaves one connected group) -- this asserts "
+            "the annulus, not just connectedness, catching a gap cut into one "
+            "segment that every width/spacing/enclosure rule passes. No "
+            "extraction or netlist needed. Runs fully headless via KLayout's "
+            "native batch database API -- no GUI, no Qt. See "
+            "docs/cli/ring-check.md."
+        ),
+    )
+    ring_check_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    ring_check_parser.add_argument(
+        "--layers",
+        required=True,
+        help=(
+            "ring layer set as a path to a JSON file, or an inline JSON array "
+            "of [layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); the "
+            "shapes on these layers are merged and their union must form the "
+            "annulus. Not validated by argparse -- an empty/malformed value "
+            "exits 1 with a clean error, per docs/cli/ring-check.md's "
+            "exit-code contract, rather than argparse's usage-error exit 2."
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "optional clip window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top] (e.g. '[0, 0, 100, 100]') "
+            "used to isolate one ring in a stream with other geometry on the "
+            "same layers; omit to check every shape on the layer set"
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--ignore-enclosed",
+        action="store_true",
+        default=False,
+        help=(
+            "ignore polygons enclosed within the ring's own hole when "
+            "asserting the annulus -- use this when the ring encloses "
+            "geometry on the same layer set (e.g. a guard/tap ring around a "
+            "device), which otherwise merges to a second, disjoint polygon "
+            "and trips a spurious 'fragmented' violation. A genuine break in "
+            "the ring's own perimeter still fails with this flag set. "
+            "Off by default (backward compatible)."
+        ),
+    )
+    _add_format_arg(ring_check_parser)
+    ring_check_parser.set_defaults(func=ring_check_cmd.run)
+
+
+def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``erc`` verb: connectivity model + antenna-ratio verdict."""
+    erc_parser = subparsers.add_parser(
+        "erc",
+        help=(
+            "build a per-gate layer-by-layer connectivity model and "
+            "antenna-ratio verdict (antenna/ERC signoff)"
+        ),
+        description=(
+            "Build the klt erc layer-by-layer connectivity model (issue "
+            "#859, Phase 1a) and the per-gate antenna-ratio verdict (issue "
+            "#860, Phase 1b) of the antenna + ERC signoff epic #713. For "
+            "every net whose geometry includes the declared gate-role "
+            "layer, accumulate that net's connected conductor area at each "
+            "fabrication step (the spec's stackup order), and, when --pdk "
+            "is given, compare each level's cumulative-area/gate-area "
+            "ratio against that PDK's real antenna-ratio limit. Also "
+            "reports the ERC finding list (issue #861, Phase 1c) and, for "
+            "every antenna violation, a diode-insertion/layer-jumping "
+            "remedy naming the specific net and layer (issue #908, "
+            "Phase 3). See docs/cli/erc.md for the spec-file schema and "
+            "the JSON contract."
+        ),
+    )
+    erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
+    erc_parser.add_argument(
+        "spec",
+        help=(
+            "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
+            "mapping GDS layer/datatype pairs to fabrication-order "
+            'conductor roles -- stackup[0] sets "role": "gate" -- and '
+            "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
+            "section"
+        ),
+    )
+    erc_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to analyse when the stream has more than one "
+            "(required in that case -- klt erc operates on exactly one "
+            "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    erc_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK antenna-ratio limit table to check each level's "
+            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "to still report every level's antenna_ratio, just with "
+            "verdict 'unchecked' everywhere. Not validated by argparse -- "
+            "an unknown name exits 1 with a clean error, per "
+            "docs/cli/erc.md's exit-code contract, rather than argparse's "
+            "usage-error exit 2."
+        ),
+    )
+    _add_format_arg(erc_parser)
+    erc_parser.set_defaults(func=erc_cmd.run)
