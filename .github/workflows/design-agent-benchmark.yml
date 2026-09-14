@@ -113,25 +113,26 @@ jobs:
           uv run --frozen python scripts/design_agent_benchmark.py validate \
             | tee design-agent-benchmark-validate.json
 
-      - name: Run the harness (reference candidate provider, pass@1/pass@2)
+      - name: Run the harness (reference candidate provider, pass@1/pass@5)
         # Deterministic reference-provider proof-of-concept -- see
         # benchmarks/design-agent/README.md "Known limitations". Always
         # reports 100% pass while the harness itself is healthy; a drop
         # below 100% here is a regression in the harness's own klt
         # eval/klt sim wiring, not (yet) in the design pipeline.
         #
-        # --attempts 2 (down from 5, issue #1736): every reference netlist
-        # now resolves a real sky130A device library per corner instead of
-        # a cheap generic LEVEL=1 stand-in, and this provider's attempts are
-        # byte-identical (same fixed reference solution every time) -- 5x
-        # identical, now much more expensive, corner sweeps measure nothing
-        # a 2x re-run doesn't already show. See issue #1781 (tracked in
-        # benchmarks/design-agent/README.md's "Known limitations") for
-        # restoring a higher k once the harness itself can dedupe/cache a
-        # deterministic provider's repeated attempts.
+        # --attempts 5 (restored from #1736's --attempts 2 stopgap, issue
+        # #1781): `run_task_attempts` now runs a provider marked
+        # `is_deterministic = True` (the reference provider) for real
+        # exactly once per task and replicates that one result across the
+        # remaining attempt slots, rather than re-running `klt eval` (and
+        # therefore the full 18-corner sky130A sweep) `--attempts` times
+        # for a provider that is byte-identical every attempt by
+        # construction -- so this step's own cost no longer scales with
+        # `--attempts` at all; see `run_task_attempts`'s docstring in
+        # `scripts/design_agent_benchmark.py`.
         run: |
           uv run --frozen python scripts/design_agent_benchmark.py run \
-            --attempts 2 --k 1 2 --out design-agent-benchmark-run.json
+            --attempts 5 --k 1 5 --out design-agent-benchmark-run.json
 
       - uses: actions/upload-artifact@v7
         if: always()
