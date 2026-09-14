@@ -21,7 +21,16 @@
 # re-deriving PRIOR_HASH/PRIOR_AT by hand every pass, and so CI/tests can
 # assert the invariant never regresses.
 #
-# Two modes, one algorithm (sorted `curator:dep-recheck` marker history, then
+# Two marker families are recognized (#1780): `<!-- curator:dep-recheck:<v>:<hash> -->`
+# (posted when the dependency is a closing PR — `dep-recheck-fingerprint.sh
+# dep-recheck`) and `<!-- curator:named-dependency:<hash> -->` (posted when the
+# dependency is a body `## Dependencies` checklist reference, not a closing
+# PR — `dep-recheck-fingerprint.sh named-dependency`; this family has no
+# `FORMULA_VERSION`, so its marker never carries a version segment). The two
+# families hash DIFFERENT, non-comparable inputs, so they are never allowed to
+# match against each other — see "--assume-new-family" below.
+#
+# Two modes, one algorithm (sorted marker history across BOTH families, then
 # walk CHRONOLOGICALLY ADJACENT pairs — never all pairs; two same-hash
 # comments separated by a differently-hashed comment are NOT a violation,
 # since the conclusion legitimately changed and reverted):
@@ -57,6 +66,16 @@
 #                           $LOOM_DEP_RECHECK_HEARTBEAT_HOURS, else 24 — same
 #                           env var and default as curator.md's rule.
 #   --assume-new-hash <h>   Switch to DECISION mode for candidate hash <h>.
+#   --assume-new-family <f>  Which marker family <h> was computed under:
+#                           `dep-recheck` (default, preserves pre-#1780
+#                           behavior for callers that don't pass this flag) or
+#                           `named-dependency`. Callers computing a hash via
+#                           `dep-recheck-fingerprint.sh named-dependency` MUST
+#                           pass `--assume-new-family named-dependency` so this
+#                           script never compares that hash against a
+#                           different-family prior marker — the two families
+#                           hash non-comparable inputs (see "#1780 marker
+#                           family guard" below).
 #   --assume-new-version <v>  The `FORMULA_VERSION` the candidate hash <h> was
 #                           computed under (see dep-recheck-fingerprint.sh's
 #                           `FORMULA_VERSION` output field). Defaults to `v0`
@@ -66,11 +85,15 @@
 #                           pre-#1544 hash-only comparison behavior unchanged.
 #                           A marker with no version segment (every
 #                           `curator:dep-recheck` comment posted before #1544
-#                           shipped) is parsed as `v0` for this same reason.
+#                           shipped, and every `curator:named-dependency`
+#                           comment — that family has no `FORMULA_VERSION` at
+#                           all) is parsed as `v0` for this same reason.
 #                           A version MISMATCH between this and the prior
 #                           marker's version always yields DECISION=NONE,
 #                           regardless of whether the hashes happen to match —
-#                           see "#1544 version guard" below.
+#                           see "#1544 version guard" below. A FAMILY mismatch
+#                           is treated identically — see "#1780 marker family
+#                           guard" below.
 #   --assume-new-at <t>     Timestamp (ISO-8601 UTC, e.g. 2026-09-06T12:48:22Z)
 #                           for the candidate entry. Defaults to now (UTC).
 #
@@ -86,13 +109,28 @@
 # dependency state. Only when the versions match does the ordinary
 # hash-comparison logic (CHANGED/SKIP/STALE) run.
 #
+# #1780 marker family guard: `curator:dep-recheck:` and `curator:named-dependency:`
+# markers hash fundamentally different inputs (a closing-PR fingerprint vs. a
+# body `## Dependencies` checklist fingerprint) — a shared hash VALUE between
+# the two families would be pure coincidence, never a meaningful match. PRIOR
+# selection always picks the single most-recent marker on the issue REGARDLESS
+# of family (an issue can carry either shape over its lifetime, e.g. a
+# body-only dependency later gaining a closing PR — the more recent marker
+# always wins, never a fixed family preference). But the two are compared only
+# when the candidate's declared `--assume-new-family` (default `dep-recheck`)
+# matches that prior marker's family — a family mismatch is folded into the
+# SAME "first check under this formula" NONE branch the version guard above
+# uses, since it is exactly the same shape of problem (two conclusions that
+# are not comparable must never yield CHANGED/SKIP/STALE against each other).
+#
 # Output (stdout — one KEY=VALUE per line, machine-parseable):
 #   AUDIT mode:   MODE=AUDIT, DECISION=OK|VIOLATION, VIOLATIONS=<n>, then one
-#                 "VIOLATION: hash=<h> at=<t1> and at=<t2> gap_hours=<g> window_hours=<w>"
+#                 "VIOLATION: hash=<h> family=<f> at=<t1> and at=<t2> gap_hours=<g> window_hours=<w>"
 #                 line per violation (sorted oldest-first).
 #   DECISION mode: MODE=DECISION, DECISION=NONE|CHANGED|SKIP|STALE,
 #                 PRIOR_HASH=<hash or empty>, PRIOR_AT=<timestamp or empty>,
-#                 PRIOR_VERSION=<version or empty>, AGE_HOURS=<n or empty>
+#                 PRIOR_VERSION=<version or empty>, PRIOR_FAMILY=<family or empty>,
+#                 AGE_HOURS=<n or empty>
 #
 # Exit codes:
 #   AUDIT mode:    0 = OK (no violation, including empty/no-marker history)
@@ -113,10 +151,11 @@ FILE=""
 HOURS="${LOOM_DEP_RECHECK_HEARTBEAT_HOURS:-24}"
 NEW_HASH=""
 NEW_VERSION=""
+NEW_FAMILY=""
 NEW_AT=""
 
 usage() {
-  echo "Usage: $0 (--issue <n> | --file <comments.json>) [--hours <n>] [--assume-new-hash <hash> [--assume-new-version <v>] [--assume-new-at <iso8601>]]" >&2
+  echo "Usage: $0 (--issue <n> | --file <comments.json>) [--hours <n>] [--assume-new-hash <hash> [--assume-new-family dep-recheck|named-dependency] [--assume-new-version <v>] [--assume-new-at <iso8601>]]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -125,6 +164,7 @@ while [[ $# -gt 0 ]]; do
     --file) FILE="${2:-}"; shift 2 ;;
     --hours) HOURS="${2:-}"; shift 2 ;;
     --assume-new-hash) NEW_HASH="${2:-}"; shift 2 ;;
+    --assume-new-family) NEW_FAMILY="${2:-}"; shift 2 ;;
     --assume-new-version) NEW_VERSION="${2:-}"; shift 2 ;;
     --assume-new-at) NEW_AT="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -160,6 +200,11 @@ if [[ ! "$HOURS" =~ ^[0-9]+$ ]]; then
   usage
   exit 2
 fi
+if [[ -n "$NEW_FAMILY" && "$NEW_FAMILY" != "dep-recheck" && "$NEW_FAMILY" != "named-dependency" ]]; then
+  echo "ERROR: --assume-new-family must be 'dep-recheck' or 'named-dependency', got: '$NEW_FAMILY'" >&2
+  usage
+  exit 2
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "ERROR: 'jq' not found on PATH" >&2; exit 2; }
 
@@ -181,27 +226,50 @@ else
   RAW_JSON="$(cat "$FILE")"
 fi
 
-# Normalize to a sorted array of {at, hash, version}, tolerating both REST
-# (created_at) and GraphQL (createdAt) field spellings, and both a bare
+# Normalize to a sorted array of {at, hash, version, family}, tolerating both
+# REST (created_at) and GraphQL (createdAt) field spellings, and both a bare
 # top-level array (REST / --file) and a `{"comments": [...]}` wrapper
 # (`gh issue view --json comments`-shaped fixtures), so callers can hand this
 # script either shape without pre-massaging it.
 #
-# The marker regex's `(?:v(?<v>[0-9]+):)?` group is OPTIONAL, so both the
-# versioned form (`<!-- curator:dep-recheck:v1:<hash> -->`, #1544) and every
-# legacy unversioned marker posted before #1544 shipped
-# (`<!-- curator:dep-recheck:<hash> -->`) match this same regex — a legacy
-# marker's `.v` capture is `null`, normalized to the `v0` sentinel below.
+# Two marker families are recognized (#1780 — see header comment):
+#   - `curator:dep-recheck:` — the `(?:v(?<v>[0-9]+):)?` group is OPTIONAL, so
+#     both the versioned form (`<!-- curator:dep-recheck:v1:<hash> -->`,
+#     #1544) and every legacy unversioned marker posted before #1544 shipped
+#     (`<!-- curator:dep-recheck:<hash> -->`) match this same regex — a legacy
+#     marker's `.v` capture is `null`, normalized to the `v0` sentinel below.
+#   - `curator:named-dependency:` — never has a version segment (that family
+#     has no `FORMULA_VERSION`); every match is normalized to `v0`.
+# Each entry's `family` field keeps the two apart for the guard below — never
+# assume a `version` of `v0` alone means "comparable"; a `dep-recheck` marker
+# and a `named-dependency` marker can both be `v0` while hashing unrelated
+# inputs.
 ENTRIES_JSON="$(jq -c '
   ( if type == "object" and has("comments") then .comments else . end )
   | [ .[]
-      | select(.body != null and (.body | test("<!--[ \t]*curator:dep-recheck:")))
-      | (.body | capture("<!--[ \t]*curator:dep-recheck:(?:v(?<v>[0-9]+):)?(?<h>[0-9a-fA-F]+)[ \t]*-->")) as $m
-      | {
-          at: (.created_at // .createdAt),
-          hash: $m.h,
-          version: (if $m.v == null then "v0" else "v" + $m.v end)
-        }
+      | select(.body != null and (.body | test("<!--[ \t]*curator:(dep-recheck|named-dependency):")))
+      | . as $c
+      # capture() is a generator (zero outputs on no match, not `null`), so
+      # each candidate regex is wrapped in `[...] | .[0]` to turn "no match"
+      # into an explicit `null` the `if`/`elif` below can branch on.
+      | ($c.body | [capture("<!--[ \t]*curator:dep-recheck:(?:v(?<v>[0-9]+):)?(?<h>[0-9a-fA-F]+)[ \t]*-->")] | .[0]) as $dr
+      | ($c.body | [capture("<!--[ \t]*curator:named-dependency:(?<h>[0-9a-fA-F]+)[ \t]*-->")] | .[0]) as $nd
+      | if $dr != null then
+          {
+            at: ($c.created_at // $c.createdAt),
+            hash: $dr.h,
+            version: (if $dr.v == null then "v0" else "v" + $dr.v end),
+            family: "dep-recheck"
+          }
+        elif $nd != null then
+          {
+            at: ($c.created_at // $c.createdAt),
+            hash: $nd.h,
+            version: "v0",
+            family: "named-dependency"
+          }
+        else empty
+        end
     ]
   | sort_by(.at)
 ' <<<"$RAW_JSON" 2>&1)" || {
@@ -225,8 +293,15 @@ if [[ -n "$NEW_HASH" ]]; then
   # updated to pass it (defaults both sides of the comparison to the same
   # `v0` sentinel legacy markers parse to, above).
   [[ -n "$NEW_VERSION" ]] || NEW_VERSION="v0"
+  # See "#1780 marker family guard" above: omitting --assume-new-family
+  # preserves the pre-#1780 behavior (every caller before this flag existed
+  # was, and every caller that still doesn't pass it is, computing a
+  # `dep-recheck` hash).
+  [[ -n "$NEW_FAMILY" ]] || NEW_FAMILY="dep-recheck"
 
-  # Most recent PRIOR entry, of ANY hash, strictly before the candidate.
+  # Most recent PRIOR entry, of ANY hash AND ANY family, strictly before the
+  # candidate — an issue can carry either marker family over its lifetime, so
+  # PRIOR selection never filters by family; only the comparison below does.
   PRIOR="$(jq -c --arg at "$NEW_AT" '
     [ .[] | select(.at < $at) ] | sort_by(.at) | last // empty
   ' <<<"$ENTRIES_JSON")"
@@ -238,6 +313,7 @@ if [[ -n "$NEW_HASH" ]]; then
     echo "PRIOR_HASH="
     echo "PRIOR_AT="
     echo "PRIOR_VERSION="
+    echo "PRIOR_FAMILY="
     echo "AGE_HOURS="
     exit 0
   fi
@@ -245,21 +321,25 @@ if [[ -n "$NEW_HASH" ]]; then
   PRIOR_HASH="$(jq -r '.hash' <<<"$PRIOR")"
   PRIOR_AT="$(jq -r '.at' <<<"$PRIOR")"
   PRIOR_VERSION="$(jq -r '.version' <<<"$PRIOR")"
+  PRIOR_FAMILY="$(jq -r '.family' <<<"$PRIOR")"
 
-  # #1544 version guard: a version mismatch is ALWAYS "first-ever check under
-  # this formula version" -- never CHANGED, regardless of whether the hashes
-  # happen to match or differ. This must run before the hash comparison below
-  # so a formula-version bump never gets misread as a genuine dependency-state
-  # change (or, worse, a coincidental hash collision across versions gets
-  # misread as SKIP/STALE). Unlike the "no prior marker at all" NONE case
-  # above, PRIOR_* is still populated here (a prior marker DOES exist, just
-  # under a different formula version) -- useful for logging/debugging even
-  # though the caller's action for DECISION=NONE is identical either way.
-  if [[ "$PRIOR_VERSION" != "$NEW_VERSION" ]]; then
+  # #1544 version guard + #1780 marker family guard: a version OR family
+  # mismatch is ALWAYS "first-ever check under this formula" -- never
+  # CHANGED, regardless of whether the hashes happen to match or differ. This
+  # must run before the hash comparison below so a formula-version bump (or a
+  # comparison across the two non-comparable marker families) never gets
+  # misread as a genuine dependency-state change (or, worse, a coincidental
+  # hash collision gets misread as SKIP/STALE). Unlike the "no prior marker at
+  # all" NONE case above, PRIOR_* is still populated here (a prior marker DOES
+  # exist, just under a different formula version or family) -- useful for
+  # logging/debugging even though the caller's action for DECISION=NONE is
+  # identical either way.
+  if [[ "$PRIOR_FAMILY" != "$NEW_FAMILY" || "$PRIOR_VERSION" != "$NEW_VERSION" ]]; then
     echo "DECISION=NONE"
     echo "PRIOR_HASH=$PRIOR_HASH"
     echo "PRIOR_AT=$PRIOR_AT"
     echo "PRIOR_VERSION=$PRIOR_VERSION"
+    echo "PRIOR_FAMILY=$PRIOR_FAMILY"
     echo "AGE_HOURS="
     exit 0
   fi
@@ -282,6 +362,7 @@ if [[ -n "$NEW_HASH" ]]; then
     echo "PRIOR_HASH=$PRIOR_HASH"
     echo "PRIOR_AT=$PRIOR_AT"
     echo "PRIOR_VERSION=$PRIOR_VERSION"
+    echo "PRIOR_FAMILY=$PRIOR_FAMILY"
     echo "AGE_HOURS=$AGE_HOURS"
     exit 0
   fi
@@ -291,6 +372,7 @@ if [[ -n "$NEW_HASH" ]]; then
     echo "PRIOR_HASH=$PRIOR_HASH"
     echo "PRIOR_AT=$PRIOR_AT"
     echo "PRIOR_VERSION=$PRIOR_VERSION"
+    echo "PRIOR_FAMILY=$PRIOR_FAMILY"
     echo "AGE_HOURS=$AGE_HOURS"
     exit 20
   fi
@@ -299,6 +381,7 @@ if [[ -n "$NEW_HASH" ]]; then
   echo "PRIOR_HASH=$PRIOR_HASH"
   echo "PRIOR_AT=$PRIOR_AT"
   echo "PRIOR_VERSION=$PRIOR_VERSION"
+  echo "PRIOR_FAMILY=$PRIOR_FAMILY"
   echo "AGE_HOURS=$AGE_HOURS"
   exit 0
 fi
@@ -313,13 +396,20 @@ if [[ "$COUNT" -lt 2 ]]; then
   exit 0
 fi
 
+# Adjacency is scanned across the FULL, combined-family timeline (sorted by
+# time, per the header comment's "auto" PRIOR-selection policy) but a pair
+# only counts as a violation when BOTH the hash AND the family match — a
+# `dep-recheck` marker immediately followed by a `named-dependency` marker
+# (or vice versa) is never comparable, even on the rare chance the two hash
+# identically (#1780).
 VIOLATIONS=0
 PREV_AT=""
 PREV_HASH=""
+PREV_FAMILY=""
 FIRST=1
-while IFS=$'\t' read -r AT HASH; do
+while IFS=$'\t' read -r AT HASH FAMILY; do
   if [[ "$FIRST" -eq 0 ]]; then
-    if [[ "$HASH" == "$PREV_HASH" ]]; then
+    if [[ "$HASH" == "$PREV_HASH" && "$FAMILY" == "$PREV_FAMILY" ]]; then
       PREV_EPOCH="$(iso_to_epoch "$PREV_AT")"
       CURR_EPOCH="$(iso_to_epoch "$AT")"
       if [[ -n "$PREV_EPOCH" && -n "$CURR_EPOCH" ]]; then
@@ -328,15 +418,16 @@ while IFS=$'\t' read -r AT HASH; do
         if [[ "$GAP_SECONDS" -lt "$WINDOW_SECONDS" ]]; then
           GAP_HOURS_DISPLAY=$(( GAP_SECONDS / 3600 ))
           VIOLATIONS=$((VIOLATIONS + 1))
-          echo "VIOLATION: hash=$HASH at=$PREV_AT and at=$AT gap_hours=$GAP_HOURS_DISPLAY window_hours=$HOURS"
+          echo "VIOLATION: hash=$HASH family=$FAMILY at=$PREV_AT and at=$AT gap_hours=$GAP_HOURS_DISPLAY window_hours=$HOURS"
         fi
       fi
     fi
   fi
   PREV_AT="$AT"
   PREV_HASH="$HASH"
+  PREV_FAMILY="$FAMILY"
   FIRST=0
-done < <(jq -r '.[] | [.at, .hash] | @tsv' <<<"$ENTRIES_JSON")
+done < <(jq -r '.[] | [.at, .hash, .family] | @tsv' <<<"$ENTRIES_JSON")
 
 if [[ "$VIOLATIONS" -gt 0 ]]; then
   echo "DECISION=VIOLATION"
