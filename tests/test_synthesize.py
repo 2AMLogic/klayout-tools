@@ -1947,6 +1947,37 @@ def test_generated_script_maps_constants_to_tie_cells_gf180mcu(tmp_path, monkeyp
     )
 
 
+def test_generated_script_maps_constants_to_tie_cells_sg13g2_stdcell(
+    tmp_path, monkeypatch
+):
+    """The third supported library (issue #1784) gets its **own** verified
+    tie cells (`sg13g2_tiehi`/`sg13g2_tielo`, a single-underscore naming
+    convention unlike sky130/gf180mcu's double-underscore
+    `<library>__tieh`/`<library>__tiel`) -- never guessed by analogy to
+    either existing entry."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "sg13g2A",
+        cell_library="sg13g2_stdcell",
+        corners=(("tt_025C_1v20", 1.0, 25.0, 1.2),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "sg13g2_stdcell", "corner": "tt_025C_1v20"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_hilomap_line(report["script_path"]) == (
+        "hilomap -hicell sg13g2_tiehi L_HI -locell sg13g2_tielo L_LO"
+    )
+
+
 def test_cell_library_without_tie_cell_entry_emits_no_hilomap(tmp_path, monkeypatch):
     """A `cell_library` with no `_TIE_CELLS` entry is never given a guessed
     tie cell: the `hilomap` pass is omitted entirely rather than the run
@@ -2108,6 +2139,46 @@ def test_run_synthesize_stubbed_success_gf180mcu(tmp_path, monkeypatch):
     assert "-dont_use" not in abc_line
     assert "gf180mcu_fd_sc_mcu9t5v0" not in synthesize._ABC_DONT_USE_GLOBS
     assert report["timing"]["source"] == "abc_stime"
+
+
+def test_run_synthesize_stubbed_success_sg13g2_stdcell(tmp_path, monkeypatch):
+    """The third supported library (issue #1784) resolves and synthesizes
+    the same way sky130/gf180mcu do -- and unlike gf180mcu, it carries both
+    an ABC `-constr` sizing target *and* a `-dont_use` exclusion list, since
+    `_ABC_DONT_USE_GLOBS["sg13g2_stdcell"]` is populated (mirrors
+    `test_generated_script_passes_constr_and_dont_use`'s sky130 assertions,
+    applied to the newest library)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "sg13g2A",
+        cell_library="sg13g2_stdcell",
+        corners=(("tt_025C_1v20", 1.0, 25.0, 1.2),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "sg13g2_stdcell", "corner": "tt_025C_1v20"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    assert report["provenance"]["pdk"]["name"] == "sg13g2A"
+    assert report["provenance"]["deck"]["name"] == "sg13g2_stdcell__tt_025C_1v20"
+    assert report["timing"]["source"] == "abc_stime"
+
+    abc_line = _script_abc_line(report["script_path"])
+    assert "-constr " in abc_line
+
+    globs = synthesize._ABC_DONT_USE_GLOBS["sg13g2_stdcell"]
+    assert globs, "the sg13g2_stdcell exclusion table entry must not be empty"
+    assert abc_line.count("-dont_use ") == len(globs)
+    for glob in globs:
+        assert f"-dont_use {glob}" in abc_line
 
 
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
