@@ -510,10 +510,19 @@ from typing import Any
 
 from ._layout import write_layout
 from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
+
+# `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
+# that only the STA subsystem calls after the issue #1808 split; they are
+# imported here purely so `klayout_tools.place_and_route.<name>` keeps
+# resolving for callers that reach them by that path (the test suite does).
+# Same intent -- and same redundant `X as X` alias form -- as the
+# `place_and_route_sta` re-export block below.
+from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import (
     _load_request_json,
     validate_request_shape,
 )
+from ._paths import _tcl_net_list as _tcl_net_list
 from ._provenance import build_provenance
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import (
