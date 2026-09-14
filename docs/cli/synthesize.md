@@ -242,7 +242,11 @@ installed variant/root instead.
 - `pdk.cell_library` — a standard-cell library name. Not restricted to a
   single PDK family: any standard-cell library the resolved install ships a
   `libs_ref` entry for resolves the same way (`sky130_fd_sc_hd` and
-  `gf180mcu_fd_sc_mcu9t5v0` both verified end to end).
+  `gf180mcu_fd_sc_mcu9t5v0` both verified end to end). Liberty filenames are
+  tried both as open_pdks' double-underscore
+  `<cell_library>__<corner>.lib` and, when that does not exist, IHP-Open-PDK's
+  single-underscore `<cell_library>_<corner>.lib` (e.g. `sg13g2_stdcell`,
+  issue #1790).
 - `pdk.corner` — a liberty corner selector (e.g. `tt_025C_1v80`); when
   omitted, the nominal (typical-process, room-temperature) corner
   `klt pdk cells`'s own `nominal_corner` selection already picks is used.

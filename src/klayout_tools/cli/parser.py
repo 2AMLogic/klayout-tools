@@ -3265,8 +3265,9 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         help="report standard-cell library device flavor(s) / nominal supply",
         description=(
             "Report, per standard-cell digital library (libs.ref entries "
-            "named `*_fd_sc_*`) under the resolved variant: the nfet/pfet "
-            "device flavor(s) its cells instantiate (spice/<lib>.spice), and "
+            "named `*_fd_sc_*` or `*_stdcell*`) under the resolved variant: "
+            "the nfet/pfet device flavor(s) its cells instantiate "
+            "(spice/<lib>.spice), and "
             "the nominal supply its .lib timing views are characterised at. "
             "With --supply, adds a per-library compatibility verdict and "
             "exits non-zero (3) when no library matches, so this can gate CI."

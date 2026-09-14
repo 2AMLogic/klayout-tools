@@ -2423,6 +2423,13 @@ def _resolve_liberty(
     for either leaves that resolver's own default search order in effect.
     Raises :class:`PlaceAndRouteError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
+
+    Liberty filename convention: tries open_pdks' double-underscore
+    ``<cell_library>__<corner>.lib`` first, falling back to a single
+    underscore (``<cell_library>_<corner>.lib``) only when that file does
+    not exist -- IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
+    `sg13cmos5l_stdcell`) uses the single-underscore form (issue #1790,
+    verified live against a real fetched IHP-Open-PDK v0.3.0 install).
     """
     try:
         info = find_pdk(variant=variant, root=root)
@@ -2460,6 +2467,20 @@ def _resolve_liberty(
             )
 
     liberty_path = os.path.join(lib_dir, "lib", f"{cell_library}__{corner}.lib")
+    if not os.path.isfile(liberty_path):
+        # Issue #1790: IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
+        # `sg13cmos5l_stdcell`) names its liberty views with a single
+        # underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
+        # not open_pdks' double-underscore convention
+        # (`sky130_fd_sc_hd__tt_025C_1v80.lib`). Fall back to that naming
+        # only when the double-underscore file does not exist, so this never
+        # masks a genuinely-missing corner on an open_pdks-shaped install
+        # with a false "found" from an unrelated same-named file.
+        single_underscore_path = os.path.join(
+            lib_dir, "lib", f"{cell_library}_{corner}.lib"
+        )
+        if os.path.isfile(single_underscore_path):
+            liberty_path = single_underscore_path
     if not os.path.isfile(liberty_path):
         raise PlaceAndRouteError(
             f"liberty not found for deck: no '{corner}' corner for "

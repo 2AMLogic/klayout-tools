@@ -147,6 +147,7 @@ def _make_pdk_install(
     ),
     with_cell_library: bool = True,
     prefixed_operating_conditions: bool = False,
+    single_underscore_naming: bool = False,
 ) -> Path:
     """Fabricate a minimal open_pdks-layout variant under ``root`` with a
     standard-cell library's `lib/` view(s) -- enough for `find_pdk()`/
@@ -157,7 +158,17 @@ def _make_pdk_install(
     ``prefixed_operating_conditions=True`` writes the `.lib` file's
     `default_operating_conditions` attribute as `f"{cell_library}__{corner_name}"`
     instead of the bare ``corner_name`` -- gf180mcu_fd_sc_mcu9t5v0's real
-    shape (issue #820); the on-disk filename is unaffected."""
+    shape (issue #820); the on-disk filename is unaffected.
+
+    ``single_underscore_naming=True`` fabricates IHP-Open-PDK's
+    `sg13g2_stdcell` shape instead (issue #1790, verified live against a
+    real fetched v0.3.0 install): both the on-disk filename
+    (`f"{cell_library}_{corner_name}.lib"`, a single underscore) and the
+    `default_operating_conditions` attribute (`f"{cell_library}_{corner_name}"`,
+    the full stem -- IHP's own `.lib` files embed the library name in that
+    attribute too, unlike sky130's bare form) use a single underscore.
+    Mutually exclusive with ``prefixed_operating_conditions`` (open_pdks'
+    double-underscore convention)."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     libs_ref = variant_dir / "libs.ref"
@@ -165,19 +176,21 @@ def _make_pdk_install(
     if with_cell_library:
         lib_views_dir = libs_ref / cell_library / "lib"
         lib_views_dir.mkdir(parents=True, exist_ok=True)
+        separator = "_" if single_underscore_naming else "__"
         for corner_name, process, temperature, voltage in corners:
-            operating_conditions = (
-                f"{cell_library}__{corner_name}"
-                if prefixed_operating_conditions
-                else corner_name
-            )
+            if single_underscore_naming:
+                operating_conditions = f"{cell_library}_{corner_name}"
+            elif prefixed_operating_conditions:
+                operating_conditions = f"{cell_library}__{corner_name}"
+            else:
+                operating_conditions = corner_name
             content = (
                 f'    default_operating_conditions : "{operating_conditions}";\n'
                 f"    nom_process : {process};\n"
                 f"    nom_temperature : {temperature};\n"
                 f"    nom_voltage : {voltage};\n"
             )
-            (lib_views_dir / f"{cell_library}__{corner_name}.lib").write_text(
+            (lib_views_dir / f"{cell_library}{separator}{corner_name}.lib").write_text(
                 content, encoding="utf-8"
             )
     return variant_dir
@@ -402,6 +415,78 @@ def test_run_synthesize_nominal_corner_default_gf180mcu_shape(tmp_path, monkeypa
     assert corner == "tt_025C_1v80"
     assert liberty_path.endswith("gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80.lib")
     assert info["variant"] == "gf180mcuD"
+
+
+def test_run_synthesize_nominal_corner_default_ihp_stdcell_shape(tmp_path, monkeypatch):
+    """IHP-Open-PDK's `sg13g2_stdcell` names its liberty views with a single
+    underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
+    not open_pdks' double-underscore convention. Omitting `pdk.corner` must
+    still resolve to the correctly-named on-disk liberty file -- not a
+    doubled-prefix path (`sg13g2_stdcell_sg13g2_stdcell_typ_1p20V_25C.lib`)
+    or a `None` corner (issue #1790, verified live against a real fetched
+    IHP-Open-PDK v0.3.0 install)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2",
+        cell_library="sg13g2_stdcell",
+        corners=(("typ_1p20V_25C", 1.0, 25.0, 1.2),),
+        single_underscore_naming=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = synthesize._resolve_liberty("sg13g2_stdcell", None)
+    assert corner == "typ_1p20V_25C"
+    assert liberty_path.endswith("sg13g2_stdcell_typ_1p20V_25C.lib")
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_run_synthesize_explicit_corner_ihp_stdcell_shape(tmp_path, monkeypatch):
+    """The single-underscore fallback also applies when `pdk.corner` is
+    given explicitly, not only via nominal-corner auto-selection."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2",
+        cell_library="sg13g2_stdcell",
+        corners=(
+            ("typ_1p20V_25C", 1.0, 25.0, 1.2),
+            ("slow_1p08V_125C", 1.0, 125.0, 1.08),
+        ),
+        single_underscore_naming=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = synthesize._resolve_liberty(
+        "sg13g2_stdcell", "slow_1p08V_125C"
+    )
+    assert corner == "slow_1p08V_125C"
+    assert liberty_path.endswith("sg13g2_stdcell_slow_1p08V_125C.lib")
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_run_synthesize_corner_not_shipped_ihp_stdcell_shape(tmp_path, monkeypatch):
+    """An explicit corner that exists in neither the double- nor
+    single-underscore naming still raises the standard "liberty not found"
+    error -- the single-underscore fallback must not mask a genuinely
+    missing corner."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2",
+        cell_library="sg13g2_stdcell",
+        corners=(("typ_1p20V_25C", 1.0, 25.0, 1.2),),
+        single_underscore_naming=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    with pytest.raises(
+        SynthesizeError, match=r"liberty not found for deck.*slow_1p08V_125C"
+    ):
+        synthesize._resolve_liberty("sg13g2_stdcell", "slow_1p08V_125C")
 
 
 # --------------------------------------------------------------------------- #

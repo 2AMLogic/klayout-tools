@@ -274,8 +274,8 @@ def _print_cells_text(report: dict) -> None:
     print(f"pdk: {report['pdk']}")
     if not libraries:
         print(
-            "no standard-cell digital libraries found (no `_fd_sc_` entry"
-            " under libs.ref)"
+            "no standard-cell digital libraries found (no `_fd_sc_` or"
+            " `_stdcell` entry under libs.ref)"
         )
         return
 

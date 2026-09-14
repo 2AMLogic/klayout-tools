@@ -179,6 +179,9 @@ def _make_pdk_install(
     with_gds: bool = True,
     prefixed_operating_conditions: bool = False,
     tech_lef_corners: tuple[str, ...] = ("nom",),
+    single_underscore_naming: bool = False,
+    ihp_style_lef: bool = False,
+    tech_lef_filename: str = "sg13g2_tech.lef",
 ) -> Path:
     """Fabricate a minimal open_pdks-layout variant with a standard-cell
     library's `lib/`/`techlef/`/`lef/`/`gds/` views -- enough for
@@ -193,7 +196,24 @@ def _make_pdk_install(
 
     ``tech_lef_corners`` (issue #1100) -- which ``__<corner>.tlef`` files to
     stage under `techlef/`; the default ``("nom",)`` matches every existing
-    caller's prior fixture shape (a `"nom"`-only install) byte-for-byte."""
+    caller's prior fixture shape (a `"nom"`-only install) byte-for-byte.
+
+    ``single_underscore_naming=True`` fabricates IHP-Open-PDK's
+    `sg13g2_stdcell` `lib/` naming instead (issue #1790, verified live
+    against a real fetched v0.3.0 install): both the on-disk filename
+    (`f"{cell_library}_{corner}.lib"`, a single underscore) and the
+    `default_operating_conditions` attribute (`f"{cell_library}_{corner}"`,
+    the full stem) use a single underscore. Mutually exclusive with
+    ``prefixed_operating_conditions``.
+
+    ``ihp_style_lef=True`` fabricates IHP's tech-LEF layout instead of
+    `techlef/`: no `techlef/` subdirectory at all, and a single,
+    corner-invariant tech LEF (``tech_lef_filename``, default
+    `sg13g2_tech.lef` -- deliberately **not** named after
+    ``cell_library``, matching IHP's real shape where the tech LEF is named
+    after the *process*) staged directly under `lef/` alongside the merged
+    cell LEF. ``tech_lef_corners`` is ignored in this mode (IHP ships one
+    tech LEF for the whole PDK, not one per parasitic-extraction corner)."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     lib_dir = variant_dir / "libs.ref" / cell_library
@@ -201,29 +221,36 @@ def _make_pdk_install(
     if with_lib:
         lib_views_dir = lib_dir / "lib"
         lib_views_dir.mkdir(parents=True, exist_ok=True)
-        operating_conditions = (
-            f"{cell_library}__{corner}" if prefixed_operating_conditions else corner
-        )
+        separator = "_" if single_underscore_naming else "__"
+        if single_underscore_naming:
+            operating_conditions = f"{cell_library}_{corner}"
+        elif prefixed_operating_conditions:
+            operating_conditions = f"{cell_library}__{corner}"
+        else:
+            operating_conditions = corner
         content = (
             f'    default_operating_conditions : "{operating_conditions}";\n'
             "    nom_process : 1.0;\n"
             "    nom_temperature : 25.0;\n"
             "    nom_voltage : 1.8;\n"
         )
-        (lib_views_dir / f"{cell_library}__{corner}.lib").write_text(
+        (lib_views_dir / f"{cell_library}{separator}{corner}.lib").write_text(
             content, encoding="utf-8"
         )
 
     if with_lef:
-        techlef_dir = lib_dir / "techlef"
-        techlef_dir.mkdir(parents=True, exist_ok=True)
-        for tech_lef_corner in tech_lef_corners:
-            (techlef_dir / f"{cell_library}__{tech_lef_corner}.tlef").write_text(
-                "# tech lef\n"
-            )
         lef_dir = lib_dir / "lef"
         lef_dir.mkdir(parents=True, exist_ok=True)
         (lef_dir / f"{cell_library}.lef").write_text("# merged cell lef\n")
+        if ihp_style_lef:
+            (lef_dir / tech_lef_filename).write_text("# tech lef\n")
+        else:
+            techlef_dir = lib_dir / "techlef"
+            techlef_dir.mkdir(parents=True, exist_ok=True)
+            for tech_lef_corner in tech_lef_corners:
+                (techlef_dir / f"{cell_library}__{tech_lef_corner}.tlef").write_text(
+                    "# tech lef\n"
+                )
 
     if with_gds:
         gds_dir = lib_dir / "gds"
@@ -555,6 +582,61 @@ def test_resolve_liberty_nominal_corner_default_gf180mcu_shape(tmp_path, monkeyp
     assert corner == "tt_025C_1v80"
     assert liberty_path.endswith("gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80.lib")
     assert info["variant"] == "gf180mcuD"
+
+
+def test_resolve_liberty_nominal_corner_default_ihp_stdcell_shape(
+    tmp_path, monkeypatch
+):
+    """IHP-Open-PDK's `sg13g2_stdcell` names its liberty views with a single
+    underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
+    not open_pdks' double-underscore convention. Omitting `pdk.corner`
+    (``requested_corner=None``) must still resolve to the correctly-named
+    on-disk liberty file -- not a doubled-prefix path
+    (`sg13g2_stdcell_sg13g2_stdcell_typ_1p20V_25C.lib`) or a `None` corner
+    (issue #1790, verified live against a real fetched IHP-Open-PDK v0.3.0
+    install)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2",
+        cell_library="sg13g2_stdcell",
+        corner="typ_1p20V_25C",
+        single_underscore_naming=True,
+        ihp_style_lef=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = place_and_route._resolve_liberty(
+        "sg13g2_stdcell", None
+    )
+    assert corner == "typ_1p20V_25C"
+    assert liberty_path.endswith("sg13g2_stdcell_typ_1p20V_25C.lib")
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_resolve_lef_ihp_stdcell_shape(tmp_path, monkeypatch):
+    """`_resolve_lef` resolves IHP's corner-invariant tech LEF -- staged
+    directly under `lef/` with no `techlef/` subdirectory and a filename
+    that does not share `cell_library`'s name -- alongside the merged cell
+    LEF (issue #1790)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2",
+        cell_library="sg13g2_stdcell",
+        corner="typ_1p20V_25C",
+        single_underscore_naming=True,
+        ihp_style_lef=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    _, _, pdk_info = place_and_route._resolve_liberty("sg13g2_stdcell", None)
+    tech_lef, cell_lef = place_and_route._resolve_lef("sg13g2_stdcell", pdk_info)
+
+    assert tech_lef.endswith("sg13g2_tech.lef")
+    assert cell_lef.endswith("sg13g2_stdcell.lef")
 
 
 def test_run_lef_not_found(tmp_path, monkeypatch):
