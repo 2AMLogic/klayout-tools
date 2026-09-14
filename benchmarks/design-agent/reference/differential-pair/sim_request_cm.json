@@ -1,20 +1,46 @@
 {
   "netlist": "diff_pair_cm.spice",
   "engine": "ngspice",
-  "models": { "lib": "models.lib" },
-  "corners": {
-    "process": ["tt", "ss", "ff"],
-    "supply_v": { "vdd": [1.62, 1.98] },
-    "temperature_c": [-40, 27, 125]
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
   },
-  "analysis": { "kind": "ac", "args": "dec 5 1 100meg" },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "ac",
+    "args": "dec 5 1 100meg"
+  },
   "measurements": [
     {
       "name": "cm_out_db",
       "spice": ".meas ac cm_out_db FIND vdb(dout) AT=1k",
       "unit": "dB",
-      "limits": { "max": 0 }
+      "limits": {
+        "max": 0
+      }
     }
   ],
-  "options": { "timeout_s": 30, "keep_artifacts": false }
+  "options": {
+    "timeout_s": 120,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
 }

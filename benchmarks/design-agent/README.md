@@ -127,7 +127,7 @@ measurements, shrinks the corner matrix) only blinds its own feedback loop
 | Task | Pass criterion |
 | --- | --- |
 | `common-source-amp` | >= 6 dB small-signal gain at 1 kHz, self-biased, 18-corner sky130-style PVT sweep |
-| `source-follower` | 0.90-0.999 V/V small-signal gain at 1 kHz, same PVT sweep |
+| `source-follower` | 0.80-0.90 V/V small-signal gain at 1 kHz, same PVT sweep |
 | `current-mirror` | Output current within the reference's declared limits (nominal 1:1 ratio) |
 | `differential-pair` | Differential-mode gain >= 8 dB *and* common-mode-driven output <= 0 dB, same PVT sweep — the differential-vs-common-mode comparison AnalogCoder's own diff-pair check calls for |
 
@@ -144,14 +144,17 @@ measurements, shrinks the corner matrix) only blinds its own feedback loop
 The two amplifier-family tasks (issue #1733) reuse the same
 DC-feedback-closes/AC-feedback-opens open-loop-gain measurement trick as
 `examples/kb/five-transistor-ota/ota_5t.spice` (see each reference
-netlist's own header for why), adapted to this benchmark's generic
-(non-PDK) NMOS/PMOS models rather than real sky130 devices. The
-two-stage task's reference solution reuses the five-transistor task's own
-first-stage topology, adding a PMOS common-source second stage and a
+netlist's own header for why), and — as of issue #1736 — real sky130
+devices rather than a generic (non-PDK) stand-in: `five-transistor-ota`'s
+own sizing is reused verbatim from that same S10-validated KB reference.
+The two-stage task's reference solution reuses the five-transistor task's
+own first-stage topology, adding a PMOS common-source second stage and a
 Miller compensation network (capacitor + RHP-zero-nulling resistor) —
 see `reference/two-stage-miller-ota/ota_2stage.spice`'s header for why
 its `inp`/`inn` pair is cross-connected relative to the single-stage
-`five-transistor-ota` reference (the extra stage inverts the loop's sign).
+`five-transistor-ota` reference (the extra stage inverts the loop's sign),
+and for why its second stage's gain device is sized well past a first-pass
+guess once the full corner sweep is run against real devices.
 
 The remaining three medium-tier tasks (issue #1734) are deliberately
 written so that a *plausible but wrong* answer fails them, not just a
@@ -160,11 +163,11 @@ deliberately degraded:
 
 | Task | Degradation | Result |
 | --- | --- | --- |
-| `telescopic-cascode-amp` | both cascode devices removed (plain common-source, identical current and PMOS current-source load) | 43.9 dB — fails the 85 dB gate, while the bias/power gate still passes, exactly as it should for a well-biased non-cascode stage |
+| `telescopic-cascode-amp` | both cascode devices removed (plain common-source, identical current and PMOS current-source load) | 48.4 dB — fails the 85 dB gate, while the bias/power gate still passes, exactly as it should for a well-biased non-cascode stage |
 | `miller-integrator` | active stage replaced by a passive R-C low-pass of the same pole frequency | 0 dB at 100 Hz (needs >= 15) and a 17.1 dB decade slope — fails |
-| `miller-integrator` | integrating capacitor shrunk to 1 fF (plain gain stage) | 32.5 dB at 1 kHz and a flat 0.00 dB/decade slope — fails |
-| `schmitt-trigger` | both feedback devices deleted (plain CMOS inverter) | ~0.002 V of hysteresis — fails |
-| `schmitt-trigger` | feedback devices under-sized (W=1 µm / 2 µm) | ~0.09–0.12 V of hysteresis — fails |
+| `miller-integrator` | integrating capacitor shrunk to 1 fF (plain gain stage) | 25.7 dB at 1 kHz and a flat ~0.0003 dB/decade slope — fails |
+| `schmitt-trigger` | both feedback devices deleted (plain CMOS inverter) | ~0.005 V of hysteresis — fails |
+| `schmitt-trigger` | feedback devices under-sized (W=1 µm / 2 µm) | ~0.20 V of hysteresis — fails |
 
 The Schmitt trigger's criterion in particular is *behavioral* — where the
 circuit switches on each edge of a transient ramp — rather than a DC
@@ -232,8 +235,10 @@ This is a first milestone, not the full issue #1719 scope.
    - The scored path still only supports `"sim"`-check gates
      (`_build_live_agent_descriptor`), matching the shipped task set; a
      DRC/LVS-gated task would need that function extended.
-   - Limitation 2 below (generic LEVEL=1 devices, not real sky130) applies
-     unchanged — the sandbox seeds whatever `models.lib` the task names.
+   - The sandbox seeds whatever `models.lib` the task's own request names
+     (issue #1736: for every task that has real MOSFETs, that is now a real
+     sky130A device library resolved via `$PDK_ROOT`, not a local file --
+     see limitation 2 below).
 
    The **deterministic `reference_candidate_provider`** (`run`'s default,
    no `--provider` flag needed) still exists alongside it and always hands
@@ -242,36 +247,68 @@ This is a first milestone, not the full issue #1719 scope.
    aggregation are wired correctly end-to-end (a regression *in this
    harness* shows up as a pass-rate drop below 100% there), independent of
    agent quality.
-2. **Generic (non-PDK) device models, not real sky130 devices.** Every
-   reference netlist under `reference/*/models.lib` uses hand-picked
-   `.model NMOS(LEVEL=1 ...)`/`.model PMOS(LEVEL=1 ...)` corner cards, the
-   same "runs anywhere ngspice
-   runs" precedent `examples/kb/rc-relaxation-oscillator` already
-   establishes — not the real sky130 PDK model library. This keeps the
-   harness runnable without a PDK fetch/`PDK_ROOT` setup, at the cost of the
-   absolute gain/current numbers being illustrative rather than sky130-
-   accurate. It matters most for `telescopic-cascode-amp`: a LEVEL=1 device
-   has no short-channel output-conductance degradation, so the reference
-   solution's ~94–103 dB is well above what a real sky130 telescopic cascode
-   reaches. What that task's gate discriminates is the *cascoded-vs-
-   uncascoded contrast* on one fixed model set, not a sky130-accurate gain
-   figure. Swapping in real sky130 devices (`models.pdk`/`models.lib`
-   pointing at `$PDK_ROOT`, per `docs/cli/sim.md`) is straightforward for a
-   future pass once the harness itself is validated end-to-end, but the
-   medium-tier thresholds would have to be re-derived against the real
-   devices at the same time.
+2. **Real sky130 devices for every task that has MOSFETs; the
+   oscillator/VCO/PLL family stays PDK-free by design.** As of issue #1736,
+   the four easy-tier tasks and the two amplifier-family/three
+   plausible-but-wrong medium-tier tasks (nine tasks total) resolve real
+   `sky130_fd_pr__nfet_01v8`/`sky130_fd_pr__pfet_01v8` devices via
+   `models.pdk`/`models.lib` pointing at `$PDK_ROOT`, per `docs/cli/sim.md`
+   — replacing the generic (non-PDK) `.model NMOS(LEVEL=1 ...)`/`.model
+   PMOS(LEVEL=1 ...)` corner cards every one of those reference netlists
+   used before. Sizing was re-verified (and, for `two-stage-miller-ota`,
+   `telescopic-cascode-amp`, and `source-follower`, re-derived) against the
+   real devices across the full 18-corner PVT sweep -- see each reference
+   netlist's own header for what changed and why.
+
+   The oscillator/VCO/PLL family (`rc-relaxation-oscillator`,
+   `relaxation-vco`, `charge-pump-pll`) is a different case: those
+   reference netlists are written with **behavioral elements only** (no
+   `.model`/device cards at all -- see each one's own header), so there is
+   no generic device model to swap out. This is unchanged by issue #1736;
+   building that family out of real sky130 devices remains a separate,
+   much larger undertaking (a real transistor-level relaxation
+   oscillator/VCO/charge-pump design), not a model-library swap.
+
+   `telescopic-cascode-amp` is the task where the swap mattered most: a
+   generic LEVEL=1 device has no short-channel output-conductance
+   degradation, so the old generic-model reference measured ~94-103 dB, well
+   above what a real sky130 telescopic cascode reaches. The real-device
+   reference measures ~86-90 dB across the corner matrix -- still comfortably
+   above the 85 dB gate, but only because the cascode devices are run at a
+   longer channel length (see the netlist header for the non-monotonic
+   gain-vs-length finding that sizing came from), not because the gate
+   itself changed. `source-follower` is the task where sizing alone could
+   not close the gap: a real sky130 NMOS has no isolated-body option, so a
+   single-transistor source follower cannot avoid body effect the way the
+   old GAMMA=0 generic model could -- the task's own gain band is now
+   0.80-0.90 V/V (down from 0.90-0.999 V/V) to match what a real device
+   actually achieves; see `sf.spice`'s header for the full derivation.
 
    The live-agent provider's device-model contract is derived **per task**
    from whichever `models.lib` that task's own `klt sim` request names
-   (`_device_model_contract` in `scripts/design_agent_benchmark.py`), so the
-   easy tier's NMOS-only prompt and the medium tier's NMOS+PMOS prompt stay
-   correct without either being hardcoded — and a future real-sky130 swap
-   needs no live-agent provider change of its own. This supersedes the
-   previously tracked "device-model contract is stale for the medium tier"
-   limitation (issue #1733): `_build_live_agent_prompt`'s fixed no-PMOS
-   prompt text has been replaced by this per-task derivation, so
-   `--provider live-agent` now tells the agent the correct model set for
-   every shipped task, amplifier and non-amplifier alike.
+   (`_device_model_contract` in `scripts/design_agent_benchmark.py`) --
+   for a PDK-backed library (every shipped task, post-#1736) there is no
+   local `.model` card to read, so the contract falls back to "use only the
+   device models this task's own `klt sim` request document points its
+   model library at" rather than asserting a specific (and possibly wrong)
+   device list. This supersedes the previously tracked "device-model
+   contract is stale for the medium tier" limitation (issue #1733):
+   `_build_live_agent_prompt`'s fixed no-PMOS prompt text was already
+   replaced by this per-task derivation before the sky130 swap, and the
+   derivation itself needed no further change for the swap to stay correct.
+
+3. **The sky130 swap (limitation 2) made this harness's own CI meaningfully
+   slower, tracked separately (issue #1781).** `ngspice` parsing the full
+   `sky130.lib.spice` deck adds a fixed ~45-120s overhead per corner
+   regardless of circuit complexity -- `"backend": "local-parallel"` +
+   `"options.max_workers": 4` was added to every real-device
+   `sim_request*.json` as an immediate mitigation, and `--attempts` for the
+   deterministic reference-provider self-check was reduced from 5 to 2 in
+   `design-agent-benchmark.yml` (since that provider is byte-identical
+   every attempt -- 5x is now 5x a much larger number for zero additional
+   signal). Issue #1781 tracks a real fix (caching a deterministic
+   provider's repeated attempts, or defaulting the harness's own `klt sim`
+   calls to a parallel backend) and restoring `--attempts 5`.
 
 A fuller interactive/tool-using live-agent provider (see limitation 1
 above) now ships as `--provider interactive-agent` (issue #1739). The

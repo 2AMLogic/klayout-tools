@@ -1,20 +1,46 @@
 {
   "netlist": "casc_amp.spice",
   "engine": "ngspice",
-  "models": { "lib": "models.lib" },
-  "corners": {
-    "process": ["tt", "ss", "ff"],
-    "supply_v": { "vdd": [1.62, 1.98] },
-    "temperature_c": [-40, 27, 125]
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
   },
-  "analysis": { "kind": "ac", "args": "dec 5 1 100meg" },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "ac",
+    "args": "dec 5 1 100meg"
+  },
   "measurements": [
     {
       "name": "gain_db",
       "spice": ".meas ac gain_db FIND vdb(out) AT=1k",
       "unit": "dB",
-      "limits": { "min": 85 }
+      "limits": {
+        "min": 85
+      }
     }
   ],
-  "options": { "timeout_s": 30, "keep_artifacts": false }
+  "options": {
+    "timeout_s": 180,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
 }

@@ -1,20 +1,47 @@
 {
   "netlist": "sf.spice",
   "engine": "ngspice",
-  "models": { "lib": "models.lib" },
-  "corners": {
-    "process": ["tt", "ss", "ff"],
-    "supply_v": { "vdd": [1.62, 1.98] },
-    "temperature_c": [-40, 27, 125]
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
   },
-  "analysis": { "kind": "ac", "args": "dec 5 1 100meg" },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "ac",
+    "args": "dec 5 1 100meg"
+  },
   "measurements": [
     {
       "name": "gain_v",
       "spice": ".meas ac gain_v FIND vm(out) AT=1k",
       "unit": "V/V",
-      "limits": { "min": 0.90, "max": 0.999 }
+      "limits": {
+        "min": 0.8,
+        "max": 0.9
+      }
     }
   ],
-  "options": { "timeout_s": 30, "keep_artifacts": false }
+  "options": {
+    "timeout_s": 120,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
 }

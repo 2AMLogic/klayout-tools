@@ -668,7 +668,20 @@ def _build_live_agent_descriptor(
         new_request = copy.deepcopy(sim_request)
         new_request["netlist"] = str(candidate_paths[stem])
         models = new_request.get("models")
-        if isinstance(models, dict) and isinstance(models.get("lib"), str):
+        # Only rewrite a *repo-local* relative `models.lib` (the pre-#1736
+        # generic-model convention) into an absolute path here -- when
+        # `models.pdk`/`models.pdk_root` is set (every shipped task's own
+        # convention as of #1736), `lib` is deliberately relative to the
+        # *resolved PDK variant directory*, per docs/cli/sim.md's
+        # `_resolve_models_lib`, never to this reference directory; rewriting
+        # it here would silently point `klt sim` at a nonexistent path under
+        # `reference_dir` instead of letting it resolve via $PDK_ROOT.
+        if (
+            isinstance(models, dict)
+            and isinstance(models.get("lib"), str)
+            and not models.get("pdk")
+            and not models.get("pdk_root")
+        ):
             lib_path = Path(models["lib"])
             if not lib_path.is_absolute():
                 models["lib"] = str((reference_dir / lib_path).resolve())

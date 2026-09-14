@@ -1,20 +1,47 @@
 {
   "netlist": "mirror.spice",
   "engine": "ngspice",
-  "models": { "lib": "models.lib" },
-  "corners": {
-    "process": ["tt", "ss", "ff"],
-    "supply_v": { "vdd": [1.62, 1.98] },
-    "temperature_c": [-40, 27, 125]
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
   },
-  "analysis": { "kind": "dc", "args": "Vout 0.7 1.1 0.05" },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "dc",
+    "args": "Vout 0.7 1.1 0.05"
+  },
   "measurements": [
     {
       "name": "iout_a",
       "spice": ".meas dc iout_a FIND vout#branch AT=0.9",
       "unit": "A",
-      "limits": { "min": -5.5e-5, "max": -4.5e-5 }
+      "limits": {
+        "min": -5.5e-05,
+        "max": -4.5e-05
+      }
     }
   ],
-  "options": { "timeout_s": 30, "keep_artifacts": false }
+  "options": {
+    "timeout_s": 120,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
 }

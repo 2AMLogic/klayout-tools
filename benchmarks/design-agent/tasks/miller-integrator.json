@@ -20,7 +20,7 @@
     "netlists": [
       "benchmarks/design-agent/reference/miller-integrator/integrator.spice"
     ],
-    "notes": "The decade-slope criterion is a derived measurement (`.meas ac ... param='gain_1khz_db-gain_10khz_db'`), so `gain_10khz_db` is declared without limits purely as its input -- reported, never failing on its own. A large drain-to-gate feedback resistor doubles as the DC self-bias path and as the lossy-integrator pole (~10 Hz, two decades below the measured band). Generic (non-PDK) NMOS model stands in for sky130 devices; see README.md's 'Known limitation' note."
+    "notes": "The decade-slope criterion is a derived measurement (`.meas ac ... param='gain_1khz_db-gain_10khz_db'`), so `gain_10khz_db` is declared without limits purely as its input -- reported, never failing on its own. A large drain-to-gate feedback resistor doubles as the DC self-bias path and as the lossy-integrator pole (~10 Hz, two decades below the measured band). Real sky130 device (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md."
   },
   "source": {
     "citation": "The inverting R-C integrator is a standard analog IC design course topic; framed here in the style of AnalogCoder's (Lai et al., AAAI 2025, arXiv 2405.14918) medium-tier task set, not reproduced from that repo (unlicensed).",

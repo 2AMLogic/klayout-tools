@@ -9,8 +9,10 @@
 * input source.
 *
 * Circuit body only: no .control/.end cards (klt sim generates those --
-* see docs/cli/sim.md, "Netlist convention"). bench_nmos comes from
-* models.lib.
+* see docs/cli/sim.md, "Netlist convention"). Real sky130 devices
+* (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md -- see
+* sim_request.json's "models" field. Device W/L are in microns
+* (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
 
 .param vdd=1.8
 .param rd=10k
@@ -21,5 +23,5 @@ Vdd vdd 0 DC {vdd}
 Vin in 0 DC 0 AC 1
 Cin in gate {cin}
 Rf out gate {rf}
-Mn out gate 0 0 bench_nmos W=15u L=2u
+XMn out gate 0 0 sky130_fd_pr__nfet_01v8 L=2 W=15 nf=1 mult=1
 Rd vdd out {rd}

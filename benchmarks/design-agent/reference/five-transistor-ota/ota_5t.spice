@@ -21,8 +21,13 @@
 * input inp alone drives the loop -- open-loop gain -- while at DC the
 * Lfb path still finds a stable bias point on its own.
 *
-* Circuit body only -- klt sim appends analysis/control. bench_nmos/
-* bench_pmos come from models.lib.
+* Circuit body only -- klt sim appends analysis/control. Real sky130
+* devices (sky130_fd_pr__nfet_01v8 / sky130_fd_pr__pfet_01v8) via
+* $PDK_ROOT, per docs/cli/sim.md -- see sim_request.json's "models"
+* field. Device W/L are in microns (sky130_fd_pr subckt convention, bare
+* numbers not "u"-suffixed). Sizing reused from the S10-validated
+* examples/kb/five-transistor-ota/ota_5t.spice reference (same topology,
+* same ibias/cl).
 
 .param vdd=1.8
 .param vcm=0.9
@@ -41,15 +46,15 @@ Lfb  out inn 1e9
 Cfb  inn cm  1e3
 
 * --- tail bias generator (external to the 5T core; see header) ---
-M5b nbias nbias 0 0 bench_nmos W=10u L=2u
+XM5b nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
 
 * --- tail current source (1 of 5) ---
-M5  tail nbias 0 0 bench_nmos W=10u L=2u
+XM5  tail nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
 
 * --- NMOS differential input pair (2 of 5) ---
-M1  n1  inp tail 0 bench_nmos W=20u L=1u
-M2  out inn tail 0 bench_nmos W=20u L=1u
+XM1  n1  inp tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  out inn tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
 
 * --- PMOS current-mirror load (2 of 5) ---
-M3  n1  n1  vdd vdd bench_pmos W=40u L=2u
-M4  out n1  vdd vdd bench_pmos W=40u L=2u
+XM3  n1  n1  vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1
+XM4  out n1  vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1

@@ -47,8 +47,41 @@ TASKS_DIR = REPO_ROOT / "benchmarks" / "design-agent" / "tasks"
 SCHEMA_PATH = REPO_ROOT / "benchmarks" / "design-agent" / "schema" / "task.schema.json"
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None
+
+
+def _have_sky130_ngspice_pdk() -> bool:
+    """Whether a real, full sky130A ngspice model deck (not just the
+    liberty-only timing view `.github/workflows/ci.yml`'s main `test` job
+    provisions via `PDK_ROOT`/`PDK`, per that job's own `pytest` step
+    comment) is resolvable right now. Every reference solution that has
+    real MOSFETs resolves `sky130_fd_pr__nfet_01v8`/`pfet_01v8` via
+    `models.pdk`/`models.lib` (issue #1736), and every `@_SKIP_NO_NGSPICE`-
+    gated test in this module runs `klt sim`/`klt eval` against at least
+    one such task (directly, or transitively via the full shipped task
+    set) -- so `_SKIP_NO_NGSPICE` below folds this check in rather than
+    gating each test individually."""
+    try:
+        from klayout_tools.pdk import find_pdk
+
+        resolution = find_pdk(variant="sky130A")
+    except Exception:  # noqa: BLE001 -- any resolution failure means "no"
+        return False
+    variant_dir = Path(resolution["root"]) / resolution["variant"]
+    return (variant_dir / "libs.tech" / "ngspice" / "sky130.lib.spice").is_file()
+
+
+HAVE_SKY130_NGSPICE_PDK = HAVE_NGSPICE and _have_sky130_ngspice_pdk()
 _SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
+    not HAVE_SKY130_NGSPICE_PDK,
+    reason=(
+        "ngspice is not installed, or no full sky130A ngspice model deck is "
+        "resolvable via $PDK_ROOT/$PDK -- the latter is expected in ci.yml's "
+        "main `test` job, which deliberately provisions only the "
+        "sky130_fd_sc_hd liberty timing view, not the full ngspice PDK "
+        "every reference solution with real MOSFETs needs as of issue "
+        "#1736; .github/workflows/design-agent-benchmark.yml provisions "
+        "the real thing and runs these tests there"
+    ),
 )
 
 
@@ -284,9 +317,11 @@ def test_deliberately_broken_reference_netlist_fails_its_gate_and_drops_pass_rat
         scratch_reference.mkdir(parents=True)
 
         src_reference = REPO_ROOT / ref_rel
+        # No local models.lib: common-source-amp's sim_request.json now
+        # resolves a real sky130A device library via $PDK_ROOT (issue
+        # #1736), per docs/cli/sim.md's models.pdk/models.lib convention.
         ref_files = (
             "cs_amp.spice",
-            "models.lib",
             "sim_request.json",
             "eval_descriptor.json",
         )
@@ -351,14 +386,26 @@ def _scratch_task_with_patched_netlist(
             "casc_amp.spice",
             [
                 (
-                    "M1 n1 gate 0 0 bench_nmos W=40u L=1u",
-                    "M1 out gate 0 0 bench_nmos W=40u L=1u",
+                    "XM1 n1  gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 "
+                    "mult=1",
+                    "XM1 out gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 "
+                    "mult=1",
                 ),
-                ("M2 out nbc n1 0 bench_nmos W=40u L=1u\n", ""),
-                ("M3 out pbc n2 vdd bench_pmos W=100u L=1u\n", ""),
                 (
-                    "M4 n2 pbs vdd vdd bench_pmos W=100u L=1u",
-                    "M4 out pbs vdd vdd bench_pmos W=100u L=1u",
+                    "XM2 out nbc  n1  0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 "
+                    "mult=1\n",
+                    "",
+                ),
+                (
+                    "XM3 out pbc  n2  vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 "
+                    "mult=1\n",
+                    "",
+                ),
+                (
+                    "XM4 n2  pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 "
+                    "mult=1",
+                    "XM4 out pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 "
+                    "mult=1",
                 ),
             ],
             "both cascode devices removed -> plain common-source stage",
@@ -375,8 +422,14 @@ def _scratch_task_with_patched_netlist(
             "schmitt-trigger",
             "schmitt.spice",
             [
-                ("MN3 vdd out na 0 bench_nmos W=10u L=1u\n", ""),
-                ("MP3 0 out nb vdd bench_pmos W=25u L=1u\n", ""),
+                (
+                    "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1\n",
+                    "",
+                ),
+                (
+                    "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1\n",
+                    "",
+                ),
             ],
             "feedback devices deleted -> plain CMOS inverter",
             id="schmitt-feedback-deleted",
@@ -386,12 +439,12 @@ def _scratch_task_with_patched_netlist(
             "schmitt.spice",
             [
                 (
-                    "MN3 vdd out na 0 bench_nmos W=10u",
-                    "MN3 vdd out na 0 bench_nmos W=1u",
+                    "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1",
+                    "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=1 nf=1 mult=1",
                 ),
                 (
-                    "MP3 0 out nb vdd bench_pmos W=25u",
-                    "MP3 0 out nb vdd bench_pmos W=2u",
+                    "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1",
+                    "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=2 nf=1 mult=1",
                 ),
             ],
             "feedback devices under-sized -> ~0.1 V of hysteresis, not 0.3 V",
@@ -468,7 +521,11 @@ def test_build_live_agent_prompt_embeds_skill_chain_and_task_spec():
     assert "design-sizing/SKILL.md" in prompt
     assert "design-netlist-authoring/SKILL.md" in prompt
     assert task["description"] in prompt
-    assert "bench_nmos" in prompt
+    # common-source-amp's sim_request.json now resolves a real sky130A
+    # device library via $PDK_ROOT (issue #1736) rather than a repo-local
+    # generic models.lib -- the device-model contract falls back to a
+    # library-agnostic instruction rather than naming specific models.
+    assert "do not write your own `.model` card" in prompt
     assert "```spice:cs_amp" in prompt
 
 
@@ -494,31 +551,50 @@ def test_build_live_agent_prompt_multi_netlist_task_lists_both_stems():
 
 
 @pytest.mark.parametrize(
-    ("task_id", "expect_pmos"),
+    "task_id",
     [
-        ("common-source-amp", False),
-        ("miller-integrator", False),
-        ("telescopic-cascode-amp", True),
-        ("schmitt-trigger", True),
+        "common-source-amp",
+        "miller-integrator",
+        "telescopic-cascode-amp",
+        "schmitt-trigger",
     ],
 )
-def test_device_model_contract_tracks_each_tasks_own_models_lib(task_id, expect_pmos):
-    """The prompt's device list is read from whichever `models.lib` the
-    task's own `klt sim` request names -- never hardcoded. The medium tier's
-    complementary blocks (cascode load, CMOS Schmitt trigger) ship a PMOS
-    card the easy tier's library does not define, and telling an agent "no
-    PMOS model is defined" while handing it one of those testbenches would
-    be actively misleading it about the contract it is then scored against.
+def test_device_model_contract_falls_back_for_every_shipped_pdk_backed_task(task_id):
+    """Every shipped task's `klt sim` request now resolves a real sky130A
+    device library via $PDK_ROOT (issue #1736) rather than a repo-local
+    generic `models.lib` -- the device-model contract must fall back to the
+    library-agnostic instruction for all of them, never assert a specific
+    (and now-nonexistent) model name like the old `bench_nmos`/`bench_pmos`
+    stand-ins.
     """
     task = dab.load_task(TASKS_DIR / f"{task_id}.json")
     testbenches = dab._reference_testbenches(task, REPO_ROOT)
     contract = dab._device_model_contract(task, REPO_ROOT, testbenches)
+    assert "bench_nmos" not in contract
+    assert "bench_pmos" not in contract
+    assert "do not write your own `.model` card" in contract
+
+
+def test_device_model_contract_reads_model_cards_from_a_local_library(tmp_path):
+    """Regression coverage for the local-`.model`-card-scanning branch of
+    :func:`dab._device_model_contract` (still real production code -- a
+    future task could ship its own generic stand-in library the same way
+    every task in this benchmark did before issue #1736's sky130 swap),
+    using a synthetic on-disk library rather than any shipped task's own
+    (now sky130-PDK-backed) `models.lib`.
+    """
+    lib_path = tmp_path / "models.lib"
+    lib_path.write_text(
+        ".model bench_nmos NMOS(LEVEL=1 VTO=0.5 KP=120u)\n"
+        ".model bench_pmos PMOS(LEVEL=1 VTO=-0.5 KP=48u)\n"
+    )
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    testbenches = [
+        {"netlist_stem": "x", "sim_request": {"models": {"lib": str(lib_path)}}}
+    ]
+    contract = dab._device_model_contract(task, REPO_ROOT, testbenches)
     assert "`bench_nmos`" in contract
-    if expect_pmos:
-        assert "PMOS: `bench_pmos`" in contract
-    else:
-        assert "PMOS: none defined" in contract
-        assert "bench_pmos" not in contract
+    assert "PMOS: `bench_pmos`" in contract
 
 
 def test_device_model_contract_falls_back_when_no_model_library_is_readable():
@@ -879,7 +955,16 @@ def _sandbox(task: dict, tmp_path: Path) -> dict:
 # --- sandbox seeding ------------------------------------------------------
 
 
-def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
+def test_seed_agent_sandbox_writes_skills_and_testbench_for_pdk_backed_task(
+    tmp_path,
+):
+    """common-source-amp's `models` is PDK-backed (issue #1736:
+    `{"pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice"}`) --
+    there is no repo-local model file to copy into the sandbox, so
+    `_seed_agent_sandbox` must leave `models` untouched (never invent a
+    local `models.lib` copy that would resolve to nothing) rather than
+    rewriting it the way it does for a repo-local library (see the sibling
+    test below, against a still-local-library oscillator-family task)."""
     task = dab.load_task(TASKS_DIR / "common-source-amp.json")
     layout = _sandbox(task, tmp_path)
     sandbox = layout["workdir"]
@@ -888,13 +973,17 @@ def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
     assert (sandbox / "skills" / "design-topology-selection.md").is_file()
     assert (sandbox / "skills" / "design-sizing.md").is_file()
     assert (sandbox / "skills" / "design-netlist-authoring.md").is_file()
-    assert (sandbox / "models.lib").is_file()
+    assert not (sandbox / "models.lib").exists()
+    assert layout["model_libs"] == []
     assert (sandbox / "TASK.md").is_file()
 
     request = json.loads((sandbox / "sim_request.json").read_text())
     # The netlist the agent is asked to author, as a sandbox-relative path.
     assert request["netlist"] == "cs_amp.spice"
-    assert request["models"]["lib"] == "models.lib"
+    assert request["models"] == {
+        "pdk": "sky130A",
+        "lib": "libs.tech/ngspice/sky130.lib.spice",
+    }
     # The measurement contract is carried over verbatim from the reference.
     reference_request = json.loads(
         (
@@ -904,6 +993,25 @@ def test_seed_agent_sandbox_writes_skills_models_and_testbench(tmp_path):
     )
     assert request["measurements"] == reference_request["measurements"]
     assert request["corners"] == reference_request["corners"]
+
+
+def test_seed_agent_sandbox_copies_a_repo_local_model_library(tmp_path):
+    """The oscillator/VCO/PLL family's `models` is still a repo-local file
+    (issue #1736 left it untouched -- those reference netlists are
+    behavioral-only, no device model to swap), so `_seed_agent_sandbox`
+    must still copy it into the sandbox and rewrite `models.lib` to the
+    sandbox-relative copy -- the pre-#1736 behavior every task exercised,
+    now only exercised by this family."""
+    task = dab.load_task(TASKS_DIR / "rc-relaxation-oscillator.json")
+    layout = _sandbox(task, tmp_path)
+    sandbox = layout["workdir"]
+
+    assert (sandbox / "models.lib").is_file()
+    assert layout["model_libs"] == ["models.lib"]
+
+    request = json.loads((sandbox / "sim_request.json").read_text())
+    assert request["netlist"] == "oscillator.spice"
+    assert request["models"]["lib"] == "models.lib"
 
 
 def test_seed_agent_sandbox_never_seeds_the_reference_netlist(tmp_path):

@@ -31,8 +31,10 @@
 * 20 dB of closed-loop gain asked for at 100 Hz.
 *
 * Circuit body only: no .control/.end cards (klt sim generates those --
-* see docs/cli/sim.md, "Netlist convention"). bench_nmos comes from
-* models.lib.
+* see docs/cli/sim.md, "Netlist convention"). Real sky130 devices
+* (sky130_fd_pr__nfet_01v8) via $PDK_ROOT, per docs/cli/sim.md -- see
+* sim_request.json's "models" field. Device W/L are in microns
+* (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
 
 .param vdd=1.8
 .param rd=1meg
@@ -47,5 +49,5 @@ Cin in sum_in {cin}
 R1 sum_in gate {r1}
 Cf gate out {cf}
 Rb gate out {rb}
-M1 out gate 0 0 bench_nmos W=10u L=1u
+XM1 out gate 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
 Rd vdd out {rd}
