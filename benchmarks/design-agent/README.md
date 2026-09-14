@@ -269,6 +269,23 @@ This is a first milestone, not the full issue #1719 scope.
    much larger undertaking (a real transistor-level relaxation
    oscillator/VCO/charge-pump design), not a model-library swap.
 
+   That undertaking's own investigation trail (issue #1789 -> #1795 ->
+   #1813) found and cleared a real blocker along the way: any *single*
+   sky130A comparator asked to resolve both of this oscillator's
+   thresholds hits a headroom/saturation ceiling at the `ss`/`-40C`/
+   `1.62V` corner that raising bias current cannot fix (and can make
+   worse). `reference/rc-relaxation-oscillator/comparator-core/` (not the
+   shipped reference solution above -- a separate, still-standalone
+   device-level spike) demonstrates a split-polarity dual-comparator
+   topology that clears that ceiling cleanly across all 18 corners with a
+   `dV` close to the behavioral design's own assumption; see
+   [`docs/design/relaxation-oscillator-comparator-core-spike.md`](../../docs/design/relaxation-oscillator-comparator-core-spike.md)
+   for the measurement trail and for what is still needed (charge/
+   discharge current source, output edge-combination logic, a device-level
+   reference generator, and #1795's originally scoped regenerative-
+   feedback work) before this becomes a full device-level oscillator that
+   could replace the behavioral reference solution above.
+
    `telescopic-cascode-amp` is the task where the swap mattered most: a
    generic LEVEL=1 device has no short-channel output-conductance
    degradation, so the old generic-model reference measured ~94-103 dB, well

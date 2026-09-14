@@ -1,0 +1,135 @@
+{
+  "netlist": "comparator_core.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "1n 3u"
+  },
+  "measurements": [
+    {
+      "name": "vlo_rise_v",
+      "spice": ".meas tran vlo_rise_v FIND v(in) WHEN v(olo)=0.8 RISE=1",
+      "unit": "V"
+    },
+    {
+      "name": "vlo_fall_v",
+      "spice": ".meas tran vlo_fall_v FIND v(in) WHEN v(olo)=0.8 FALL=1",
+      "unit": "V"
+    },
+    {
+      "name": "vhi_rise_v",
+      "spice": ".meas tran vhi_rise_v FIND v(in) WHEN v(ohi)=0.8 RISE=1",
+      "unit": "V"
+    },
+    {
+      "name": "vhi_fall_v",
+      "spice": ".meas tran vhi_fall_v FIND v(in) WHEN v(ohi)=0.8 FALL=1",
+      "unit": "V"
+    },
+    {
+      "name": "vtrip_lo_v",
+      "spice": ".meas tran vtrip_lo_v param='(vlo_rise_v+vlo_fall_v)/2'",
+      "unit": "V",
+      "limits": {
+        "min": 0.33,
+        "max": 0.38
+      }
+    },
+    {
+      "name": "vtrip_hi_v",
+      "spice": ".meas tran vtrip_hi_v param='(vhi_rise_v+vhi_fall_v)/2'",
+      "unit": "V",
+      "limits": {
+        "min": 1.12,
+        "max": 1.17
+      }
+    },
+    {
+      "name": "dv_eff_v",
+      "spice": ".meas tran dv_eff_v param='vtrip_hi_v-vtrip_lo_v'",
+      "unit": "V",
+      "limits": {
+        "min": 0.75,
+        "max": 0.83
+      }
+    },
+    {
+      "name": "tpd_lo_s",
+      "spice": ".meas tran tpd_lo_s param='(vlo_rise_v-vlo_fall_v)/2*1e-6'",
+      "unit": "s",
+      "limits": {
+        "min": 0,
+        "max": 4e-8
+      }
+    },
+    {
+      "name": "tpd_hi_s",
+      "spice": ".meas tran tpd_hi_s param='(vhi_rise_v-vhi_fall_v)/2*1e-6'",
+      "unit": "s",
+      "limits": {
+        "min": 0,
+        "max": 4e-8
+      }
+    },
+    {
+      "name": "volo_high_v",
+      "spice": ".meas tran volo_high_v FIND v(olo) AT=1.5u",
+      "unit": "V",
+      "limits": {
+        "min": 1.55
+      }
+    },
+    {
+      "name": "volo_low_v",
+      "spice": ".meas tran volo_low_v FIND v(olo) AT=0.05u",
+      "unit": "V",
+      "limits": {
+        "max": 0.05
+      }
+    },
+    {
+      "name": "vohi_high_v",
+      "spice": ".meas tran vohi_high_v FIND v(ohi) AT=1.5u",
+      "unit": "V",
+      "limits": {
+        "min": 1.55
+      }
+    },
+    {
+      "name": "vohi_low_v",
+      "spice": ".meas tran vohi_low_v FIND v(ohi) AT=0.05u",
+      "unit": "V",
+      "limits": {
+        "max": 0.05
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 150,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
+}

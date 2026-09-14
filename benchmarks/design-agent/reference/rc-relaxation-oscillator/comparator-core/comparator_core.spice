@@ -1,0 +1,138 @@
+* Device-level comparator core for the RC relaxation oscillator
+* (issue #1813, successor to #1789/#1795).
+*
+* NOT the benchmark's reference solution. The shipped reference solution
+* for benchmarks/design-agent/tasks/rc-relaxation-oscillator.json is still
+* the behavioral ../oscillator.spice; this directory holds the real
+* sky130A device-level *comparator core* that a future device-level
+* oscillator will be built around, validated on its own testbench across
+* the same 18-corner matrix. See README.md here and
+* docs/design/relaxation-oscillator-comparator-core-spike.md for the
+* measurement trail and for what is deliberately still missing (the
+* charge/discharge current source, the SR latch, the reference).
+*
+* -------------------------------------------------------------------
+* Topology: SPLIT-POLARITY DUAL COMPARATOR
+* -------------------------------------------------------------------
+* Two single-stage 5T OTAs of *opposite input polarity*, one per
+* threshold, instead of one comparator that must resolve both:
+*
+*   cmp_n (NMOS input pair, PMOS mirror load)  -> UPPER threshold vth_hi
+*   cmp_p (PMOS input pair, NMOS mirror load)  -> LOWER threshold vth_lo
+*
+* Each comparator only ever has to be *accurate* at its own threshold,
+* and each threshold is placed in the half of the supply where that
+* polarity's input pair still has tail headroom. Neither comparator is
+* ever asked to resolve in the mid-supply band where, at ss/-40C/1.62V,
+* *neither* polarity works -- which is the ceiling #1813 measured and
+* (reading it as a property of "a comparator") concluded blocked any
+* simple topology. It blocks a *single* comparator spanning both
+* thresholds; it does not block two of them splitting the span.
+*
+* Outside its own threshold the "wrong-side" comparator is slow (its tail
+* device is in triode, decades below the nominal 5 uA) but its output
+* polarity is still correct and rails cleanly, which is all that is asked
+* of it there -- the oscillator's edge always comes from whichever
+* comparator owns the threshold being crossed.
+*
+* -------------------------------------------------------------------
+* Sizing: the load's |Vsg|, not the input pair's gm, sets the ceiling
+* -------------------------------------------------------------------
+* The one sizing change that matters versus ../../five-transistor-ota/
+* ota_5t.spice's mirror load (L=1 W=6) is the PMOS load geometry
+* (L=0.5 W=40 nf=2, ~13x the W/L) at a *lower* bias current (5 uA, not
+* 20 uA). At ss/-40C a sky130 pfet_01v8 is weak enough that a W/L=6 load
+* needs |Vsg| ~ 1.38 V to pass 20 uA, leaving only ~0.24 V of the 1.62 V
+* supply for the whole NMOS side -- which clamps the tail node, and with
+* it the input common mode, at ~1.05 V. Widening the load (and cutting
+* the current) buys that headroom back directly: measured ICMR ceiling at
+* ss/-40C/1.62V goes 1.05 V -> 1.25 V (20 uA) -> 1.30 V (5 uA).
+* This is why #1813's "raise icmp_bias" sweep made resolution *worse*:
+* more current raises the load's own |Vsg|, spending the same budget it
+* was trying to free.
+*
+* -------------------------------------------------------------------
+* Testbench
+* -------------------------------------------------------------------
+* A triangular input ramp at slew = 1 V/us -- the *actual* dv/dt the
+* timing capacitor sees in the behavioral reference (iref/cosc =
+* 10u/10p) -- from 0 up to vpk and back. vpk=1.5 V stays at or below the
+* rail in every supply corner (klt sim applies a supply corner by
+* `alter`ing Vdd at runtime, which does not rewrite a PWL card's already
+* expanded literals -- same constraint ../../schmitt-trigger/schmitt.spice
+* documents).
+*
+* Each comparator is crossed once on the rising edge and once on the
+* falling edge, so one 3 us transient yields both of the numbers the
+* oscillator's period budget needs:
+*
+*   DC trip point   = (v_rise + v_fall) / 2      (delay cancels)
+*   delay-induced   = (v_rise - v_fall) / 2      (in volts; divide by
+*   threshold error                               slew for seconds)
+*
+* and the effective threshold spacing the oscillator would actually
+* integrate between is dv_eff = trip_hi - trip_lo.
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md, "Netlist convention: a circuit body, not a full
+* deck"). Real sky130 devices via $PDK_ROOT, per sim_request.json's
+* "models" field. Device W/L are in microns (sky130_fd_pr subckt
+* convention, bare numbers not "u"-suffixed).
+
+.param vdd=1.8
+.param ib=5u
+* Thresholds: absolute (supply-independent) voltages, standing in for the
+* bandgap-derived reference kb/entries/sky130-bandgap-reference.json
+* describes. dv_eff = vth_hi - vth_lo = 0.80 V -- see README.md for why
+* this replaces the behavioral reference's dV = vref = 0.9 V assumption.
+.param vth_lo=0.35
+.param vth_hi=1.15
+* Input ramp: 1 V/us slew, 0 -> 1.5 V -> 0 (3 us total).
+.param slew=1
+.param vpk=1.5
+.param cl=0.02p
+
+Vdd vdd 0 DC {vdd}
+Vin in 0 PWL(0 0 '{vpk}/{slew}*1u' {vpk} '2*{vpk}/{slew}*1u' 0)
+Vrl vrl 0 DC {vth_lo}
+Vrh vrh 0 DC {vth_hi}
+
+* --- bias generation (shared; external to both comparator cores, same
+*     convention as ../../five-transistor-ota/ota_5t.spice's M5b) ---
+Iref vdd nbias DC {ib}
+XM5b nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+Irefp pbias 0 DC {ib}
+XM5c pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+
+* --- NMOS-input comparator: owns the UPPER threshold ---
+.subckt cmp_n in vref out vdd nbias
+XM5  tail nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XM1  n1   in   tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  pout vref tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM3  n1   n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM4  pout n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+* Two-inverter output buffer: restores CMOS levels and fixes the polarity
+* (out is HIGH when in > vref), so the core drives a logic load directly.
+XMN6 nb  pout 0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  pout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out 0 0.02p
+.ends
+
+* --- PMOS-input comparator: owns the LOWER threshold ---
+.subckt cmp_p in vref out vdd pbias
+XM5  tailp pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XM1  n1   in    tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM2  nout vref  tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM3  n1   n1    0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XM4  nout n1    0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XMN6 nb  nout 0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  nout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out 0 0.02p
+.ends
+
+Xhi in vrh ohi vdd nbias cmp_n
+Xlo in vrl olo vdd pbias cmp_p
