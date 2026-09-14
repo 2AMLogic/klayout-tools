@@ -1004,584 +1004,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_env_provenance_parser(subparsers)
     _add_version_parser(subparsers)
 
-    extract_parser = subparsers.add_parser(
-        "extract",
-        help="extract a schematic-equivalent netlist from a GDSII/OASIS stream",
-        description=(
-            "Extract a schematic-equivalent SPICE netlist (devices + "
-            "connectivity, no parasitics) from a GDSII or OASIS layout file "
-            "and report a structured summary -- see "
-            "docs/design/lvs-extraction-spike.md section 2a for the "
-            "contract and docs/cli/extract.md for the CLI surface. Runs "
-            "fully headless via KLayout's native LayoutToNetlist/"
-            "NetlistSpiceWriter -- no GUI, no Qt. PDK resolution (when "
-            "--pdk/--pdk-root are given) reuses `klt pdk find`'s resolver. "
-            "NOTE: anonymous net numbering ('$N' labels assigned to a net "
-            "with no drawn label) is NOT a stable contract across klayout "
-            "versions or host platforms (issue #1063) -- do not diff raw "
-            "netlist text across environments; compare with `klt lvs` "
-            "(topological, unaffected by this numbering) instead. See "
-            "docs/cli/extract.md's 'Anonymous net numbering' section."
-        ),
-    )
-    # `file` (positional) and `--check` (issue #1149) are mutually exclusive
-    # input sources -- exactly one is required. See the matching
-    # `drc_input_group` comment in this file's `drc` subparser for why this
-    # is a required mutually-exclusive group rather than a manual runtime
-    # check.
-    extract_input_group = extract_parser.add_mutually_exclusive_group(required=True)
-    extract_input_group.add_argument(
-        "file",
-        nargs="?",
-        default=None,
-        help=(
-            "path to a GDSII or OASIS layout file. Omit when using --check "
-            "(the input path is read from the committed report instead)"
-        ),
-    )
-    extract_parser.add_argument(
-        "--deck",
-        default=None,
-        help=(
-            f"extraction deck to run (currently: {_deck_names_str()}). "
-            "Required unless --check is given (an omitted --deck with "
-            "positional 'file' is an application error, exit 1, not an "
-            "argparse usage error -- see docs/cli/extract.md's exit-code "
-            "contract). Not validated by argparse -- an unknown deck name "
-            "also exits 1 with a clean error."
-        ),
-    )
-    extract_parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help=(
-            "path to write the extracted SPICE netlist "
-            "(default: <file> with its extension replaced by .spice)"
-        ),
-    )
-    extract_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to extract when the stream has more than one "
-            "(required in that case; optional otherwise)"
-        ),
-    )
-    _add_pdk_args(
-        extract_parser,
-        pdk_help=(
-            "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
-            "Optional -- extraction runs from --deck alone when omitted; "
-            "when given, an unresolvable PDK is an application error."
-        ),
-    )
-    extract_parser.add_argument(
-        "--parasitics",
-        action="store_true",
-        help=(
-            "additionally extract first-order lumped RC parasitics (one "
-            "series R + one ground C per net, from the deck's curated "
-            "sheet-resistance/capacitance table) as extra R/C cards in the "
-            "written netlist and a `parasitics` block in the JSON. Off by "
-            "default; when omitted, output is byte-identical to a "
-            "schematic-equivalent extraction. See docs/cli/extract.md."
-        ),
-    )
-    extract_parser.add_argument(
-        "--mom-net",
-        dest="mom_net",
-        default=None,
-        metavar="NET",
-        help=(
-            "cross-check (and replace) this one net's --parasitics ground "
-            "capacitance against the `klt mom` Method-of-Moments field "
-            "solver instead of the deck's lumped-RC coefficient table "
-            "(issue #798, Epic #701 Phase 1b); requires --parasitics. Both "
-            "the written SPICE `C` card and the `parasitics.nets[]` entry "
-            "for this net carry the MoM value; the pre-swap lumped-RC value "
-            "and the measured delta between the two are reported in the "
-            "new `parasitics.mom_crosscheck` block. Requires the "
-            "klt_mom_native extension to be built (see "
-            "docs/cli/mom.md#building-the-native-extension); an unbuilt "
-            "extension, a name matching no net with ground-eligible "
-            "parasitics geometry, or a solver-level failure is an error. "
-            "Off by default -- byte-identical to today's behavior. See "
-            "docs/cli/extract.md's '--mom-net' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--spef",
-        dest="spef",
-        default=None,
-        metavar="PATH",
-        help=(
-            "additionally write --parasitics's per-net R/C model as a "
-            "Standard Parasitic Exchange Format (SPEF) file at this path "
-            "(issue #948, Epic #700 Phase 3) -- a format translation of the "
-            "same per-net R/C model reported in the JSON `parasitics` block "
-            "and injected into the written SPICE, for `read_spef`-style STA "
-            "consumption (e.g. `klt place-and-route`'s `route` stage). "
-            "Requires --parasitics. Off by default -- byte-identical to "
-            "today's behavior. See docs/cli/extract.md's 'SPEF export' "
-            "section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--critical-net",
-        dest="critical_nets",
-        action="append",
-        default=None,
-        metavar="NET",
-        help=(
-            "scope the lateral (same-layer, sidewall) coupling-capacitance "
-            "pass onto this net (issue #976, Epic #709 Phase 2a); "
-            "repeatable. A same-layer net pair only gets lateral coupling "
-            "computed when at least one side is named this way -- see "
-            "docs/design/extract-fidelity-roadmap.md's Stage 2b cost "
-            "estimate for why this is scoped rather than run across the "
-            "whole layout unconditionally, the way vertical-overlap "
-            "coupling (issue #760) already is. Requires --parasitics. A "
-            "name matching no net in this layout is not an error -- it is "
-            "reported in `warnings` instead. Off by default -- "
-            "byte-identical to today's behavior. See docs/cli/extract.md's "
-            "'--critical-net' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--parasitics-net",
-        dest="parasitics_nets",
-        action="append",
-        default=None,
-        metavar="NET",
-        help=(
-            "scope --parasitics' per-net ground R/C pass onto this net "
-            "(issue #1700); repeatable. Without it the ground R/C pass "
-            "measures every net in the design, which dominates runtime on a "
-            "large block even when only a handful of nets' R/C is wanted; "
-            "with it, only the named nets are measured (and only a pair of "
-            "named nets can couple). Requires --parasitics. A name matching "
-            "no net in this layout is not an error -- it is reported in "
-            "`warnings` instead, same as --critical-net. Off by default -- "
-            "byte-identical to today's behavior. See docs/cli/extract.md's "
-            "'--parasitics-net' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--distributed-rc",
-        dest="distributed_rc",
-        action="store_true",
-        help=(
-            "model every --critical-net-named net's parasitic R/C as a "
-            "distributed, multi-segment ladder instead of a single lumped "
-            "star (issue #977, Epic #709 Phase 2b): terminals are ordered "
-            "along their approximate physical spread, the net's total "
-            "resistance is split into series segments between adjacent "
-            "terminals, and its total capacitance into per-terminal ground "
-            "capacitors. Requires --critical-net (reuses that flag's own "
-            "net set rather than a second net classification mechanism). A "
-            "named net with fewer than 2 device terminals keeps the star "
-            "model (nothing to chain) -- reported in `warnings`, not an "
-            "error. Off by default -- byte-identical to today's behavior. "
-            "See docs/cli/extract.md's '--distributed-rc' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--mom-rlc-net",
-        dest="mom_rlc_net",
-        default=None,
-        metavar="NET",
-        help=(
-            "substitute a caller-supplied R/L/C for this one net's "
-            "--parasitics Phase 1/2 lumped-RC ground model -- e.g. from a "
-            "separate `klt mom` (Method-of-Moments, Epic #701) run against "
-            "this net's real geometry (issue #988, Epic #709 Phase 3a). "
-            "Requires --parasitics and at least one of "
-            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
-            "--mom-rlc-inductance-nh. Unlike --mom-net (which drives its "
-            "own internal solve), this command never calls `klt mom` "
-            "itself -- the values are opaque caller input, applied "
-            "verbatim. Mutually exclusive with --distributed-rc naming the "
-            "same net. A name matching no net with ground-eligible "
-            "parasitics geometry is an error (unlike --critical-net's "
-            "tolerant `warnings` convention -- a caller-supplied measured "
-            "value is expected to land somewhere). Off by default -- "
-            "byte-identical to today's behavior. See docs/cli/extract.md's "
-            "'--mom-rlc-net' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--mom-rlc-resistance-ohm",
-        dest="mom_rlc_resistance_ohm",
-        type=float,
-        default=None,
-        metavar="OHM",
-        help=(
-            "the --mom-rlc-net net's substituted total series resistance, "
-            "ohms; replaces its written SPICE `R` card(s)' total and its "
-            "`parasitics.nets[].resistance_ohm`. Requires --mom-rlc-net."
-        ),
-    )
-    extract_parser.add_argument(
-        "--mom-rlc-capacitance-ff",
-        dest="mom_rlc_capacitance_ff",
-        type=float,
-        default=None,
-        metavar="FF",
-        help=(
-            "the --mom-rlc-net net's substituted total ground capacitance, "
-            "femtofarads; replaces its written SPICE `C` card's value and "
-            "its `parasitics.nets[].capacitance_ff`. Requires "
-            "--mom-rlc-net."
-        ),
-    )
-    extract_parser.add_argument(
-        "--mom-rlc-inductance-nh",
-        dest="mom_rlc_inductance_nh",
-        type=float,
-        default=None,
-        metavar="NH",
-        help=(
-            "add one series inductor (henries, in the written SPICE `L` "
-            "card) between the --mom-rlc-net net's hub and its ground "
-            "capacitor, nanohenries. Purely additive -- there is no "
-            "inductance term in this command's default RC-only model to "
-            "replace. Requires --mom-rlc-net."
-        ),
-    )
-    extract_parser.add_argument(
-        "--def-net-names",
-        dest="def_net_names",
-        action="store_true",
-        help=(
-            "name routed nets from the DEF net name KLayout's LEF/DEF reader "
-            "recorded on their geometry as a GDS shape property (property 1, "
-            "`LEFDEFReaderConfiguration.net_property_name`'s default) instead "
-            "of from GDS text labels (issue #951, Epic #700 Phase 3). On a "
-            "routed GDS from `klt place-and-route` this recovers the design's "
-            "own net names (`_019_`, `req_msg[3]`) in place of KLayout's "
-            "synthesized `$<id>` placeholders and pin-label-joined `A,X` "
-            "names, which is what lets the emitted SPICE/SPEF line up with "
-            "the netlist an STA tool has linked. Off by default -- property 1 "
-            "carries no guaranteed meaning in a GDS that did not come from a "
-            "LEF/DEF merge, so this is opt-in, and every other layout's "
-            "output is byte-identical to today's. A run that opts in and "
-            "finds no such property says so in `warnings`. See "
-            "docs/cli/extract.md's '--def-net-names' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--def-net-connections",
-        dest="def_net_connections",
-        default=None,
-        metavar="PATH",
-        help=(
-            "correlate --spef's `*D_NET` blocks against real cell-instance "
-            "pins by parsing this routed DEF file's own `NETS` section "
-            "(issue #961, Epic #700 Phase 3) -- emits `*I <inst>:<pin>` "
-            "`*CONN` entries (in addition to any `*P` port entry) and wires "
-            "each into the RC network with a zero-ohm connectivity leg from "
-            "the net's own node, which is what lets a real OpenSTA "
-            "`read_spef` session actually attach this net's parasitics to a "
-            "design pin instead of discarding the whole `*D_NET` block as "
-            "unconnected. A net name that appears more than once in the "
-            "extraction (e.g. several un-strapped `VGND` islands) is "
-            "skipped -- see docs/cli/extract.md's 'SPEF export' section. "
-            "Requires --spef. Off by default -- byte-identical to today's "
-            "behavior."
-        ),
-    )
-    extract_parser.add_argument(
-        "--top-cell-pins",
-        dest="top_cell_pins",
-        action="store_true",
-        help=(
-            "promote only labels drawn directly in the top cell to top-level "
-            "pins. Extraction is flat, so by default every named net becomes a "
-            "pin -- including nets named only by a label inside an instanced "
-            "sub-cell, which are internal nodes once instanced (issue #291). "
-            "With this flag such below-top labels keep their net name but stay "
-            "internal. A warning naming any below-top label promotion is "
-            "emitted either way. See docs/cli/extract.md."
-        ),
-    )
-    extract_parser.add_argument(
-        "--pins",
-        default=None,
-        help=(
-            "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), issue "
-            "#514. Orthogonal to --top-cell-pins (a per-cell filter): this "
-            "is per-net -- a promoted net matches this set when any one of "
-            "its comma-joined component labels is in it (issue #1687, not "
-            "a whole-string match), and every net that matches none of its "
-            "labels keeps its name but is demoted to an internal node, "
-            "instead of being promoted to a top-level pin. Use this to "
-            "name an internal node of a lumped schematic device (e.g. one "
-            "tap of a metal-option ladder) for documentation without "
-            "blocking `klt lvs`'s options.combine_devices from folding the "
-            "series chain. Off by default -- every named net still "
-            "promotes to a pin, byte-identical to today's behavior. See "
-            "docs/cli/extract.md."
-        ),
-    )
-    extract_parser.add_argument(
-        "--def-pins",
-        dest="def_pins",
-        default=None,
-        metavar="PATH",
-        help=(
-            "derive the declared pin set automatically from this routed "
-            "DEF file's own PINS section (issue #1390), instead of "
-            "requiring --pins to be hand-derived. The automatic counterpart "
-            "to --top-cell-pins for a `klt place-and-route`-produced "
-            "(DEF->GDS-merged) layout: that merge flattens the whole "
-            "design into the top cell, so --top-cell-pins's below-top-label "
-            "heuristic cannot tell a genuine top-level port from an "
-            "internal DEF NETS connection point (both land 'in the top "
-            "cell'). Reuses --pins' own per-net, any-component-label "
-            "reconciliation (issue #1687), with the DEF's own PINS section "
-            "as the declared set instead of a hand-derived --pins list. "
-            "Off by default -- byte-identical to today's behavior. See "
-            "docs/cli/extract.md's 'DEF-derived declared pins' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--pin-source-cells",
-        dest="pin_source_cells",
-        default=None,
-        metavar="CELL[,CELL...]",
-        help=(
-            "comma-separated cell name(s) whose own drawn pin-name labels "
-            "(anywhere in the hierarchy, at any depth) declare genuine "
-            "top-level pins -- issue #1513, a third, *positional* "
-            "declared-pin mechanism for a `klt gen-compose`d assembly of "
-            "several pre-labelled macros with no governing top-level DEF of "
-            "its own to anchor --def-pins on. Unlike --top-cell-pins (a "
-            "per-cell-depth filter that demotes a composition's own "
-            "hand-drawn interconnect labels, since they necessarily live in "
-            "an instanced sub-cell, not the new top cell) and --pins/"
-            "--def-pins (per-net string matching, which cannot tell two "
-            "distinct nets apart when they coincidentally share a joined "
-            "label component -- e.g. two independently-labelled macros that "
-            "each happen to use 'CLK' internally), this resolves each named "
-            "cell's own labels to their real net by probing that label's "
-            "own position, not by matching its text. Every currently-"
-            "promoted pin not reached this way is demoted, exactly as "
-            "--pins/--def-pins demote on a miss. Applied after --pins/"
-            "--def-pins's own reconciliation (when given), so it can only "
-            "further restrict. Off by default -- byte-identical to today's "
-            "behavior. See docs/cli/extract.md's 'Pin-source cells' "
-            "section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--deck-option",
-        dest="deck_options",
-        action="append",
-        default=None,
-        metavar="KEY=VALUE",
-        help=(
-            "select a caller-visible flavour of a deck's shared-geometry "
-            "device family (issue #595), as KEY=VALUE; repeatable. Today's "
-            "only recognised key is gf180mcu's `poly_res` (values `1k` "
-            "(default), `2k`, `3k`), which selects which of the "
-            "identically-drawn `ppolyf_u_{1k,2k,3k}` sheet-rho "
-            "interpretations a `Resistor`-marked poly segment extracts as -- "
-            "mirroring the upstream PDK LVS deck's own build-time `POLY_RES` "
-            "variable, which the drawn geometry alone cannot distinguish. "
-            "An unrecognised key or value is an error, not a silently-kept "
-            "default. Omitted by default, which resolves every deck exactly "
-            "as before this flag existed. The resolved mapping is echoed in "
-            "the JSON response's `provenance.deck.options`. See "
-            "docs/cli/extract.md's 'Selecting a shared-geometry resistor "
-            "flavour' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--defer-resistor-fixed-offset",
-        dest="defer_resistor_fixed_offset",
-        action="store_true",
-        help=(
-            "omit each opted-in resistor device class's "
-            "`fixed_offset_ohm` head/end-resistance term from the extracted "
-            "`R` (issue #588), leaving only the raw per-primitive body "
-            "resistance in both the written SPICE and the JSON "
-            "`devices[].params.r_ohm`. Use this when the netlist will be "
-            "read back through `klt lvs`'s pre-extracted `layout.netlist` + "
-            "`layout.deck` + `options.combine_devices: true` path, which "
-            "applies the offset once per *post-combine* logical device -- "
-            "extracting it per drawn primitive first would double-count it "
-            "across a series fold. Off by default: the offset is applied at "
-            "extraction time, byte-identical to today's behavior. A deck "
-            "with no `fixed_offset_ohm`-opted-in resistor class (everything "
-            "except sky130's res_high_po today) is unaffected either way. "
-            "See docs/cli/extract.md."
-        ),
-    )
-    extract_parser.add_argument(
-        "--abstract-cells",
-        dest="abstract_cells",
-        action="append",
-        default=None,
-        metavar="PATTERN",
-        help=(
-            "treat every instantiated cell whose name matches this fnmatch "
-            "glob (e.g. 'sky130_fd_sc_hd__*') as an opaque, pinned black box "
-            "instead of flattening it to its own devices (issue #620); "
-            "repeatable, OR'd together. Pins are resolved per distinct cell "
-            "type, from that cell's own metal_labels/well_label/poly_label "
-            "text when present, else from --abstract-cell-lef; a matched "
-            "type with neither pin source is an error. Emits one .SUBCKT "
-            "per matched cell type (empty body) and one X<instance> card per "
-            "matched instance in the written SPICE, wired via the same net "
-            "names the un-abstracted portion already uses. Everything not "
-            "matched extracts exactly as today. Off by default. See "
-            "docs/cli/extract.md's 'Cell-level (black-box + pins) "
-            "abstraction' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--abstract-cell-lef",
-        dest="abstract_cell_lef",
-        action="append",
-        default=None,
-        metavar="PATH",
-        help=(
-            "LEF file (or directory of *.lef/*.tlef files) to resolve pins "
-            "from for an --abstract-cells-matched cell type that draws no "
-            "in-cell pin label -- the MACRO/PIN/PORT block whose name "
-            "matches the cell type; repeatable, first match wins. Has no "
-            "effect without --abstract-cells (an error if given alone). See "
-            "docs/cli/extract.md's 'Cell-level (black-box + pins) "
-            "abstraction' section."
-        ),
-    )
-    extract_parser.add_argument(
-        "--matched-group",
-        dest="matched_groups",
-        action="append",
-        default=None,
-        metavar="NAME=INST1,INST2[,...]",
-        help=(
-            "declare a set of device instances (devices[].name, e.g. '$1') "
-            "expected to stay geometrically matched -- a differential pair, "
-            "a current-mirror leg (issue #1018); repeatable, one group per "
-            "flag. After extraction, every parameter every resolved member "
-            "reports in common (e.g. w_um/l_um for a MOS pair, r_ohm for a "
-            "matched resistor pair) is compared for exact equality "
-            "(post-rounding) across the group; a divergence is reported in "
-            "the new matched_device_groups[] field and in warnings, citing "
-            "the group name, the mismatched field, and each member's value. "
-            "This is a self-consistency check within one extraction, not a "
-            "comparison against a reference netlist (that is `klt lvs`'s "
-            "job). An instance name matching no extracted device is not an "
-            "error -- it is reported in matched_device_groups[]."
-            "unresolved_instances and in warnings instead. A group name "
-            "repeated across two --matched-group flags, or fewer than two "
-            "instance names in one entry, is an error. Off by default -- "
-            "byte-identical to today's behavior. See docs/cli/extract.md's "
-            "'Matched-device geometry check' section."
-        ),
-    )
-    extract_input_group.add_argument(
-        "--check",
-        default=None,
-        metavar="REPORT",
-        help=(
-            "verify a previously committed 'klt extract --format json' "
-            "report (REPORT) instead of running a fresh extraction: "
-            "mutually exclusive with the positional 'file' argument, since "
-            "the input path is read from REPORT itself (issue #1149). "
-            "Cheap mode (default): re-hash the input layout and deck named "
-            "in REPORT's provenance block and compare against the "
-            "recorded content_hash values, no extraction engine re-run. "
-            "Combine with --rerun for full mode (re-run the extraction and "
-            "diff verdict-bearing fields). Exits 0 if still consistent, 3 "
-            "if drifted -- see docs/cli/extract.md, '--check'"
-        ),
-    )
-    extract_parser.add_argument(
-        "--rerun",
-        action="store_true",
-        help=(
-            "full mode for --check (issue #1149): re-run the extraction "
-            "named in REPORT (best-effort -- reconstructs only file/deck/"
-            "top/deck_options; see docs/cli/extract.md, '--check', for "
-            "reconstruction limits) and diff verdict-bearing fields "
-            "against the committed report, excluding "
-            "provenance.klt_version/klayout_version/pdk.version (fields "
-            "that legitimately vary between runs of identical inputs). "
-            "Requires --check; a clean error (exit 1) otherwise"
-        ),
-    )
-    _add_format_arg(extract_parser)
-    extract_parser.set_defaults(func=extract_cmd.run)
-
-    lvs_parser = subparsers.add_parser(
-        "lvs",
-        help="compare an extracted/reference netlist pair and report mismatches",
-        description=(
-            "Compare a layout-derived netlist (extracted inline, or a "
-            "pre-extracted `klt extract` output) against a reference "
-            "(schematic/golden) SPICE netlist and report structured "
-            "mismatches -- see docs/design/lvs-extraction-spike.md section "
-            "2b for the request/response contract and docs/cli/lvs.md for "
-            "the CLI surface. Runs fully headless via KLayout's native "
-            "NetlistComparer/NetlistSpiceReader -- no GUI, no Qt. Takes a "
-            "request-document path (like `klt sim`/`klt gen`), not "
-            "positional netlist file args."
-        ),
-    )
-    # `request` (positional) and `--check` (issue #1106) are mutually
-    # exclusive input sources -- exactly one is required. See the matching
-    # `drc_input_group` comment above for why this is a required
-    # mutually-exclusive group rather than a manual runtime check.
-    lvs_input_group = lvs_parser.add_mutually_exclusive_group(required=True)
-    lvs_input_group.add_argument(
-        "request",
-        nargs="?",
-        default=None,
-        help=(
-            "klt lvs request: a path to a JSON file, '-' to read the "
-            "request from stdin, or an inline JSON object string. Omit "
-            "when using --check (inputs are read from the committed "
-            "report instead)"
-        ),
-    )
-    lvs_input_group.add_argument(
-        "--check",
-        default=None,
-        metavar="REPORT",
-        help=(
-            "verify a previously committed 'klt lvs --format json' report "
-            "(REPORT) instead of running a fresh compare: mutually "
-            "exclusive with the positional 'request' argument, since "
-            "inputs are read from REPORT itself (issue #1106). Cheap mode "
-            "(default): re-hash REPORT's layout/reference netlists (and "
-            "extraction deck, when one was used) and compare against the "
-            "recorded environment.layout_sha256/reference_sha256/"
-            "provenance.deck.content_hash values, no compare engine "
-            "re-run. Combine with --rerun for full mode (re-run the "
-            "compare and diff verdict-bearing fields). Exits 0 if still "
-            "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
-        ),
-    )
-    lvs_parser.add_argument(
-        "--rerun",
-        action="store_true",
-        help=(
-            "full mode for --check (issue #1106): best-effort re-run of "
-            "the compare REPORT names (reconstructed from REPORT's own "
-            "echoed layout/reference/engine/deck/parameter_tolerance "
-            "fields -- see docs/cli/lvs.md, '--check', for reconstruction "
-            "limits) and diff verdict-bearing fields against the "
-            "committed report, excluding provenance.klt_version/"
-            "klayout_version/pdk.version. Requires --check; a clean error "
-            "(exit 1) otherwise"
-        ),
-    )
-    _add_format_arg(lvs_parser)
-    lvs_parser.set_defaults(func=lvs_cmd.run)
+    _add_extract_parser(subparsers)
+    _add_lvs_parser(subparsers)
 
     synthesize_parser = subparsers.add_parser(
         "synthesize",
@@ -1799,48 +1223,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(techmap_parser)
     techmap_parser.set_defaults(func=techmap_cmd.run)
 
-    equiv_parser = subparsers.add_parser(
-        "equiv",
-        help="prove/refute combinational equivalence of two RTL/gate netlists (Yosys)",
-        description=(
-            "Prove or refute combinational equivalence between two RTL/"
-            "gate-level netlists ('gold' and 'gate') via Yosys's built-in "
-            "miter/SAT equivalence-checking flow -- Phase 0 of the formal-"
-            "equivalence epic #707, the correctness loop-closer #704 (RTL "
-            "synthesis) and #700 (place-and-route) both depend on. On a "
-            "refutation, the concrete counterexample vector is independently "
-            "re-run through both netlists via iverilog/vvp to confirm the "
-            "divergence, not just trusted from the solver. A solver/process "
-            "timeout is reported `inconclusive`, never `equivalent`. "
-            "Combinational designs only in this MVP -- a design containing "
-            "flip-flops, latches, or memories is a clear scope error (exit "
-            "1), not a silently-wrong verdict. Takes a request-document "
-            "path (like `klt lvs`/`klt sim`/`klt synthesize`), not "
-            "positional RTL file args -- see docs/cli/equiv.md."
-        ),
-    )
-    equiv_parser.add_argument(
-        "request",
-        help=(
-            "klt equiv request: a path to a JSON file, '-' to read the "
-            "request from stdin, or an inline JSON object string"
-        ),
-    )
-    equiv_parser.add_argument(
-        "--timeout-s",
-        dest="timeout_s",
-        type=float,
-        default=None,
-        help=(
-            "overall wall-clock timeout in seconds for the Yosys proof "
-            "(default: 60, or the request's own `timeout_s` field); "
-            "overrides the request field when given. A run that does not "
-            "finish within this budget is reported `inconclusive`, never "
-            "`equivalent` -- see docs/cli/equiv.md."
-        ),
-    )
-    _add_format_arg(equiv_parser)
-    equiv_parser.set_defaults(func=equiv_cmd.run)
+    _add_equiv_parser(subparsers)
 
     erc_parser = subparsers.add_parser(
         "erc",
@@ -2380,211 +1763,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
 
-    pex_parser = subparsers.add_parser(
-        "pex",
-        help=(
-            "extract a parasitic-annotated netlist and re-sim the schematic "
-            "testbenches against it"
-        ),
-        description=(
-            "Extract a lumped-RC parasitic-annotated netlist from a routed "
-            "layout (`klt extract --parasitics`), re-run one or more `klt "
-            "sim` testbench requests against it per corner, and report a "
-            "per-corner, per-spec-row schematic-vs-extracted delta -- Phase "
-            "1a of Epic #709. Each testbench's `netlist` file must "
-            "`.include`/`.inc` its schematic DUT (the same convention "
-            "docs/cli/extract.md's 'Verified compatible with klt sim's "
-            "netlist convention' documents); the extracted-side run "
-            "re-points only that one line at the freshly-extracted "
-            "netlist, reusing `klt sim`'s existing `netlist_source` field. "
-            "See docs/cli/pex.md for the request/response contract."
-        ),
-    )
-    pex_parser.add_argument("layout", help="path to a GDSII or OASIS layout file")
-    pex_parser.add_argument(
-        "testbenches",
-        nargs="+",
-        help=(
-            "one or more `klt sim` request JSON files, each `.include`ing "
-            "the same schematic DUT netlist -- reused completely "
-            "unmodified for the schematic-side run, and with only their "
-            "`.include`/`.inc` DUT reference re-pointed for the "
-            "extracted-side run"
-        ),
-    )
-    pex_parser.add_argument(
-        "--deck",
-        required=True,
-        help=(
-            f"extraction deck to run (currently: {_deck_names_str()}), "
-            "passed through to `klt extract --parasitics`"
-        ),
-    )
-    pex_parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help=(
-            "path to write the extracted SPICE netlist "
-            "(default: <layout> with its extension replaced by .spice)"
-        ),
-    )
-    pex_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to extract when the stream has more than one "
-            "(required in that case; optional otherwise)"
-        ),
-    )
-    _add_pdk_args(
-        pex_parser,
-        pdk_help=(
-            "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
-            "Optional -- extraction runs from --deck alone when omitted."
-        ),
-    )
-    pex_parser.add_argument(
-        "--outdir",
-        default=None,
-        help=(
-            "override where this command writes its own generated "
-            "artifacts (the extracted-side testbench body/request copies, "
-            "and each `klt sim` call's own `options.keep_artifacts` "
-            "output, namespaced per testbench and per side) -- default: a "
-            "`.klt/pex/` directory next to <layout>"
-        ),
-    )
-    pex_parser.add_argument(
-        "--backend",
-        default=None,
-        help=(
-            "execution backend passed through to every `klt sim` call "
-            "(schematic and extracted side, every testbench) -- see "
-            "docs/cli/sim.md's 'Execution backends'. Defaults to `local` "
-            "(or each testbench request's own `backend` field)."
-        ),
-    )
-    pex_parser.add_argument(
-        "--deck-option",
-        dest="deck_options",
-        action="append",
-        default=None,
-        metavar="KEY=VALUE",
-        help=(
-            "select a caller-visible flavour of a deck's shared-geometry "
-            "device family (issue #1558), as KEY=VALUE; repeatable, passed "
-            "through verbatim to `klt extract --deck-option`. Today's "
-            "recognised keys are gf180mcu's `poly_res` (values `1k` "
-            "(default), `2k`, `3k`) and `mim_cap` (values "
-            "`cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, "
-            "`cap_mim_2f0_m4m5_noshield` (default)). Without this flag `klt "
-            "pex` extracts against whatever the deck's own default flavour "
-            "is, which is not necessarily the one the design uses -- and "
-            "reports a delta computed from the wrong parasitics. An "
-            "unrecognised key or value is an error, not a silently-kept "
-            "default. Omitted by default, which resolves every deck exactly "
-            "as before this flag existed. The resolved mapping is echoed in "
-            "the JSON response's `provenance.deck.options`. See "
-            "docs/cli/extract.md's 'Selecting a shared-geometry resistor "
-            "flavour' section."
-        ),
-    )
-    pex_parser.add_argument(
-        "--pins",
-        default=None,
-        help=(
-            "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), passed "
-            "through to `klt extract --pins` (issue #1558). Every named net "
-            "not in this set keeps its name but is demoted to an internal "
-            "node instead of being promoted to a top-level pin -- use it "
-            "when flat extraction would otherwise promote more pins than "
-            "the schematic DUT declares (the `pin_count_mismatch` shape "
-            "below). Off by default -- every named net still promotes to a "
-            "pin, byte-identical to today's behavior. See "
-            "docs/cli/extract.md."
-        ),
-    )
-    pex_parser.add_argument(
-        "--critical-net",
-        dest="critical_nets",
-        action="append",
-        default=None,
-        metavar="NET",
-        help=(
-            "scope the lateral (same-layer, sidewall) coupling-capacitance "
-            "pass onto this net (issue #976, Epic #709 Phase 2a), passed "
-            "through to `klt extract --critical-net`; repeatable. Off by "
-            "default -- byte-identical to today's behavior. See "
-            "docs/cli/extract.md's '--critical-net' section."
-        ),
-    )
-    pex_parser.add_argument(
-        "--distributed-rc",
-        dest="distributed_rc",
-        action="store_true",
-        help=(
-            "model every --critical-net-named net's parasitic R/C as a "
-            "distributed, multi-segment ladder instead of a single lumped "
-            "star (issue #977, Epic #709 Phase 2b), passed through to `klt "
-            "extract --distributed-rc`; requires --critical-net. Off by "
-            "default -- byte-identical to today's behavior. See "
-            "docs/cli/extract.md's '--distributed-rc' section."
-        ),
-    )
-    pex_parser.add_argument(
-        "--mom-rlc-net",
-        dest="mom_rlc_net",
-        default=None,
-        metavar="NET",
-        help=(
-            "substitute a caller-supplied R/L/C for this one net's Phase "
-            "1/2 lumped-RC ground model -- e.g. from a separate `klt mom` "
-            "(Method-of-Moments, Epic #701) run against this net's real "
-            "geometry (issue #988, Epic #709 Phase 3a), passed through to "
-            "`klt extract --mom-rlc-net`. Requires at least one of "
-            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
-            "--mom-rlc-inductance-nh. Off by default -- byte-identical to "
-            "today's behavior. See docs/cli/extract.md's '--mom-rlc-net' "
-            "section."
-        ),
-    )
-    pex_parser.add_argument(
-        "--mom-rlc-resistance-ohm",
-        dest="mom_rlc_resistance_ohm",
-        type=float,
-        default=None,
-        metavar="OHM",
-        help=(
-            "the --mom-rlc-net net's substituted total series resistance, "
-            "ohms. Requires --mom-rlc-net."
-        ),
-    )
-    pex_parser.add_argument(
-        "--mom-rlc-capacitance-ff",
-        dest="mom_rlc_capacitance_ff",
-        type=float,
-        default=None,
-        metavar="FF",
-        help=(
-            "the --mom-rlc-net net's substituted total ground capacitance, "
-            "femtofarads. Requires --mom-rlc-net."
-        ),
-    )
-    pex_parser.add_argument(
-        "--mom-rlc-inductance-nh",
-        dest="mom_rlc_inductance_nh",
-        type=float,
-        default=None,
-        metavar="NH",
-        help=(
-            "add one series inductor between the --mom-rlc-net net's hub "
-            "and its ground capacitor, nanohenries. Purely additive. "
-            "Requires --mom-rlc-net."
-        ),
-    )
-    _add_format_arg(pex_parser)
-    pex_parser.set_defaults(func=pex_cmd.run)
+    _add_pex_parser(subparsers)
 
     size_parser = subparsers.add_parser(
         "size",
@@ -2653,81 +1832,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     report_parser.set_defaults(func=report_cmd.run)
 
-    signoff_parser = subparsers.add_parser(
-        "signoff",
-        help=(
-            "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
-            "pass/fail verdict, render a T1-T4 tier-verdict report with "
-            "--manifest, or a fleet-wide tier roll-up with --fleet"
-        ),
-        description=(
-            "Read one or more `klt` JSON envelope files (or '-' for stdin) "
-            "produced by `klt drc`/`klt lvs`/`klt extract`/`klt sim` and "
-            "combine them into a single signoff verdict: pass only if every "
-            "check's own status passed AND every input's `provenance` block "
-            "(issue #251) agrees on PDK/deck/input-layout identity -- a "
-            "mismatched-provenance input set is refused (status: "
-            "'refused'), never silently aggregated into a wrong verdict. "
-            "With --manifest instead, renders the T1-T4 evidence-tier item "
-            "skeleton mechanically parsed from docs/design-evidence-tiers.md, "
-            "graded against a block manifest's declared kind and per-item "
-            "evidence locations -- an item is 'met' only when it cites a "
-            "passing klt JSON envelope with fresh provenance; a missing or "
-            "stale check renders 'unmet', never assumed met. With --fleet "
-            "instead, grades every block named in a fleet manifest and "
-            "reports each block's current tier and, for any block not yet "
-            "T1, the single item still blocking it -- one query across the "
-            "whole fleet instead of opening each block's own report. "
-            "See docs/cli/signoff.md."
-        ),
-    )
-    signoff_parser.add_argument(
-        "files",
-        nargs="*",
-        default=[],
-        help=(
-            "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
-            "'-' to read one from stdin (mutually exclusive with "
-            "--manifest/--fleet)"
-        ),
-    )
-    signoff_parser.add_argument(
-        "--manifest",
-        metavar="FILE",
-        help=(
-            "path to a block manifest JSON file (or '-' for stdin) -- "
-            "renders the T1-T4 tier-verdict report instead of aggregating "
-            "envelope <file> arguments (mutually exclusive with them and "
-            "with --fleet). See docs/cli/signoff.md's 'Tier-verdict report' "
-            "section for the manifest shape."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--fleet",
-        metavar="FILE",
-        help=(
-            "path to a fleet manifest JSON file (or '-' for stdin) -- "
-            "grades every block it names (each a block manifest, inline or "
-            "by path) and renders a fleet-wide tier roll-up instead of a "
-            "single block's report (mutually exclusive with the envelope "
-            "<file> arguments and with --manifest). See "
-            "docs/cli/signoff.md's 'Fleet roll-up' section for the fleet "
-            "manifest shape."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--tiers-doc",
-        metavar="PATH",
-        help=(
-            "path to the design-evidence-tiers Markdown doc to parse the "
-            "T1-T4 item skeleton from, instead of the copy this install "
-            "ships (or $KLT_TIERS_DOC, which this overrides) -- only "
-            "meaningful with --manifest/--fleet. See docs/cli/signoff.md's "
-            "'Where the tier doc comes from' section."
-        ),
-    )
-    _add_format_arg(signoff_parser)
-    signoff_parser.set_defaults(func=signoff_cmd.run)
+    _add_signoff_parser(subparsers)
 
     trajectory_parser = subparsers.add_parser(
         "trajectory",
@@ -3157,6 +2262,945 @@ def create_parser() -> argparse.ArgumentParser:
     design_centering_parser.set_defaults(func=design_centering_cmd.run)
 
     return parser
+
+
+def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``extract`` verb with CLI for extracting netlists from layouts.
+
+    Extracts a schematic-equivalent SPICE netlist from a GDSII/OASIS layout
+    file. See docs/cli/extract.md for full details.
+    """
+    extract_parser = subparsers.add_parser(
+        "extract",
+        help="extract a schematic-equivalent netlist from a GDSII/OASIS stream",
+        description=(
+            "Extract a schematic-equivalent SPICE netlist (devices + "
+            "connectivity, no parasitics) from a GDSII or OASIS layout file "
+            "and report a structured summary -- see "
+            "docs/design/lvs-extraction-spike.md section 2a for the "
+            "contract and docs/cli/extract.md for the CLI surface. Runs "
+            "fully headless via KLayout's native LayoutToNetlist/"
+            "NetlistSpiceWriter -- no GUI, no Qt. PDK resolution (when "
+            "--pdk/--pdk-root are given) reuses `klt pdk find`'s resolver. "
+            "NOTE: anonymous net numbering ('$N' labels assigned to a net "
+            "with no drawn label) is NOT a stable contract across klayout "
+            "versions or host platforms (issue #1063) -- do not diff raw "
+            "netlist text across environments; compare with `klt lvs` "
+            "(topological, unaffected by this numbering) instead. See "
+            "docs/cli/extract.md's 'Anonymous net numbering' section."
+        ),
+    )
+    # `file` (positional) and `--check` (issue #1149) are mutually exclusive
+    # input sources -- exactly one is required. See the matching
+    # `drc_input_group` comment in this file's `drc` subparser for why this
+    # is a required mutually-exclusive group rather than a manual runtime
+    # check.
+    extract_input_group = extract_parser.add_mutually_exclusive_group(required=True)
+    extract_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a GDSII or OASIS layout file. Omit when using --check "
+            "(the input path is read from the committed report instead)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            f"extraction deck to run (currently: {_deck_names_str()}). "
+            "Required unless --check is given (an omitted --deck with "
+            "positional 'file' is an application error, exit 1, not an "
+            "argparse usage error -- see docs/cli/extract.md's exit-code "
+            "contract). Not validated by argparse -- an unknown deck name "
+            "also exits 1 with a clean error."
+        ),
+    )
+    extract_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "path to write the extracted SPICE netlist "
+            "(default: <file> with its extension replaced by .spice)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to extract when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
+    )
+    _add_pdk_args(
+        extract_parser,
+        pdk_help=(
+            "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
+            "Optional -- extraction runs from --deck alone when omitted; "
+            "when given, an unresolvable PDK is an application error."
+        ),
+    )
+    extract_parser.add_argument(
+        "--parasitics",
+        action="store_true",
+        help=(
+            "additionally extract first-order lumped RC parasitics (one "
+            "series R + one ground C per net, from the deck's curated "
+            "sheet-resistance/capacitance table) as extra R/C cards in the "
+            "written netlist and a `parasitics` block in the JSON. Off by "
+            "default; when omitted, output is byte-identical to a "
+            "schematic-equivalent extraction. See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-net",
+        dest="mom_net",
+        default=None,
+        metavar="NET",
+        help=(
+            "cross-check (and replace) this one net's --parasitics ground "
+            "capacitance against the `klt mom` Method-of-Moments field "
+            "solver instead of the deck's lumped-RC coefficient table "
+            "(issue #798, Epic #701 Phase 1b); requires --parasitics. Both "
+            "the written SPICE `C` card and the `parasitics.nets[]` entry "
+            "for this net carry the MoM value; the pre-swap lumped-RC value "
+            "and the measured delta between the two are reported in the "
+            "new `parasitics.mom_crosscheck` block. Requires the "
+            "klt_mom_native extension to be built (see "
+            "docs/cli/mom.md#building-the-native-extension); an unbuilt "
+            "extension, a name matching no net with ground-eligible "
+            "parasitics geometry, or a solver-level failure is an error. "
+            "Off by default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--mom-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--spef",
+        dest="spef",
+        default=None,
+        metavar="PATH",
+        help=(
+            "additionally write --parasitics's per-net R/C model as a "
+            "Standard Parasitic Exchange Format (SPEF) file at this path "
+            "(issue #948, Epic #700 Phase 3) -- a format translation of the "
+            "same per-net R/C model reported in the JSON `parasitics` block "
+            "and injected into the written SPICE, for `read_spef`-style STA "
+            "consumption (e.g. `klt place-and-route`'s `route` stage). "
+            "Requires --parasitics. Off by default -- byte-identical to "
+            "today's behavior. See docs/cli/extract.md's 'SPEF export' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--critical-net",
+        dest="critical_nets",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "scope the lateral (same-layer, sidewall) coupling-capacitance "
+            "pass onto this net (issue #976, Epic #709 Phase 2a); "
+            "repeatable. A same-layer net pair only gets lateral coupling "
+            "computed when at least one side is named this way -- see "
+            "docs/design/extract-fidelity-roadmap.md's Stage 2b cost "
+            "estimate for why this is scoped rather than run across the "
+            "whole layout unconditionally, the way vertical-overlap "
+            "coupling (issue #760) already is. Requires --parasitics. A "
+            "name matching no net in this layout is not an error -- it is "
+            "reported in `warnings` instead. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--critical-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--parasitics-net",
+        dest="parasitics_nets",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "scope --parasitics' per-net ground R/C pass onto this net "
+            "(issue #1700); repeatable. Without it the ground R/C pass "
+            "measures every net in the design, which dominates runtime on a "
+            "large block even when only a handful of nets' R/C is wanted; "
+            "with it, only the named nets are measured (and only a pair of "
+            "named nets can couple). Requires --parasitics. A name matching "
+            "no net in this layout is not an error -- it is reported in "
+            "`warnings` instead, same as --critical-net. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitics-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--distributed-rc",
+        dest="distributed_rc",
+        action="store_true",
+        help=(
+            "model every --critical-net-named net's parasitic R/C as a "
+            "distributed, multi-segment ladder instead of a single lumped "
+            "star (issue #977, Epic #709 Phase 2b): terminals are ordered "
+            "along their approximate physical spread, the net's total "
+            "resistance is split into series segments between adjacent "
+            "terminals, and its total capacitance into per-terminal ground "
+            "capacitors. Requires --critical-net (reuses that flag's own "
+            "net set rather than a second net classification mechanism). A "
+            "named net with fewer than 2 device terminals keeps the star "
+            "model (nothing to chain) -- reported in `warnings`, not an "
+            "error. Off by default -- byte-identical to today's behavior. "
+            "See docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-net",
+        dest="mom_rlc_net",
+        default=None,
+        metavar="NET",
+        help=(
+            "substitute a caller-supplied R/L/C for this one net's "
+            "--parasitics Phase 1/2 lumped-RC ground model -- e.g. from a "
+            "separate `klt mom` (Method-of-Moments, Epic #701) run against "
+            "this net's real geometry (issue #988, Epic #709 Phase 3a). "
+            "Requires --parasitics and at least one of "
+            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
+            "--mom-rlc-inductance-nh. Unlike --mom-net (which drives its "
+            "own internal solve), this command never calls `klt mom` "
+            "itself -- the values are opaque caller input, applied "
+            "verbatim. Mutually exclusive with --distributed-rc naming the "
+            "same net. A name matching no net with ground-eligible "
+            "parasitics geometry is an error (unlike --critical-net's "
+            "tolerant `warnings` convention -- a caller-supplied measured "
+            "value is expected to land somewhere). Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--mom-rlc-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-resistance-ohm",
+        dest="mom_rlc_resistance_ohm",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "the --mom-rlc-net net's substituted total series resistance, "
+            "ohms; replaces its written SPICE `R` card(s)' total and its "
+            "`parasitics.nets[].resistance_ohm`. Requires --mom-rlc-net."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-capacitance-ff",
+        dest="mom_rlc_capacitance_ff",
+        type=float,
+        default=None,
+        metavar="FF",
+        help=(
+            "the --mom-rlc-net net's substituted total ground capacitance, "
+            "femtofarads; replaces its written SPICE `C` card's value and "
+            "its `parasitics.nets[].capacitance_ff`. Requires "
+            "--mom-rlc-net."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-inductance-nh",
+        dest="mom_rlc_inductance_nh",
+        type=float,
+        default=None,
+        metavar="NH",
+        help=(
+            "add one series inductor (henries, in the written SPICE `L` "
+            "card) between the --mom-rlc-net net's hub and its ground "
+            "capacitor, nanohenries. Purely additive -- there is no "
+            "inductance term in this command's default RC-only model to "
+            "replace. Requires --mom-rlc-net."
+        ),
+    )
+    extract_parser.add_argument(
+        "--def-net-names",
+        dest="def_net_names",
+        action="store_true",
+        help=(
+            "name routed nets from the DEF net name KLayout's LEF/DEF reader "
+            "recorded on their geometry as a GDS shape property (property 1, "
+            "`LEFDEFReaderConfiguration.net_property_name`'s default) instead "
+            "of from GDS text labels (issue #951, Epic #700 Phase 3). On a "
+            "routed GDS from `klt place-and-route` this recovers the design's "
+            "own net names (`_019_`, `req_msg[3]`) in place of KLayout's "
+            "synthesized `$<id>` placeholders and pin-label-joined `A,X` "
+            "names, which is what lets the emitted SPICE/SPEF line up with "
+            "the netlist an STA tool has linked. Off by default -- property 1 "
+            "carries no guaranteed meaning in a GDS that did not come from a "
+            "LEF/DEF merge, so this is opt-in, and every other layout's "
+            "output is byte-identical to today's. A run that opts in and "
+            "finds no such property says so in `warnings`. See "
+            "docs/cli/extract.md's '--def-net-names' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--def-net-connections",
+        dest="def_net_connections",
+        default=None,
+        metavar="PATH",
+        help=(
+            "correlate --spef's `*D_NET` blocks against real cell-instance "
+            "pins by parsing this routed DEF file's own `NETS` section "
+            "(issue #961, Epic #700 Phase 3) -- emits `*I <inst>:<pin>` "
+            "`*CONN` entries (in addition to any `*P` port entry) and wires "
+            "each into the RC network with a zero-ohm connectivity leg from "
+            "the net's own node, which is what lets a real OpenSTA "
+            "`read_spef` session actually attach this net's parasitics to a "
+            "design pin instead of discarding the whole `*D_NET` block as "
+            "unconnected. A net name that appears more than once in the "
+            "extraction (e.g. several un-strapped `VGND` islands) is "
+            "skipped -- see docs/cli/extract.md's 'SPEF export' section. "
+            "Requires --spef. Off by default -- byte-identical to today's "
+            "behavior."
+        ),
+    )
+    extract_parser.add_argument(
+        "--top-cell-pins",
+        dest="top_cell_pins",
+        action="store_true",
+        help=(
+            "promote only labels drawn directly in the top cell to top-level "
+            "pins. Extraction is flat, so by default every named net becomes a "
+            "pin -- including nets named only by a label inside an instanced "
+            "sub-cell, which are internal nodes once instanced (issue #291). "
+            "With this flag such below-top labels keep their net name but stay "
+            "internal. A warning naming any below-top label promotion is "
+            "emitted either way. See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
+        "--pins",
+        default=None,
+        help=(
+            "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), issue "
+            "#514. Orthogonal to --top-cell-pins (a per-cell filter): this "
+            "is per-net -- a promoted net matches this set when any one of "
+            "its comma-joined component labels is in it (issue #1687, not "
+            "a whole-string match), and every net that matches none of its "
+            "labels keeps its name but is demoted to an internal node, "
+            "instead of being promoted to a top-level pin. Use this to "
+            "name an internal node of a lumped schematic device (e.g. one "
+            "tap of a metal-option ladder) for documentation without "
+            "blocking `klt lvs`'s options.combine_devices from folding the "
+            "series chain. Off by default -- every named net still "
+            "promotes to a pin, byte-identical to today's behavior. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
+        "--def-pins",
+        dest="def_pins",
+        default=None,
+        metavar="PATH",
+        help=(
+            "derive the declared pin set automatically from this routed "
+            "DEF file's own PINS section (issue #1390), instead of "
+            "requiring --pins to be hand-derived. The automatic counterpart "
+            "to --top-cell-pins for a `klt place-and-route`-produced "
+            "(DEF->GDS-merged) layout: that merge flattens the whole "
+            "design into the top cell, so --top-cell-pins's below-top-label "
+            "heuristic cannot tell a genuine top-level port from an "
+            "internal DEF NETS connection point (both land 'in the top "
+            "cell'). Reuses --pins' own per-net, any-component-label "
+            "reconciliation (issue #1687), with the DEF's own PINS section "
+            "as the declared set instead of a hand-derived --pins list. "
+            "Off by default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's 'DEF-derived declared pins' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--pin-source-cells",
+        dest="pin_source_cells",
+        default=None,
+        metavar="CELL[,CELL...]",
+        help=(
+            "comma-separated cell name(s) whose own drawn pin-name labels "
+            "(anywhere in the hierarchy, at any depth) declare genuine "
+            "top-level pins -- issue #1513, a third, *positional* "
+            "declared-pin mechanism for a `klt gen-compose`d assembly of "
+            "several pre-labelled macros with no governing top-level DEF of "
+            "its own to anchor --def-pins on. Unlike --top-cell-pins (a "
+            "per-cell-depth filter that demotes a composition's own "
+            "hand-drawn interconnect labels, since they necessarily live in "
+            "an instanced sub-cell, not the new top cell) and --pins/"
+            "--def-pins (per-net string matching, which cannot tell two "
+            "distinct nets apart when they coincidentally share a joined "
+            "label component -- e.g. two independently-labelled macros that "
+            "each happen to use 'CLK' internally), this resolves each named "
+            "cell's own labels to their real net by probing that label's "
+            "own position, not by matching its text. Every currently-"
+            "promoted pin not reached this way is demoted, exactly as "
+            "--pins/--def-pins demote on a miss. Applied after --pins/"
+            "--def-pins's own reconciliation (when given), so it can only "
+            "further restrict. Off by default -- byte-identical to today's "
+            "behavior. See docs/cli/extract.md's 'Pin-source cells' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--deck-option",
+        dest="deck_options",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "select a caller-visible flavour of a deck's shared-geometry "
+            "device family (issue #595), as KEY=VALUE; repeatable. Today's "
+            "only recognised key is gf180mcu's `poly_res` (values `1k` "
+            "(default), `2k`, `3k`), which selects which of the "
+            "identically-drawn `ppolyf_u_{1k,2k,3k}` sheet-rho "
+            "interpretations a `Resistor`-marked poly segment extracts as -- "
+            "mirroring the upstream PDK LVS deck's own build-time `POLY_RES` "
+            "variable, which the drawn geometry alone cannot distinguish. "
+            "An unrecognised key or value is an error, not a silently-kept "
+            "default. Omitted by default, which resolves every deck exactly "
+            "as before this flag existed. The resolved mapping is echoed in "
+            "the JSON response's `provenance.deck.options`. See "
+            "docs/cli/extract.md's 'Selecting a shared-geometry resistor "
+            "flavour' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--defer-resistor-fixed-offset",
+        dest="defer_resistor_fixed_offset",
+        action="store_true",
+        help=(
+            "omit each opted-in resistor device class's "
+            "`fixed_offset_ohm` head/end-resistance term from the extracted "
+            "`R` (issue #588), leaving only the raw per-primitive body "
+            "resistance in both the written SPICE and the JSON "
+            "`devices[].params.r_ohm`. Use this when the netlist will be "
+            "read back through `klt lvs`'s pre-extracted `layout.netlist` + "
+            "`layout.deck` + `options.combine_devices: true` path, which "
+            "applies the offset once per *post-combine* logical device -- "
+            "extracting it per drawn primitive first would double-count it "
+            "across a series fold. Off by default: the offset is applied at "
+            "extraction time, byte-identical to today's behavior. A deck "
+            "with no `fixed_offset_ohm`-opted-in resistor class (everything "
+            "except sky130's res_high_po today) is unaffected either way. "
+            "See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
+        "--abstract-cells",
+        dest="abstract_cells",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help=(
+            "treat every instantiated cell whose name matches this fnmatch "
+            "glob (e.g. 'sky130_fd_sc_hd__*') as an opaque, pinned black box "
+            "instead of flattening it to its own devices (issue #620); "
+            "repeatable, OR'd together. Pins are resolved per distinct cell "
+            "type, from that cell's own metal_labels/well_label/poly_label "
+            "text when present, else from --abstract-cell-lef; a matched "
+            "type with neither pin source is an error. Emits one .SUBCKT "
+            "per matched cell type (empty body) and one X<instance> card per "
+            "matched instance in the written SPICE, wired via the same net "
+            "names the un-abstracted portion already uses. Everything not "
+            "matched extracts exactly as today. Off by default. See "
+            "docs/cli/extract.md's 'Cell-level (black-box + pins) "
+            "abstraction' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--abstract-cell-lef",
+        dest="abstract_cell_lef",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LEF file (or directory of *.lef/*.tlef files) to resolve pins "
+            "from for an --abstract-cells-matched cell type that draws no "
+            "in-cell pin label -- the MACRO/PIN/PORT block whose name "
+            "matches the cell type; repeatable, first match wins. Has no "
+            "effect without --abstract-cells (an error if given alone). See "
+            "docs/cli/extract.md's 'Cell-level (black-box + pins) "
+            "abstraction' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--matched-group",
+        dest="matched_groups",
+        action="append",
+        default=None,
+        metavar="NAME=INST1,INST2[,...]",
+        help=(
+            "declare a set of device instances (devices[].name, e.g. '$1') "
+            "expected to stay geometrically matched -- a differential pair, "
+            "a current-mirror leg (issue #1018); repeatable, one group per "
+            "flag. After extraction, every parameter every resolved member "
+            "reports in common (e.g. w_um/l_um for a MOS pair, r_ohm for a "
+            "matched resistor pair) is compared for exact equality "
+            "(post-rounding) across the group; a divergence is reported in "
+            "the new matched_device_groups[] field and in warnings, citing "
+            "the group name, the mismatched field, and each member's value. "
+            "This is a self-consistency check within one extraction, not a "
+            "comparison against a reference netlist (that is `klt lvs`'s "
+            "job). An instance name matching no extracted device is not an "
+            "error -- it is reported in matched_device_groups[]."
+            "unresolved_instances and in warnings instead. A group name "
+            "repeated across two --matched-group flags, or fewer than two "
+            "instance names in one entry, is an error. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'Matched-device geometry check' section."
+        ),
+    )
+    extract_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt extract --format json' "
+            "report (REPORT) instead of running a fresh extraction: "
+            "mutually exclusive with the positional 'file' argument, since "
+            "the input path is read from REPORT itself (issue #1149). "
+            "Cheap mode (default): re-hash the input layout and deck named "
+            "in REPORT's provenance block and compare against the "
+            "recorded content_hash values, no extraction engine re-run. "
+            "Combine with --rerun for full mode (re-run the extraction and "
+            "diff verdict-bearing fields). Exits 0 if still consistent, 3 "
+            "if drifted -- see docs/cli/extract.md, '--check'"
+        ),
+    )
+    extract_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1149): re-run the extraction "
+            "named in REPORT (best-effort -- reconstructs only file/deck/"
+            "top/deck_options; see docs/cli/extract.md, '--check', for "
+            "reconstruction limits) and diff verdict-bearing fields "
+            "against the committed report, excluding "
+            "provenance.klt_version/klayout_version/pdk.version (fields "
+            "that legitimately vary between runs of identical inputs). "
+            "Requires --check; a clean error (exit 1) otherwise"
+        ),
+    )
+    _add_format_arg(extract_parser)
+    extract_parser.set_defaults(func=extract_cmd.run)
+
+
+def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``lvs`` verb for comparing netlist pairs.
+
+    Compare a layout-derived netlist against a reference SPICE netlist and
+    report mismatches. See docs/cli/lvs.md for full details.
+    """
+    lvs_parser = subparsers.add_parser(
+        "lvs",
+        help="compare an extracted/reference netlist pair and report mismatches",
+        description=(
+            "Compare a layout-derived netlist (extracted inline, or a "
+            "pre-extracted `klt extract` output) against a reference "
+            "(schematic/golden) SPICE netlist and report structured "
+            "mismatches -- see docs/design/lvs-extraction-spike.md section "
+            "2b for the request/response contract and docs/cli/lvs.md for "
+            "the CLI surface. Runs fully headless via KLayout's native "
+            "NetlistComparer/NetlistSpiceReader -- no GUI, no Qt. Takes a "
+            "request-document path (like `klt sim`/`klt gen`), not "
+            "positional netlist file args."
+        ),
+    )
+    # `request` (positional) and `--check` (issue #1106) are mutually
+    # exclusive input sources -- exactly one is required. See the matching
+    # `drc_input_group` comment above for why this is a required
+    # mutually-exclusive group rather than a manual runtime check.
+    lvs_input_group = lvs_parser.add_mutually_exclusive_group(required=True)
+    lvs_input_group.add_argument(
+        "request",
+        nargs="?",
+        default=None,
+        help=(
+            "klt lvs request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string. Omit "
+            "when using --check (inputs are read from the committed "
+            "report instead)"
+        ),
+    )
+    lvs_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt lvs --format json' report "
+            "(REPORT) instead of running a fresh compare: mutually "
+            "exclusive with the positional 'request' argument, since "
+            "inputs are read from REPORT itself (issue #1106). Cheap mode "
+            "(default): re-hash REPORT's layout/reference netlists (and "
+            "extraction deck, when one was used) and compare against the "
+            "recorded environment.layout_sha256/reference_sha256/"
+            "provenance.deck.content_hash values, no compare engine "
+            "re-run. Combine with --rerun for full mode (re-run the "
+            "compare and diff verdict-bearing fields). Exits 0 if still "
+            "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1106): best-effort re-run of "
+            "the compare REPORT names (reconstructed from REPORT's own "
+            "echoed layout/reference/engine/deck/parameter_tolerance "
+            "fields -- see docs/cli/lvs.md, '--check', for reconstruction "
+            "limits) and diff verdict-bearing fields against the "
+            "committed report, excluding provenance.klt_version/"
+            "klayout_version/pdk.version. Requires --check; a clean error "
+            "(exit 1) otherwise"
+        ),
+    )
+    _add_format_arg(lvs_parser)
+    lvs_parser.set_defaults(func=lvs_cmd.run)
+
+
+def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``equiv`` verb for proving combinational equivalence.
+
+    Prove or refute combinational equivalence between two netlists via Yosys.
+    See docs/cli/equiv.md for full details.
+    """
+    equiv_parser = subparsers.add_parser(
+        "equiv",
+        help="prove/refute combinational equivalence of two RTL/gate netlists (Yosys)",
+        description=(
+            "Prove or refute combinational equivalence between two RTL/"
+            "gate-level netlists ('gold' and 'gate') via Yosys's built-in "
+            "miter/SAT equivalence-checking flow -- Phase 0 of the formal-"
+            "equivalence epic #707, the correctness loop-closer #704 (RTL "
+            "synthesis) and #700 (place-and-route) both depend on. On a "
+            "refutation, the concrete counterexample vector is independently "
+            "re-run through both netlists via iverilog/vvp to confirm the "
+            "divergence, not just trusted from the solver. A solver/process "
+            "timeout is reported `inconclusive`, never `equivalent`. "
+            "Combinational designs only in this MVP -- a design containing "
+            "flip-flops, latches, or memories is a clear scope error (exit "
+            "1), not a silently-wrong verdict. Takes a request-document "
+            "path (like `klt lvs`/`klt sim`/`klt synthesize`), not "
+            "positional RTL file args -- see docs/cli/equiv.md."
+        ),
+    )
+    equiv_parser.add_argument(
+        "request",
+        help=(
+            "klt equiv request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string"
+        ),
+    )
+    equiv_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds for the Yosys proof "
+            "(default: 60, or the request's own `timeout_s` field); "
+            "overrides the request field when given. A run that does not "
+            "finish within this budget is reported `inconclusive`, never "
+            "`equivalent` -- see docs/cli/equiv.md."
+        ),
+    )
+    _add_format_arg(equiv_parser)
+    equiv_parser.set_defaults(func=equiv_cmd.run)
+
+
+def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``pex`` verb for parasitic extraction and re-simulation.
+
+    Extract a parasitic-annotated netlist and re-run testbenches against it.
+    See docs/cli/pex.md for full details.
+    """
+    pex_parser = subparsers.add_parser(
+        "pex",
+        help=(
+            "extract a parasitic-annotated netlist and re-sim the schematic "
+            "testbenches against it"
+        ),
+        description=(
+            "Extract a lumped-RC parasitic-annotated netlist from a routed "
+            "layout (`klt extract --parasitics`), re-run one or more `klt "
+            "sim` testbench requests against it per corner, and report a "
+            "per-corner, per-spec-row schematic-vs-extracted delta -- Phase "
+            "1a of Epic #709. Each testbench's `netlist` file must "
+            "`.include`/`.inc` its schematic DUT (the same convention "
+            "docs/cli/extract.md's 'Verified compatible with klt sim's "
+            "netlist convention' documents); the extracted-side run "
+            "re-points only that one line at the freshly-extracted "
+            "netlist, reusing `klt sim`'s existing `netlist_source` field. "
+            "See docs/cli/pex.md for the request/response contract."
+        ),
+    )
+    pex_parser.add_argument("layout", help="path to a GDSII or OASIS layout file")
+    pex_parser.add_argument(
+        "testbenches",
+        nargs="+",
+        help=(
+            "one or more `klt sim` request JSON files, each `.include`ing "
+            "the same schematic DUT netlist -- reused completely "
+            "unmodified for the schematic-side run, and with only their "
+            "`.include`/`.inc` DUT reference re-pointed for the "
+            "extracted-side run"
+        ),
+    )
+    pex_parser.add_argument(
+        "--deck",
+        required=True,
+        help=(
+            f"extraction deck to run (currently: {_deck_names_str()}), "
+            "passed through to `klt extract --parasitics`"
+        ),
+    )
+    pex_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "path to write the extracted SPICE netlist "
+            "(default: <layout> with its extension replaced by .spice)"
+        ),
+    )
+    pex_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to extract when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
+    )
+    _add_pdk_args(
+        pex_parser,
+        pdk_help=(
+            "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
+            "Optional -- extraction runs from --deck alone when omitted."
+        ),
+    )
+    pex_parser.add_argument(
+        "--outdir",
+        default=None,
+        help=(
+            "override where this command writes its own generated "
+            "artifacts (the extracted-side testbench body/request copies, "
+            "and each `klt sim` call's own `options.keep_artifacts` "
+            "output, namespaced per testbench and per side) -- default: a "
+            "`.klt/pex/` directory next to <layout>"
+        ),
+    )
+    pex_parser.add_argument(
+        "--backend",
+        default=None,
+        help=(
+            "execution backend passed through to every `klt sim` call "
+            "(schematic and extracted side, every testbench) -- see "
+            "docs/cli/sim.md's 'Execution backends'. Defaults to `local` "
+            "(or each testbench request's own `backend` field)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--deck-option",
+        dest="deck_options",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "select a caller-visible flavour of a deck's shared-geometry "
+            "device family (issue #1558), as KEY=VALUE; repeatable, passed "
+            "through verbatim to `klt extract --deck-option`. Today's "
+            "recognised keys are gf180mcu's `poly_res` (values `1k` "
+            "(default), `2k`, `3k`) and `mim_cap` (values "
+            "`cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, "
+            "`cap_mim_2f0_m4m5_noshield` (default)). Without this flag `klt "
+            "pex` extracts against whatever the deck's own default flavour "
+            "is, which is not necessarily the one the design uses -- and "
+            "reports a delta computed from the wrong parasitics. An "
+            "unrecognised key or value is an error, not a silently-kept "
+            "default. Omitted by default, which resolves every deck exactly "
+            "as before this flag existed. The resolved mapping is echoed in "
+            "the JSON response's `provenance.deck.options`. See "
+            "docs/cli/extract.md's 'Selecting a shared-geometry resistor "
+            "flavour' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--pins",
+        default=None,
+        help=(
+            "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), passed "
+            "through to `klt extract --pins` (issue #1558). Every named net "
+            "not in this set keeps its name but is demoted to an internal "
+            "node instead of being promoted to a top-level pin -- use it "
+            "when flat extraction would otherwise promote more pins than "
+            "the schematic DUT declares (the `pin_count_mismatch` shape "
+            "below). Off by default -- every named net still promotes to a "
+            "pin, byte-identical to today's behavior. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net",
+        dest="critical_nets",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "scope the lateral (same-layer, sidewall) coupling-capacitance "
+            "pass onto this net (issue #976, Epic #709 Phase 2a), passed "
+            "through to `klt extract --critical-net`; repeatable. Off by "
+            "default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--critical-net' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--distributed-rc",
+        dest="distributed_rc",
+        action="store_true",
+        help=(
+            "model every --critical-net-named net's parasitic R/C as a "
+            "distributed, multi-segment ladder instead of a single lumped "
+            "star (issue #977, Epic #709 Phase 2b), passed through to `klt "
+            "extract --distributed-rc`; requires --critical-net. Off by "
+            "default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-net",
+        dest="mom_rlc_net",
+        default=None,
+        metavar="NET",
+        help=(
+            "substitute a caller-supplied R/L/C for this one net's Phase "
+            "1/2 lumped-RC ground model -- e.g. from a separate `klt mom` "
+            "(Method-of-Moments, Epic #701) run against this net's real "
+            "geometry (issue #988, Epic #709 Phase 3a), passed through to "
+            "`klt extract --mom-rlc-net`. Requires at least one of "
+            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
+            "--mom-rlc-inductance-nh. Off by default -- byte-identical to "
+            "today's behavior. See docs/cli/extract.md's '--mom-rlc-net' "
+            "section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-resistance-ohm",
+        dest="mom_rlc_resistance_ohm",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "the --mom-rlc-net net's substituted total series resistance, "
+            "ohms. Requires --mom-rlc-net."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-capacitance-ff",
+        dest="mom_rlc_capacitance_ff",
+        type=float,
+        default=None,
+        metavar="FF",
+        help=(
+            "the --mom-rlc-net net's substituted total ground capacitance, "
+            "femtofarads. Requires --mom-rlc-net."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-inductance-nh",
+        dest="mom_rlc_inductance_nh",
+        type=float,
+        default=None,
+        metavar="NH",
+        help=(
+            "add one series inductor between the --mom-rlc-net net's hub "
+            "and its ground capacitor, nanohenries. Purely additive. "
+            "Requires --mom-rlc-net."
+        ),
+    )
+    _add_format_arg(pex_parser)
+    pex_parser.set_defaults(func=pex_cmd.run)
+
+
+def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``signoff`` verb for aggregating check results.
+
+    Aggregate klt drc/lvs/extract/sim results into a pass/fail verdict.
+    See docs/cli/signoff.md for full details.
+    """
+    signoff_parser = subparsers.add_parser(
+        "signoff",
+        help=(
+            "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
+            "pass/fail verdict, render a T1-T4 tier-verdict report with "
+            "--manifest, or a fleet-wide tier roll-up with --fleet"
+        ),
+        description=(
+            "Read one or more `klt` JSON envelope files (or '-' for stdin) "
+            "produced by `klt drc`/`klt lvs`/`klt extract`/`klt sim` and "
+            "combine them into a single signoff verdict: pass only if every "
+            "check's own status passed AND every input's `provenance` block "
+            "(issue #251) agrees on PDK/deck/input-layout identity -- a "
+            "mismatched-provenance input set is refused (status: "
+            "'refused'), never silently aggregated into a wrong verdict. "
+            "With --manifest instead, renders the T1-T4 evidence-tier item "
+            "skeleton mechanically parsed from docs/design-evidence-tiers.md, "
+            "graded against a block manifest's declared kind and per-item "
+            "evidence locations -- an item is 'met' only when it cites a "
+            "passing klt JSON envelope with fresh provenance; a missing or "
+            "stale check renders 'unmet', never assumed met. With --fleet "
+            "instead, grades every block named in a fleet manifest and "
+            "reports each block's current tier and, for any block not yet "
+            "T1, the single item still blocking it -- one query across the "
+            "whole fleet instead of opening each block's own report. "
+            "See docs/cli/signoff.md."
+        ),
+    )
+    signoff_parser.add_argument(
+        "files",
+        nargs="*",
+        default=[],
+        help=(
+            "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
+            "'-' to read one from stdin (mutually exclusive with "
+            "--manifest/--fleet)"
+        ),
+    )
+    signoff_parser.add_argument(
+        "--manifest",
+        metavar="FILE",
+        help=(
+            "path to a block manifest JSON file (or '-' for stdin) -- "
+            "renders the T1-T4 tier-verdict report instead of aggregating "
+            "envelope <file> arguments (mutually exclusive with them and "
+            "with --fleet). See docs/cli/signoff.md's 'Tier-verdict report' "
+            "section for the manifest shape."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--fleet",
+        metavar="FILE",
+        help=(
+            "path to a fleet manifest JSON file (or '-' for stdin) -- "
+            "grades every block it names (each a block manifest, inline or "
+            "by path) and renders a fleet-wide tier roll-up instead of a "
+            "single block's report (mutually exclusive with the envelope "
+            "<file> arguments and with --manifest). See "
+            "docs/cli/signoff.md's 'Fleet roll-up' section for the fleet "
+            "manifest shape."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--tiers-doc",
+        metavar="PATH",
+        help=(
+            "path to the design-evidence-tiers Markdown doc to parse the "
+            "T1-T4 item skeleton from, instead of the copy this install "
+            "ships (or $KLT_TIERS_DOC, which this overrides) -- only "
+            "meaningful with --manifest/--fleet. See docs/cli/signoff.md's "
+            "'Where the tier doc comes from' section."
+        ),
+    )
+    _add_format_arg(signoff_parser)
+    signoff_parser.set_defaults(func=signoff_cmd.run)
 
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
