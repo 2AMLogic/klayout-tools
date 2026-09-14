@@ -309,6 +309,11 @@ the new `klayout_tools.pdk.lef_files()` resolver (issue #397/#425 — the
 survey's own finding that `_ASSET_LAYOUT` never carried a `lef` key), which
 looks for open_pdks' own `<libs_ref>/<cell_library>/techlef/<cell_library>
 __<corner>.tlef` and `<libs_ref>/<cell_library>/lef/<cell_library>.lef`.
+`lef_files()` also resolves IHP-Open-PDK's distinct tech-LEF layout (issue
+#1790): when a library ships no `techlef/` subdirectory at all, a single,
+corner-invariant tech LEF staged directly under `lef/` (e.g.
+`sg13g2_stdcell`'s `lef/sg13g2_tech.lef`, named after the process rather
+than the library) resolves instead, ignoring `interconnect_corner`.
 
 The tech LEF's own `<corner>` is a **parasitic-extraction corner**
 (`min`/`nom`/`max` routing-layer resistance/capacitance) — a wire-model

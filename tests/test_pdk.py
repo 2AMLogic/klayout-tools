@@ -9,6 +9,7 @@ is installed on the machine running the suite.
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -100,6 +101,62 @@ def _make_cell_library(
             (lib_views_dir / f"{name}__{corner_name}.lib").write_text(
                 content, encoding="utf-8"
             )
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    return lib_dir
+
+
+def _make_ihp_stdcell_library(
+    variant_dir,
+    name="sg13g2_stdcell",
+    *,
+    devices=("nfet",),
+    corners=(("typ_1p20V_25C", 1.0, 25.0, 1.2),),
+    with_spice=True,
+    with_lib=True,
+    with_lef=True,
+    tech_lef_filename="sg13g2_tech.lef",
+):
+    """Fabricate a `libs.ref/<name>` entry mirroring IHP-Open-PDK's real
+    `sg13g2_stdcell` shape (issue #1790, verified live against a real
+    fetched v0.3.0 install):
+
+    - Single-underscore `lib/` naming (`f"{name}_{corner}.lib"`), with
+      `default_operating_conditions` written as the full stem too -- IHP's
+      own `.lib` files embed the library name in that attribute, unlike
+      sky130's bare form.
+    - A `lef/` directory with **no** `techlef/` subdirectory at all -- just
+      the merged cell LEF (`f"{name}.lef"`) alongside a single,
+      corner-invariant tech LEF named after the *process*, not the library
+      (``tech_lef_filename``, default `sg13g2_tech.lef`, matching IHP's real
+      mismatch between the tech LEF's filename and `cell_library`'s name).
+    """
+    lib_dir = variant_dir / "libs.ref" / name
+    if with_spice:
+        spice_dir = lib_dir / "spice"
+        spice_dir.mkdir(parents=True)
+        lines = [f"X{i} a b c d {device} w=1u l=1u" for i, device in enumerate(devices)]
+        (spice_dir / f"{name}.spice").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    if with_lib:
+        lib_views_dir = lib_dir / "lib"
+        lib_views_dir.mkdir(parents=True, exist_ok=True)
+        for corner_name, process, temperature, voltage in corners:
+            operating_conditions = f"{name}_{corner_name}"
+            content = (
+                f'    default_operating_conditions : "{operating_conditions}";\n'
+                f"    nom_process : {process};\n"
+                f"    nom_temperature : {temperature};\n"
+                f"    nom_voltage : {voltage};\n"
+            )
+            (lib_views_dir / f"{name}_{corner_name}.lib").write_text(
+                content, encoding="utf-8"
+            )
+    if with_lef:
+        lef_dir = lib_dir / "lef"
+        lef_dir.mkdir(parents=True, exist_ok=True)
+        (lef_dir / f"{name}.lef").write_text("# merged cell lef\n")
+        (lef_dir / tech_lef_filename).write_text("# tech lef\n")
     lib_dir.mkdir(parents=True, exist_ok=True)
     return lib_dir
 
@@ -1224,6 +1281,91 @@ def test_lef_files_no_install_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# lef_files -- IHP-Open-PDK's distinct tech-LEF layout (issue #1790,
+# verified live against a real fetched v0.3.0 install): no `techlef/`
+# subdirectory, and a single, corner-invariant tech LEF staged directly
+# under `lef/` with a filename that does not share `cell_library`'s name.
+# --------------------------------------------------------------------------- #
+
+
+def test_lef_files_resolves_ihp_style_tech_lef(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+
+    result = pdk.lef_files("sg13g2_stdcell", root=str(root))
+
+    assert result["tech_lef"] == str(
+        variant_dir / "libs.ref" / "sg13g2_stdcell" / "lef" / "sg13g2_tech.lef"
+    )
+    assert result["cell_lef"] == str(
+        variant_dir / "libs.ref" / "sg13g2_stdcell" / "lef" / "sg13g2_stdcell.lef"
+    )
+
+
+def test_lef_files_ihp_style_ignores_requested_corner(tmp_path):
+    """IHP ships one tech LEF for the whole PDK -- an explicit ``corner``
+    (meaningless for this layout) must not prevent resolution."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+
+    result = pdk.lef_files("sg13g2_stdcell", root=str(root), corner="max")
+
+    assert result["tech_lef"] is not None
+    assert result["tech_lef"].endswith("sg13g2_tech.lef")
+
+
+def test_lef_files_ihp_style_ambiguous_extra_lef_candidates_returns_none(tmp_path):
+    """Two non-cell-LEF files under `lef/` (no `techlef/` subdirectory) is
+    ambiguous -- returns ``None`` rather than guessing which one is the
+    tech LEF."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+    lef_dir = variant_dir / "libs.ref" / "sg13g2_stdcell" / "lef"
+    (lef_dir / "sg13g2_tech_alt.lef").write_text("# another candidate\n")
+
+    result = pdk.lef_files("sg13g2_stdcell", root=str(root))
+
+    assert result["tech_lef"] is None
+    assert result["cell_lef"] is not None  # cell lef still resolves unambiguously
+
+
+def test_lef_files_ihp_style_no_extra_lef_candidate_returns_none(tmp_path):
+    """No `techlef/` subdirectory and only the merged cell LEF under
+    `lef/` -- no tech LEF to resolve, ``None`` not a guess."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    lib_dir = variant_dir / "libs.ref" / "sg13g2_stdcell"
+    lef_dir = lib_dir / "lef"
+    lef_dir.mkdir(parents=True)
+    (lef_dir / "sg13g2_stdcell.lef").write_text("# merged cell lef\n")
+
+    result = pdk.lef_files("sg13g2_stdcell", root=str(root))
+
+    assert result["tech_lef"] is None
+    assert result["cell_lef"] is not None
+
+
+def test_lef_files_missing_corner_with_techlef_dir_does_not_fall_back_to_ihp_style(
+    tmp_path,
+):
+    """A library that *does* ship a `techlef/` subdirectory but not the
+    requested corner must not fall back to guessing inside `lef/` -- the
+    IHP-style fallback only engages when `techlef/` is absent entirely
+    (regression guard for sky130/gf180mcu's existing behaviour)."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_lef_library(variant_dir, "sky130_fd_sc_hd", corners=("min", "max"))
+
+    result = pdk.lef_files("sky130_fd_sc_hd", root=str(root))  # default: "nom"
+
+    assert result["tech_lef"] is None
+    assert result["cell_lef"] is not None
+
+
+# --------------------------------------------------------------------------- #
 # list_lib_corners (issue #949 -- every shipped `.lib` timing corner for a
 # resolved cell library, not only the nominal pick -- feeds
 # `place_and_route.py`'s post-route setup/hold corner sweep).
@@ -1628,6 +1770,28 @@ def test_cells_nominal_corner_strips_doubled_library_prefix_gf180mcu_shape(tmp_p
     assert not library["nominal_corner"].startswith("gf180mcu_fd_sc_mcu9t5v0__")
 
 
+def test_cells_nominal_corner_strips_single_underscore_prefix_ihp_shape(tmp_path):
+    """IHP-Open-PDK's `sg13g2_stdcell` `.lib` files write their own
+    single-underscore `<cell_library>_` prefix into
+    `default_operating_conditions` (e.g. `sg13g2_stdcell_typ_1p20V_25C`),
+    distinct from both sky130's bare attribute and gf180mcu's
+    double-underscore prefix. `nominal_corner` must report the bare corner
+    here too -- otherwise `synthesize`/`place_and_route`'s single-underscore
+    liberty-filename fallback would build a doubled-prefix path
+    (`sg13g2_stdcell_sg13g2_stdcell_typ_1p20V_25C.lib`) that does not exist
+    (issue #1790, verified live against a real fetched IHP-Open-PDK v0.3.0
+    install)."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["nominal_corner"] == "typ_1p20V_25C"
+    assert not library["nominal_corner"].startswith("sg13g2_stdcell_")
+
+
 def test_cells_supply_matches_against_full_supply_set_not_just_nominal(tmp_path):
     """`--supply` must match against every characterised supply, not just the
     single lowest `nominal_supply_v` -- a library characterised at 3.3V (in
@@ -1669,6 +1833,39 @@ def test_cells_excludes_non_std_cell_libraries(tmp_path):
     report = pdk.list_cell_libraries(root=str(root))
 
     assert [lib["name"] for lib in report["libraries"]] == ["sky130_fd_sc_hd"]
+
+
+def test_cells_includes_ihp_stdcell_naming(tmp_path):
+    """`sg13g2_stdcell` (IHP-Open-PDK's real naming -- no `_fd_sc_` marker
+    at all) is enumerated via the additive `_stdcell` marker, alongside a
+    `_fd_sc_`-named library from a different install -- issue #1790's
+    "additive, not a replacement" acceptance criterion."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell")
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    assert [lib["name"] for lib in report["libraries"]] == ["sg13g2_stdcell"]
+    library = report["libraries"][0]
+    assert library["nominal_corner"] == "typ_1p20V_25C"
+    assert library["nominal_supply_v"] == 1.2
+
+
+def test_cells_ihp_stdcell_does_not_match_io_or_sram_siblings(tmp_path):
+    """The `_stdcell` marker does not also sweep up IHP's I/O
+    (`sg13g2_io`) or SRAM (`sg13g2_sram`) `libs_ref` entries -- both ship
+    their own `lib/` timing views too, so only the name marker (not a
+    "ships `lib/`" shape check) distinguishes the standard-cell library."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell")
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_io", devices=("nfet_io",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_sram", with_spice=False)
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    assert [lib["name"] for lib in report["libraries"]] == ["sg13g2_stdcell"]
 
 
 def test_cells_no_libs_ref_is_empty_list(tmp_path):
@@ -2648,10 +2845,11 @@ def test_em_limits_excludes_library_with_no_techlef_directory(tmp_path):
 
 
 def test_em_limits_osu_named_library_not_dropped_by_std_cell_marker(tmp_path):
-    """Regression guard: `_STD_CELL_LIB_MARKER` (`_fd_sc_`) does not match
-    `_osu_sc_`-named libraries -- `em_limits` must not silently exclude them
-    the way a `list_cell_libraries()`-based scan would (issue #1215's own
-    disagreement is between exactly these two naming families)."""
+    """Regression guard: `_STD_CELL_LIB_MARKERS` (`_fd_sc_`/`_stdcell`) does
+    not match `_osu_sc_`-named libraries -- `em_limits` must not silently
+    exclude them the way a `list_cell_libraries()`-based scan would (issue
+    #1215's own disagreement is between exactly these two naming
+    families)."""
     root = tmp_path / "install"
     variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
     _write_tech_lef(
@@ -2839,3 +3037,55 @@ def test_resolve_pdk_dbu_picks_the_finest_of_disagreeing_tech_lefs(tmp_path):
     info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
 
     assert pdk.resolve_pdk_dbu(info) == pytest.approx(0.0005)
+
+
+# --------------------------------------------------------------------------- #
+# Real-install integration (issue #1790) -- skips cleanly when no real
+# fetched IHP-Open-PDK install is present. This repository's `pdks/` is
+# gitignored and never fetched in CI (`scripts/fetch-ihp-sg13g2.sh` is a
+# manual/local step), so this mirrors `tests/test_lvs.py`'s own real-PDK
+# integration-tier convention: search a known local path, skip cleanly if
+# absent, exercise the real resolution path end to end if present.
+# --------------------------------------------------------------------------- #
+
+_REAL_IHP_OPEN_PDK_ROOT = Path(__file__).resolve().parents[1] / "pdks" / "ihp-open-pdk"
+_REAL_IHP_SG13G2_STDCELL_TECH_LEF = (
+    _REAL_IHP_OPEN_PDK_ROOT
+    / "ihp-sg13g2"
+    / "libs.ref"
+    / "sg13g2_stdcell"
+    / "lef"
+    / "sg13g2_tech.lef"
+)
+
+
+@pytest.mark.skipif(
+    not _REAL_IHP_SG13G2_STDCELL_TECH_LEF.is_file(),
+    reason=(
+        "no real IHP-Open-PDK install at pdks/ihp-open-pdk -- run "
+        "scripts/fetch-ihp-sg13g2.sh to enable this test"
+    ),
+)
+def test_real_ihp_sg13g2_stdcell_resolves_lef_and_cell_library():
+    """Live verification against a real, fetched IHP-Open-PDK v0.3.0
+    install -- issue #1790's own reproduction, re-run against the fix.
+    Confirms both `lef_files()`'s tech-LEF resolution and
+    `list_cell_libraries()`'s enumeration/nominal-corner resolution work
+    against the genuine on-disk shape, not only a synthetic fixture."""
+    result = pdk.lef_files(
+        "sg13g2_stdcell", variant="ihp-sg13g2", root=str(_REAL_IHP_OPEN_PDK_ROOT)
+    )
+    assert result["tech_lef"] == str(_REAL_IHP_SG13G2_STDCELL_TECH_LEF)
+    assert result["cell_lef"] is not None
+    assert result["cell_lef"].endswith("sg13g2_stdcell.lef")
+
+    report = pdk.list_cell_libraries(
+        variant="ihp-sg13g2", root=str(_REAL_IHP_OPEN_PDK_ROOT)
+    )
+    names = [lib["name"] for lib in report["libraries"]]
+    assert "sg13g2_stdcell" in names
+    library = next(
+        lib for lib in report["libraries"] if lib["name"] == "sg13g2_stdcell"
+    )
+    assert library["nominal_corner"] == "typ_1p20V_25C"
+    assert library["nominal_supply_v"] == pytest.approx(1.2)

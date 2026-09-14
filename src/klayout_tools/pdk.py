@@ -776,6 +776,66 @@ def pdk_pcell_libraries(
 _NOMINAL_TECH_LEF_CORNER = "nom"
 
 
+def _resolve_tech_lef(lib_dir: str, cell_library: str, corner: str) -> str | None:
+    """Resolve the tech LEF for ``cell_library`` under ``lib_dir``, issue
+    #1790's generalization of :func:`lef_files`' original open_pdks-only
+    resolution.
+
+    Tries the open_pdks-wide convention first: a per-corner tech LEF at
+    ``techlef/<cell_library>__<corner>.tlef`` (``corner`` one of
+    ``min``/``nom``/``max`` -- a parasitic-extraction corner, not a liberty
+    corner).
+
+    Falls back to IHP-Open-PDK's distinct layout when the library ships no
+    ``techlef/`` subdirectory at all (verified live against a real fetched
+    IHP-Open-PDK v0.3.0 install): a single, corner-invariant tech LEF staged
+    directly under ``lef/`` alongside the merged cell LEF -- e.g. IHP's
+    ``sg13g2_stdcell`` ships ``lef/sg13g2_stdcell.lef`` (the merged cell LEF)
+    and ``lef/sg13g2_tech.lef`` (the tech LEF) side by side, with no
+    per-corner variants and no ``techlef/`` subdirectory. Note the tech
+    LEF's own filename does not even share ``cell_library``'s name (IHP
+    names it after the *process*, not the *library*), so this fallback
+    identifies it **structurally** -- "the other ``.lef`` file in ``lef/``"
+    -- rather than by any name pattern, and ``corner`` is ignored on this
+    path since IHP ships one tech LEF for the whole PDK, not one per
+    parasitic-extraction corner.
+
+    A library that *does* ship a ``techlef/`` subdirectory but not the
+    requested corner does **not** fall back to guessing inside ``lef/`` --
+    that would silently substitute an unrelated file for a corner the
+    install genuinely does not stage, exactly the "never guessed or
+    fabricated" convention :func:`lef_files` documents. The fallback only
+    engages when ``techlef/`` is absent entirely.
+
+    Requires exactly one non-cell-LEF ``.lef`` candidate under ``lef/`` to
+    resolve the fallback -- zero or more than one is ambiguous and returns
+    ``None`` rather than guessing.
+    """
+    techlef_dir = os.path.join(lib_dir, "techlef")
+    conventional = os.path.join(techlef_dir, f"{cell_library}__{corner}.tlef")
+    if os.path.isfile(conventional):
+        return conventional
+    if os.path.isdir(techlef_dir):
+        return None
+
+    lef_dir = os.path.join(lib_dir, "lef")
+    cell_lef_name = f"{cell_library}.lef"
+    try:
+        entries = sorted(os.listdir(lef_dir))
+    except OSError:
+        return None
+    candidates = [
+        name
+        for name in entries
+        if name != cell_lef_name
+        and name.endswith(".lef")
+        and os.path.isfile(os.path.join(lef_dir, name))
+    ]
+    if len(candidates) == 1:
+        return os.path.join(lef_dir, candidates[0])
+    return None
+
+
 def lef_files(
     cell_library: str,
     variant: str | None = None,
@@ -801,17 +861,22 @@ def lef_files(
     corner, not a liberty corner) and a **merged macro/cell LEF** (every
     standard cell's pins/obstructions/outline, already merged -- no
     per-cell LEF files to concatenate) at
-    ``<libs_ref>/<cell_library>/lef/<cell_library>.lef``.
+    ``<libs_ref>/<cell_library>/lef/<cell_library>.lef``. A second, distinct
+    layout (verified live against a real fetched IHP-Open-PDK v0.3.0
+    install, issue #1790) is also resolved for the tech LEF -- see
+    :func:`_resolve_tech_lef` -- for PDKs like IHP's ``sg13g2_stdcell`` that
+    ship one corner-invariant tech LEF directly under ``lef/`` instead of a
+    ``techlef/`` subdirectory.
 
     Returns::
 
         {"tech_lef": <abs path | None>, "cell_lef": <abs path | None>}
 
     Each value is ``None`` when the resolved install ships no ``libs_ref``
-    asset at all, no ``cell_library`` entry, or that entry's ``techlef``/
-    ``lef`` subdirectory does not contain the expected file -- never guessed
-    or fabricated, matching this module's existing ``None``-means-absent
-    convention (see :func:`_asset_dirs`/:func:`netgen_setup_file`).
+    asset at all, no ``cell_library`` entry, or that entry ships neither
+    layout's expected tech-LEF/cell-LEF file -- never guessed or fabricated,
+    matching this module's existing ``None``-means-absent convention (see
+    :func:`_asset_dirs`/:func:`netgen_setup_file`).
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all
     (the same condition :func:`find_pdk` raises for).
@@ -823,11 +888,11 @@ def lef_files(
 
     lib_dir = os.path.join(libs_ref, cell_library)
 
-    tech_lef = os.path.join(lib_dir, "techlef", f"{cell_library}__{corner}.tlef")
+    tech_lef = _resolve_tech_lef(lib_dir, cell_library, corner)
     cell_lef = os.path.join(lib_dir, "lef", f"{cell_library}.lef")
 
     return {
-        "tech_lef": tech_lef if os.path.isfile(tech_lef) else None,
+        "tech_lef": tech_lef,
         "cell_lef": cell_lef if os.path.isfile(cell_lef) else None,
     }
 
@@ -916,7 +981,7 @@ def _discover_tech_lefs(libs_ref: str) -> list[dict[str, str]]:
     subdirectory at all.
 
     Deliberately does **not** reuse :func:`_scan_cell_libraries`'s
-    `_fd_sc_`-name filter (:data:`_STD_CELL_LIB_MARKER`): issue #1215's own
+    name filter (:data:`_STD_CELL_LIB_MARKERS`): issue #1215's own
     reported disagreement is precisely *between* an `_fd_sc_`-named family
     (`gf180mcu_fd_sc_mcu9t5v0`/`mcu7t5v0`) and an `_osu_sc_`-named one
     (`gf180mcu_osu_sc_gp9t3v3`/`gp12t3v3`) -- a name filter tuned for `klt
@@ -1170,18 +1235,29 @@ def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -
 # `klt pdk cells` -- standard-cell library device flavor / voltage domain
 # --------------------------------------------------------------------------- #
 
-#: Marker substring identifying a `libs_ref` entry as an open_pdks "foundry
-#: digital, standard cell" library (`sky130_fd_sc_hd`, `sky130_fd_sc_hvl`,
-#: `gf180mcu_fd_sc_mcu9t5v0`, ...), as opposed to primitive-device libraries
+#: Marker substrings identifying a `libs_ref` entry as a "foundry digital,
+#: standard cell" library, as opposed to primitive-device libraries
 #: (`*_fd_pr`, no `.lib` timing views), I/O-pad libraries (`*_fd_io`),
 #: macros (`*_sram_macros`), or hard-macro IP libraries (`*_fd_ip_*`, see
 #: :data:`_HARD_MACRO_LIB_MARKER`/`klt pdk macros` below -- their own sibling
-#: command, not a mode of this one). This is an open_pdks-wide naming
-#: convention (shared by sky130 and gf180mcu), not a sky130-specific
-#: hardcoded list -- see docs/cli/pdk.md "klt pdk cells" scope note for the
-#: deliberate sky130_fd_io/sky130_sram_macros/sky130_fd_ip_* exclusion this
-#: implies.
-_STD_CELL_LIB_MARKER = "_fd_sc_"
+#: command, not a mode of this one). A library qualifies when its name
+#: contains **any** of these markers:
+#:
+#: - ``"_fd_sc_"`` -- the open_pdks-wide convention (`sky130_fd_sc_hd`,
+#:   `sky130_fd_sc_hvl`, `gf180mcu_fd_sc_mcu9t5v0`, ...), not a
+#:   sky130-specific hardcoded list -- see docs/cli/pdk.md "klt pdk cells"
+#:   scope note for the deliberate sky130_fd_io/sky130_sram_macros/
+#:   sky130_fd_ip_* exclusion this implies.
+#: - ``"_stdcell"`` -- IHP-Open-PDK's own convention (`sg13g2_stdcell`,
+#:   and (per issue #1786) `sg13cmos5l_stdcell` on IHP's other process
+#:   variant), which does not use `_fd_sc_` at all (issue #1790). Verified
+#:   this does not also match IHP's I/O (`sg13g2_io`) or SRAM
+#:   (`sg13g2_sram`) `libs_ref` entries -- those ship their own `lib/`
+#:   timing views too, so a shape-based ("ships `lib/*.lib` files") rule
+#:   would have wrongly included them; a name marker is the only thing
+#:   that distinguishes IHP's *standard-cell* library from its other
+#:   digital `libs_ref` entries.
+_STD_CELL_LIB_MARKERS = ("_fd_sc_", "_stdcell")
 
 #: Nominal-corner selection for a library's `.lib` timing views: the
 #: typical-process, room-temperature corner. A tolerance is used because the
@@ -1238,9 +1314,10 @@ def list_cell_libraries(
     Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
     ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
     then scans its ``libs_ref`` asset for standard-cell **digital** libraries
-    -- entries whose name contains ``_fd_sc_`` (see :data:`_STD_CELL_LIB_MARKER`).
-    This is a deliberate, name-convention-based filter, not an accident of the
-    glob used to walk `libs_ref`: it excludes primitive-device libraries
+    -- entries whose name contains ``_fd_sc_`` or ``_stdcell`` (see
+    :data:`_STD_CELL_LIB_MARKERS`). This is a deliberate, name-convention-
+    based filter, not an accident of the glob used to walk `libs_ref`: it
+    excludes primitive-device libraries
     (`*_fd_pr`, which ship no `.lib` timing views), I/O-pad libraries
     (`*_fd_io`), macros (`*_sram_macros`), and hard-macro IP libraries
     (`*_fd_ip_*`, see :func:`list_hard_macro_libraries`/`klt pdk macros`) --
@@ -1329,7 +1406,7 @@ def list_cell_libraries(
         }
 
     An empty ``libraries`` list is a successful result (the variant ships no
-    `_fd_sc_`-named library), not an error.
+    library matching :data:`_STD_CELL_LIB_MARKERS`), not an error.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves.
     """
@@ -1357,13 +1434,16 @@ def list_cell_libraries(
 
 
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
-    """Enumerate `_fd_sc_`-named entries under ``libs_ref``, name-sorted."""
+    """Enumerate :data:`_STD_CELL_LIB_MARKERS`-named entries under
+    ``libs_ref``, name-sorted."""
     if not os.path.isdir(libs_ref):
         return []
     libraries: list[dict[str, Any]] = []
     for name in sorted(os.listdir(libs_ref)):
         lib_dir = os.path.join(libs_ref, name)
-        if not os.path.isdir(lib_dir) or _STD_CELL_LIB_MARKER not in name:
+        if not os.path.isdir(lib_dir) or not any(
+            marker in name for marker in _STD_CELL_LIB_MARKERS
+        ):
             continue
         nominal = _nominal_supply(lib_dir)
         flavors, flavors_status = _device_flavors(name, lib_dir)
@@ -1473,13 +1553,22 @@ def _parse_lib_corner(path: str, library_name: str | None = None) -> dict[str, A
     attribute is absent), and ``filename`` (for deterministic tie-breaking).
     This is a targeted attribute scrape, not a Liberty parser.
 
-    ``corner`` is always returned bare (never `<library_name>__<corner>`):
-    some vendors' `.lib` files (e.g. gf180mcu_fd_sc_mcu9t5v0) write their own
-    `<library_name>__` prefix into `default_operating_conditions`, unlike
-    sky130's files, which are already bare. When ``library_name`` is given, a
-    leading `f"{library_name}__"` is stripped from the parsed corner so
-    callers (``_nominal_supply``/``list_cell_libraries``) always see the bare
-    form documented for `nominal_corner` (`docs/cli/pdk.md`).
+    ``corner`` is always returned bare (never `<library_name>__<corner>` or
+    `<library_name>_<corner>`): some vendors' `.lib` files (e.g.
+    gf180mcu_fd_sc_mcu9t5v0) write their own `<library_name>__` prefix into
+    `default_operating_conditions`, unlike sky130's files, which are already
+    bare. IHP-Open-PDK's `sg13g2_stdcell` (issue #1790, verified live
+    against a real fetched v0.3.0 install) writes a single-underscore
+    `<library_name>_` prefix instead (its own naming convention has no
+    double underscore anywhere). When ``library_name`` is given, a leading
+    `f"{library_name}__"` is stripped first, falling back to a leading
+    `f"{library_name}_"` only when the double-underscore form does not
+    match, so callers (``_nominal_supply``/``list_cell_libraries``) always
+    see the bare form documented for `nominal_corner` (`docs/cli/pdk.md`) --
+    and so :func:`klayout_tools.synthesize._resolve_liberty`/
+    :func:`klayout_tools.place_and_route._resolve_liberty`'s own
+    single-underscore liberty-filename fallback receives a bare corner, not
+    one still carrying a duplicated library-name prefix.
     """
     filename = os.path.basename(path)
     text = _read_text(path)
@@ -1499,9 +1588,12 @@ def _parse_lib_corner(path: str, library_name: str | None = None) -> dict[str, A
     corner_match = _OPERATING_CONDITIONS_RE.search(text)
     corner = corner_match.group(1) if corner_match else os.path.splitext(filename)[0]
     if library_name is not None:
-        prefix = f"{library_name}__"
-        if corner.startswith(prefix):
-            corner = corner[len(prefix) :]
+        double_prefix = f"{library_name}__"
+        single_prefix = f"{library_name}_"
+        if corner.startswith(double_prefix):
+            corner = corner[len(double_prefix) :]
+        elif corner.startswith(single_prefix):
+            corner = corner[len(single_prefix) :]
 
     return {
         "voltage": _first_float(_NOM_VOLTAGE_RE),
@@ -1634,8 +1726,8 @@ def _read_text(path: str) -> str | None:
 #: Marker substring identifying a `libs_ref` entry as an open_pdks "foundry
 #: digital, IP" (hard-macro) library -- e.g. an SRAM/ROM compiler output
 #: (`<family>_fd_ip_<name>`) -- as opposed to the standard-cell digital
-#: libraries :data:`_STD_CELL_LIB_MARKER`/`klt pdk cells` reports. Like
-#: `_STD_CELL_LIB_MARKER`, this is an open_pdks-wide naming convention
+#: libraries :data:`_STD_CELL_LIB_MARKERS`/`klt pdk cells` reports. Like
+#: `_STD_CELL_LIB_MARKERS`, this is an open_pdks-wide naming convention
 #: (shared by sky130 and gf180mcu), not a sky130-specific hardcoded list.
 #: `klt pdk cells` deliberately excludes `*_fd_ip_*` entries (they are not a
 #: "standard-cell digital library"); `klt pdk macros` exists specifically to

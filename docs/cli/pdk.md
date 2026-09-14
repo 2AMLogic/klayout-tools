@@ -606,7 +606,7 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
 | `libraries[].device_flavors` | array of string | Sorted, deduplicated nfet/pfet device model *suffixes* its cells instantiate, read from `spice/<lib>.spice`'s instance lines. An optional `<family>_fd_pr__` prefix is stripped when present (sky130's `sky130_fd_pr__nfet_01v8` shape) — the prefix repeats the PDK family and adds no information; gf180mcu's instance lines name the bare flavor with no prefix at all (`nfet_06v0`) and are matched directly. `[]` when the library ships no `spice/` view, no instance line at all, or (see `device_flavors_status`) every instance line failed to parse. |
 | `libraries[].device_flavors_status` | `"ok"` \| `"unknown"` | `"unknown"` when the `spice/` view has SPICE instance lines (`X<n> ...`) but none matched the device-flavor parser — a loud signal that this library's device-naming convention is not recognised, so an empty `device_flavors` cannot be silently mistaken for "this library has no devices". `"ok"` otherwise (parsed successfully, or the library genuinely ships no instance lines). |
 | `libraries[].nominal_supply_v` | float \| null | The **lowest** of `supplies_v` (below) — the library's nominal, baseline/minimum-operating-point `.lib` timing view (its `nom_voltage` Liberty attribute). Preserved for backward compatibility; it is *not* necessarily the library's only characterised supply — see `supplies_v`. `null` when the library ships no `lib/` directory or no parseable `.lib` file. |
-| `libraries[].nominal_corner` | string \| null | The nominal view's Liberty operating-condition name (its `default_operating_conditions`, e.g. `tt_025C_1v80`), always bare — never `<name>__<corner>` — even for a library (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`) whose `.lib` file's own `default_operating_conditions` attribute already carries a leading `<name>__` prefix; that prefix is stripped. `null` alongside `nominal_supply_v`. |
+| `libraries[].nominal_corner` | string \| null | The nominal view's Liberty operating-condition name (its `default_operating_conditions`, e.g. `tt_025C_1v80`), always bare — never `<name>__<corner>` or `<name>_<corner>` — even for a library whose `.lib` file's own `default_operating_conditions` attribute already carries a leading `<name>__` prefix (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`) or a leading `<name>_` prefix (e.g. IHP's `sg13g2_stdcell`, issue #1790); that prefix is stripped. `null` alongside `nominal_supply_v`. |
 | `libraries[].supplies_v` | array of float | **Every** distinct supply (volts) the library's nominal-corner `.lib` views are characterised at, sorted ascending — e.g. `[1.8]` for a single-supply library, or `[1.8, 3.3, 5.0]` for a library separately, fully characterised at multiple voltages (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`). `[]` alongside a `null` `nominal_supply_v`. See "Nominal supply selection" below. |
 | `libraries[].voltage_class` | `"core"` \| `"io"` \| null | `"core"` when `nominal_supply_v <= 2.5`, `"io"` above that. A documented heuristic threshold — not a field the PDK itself declares. `null` when `nominal_supply_v` is `null`. |
 | `libraries[].compatible` | boolean | **Present only when `--supply` is given.** See "Compatibility verdict (`--supply`)" below. |
@@ -617,7 +617,9 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
 
 Only `libs_ref` entries whose name contains `_fd_sc_` — the open_pdks
 "foundry digital, standard cell" naming convention (`sky130_fd_sc_hd`/`_hvl`;
-`gf180mcu_fd_sc_mcu*`) — are reported. This is a **deliberate** filter, not an
+`gf180mcu_fd_sc_mcu*`) — **or** `_stdcell` — IHP-Open-PDK's own convention
+(`sg13g2_stdcell`, `sg13cmos5l_stdcell`), which does not use `_fd_sc_` at all
+(issue #1790) — are reported. This is a **deliberate** filter, not an
 accident of the glob used to walk `libs_ref`:
 
 - **`sky130_fd_pr`** (primitive devices) is excluded — it ships no `.lib`
@@ -635,8 +637,8 @@ accident of the glob used to walk `libs_ref`:
   a silent gap: [`klt pdk macros`](#klt-pdk-macros) is the dedicated sibling
   command for discovering these.
 
-An empty `libraries` list (a variant with no `_fd_sc_`-named `libs_ref` entry)
-is a **successful result**, not an error.
+An empty `libraries` list (a variant with no `_fd_sc_`- or `_stdcell`-named
+`libs_ref` entry) is a **successful result**, not an error.
 
 ### Nominal supply selection
 
