@@ -164,197 +164,13 @@ def create_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
-    layers_parser = subparsers.add_parser(
-        "layers",
-        help="enumerate layers of a GDSII/OASIS stream",
-        description=(
-            "Report the layer/datatype pairs, names, and per-cell-definition "
-            "shape counts of a GDSII or OASIS layout file."
-        ),
-    )
-    layers_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    layers_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to report on when the stream has more than one; omit "
-            "to report shape counts summed across every top cell. Also "
-            "selects the flattening root for --flattened"
-        ),
-    )
-    layers_parser.add_argument(
-        "--flattened",
-        action="store_true",
-        help=(
-            "also report per-layer instantiated (hierarchy- and "
-            "transform-flattened) shape counts, physical bounding boxes, "
-            "and instance-weighted contributing cells"
-        ),
-    )
-    layers_parser.add_argument(
-        "--include-text",
-        action="store_true",
-        help=(
-            "also report per-layer flattened text occurrence counts and "
-            "unique text strings (requires --flattened)"
-        ),
-    )
-    _add_format_arg(layers_parser)
-    layers_parser.set_defaults(func=layers_cmd.run)
+    _add_layers_parser(subparsers)
 
-    stats_parser = subparsers.add_parser(
-        "stats",
-        help="report area, density, and polygon/vertex counts of a GDSII/OASIS stream",
-        description=(
-            "Report bounding box, drawn area, density, and polygon/vertex "
-            "counts of a GDSII or OASIS layout file, in total and optionally "
-            "per layer."
-        ),
-    )
-    stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    stats_parser.add_argument(
-        "--per-layer",
-        action="store_true",
-        help="also report the same statistics broken down per layer",
-    )
-    stats_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to report on when the stream has more than one "
-            "(required in that case; optional otherwise)"
-        ),
-    )
-    _add_format_arg(stats_parser)
-    stats_parser.set_defaults(func=stats_cmd.run)
+    _add_stats_parser(subparsers)
 
-    economy_parser = subparsers.add_parser(
-        "economy",
-        help="quantitative layout-density report (issue #1012)",
-        description=(
-            "Report utilization (per cell and for the top), a whitespace "
-            "map (grid + largest exact empty regions), bounding-box "
-            "tightness/aspect-ratio/dead-margins, and optional "
-            "area-budget/reference-area and AREA-EFF (issue #1086) bounds "
-            "checks for one top cell of a GDSII or OASIS layout stream."
-        ),
-    )
-    economy_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    economy_parser.add_argument(
-        "--top",
-        default=None,
-        help=(
-            "top cell to report on when the stream has more than one "
-            "(required in that case; optional otherwise)"
-        ),
-    )
-    economy_parser.add_argument(
-        "--grid-cols",
-        type=int,
-        default=4,
-        dest="grid_cols",
-        help="whitespace-grid column count (default: 4)",
-    )
-    economy_parser.add_argument(
-        "--grid-rows",
-        type=int,
-        default=4,
-        dest="grid_rows",
-        help="whitespace-grid row count (default: 4)",
-    )
-    economy_parser.add_argument(
-        "--max-empty-regions",
-        type=int,
-        default=10,
-        dest="max_empty_regions",
-        help="cap on how many largest empty regions to report (default: 10)",
-    )
-    economy_parser.add_argument(
-        "--budget-um2",
-        type=float,
-        default=None,
-        dest="budget_um2",
-        help=(
-            "area budget in square micrometres; when given, reports a "
-            "PASS/FAIL 'budget' block against the top cell's bbox area"
-        ),
-    )
-    economy_parser.add_argument(
-        "--reference-area-um2",
-        type=float,
-        default=None,
-        dest="reference_area_um2",
-        help=(
-            "a comparable hand-designed reference's area in square "
-            "micrometres; when given, reports a 'reference' block with the "
-            "ratio to the top cell's bbox area"
-        ),
-    )
-    economy_parser.add_argument(
-        "--area-eff-max-dead-margin-um",
-        type=float,
-        default=None,
-        dest="area_eff_max_dead_margin_um",
-        help=(
-            "AREA-EFF hard bound (issue #1086): cap in micrometres on any "
-            "single edge of dead_margins_um; when given, adds an 'area_eff' "
-            "block with a 'dead_margins' PASS/FAIL check"
-        ),
-    )
-    economy_parser.add_argument(
-        "--area-eff-min-utilization",
-        type=float,
-        default=None,
-        dest="area_eff_min_utilization",
-        help=(
-            "AREA-EFF calibrated bound (issue #1086): per-block-kind "
-            "utilization floor (see the economy-review skill's rubric "
-            "table); when given, adds an 'area_eff' block with a "
-            "'utilization' PASS/FAIL check"
-        ),
-    )
-    economy_parser.add_argument(
-        "--area-eff-max-empty-region-fraction",
-        type=float,
-        default=None,
-        dest="area_eff_max_empty_region_fraction",
-        help=(
-            "AREA-EFF hard bound (issue #1086): cap on the largest single "
-            "empty region's area as a fraction of the top cell's bbox "
-            "area; when given, adds an 'area_eff' block with a "
-            "'largest_empty_region_fraction' PASS/FAIL check"
-        ),
-    )
-    economy_parser.add_argument(
-        "--area-eff-require-bbox-tightness",
-        action="store_true",
-        dest="area_eff_require_bbox_tightness",
-        help=(
-            "AREA-EFF hard bound (issue #1086): require bbox_tightness == "
-            "1.0; when given, adds an 'area_eff' block with a "
-            "'bbox_tightness' PASS/FAIL check"
-        ),
-    )
-    _add_format_arg(economy_parser)
-    economy_parser.set_defaults(func=economy_cmd.run)
+    _add_economy_parser(subparsers)
 
-    cells_parser = subparsers.add_parser(
-        "cells",
-        help="report the cell hierarchy of a GDSII/OASIS stream",
-        description=(
-            "Report the cell hierarchy of a GDSII or OASIS layout file: "
-            "top-cell status, per-cell shape/instance counts, direct "
-            "children/parents, and bounding box."
-        ),
-    )
-    cells_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
-    cells_parser.add_argument(
-        "--top",
-        action="store_true",
-        help="only report top cells (cells with no parent instances)",
-    )
-    _add_format_arg(cells_parser)
-    cells_parser.set_defaults(func=cells_cmd.run)
+    _add_cells_parser(subparsers)
 
     clip_parser = subparsers.add_parser(
         "clip",
@@ -880,52 +696,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
-    layout_metrics_parser = subparsers.add_parser(
-        "layout-metrics",
-        help="emit a normalized layout.json per block from existing klt output",
-        description=(
-            "Aggregate klt layers/cells/drc output for a block directory into "
-            "a single normalized layout.json, the gallery site's data "
-            "contract (epic #13). Never recomputes metrics ad hoc -- it "
-            "calls the same library functions that back klt layers/klt "
-            "cells/klt drc."
-        ),
-    )
-    layout_metrics_parser.add_argument(
-        "block", help="path to a block directory (e.g. blocks/example-block)"
-    )
-    layout_metrics_parser.add_argument(
-        "--deck",
-        default=None,
-        help=(
-            "DRC deck to run for the drc.violation_count field (currently: "
-            f"{_deck_names_str()}). Omit to skip DRC entirely."
-        ),
-    )
-    layout_metrics_parser.add_argument(
-        "--pdk",
-        default=None,
-        help=(
-            "PDK family this block targets, recorded verbatim as the pdk "
-            f"field (currently: {_deck_names_str()}). Omit to leave the "
-            "field out -- nothing in a block directory identifies its PDK, "
-            "so it is never inferred. Unlike --deck, an unknown name exits 1 "
-            "rather than being silently dropped."
-        ),
-    )
-    layout_metrics_parser.add_argument(
-        "--output",
-        "-o",
-        default=None,
-        help="override the output path (default: <block>/output/layout.json)",
-    )
-    layout_metrics_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="print layout.json without writing any file",
-    )
-    _add_format_arg(layout_metrics_parser)
-    layout_metrics_parser.set_defaults(func=layout_metrics_cmd.run)
+    _add_layout_metrics_parser(subparsers)
 
     render_parser = subparsers.add_parser(
         "render",
@@ -3811,3 +3582,258 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(validate_parser)
     validate_parser.set_defaults(func=kb_cmd.run_validate)
+
+
+def _add_layers_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``layers`` verb: enumerate layers of a GDSII/OASIS stream."""
+    layers_parser = subparsers.add_parser(
+        "layers",
+        help="enumerate layers of a GDSII/OASIS stream",
+        description=(
+            "Report the layer/datatype pairs, names, and per-cell-definition "
+            "shape counts of a GDSII or OASIS layout file."
+        ),
+    )
+    layers_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    layers_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one; omit "
+            "to report shape counts summed across every top cell. Also "
+            "selects the flattening root for --flattened"
+        ),
+    )
+    layers_parser.add_argument(
+        "--flattened",
+        action="store_true",
+        help=(
+            "also report per-layer instantiated (hierarchy- and "
+            "transform-flattened) shape counts, physical bounding boxes, "
+            "and instance-weighted contributing cells"
+        ),
+    )
+    layers_parser.add_argument(
+        "--include-text",
+        action="store_true",
+        help=(
+            "also report per-layer flattened text occurrence counts and "
+            "unique text strings (requires --flattened)"
+        ),
+    )
+    _add_format_arg(layers_parser)
+    layers_parser.set_defaults(func=layers_cmd.run)
+
+
+def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``stats`` verb: report area/density/polygon-vertex counts."""
+    stats_parser = subparsers.add_parser(
+        "stats",
+        help="report area, density, and polygon/vertex counts of a GDSII/OASIS stream",
+        description=(
+            "Report bounding box, drawn area, density, and polygon/vertex "
+            "counts of a GDSII or OASIS layout file, in total and optionally "
+            "per layer."
+        ),
+    )
+    stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    stats_parser.add_argument(
+        "--per-layer",
+        action="store_true",
+        help="also report the same statistics broken down per layer",
+    )
+    stats_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
+    )
+    _add_format_arg(stats_parser)
+    stats_parser.set_defaults(func=stats_cmd.run)
+
+
+def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``economy`` verb: quantitative layout-density report (#1012)."""
+    economy_parser = subparsers.add_parser(
+        "economy",
+        help="quantitative layout-density report (issue #1012)",
+        description=(
+            "Report utilization (per cell and for the top), a whitespace "
+            "map (grid + largest exact empty regions), bounding-box "
+            "tightness/aspect-ratio/dead-margins, and optional "
+            "area-budget/reference-area and AREA-EFF (issue #1086) bounds "
+            "checks for one top cell of a GDSII or OASIS layout stream."
+        ),
+    )
+    economy_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    economy_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
+    )
+    economy_parser.add_argument(
+        "--grid-cols",
+        type=int,
+        default=4,
+        dest="grid_cols",
+        help="whitespace-grid column count (default: 4)",
+    )
+    economy_parser.add_argument(
+        "--grid-rows",
+        type=int,
+        default=4,
+        dest="grid_rows",
+        help="whitespace-grid row count (default: 4)",
+    )
+    economy_parser.add_argument(
+        "--max-empty-regions",
+        type=int,
+        default=10,
+        dest="max_empty_regions",
+        help="cap on how many largest empty regions to report (default: 10)",
+    )
+    economy_parser.add_argument(
+        "--budget-um2",
+        type=float,
+        default=None,
+        dest="budget_um2",
+        help=(
+            "area budget in square micrometres; when given, reports a "
+            "PASS/FAIL 'budget' block against the top cell's bbox area"
+        ),
+    )
+    economy_parser.add_argument(
+        "--reference-area-um2",
+        type=float,
+        default=None,
+        dest="reference_area_um2",
+        help=(
+            "a comparable hand-designed reference's area in square "
+            "micrometres; when given, reports a 'reference' block with the "
+            "ratio to the top cell's bbox area"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-max-dead-margin-um",
+        type=float,
+        default=None,
+        dest="area_eff_max_dead_margin_um",
+        help=(
+            "AREA-EFF hard bound (issue #1086): cap in micrometres on any "
+            "single edge of dead_margins_um; when given, adds an 'area_eff' "
+            "block with a 'dead_margins' PASS/FAIL check"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-min-utilization",
+        type=float,
+        default=None,
+        dest="area_eff_min_utilization",
+        help=(
+            "AREA-EFF calibrated bound (issue #1086): per-block-kind "
+            "utilization floor (see the economy-review skill's rubric "
+            "table); when given, adds an 'area_eff' block with a "
+            "'utilization' PASS/FAIL check"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-max-empty-region-fraction",
+        type=float,
+        default=None,
+        dest="area_eff_max_empty_region_fraction",
+        help=(
+            "AREA-EFF hard bound (issue #1086): cap on the largest single "
+            "empty region's area as a fraction of the top cell's bbox "
+            "area; when given, adds an 'area_eff' block with a "
+            "'largest_empty_region_fraction' PASS/FAIL check"
+        ),
+    )
+    economy_parser.add_argument(
+        "--area-eff-require-bbox-tightness",
+        action="store_true",
+        dest="area_eff_require_bbox_tightness",
+        help=(
+            "AREA-EFF hard bound (issue #1086): require bbox_tightness == "
+            "1.0; when given, adds an 'area_eff' block with a "
+            "'bbox_tightness' PASS/FAIL check"
+        ),
+    )
+    _add_format_arg(economy_parser)
+    economy_parser.set_defaults(func=economy_cmd.run)
+
+
+def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``cells`` verb: report the cell hierarchy of a GDSII/OASIS
+    stream."""
+    cells_parser = subparsers.add_parser(
+        "cells",
+        help="report the cell hierarchy of a GDSII/OASIS stream",
+        description=(
+            "Report the cell hierarchy of a GDSII or OASIS layout file: "
+            "top-cell status, per-cell shape/instance counts, direct "
+            "children/parents, and bounding box."
+        ),
+    )
+    cells_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    cells_parser.add_argument(
+        "--top",
+        action="store_true",
+        help="only report top cells (cells with no parent instances)",
+    )
+    _add_format_arg(cells_parser)
+    cells_parser.set_defaults(func=cells_cmd.run)
+
+
+def _add_layout_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``layout-metrics`` verb: emit a normalized layout.json per block."""
+    layout_metrics_parser = subparsers.add_parser(
+        "layout-metrics",
+        help="emit a normalized layout.json per block from existing klt output",
+        description=(
+            "Aggregate klt layers/cells/drc output for a block directory into "
+            "a single normalized layout.json, the gallery site's data "
+            "contract (epic #13). Never recomputes metrics ad hoc -- it "
+            "calls the same library functions that back klt layers/klt "
+            "cells/klt drc."
+        ),
+    )
+    layout_metrics_parser.add_argument(
+        "block", help="path to a block directory (e.g. blocks/example-block)"
+    )
+    layout_metrics_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "DRC deck to run for the drc.violation_count field (currently: "
+            f"{_deck_names_str()}). Omit to skip DRC entirely."
+        ),
+    )
+    layout_metrics_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK family this block targets, recorded verbatim as the pdk "
+            f"field (currently: {_deck_names_str()}). Omit to leave the "
+            "field out -- nothing in a block directory identifies its PDK, "
+            "so it is never inferred. Unlike --deck, an unknown name exits 1 "
+            "rather than being silently dropped."
+        ),
+    )
+    layout_metrics_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="override the output path (default: <block>/output/layout.json)",
+    )
+    layout_metrics_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print layout.json without writing any file",
+    )
+    _add_format_arg(layout_metrics_parser)
+    layout_metrics_parser.set_defaults(func=layout_metrics_cmd.run)
