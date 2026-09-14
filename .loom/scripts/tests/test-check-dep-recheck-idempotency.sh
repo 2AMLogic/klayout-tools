@@ -431,5 +431,100 @@ assert_eq "20" "$RC" "(t5) no --assume-new-version given, legacy v0 prior, same 
 assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(t5) DECISION=SKIP — omitting the flag does not spuriously trigger the version guard"
 
 echo ""
+echo "--- Marker family guard (#1780) ---"
+
+# Fixture reconstructed from issue #1779's real comment history (2026-09-13):
+# two mis-subcommanded `dep-recheck` markers, then a corrected
+# `named-dependency` marker for the same underlying (unchanged) blocker
+# state. Verbatim hashes/timestamps from the live incident this issue reports.
+cat > "$WORK_DIR/1779-real.json" <<'EOF'
+[
+  {"created_at":"2026-09-13T21:32:03Z","body":"still blocked <!-- curator:dep-recheck:v1:53f6ede16c2edb7c -->"},
+  {"created_at":"2026-09-13T21:59:18Z","body":"still blocked <!-- curator:dep-recheck:v1:ce591f4928d41dc7 -->"},
+  {"created_at":"2026-09-13T22:26:46Z","body":"still blocked <!-- curator:named-dependency:53f6ede16c2edb7c -->"}
+]
+EOF
+
+# (u1) THE LIVE REPRO: recomputing with `named-dependency --number 1779`
+#      yields the identical hash 53f6ede16c2edb7c the last comment already
+#      carries. Before #1780, this always reported NONE (the regex never
+#      matched `curator:named-dependency:` at all, so PRIOR fell back to the
+#      unrelated, older `dep-recheck` marker). After the fix: SKIP.
+run_sut --file "$WORK_DIR/1779-real.json" --assume-new-family named-dependency \
+    --assume-new-hash "53f6ede16c2edb7c" --assume-new-at "2026-09-13T23:00:00Z"
+assert_eq "20" "$RC" "(u1) live repro: named-dependency candidate matching the true prior -> SKIP, exit 20"
+assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(u1) DECISION=SKIP, not NONE (the #1780 defect)"
+assert_eq "2026-09-13T22:26:46Z" "$(get_field "$OUT" PRIOR_AT)" "(u1) PRIOR_AT is the true immediately-preceding named-dependency marker"
+assert_eq "named-dependency" "$(get_field "$OUT" PRIOR_FAMILY)" "(u1) PRIOR_FAMILY=named-dependency"
+
+# (u2) Same fixture, past the staleness window -> STALE, not NONE.
+run_sut --file "$WORK_DIR/1779-real.json" --assume-new-family named-dependency \
+    --assume-new-hash "53f6ede16c2edb7c" --assume-new-at "2026-09-15T00:00:00Z"
+assert_eq "0" "$RC" "(u2) live repro past the 24h window -> exit 0"
+assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(u2) DECISION=STALE (heartbeat still posts)"
+
+# (u3) Not confused: a candidate declaring family=dep-recheck must NOT match
+#      against the more recent named-dependency marker even if the hash
+#      happens to be textually identical (53f6ede16c2edb7c appears in both
+#      this fixture's dep-recheck AND named-dependency markers) -- the family
+#      mismatch alone forces NONE, exactly like a FORMULA_VERSION mismatch.
+run_sut --file "$WORK_DIR/1779-real.json" --assume-new-family dep-recheck --assume-new-version v1 \
+    --assume-new-hash "53f6ede16c2edb7c" --assume-new-at "2026-09-13T23:00:00Z"
+assert_eq "0" "$RC" "(u3) dep-recheck candidate vs a more-recent named-dependency prior -> exit 0"
+assert_eq "NONE" "$(get_field "$OUT" DECISION)" "(u3) DECISION=NONE — family mismatch, not a coincidental SKIP on the shared hash text"
+assert_eq "named-dependency" "$(get_field "$OUT" PRIOR_FAMILY)" "(u3) PRIOR_FAMILY correctly reports the more-recent marker's real family"
+
+# (u4) Backward compatibility: omitting --assume-new-family defaults to
+#      dep-recheck (pre-#1780 behavior) -- so against this same fixture (most
+#      recent marker is named-dependency) an un-updated caller still gets
+#      NONE, never a false SKIP against a non-comparable family.
+run_sut --file "$WORK_DIR/1779-real.json" --assume-new-version v1 \
+    --assume-new-hash "53f6ede16c2edb7c" --assume-new-at "2026-09-13T23:00:00Z"
+assert_eq "0" "$RC" "(u4) no --assume-new-family given -> exit 0"
+assert_eq "NONE" "$(get_field "$OUT" DECISION)" "(u4) DECISION=NONE — defaults to dep-recheck family, correctly mismatched against the named-dependency prior"
+
+# (u5) The reverse ordering: an issue whose MOST RECENT marker is dep-recheck
+#      (a body-only dependency later gaining a closing PR) must pick that one,
+#      not a fixed family preference for named-dependency.
+cat > "$WORK_DIR/family-flip.json" <<'EOF'
+[
+  {"created_at":"2026-09-01T00:00:00Z","body":"<!-- curator:named-dependency:1111111111111111 -->"},
+  {"created_at":"2026-09-02T00:00:00Z","body":"<!-- curator:dep-recheck:v1:2222222222222222 -->"}
+]
+EOF
+run_sut --file "$WORK_DIR/family-flip.json" --assume-new-family dep-recheck --assume-new-version v1 \
+    --assume-new-hash "2222222222222222" --assume-new-at "2026-09-02T04:00:00Z"
+assert_eq "20" "$RC" "(u5) dep-recheck candidate correctly matches the MORE RECENT dep-recheck prior -> SKIP"
+assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(u5) DECISION=SKIP — most-recent-wins, not a fixed family preference"
+assert_eq "dep-recheck" "$(get_field "$OUT" PRIOR_FAMILY)" "(u5) PRIOR_FAMILY=dep-recheck"
+
+# (u6) AUDIT mode also scans named-dependency markers: two adjacent
+#      named-dependency comments sharing a hash inside the window is a
+#      violation, exactly like the dep-recheck case.
+cat > "$WORK_DIR/named-dependency-duplicate.json" <<'EOF'
+[
+  {"created_at":"2026-09-13T08:00:00Z","body":"<!-- curator:named-dependency:53f6ede16c2edb7c -->"},
+  {"created_at":"2026-09-13T12:00:00Z","body":"<!-- curator:named-dependency:53f6ede16c2edb7c -->"}
+]
+EOF
+run_sut --file "$WORK_DIR/named-dependency-duplicate.json"
+assert_eq "1" "$RC" "(u6) AUDIT mode flags a named-dependency duplicate heartbeat -> exit 1"
+assert_eq "VIOLATION" "$(get_field "$OUT" DECISION)" "(u6) DECISION=VIOLATION"
+assert_contains "$OUT" "family=named-dependency" "(u6) violation line names the named-dependency family"
+
+# (u7) AUDIT mode must NOT cross-match families: an adjacent dep-recheck /
+#      named-dependency pair sharing a hash is never a violation (#1780's
+#      "not confused" requirement, AUDIT-mode analogue of (u3)).
+cat > "$WORK_DIR/cross-family-not-a-violation.json" <<'EOF'
+[
+  {"created_at":"2026-09-13T08:00:00Z","body":"<!-- curator:dep-recheck:v1:53f6ede16c2edb7c -->"},
+  {"created_at":"2026-09-13T09:00:00Z","body":"<!-- curator:named-dependency:53f6ede16c2edb7c -->"}
+]
+EOF
+run_sut --file "$WORK_DIR/cross-family-not-a-violation.json"
+assert_eq "0" "$RC" "(u7) adjacent dep-recheck/named-dependency pair sharing a hash -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(u7) DECISION=OK — cross-family hash match is not a violation"
+
+echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]] || exit 1
