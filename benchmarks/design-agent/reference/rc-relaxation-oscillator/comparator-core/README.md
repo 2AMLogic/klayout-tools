@@ -16,8 +16,14 @@ any single comparator spanning both of this oscillator's thresholds. See
 topology/sizing rationale and
 [`../../../../../docs/design/relaxation-oscillator-comparator-core-spike.md`](../../../../../docs/design/relaxation-oscillator-comparator-core-spike.md)
 for the full measurement trail (18/18 corners passing, achievable `dV`
-re-derivation, and what is deliberately still missing before this becomes
-a full device-level oscillator).
+re-derivation, and what was still missing at the time of that spike before
+this became a full device-level oscillator).
+
+Those missing pieces have since been assembled around this core:
+[`../device-oscillator/`](../device-oscillator/) is the complete
+device-level oscillator (issue #1814), which reuses the `cmp_n`/`cmp_p`
+subcircuits below verbatim. It too ships alongside — not in place of —
+`../oscillator.spice`.
 
 Reproduce:
 

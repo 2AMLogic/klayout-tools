@@ -1,0 +1,255 @@
+* Device-level sky130 relaxation oscillator assembled around the
+* split-polarity comparator core (issue #1813/#1815), per issue #1814.
+*
+* NOT the benchmark's reference solution. The shipped reference solution
+* for benchmarks/design-agent/tasks/rc-relaxation-oscillator.json remains
+* the behavioral ../oscillator.spice -- see README.md here for the explicit
+* "replace vs. ship alongside" decision this issue asks for (ship
+* alongside; this file is an additional device-level variant).
+*
+* -------------------------------------------------------------------
+* What this file assembles (the four pieces
+* docs/design/relaxation-oscillator-comparator-core-spike.md's "What is
+* deliberately still missing" section named):
+* -------------------------------------------------------------------
+*   1. Charge/discharge current source + timing capacitor (Cosc/Rleak/
+*      XMchg+XSWchg/XMdis+XSWdis below) -- a real sky130 current-mirror
+*      equivalent of ../oscillator.spice's ideal Biosc element, mirrored
+*      off the same nbias/pbias rails the comparator core already uses,
+*      switched on/off by the SR latch's q output.
+*   2. Output edge-combination logic (the cross-coupled NOR SR latch +
+*      inverter below) -- turns cmp_n/cmp_p's ohi/olo into a single q/qb
+*      clock pair that flips on whichever threshold is currently crossed.
+*   3. A device-level reference generator for vth_lo/vth_hi (XMref +
+*      Rdiv2/Rdiv1 below) -- see "Reference generator: a documented
+*      simpler stand-in, not a full bandgap" below for why this is not a
+*      full Banba-style bandgap.
+*   4. Full 18-corner oscillation validation -- see sim_request.json and
+*      README.md's Evidence section.
+*
+* Item 5 (#1795's regenerative-feedback/PTAT-CTAT bias-generator work) is
+* explicitly OUT OF SCOPE here -- see README.md.
+*
+* -------------------------------------------------------------------
+* Comparator core: reused verbatim, not modified
+* -------------------------------------------------------------------
+* The cmp_n/cmp_p .subckt bodies and their nbias/pbias bias generation
+* below are copied byte-for-byte from
+* ../comparator-core/comparator_core.spice (the validated, 18/18-corner
+* split-polarity topology) so this file stays a single self-contained
+* circuit body -- see docs/cli/sim.md's "circuit body, not a full deck"
+* convention. Nothing about the comparator core itself changes: its own
+* headroom fix (issue #1813) is out of scope for this issue to touch.
+*
+* -------------------------------------------------------------------
+* Reference generator: a documented simpler stand-in, not a full bandgap
+* -------------------------------------------------------------------
+* kb/entries/sky130-bandgap-reference.json's own artifact
+* (examples/kb/sky130-bandgap-reference/testbench.spice) is itself a
+* behavioral stand-in -- "ideal diodes/current sources", not sky130's
+* real parasitic PNP devices (see that entry's own `measured.notes`). A
+* genuinely device-level, curvature-corrected Banba bandgap (real
+* sky130_fd_pr__pnp_05v5 devices, trimmed PTAT/CTAT resistor ratios) does
+* not exist anywhere in this repo yet and is a substantial standalone
+* design effort in its own right -- explicitly out of scope for this
+* issue's "assemble an oscillator" increment (see also issue #1795's
+* deferred PTAT-CTAT bias-generator work, item 5 above).
+*
+* Instead: XMref mirrors the SAME nbias/pbias-derived {ib} current the
+* comparator core's own bias uses into a two-resistor divider string
+* (Rdiv2/Rdiv1, real sky130_fd_pr__res_xhigh_po devices) referenced to
+* ground, producing two real, device-set (not ideal-DC-source) absolute
+* node voltages:
+*   vth_lo = ib * r1
+*   vth_hi = ib * (r1 + r2)
+* This is a genuine improvement over the spike's ideal Vrl/Vrh sources
+* (the thresholds now depend on real MOSFET mirror + real poly resistor
+* devices, and show real PVT sensitivity in the corner sweep below) at
+* far lower complexity than a full bandgap. It does NOT get the
+* first-order supply/temperature cancellation a trimmed bandgap would
+* (kb/entries/sky130-bandgap-reference.json's whole point).
+*
+* What remains ideal here, and why it matters less than it looks: Iref/
+* Irefp are still ideal DC sources (as they are in ../comparator-core/
+* comparator_core.spice, which this file reuses verbatim). {ib} largely
+* cancels out of the period rather than setting it -- both the threshold
+* spacing and the charge current are derived from the same {ib}:
+*   dV    = ib * r2
+*   iosc  = k * ib             (k = XMchg/XMdis mirror ratio, ~1.95)
+*   T     = 2 * cosc * dV / iosc = 2 * cosc * r2 / k
+* so a real (non-ideal) bias generator would move the period only through
+* its second-order effects, not its absolute value. What does NOT cancel
+* is r2's own temperature coefficient, and that is the dominant PVT term
+* in the measured spread -- see README.md's Evidence section for the
+* number and docs/design/relaxation-oscillator-device-level-assembly.md
+* for the breakdown.
+*
+* -------------------------------------------------------------------
+* Charge/discharge current source + SR-latch switching
+* -------------------------------------------------------------------
+* XMchg (PMOS, mirrored off pbias) sources iosc into node vo through
+* PMOS switch XSWchg, gated by q (ON when q=0, i.e. "charge" state).
+* XMdis (NMOS, mirrored off nbias) sinks iosc from node vo through NMOS
+* switch XSWdis, gated by q (ON when q=1, i.e. "discharge" state) -- one
+* control signal drives both switches because PMOS/NMOS switches are ON
+* at opposite gate polarities. Whichever switch is enabled dominates the
+* other's (large, ~1 Gohm) off-state leakage by many orders of magnitude,
+* so at most one of charge/discharge is ever effectively active.
+*
+* The SR latch (2 cross-coupled NOR gates, standard CMOS complementary
+* stacks) takes S=ohi (pulses HIGH when vo crosses vth_hi, per
+* comparator_core.spice's own "out is HIGH when in > vref" convention)
+* and R=NOT(olo) (an explicit inverter, since olo pulses LOW -- not
+* high -- when vo drops below vth_lo, and a NOR latch's reset input needs
+* an active-HIGH pulse):
+*   S=1 (hit vth_hi) -> q=1 -> switch to discharge
+*   R=1 (dropped below vth_lo) -> q=0 -> switch to charge
+*
+* -------------------------------------------------------------------
+* Start-up: no kick source, and NOT because .op lands on a latch state
+* -------------------------------------------------------------------
+* Unlike ../oscillator.spice, this netlist has no Istart-equivalent
+* start-up kick. It does not need one -- but the reason is not that the
+* SR latch's bistability makes ngspice's .op pick one of the two valid
+* latch states. Measured at ss/1.62V/-40C, .op leaves the latch itself
+* *unresolved*: v(q) at t=0 is 0.5715 V, mid-rail, neither state.
+*
+* What actually self-starts it is the timing node, not the latch. The
+* same .op leaves vo at 1.3623 V -- *outside* the threshold band
+* (vth_hi = 1.3025 V there), because with both charge and discharge
+* mirrors partially on and only Rleak to ground, the balance point .op
+* finds for vo is not between the thresholds. So at t=0 cmp_n is
+* unambiguously asserting ohi, the latch's own positive feedback resolves
+* q within a few ns, and the first full edge lands at t = 0.24 us. This
+* holds at every one of the 18 corners (see README.md's Evidence
+* section); it is measured, not assumed.
+*
+* Two consequences for the testbench, both handled in sim_request.json:
+*   - The first ~0.3 us is a start-up transient, not oscillation. Every
+*     edge measurement is TD-gated to start at 6 us so no start-up edge
+*     can land in a reported period.
+*   - Before that gate was added, the *number* of q crossings inside the
+*     start-up transient was integration-timestep-dependent (a 5 ns
+*     maxstep saw two extra crossings at ss/1.62V/-40C that a 2 ns
+*     maxstep did not), which made any RISE=<n>-indexed measurement
+*     counted from t=0 fragile. TD-gating removes that dependence: a
+*     period is the gap between two consecutive steady-state edges no
+*     matter what index they carry.
+*
+* -------------------------------------------------------------------
+* Expected solver diagnostics (benign, and not this topology's fault)
+* -------------------------------------------------------------------
+* Most corners report "Warning: Dynamic gmin stepping failed" and about
+* half additionally report "Warning: singular matrix: check node vth_lo"
+* during the DC operating-point solve. Source stepping then completes and
+* the .tran runs cleanly at all 18 corners. The singular-matrix note is
+* attributable to the sky130 resistor model, not to this circuit:
+* replacing XRdiv1/XRdiv2 with ideal R elements of the same value makes
+* it disappear while leaving everything else identical. sky130_fd_pr__
+* res_xhigh_po models its body resistance as a bias-dependent expression
+* containing abs(v(t1,t2)), whose Jacobian is discontinuous at exactly
+* zero bias -- which is where gmin/source stepping starts from. Worth
+* knowing before chasing it as a netlist bug; the shipped netlist keeps
+* the real resistor device rather than an ideal R.
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md). Real sky130 devices via $PDK_ROOT. Device W/L in
+* microns (sky130_fd_pr subckt convention, bare numbers not "u"-suffixed).
+
+.param vdd=1.8
+.param ib=5u
+.param cosc=10p
+* Reference-divider resistors (sky130_fd_pr__res_xhigh_po, rsheet ~2000
+* ohm/sq): r1 sets vth_lo = ib*r1, r2 sets vth_hi-vth_lo = ib*r2. Lengths
+* below were hand-picked from the rsheet estimate then corrected against
+* the real device model's measured node voltages (see README.md).
+.param r1_w=1
+.param r1_l=35
+.param r2_w=1
+.param r2_l=80
+* Reference-node decoupling. Both threshold nodes are high-impedance
+* (vth_lo ~70 kohm, vth_hi ~230 kohm to ground), so each comparator's
+* switching kickback through its own input-pair gate overlap lands
+* directly on the threshold it is in the act of crossing. 0.5 pF is ~15x
+* the input pair's total gate capacitance at these geometries (W=8, L=0.5
+* at ~8 fF/um^2) and orders of magnitude above its gate-drain overlap, so
+* the threshold holds still across an edge; the resulting ~35 ns / ~115 ns
+* node time constants still settle the reference long before the 6 us
+* measurement gate in sim_request.json. Undecoupled, the kickback was
+* large enough to make an instantaneous threshold reading at
+* ff/1.62V/-40C come back 122 mV high -- see README.md.
+.param cref=0.5p
+
+Vdd vdd 0 DC {vdd}
+
+* --- shared bias generation (verbatim from ../comparator-core/comparator_core.spice) ---
+Iref vdd nbias DC {ib}
+XM5b nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+Irefp pbias 0 DC {ib}
+XM5c pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+
+* --- device-level vth_lo/vth_hi reference generator ---
+XMref vth_hi pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XRdiv2 vth_hi vth_lo 0 sky130_fd_pr__res_xhigh_po W={r2_w} L={r2_l} mult=1 m=1
+XRdiv1 vth_lo 0      0 sky130_fd_pr__res_xhigh_po W={r1_w} L={r1_l} mult=1 m=1
+Crefh vth_hi 0 {cref}
+Crefl vth_lo 0 {cref}
+
+* --- NMOS-input comparator: owns the UPPER threshold (verbatim from comparator_core.spice) ---
+.subckt cmp_n in vref out vdd nbias
+XM5  tail nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XM1  n1   in   tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  pout vref tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM3  n1   n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM4  pout n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XMN6 nb  pout 0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  pout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out 0 0.02p
+.ends
+
+* --- PMOS-input comparator: owns the LOWER threshold (verbatim from comparator_core.spice) ---
+.subckt cmp_p in vref out vdd pbias
+XM5  tailp pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XM1  n1   in    tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM2  nout vref  tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM3  n1   n1    0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XM4  nout n1    0 0 sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XMN6 nb  nout 0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  nout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out 0 0.02p
+.ends
+
+Xhi vo vth_hi ohi vdd nbias cmp_n
+Xlo vo vth_lo olo vdd pbias cmp_p
+
+* --- output edge-combination logic: NOT(olo) inverter + cross-coupled NOR SR latch ---
+XINVp olo_b olo vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XINVn olo_b olo 0   0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Colo olo_b 0 0.005p
+
+* NOR1: q = NOR(r=olo_b, qb)
+XP1a na1  olo_b vdd  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XP1b q    qb    na1  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XN1a q    olo_b 0    0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XN1b q    qb    0    0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Cq q 0 0.005p
+
+* NOR2: qb = NOR(s=ohi, q)
+XP2a na2  ohi   vdd  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XP2b qb   q     na2  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XN2a qb   ohi   0    0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XN2b qb   q     0    0   sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Cqb qb 0 0.005p
+
+* --- charge/discharge current source + timing capacitor ---
+XMchg  chgd pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=78 nf=2 mult=1
+XSWchg vo   q     chgd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=8 nf=1 mult=1
+XMdis  disd nbias 0   0   sky130_fd_pr__nfet_01v8 L=1 W=19.5 nf=1 mult=1
+XSWdis vo   q     disd 0   sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+
+Ccap vo 0 {cosc}
+Rleak vo 0 1G

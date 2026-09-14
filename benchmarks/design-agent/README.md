@@ -280,11 +280,32 @@ This is a first milestone, not the full issue #1719 scope.
    topology that clears that ceiling cleanly across all 18 corners with a
    `dV` close to the behavioral design's own assumption; see
    [`docs/design/relaxation-oscillator-comparator-core-spike.md`](../../docs/design/relaxation-oscillator-comparator-core-spike.md)
-   for the measurement trail and for what is still needed (charge/
-   discharge current source, output edge-combination logic, a device-level
-   reference generator, and #1795's originally scoped regenerative-
-   feedback work) before this becomes a full device-level oscillator that
-   could replace the behavioral reference solution above.
+   for that measurement trail.
+
+   As of issue #1814 that core is assembled into a **complete, working
+   device-level oscillator**:
+   `reference/rc-relaxation-oscillator/device-oscillator/` adds the
+   charge/discharge current mirrors and timing capacitor, a NOR SR latch
+   combining the two comparator outputs into one clock, and a device-level
+   `vth_lo`/`vth_hi` reference (a mirrored current into a real
+   `sky130_fd_pr__res_xhigh_po` divider, not a bandgap -- justified in that
+   directory's `README.md`). It oscillates and holds this task's own
+   1.4-2.2 us period band at **all 18 corners** (1.4876-2.0542 us, ~6-7%
+   ratio margin each side, cycle-to-cycle stability within +/-0.32%). See
+   [`docs/design/relaxation-oscillator-device-level-assembly.md`](../../docs/design/relaxation-oscillator-device-level-assembly.md)
+   for the assembly's own measurement trail.
+
+   **It is shipped alongside the behavioral reference solution above, not
+   as a replacement for it** -- that decision is recorded, with its
+   reasoning and the conditions for revisiting it, in
+   [`reference/rc-relaxation-oscillator/device-oscillator/README.md`](reference/rc-relaxation-oscillator/device-oscillator/README.md#decision-ship-alongside-do-not-replace).
+   In short: the scored reference solution stays PDK-model-free so the
+   benchmark's own reference gate needs no `$PDK_ROOT` and runs in seconds
+   rather than ~5 minutes, and the device-level design holds the band with
+   ~6% margin (dominated by the reference resistor's temperature
+   coefficient) where the behavioral one sits comfortably mid-band by
+   construction. Tightening that spread -- #1795's originally scoped
+   regenerative-feedback / PTAT-CTAT work -- is the remaining follow-on.
 
    `telescopic-cascode-amp` is the task where the swap mattered most: a
    generic LEVEL=1 device has no short-channel output-conductance
