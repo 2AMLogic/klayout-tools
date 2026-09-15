@@ -3674,6 +3674,7 @@ def _mos_array_layout(
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
     voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
+    interior_channel_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -3720,7 +3721,29 @@ def _mos_array_layout(
 
     ``contact_gate_offset_um``/``bottom_endcap_um``/``sd_implant_margin_um``
     (issue #1577) are forwarded to :func:`_mos_unit_layout` unchanged -- see
-    that function's own docstring."""
+    that function's own docstring.
+
+    ``interior_channel_um`` (issue #1531, Phase 1) reserves a navigable
+    routing channel *inside* the array's own grid: when greater than zero it
+    is added to both ``col_pitch``/``row_pitch`` on top of the fixed
+    :data:`MIN_SAME_LAYER_SPACING_UM` gap already between adjacent unit
+    devices, and every resulting inter-row/inter-column gap band (one per
+    adjacent row pair when ``rows > 1``, one per adjacent column pair when
+    ``cols > 1``) is reported back as a rectangle in
+    ``navigable_regions_um`` -- metal-free space wide enough for `klt
+    gen-compose` (a future phase, not this one) to route a ``waypoints_um``
+    backbone through to an interior unit device's pin, rather than treating
+    the array's whole footprint as one opaque obstacle (see the issue's "The
+    gap" section). ``0.0`` (the default) adds nothing to either pitch and
+    reports an empty ``navigable_regions_um`` list, so every existing caller
+    keeps byte-for-byte identical geometry -- the same regression-safety
+    convention this generator's other additive params (``add_guard_ring``,
+    ``gate_pad_clearance_um``) already established. Reserving the channel
+    here (rather than teaching `gen-compose` to peek inside an otherwise-
+    opaque block) keeps the generator responsible for its own routability
+    the same way it is already responsible for its own DRC cleanliness;
+    ``res_array``/``diff_pair`` are expected to grow the same parameter in a
+    later phase, not this one."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -3734,6 +3757,14 @@ def _mos_array_layout(
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #1531 (Phase 1): a positive `interior_channel_um` widens both
+    # pitches by exactly that amount -- `0.0` (the default) is a strict no-op
+    # on both, so every existing caller's `col_pitch`/`row_pitch` (and thus
+    # every cell's `x0_um`/`y0_um` below) stay byte-for-byte unchanged.
+    channel_um = max(interior_channel_um, 0.0)
+    if channel_um > 0.0:
+        col_pitch += channel_um
+        row_pitch += channel_um
 
     order = (
         _centroid_order(rows, cols)
@@ -3765,6 +3796,41 @@ def _mos_array_layout(
     max_x1 = max(c["x0_um"] + unit["total_len_um"] for c in all_cells)
     min_y0 = min(c["y0_um"] for c in all_cells)
     max_y1 = max(c["y0_um"] + unit["bbox_height_um"] for c in all_cells)
+
+    # Issue #1531 (Phase 1): one navigable rectangle per interior row/column
+    # gap band opened up by `channel_um` above -- spanning the array's full
+    # real+dummy footprint in the direction perpendicular to the gap, so a
+    # future `gen-compose` phase can subtract these from a block's obstacle
+    # bbox and route a `waypoints_um` backbone through to an interior unit
+    # device's pin. Grid positions are plain `(r, c)` indices, unaffected by
+    # `topology` (`_centroid_order` only permutes which index each position
+    # gets, never the position itself -- see its own docstring), so this
+    # loop is independent of `order`/`cells` above. Empty when `channel_um`
+    # is `0.0` (the default), matching every existing caller's unchanged
+    # geometry.
+    navigable_regions: list[tuple[float, float, float, float]] = []
+    if channel_um > 0.0:
+        if rows > 1:
+            for r in range(rows - 1):
+                navigable_regions.append(
+                    (
+                        min_x0,
+                        r * row_pitch + unit["bbox_height_um"],
+                        max_x1,
+                        (r + 1) * row_pitch,
+                    )
+                )
+        if cols > 1:
+            for c in range(cols - 1):
+                navigable_regions.append(
+                    (
+                        c * col_pitch + unit["total_len_um"],
+                        min_y0,
+                        (c + 1) * col_pitch,
+                        max_y1,
+                    )
+                )
+
     margin = WELL_ENCLOSURE_MARGIN_UM
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
     # `voltage_flavor` marker box (issue #1054, margin widened by #1577):
@@ -3821,6 +3887,7 @@ def _mos_array_layout(
         "well_tap": well_tap,
         "ring": ring,
         "ring_offset_um": ring_offset,
+        "navigable_regions_um": navigable_regions,
     }
 
 
@@ -5086,6 +5153,16 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
     every block) without a separate ``klt stats`` round-trip. Additive field,
     no ``schema_version`` bump (see ``docs/json-contract.md``).
 
+    ``navigable_regions`` (issue #1531, Phase 1) reports metal-free
+    rectangles ``{"x0_um", "y0_um", "x1_um", "y1_um"}`` inside the emitted
+    cell's own footprint that a router could pass through -- currently
+    populated only by ``mos_array``'s ``interior_channel_um`` param (see
+    :func:`_mos_array_layout`); every other generator, and ``mos_array``
+    itself at its default ``interior_channel_um=0.0``, reports an empty
+    list. Another additive field, no ``schema_version`` bump: a future
+    `gen-compose` phase is expected to subtract these from a block's
+    obstacle bbox (not implemented by this phase).
+
     Raises :class:`GenError` for an unknown generator, an unresolvable PDK,
     invalid/out-of-range ``params``, or a write failure (e.g. the
     ``options.output`` directory does not exist).
@@ -5160,6 +5237,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         "bbox_um": bbox_um,
         "device_count": described["device_count"],
         "ports": described["ports"],
+        "navigable_regions": described.get("navigable_regions", []),
         "drc_hints": described["drc_hints"],
         "warnings": described["warnings"],
     }
@@ -5476,6 +5554,8 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         )
     if params["ring_padding_um"] < 0:
         raise GenError("generator 'mos_array': params.ring_padding_um must be >= 0")
+    if params["interior_channel_um"] < 0:
+        raise GenError("generator 'mos_array': params.interior_channel_um must be >= 0")
 
     # `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um` are validated against
     # a hypothetical ring (`add_guard_ring=True`) regardless of the request's
@@ -5496,6 +5576,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             params["finger_topology"],
             add_guard_ring=True,
             ring_padding_um=params["ring_padding_um"],
+            interior_channel_um=params["interior_channel_um"],
         )
     )
     _validate_ring_gap(
@@ -5572,6 +5653,7 @@ def _mos_array_describe(
         # `gate_pad_clearance_um` above moves the gate port's `y_um`.
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        interior_channel_um=params["interior_channel_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -5759,9 +5841,20 @@ def _mos_array_describe(
         params["rows"] * params["cols"] * (params["fingers"] if series_fingers else 1)
     )
 
+    # Issue #1531 (Phase 1): `navigable_regions_um` (a list of
+    # `(x0, y0, x1, y1)` tuples in um, see `_mos_array_layout`'s own
+    # docstring) is reported alongside `ports` as `navigable_regions` --
+    # empty for every existing caller (`interior_channel_um` defaults to
+    # `0.0`), populated only when a caller actually reserves a channel.
+    navigable_regions = [
+        {"x0_um": x0, "y0_um": y0, "x1_um": x1, "y1_um": y1}
+        for x0, y0, x1, y1 in info["navigable_regions_um"]
+    ]
+
     return {
         "device_count": device_count,
         "ports": ports,
+        "navigable_regions": navigable_regions,
         "drc_hints": {
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
             "matched_group_id": matched_group_id,

@@ -64,7 +64,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         the same shared box ``flavor="pfet"``'s well shape already encloses.
         The default, an empty string, draws nothing (byte-for-byte unchanged
         geometry). See :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` for the flavour
-        names each PDK family recognises."""
+        names each PDK family recognises.
+
+        ``interior_channel_um`` (issue #1531, Phase 1) widens the row/column
+        pitch to reserve a navigable routing channel between interior
+        rows/columns, reported back as ``navigable_regions_um`` -- see
+        :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
+        draws byte-for-byte unchanged geometry."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -334,6 +340,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "the guard ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
             )
+            self.param(
+                "interior_channel_um",
+                self.TypeDouble,
+                "Extra gap (um) reserved between adjacent rows/columns, on "
+                "top of the fixed inter-device spacing, so an interior unit "
+                "device's pin has a navigable path to the array's edge "
+                "(issue #1531). 0.0 (default) draws byte-for-byte identical "
+                "geometry to every existing caller",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -378,6 +394,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 self.voltage_flavor_mark_margin_um,
+                self.interior_channel_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
