@@ -8,6 +8,7 @@
     "drc.coverage.rules_skipped_count": 40,
     "drc.coverage.voltage_domain_warnings_count": 0,
     "drc.dbu_um": 0.001,
+    "drc.metrics.drc__error__count": 0,
     "drc.schema_version": 1,
     "drc.violation_count": 0,
     "drc.violations_count": 0,

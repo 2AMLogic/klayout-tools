@@ -6,6 +6,9 @@
   "status": "clean",
   "violation_count": 0,
   "rule_counts": {},
+  "metrics": {
+    "drc__error__count": 0
+  },
   "violations": [],
   "coverage": {
     "deck_layers": [

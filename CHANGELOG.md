@@ -61,6 +61,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   "Declared metric namespace" section for the cross-verb convention. Other
   verbs (`klt drc`, `klt extract`, `klt sim`) adopt the registry via their
   own follow-on issues.
+- **Added**: `klt drc` adopts the declared metric namespace registry (issue
+  #1847, following #247's `klt layout-metrics` pilot) — `run_drc()` now
+  emits an additive, parallel `metrics` object (`{"drc__error__count":
+  <violation_count>}`), always present, including in the clean/
+  zero-violation case. The existing `violation_count`/`rule_counts` fields
+  are unchanged and no `schema_version` bump was required. See
+  [`docs/cli/drc.md`](docs/cli/drc.md)'s `metrics` field.
 - **Added**: `klt mom` spec field `stackup_from_pdk` (issue #1617) —
   `{"pdk": "<variant>", "layers": ["<conductor name>", ...], "corner":
   "<optional, default 'nom'>"}` resolves the named conductors from an

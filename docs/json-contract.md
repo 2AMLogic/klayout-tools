@@ -301,13 +301,15 @@ convention).
   `null` for a purely structural/descriptive count with no declared quality
   polarity, not a placeholder), and `critical` (whether a failing value
   should mechanically gate signoff).
-- **Adoption is per-verb and incremental.** As of this registry's
-  introduction, only `klt layout-metrics` emits a `metrics` block (the
-  pilot integration; see [`docs/cli/layout-metrics.md`](cli/layout-metrics.md)'s
-  `metrics` field). Each other verb (`klt drc`, `klt extract`, `klt sim`,
-  ...) adopts the registry — and grows its own `metrics` block — via its own
-  follow-on issue; a verb that has not yet adopted it simply has no
-  `metrics` field at all, same as any other not-yet-shipped optional field.
+- **Adoption is per-verb and incremental.** `klt layout-metrics` was the
+  pilot integration (see
+  [`docs/cli/layout-metrics.md`](cli/layout-metrics.md)'s `metrics` field);
+  `klt drc` adopted it next (issue #1847; see
+  [`docs/cli/drc.md`](cli/drc.md)'s `metrics` field). Each other verb (`klt
+  extract`, `klt sim`, ...) adopts the registry — and grows its own
+  `metrics` block — via its own follow-on issue; a verb that has not yet
+  adopted it simply has no `metrics` field at all, same as any other
+  not-yet-shipped optional field.
 - A caller-supplied, per-run name (e.g. `klt sim`'s `measurements[].name`,
   which a request spec defines, not `klt` itself) is out of scope for this
   registry — it cannot be declared ahead of time because `klt` does not own
