@@ -250,6 +250,58 @@ committed/fresh pair differing only in `net_id`, an anonymous `$N` net-name
 spelling, and/or `parasitics.nets[]` ordering no longer reports `status:
 "drifted"` — only genuine **content** drift does.
 
+## Declared metric namespace (`metrics` block, issue #247)
+
+Every verb's numeric fields are named ad hoc today (`violation_count`,
+`device_count`, `instance_count`, ...), with no declared aggregation or
+polarity semantics — nothing states how a metric rolls up across blocks
+(sum? max?), whether a larger value is better, or which metrics are critical
+enough to gate signoff. `src/klayout_tools/metrics.py` is a **data-only
+registry** — declared name -> `{aggregator, higher_is_better, critical}` —
+that answers those questions mechanically, modeled on LibreLane/OpenROAD's
+METRICS2.1 convention (hierarchical, double-underscore names such as
+`design__instance__count`, `drc__error__count`). Full rationale, the
+additive-vs-rename decision, and the naming grammar:
+[`docs/design/metric-namespace.md`](design/metric-namespace.md).
+
+**The convention is additive, never a rename.** A verb that adopts this
+registry adds a parallel top-level `metrics` object re-keying a subset of
+its *own already-emitted* fields under their declared name — it never
+renames, removes, or retypes an existing field, and earns no
+`schema_version` bump. `metrics` is omitted entirely when it would
+otherwise be empty (mirroring this document's general omit-absent
+convention).
+
+```json
+{
+  "schema_version": 1,
+  "...": "the command's own existing top-level fields, unchanged",
+  "metrics": {
+    "design__instance__count": 120,
+    "drc__error__count": 0
+  }
+}
+```
+
+- Each key is a name declared in `klayout_tools.metrics.REGISTRY` — see that
+  module (or `klt`'s own source) for the full registry, including each
+  entry's `aggregator` (`"sum"`/`"min"`/`"max"`/`"mean"` — how per-block
+  values roll up to a parent), `higher_is_better` (`true`/`false`/`null` —
+  `null` for a purely structural/descriptive count with no declared quality
+  polarity, not a placeholder), and `critical` (whether a failing value
+  should mechanically gate signoff).
+- **Adoption is per-verb and incremental.** As of this registry's
+  introduction, only `klt layout-metrics` emits a `metrics` block (the
+  pilot integration; see [`docs/cli/layout-metrics.md`](cli/layout-metrics.md)'s
+  `metrics` field). Each other verb (`klt drc`, `klt extract`, `klt sim`,
+  ...) adopts the registry — and grows its own `metrics` block — via its own
+  follow-on issue; a verb that has not yet adopted it simply has no
+  `metrics` field at all, same as any other not-yet-shipped optional field.
+- A caller-supplied, per-run name (e.g. `klt sim`'s `measurements[].name`,
+  which a request spec defines, not `klt` itself) is out of scope for this
+  registry — it cannot be declared ahead of time because `klt` does not own
+  the name.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written
