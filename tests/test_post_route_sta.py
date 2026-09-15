@@ -76,11 +76,20 @@ def _make_pdk_install(
     corner: str = "tt_025C_1v80",
     with_lib: bool = True,
     with_lef: bool = True,
+    single_underscore_naming: bool = False,
 ) -> Path:
     """Fabricate a minimal open_pdks-layout variant -- mirrors
     `tests/test_place_and_route.py`'s identical `_make_pdk_install`, trimmed
     to the lib/LEF views this module actually resolves (no GDS view --
-    `klt sta` never merges a GDS)."""
+    `klt sta` never merges a GDS).
+
+    ``single_underscore_naming=True`` fabricates IHP-Open-PDK's
+    `sg13g2_stdcell` `lib/` naming instead (issue #1790, verified live
+    against a real fetched v0.3.0 install): both the on-disk filename
+    (`f"{cell_library}_{corner}.lib"`, a single underscore) and the
+    `default_operating_conditions` attribute (`f"{cell_library}_{corner}"`,
+    the full stem) use a single underscore -- no double-underscore file is
+    written at all, matching a real IHP install."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     lib_dir = variant_dir / "libs.ref" / cell_library
@@ -88,13 +97,17 @@ def _make_pdk_install(
     if with_lib:
         lib_views_dir = lib_dir / "lib"
         lib_views_dir.mkdir(parents=True, exist_ok=True)
+        separator = "_" if single_underscore_naming else "__"
+        operating_conditions = (
+            f"{cell_library}_{corner}" if single_underscore_naming else corner
+        )
         content = (
-            f'    default_operating_conditions : "{corner}";\n'
+            f'    default_operating_conditions : "{operating_conditions}";\n'
             "    nom_process : 1.0;\n"
             "    nom_temperature : 25.0;\n"
             "    nom_voltage : 1.8;\n"
         )
-        (lib_views_dir / f"{cell_library}__{corner}.lib").write_text(
+        (lib_views_dir / f"{cell_library}{separator}{corner}.lib").write_text(
             content, encoding="utf-8"
         )
 
@@ -449,6 +462,35 @@ def test_resolve_liberty_defaults_to_nominal_corner(tmp_path, monkeypatch):
     assert corner == "tt_025C_1v80"
     assert liberty_path.endswith("sky130_fd_sc_hd__tt_025C_1v80.lib")
     assert info["variant"] == "sky130A"
+
+
+def test_resolve_liberty_ihp_single_underscore_fallback(tmp_path, monkeypatch):
+    """IHP-Open-PDK's `sg13g2_stdcell` names its liberty views with a single
+    underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
+    not open_pdks' double-underscore convention -- only the single-underscore
+    file exists on disk here, no double-underscore file at all. Must still
+    resolve via the single-underscore fallback rather than raising "liberty
+    not found" (issue #1790, missed in `post_route_sta.py`'s own copy of
+    `_resolve_liberty` until issue #1652 folded it into the shared
+    `klayout_tools.pdk.resolve_liberty_for_cell_library` implementation
+    `synthesize.py`/`place_and_route.py` already carried this fallback in)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "ihp-sg13g2",
+        cell_library="sg13g2_stdcell",
+        corner="typ_1p20V_25C",
+        single_underscore_naming=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = post_route_sta._resolve_liberty("sg13g2_stdcell", None)
+
+    assert corner == "typ_1p20V_25C"
+    assert liberty_path.endswith("sg13g2_stdcell_typ_1p20V_25C.lib")
+    assert "__" not in Path(liberty_path).name
+    assert info["variant"] == "ihp-sg13g2"
 
 
 def test_resolve_lef_missing(tmp_path, monkeypatch):

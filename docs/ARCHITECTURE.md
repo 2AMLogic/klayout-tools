@@ -53,6 +53,15 @@ contract (inputs, outputs, error shape), not by the engine that happens
 to implement it today. This is what makes engines swappable — and what
 makes later rewrites safe rather than bet-the-project.
 
+**Verb modules stay self-contained, except PDK resolution.** Each `klt`
+verb's implementation module (`src/klayout_tools/<verb>.py`) is written to
+stand alone rather than share private helpers with its siblings, so no verb
+implicitly breaks another. The one narrowed exception is PDK-*resolution*
+logic (e.g. liberty/LEF file lookup): letting those drift independently
+across modules is a correctness risk, not a design feature (issue #1652), so
+that logic is shared via public helpers in `pdk.py` and each verb module
+keeps only a thin, module-specific wrapper.
+
 **Wrap the proven engine.** The heavy lifting stays in an existing,
 battle-tested engine; the agent-native surface is ours. KLayout is the
 first engine, not a submodule or fork — a dependency behind the contract.

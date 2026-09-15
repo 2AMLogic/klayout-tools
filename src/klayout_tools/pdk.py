@@ -1433,6 +1433,100 @@ def list_cell_libraries(
     return result
 
 
+def resolve_liberty_for_cell_library(
+    cell_library: str,
+    requested_corner: str | None,
+    error_cls: type[Exception],
+    *,
+    variant: str | None = None,
+    root: str | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library``.
+
+    Shared implementation behind ``synthesize._resolve_liberty``,
+    ``place_and_route._resolve_liberty``, and
+    ``post_route_sta._resolve_liberty`` (issue #1652) -- those three verb
+    modules previously carried byte-identical copies of this resolution,
+    differing only in which module-specific error class each raised. Callers
+    pass their own ``error_cls`` (e.g. ``SynthesizeError``,
+    ``PlaceAndRouteError``, ``PostRouteStaError``) so every failure mode
+    below raises *that* type -- never :class:`PdkNotFoundError` -- keeping
+    each verb module's own exception-type contract with its callers intact.
+
+    ``variant``/``root`` (the CLI's ``--pdk``/``--pdk-root`` flags, threaded
+    through from each verb's own ``run_*`` entry point) select a specific
+    installed PDK variant/root exactly as :func:`find_pdk` does; ``None`` for
+    either leaves that resolver's own default search order in effect.
+
+    ``pdk_info`` is :func:`find_pdk`'s own resolution dict, returned
+    unchanged for the caller to pass through to its own provenance builder.
+
+    Liberty filename convention: tries open_pdks' double-underscore
+    ``<cell_library>__<corner>.lib`` first, falling back to a single
+    underscore (``<cell_library>_<corner>.lib``) only when that file does
+    not exist -- IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
+    `sg13cmos5l_stdcell`) uses the single-underscore form (issue #1790,
+    verified live against a real fetched IHP-Open-PDK v0.3.0 install).
+    """
+    try:
+        info = find_pdk(variant=variant, root=root)
+    except PdkNotFoundError as exc:
+        raise error_cls(str(exc)) from exc
+
+    libs_ref = info["assets"]["libs_ref"]
+    if libs_ref is None:
+        raise error_cls(
+            f"liberty not found for deck: resolved PDK install "
+            f"'{info['variant']}' at '{info['root']}' ships no libs_ref asset"
+        )
+
+    lib_dir = os.path.join(libs_ref, cell_library)
+    if not os.path.isdir(lib_dir):
+        raise error_cls(
+            f"liberty not found for deck: standard-cell library "
+            f"'{cell_library}' not found under resolved PDK install "
+            f"'{info['variant']}' at '{info['root']}'"
+        )
+
+    corner = requested_corner
+    if corner is None:
+        libraries = list_cell_libraries(variant=info["variant"], root=info["root"])
+        entry = next(
+            (lib for lib in libraries["libraries"] if lib["name"] == cell_library),
+            None,
+        )
+        corner = entry["nominal_corner"] if entry else None
+        if corner is None:
+            raise error_cls(
+                f"liberty not found for deck: could not determine a nominal "
+                f"corner for '{cell_library}' -- pass request.pdk.corner "
+                "explicitly"
+            )
+
+    liberty_path = os.path.join(lib_dir, "lib", f"{cell_library}__{corner}.lib")
+    if not os.path.isfile(liberty_path):
+        # Issue #1790: IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
+        # `sg13cmos5l_stdcell`) names its liberty views with a single
+        # underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
+        # not open_pdks' double-underscore convention
+        # (`sky130_fd_sc_hd__tt_025C_1v80.lib`). Fall back to that naming
+        # only when the double-underscore file does not exist, so this never
+        # masks a genuinely-missing corner on an open_pdks-shaped install
+        # with a false "found" from an unrelated same-named file.
+        single_underscore_path = os.path.join(
+            lib_dir, "lib", f"{cell_library}_{corner}.lib"
+        )
+        if os.path.isfile(single_underscore_path):
+            liberty_path = single_underscore_path
+    if not os.path.isfile(liberty_path):
+        raise error_cls(
+            f"liberty not found for deck: no '{corner}' corner for "
+            f"'{cell_library}' under resolved PDK install '{info['variant']}' "
+            f"(expected '{liberty_path}')"
+        )
+    return liberty_path, corner, info
+
+
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
     """Enumerate :data:`_STD_CELL_LIB_MARKERS`-named entries under
     ``libs_ref``, name-sorted."""
@@ -1565,10 +1659,11 @@ def _parse_lib_corner(path: str, library_name: str | None = None) -> dict[str, A
     `f"{library_name}_"` only when the double-underscore form does not
     match, so callers (``_nominal_supply``/``list_cell_libraries``) always
     see the bare form documented for `nominal_corner` (`docs/cli/pdk.md`) --
-    and so :func:`klayout_tools.synthesize._resolve_liberty`/
-    :func:`klayout_tools.place_and_route._resolve_liberty`'s own
-    single-underscore liberty-filename fallback receives a bare corner, not
-    one still carrying a duplicated library-name prefix.
+    and so :func:`resolve_liberty_for_cell_library`'s own single-underscore
+    liberty-filename fallback (shared by ``synthesize``/``place_and_route``/
+    ``post_route_sta``'s own ``_resolve_liberty`` wrappers, issue #1652)
+    receives a bare corner, not one still carrying a duplicated
+    library-name prefix.
     """
     filename = os.path.basename(path)
     text = _read_text(path)

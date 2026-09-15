@@ -3040,6 +3040,119 @@ def test_resolve_pdk_dbu_picks_the_finest_of_disagreeing_tech_lefs(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# resolve_liberty_for_cell_library (issue #1652) -- the shared implementation
+# behind synthesize._resolve_liberty / place_and_route._resolve_liberty /
+# post_route_sta._resolve_liberty, which used to be three byte-identical
+# (modulo which exception class each raised) copies of this same resolution.
+# Basic behavior is covered by resolve_pdk_dbu-style unit tests here; the
+# three verb modules' own test suites (test_synthesize.py,
+# test_place_and_route.py, test_post_route_sta.py) separately cover each
+# wrapper's own module-specific exception type end to end. The parity test
+# below is the cross-module check: same inputs must resolve identically
+# through all three wrappers, and each must still raise its own error class.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_liberty_for_cell_library_resolves_nominal_corner(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    liberty_path, corner, info = pdk.resolve_liberty_for_cell_library(
+        "sky130_fd_sc_hd", None, ValueError, root=str(root)
+    )
+
+    assert corner == "tt_025C_1v80"
+    assert liberty_path.endswith("sky130_fd_sc_hd__tt_025C_1v80.lib")
+    assert info["variant"] == "sky130A"
+
+
+def test_resolve_liberty_for_cell_library_ihp_single_underscore_fallback(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+
+    liberty_path, corner, info = pdk.resolve_liberty_for_cell_library(
+        "sg13g2_stdcell", None, ValueError, root=str(root)
+    )
+
+    assert corner == "typ_1p20V_25C"
+    assert liberty_path.endswith("sg13g2_stdcell_typ_1p20V_25C.lib")
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_resolve_liberty_for_cell_library_raises_caller_supplied_error_cls(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    class _CustomError(Exception):
+        pass
+
+    with pytest.raises(_CustomError, match="liberty not found for deck"):
+        pdk.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", "ff_n40C_1v95", _CustomError, root=str(root)
+        )
+
+
+def test_resolve_liberty_three_verb_wrappers_agree_and_raise_their_own_error(
+    tmp_path,
+):
+    """`synthesize._resolve_liberty`/`place_and_route._resolve_liberty`/
+    `post_route_sta._resolve_liberty` (issue #1652) are thin wrappers around
+    the shared `resolve_liberty_for_cell_library` above. Given the identical
+    fixture .lib files and identical (cell_library, corner) inputs, all three
+    must resolve to the same `(liberty_path, corner, pdk_info)` -- and each
+    must still raise its own module-specific exception type (never a shared
+    or generic one) on a not-found corner, preserving each module's
+    pre-existing exception-type contract with its own callers."""
+    from klayout_tools import place_and_route, post_route_sta, synthesize
+    from klayout_tools.place_and_route import PlaceAndRouteError
+    from klayout_tools.post_route_sta import PostRouteStaError
+    from klayout_tools.synthesize import SynthesizeError
+
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("ff_n40C_1v95", 1.0, -40.0, 1.95),
+        ),
+    )
+
+    results = {
+        "synthesize": synthesize._resolve_liberty(
+            "sky130_fd_sc_hd", "ff_n40C_1v95", root=str(root)
+        ),
+        "place_and_route": place_and_route._resolve_liberty(
+            "sky130_fd_sc_hd", "ff_n40C_1v95", root=str(root)
+        ),
+        "post_route_sta": post_route_sta._resolve_liberty(
+            "sky130_fd_sc_hd", "ff_n40C_1v95", root=str(root)
+        ),
+    }
+    # Same (liberty_path, corner, pdk_info) from every wrapper.
+    values = list(results.values())
+    assert all(value == values[0] for value in values), results
+    assert values[0][1] == "ff_n40C_1v95"
+    assert values[0][0].endswith("sky130_fd_sc_hd__ff_n40C_1v95.lib")
+
+    # Not-found case: each wrapper still raises its own error class.
+    with pytest.raises(SynthesizeError, match="liberty not found for deck"):
+        synthesize._resolve_liberty("sky130_fd_sc_hd", "ss_100C_1v60", root=str(root))
+    with pytest.raises(PlaceAndRouteError, match="liberty not found for deck"):
+        place_and_route._resolve_liberty(
+            "sky130_fd_sc_hd", "ss_100C_1v60", root=str(root)
+        )
+    with pytest.raises(PostRouteStaError, match="liberty not found for deck"):
+        post_route_sta._resolve_liberty(
+            "sky130_fd_sc_hd", "ss_100C_1v60", root=str(root)
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Real-install integration (issue #1790) -- skips cleanly when no real
 # fetched IHP-Open-PDK install is present. This repository's `pdks/` is
 # gitignored and never fetched in CI (`scripts/fetch-ihp-sg13g2.sh` is a

@@ -128,9 +128,12 @@ Standard-cell PDK plumbing
 ----------------------------
 
 ``pdk.cell_library``/``corner`` resolve a liberty exactly as ``klt
-synthesize`` already does (:func:`_resolve_liberty`, this module's own
-copy of that resolution -- each verb module in this repo is self-contained,
-matching the existing precedent), and, like that module, accepts the CLI's
+synthesize`` already does (:func:`_resolve_liberty`, a thin wrapper around
+the shared :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+resolution both modules call, issue #1652 -- PDK-resolution helpers are the
+one exception to this repo's otherwise-self-contained verb modules, since
+letting them drift independently is a live-bug risk, not a design feature),
+and, like that module, accepts the CLI's
 own ``--pdk``/``--pdk-root`` flags (mirroring ``klt extract``'s identical
 pair) to pin a specific installed PDK variant/root rather than always
 falling back to ``find_pdk()``'s own default search order. The tech +
@@ -525,11 +528,9 @@ from ._paths import _tcl_net_list as _tcl_net_list
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
 from .pdk import (
-    PdkNotFoundError,
-    find_pdk,
     lef_files,
-    list_cell_libraries,
     list_lib_corners,
+    resolve_liberty_for_cell_library,
 )
 
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
@@ -2573,80 +2574,28 @@ def _resolve_liberty(
     variant: str | None = None,
     root: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
-    """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library`` --
-    this module's own copy of ``synthesize.py``'s identical resolution
-    (each verb module in this repo is self-contained). ``variant``/``root``
-    (the CLI's ``--pdk``/``--pdk-root`` flags, threaded through from
-    :func:`run_place_and_route`) select a specific installed PDK
+    """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library``.
+    ``variant``/``root`` (the CLI's ``--pdk``/``--pdk-root`` flags, threaded
+    through from :func:`run_place_and_route`) select a specific installed PDK
     variant/root exactly as :func:`klayout_tools.pdk.find_pdk` does; ``None``
     for either leaves that resolver's own default search order in effect.
     Raises :class:`PlaceAndRouteError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Liberty filename convention: tries open_pdks' double-underscore
-    ``<cell_library>__<corner>.lib`` first, falling back to a single
-    underscore (``<cell_library>_<corner>.lib``) only when that file does
-    not exist -- IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
-    `sg13cmos5l_stdcell`) uses the single-underscore form (issue #1790,
-    verified live against a real fetched IHP-Open-PDK v0.3.0 install).
+    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    (issue #1652) -- that shared implementation (including the IHP
+    single-underscore liberty-filename fallback, issue #1790) is what
+    ``synthesize.py`` and ``post_route_sta.py``'s own ``_resolve_liberty``
+    wrappers call too, so all three modules stay in sync by construction;
+    only the exception type raised on each failure differs per module.
     """
-    try:
-        info = find_pdk(variant=variant, root=root)
-    except PdkNotFoundError as exc:
-        raise PlaceAndRouteError(str(exc)) from exc
-
-    libs_ref = info["assets"]["libs_ref"]
-    if libs_ref is None:
-        raise PlaceAndRouteError(
-            f"liberty not found for deck: resolved PDK install "
-            f"'{info['variant']}' at '{info['root']}' ships no libs_ref asset"
-        )
-
-    lib_dir = os.path.join(libs_ref, cell_library)
-    if not os.path.isdir(lib_dir):
-        raise PlaceAndRouteError(
-            f"liberty not found for deck: standard-cell library "
-            f"'{cell_library}' not found under resolved PDK install "
-            f"'{info['variant']}' at '{info['root']}'"
-        )
-
-    corner = requested_corner
-    if corner is None:
-        libraries = list_cell_libraries(variant=info["variant"], root=info["root"])
-        entry = next(
-            (lib for lib in libraries["libraries"] if lib["name"] == cell_library),
-            None,
-        )
-        corner = entry["nominal_corner"] if entry else None
-        if corner is None:
-            raise PlaceAndRouteError(
-                f"liberty not found for deck: could not determine a nominal "
-                f"corner for '{cell_library}' -- pass request.pdk.corner "
-                "explicitly"
-            )
-
-    liberty_path = os.path.join(lib_dir, "lib", f"{cell_library}__{corner}.lib")
-    if not os.path.isfile(liberty_path):
-        # Issue #1790: IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
-        # `sg13cmos5l_stdcell`) names its liberty views with a single
-        # underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
-        # not open_pdks' double-underscore convention
-        # (`sky130_fd_sc_hd__tt_025C_1v80.lib`). Fall back to that naming
-        # only when the double-underscore file does not exist, so this never
-        # masks a genuinely-missing corner on an open_pdks-shaped install
-        # with a false "found" from an unrelated same-named file.
-        single_underscore_path = os.path.join(
-            lib_dir, "lib", f"{cell_library}_{corner}.lib"
-        )
-        if os.path.isfile(single_underscore_path):
-            liberty_path = single_underscore_path
-    if not os.path.isfile(liberty_path):
-        raise PlaceAndRouteError(
-            f"liberty not found for deck: no '{corner}' corner for "
-            f"'{cell_library}' under resolved PDK install '{info['variant']}' "
-            f"(expected '{liberty_path}')"
-        )
-    return liberty_path, corner, info
+    return resolve_liberty_for_cell_library(
+        cell_library,
+        requested_corner,
+        PlaceAndRouteError,
+        variant=variant,
+        root=root,
+    )
 
 
 def _resolve_lef(
