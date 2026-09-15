@@ -10,11 +10,17 @@ instead. This file is the source of truth for which categories exist as of a
 given date; pin `provenance.deck` (sha256) and `provenance.klayout_version`,
 not `klt --version`, if you need to detect this kind of drift. See
 [`RELEASING.md`](RELEASING.md)'s "Release cadence" section for when the
-`## Unreleased
-
-## 0.4.0 (2026-09-05)` entries below actually ship to PyPI.
+`## Unreleased` entries below actually ship to PyPI.
 
 ## Unreleased
+
+## 0.5.0 (2026-09-15)
+
+235 commits on `main` since v0.4.0, cut under the 25-commit backstop in
+[`RELEASING.md`](RELEASING.md)'s "Release cadence" (operator ruling 2026-09-15,
+issue #1563). Minor bump: the range carries no conventional-commit breaking
+marker (`!:` / `BREAKING CHANGE`) and no `schema_version` value under `src/`
+changed; compatibility notes, where they matter, are in the entries below.
 
 - **Added**: `klt place-and-route` response field `nominal_hold_slack_ns`
   (issue #1826) — the single, nominal-corner hold WNS
@@ -1254,6 +1260,194 @@ not `klt --version`, if you need to detect this kind of drift. See
   unaffected. A general `gen-compose`-level declared-enclosure relationship
   for a ring around a *separately*-generated block remains a non-goal for
   this issue.
+
+### Merged since 0.4.0, by commit type
+
+Every commit on `main` in `v0.4.0..v0.5.0` (235 commits), grouped by its
+conventional-commit prefix; the trailing `(#N)` is the squash-merged PR.
+The narrative entries above cite the originating issue where one exists.
+
+#### Added
+
+- feat(sta): from-scratch netlist input mode for klt sta (issue #1825) (#1832)
+- feat(place-and-route,sta): pre-route timing checkpoint (nominal hold slack + unrouted DEF) (#1831)
+- feat(wave): port VCD ingest and implement klt wave build (#1607)
+- feat(wave): port bwave FST query engine, implement klt-wave query (#1602)
+- feat(design-agent): device-level sky130 relaxation oscillator, 18/18 corners (#1822)
+- feat(synthesize,place-and-route): add sg13g2_stdcell platform-table entries (#1791)
+- feat(benchmarks): swap design-agent reference solutions to real sky130 devices (#1782)
+- feat(synthesize): generate prefix adders and pick one by measured synthesis (#1772)
+- feat(gen): populate res_array metal_level for gf180mcu rm1/rm2/rm3 (#1774)
+- feat(gen): populate res_array metal_level for sg13g2 res_metal1/res_metal2 (#1769)
+- feat(benchmarks): add charge-pump-pll hard-tier design-agent task (#1767)
+- feat(benchmarks): add tool-using interactive design-agent provider (#1763)
+- feat(loom): propagate a held PR's loom:operator onto its linked issue(s) (#1762)
+- feat(sim): add `klt sim --plot` waveform SVG rendering (issue #1723) (#1757)
+- feat(benchmarks): add hard-tier voltage-controlled relaxation oscillator (VCO) design-agent task (#1753)
+- feat(benchmarks): add medium-tier cascode, integrator and Schmitt trigger tasks (#1750)
+- feat(benchmarks): add medium-tier design-agent tasks (5T OTA + two-stage Miller OTA) (#1746)
+- feat(benchmarks): add hard-tier RC relaxation oscillator design-agent task (#1735) (#1745)
+- feat(kb): nightly CI drift-check that re-runs measured testbenches (#1742)
+- feat(benchmarks): add live-agent candidate provider to design-agent benchmark (#1732) (#1740)
+- feat(sim): add per-device operating-point sanity lint (klt sim --op-lint, eval op-sanity gate) (#1730)
+- feat(benchmarks): add design-agent benchmark harness (schema + runner + easy-tier tasks) (#1729)
+- feat(gen-compose): add gf180mcu metal4/via3 routing roles (#1670) (#1675)
+- feat(extract): add devices[].instance_path, attributing each device to its originating GDS instance (#1672)
+- feat(extract): recognise gf180mcu's drawn metal-resistor family (issue #1640) (#1662)
+- feat(drc): add isolated check kind, fix nwell.space.1 notch false positive (#1661)
+- feat(gen): add metal_level param to res_array for sky130 res_generic_mN (#1639) (#1660)
+- feat(gen-compose): decouple cross_block_layer_role's width from routing.width_um (#1620) (#1648)
+- feat(extract): recognise sky130's drawn metal-resistor family (issue #1621) (#1641)
+- feat(pdk): provision SG13G2 ngspice/OSDI sim toolchain (issue #1628) (#1644)
+- feat(synthesize): report static leakage power (issue #1626) (#1635)
+- feat(sta): add hold-side worst/negative slack fields to `klt sta` (#1625) (#1634)
+- feat(pdk): curate a gf180mcu cross-section table for klt pdk stackup (#1629)
+- feat(pdk): add `klt pdk stackup` — PDK cross-section for field solvers (#1609) (#1615)
+- feat(clip): add `klt clip` to write a bbox region or named cell out as its own stream (#1618)
+- feat(pdk): surface PDK PCell importability probe via `klt pdk pcell-check` (#1611)
+- feat(functional-verification): add --mutations mutation testing (issue #1592) (#1604)
+- feat(docker): add eda-sim overlay image on the loom-worker base (#1584)
+- feat(gen-compose): support multi-level via-drop ladders (#1567) (#1570)
+- feat(gen): add gf180mcu MiM-capacitor support to cap_array (#1561)
+- feat(lvs): add options.combine_devices_per_circuit for composed macros (#1556)
+- feat(gen): expose gf180mcu high-sheet-rho poly-resistor flavours in res_array (#1553)
+- feat(extract): disclose positional pin/net identity for internally-repeated sub-cell name collisions (#1540) (#1543)
+- feat(gen): instantiate a PDK's own shipped PCell library via --list-pdk-pcells/--pdk-pcell (#1538)
+- feat(gen-compose): steer individual legs of a bundle net with connectivity[].legs[] (#1529) (#1536)
+- feat(mom): add --touchstone (.s2p) export for two-port S-parameters (#1521)
+- feat(extract): add --pin-source-cells for gen-compose'd multi-macro pin declaration (#1515)
+- feat(gen): add add_guard_ring to mos_array (issue #1493) (#1499)
+
+#### Fixed
+
+- fix(buildgate): skip real ngspice/openroad tiers locally, raise timeout (#1651) (#1659)
+- fix(pdk): resolve IHP sg13g2_stdcell's naming convention in synthesize/place-and-route liberty/LEF resolvers (#1796)
+- fix(dep-recheck): recognize curator:named-dependency markers in idempotency check (#1788)
+- fix(synthesize): bound _run_yosys with a timeout to avoid indefinite hangs (#1777)
+- fix(equiv): apply WASI-sandboxed-yosys hint to equiv.py too (#1755) (#1768)
+- fix(sim): parse_ascii_rawfile handles ac/sp Flags: complex rawfiles (#1761)
+- fix: scope champion-issue-promo tier backlog counts to loom:issue only (#1716)
+- fix(extract): recover DEF net names one level below a composed macro's top (#1696)
+- fix(decks): add gf180mcu metal4.width.1 / metal4.space.1 (#1688) (#1692)
+- fix(extract): --pins matches any component label of a multi-label net (#1690)
+- fix(gen-compose): warn when a block's declared bbox_um understates its real geometry (#1679) (#1684)
+- fix(gen-compose): retry route-vs-route collision onto cross_block_layer_role (#1683)
+- fix(gen-compose): exempt a hollow block's cavity from the obstacle check (#1682)
+- fix(gen-compose): scope obstacle-overlap check to layers a block actually draws (#1678)
+- fix(loom): guard against inline-code-quoted closing keywords in PR bodies (#1677)
+- fix(loom): match #N anywhere on named-dependency checklist lines (#1669) (#1671)
+- fix(lvs): prune power-only layout circuits before gate-level-verilog compare (#1663)
+- fix(lvs): compare circuits by identity in _prune_extra_top_circuits (#1664)
+- fix(ci): make ci-apt-install.sh's mirror rewrite adaptive, not one-directional (#1665) (#1668)
+- fix(place-and-route): add gf180mcu_fd_sc_mcu7t5v0 table entries (#1653)
+- fix(lef-abstract): search every GDS datatype sharing a pin's LEF layer name (#1636)
+- fix(sta): verify SPEF annotation after read_spef, not just net names (#1647)
+- fix(lef-abstract): emit non-rectangular OBS polygons instead of crashing (#1642)
+- fix(pdk-pcell): reach ihp-sg13g2's cni compat shim via sys.path hint + tkinter workaround (#1638)
+- fix(extract): make SPEF *DATE header a fixed placeholder, not wall-clock (#1631)
+- fix: unescape DEF identifiers in extract's --def-net-connections (#1632)
+- fix(gen): cover gf180mcu guard/tap/collector-ring Comp shapes with implant (#1580) (#1583)
+- fix(components): scope --label-layers texts to their own conductor (#1582)
+- fix(gen): close mos_array's gf180mcu unit-device signoff-DRC gap (#1577) (#1581)
+- fix(dep-recheck): extract Dependencies section by last match, any heading level (#1571)
+- fix(extract): normalize bookkeeping fields before --check --rerun diff (#1562)
+- fix: write bare C cards and add klt pex --deck-option/--pins passthrough (#1564)
+- fix(lvs): carry #559/#1497 resistor-offset and capacitor-C corrections into combine_devices_per_circuit (#1560)
+- fix(gen): snap res_array end contacts to the dbu grid before deriving edges (#1554)
+- fix(gen-compose): reject unrecognized connectivity[]/legs[]/endpoint keys (#1549)
+- fix(loom): restore FORMULA_VERSION guard reverted by resync (#1546) (#1547)
+- fix(loom): add FORMULA_VERSION guard to dep-recheck-fingerprint.sh (#1544) (#1545)
+- fix(loom): repair curator.md's dep-recheck-fingerprint.sh recipe after CLI resync (#1542)
+- fix(lvs): scope net-mismatch merge/split classification per weakly-connected component (#1539)
+- fix(curator): derive dep-recheck CONCLUSION_HASH from canonical state, not prose (#1534)
+- fix(gen-compose): reject inter-block legs that short to their own block's other metal (#1527) (#1530)
+- fix(pex): resolve extracted-side .include path to absolute before writing testbench (#1526)
+- fix(curator): add regression guard for dep-recheck idempotency violations (#1523) (#1524)
+- fix(gen-compose): reject via-drop pads that self-notch their own block's wire (#1522)
+- fix(gen-compose): reconcile integer-ratio dbu mismatches instead of refusing (#1516)
+- fix(gen): resolve output dbu from the PDK's tech LEF DATABASE MICRONS (#1512)
+- fix(extract): declare substrate DC-tie nets SPICE-global so instantiated testbenches share the node (#1503) (#1511)
+- fix(pnr): skip clock_tree_synthesis for a zero-fanout clock instead of segfaulting (#1506) (#1510)
+- fix(lvs): correct capacitor C left unmerged by combine_devices() (#1497) (#1508)
+- fix(layout-plan): forward routing.cross_block_layer_role instead of silently dropping it (#1509)
+- fix(gen): floor routing width and via-drop size at the resolved deck's own DRC minimums (#1507)
+- fix(lvs): resolve bare L=/W= geometry literals per deck's .option scale convention (#1505)
+- fix(gen): give cap_array's C<i>_TOP port a routable escape pad (#1500)
+- fix(extract): recover DEF net names for unrouted single-pin nets (#1498)
+- fix(lvs): expand nf>1 MOS subckt calls into parallel plain-element fingers (#1489)
+
+#### Changed
+
+- refactor(decks): split decks/__init__.py into rules/extraction/parasitics submodules (#1824)
+- refactor(place-and-route): split DEF->GDS merge subsystem into place_and_route_gds_merge.py (#1823)
+- refactor(cli): extract checks-cluster parsers into _add_X_parser() helpers (#1807)
+- refactor(place-and-route): split corner-sweep/post-route-SPEF STA into place_and_route_sta.py (#1819)
+- refactor(cli): extract misc-cluster parsers into _add_X_parser() helpers (#1811)
+- refactor(cli): extract 5 generation-verb parsers into _add_<verb>_parser() helpers (#1818)
+- refactor(cli): extract analysis-cluster parsers into _add_<verb>_parser() helpers (#1817)
+- refactor(cli): extract 5 inspection-verb parsers into _add_<verb>_parser() helpers (#1802)
+- refactor(lvs): split netgen engine subsystem into lvs_netgen.py (#1806)
+- refactor(cli): extract 'extraction/verification' cluster parsers into _add_*_parser() helpers (#1809)
+- perf(benchmarks): cross-step cache for design-agent-benchmark reference solutions (#1794)
+- perf(benchmarks): cache deterministic reference-provider attempts, re-tune CI timeout from measured run (#1792)
+- refactor(cli): consolidate duplicated _print_rerun_text into output.render_rerun_drift (#1787)
+- refactor(benchmarks): split interactive agent provider into its own module (#1770)
+- refactor(sim): split fleet shard/merge + remote dispatch into sim_remote.py (#1765)
+- refactor: dedup SPICE + continuation-line fold into _paths.py (#1741) (#1751)
+- refactor(lvs): split mismatch-classification subsystem into lvs_mismatch.py (#1724)
+- refactor(gen-compose): split routing subsystem into gen_compose_routing.py (#1717)
+- refactor: dedupe _tcl_net_list/_count_spef_nets_annotated into _paths.py (#1715)
+- refactor(gen): split ten _build_<family>_pcell() factories into gen_pcells/ package (#1713)
+- refactor: extract _load_block_cell to dedupe gen_compose GDS-load block (#1711)
+- extract: add --parasitics-net to scope the ground R/C pass to named nets (#1705)
+- extract: expose per-net R/C breakdown by layer in --parasitics JSON (#1701) (#1706)
+- sim: add coarse timeout-budget preflight warning (part of #1686) (#1695)
+- refactor: deduplicate _validate_vias between power.py and erc.py (#1693)
+- refactor(gen): split _build_pcell_classes into per-family factories (#1650)
+- refactor: remove unused build_identity.git_commit()/is_release() accessors (#1646)
+- refactor: dedupe _run_openroad/_count_violations/_openroad_version into _openroad_engine.py (#1643)
+- klt synthesize: additive structural verdict, warnings summary, baseline QoR delta (#1605)
+
+#### Docs
+
+- docs(design-agent): split-polarity dual comparator clears the sky130A ss/-40C/1.62V headroom ceiling (#1815)
+- docs(kb): document sky130 binned nfet L=0.15/nf>=3 BSIM4 fatal footgun (#1812)
+- kb: add reference netlist + measured figures for sky130-lc-vco-cross-coupled (#1805)
+- kb: add reference netlist + measured figures for multi-ro-xor-entropy-source (#1778)
+- kb: add reference netlists + measured figures for ro-puf, metastability-trng, ring-oscillator-jitter-trng (#1776)
+- kb: add reference netlists + measured figures for beta-multiplier-bias-cell, cmos-subthreshold-voltage-reference and cmos-ring-vco-current-starved (#1773)
+- kb: add reference netlists + measured figures for rx-front-end-termination-buffer and sram-power-up-puf (#1760)
+- kb: add reference netlists + measured figures for folded-cascode-ota and cml-tx-line-driver (#1754)
+- kb: add reference netlists + measured figures for two-stage-miller-ota and strongarm-latch-comparator (#1747)
+- kb: add reference netlists + measured figures for five-transistor-ota and inverter-based-comparator (#1737)
+- kb: add measured figures block + numeric search filters (av_db>=40 style) (#1727)
+- docs: document daemon dispatch race claiming a reverted promotion (#1710) (#1712)
+- docs: design spike — attribute --parasitics R/C to top-cell-drawn vs. instance-inherited geometry (#1707)
+- docs(extract): document parasitics star addressing and device-card node order (#1676)
+- docs: port per-concern RTL/testbench review guides into docs/guides/digital-review/ (#1612)
+- docs(design): survey klt wave query surface and trace formats (#1598)
+- docs(guides): port booley's RTL mutation-proposer guide (Apache-2.0) (#1597)
+- docs(design): port-vs-build decision record for klt wave (#1596)
+- docs(design): propose the klt wave build/query JSON contract (#1595)
+- docs(design): survey mutation testing as a test-quality gate for functional-verification (#1594)
+- docs(gen,drc): disclose gf180mcu mos_array's real-signoff-DRC gap (#1575) (#1578)
+- docs(gen): add dog-bone terminal recipe for W below UNIT_MIN_W_UM (#1576)
+- docs(layout_plan): update stale "Phase C not-yet-built" claims (#1566)
+- docs(loom): document local Loom test-suite wiring convention (#1532) (#1537)
+- docs(gen): state diff_pair's shared per-terminal x column in docs and --list (#1504)
+
+#### Chores
+
+- test(place-and-route): gate a real ihp-sg13g2 GCD integration test (#1784) (#1816)
+- chore(deps-dev): bump the npm-minor-patch group across 1 directory with 5 updates (#1573)
+- chore(deps): bump flate2 (#1482)
+- ci: declare python3-click for the pinned SymbiYosys launcher (#1685)
+- ci: run native-techmap on the dedicated heavy runner (2am#29) (#1246)
+- chore(decks): regenerate deck history table for v0.4.0
+- chore: resync installed Loom surfaces (72 commits, no PR)
+
+## 0.4.0 (2026-09-05)
+
 - **Fixed**: `klt lvs` no longer reports one comparer event twice when a
   `hints.same_nets` pair is refused after the comparer had already associated
   the two nets (issue #1484). Declaring such a pair used to add a
