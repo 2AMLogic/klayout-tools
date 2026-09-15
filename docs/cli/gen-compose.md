@@ -160,10 +160,11 @@ cleanly.
     `legs[]` (#1529, below) to steer one or more individual legs of a
     bundle net by name instead.
   - **`legs[]` (#1529)** — an optional array of
-    `{from_pin, to_pin, waypoints_um}` objects, each naming one leg of
-    *this* net (`from_pin`/`to_pin` must match two of the entry's own
-    `pins[]`) and, optionally, the same `[x_um, y_um]` waypoint list
-    `waypoints_um` accepts for a 2-pin net. Every named leg is routed and
+    `{from_pin, to_pin, waypoints_um, layer_role, width_um}` objects, each
+    naming one leg of *this* net (`from_pin`/`to_pin` must match two of the
+    entry's own `pins[]`) and, optionally, the same `[x_um, y_um]` waypoint
+    list `waypoints_um` accepts for a 2-pin net (plus, since #1655, that
+    leg's own routing plane/width). Every named leg is routed and
     seeded into the spanning tree **before** the automatic nearest-first
     search runs, so a caller can hand-route one or more legs of a large
     bundle net (steering around pre-existing geometry, or simply forcing a
@@ -172,6 +173,14 @@ cleanly.
     net with `legs[]`" below for the full worked example, including why
     this removes the need for the N-entry, pin-adjacent decomposition the
     accepted-leg overlap check otherwise demands.
+- **Per-net routing planes (#1655)** — `connectivity[].layer_role` (and
+  `connectivity[].legs[].layer_role`) name the metal *that net* (or that one
+  leg) routes on, overriding `routing.layer_role` for it alone. This is what
+  makes a **non-planar** net graph drawable in a single `gen-compose` call:
+  no floorplan or track assignment can route a K3,3-shaped connectivity graph
+  on one plane, because some pair of nets must cross — and two crossing nets
+  on one layer are a short the route-vs-route check correctly rejects. See
+  "Per-net routing planes (`connectivity[].layer_role`, #1655)" below.
 - **Via-drop routing (#454)** — a family whose curated extraction deck
   declares a second routing-metal level exposes it as a second
   `routing.layer_role` (sky130's `"metal2"`, resolving to met1 `68/20`;
@@ -1356,6 +1365,104 @@ in one composition, one north-facing and one south-facing — resolve their
 own contention completely independently; a track index assigned in one
 channel has no bearing on the other.
 
+## Per-net routing planes (`connectivity[].layer_role`, #1655)
+
+Everything above allocates **one** routing plane per request: `routing.
+layer_role` resolves a single `(layer, datatype)` pair, and
+`routing.cross_block_layer_role` adds a second one the *router* reaches for on
+its own (a same-block self-net leg that would otherwise short, #1168; a
+route-vs-route rejection, #1680). Neither lets the caller say "route `CLK` on
+met1 and `VBIAS` on li1."
+
+That is a structural limit, not an ergonomic one. A set of nets is drawable on
+one plane only if its connectivity graph can be embedded with no crossings; a
+graph containing a **K3,3 subdivision** — the canonical smallest non-planar
+shape, and a common one once more than four or five devices share overlapping
+net pairs — has no such embedding, in any floorplan, at any track assignment.
+Such a composition could not be drawn by one `gen-compose` call at all: some
+pair of nets necessarily crosses, and the route-vs-route check (#1057)
+correctly rejects the second one (`crosses already-routed net '<first>'`)
+rather than drawing a short.
+
+`connectivity[].layer_role` names the plane a single net routes on:
+
+```json
+{
+  "connectivity": [
+    { "net": "N_A1B1", "pins": [ /* ... */ ] },
+    {
+      "net": "N_A3B1",
+      "layer_role": "metal2",
+      "pins": [ /* ... */ ]
+    }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17 }
+}
+```
+
+Rules, all of which fall out of reusing the existing machinery rather than
+adding a second one:
+
+- **Roles resolve exactly like `routing.layer_role`.** Same per-PDK-family
+  role→layer table, same errors for an unknown role or a role with no layer
+  in the family's curated deck (exit 1), re-labelled to name
+  `connectivity[<i>].layer_role` rather than the request-level field.
+- **Width is inherited, then floored.** Omit `connectivity[].width_um` and the
+  net draws at `routing.width_um`; either way the width is validated against
+  the *named* plane's own minimum-width rule from the same deck `klt drc`
+  judges the composed layout with. An inherited width that does not clear a
+  stricter plane's floor is an application error naming
+  `connectivity[<i>].width_um` as the fix — naming a second plane never
+  silently widens every other net's routing (the same guarantee
+  `routing.cross_block_width_um` gives, issue #1620).
+- **An explicit plane wins over the automatic fallback.** A net that names its
+  own `layer_role` is never retried onto `routing.cross_block_layer_role`; a
+  net that names none keeps that fallback (and the #1393/#1680 retries)
+  exactly as before. A net that genuinely needs two planes says so per leg.
+- **Per-leg overrides** (`connectivity[].legs[].layer_role`/`.width_um`) do
+  the same for one named leg of any net, overriding the net's own choice.
+  `layer_role` is the part that takes control of a plane: a leg that names one
+  is never retried onto the cross-block plane, and — if it is rejected on the
+  plane it named — the automatic spanning-tree search does **not** pick that
+  same pin pair back up and redraw it on the net's own plane. The leg stays in
+  the response's `legs[]` with `routed: false` and its own `reason`; the net
+  may still reach those two pins *indirectly*, through other pins, but never
+  by redrawing the named leg somewhere the caller did not ask for. A leg that
+  names only `width_um` is not a plane override: it draws wider on the net's
+  own plane and keeps every fallback an ordinary leg has.
+- **The legs stitch through the via-drop that already exists.** Every leg
+  drops from its own drawing layer to *each endpoint pin's own reported
+  layer*, at that pin, through the via ladder #454/#1567 already resolve — so
+  two legs of one net that ran on different planes meet on the shared pin's
+  own pad. No new geometry is introduced for cross-plane stitching, and a
+  plane with no via ladder down to a pin's own layer is still an explicit
+  rejection, never a disconnected stub (#492).
+- **Purely additive.** Omitting both fields reproduces today's behaviour
+  byte-for-byte (the test suite asserts the composed GDS bytes are identical),
+  so there is no `schema_version` bump.
+
+### What this does *not* do
+
+`gen-compose` does not compute the planar split for you. There is no
+`--check-planar` and no "route what you can on plane A, spill the rest to
+plane B" mode: the caller names the planes, and the router draws and checks
+them (every one of `route_two_pin()`'s checks runs per leg against the plane
+that leg actually draws on, and the route-vs-route check already skips
+genuinely different planes, #1386). Allocating *tracks* within one plane is a
+separate, orthogonal gap (#1467) — the two compose, and neither substitutes
+for the other: tracks cannot make a non-planar graph drawable on one plane,
+and planes do not stop two same-plane nets from wanting the same channel.
+
+The mechanism can only name planes a family's role table actually exposes; a
+family with a single routing metal cannot express a non-planar graph at all
+(the constraint IHP's `sg13g2`/`sg13cmos5l` tables had when #1474 was filed —
+since fixed there; all four supported families now expose
+`metal`/`metal2`/`metal3` plus their connecting vias).
+
+The full rationale, including why the alternative (an N-pass `routing[]`
+request array with an internal merge) was rejected, is recorded in
+[`docs/design/gen-compose-per-net-layer.md`](../design/gen-compose-per-net-layer.md).
+
 ## CLI shape (a Builder decision, per the spike's own flag)
 
 The spike's contract section names `klt gen compose` as a working name only
@@ -1544,6 +1651,9 @@ exit codes).
 | `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. Every net's `pins[]` are always validated against the referenced blocks' own reported ports, whether or not `routing` is supplied (#1188 — see below). When `routing` is supplied, a **2-pin** net is routed point-to-point; a **>2-pin** (bundle) net is routed as a spanning tree of two-pin legs, nearest pair first (#1073) — see "Scope". Pin order is not a routing order. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
 | `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1), as is supplying it on a **>2-pin** net (#1073 — a bundle net's spanning tree has no single backbone for the path to belong to; use `legs[]` to steer individual legs by name instead), or supplying it together with `legs[]` on the same entry (#1529 — mutually exclusive). Omitting it changes nothing (today's fixed one-jog/corner shape). |
 | `connectivity[].legs[]` | array\<object\> | Optional (#1529). An array of `{from_pin, to_pin, waypoints_um}` objects, each steering one leg of *this* net by name — `from_pin`/`to_pin` are `{block, port}` objects that must each match one of this same entry's own `pins[]`, and `waypoints_um` is the same optional `[x_um, y_um]` list format as the top-level field (omit it to force just that pin pair into the spanning tree, without steering its path). See "Hand-routing individual legs of a bundle net with `legs[]`" below. A `from_pin`/`to_pin` not present in this entry's `pins[]`, a leg naming the same pin as both endpoints, a non-object leg entry, or a malformed `waypoints_um` is an application error (exit 1), as is supplying `legs[]` together with the top-level `waypoints_um` on the same entry. Omitting it changes nothing (every pin routes via the automatic nearest-first spanning-tree search, as before #1529). |
+| `connectivity[].layer_role` | string | Optional (issue #1655). The layer *role* **this net** routes on, overriding `routing.layer_role` for every one of its legs — resolved through the same per-PDK-family role→layer table `routing.layer_role` is, with the same unknown-role/no-layer-in-this-family errors (exit 1) re-labelled to name this field. This is what lets one `gen-compose` call draw a **non-planar** net graph, which no single plane can carry however the blocks are placed — see "Per-net routing planes (`connectivity[].layer_role`, #1655)" below and the decision record [`docs/design/gen-compose-per-net-layer.md`](../design/gen-compose-per-net-layer.md). A net that names its own plane is **not** retried onto `routing.cross_block_layer_role` (explicit wins over the automatic fallback); a net that names none keeps that fallback exactly as before. Omitting it changes nothing. |
+| `connectivity[].width_um` | number | Optional (issue #1655). The width **this net** draws at, overriding `routing.width_um`. Must be `> 0`. Whether given or inherited, it is floored against the plane this net actually routes on, from the same curated deck `klt drc` judges the output with — an *inherited* width that does not clear a named plane's stricter floor is an application error (exit 1) naming this field as the fix, never a silent widening of `routing.width_um` for every other net (the #1620 rule, applied per net). |
+| `connectivity[].legs[].layer_role`/`.width_um` | string / number | Optional (issue #1655). The per-*leg* tier of the two fields above: the plane (and width) **this one named leg** draws on, overriding the net's own. Resolved and floored exactly as the net-level fields are. `layer_role` — and only `layer_role`, exactly as at the net level — exempts the leg from the cross-block fallback: a layer-pinned leg is never retried onto `routing.cross_block_layer_role`, and if it is rejected on the plane it named it is reported `routed: false` rather than silently re-routed on the net's own plane by the automatic spanning-tree search (that pin pair is skipped there; the net may still reach those pins indirectly through other pins). A leg naming only `width_um` draws wider on the net's own plane and keeps every fallback an ordinary leg has. This is how a single net's legs span two planes; they stitch together at the leg's own endpoint pins through the existing #454 via-drop, which already drops every leg to each pin's own reported layer. |
 | `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
 | `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |

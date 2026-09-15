@@ -120,6 +120,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/cli/extract.md`'s "Top-cell-only hierarchy split" section and
   `docs/design/parasitics-hierarchy-attribution-spike.md`. Off by default —
   byte-identical to today's behavior.
+- **Added**: `klt gen-compose` request fields `connectivity[].layer_role` /
+  `connectivity[].width_um` and `connectivity[].legs[].layer_role` /
+  `.width_um` (issue #1655) — the metal plane (and width) an individual net,
+  or an individual named leg of one, routes on, overriding
+  `routing.layer_role`/`routing.width_um` for it alone. Until now
+  `routing.layer_role` resolved exactly one plane for the whole composition,
+  so a composition whose net-connectivity graph is **non-planar** (a
+  K3,3 subdivision) could not be drawn in a single call at all: some pair of
+  nets must cross, and two crossing nets on one layer are a short the
+  route-vs-route check correctly rejects. Roles resolve through the same
+  per-PDK-family table `routing.layer_role` uses; a width is inherited when
+  omitted and always floored against the plane the entry actually draws on
+  (an inherited width that does not clear a stricter plane's floor is an
+  error naming that entry's own `width_um`, never a silent widening of every
+  other net's routing — the `routing.cross_block_width_um` rule, #1620,
+  applied per net). An explicit plane — `layer_role`, at either tier — wins
+  over the automatic `routing.cross_block_layer_role` fallback, which still
+  applies unchanged to every net (and every leg) that names no plane of its
+  own: a *layer-pinned leg* is neither retried onto the cross-block plane nor
+  picked back up by the automatic spanning-tree search if it is rejected on
+  the plane it named, so it is reported `routed: false` rather than silently
+  redrawn on the net's own plane (the net may still reach those two pins
+  indirectly, through other pins). A `width_um` with no `layer_role` takes
+  control of no plane and keeps every fallback, at both tiers. Legs of one net
+  that span two planes stitch at their shared pin through the existing #454
+  via-drop. All
+  four fields are optional and additive — a request that omits them composes
+  byte-for-byte identically — so there is no `schema_version` bump. See
+  `docs/cli/gen-compose.md`'s "Per-net routing planes" section and the
+  decision record `docs/design/gen-compose-per-net-layer.md`.
 - **Added**: `klt gen mos_array` gains `interior_channel_um` (default `0.0`,
   preserving byte-for-byte existing geometry; issue #1531, Phase 1) — extra
   gap in µm reserved between adjacent rows/columns, on top of the fixed
