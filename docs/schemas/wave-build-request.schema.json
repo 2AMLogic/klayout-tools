@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/wave-build-request.schema.json",
+  "title": "klt wave build request (klt.wave_build.request/1)",
+  "description": "Index a VCD/FST functional-verification waveform trace into a compact, queryable FST store -- see docs/design/waveform-query-contract-spike.md section 4 for the full contract and docs/cli/wave.md for the CLI surface (Epic #1585, issue #1601).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["trace", "store"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "klt.wave_build.request/1",
+      "description": "Request contract identifier + major version. Not validated by `klt-wave` itself -- user- or generator-authored input, never emitted by this tool."
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to the input trace, resolved relative to the request file's own directory."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["vcd", "fst"],
+          "description": "Optional -- inferred from `trace.path`'s extension when omitted. An unresolvable/ambiguous extension with `format` omitted is exit 1."
+        }
+      }
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal"],
+      "description": "Optional. Declaring this enables `cycle` addressing (section 3) in every query against the resulting store; omitted means the store supports `time_ns`-only addressing.",
+      "properties": {
+        "signal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Hierarchical path to the clock signal (e.g. `tb.clk`), resolved relative to the trace's top scope."
+        },
+        "edge": {
+          "type": "string",
+          "enum": ["rising", "falling"],
+          "default": "rising",
+          "description": "Which edge of `clock.signal` defines cycle boundaries."
+        }
+      }
+    },
+    "reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal"],
+      "description": "Optional. When given together with `clock`, cycle 0 is defined as the first active clock edge at or after this signal's release; when omitted, cycle 0 is the trace's first active clock edge, full stop.",
+      "properties": {
+        "signal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Hierarchical path to the reset signal."
+        },
+        "active": {
+          "type": "string",
+          "enum": ["low", "high"],
+          "default": "low",
+          "description": "Which level of `reset.signal` is the asserted (in-reset) state."
+        }
+      }
+    },
+    "signals": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "Optional allow-list of hierarchical signal paths to index. `null` (default) indexes every signal the trace declares. A non-null, empty array is a request error (exit 1) -- enforced here via `minItems: 1` on the non-null form."
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where to write the built store, resolved relative to the request file's own directory. `klt wave build` never picks an implicit output path."
+        }
+      }
+    }
+  }
+}

@@ -880,7 +880,12 @@ relative to the request's own directory).
   only — see "Coverage".
 - **Waveform inspection / interactive debug.** Batch pass-fail + coverage is
   the contract; `--trace` is enabled on coverage builds as a side effect of
-  Verilator's coverage recipe, but no waveform artifact is contracted.
+  Verilator's coverage recipe, but no waveform artifact is contracted by
+  this verb. [`klt wave build`/`klt wave query`](wave.md) (Epic #1585)
+  fills this gap as a separate, standalone pair of verbs -- point `klt
+  wave build`'s `trace.path` at whatever VCD/FST your own simulation run
+  wrote to disk. Wiring `klt functional-verification` to emit a `trace`
+  field of its own directly is Epic #1585 Phase 3, not yet implemented.
 - **Commercial simulators.** cocotb supports several; open-tooling posture
   keeps them out (the same reasoning that excludes Calibre/HSPICE-class
   tools from the LVS and SPICE contracts).

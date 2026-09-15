@@ -62,6 +62,7 @@ docs/
     techmap.md
     trajectory.md
     version.md
+    wave.md
     yield-sensitivity.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
@@ -118,6 +119,10 @@ docs/
     remote-sim-ami-manifest.schema.json
     socket.schema.json
     synth-generic-netlist.schema.json
+    wave-build-request.schema.json
+    wave-build-response.schema.json
+    wave-query-request.schema.json
+    wave-query-response.schema.json
   guides/                # how-to guides
     building-klayout-macos.md
     github-action.md

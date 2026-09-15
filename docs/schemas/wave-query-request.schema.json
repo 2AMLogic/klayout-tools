@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/wave-query-request.schema.json",
+  "title": "klt wave query request (klt.wave_query.request/1)",
+  "description": "One or more query operations against a store `klt wave build` produced -- see docs/design/waveform-query-contract-spike.md section 5 for the full op vocabulary and predicate/exit-code-3 design (Epic #1585, issue #1601). A single query is simply a one-entry `ops` array -- there is no separate non-batched request shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["store", "ops"],
+  "$defs": {
+    "time_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "description": "Carries exactly one of `time_ns`/`cycle`, never both.",
+      "properties": {
+        "time_ns": { "type": "number" },
+        "cycle": { "type": "integer" }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A bounded span; `from`/`to` may independently use `time_ns` or `cycle`. `to` omitted means through the end of the trace; `from` omitted means the trace's true first tick.",
+      "properties": {
+        "from": { "$ref": "#/$defs/time_point" },
+        "to": { "$ref": "#/$defs/time_point" }
+      }
+    },
+    "duration": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "description": "A span length, spelled `{\"cycles\": <integer>}` or `{\"time_ns\": <number>}` -- distinct from a time point.",
+      "properties": {
+        "cycles": { "type": "integer", "minimum": 0 },
+        "time_ns": { "type": "number", "minimum": 0 }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "description": "A level match (`{\"value\": <string>}`) or an edge match (`{\"edge\": \"rising\"|\"falling\"|\"any\"}`).",
+      "properties": {
+        "value": { "type": "string" },
+        "edge": { "type": "string", "enum": ["rising", "falling", "any"] }
+      }
+    },
+    "value_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "at"],
+      "properties": {
+        "op": { "const": "value" },
+        "signal": { "type": "string", "minLength": 1 },
+        "at": { "$ref": "#/$defs/time_point" },
+        "predicate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["equals"],
+          "properties": { "equals": { "type": "string" } }
+        }
+      }
+    },
+    "find_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "match"],
+      "properties": {
+        "op": { "const": "find" },
+        "signal": { "type": "string", "minLength": 1 },
+        "match": { "$ref": "#/$defs/match" },
+        "occurrence": { "type": "string", "enum": ["first", "last"], "default": "first" },
+        "window": { "$ref": "#/$defs/window" },
+        "predicate": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "max_cycle": { "type": "integer" },
+            "max_time_ns": { "type": "number" },
+            "must_find": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "count_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "match"],
+      "properties": {
+        "op": { "const": "count" },
+        "signal": { "type": "string", "minLength": 1 },
+        "match": { "$ref": "#/$defs/match" },
+        "window": { "$ref": "#/$defs/window" },
+        "predicate": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "min": { "type": "integer" },
+            "max": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "sample_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signals", "edge_of"],
+      "description": "Dump-shaped, not verdict-shaped -- a `predicate` key is a request error (rejected here by `additionalProperties: false` -- `predicate` is deliberately not a declared property).",
+      "properties": {
+        "op": { "const": "sample" },
+        "signals": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "edge_of": { "type": "string", "minLength": 1 },
+        "edge": { "type": "string", "enum": ["rising", "falling", "both"], "default": "rising" },
+        "window": { "$ref": "#/$defs/window" }
+      }
+    },
+    "stuck_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "min_span"],
+      "properties": {
+        "op": { "const": "stuck" },
+        "signal": { "type": "string", "minLength": 1 },
+        "window": { "$ref": "#/$defs/window" },
+        "min_span": { "$ref": "#/$defs/duration" },
+        "predicate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expect"],
+          "properties": { "expect": { "type": "boolean" } }
+        }
+      }
+    },
+    "diff_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "other_store"],
+      "properties": {
+        "op": { "const": "diff" },
+        "signal": { "type": "string", "minLength": 1 },
+        "other_store": { "type": "string", "minLength": 1 },
+        "window": { "$ref": "#/$defs/window" },
+        "predicate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expect_diverges"],
+          "properties": { "expect_diverges": { "type": "boolean" } }
+        }
+      }
+    },
+    "wave_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal"],
+      "description": "Dump-shaped, not verdict-shaped -- a `predicate` key is a request error (rejected here by `additionalProperties: false` -- `predicate` is deliberately not a declared property).",
+      "properties": {
+        "op": { "const": "wave" },
+        "signal": { "type": "string", "minLength": 1 },
+        "window": { "$ref": "#/$defs/window" },
+        "max_entries": { "type": "integer", "minimum": 1, "default": 256 }
+      }
+    }
+  },
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "klt.wave_query.request/1",
+      "description": "Request contract identifier + major version. Not validated by `klt-wave` itself."
+    },
+    "store": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to a store produced by `klt wave build`, resolved relative to the request file's own directory."
+    },
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One or more query operations, evaluated independently -- one op's failure aborts the whole batch (exit 1), never a silent per-op skip. Required, non-empty.",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/value_op" },
+          { "$ref": "#/$defs/find_op" },
+          { "$ref": "#/$defs/count_op" },
+          { "$ref": "#/$defs/sample_op" },
+          { "$ref": "#/$defs/stuck_op" },
+          { "$ref": "#/$defs/diff_op" },
+          { "$ref": "#/$defs/wave_op" }
+        ]
+      }
+    }
+  }
+}
