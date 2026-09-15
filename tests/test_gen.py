@@ -258,6 +258,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "bbox_um",
         "device_count",
         "ports",
+        "navigable_regions",
         "drc_hints",
         "warnings",
     }
@@ -1913,6 +1914,181 @@ def test_list_generators_mos_array_declares_finger_topology():
     param = next(p for p in mos_array["params"] if p["name"] == "finger_topology")
     assert param["type"] == "string"
     assert param["default"] == "parallel"
+
+
+# --------------------------------------------------------------------------- #
+# `interior_channel_um` (issue #1531, Phase 1): reserves a navigable routing
+# channel between interior rows/columns of a `mos_array`, so a future
+# `gen-compose` phase can route through to a pin that today sits enclosed by
+# the array's own footprint on every side. This phase only adds the
+# generator-side channel + `navigable_regions` reporting -- `gen-compose`
+# itself does not yet consume the field (see the issue's Phase 2 follow-on).
+# --------------------------------------------------------------------------- #
+
+
+def test_mos_array_default_interior_channel_output_unchanged(tmp_path, pdk_root):
+    """`interior_channel_um` defaults to `0.0`, which must draw byte-for-byte
+    identical geometry to a request that never even mentions it -- this
+    generator's established regression-safety bar for every additive param
+    (`add_guard_ring`, `gate_pad_clearance_um`, `voltage_flavor`, ...)."""
+    implicit = tmp_path / "implicit.gds"
+    explicit = tmp_path / "explicit.gds"
+    implicit_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 3, "cols": 2, "dummy": 1},
+            "options": {"output": str(implicit)},
+        }
+    )
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 3, "cols": 2, "dummy": 1, "interior_channel_um": 0.0},
+            "options": {"output": str(explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert implicit_report["navigable_regions"] == []
+
+
+def test_mos_array_interior_channel_widens_row_pitch_and_reports_regions(
+    tmp_path, pdk_root
+):
+    """A `rows=3, cols=1` array with a non-zero `interior_channel_um` widens
+    the row-to-row pitch by exactly the requested gap, and reports one
+    navigable rectangle per interior row boundary (2, for 3 rows) -- each
+    wide enough to actually hold the requested channel."""
+    channel_um = 2.0
+    baseline = tmp_path / "baseline.gds"
+    widened = tmp_path / "widened.gds"
+    baseline_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 3, "cols": 1, "dummy": 0},
+            "options": {"output": str(baseline)},
+        }
+    )
+    widened_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "rows": 3,
+                "cols": 1,
+                "dummy": 0,
+                "interior_channel_um": channel_um,
+            },
+            "options": {"output": str(widened)},
+        }
+    )
+
+    # device_count/port count are unaffected by the channel -- it only moves
+    # cells further apart, it never adds or removes one.
+    assert widened_report["device_count"] == baseline_report["device_count"]
+    assert len(widened_report["ports"]) == len(baseline_report["ports"])
+
+    # The array's total height grows by exactly 2 * channel_um (one gap
+    # between row 0/1, one between row 1/2).
+    baseline_height = (
+        baseline_report["bbox_um"]["y1"] - baseline_report["bbox_um"]["y0"]
+    )
+    widened_height = widened_report["bbox_um"]["y1"] - widened_report["bbox_um"]["y0"]
+    assert widened_height == pytest.approx(baseline_height + 2 * channel_um)
+
+    # Width (a single column, no cols>1 channel requested) is unaffected.
+    baseline_width = baseline_report["bbox_um"]["x1"] - baseline_report["bbox_um"]["x0"]
+    widened_width = widened_report["bbox_um"]["x1"] - widened_report["bbox_um"]["x0"]
+    assert widened_width == pytest.approx(baseline_width)
+
+    assert baseline_report["navigable_regions"] == []
+    regions = widened_report["navigable_regions"]
+    assert len(regions) == 2  # rows=3 -> 2 interior row boundaries
+    for region in regions:
+        assert region["y1_um"] - region["y0_um"] >= channel_um
+        # Spans the array's own x extent -- a real, non-degenerate channel.
+        assert region["x1_um"] > region["x0_um"]
+    # Sorted by y, the two bands must not overlap each other.
+    ys = sorted(regions, key=lambda r: r["y0_um"])
+    assert ys[0]["y1_um"] <= ys[1]["y0_um"]
+
+
+def test_mos_array_interior_channel_widens_col_pitch_for_multi_column(
+    tmp_path, pdk_root
+):
+    """The same channel reservation applies along columns when `cols > 1` --
+    mirrors the row case above, confirmed independently since `mos_array`
+    bumps `row_pitch`/`col_pitch` in the same conditional."""
+    channel_um = 1.5
+    baseline = tmp_path / "baseline_cols.gds"
+    widened = tmp_path / "widened_cols.gds"
+    baseline_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 1, "cols": 3, "dummy": 0},
+            "options": {"output": str(baseline)},
+        }
+    )
+    widened_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "rows": 1,
+                "cols": 3,
+                "dummy": 0,
+                "interior_channel_um": channel_um,
+            },
+            "options": {"output": str(widened)},
+        }
+    )
+    baseline_width = baseline_report["bbox_um"]["x1"] - baseline_report["bbox_um"]["x0"]
+    widened_width = widened_report["bbox_um"]["x1"] - widened_report["bbox_um"]["x0"]
+    assert widened_width == pytest.approx(baseline_width + 2 * channel_um)
+
+    regions = widened_report["navigable_regions"]
+    assert len(regions) == 2  # cols=3 -> 2 interior column boundaries
+    for region in regions:
+        assert region["x1_um"] - region["x0_um"] >= channel_um
+
+
+def test_mos_array_interior_channel_negative_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"interior_channel_um": -0.1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
+    """The widened array stays DRC-clean at both a default (`0.0`, no-op)
+    and a non-default `interior_channel_um` on both curated PDK families --
+    the channel only ever adds clearance, never removes it."""
+    for variant, deck in (("sky130A", "sky130"), ("gf180mcuD", "gf180mcu")):
+        for channel_um in (0.0, 1.0):
+            output = tmp_path / f"mos_array_channel_{deck}_{channel_um}.gds"
+            generate(
+                {
+                    "generator": "mos_array",
+                    "pdk": {"variant": variant, "root": str(both_pdk_root)},
+                    "params": {
+                        "rows": 3,
+                        "cols": 2,
+                        "dummy": 1,
+                        "interior_channel_um": channel_um,
+                    },
+                    "options": {"output": str(output)},
+                }
+            )
+            drc_report = run_drc(str(output), deck)
+            assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # --- res_array --------------------------------------------------------------- #

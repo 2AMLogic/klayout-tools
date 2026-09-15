@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt gen mos_array` gains `interior_channel_um` (default `0.0`,
+  preserving byte-for-byte existing geometry; issue #1531, Phase 1) — extra
+  gap in µm reserved between adjacent rows/columns, on top of the fixed
+  inter-device spacing, so an interior unit device's pin has a metal-free
+  path out to the array's edge. A positive value widens both `row_pitch` and
+  `col_pitch` by exactly that amount; `0.0` adds nothing to either pitch, so
+  every request that predates this param keeps identical `x0_um`/`y0_um` per
+  cell — the same regression-safety convention `add_guard_ring` and
+  `gate_pad_clearance_um` already established. Reserving the channel in the
+  generator (rather than teaching `gen-compose` to peek inside an otherwise-
+  opaque block) keeps the generator responsible for its own routability the
+  same way it already is for its own DRC cleanliness. `res_array`/`diff_pair`
+  are expected to grow the same parameter in a later phase, not this one. See
+  `docs/cli/gen.md`'s `mos_array` param table.
+- **Added**: `klt gen` response field `navigable_regions` (issue #1531,
+  Phase 1) — a list of metal-free `{"x0_um", "y0_um", "x1_um", "y1_um"}`
+  rectangles inside the emitted cell's own footprint that a router could pass
+  through, reported as a sibling of `ports`. Currently populated only by
+  `mos_array`'s `interior_channel_um` above (one band per adjacent row pair
+  when `rows > 1`, one per adjacent column pair when `cols > 1`); every other
+  generator — and `mos_array` itself at the default `interior_channel_um:
+  0.0` — reports an empty list. Additive field on `klt gen` only, no
+  `schema_version` bump, per [`docs/json-contract.md`](docs/json-contract.md)
+  (same precedent as `dbu_um`, issue #1496). `klt gen-compose` does **not**
+  yet consume this field: subtracting a block's declared `navigable_regions`
+  from its obstacle bbox so a `waypoints_um` backbone can be routed through
+  the channel is Phase 2, filed separately as issue #1835.
+
 ## 0.5.0 (2026-09-15)
 
 235 commits on `main` since v0.4.0, cut under the 25-commit backstop in
