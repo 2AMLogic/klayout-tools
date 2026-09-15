@@ -176,19 +176,13 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build + install the extension, then run the klt ${{ matrix.crate }} tests
+      - name: Build + install the ${{ matrix.extension_module }} extension
         # `--group <crate>` resolves `klt-<crate>-native` from
         # `${{ matrix.dir }}` via pyproject.toml's [tool.uv.sources] and
         # drives maturin to compile it. Without it, this crate's native-
         # extension-dependent tests skip themselves wholesale (by design, so
         # a Rust-less environment degrades gracefully) -- this step is what
         # makes sure the skip is never the only thing CI ever sees.
-        #
-        # --capture=tee-sys so the closed-form comparison and
-        # convergence-rate tables (mom's tests/test_mom_validation.py, issue
-        # #719) print in this leg's log on a green run too, not only on
-        # failure. It still captures, so capsys-based CLI assertions are
-        # unaffected -- unlike -s / --capture=no, which would break them.
         #
         # --reinstall-package klt-<crate>-native (issue #1885, found on PR
         # #1879): the `Set up uv` step above enables setup-uv's cache with
@@ -209,20 +203,53 @@ jobs:
         # step stays fast. The crate name matches
         # pyproject.toml's [tool.uv.sources] keys: klt-mom-native,
         # klt-congestion-native, klt-yield-native.
+        #
+        # The freshness gate below is what keeps that flag honest -- see
+        # docs/design/native-extension-freshness.md.
         working-directory: .
         run: |
           uv sync --locked --extra dev --group ${{ matrix.group }} \
             --reinstall-package klt-${{ matrix.crate }}-native
-          uv run --frozen --extra dev --group ${{ matrix.group }} pytest \
-            ${{ matrix.test_paths }} -v --capture=tee-sys
 
-      - name: Assert the klt ${{ matrix.crate }} tests actually ran (no silent skip)
+      - name: Assert ${{ matrix.extension_module }} is this checkout's (freshness gate)
+        # GATE, and deliberately BEFORE pytest (issue #1889). Two failure
+        # modes, one step:
+        #
+        #   1. the extension did not install at all -- the tests below would
+        #      have skipped themselves and this leg would have been green
+        #      while testing nothing (this is the old "no silent skip"
+        #      assert, folded in here so there is exactly one importability
+        #      gate per leg);
+        #   2. the extension installed but is STALE -- `uv sync` served a
+        #      cached wheel built from different Rust sources, so the tests
+        #      below would have validated the PREVIOUS build. That is the
+        #      dangerous direction: the cache normally holds main's wheel, so
+        #      a branch that breaks this crate can go green against it.
+        #
+        # The check is content-based, never mtime-based: `build.rs` embeds an
+        # FNV-1a-64 fingerprint of the crate's Rust sources into the module as
+        # `__source_fingerprint__` and the script recomputes it from this
+        # checkout. A timestamp comparison would be defeated by the very
+        # mechanism it is meant to catch -- this pool's self-hosted runners
+        # reuse their workspace, where `git checkout` does not reliably
+        # advance a tracked file's mtime.
         working-directory: .
         run: |
-          uv run --frozen --extra dev --group ${{ matrix.group }} python -c "import ${{ matrix.extension_module }}" || {
-            echo "::error::${{ matrix.no_skip_message }}"
-            exit 1
-          }
+          uv run --frozen --extra dev --group ${{ matrix.group }} \
+            python scripts/native_source_fingerprint.py ${{ matrix.dir }} \
+            --assert-module ${{ matrix.extension_module }} \
+            --import-error-message "${{ matrix.no_skip_message }}"
+
+      - name: Run the klt ${{ matrix.crate }} tests
+        # --capture=tee-sys so the closed-form comparison and
+        # convergence-rate tables (mom's tests/test_mom_validation.py, issue
+        # #719) print in this leg's log on a green run too, not only on
+        # failure. It still captures, so capsys-based CLI assertions are
+        # unaffected -- unlike -s / --capture=no, which would break them.
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group ${{ matrix.group }} pytest \
+            ${{ matrix.test_paths }} -v --capture=tee-sys
 
       - name: Install the external NEC2++ oracle and run the cross-validation test
         # tests/test_mom_cross_validation.py (issue #895, Phase 2c) checks
@@ -240,6 +267,12 @@ jobs:
         # to attribute independently on a failure. mom-only (issue #929's
         # matrix has no equivalent for congestion/yield): guarded so it does
         # not run on those legs.
+        #
+        # No --reinstall-package here on purpose: klt-mom-native is already
+        # installed from this checkout (and gated on above), and this sync
+        # only adds PyNEC -- uv leaves an already-satisfied package alone
+        # rather than re-serving it from the cache, so rebuilding the
+        # extension a second time would only cost time.
         if: matrix.crate == 'mom'
         working-directory: .
         run: |
@@ -310,29 +343,48 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build + install the extension, then run the klt sta tests
+      - name: Build + install the klt_statime_native extension
         # `--group statime` resolves klt-statime-native from native/statime/
         # via pyproject.toml's [tool.uv.sources] and drives maturin to
-        # compile it. tests/test_sta.py is hermetic (no PDK, no Rust needed
-        # -- it also runs in the `test` job below); the extension-backed
-        # tier here is what proves the real pyo3 boundary works.
+        # compile it.
+        #
+        # --reinstall-package klt-statime-native (issue #1892, the
+        # `native-statime` counterpart of #1885): without it, a Rust-only
+        # change to native/statime/ restores the previously built wheel from
+        # the uv cache -- setup-uv's default cache-dependency-glob never keys
+        # on `native/**/*.rs` -- and the tests below exercise a stale
+        # extension. See the `native` matrix job's own copy of this comment
+        # for the full mechanism.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group statime \
+            --reinstall-package klt-statime-native
+
+      - name: Assert klt_statime_native is this checkout's (freshness gate)
+        # GATE, before the tests (issue #1889): fails when the extension did
+        # not install at all (the tests below would have skipped themselves)
+        # AND when it installed but was served stale from the uv cache. See
+        # the `native` matrix job's own copy of this step, and
+        # docs/design/native-extension-freshness.md.
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group statime \
+            python scripts/native_source_fingerprint.py native/statime \
+            --assert-module klt_statime_native \
+            --import-error-message "klt_statime_native did not install -- tests/test_sta.py's extension tier would have skipped"
+
+      - name: Run the klt sta tests
+        # tests/test_sta.py is hermetic (no PDK, no Rust needed -- it also
+        # runs in the `test` job below); the extension-backed tier here is
+        # what proves the real pyo3 boundary works.
         # tests/test_sta_corpus.py still self-skips: it needs a real ~13 MB
         # sky130 liberty this workflow does not provision, same posture as
         # tests/test_synthesize.py's own real-PDK tier.
         working-directory: .
         run: |
-          uv sync --locked --extra dev --group statime
           uv run --frozen --extra dev --group statime pytest \
             tests/test_sta.py tests/test_sta_corpus.py \
             -v --capture=tee-sys
-
-      - name: Assert the extension actually installed (no silent skip)
-        working-directory: .
-        run: |
-          uv run --frozen --extra dev --group statime python -c "import klt_statime_native" || {
-            echo "::error::klt_statime_native did not install -- tests/test_sta.py's extension tier would have skipped"
-            exit 1
-          }
 
       - name: Smoke-test the pyo3 boundary end to end
         # A real critical_path_json() call through the extension against a

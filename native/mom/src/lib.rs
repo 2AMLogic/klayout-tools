@@ -120,5 +120,15 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
 #[pymodule]
 fn klt_mom_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_mom_json, m)?)?;
+    // Build provenance (issue #1889): the FNV-1a-64 content fingerprint of
+    // this crate's Rust sources at compile time, computed by `build.rs`. CI
+    // recomputes it from the checkout (see
+    // `scripts/native_source_fingerprint.py`) and fails loudly when they
+    // differ, so a cached, stale wheel served by `uv sync` can never be
+    // mistaken for a fresh build of this branch.
+    m.add(
+        "__source_fingerprint__",
+        env!("KLT_NATIVE_SOURCE_FINGERPRINT"),
+    )?;
     Ok(())
 }

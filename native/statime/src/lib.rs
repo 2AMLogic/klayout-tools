@@ -107,5 +107,11 @@ fn run_critical_path(
 #[pymodule]
 fn klt_statime_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(critical_path_json, m)?)?;
+    // Build provenance (issue #1889) -- see native/mom/src/lib.rs's own
+    // comment on this line and `scripts/native_source_fingerprint.py`.
+    m.add(
+        "__source_fingerprint__",
+        env!("KLT_NATIVE_SOURCE_FINGERPRINT"),
+    )?;
     Ok(())
 }
