@@ -49,6 +49,7 @@ def _print_text(report: dict) -> None:
     print(f"estimated_power_mw: {report['estimated_power_mw']}")
     print()
     print(f"def_path: {report['def_path']}")
+    print(f"geometry_source: {report['geometry_source']}")
     print(f"spef_path: {report['spef_path']}")
 
     annotation = report.get("spef_annotation")

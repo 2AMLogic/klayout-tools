@@ -59,6 +59,34 @@ not required for this issue): a ``propagated_clock`` request option (the
 in-flow STA -- and this module -- both time an ideal SDC-only clock even
 once a real clock tree exists) and a bisected (rather than
 ``report_fmax_metric``'s ``1/(T-WNS)`` extrapolated) ``fmax_mhz``.
+
+**Pre-route DEFs (issue #1826).** Nothing about this module's OpenSTA session
+construction (``read_lef`` x2, ``read_def`` -- no ``-floorplan_initialize``,
+``read_liberty``, ``create_clock``) actually requires the DEF to be *routed*
+specifically; a placement- or CTS-stage DEF (``klt place-and-route``'s own
+``unrouted_def_path``, populated when ``target_stage`` is ``"place"`` or
+``"cts"``) loads and times the same way. This closes issue #1826's "gap 1":
+a caller wanting an SDC-driven, clock-constrained setup/hold slack number
+*before* a full route now has a real path to one, reusing the DEF
+``place_and_route.py``'s own ``"place"``/``"cts"`` stages already write
+(issue #785 originally kept the ``"place"``-stage one internal-only; #1826
+reverses that for exactly this use case) rather than giving this module a
+from-scratch netlist-input mode (the alternative shape issue #1825 proposes
+for the same gap -- see that issue for the cross-reference and rationale).
+
+Because a bare DEF file carries no metadata declaring which stage produced
+it, this module cannot infer "was this routed" on its own -- the caller must
+say so via the optional ``request.geometry_source`` field
+(``"routed"``, the default, vs. ``"placement_estimate"``), echoed back
+verbatim as the response's own ``geometry_source`` field. This exists
+specifically so a response built on a pre-route DEF is never silently
+shaped identically to a routed, detailed-SPEF-eligible signoff result: a
+placement-stage (or CTS-stage) DEF's parasitics come from
+``estimate_parasitics -placement`` (a placement/bounding-box estimate), not
+routing-derived RC, so its ``worst_slack_ns``/``worst_hold_slack_ns``/etc.
+are a real number but a less accurate one than the same fields on a routed
+DEF -- ``geometry_source: "placement_estimate"`` is the caller's own
+declaration of that distinction, machine-readable rather than left to prose.
 """
 
 from __future__ import annotations
@@ -157,6 +185,15 @@ _PARTIAL_DRIVERS_RE = re.compile(
 #: ``delay_changed`` to ``null`` (unknown), never to ``false``.
 _NO_PATHS_FOUND = "no paths found"
 
+#: Issue #1826: the two ``request.geometry_source`` values this module
+#: accepts -- ``"routed"`` (the default, this command's original and only
+#: behaviour) declares the ``def`` a fully-routed, detailed-SPEF-eligible
+#: signoff geometry; ``"placement_estimate"`` declares it a pre-route
+#: (placement- or CTS-stage) DEF whose parasitics are a bounding-box
+#: estimate, not routing-derived RC. See this module's own docstring
+#: "Pre-route DEFs" section for the full rationale.
+_GEOMETRY_SOURCES = ("routed", "placement_estimate")
+
 
 class PostRouteStaError(Exception):
     """Raised when a standalone STA run cannot be completed: a missing/
@@ -239,6 +276,7 @@ def run_sta(
 
     clock_port, clock_period_ns = _validate_constraints(request["constraints"])
     spef_path = _resolve_spef(request.get("spef"), request_dir)
+    geometry_source = _validate_geometry_source(request.get("geometry_source"))
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -306,6 +344,12 @@ def run_sta(
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
         "def_path": def_path,
+        # Additive field (issue #1826): echo of `request.geometry_source` --
+        # see this module's own docstring "Pre-route DEFs" section. Always
+        # present (never `null`): `"routed"` is the default when the request
+        # omits it, matching this command's pre-#1826 behaviour byte-for-
+        # byte.
+        "geometry_source": geometry_source,
         "spef_path": spef_path,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
@@ -492,6 +536,25 @@ def _validate_constraints(constraints: Any) -> tuple[str, float]:
             "request.constraints.clock_period_ns must be a positive number"
         )
     return clock_port, float(clock_period_ns)
+
+
+def _validate_geometry_source(geometry_source: Any) -> str:
+    """``request.geometry_source`` (issue #1826): declares whether ``def``
+    is a fully-routed signoff geometry (``"routed"``, the default) or a
+    pre-route placement-/CTS-stage estimate (``"placement_estimate"``) --
+    see this module's own docstring "Pre-route DEFs" section. Purely a
+    caller-supplied label this module cannot itself verify (a bare DEF file
+    carries no stage provenance); echoed back in the response so a
+    downstream consumer never mistakes a pre-route estimate for a routed
+    signoff number without an explicit declaration in the request that put
+    it there."""
+    if geometry_source is None:
+        return "routed"
+    if geometry_source not in _GEOMETRY_SOURCES:
+        raise PostRouteStaError(
+            "request.geometry_source must be one of: " + ", ".join(_GEOMETRY_SOURCES)
+        )
+    return geometry_source
 
 
 def _resolve_liberty(

@@ -1582,6 +1582,12 @@ _STAGE_METRICS = {
         "route__wirelength__estimated": 7852.26,
         "timing__setup__ws": -1.9939,
         "timing__setup__tns": -75.8268,
+        # Issue #1826: the nominal-corner hold WNS, present from `"place"`
+        # onward (`report_worst_slack_metric -hold`, mirroring `-setup`
+        # above) -- deliberately distinct per stage below, so a test
+        # asserting `nominal_hold_slack_ns` catches an accidental "same
+        # value at every stage" bug.
+        "timing__hold__ws": 0.42011,
         "timing__fmax": 3.23217e08,
         "design__die__area": 8487.94,
         "design__core__area": 7607.3,
@@ -1592,6 +1598,7 @@ _STAGE_METRICS = {
         "route__wirelength__estimated": 8095.6,
         "timing__setup__ws": -2.05,
         "timing__setup__tns": -78.1,
+        "timing__hold__ws": 0.31882,
         "timing__fmax": 3.1e08,
         "design__die__area": 8487.94,
         "design__core__area": 7607.3,
@@ -1607,6 +1614,7 @@ _STAGE_METRICS = {
         "route__drc_errors": 0,
         "timing__setup__ws": -2.18828,
         "timing__setup__tns": -82.8171,
+        "timing__hold__ws": 0.22011,
         "timing__fmax": 3.0411e08,
         "design__die__area": 8487.94,
         "design__core__area": 7607.3,
@@ -1828,6 +1836,14 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # accidental alias of the existing one.
     assert report["worst_setup_slack_ns"] == pytest.approx(-4.02163)
     assert report["worst_hold_slack_ns"] == pytest.approx(0.08421)
+    # Issue #1826: the single, nominal-corner hold WNS at `stage_reached`
+    # ("route") -- deliberately distinct from the corner-swept
+    # `worst_hold_slack_ns` aggregate above (0.08421 vs. 0.22011), proving
+    # the new field is not an accidental alias of the existing one. Also
+    # distinct from `unrouted_def_path`, which is `null` at `"route"` (the
+    # routed `def_path` above is the artifact to use there instead).
+    assert report["nominal_hold_slack_ns"] == pytest.approx(0.22011)
+    assert report["unrouted_def_path"] is None
 
     assert [stage["name"] for stage in report["stages"]] == list(
         place_and_route.STAGE_ORDER
@@ -1839,6 +1855,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert "route_drc_violation_count" not in report["stages"][0]
     assert "worst_setup_slack_ns" not in report["stages"][0]
     assert "worst_hold_slack_ns" not in report["stages"][0]
+    # Issue #1826: `nominal_hold_slack_ns` is gated exactly like
+    # `hold_violation_count` -- absent at floorplan, present from `"place"`
+    # onward, each stage's own (distinct) value.
+    assert "nominal_hold_slack_ns" not in report["stages"][0]
+    assert report["stages"][1]["nominal_hold_slack_ns"] == pytest.approx(0.42011)
+    assert report["stages"][2]["nominal_hold_slack_ns"] == pytest.approx(0.31882)
+    assert report["stages"][3]["nominal_hold_slack_ns"] == pytest.approx(0.22011)
     # place/cts stages report setup/hold but not antenna (route-only check).
     assert "antenna_violation_count" not in report["stages"][1]
     assert "antenna_violation_count" not in report["stages"][2]
@@ -3252,6 +3275,39 @@ def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     # `clock_skew_ns` is `null` before the `cts` stage runs -- no clock tree
     # exists yet at `"place"` (issue #783).
     assert report["clock_skew_ns"] is None
+    # Issue #1826: `nominal_hold_slack_ns` populates from `"place"` onward,
+    # same as `worst_slack_ns`/`hold_violation_count`, even though routing
+    # never ran.
+    assert report["nominal_hold_slack_ns"] == pytest.approx(0.42011)
+    # Issue #1826 (gap 1): `unrouted_def_path` points at the deterministic
+    # `<hdl_toplevel>.place.def` `_stage_script_lines`'s own `"place"`
+    # branch already writes unconditionally (originally internal-only per
+    # issue #785) -- populated because `target_stage` itself is `"place"`.
+    expected_place_def = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "gcd.place.def"
+    )
+    assert report["unrouted_def_path"] == expected_place_def
+    assert os.path.isfile(report["unrouted_def_path"])
+
+
+def test_stubbed_target_stage_cts_reports_unrouted_def_path(tmp_path, monkeypatch):
+    """Issue #1826 (gap 1): a `target_stage: "cts"` run gets its own
+    post-CTS, still-unrouted DEF via `unrouted_def_path` -- the `"cts"`
+    stage's own `write_def` call, newly added by this issue (`"place"`'s
+    own DEF is a different, earlier artifact, not reused here)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="cts")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place", "cts"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "cts"
+    assert report["def_path"] is None
+    expected_cts_def = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "gcd.cts.def"
+    )
+    assert report["unrouted_def_path"] == expected_cts_def
+    assert os.path.isfile(report["unrouted_def_path"])
+    assert report["nominal_hold_slack_ns"] == pytest.approx(0.31882)
 
 
 def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
@@ -3270,6 +3326,10 @@ def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
     assert report["def_path"] is None
     assert report["gds_path"] is None
     assert report["verilog_path"] is None
+    # Issue #1826: neither the pre-route DEF nor the nominal hold slack
+    # exists yet at `"floorplan"` -- no placement, no DEF write.
+    assert report["unrouted_def_path"] is None
+    assert report["nominal_hold_slack_ns"] is None
 
 
 def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
