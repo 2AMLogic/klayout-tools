@@ -547,6 +547,7 @@ def run_sim(
     budget_s: float | None = None,
     resume: bool | None = None,
     plot_dir: str | None = None,
+    fail_fast_probe: bool | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -650,6 +651,25 @@ def run_sim(
     ``measurements[].plot`` entry, so the miss report itself names the SVG
     to look at (see docs/cli/sim.md's "Waveform plots" section).
     ``None`` (the default) writes nothing, exactly today's behaviour.
+
+    ``fail_fast_probe`` (issue #1694, the two-pass probe model -- see
+    docs/design/sim-corner-reached-s.md) opts into a dispatch-time
+    calibration probe: before any real corner runs, a short, bounded
+    ``tran`` slice of the grid's first corner is run to measure that
+    corner/deck's own simulated-time-per-wall-clock-second rate, which is
+    then used to estimate whether ``options.timeout_s`` can plausibly cover
+    the *full* analysis window. When the estimate says no (see
+    ``_run_fail_fast_probe``/``_PROBE_ABORT_MARGIN``), the entire grid is
+    aborted before a single real corner is dispatched -- each reported
+    ``status: "error"`` with a ``timeout_budget_unreachable`` diagnostic
+    carrying an *estimated* ``reached_s``/``fraction`` derived from the
+    measured rate (never a true per-corner recovery -- see
+    docs/cli/sim.md's "Timeout-budget preflight" section for why that
+    remains out of reach). Overrides the request's own
+    ``options.fail_fast_probe`` when given. Only engaged for ``backend in
+    ("local", "local-parallel")`` (including any ``hosts > 1`` shard built
+    on them) and only when ``analysis.kind == "tran"``; ``None``/``False``
+    (the default) runs no probe at all, exactly today's behaviour.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
@@ -766,14 +786,21 @@ def run_sim(
             )
 
     resume = resume if resume is not None else bool(options.get("resume", False))
+    fail_fast_probe = (
+        fail_fast_probe
+        if fail_fast_probe is not None
+        else bool(options.get("fail_fast_probe", False))
+    )
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
-    # check -- never blocks the sweep, only surfaces an advisory string.
-    # See `_preflight_timeout_warning`'s docstring for why this is
-    # deliberately not a real per-engine throughput estimate, and this
-    # module's "Timeout-budget preflight" section header for why a
-    # dispatch-time fail-fast guard (this issue's more impactful second
-    # acceptance criterion) is not implemented here.
+    # check -- never blocks the sweep, only surfaces an advisory string. See
+    # `_preflight_timeout_warning`'s docstring for why this is deliberately
+    # not a real per-engine throughput estimate. The dispatch-time
+    # fail-fast guard this warning's own docstring used to say was "not
+    # implemented" now exists (issue #1694's two-pass probe model, gated on
+    # `fail_fast_probe`/`options.fail_fast_probe` -- see
+    # `_run_fail_fast_probe`, run further below once `models_lib` and the
+    # dispatched corner list are known).
     preflight_warning = _preflight_timeout_warning(
         analysis=analysis, timeout_s=timeout_s
     )
@@ -899,12 +926,61 @@ def run_sim(
         else corner_points
     )
 
+    # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
+    # `options.fail_fast_probe`): run once per grid, before any real corner
+    # is dispatched -- not per backend/shard/host, and not for `remote`
+    # (see `_run_remote`'s docstring for why probing this process's own
+    # host is not representative of a provisioned remote box). `None` when
+    # the probe did not run at all (opted out, wrong analysis kind, empty
+    # grid) or came back inconclusive -- see `_run_fail_fast_probe`.
+    probe_result: dict[str, Any] | None = None
+    if fail_fast_probe and backend != "remote" and dispatch_points:
+        probe_result = _run_fail_fast_probe(
+            corner_points=dispatch_points,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            analysis=analysis,
+            timeout_s=timeout_s,
+            artifacts_dir=artifacts_dir,
+            keep_artifacts=keep_artifacts,
+        )
+
+    probe_abort: dict[str, Any] | None = None
+    if probe_result is not None and probe_result["abort"]:
+        probe_abort = {
+            "code": "timeout_budget_unreachable",
+            "message": (
+                "the two-pass fail-fast probe (issue #1694) measured "
+                f"{probe_result['measured_rate_s_per_s']:.4g}s of simulated "
+                f"time per wall-clock second at corner "
+                f"{probe_result['corner_id']!r} "
+                + (
+                    "(an upper bound -- the probe itself was killed at its "
+                    "own bounded timeout before finishing its calibration "
+                    "slice)"
+                    if probe_result["rate_is_upper_bound"]
+                    else "(from a completed calibration slice)"
+                )
+                + f", implying the full {probe_result['analysis_window_s']:.4g}s "
+                f"tran window would need an estimated "
+                f"{probe_result['estimated_wall_s']:.4g}s of wall-clock time "
+                f"per corner -- more than {_PROBE_ABORT_MARGIN:g}x the "
+                f"configured options.timeout_s ({timeout_s:g}s). Aborting "
+                "the whole grid now rather than letting every corner burn "
+                "its full timeout for a partial result -- see "
+                "docs/design/sim-corner-reached-s.md."
+            ),
+            "reached_s": probe_result["estimated_reached_s"],
+            "fraction": probe_result["estimated_fraction"],
+        }
+
     if hosts == 1:
         # The exact pre-#376 call for the default case (no budget, no
-        # resume, hosts=1) -- `dispatch_points`/the three new kwargs are
-        # identity no-ops then (`dispatch_points is corner_points`,
-        # `deadline`/`checkpoint` both `None`), so this path stays
-        # byte-identical for every existing request/response.
+        # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
+        # new-since kwargs are identity no-ops then (`dispatch_points is
+        # corner_points`, `deadline`/`checkpoint`/`probe_abort` all `None`),
+        # so this path stays byte-identical for every existing
+        # request/response.
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
             corner_points=dispatch_points,
             netlist_path=netlist_path,
@@ -920,6 +996,7 @@ def run_sim(
             deadline=deadline,
             initial_ppid=initial_ppid,
             checkpoint=checkpoint,
+            probe_abort=probe_abort,
         )
     elif backend == "remote":
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
@@ -960,6 +1037,7 @@ def run_sim(
                 deadline=deadline,
                 initial_ppid=initial_ppid,
                 checkpoint=checkpoint,
+                probe_abort=probe_abort,
             )
 
         corners_new, backend_engine_version, remote_environment = _run_sharded(
@@ -1140,6 +1218,16 @@ def run_sim(
         # that looks plausible for the declared `tran` window), exactly
         # like `orphaned` above. Advisory only -- never blocks the sweep.
         environment["timeout_preflight_warning"] = preflight_warning
+    if probe_result is not None:
+        # Additive/optional: only present when `fail_fast_probe`/
+        # `options.fail_fast_probe` opted in *and* the probe actually ran
+        # and came back conclusive (issue #1694) -- reports the measured
+        # rate/estimate regardless of whether it triggered an abort, so a
+        # caller can see how close a passing sweep came to the margin, not
+        # just learn about it after the fact. See
+        # docs/design/sim-corner-reached-s.md and docs/cli/sim.md's
+        # "Timeout-budget preflight" section.
+        environment["fail_fast_probe"] = probe_result
     if resume:
         # Additive/optional: only present when `options.resume`/`--resume`
         # was requested -- see `run_sim`'s docstring.
@@ -1877,21 +1965,22 @@ def _run_local(
     deadline: float | None = None,
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
+    probe_abort: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
     This is the unit a backend implements -- given the expanded corner list
     plus the already-resolved netlist/model paths and run options, return
     ``(per_corner_reports, engine_version, remote_environment)``. For the
-    default case (no ``deadline``/``initial_ppid``/``checkpoint``) this
-    intentionally reproduces the original in-line loop byte-for-byte (same
-    ordering, same ``engine_version`` last-writer-wins tracking) so the
-    report JSON and on-disk artifacts are unchanged from before the backend
-    seam existed. ``max_workers``/``request`` are accepted for signature
-    parity with the other backends (every entry in :data:`_BACKENDS` is
-    called with the same keyword set) but are meaningless for a sequential
-    local runner, so both are ignored here; the third return value is always
-    ``None`` (only ``remote`` populates it).
+    default case (no ``deadline``/``initial_ppid``/``checkpoint``/
+    ``probe_abort``) this intentionally reproduces the original in-line loop
+    byte-for-byte (same ordering, same ``engine_version`` last-writer-wins
+    tracking) so the report JSON and on-disk artifacts are unchanged from
+    before the backend seam existed. ``max_workers``/``request`` are
+    accepted for signature parity with the other backends (every entry in
+    :data:`_BACKENDS` is called with the same keyword set) but are
+    meaningless for a sequential local runner, so both are ignored here; the
+    third return value is always ``None`` (only ``remote`` populates it).
 
     ``deadline``/``initial_ppid`` (issue #473) are checked before *starting*
     each corner: once either fires, every remaining corner is reported via
@@ -1900,11 +1989,30 @@ def _run_local(
     is only ever one, for this sequential backend). ``checkpoint``, when
     given, records each corner as it completes so a later ``--resume`` run
     does not recompute it.
+
+    ``probe_abort`` (issue #1694, the two-pass probe model's fail-fast half
+    -- see ``_run_fail_fast_probe`` and docs/design/sim-corner-reached-s.md)
+    is the ``{"code", "message", "reached_s", "fraction"}`` decision ``run_sim``
+    already made *before* calling this backend at all: when given, **every**
+    corner in ``corner_points`` is reported unrun via
+    :func:`_unrun_corner_report` with that code/message/estimate, and no
+    ``ngspice`` process is ever spawned for this sweep -- the whole point of
+    running the calibration probe first is to make this decision before any
+    real corner (not just the ones after some in-flight budget/orphan check)
+    burns its own ``options.timeout_s``.
     """
     del max_workers, request  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     stop_reason: str | None = None
+    abort_message: str | None = None
+    abort_reached_s: float | None = None
+    abort_fraction: float | None = None
+    if probe_abort is not None:
+        stop_reason = probe_abort["code"]
+        abort_message = probe_abort["message"]
+        abort_reached_s = probe_abort.get("reached_s")
+        abort_fraction = probe_abort.get("fraction")
     for point in corner_points:
         if stop_reason is None:
             if deadline is not None and time.monotonic() >= deadline:
@@ -1912,7 +2020,16 @@ def _run_local(
             elif initial_ppid is not None and os.getppid() != initial_ppid:
                 stop_reason = "orphaned"
         if stop_reason is not None:
-            corners.append(_unrun_corner_report(point, measurements_spec, stop_reason))
+            corners.append(
+                _unrun_corner_report(
+                    point,
+                    measurements_spec,
+                    stop_reason,
+                    message=abort_message,
+                    reached_s=abort_reached_s,
+                    fraction=abort_fraction,
+                )
+            )
             continue
         result, version = _run_corner(
             point=point,
@@ -1965,6 +2082,7 @@ def _run_local_parallel(
     deadline: float | None = None,
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
+    probe_abort: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -2005,6 +2123,12 @@ def _run_local_parallel(
     given, records each corner the instant its future resolves -- not
     batched at the end -- so a crash mid-sweep loses at most the corners
     still in flight at that moment.
+
+    ``probe_abort`` (issue #1694): identical contract to
+    :func:`_run_local`'s own ``probe_abort`` -- when given, ``stop_reason``
+    starts pre-set to its code, so ``_fill`` never submits a single corner
+    to the pool and every corner in ``corner_points`` comes back through
+    :func:`_unrun_corner_report` with that code/message/estimate.
     """
     del request  # unused: local-parallel needs no request-level context
     resolved_workers = (
@@ -2014,6 +2138,14 @@ def _run_local_parallel(
     total = len(corner_points)
     results: list[tuple[dict[str, Any], str | None] | None] = [None] * total
     stop_reason: str | None = None
+    abort_message: str | None = None
+    abort_reached_s: float | None = None
+    abort_fraction: float | None = None
+    if probe_abort is not None:
+        stop_reason = probe_abort["code"]
+        abort_message = probe_abort["message"]
+        abort_reached_s = probe_abort.get("reached_s")
+        abort_fraction = probe_abort.get("fraction")
     next_index = 0
 
     def _stopped() -> str | None:
@@ -2073,7 +2205,12 @@ def _run_local_parallel(
             assert stop_reason is not None
             corners.append(
                 _unrun_corner_report(
-                    corner_points[index], measurements_spec, stop_reason
+                    corner_points[index],
+                    measurements_spec,
+                    stop_reason,
+                    message=abort_message,
+                    reached_s=abort_reached_s,
+                    fraction=abort_fraction,
                 )
             )
             continue
@@ -2415,10 +2552,19 @@ def _extract_engine_version(stdout: str) -> str | None:
 #    (non-timeout) sweeps, which is unacceptable.
 #
 # Both are real, reproducible findings (not merely "harder than expected"),
-# so this Builder pass ships the parts of the issue's acceptance criteria
-# that are safe today -- the preflight heuristic below -- and files
-# https://github.com/2AMLogic/klayout-tools/issues/1694 for the harder,
-# deck-architecture-level question that `reached_s` recovery actually raises.
+# so a prior Builder pass shipped only the parts of the issue's acceptance
+# criteria that were safe at the time -- the coarse pre-grid preflight
+# heuristic below -- and filed issue #1694 for the harder,
+# deck-architecture-level question that `reached_s` recovery actually
+# raises. Issue #1694 -- see docs/design/sim-corner-reached-s.md for the
+# design decision -- ships the dispatch-time fail-fast half of that
+# acceptance criterion via a *different* mechanism than the blocked
+# per-corner `reached_s` recovery: a two-pass calibration probe (this
+# section's "Two-pass fail-fast probe" below), run once per grid rather
+# than instrumenting every corner. A corner actually dispatched and then
+# killed by its own `options.timeout_s` still reports `reached_s: null`
+# in its `timeout` diagnostic -- that per-corner recovery gap is
+# unchanged by #1694 and remains exactly as described above.
 # --------------------------------------------------------------------------- #
 
 
@@ -2459,6 +2605,32 @@ def _parse_spice_seconds(raw: str) -> float | None:
 _PREFLIGHT_MIN_TIMEPOINTS_PER_S = 50.0
 
 
+def _parse_tran_window(
+    analysis: dict[str, Any],
+) -> tuple[str, str, float, float] | None:
+    """Parse a ``tran`` analysis's own ``step``/``window`` tokens (the first
+    two space-separated tokens of ``analysis['args']``), shared by
+    :func:`_preflight_timeout_warning` (issue #1686) and
+    :func:`_run_fail_fast_probe` (issue #1694) -- both need the same "is
+    this a `tran` analysis with parseable timing tokens" gate.
+
+    Returns ``(step_token, window_token, step_s, window_s)`` (the original
+    token strings, for messages, alongside their parsed seconds), or
+    ``None`` when ``analysis['kind']`` isn't ``"tran"`` or the tokens can't
+    be parsed as positive SPICE time literals.
+    """
+    if analysis.get("kind") != "tran":
+        return None
+    tokens = (analysis.get("args") or "").split()
+    if len(tokens) < 2:
+        return None
+    step_s = _parse_spice_seconds(tokens[0])
+    window_s = _parse_spice_seconds(tokens[1])
+    if step_s is None or window_s is None or step_s <= 0 or window_s <= 0:
+        return None
+    return tokens[0], tokens[1], step_s, window_s
+
+
 def _preflight_timeout_warning(
     *, analysis: dict[str, Any], timeout_s: float
 ) -> str | None:
@@ -2472,31 +2644,290 @@ def _preflight_timeout_warning(
 
     Scoped to ``kind == "tran"`` (the only analysis with a "window of
     simulated time" concept); returns ``None`` for anything else, or when
-    ``args``'s step/window tokens cannot be parsed.
+    ``args``'s step/window tokens cannot be parsed (see
+    :func:`_parse_tran_window`).
+
+    This is a static, structural check (step/window vs. a generous
+    timepoints-per-second floor) -- it never runs ``ngspice`` and so cannot
+    know this deck's *actual* rate. :func:`_run_fail_fast_probe` (issue
+    #1694) is the complementary, evidence-based check: it actually measures
+    a rate before the grid runs, and can abort the sweep outright, not just
+    warn.
     """
-    if analysis.get("kind") != "tran":
+    parsed = _parse_tran_window(analysis)
+    if parsed is None:
         return None
-    tokens = (analysis.get("args") or "").split()
-    if len(tokens) < 2:
-        return None
-    step_s = _parse_spice_seconds(tokens[0])
-    window_s = _parse_spice_seconds(tokens[1])
-    if step_s is None or window_s is None or step_s <= 0 or window_s <= 0:
-        return None
+    step_token, window_token, step_s, window_s = parsed
     timepoints = window_s / step_s
     min_plausible_s = timepoints / _PREFLIGHT_MIN_TIMEPOINTS_PER_S
     if timeout_s >= min_plausible_s:
         return None
     return (
         f"options.timeout_s ({timeout_s:g}s) looks implausible for a tran "
-        f"analysis with ~{timepoints:.3g} timepoints ({tokens[0]} step, "
-        f"{tokens[1]} window) -- even {_PREFLIGHT_MIN_TIMEPOINTS_PER_S:.0f} "
+        f"analysis with ~{timepoints:.3g} timepoints ({step_token} step, "
+        f"{window_token} window) -- even {_PREFLIGHT_MIN_TIMEPOINTS_PER_S:.0f} "
         "timepoints/s (a generous floor, not a real engine-rate estimate) "
         f"would need {min_plausible_s:.3g}s per corner. This is only a "
         "coarse, advisory pre-grid heuristic -- it does not block the "
         "sweep, and a plausible-looking budget can still turn out to be "
         "too short in practice."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Two-pass fail-fast probe (issue #1694)
+# --------------------------------------------------------------------------- #
+#
+# See docs/design/sim-corner-reached-s.md for the design decision this
+# implements. Summary: rather than recovering a real per-corner `reached_s`
+# (blocked -- see the "Timeout-budget preflight" section above), run one
+# short, bounded calibration `tran` slice on the grid's first corner before
+# dispatching any real corner, measure that slice's own
+# simulated-seconds-per-wall-clock-second rate, and use it to estimate
+# whether `options.timeout_s` can plausibly cover the *full* analysis
+# window. When the estimate says no -- by more than `_PROBE_ABORT_MARGIN`,
+# to absorb the probe's own sampling noise -- the entire grid is aborted
+# before a single real corner is dispatched, each reported with an
+# *estimated* `reached_s`/`fraction` derived from the measured rate (never
+# a real per-corner recovery, and clearly distinct from one -- see
+# `_unrun_corner_report`'s docstring). This is the guard that would have
+# caught the motivating incident (2AMLogic/sky130-pll#103: 45 corners each
+# burning their full 10800s `timeout_s` while covering only ~54% of a
+# widened analysis window) after the very first corner's probe, rather than
+# after all 45 corners had already run to completion.
+#
+# Opt-in via `options.fail_fast_probe` (default `False`, like
+# `options.resume`/`options.wall_clock_budget_s`) -- see `run_sim`'s
+# docstring. Only engaged for `backend in ("local", "local-parallel")`
+# (including any `hosts > 1` shard built on them); see `_run_remote`'s
+# docstring for why the `remote` backend does not probe.
+# --------------------------------------------------------------------------- #
+
+#: Fraction of the full `tran` analysis window used for the calibration
+#: probe's own (much shorter) `tran` slice. Small enough that the probe
+#: itself never becomes a material fraction of the grid's total cost, large
+#: enough to be a representative sample of this corner/deck's own
+#: convergence behaviour rather than pure startup-transient noise.
+_PROBE_WINDOW_FRACTION = 0.02
+
+#: Bounds on the probe's own wall-clock budget, independent of the corner's
+#: real `options.timeout_s`: a fraction of it, floored so a tiny `timeout_s`
+#: still gives the probe a moment to run, and capped so a huge `timeout_s`
+#: does not make the probe itself an hours-long liability -- the entire
+#: point of probing first is to spend a small, predictable amount of
+#: wall-clock time finding out whether `timeout_s` is achievable, not to
+#: recreate the same problem at a smaller scale.
+_PROBE_TIMEOUT_FRACTION = 0.1
+_PROBE_TIMEOUT_FLOOR_S = 1.0
+_PROBE_TIMEOUT_CAP_S = 60.0
+
+#: How much worse than `options.timeout_s` the probe's estimate must say the
+#: full run would be before the fail-fast actually aborts the grid. A
+#: margin above 1.0 absorbs the probe's own sampling noise (a short,
+#: possibly-transient-heavy slice at the start of a `tran` can under- or
+#: over-estimate the deck's steady-state rate) without masking the kind of
+#: gross mismatch the motivating incident showed: 45 corners that only
+#: reached ~54% of the window in their full budget imply the true run
+#: needed roughly 1.85x `timeout_s`, comfortably past this margin.
+_PROBE_ABORT_MARGIN = 1.5
+
+
+def _probe_window_and_timeout(window_s: float, timeout_s: float) -> tuple[float, float]:
+    """The calibration probe's own bounded ``(window_s, timeout_s)`` pair,
+    derived from the *real* analysis window and per-corner timeout -- see
+    this section's module-level constants for the rationale.
+    """
+    probe_window_s = window_s * _PROBE_WINDOW_FRACTION
+    probe_timeout_s = min(
+        max(timeout_s * _PROBE_TIMEOUT_FRACTION, _PROBE_TIMEOUT_FLOOR_S),
+        _PROBE_TIMEOUT_CAP_S,
+        timeout_s,
+    )
+    return probe_window_s, probe_timeout_s
+
+
+def _run_calibration_probe(
+    *,
+    point: CornerPoint,
+    netlist_path: str,
+    models_lib: str | None,
+    step_token: str,
+    probe_window_s: float,
+    probe_timeout_s: float,
+    artifacts_dir: str,
+    keep_artifacts: bool,
+) -> dict[str, Any]:
+    """Run one short, bounded ``tran`` slice -- the calibration half of the
+    two-pass probe model -- and report how it went.
+
+    Reuses :func:`_write_corner_deck` unmodified for the deck shape (same
+    ``alter`` cards, same ``.control`` wrapper -- a probe on a corner whose
+    supply override changes convergence behaviour needs that same override
+    active to be representative) with an empty ``measurements_spec`` (the
+    probe's own pass/fail is irrelevant, and skipping ``.meas`` cards avoids
+    the "out of interval" corruption this module's "Timeout-budget
+    preflight" section documents for a truncated window) and a scaled-down
+    ``tran`` window in place of the real ``analysis``.
+
+    Returns ``{"wall_s", "timed_out", "error"}``; never raises. A timed-out
+    probe (``timed_out=True``) still yields a usable rate estimate at the
+    call site -- an *upper bound*, since ``probe_window_s`` of simulated
+    time provably was not reached within ``probe_timeout_s`` of wall time,
+    even though (mirroring this module's core finding) exactly how far it
+    did get cannot be recovered from a ``.control``-wrapped run killed
+    mid-flight. ``error`` (non-``None``) means the probe itself is
+    inconclusive (could not launch ngspice, or its own shortened analysis
+    did not complete cleanly) -- the caller treats that exactly like "no
+    evidence either way" and skips the fail-fast check entirely, never
+    aborting a grid on untrustworthy evidence.
+    """
+    probe_dir = (
+        os.path.join(artifacts_dir, f"{point.slug}__probe")
+        if keep_artifacts
+        else _tmp_work_dir()
+    )
+    if keep_artifacts:
+        os.makedirs(probe_dir, exist_ok=True)
+    deck_path = os.path.join(probe_dir, "probe.cir")
+    log_path = os.path.join(probe_dir, "probe.log")
+
+    _write_corner_deck(
+        deck_path=deck_path,
+        netlist_path=netlist_path,
+        models_lib=models_lib,
+        point=point,
+        analysis={"kind": "tran", "args": f"{step_token} {probe_window_s:.9g}"},
+        measurements_spec=[],
+        raw_path=None,
+    )
+
+    started = time.monotonic()
+    timed_out = False
+    error: str | None = None
+    try:
+        subprocess.run(
+            ["ngspice", "-b", deck_path, "-o", log_path],
+            capture_output=True,
+            text=True,
+            timeout=probe_timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    except FileNotFoundError as exc:
+        error = f"could not launch ngspice for the calibration probe: {exc}"
+    wall_s = round(time.monotonic() - started, 3)
+
+    if not timed_out and error is None:
+        log_text = ""
+        if os.path.isfile(log_path):
+            try:
+                with open(log_path, encoding="utf-8", errors="replace") as handle:
+                    log_text = handle.read()
+            except OSError:
+                log_text = ""
+        if _SIMULATION_ABORTED_RE.search(log_text):
+            # The probe's own (shortened) analysis never completed cleanly
+            # -- e.g. a genuine convergence failure at this corner, not the
+            # probe window being too generous. Its wall time is not a
+            # trustworthy rate sample either way.
+            error = "the calibration probe's own analysis did not complete cleanly"
+
+    if not keep_artifacts:
+        _cleanup_dir(probe_dir)
+
+    return {"wall_s": wall_s, "timed_out": timed_out, "error": error}
+
+
+def _run_fail_fast_probe(
+    *,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    models_lib: str | None,
+    analysis: dict[str, Any],
+    timeout_s: float,
+    artifacts_dir: str,
+    keep_artifacts: bool,
+) -> dict[str, Any] | None:
+    """The two-pass probe model's dispatch-time entry point (issue #1694):
+    run one short, bounded calibration ``tran`` slice on the grid's first
+    corner, measure that corner/deck's own simulated-time-per-wall-clock-
+    second rate, and use it to estimate whether ``timeout_s`` can plausibly
+    cover the *full* analysis window -- before committing the rest of the
+    grid to it. See docs/design/sim-corner-reached-s.md for the rationale
+    and docs/cli/sim.md's "Timeout-budget preflight" section for the
+    reported shape.
+
+    Returns ``None`` when there is nothing to probe (``analysis.kind``
+    isn't ``"tran"``, its step/window tokens don't parse, or the grid is
+    empty) or when the probe itself was inconclusive (spawn failure, or its
+    own shortened analysis did not complete cleanly) -- in every such case
+    the sweep proceeds exactly as it would have before this issue, with no
+    probe surfaced in the response at all. Otherwise returns a dict with
+    the measured rate, the estimated full-window wall-clock cost, and an
+    ``"abort"`` boolean the caller uses to decide whether to skip the whole
+    grid; the caller (``run_sim``) is responsible for turning ``"abort":
+    True`` into the actual dispatch-time skip (see ``_run_local``'s
+    ``probe_abort`` parameter).
+    """
+    parsed = _parse_tran_window(analysis)
+    if parsed is None or not corner_points:
+        return None
+    step_token, _window_token, _step_s, window_s = parsed
+
+    point = corner_points[0]
+    probe_window_s, probe_timeout_s = _probe_window_and_timeout(window_s, timeout_s)
+    if probe_window_s <= 0:
+        return None
+
+    probe = _run_calibration_probe(
+        point=point,
+        netlist_path=netlist_path,
+        models_lib=models_lib,
+        step_token=step_token,
+        probe_window_s=probe_window_s,
+        probe_timeout_s=probe_timeout_s,
+        artifacts_dir=artifacts_dir,
+        keep_artifacts=keep_artifacts,
+    )
+    if probe["error"] is not None:
+        return None
+
+    if probe["timed_out"]:
+        rate_s_per_s: float | None = probe_window_s / probe_timeout_s
+        rate_is_upper_bound = True
+    elif probe["wall_s"] > 0:
+        rate_s_per_s = probe_window_s / probe["wall_s"]
+        rate_is_upper_bound = False
+    else:
+        # Immeasurably fast (a near-zero wall time for a nonzero probe
+        # window) -- no usable rate, but also no reason to suspect a
+        # feasibility problem; treated the same as any other inconclusive
+        # probe.
+        rate_s_per_s = None
+        rate_is_upper_bound = False
+
+    if rate_s_per_s is None:
+        return None
+
+    estimated_wall_s = window_s / rate_s_per_s
+    estimated_reached_s = min(window_s, rate_s_per_s * timeout_s)
+    abort = estimated_wall_s > timeout_s * _PROBE_ABORT_MARGIN
+
+    return {
+        "corner_id": point.corner_id,
+        "probe_window_s": probe_window_s,
+        "probe_timeout_s": probe_timeout_s,
+        "probe_wall_s": probe["wall_s"],
+        "measured_rate_s_per_s": rate_s_per_s,
+        "rate_is_upper_bound": rate_is_upper_bound,
+        "analysis_window_s": window_s,
+        "timeout_s": timeout_s,
+        "estimated_wall_s": estimated_wall_s,
+        "estimated_reached_s": estimated_reached_s,
+        "estimated_fraction": (estimated_reached_s / window_s if window_s else None),
+        "abort_margin": _PROBE_ABORT_MARGIN,
+        "abort": abort,
+    }
 
 
 def _classify_diagnostics(
