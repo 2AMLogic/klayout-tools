@@ -886,6 +886,33 @@ into the circuit.)
   block's own drawn shapes on the route layer, not a substitute for `klt
   extract` — see "`unrouted_nets: []` plus a clean `klt drc` is not a
   connectivity guarantee either" above.
+- **Two inter-block nets sharing one row channel can now both route via a
+  channel track retry (#1467), but only when their spans nest — a
+  genuinely crossing pair is still a capability ceiling.** Before this
+  issue, the router drew every inter-block net's fixed-shape backbone at
+  the *same* channel y whenever two nets faced the same direction off the
+  same row (`manhattan_backbone`'s both-vertical-facing branch), so the
+  *first*-processed net always won the channel and every other
+  contending net was rejected outright with `"crosses already-routed net
+  ..."` — see "Channel track assignment (`#1467`)" below for the retry
+  this issue adds and its exact scope. That retry is a **single-sided,
+  y-offset-only** mechanism, and single-sided access (every port on the
+  *same* edge, approached by a vertical stub from the row below) can only
+  resolve **nested** span pairs — a wider (outer) net on a farther track
+  clearing a narrower (inner) net's own approach stub, which sits inside
+  the outer net's horizontal run by construction. Two nets whose spans
+  *cross* (partially overlap, with neither fully containing the other) are
+  **not** resolvable by any y-offset: whichever one lands on the farther
+  track still has an endpoint inside the nearer net's span, so its own
+  approach stub crosses the nearer net's horizontal run regardless of how
+  far it is pushed. This is the same "capability ceiling" framing as the
+  two obstacle cases above — the router reports the crossing net
+  unroutable rather than drawing a short — and, per the design decision
+  this issue recorded (`docs/design/gen-compose-track-assignment.md`), a
+  caller who hits it needs either a caller-supplied `waypoints_um` detour
+  (see "Routing same-facing port pairs with waypoints_um" below) or a
+  second routing plane (`routing.cross_block_layer_role`, below) for one
+  of the two nets.
 
 ## Via-drop routing (metal2/via, #454)
 
@@ -1238,6 +1265,91 @@ to pick the path themselves — the retry only fires for a leg that supplied
 none. As with every other check in this document, the composed output must
 still be re-verified with `klt drc`.
 
+## Channel track assignment (#1467)
+
+`#1393` above resolves same-block self-net contention; the route-vs-route
+collision check itself (#1057/#1386) still had no retry at all for the
+**inter-block** analog — two *different* nets, each between its own pair of
+blocks, whose fixed-shape backbones land on the identical channel y because
+both go through `manhattan_backbone()`'s both-vertical-facing (or
+both-horizontal-facing) branch: same row, ports facing the same absolute
+direction. Before this issue, the router placed every net's backbone at
+whatever y the fixed shape computed, with no allocation of separate routing
+resources between nets — the *first* net `connectivity[]` declared always
+won the channel, and every other contending net was rejected outright
+(`"crosses already-routed net '<first net>'"`); reordering `connectivity[]`
+just moved which net won. This is the resource-allocation gap #1467 reported
+against a real 8-block/13-net composition (1 of 13 nets routing).
+
+**The retry.** When a leg is all of: an inter-block net (`pin_a["block"] !=
+pin_b["block"]`), no caller-supplied `connectivity[].waypoints_um`, and both
+ports facing the identical vertical (or identical horizontal) direction —
+and the fixed-shape (untracked) attempt's route-vs-route check rejects it —
+`route_two_pin()` retries the *same* pin pair on successive **channel
+tracks**: the fixed shape's own single mid coordinate (`manhattan_backbone`'s
+`mx`/`my`) shifted farther from the row, one route width's worth of pitch
+per track (`2 * width_um`, comfortably inside almost every deck's own
+same-layer spacing rule — the caller's `leg_conflict` check still enforces
+the *actual* resolved rule, so an unusually wide spacing rule still fails
+safe rather than being silently violated), away from the ports' own facing
+direction. Each candidate track goes back through every one of
+`route_two_pin()`'s own checks (obstacle overlap, via-drop resolution, the
+lot — a track is just a different fixed shape, not an exemption from
+anything) and is re-checked against the route-vs-route collision check; the
+first track that clears both is accepted, up to a bound of 24 tracks before
+the leg is reported unroutable (the original collision wording, plus a note
+naming how many tracks were tried — the same convention #1167's and #1393's
+own exhausted searches use). A resolved leg reports which track it landed on
+in its own `nets[].legs[].channel_track` field (`0` for the untracked
+default, matching every other leg field's per-leg reporting — see the
+[response schema](#response) below); an unrouted leg omits it, the same
+convention `width_um` already uses.
+
+**Scope and topology — a nested-span resource allocator, not a general
+router.** This is deliberately the *online* equivalent of the classic
+left-edge interval-packing channel-router algorithm: legs are already
+processed in a fixed order (`connectivity[]` declaration order, or
+nearest-first within a bundle), and each claims the lowest-numbered track
+that is actually free by the time it is processed — decided lazily, on
+rejection, rather than by a separate up-front sort. Because every port in
+this shape is accessed from the **same** row edge (a single-sided channel,
+no "far side" to route a stub through), a pure y-offset can only resolve
+**nested** span pairs correctly: a wider (outer) net's horizontal run must
+sit on a *farther* track than a narrower (inner) net whose own approach stub
+sits, by construction, inside the outer net's span — the inner net's stub
+only avoids crossing the outer net's run by staying *below* it, never above.
+This means **declaration order matters** for a nested group: the router
+never reorders an already-accepted net, so if a request declares the
+*outermost* (widest) net of a nested group first, it claims the untracked
+(closest) track and strands every narrower net nested inside it — no number
+of tracks can clear that leg, since its own approach stub is inside the
+outer net's span at every height. Declare nested groups **narrowest
+(innermost) first, widest (outermost) last** so each successively wider net
+is naturally pushed to a farther track by this retry.
+
+**Two nets whose spans genuinely *cross* — partially overlapping, with
+neither containing the other — are not resolvable by this mechanism at
+all**, at any track count: whichever one lands on the farther track still
+has an endpoint inside the nearer net's span, so its approach stub crosses
+the nearer net's run regardless of offset. This is a real capability
+ceiling, not an implementation gap this retry is expected to eventually
+close — see "Known limitations" above and
+`docs/design/gen-compose-track-assignment.md` for the design decision that
+scoped this issue to nested-span resource allocation on the existing layer,
+deferring per-net layer assignment (option 2) and covering the crossing-span
+case in the interim via the "Known limitations" documentation itself (option
+3). A caller who hits the crossing case needs a caller-supplied
+`waypoints_um` detour or a second routing plane
+(`routing.cross_block_layer_role`, above) for one of the two nets.
+
+**Two independent channels never interact.** Because the retry only ever
+compares a candidate track's footprint against `accepted_route_regions` (the
+same route-vs-route collision state every other check in this module reads),
+two channel-congested groups at disjoint y ranges — e.g. two separate rows
+in one composition, one north-facing and one south-facing — resolve their
+own contention completely independently; a track index assigned in one
+channel has no bearing on the other.
+
 ## CLI shape (a Builder decision, per the spike's own flag)
 
 The spike's contract section names `klt gen compose` as a working name only
@@ -1490,7 +1602,8 @@ exit codes).
           ],
           "routed": true,
           "route_length_um": 3.2,
-          "reason": null
+          "reason": null,
+          "channel_track": 0
         }
       ]
     }
@@ -1529,7 +1642,7 @@ exit codes).
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
 | `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean — `true` only when *every* pin joined one component), `route_length_um` (summed wire length in um across the net's **drawn** legs, or `null` when zero legs were drawn — for a caller doing a first-order parasitic estimate before extraction), `status` (below), and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). Under a declare-only request (`routing` absent/`{}`, #1188), every net reports `routed: false`, `status: "unrouted"`, `route_length_um: null`, and every leg's `reason: "routing not requested"` — validated against the blocks' own ports, but never drawn. |
 | `nets[].status` | string | One of `"routed"` (every pin connected into one component), `"partial"` (at least one leg drawn, but the net is not fully connected), or `"unrouted"` (no leg was ever accepted, including every net under a declare-only request, #1188) — issue #1169. Distinguishes a partially-drawn net from a fully-undrawn one: both report `routed: false`, so a caller must read `status` (not just count `legs[].routed`) to tell them apart. |
-| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, and `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
+| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason), and `channel_track` (#1467, present only when `routed: true` — which channel track this leg's backbone landed on; `0` is the untracked/default fixed shape, `>0` means the router offset it to clear an already-routed net contending for the same channel; see "Channel track assignment (#1467)" above). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |

@@ -2659,6 +2659,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         "routed": leg["routed"],
                         "route_length_um": leg["route_length_um"],
                         "reason": leg["reason"],
+                        # channel_track (#1467): which channel track this leg's
+                        # backbone landed on -- 0 is the untracked/default
+                        # shape, >0 means the router offset it to avoid
+                        # contending with an already-routed net sharing the
+                        # same channel. Absent on an unrouted leg, matching
+                        # route_two_pin's own "no width_um either" convention.
+                        **(
+                            {"channel_track": leg["channel_track"]}
+                            if leg["routed"]
+                            else {}
+                        ),
                     }
                     for leg in result["legs"]
                 ],

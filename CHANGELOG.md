@@ -101,6 +101,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/wave.md`](docs/cli/wave.md) and
   [`docs/design/waveform-query-contract-spike.md`](docs/design/waveform-query-contract-spike.md)
   for the full contract.
+- **Added**: `klt gen-compose` — a channel track retry for inter-block
+  route-vs-route collisions (issue #1467): a leg whose fixed-shape backbone
+  contends with an already-routed net sharing the same single-sided channel
+  (same row, ports facing the same direction) is now retried on successive
+  y-offset tracks before being reported unroutable, instead of being
+  rejected outright on the first collision. Resolved legs report which
+  track they landed on in the new `nets[].legs[].channel_track` field (`0`
+  for the untracked default). Scoped to nested span pairs — see
+  `docs/cli/gen-compose.md`'s "Channel track assignment (#1467)" section for
+  the mechanism, the declaration-order requirement, and the capability
+  ceiling for genuinely crossing (non-nested) span pairs, which this retry
+  cannot resolve. Channel-track exhaustion with a configured
+  `routing.cross_block_layer_role` falls back to that cross-layer retry
+  (issue #1680) instead of failing outright.
 
 ## 0.5.0 (2026-09-15)
 

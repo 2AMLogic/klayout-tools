@@ -528,6 +528,7 @@ def manhattan_backbone(
     stub_a_um: float | None = None,
     stub_b_um: float | None = None,
     waypoints: list[tuple[float, float]] | None = None,
+    channel_offset_um: float = 0.0,
 ) -> list[tuple[float, float]]:
     """Generate a two-pin Manhattan backbone from port ``a`` to port ``b``.
 
@@ -547,6 +548,16 @@ def manhattan_backbone(
     port sits inside (e.g. a gate landing pad recessed below its block's top
     edge, issue #461); each defaults to ``stub_um``.
 
+    ``channel_offset_um`` (#1467) shifts the fixed shape's own single mid
+    coordinate -- ``mx`` for the both-horizontal-facing (vertical jog) branch,
+    ``my`` for the both-vertical-facing (horizontal jog) branch -- by this
+    signed amount, moving the connecting run to a different *track* within
+    the same channel without otherwise changing the shape. It has no effect
+    on the mixed-orientation (single-corner) branch, and is ignored entirely
+    whenever ``waypoints`` is supplied (the fixed-shape mid computation this
+    parameter shifts is not used in that case at all). Default ``0.0``
+    reproduces the unshifted shape exactly -- see :func:`route_two_pin`'s own
+    "Channel track retry" section for how a caller picks a nonzero value.
     ``waypoints`` (#634) is an optional caller-supplied ordered list of
     ``(x, y)`` points the backbone is forced through, between port ``a``'s
     stub and port ``b``'s stub -- the fixed-shape jog logic above is skipped
@@ -598,10 +609,10 @@ def manhattan_backbone(
 
     mid: list[tuple[float, float]] = []
     if a_horizontal and b_horizontal:
-        mx = (sa[0] + sb[0]) / 2.0
+        mx = (sa[0] + sb[0]) / 2.0 + channel_offset_um
         mid = [(mx, sa[1]), (mx, sb[1])]
     elif not a_horizontal and not b_horizontal:
-        my = (sa[1] + sb[1]) / 2.0
+        my = (sa[1] + sb[1]) / 2.0 + channel_offset_um
         mid = [(sa[0], my), (sb[0], my)]
     else:
         # One port faces x, the other y -> a single corner joins the stubs.
@@ -654,6 +665,30 @@ _DETOUR_CLEARANCE_WIDTHS = 2.0
 #: each a distinct lane still has the same "reported unroutable, not a
 #: silent short" failure mode as any other exhausted bounded search.
 _MAX_DETOUR_LANES = 2
+
+#: Track pitch for the channel track retry (#1467), as a multiple of the
+#: route width -- the same "comfortable margin, not legal-by-a-hair"
+#: convention :data:`_DETOUR_CLEARANCE_WIDTHS` uses: a leg's obstacle-overlap
+#: inflation only ever needs ``width_um / 2`` clearance, so stacking tracks
+#: ``2 * width_um`` apart leaves ``1.5 * width_um`` of clear space between two
+#: adjacent tracks' drawn metal, comfortably inside almost every PDK's own
+#: same-layer minimum-spacing rule without this module needing to resolve
+#: that rule itself (:func:`route_two_pin`'s own ``leg_conflict`` callback
+#: still rejects a track that isn't far enough for the *caller's* resolved
+#: deck rule -- see the retry loop below -- so an unusually wide spacing rule
+#: still fails safe, it just costs an extra track attempt rather than being
+#: silently violated).
+_CHANNEL_TRACK_PITCH_WIDTHS = 2.0
+
+#: How many alternate channel tracks (#1467) the retry below tries, beyond
+#: the fixed shape's own default (untracked) attempt, before reporting the
+#: leg unroutable. Generous relative to `_MAX_DETOUR_LANES` on purpose: a
+#: detour lane routes *around* a discrete obstacle (one or two lanes is
+#: always enough), while a channel track absorbs *contention between nets*,
+#: which can require as many tracks as there are mutually-overlapping nets
+#: sharing one channel -- the real-world reproduction this issue was filed
+#: against needed multiple tracks to clear a 13-net block.
+_MAX_CHANNEL_TRACKS = 24
 
 
 def _detour_escape_um(
@@ -1593,6 +1628,7 @@ def route_two_pin(
     leg_conflict: Any = None,
     block_geometry_for: Any = None,
     cross_block_geometry_for: Any = None,
+    channel_offset_um: float = 0.0,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -1934,11 +1970,59 @@ def route_two_pin(
     from a leg that needed the cross layer; it makes no promise about which
     layer the accepted lane ends up on.
 
+    **Channel track retry (issue #1467).** #1393 above only ever fires for a
+    *same-block* self-net's cross-layer fallback -- an *inter*-block leg that
+    ``leg_conflict`` rejects (a route-vs-route collision, #1057/#1386, not a
+    block obstacle) had no retry at this level at all before this issue: the
+    fixed one-jog shape always lands every net sharing one channel on the
+    exact same mid coordinate (:func:`manhattan_backbone`'s ``my``/``mx``),
+    so the *first* net processed wins the channel and every other net
+    contending for it is simply rejected, with no attempt to offset it onto a
+    different track the same channel has room for (see the module's own
+    "capability ceiling" framing -- this is a resource-*allocation* gap, not
+    a rejection-logic bug). This fires only for the common shared-row-channel
+    shape: an inter-block leg (``pin_a``/``pin_b`` on different blocks), both
+    ports facing the identical vertical direction (``va[1] == vb[1] != 0`` --
+    both north-facing or both south-facing, i.e. :func:`manhattan_backbone`'s
+    both-vertical-facing/horizontal-jog branch), with no caller-supplied
+    ``waypoints_um`` (a caller-steered path owns its own routing, exactly as
+    every other fixed-shape-only heuristic in this function already respects)
+    and ``leg_conflict`` actually supplied. Mixed-orientation pairs, a
+    vertical (both-horizontal-facing) jog's column channel, and same-block
+    self-nets are all out of scope for this retry -- the first two lack the
+    "many nets, one mid coordinate" degeneracy this retry exists to fix, and
+    the third is already #1393's own case.
+
+    When eligible and the fixed-shape (``channel_offset_um=0.0``) attempt's
+    ``leg_conflict`` check rejects it, this function retries the *identical*
+    pin pair on successive channel tracks -- the horizontal jog shifted
+    ``_CHANNEL_TRACK_PITCH_WIDTHS * width_um`` farther from the row per track,
+    away from the ports' own facing direction (north-facing ports stack
+    tracks upward, south-facing downward) -- via a recursive call with
+    ``channel_offset_um`` set accordingly, up to ``_MAX_CHANNEL_TRACKS``
+    tracks. Each candidate track is routed through *every* one of this
+    function's own checks again (obstacle overlap, via-drop resolution, the
+    lot -- a track is just a different fixed shape, not an exemption from
+    anything) and then re-checked against ``leg_conflict``; the first track
+    that clears both is accepted. This is the online equivalent of the
+    classic left-edge interval-packing channel-router algorithm: legs are
+    already processed in a fixed (request-declaration, or nearest-first
+    within a bundle) order, and each one claims the lowest-numbered track
+    that is actually free by the time it is processed, exactly as first-fit
+    packing would -- just decided lazily, on rejection, rather than by a
+    separate up-front sort. When every track up to the bound still conflicts,
+    the leg is reported unroutable with ``leg_conflict``'s own wording plus a
+    note naming how many tracks were tried, the same convention #1167's and
+    #1393's own exhausted searches use. A resolved leg reports which track it
+    landed on in its own ``channel_track`` field (0 for the untracked
+    default, matching :func:`route_bundle`'s own per-leg passthrough) -- see
+    the return-value doc below.
+
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list,
-    "route_layer": tuple[int, int] | None, "width_um": float, "reason":
-    str | None}`` (a rejected leg omits ``width_um``, nothing having been
-    drawn for it).
+    "route_layer": tuple[int, int] | None, "width_um": float,
+    "channel_track": int, "reason": str | None}`` (a rejected leg omits
+    ``width_um``/``channel_track``, nothing having been drawn for it).
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
     "landing_layers", "block_id"}`` entries (empty unless a drop was
     resolved; issue #1567: one entry per via *hop* -- a multi-level drop
@@ -2145,6 +2229,7 @@ def route_two_pin(
         stub_a_um=stub_a_um,
         stub_b_um=stub_b_um,
         waypoints=waypoints_um,
+        channel_offset_um=channel_offset_um,
     )
     margin_eps_um = 1e-6
 
@@ -2921,6 +3006,74 @@ def route_two_pin(
             ),
         }
 
+    # Channel track retry (#1467, see docstring): only armed for the
+    # untracked (channel_offset_um == 0.0) top-level attempt at an
+    # inter-block leg whose fixed shape is the shared-channel horizontal jog
+    # -- both ports facing the identical vertical direction -- with no
+    # caller-supplied waypoints_um. Every other leg (a vertical-jog/column
+    # channel, a mixed-orientation corner, a same-block self-net -- #1393's
+    # own case -- or a caller-/detour-supplied path) skips this block
+    # entirely, exactly as before this issue.
+    channel_track_eligible = (
+        leg_conflict is not None
+        and waypoints_um is None
+        and channel_offset_um == 0.0
+        and pin_a["block"] != pin_b["block"]
+        and va[1] != 0
+        and vb[1] != 0
+        and va[1] == vb[1]
+    )
+    channel_track_reason = (
+        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        if channel_track_eligible
+        else None
+    )
+    if channel_track_reason is not None:
+        pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
+        direction_sign = 1 if va[1] > 0 else -1
+        for track_index in range(1, _MAX_CHANNEL_TRACKS + 1):
+            retry = route_two_pin(
+                pin_a,
+                pin_b,
+                blocks,
+                offsets_um,
+                placed_bboxes_um,
+                width_um,
+                route_layer,
+                extraction_deck,
+                block_geometry,
+                cross_block_route_layer=cross_block_route_layer,
+                cross_block_geometry=cross_block_geometry,
+                cross_block_width_um=cross_block_width_um,
+                leg_conflict=leg_conflict,
+                block_geometry_for=block_geometry_for,
+                cross_block_geometry_for=cross_block_geometry_for,
+                channel_offset_um=direction_sign * pitch_um * track_index,
+            )
+            if not retry["routed"]:
+                continue
+            track_conflict = leg_conflict(
+                retry["points_um"],
+                retry.get("via_drops", []),
+                retry.get("stub_widen", []),
+                retry.get("route_layer"),
+            )
+            if track_conflict is None:
+                retry["channel_track"] = track_index
+                return retry
+        return {
+            "routed": False,
+            "route_length_um": None,
+            "points_um": None,
+            "reason": (
+                channel_track_reason
+                + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
+                "leg's shared-channel horizontal jog shifted farther from "
+                "the row, one route width's worth of clearance per track) "
+                "were tried first, and each one still conflicted"
+            ),
+        }
+
     return {
         "routed": True,
         "route_length_um": _polyline_length_um(points),
@@ -2929,6 +3082,7 @@ def route_two_pin(
         "stub_widen": stub_widen,
         "route_layer": effective_route_layer,
         "width_um": effective_width_um,
+        "channel_track": 0,
         "reason": None,
     }
 
@@ -3417,6 +3571,7 @@ def route_bundle(
                     "stub_widen": result.get("stub_widen", []),
                     "route_layer": result.get("route_layer"),
                     "width_um": result.get("width_um", width_um),
+                    "channel_track": result.get("channel_track", 0),
                 }
             )
         else:
@@ -3492,6 +3647,7 @@ def route_bundle(
                     "stub_widen": result.get("stub_widen", []),
                     "route_layer": result.get("route_layer"),
                     "width_um": result.get("width_um", width_um),
+                    "channel_track": result.get("channel_track", 0),
                 }
             )
         else:
