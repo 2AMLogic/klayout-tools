@@ -4736,6 +4736,11 @@ exit codes).
   "net_count": 6,
   "pin_count": 6,
   "device_counts": { "nfet": 1, "pfet": 1 },
+  "metrics": {
+    "extract__device__count": 2,
+    "extract__net__count": 6,
+    "extract__pin__count": 6
+  },
   "ignored_layers": [{ "layer": 55, "datatype": 0, "shapes": 12 }],
   "device_recognition_only_layers": [],
   "device_classes": [
@@ -4801,6 +4806,7 @@ exit codes).
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |
+| `metrics`          | object                     | Declared-namespace re-keying of `device_count`/`net_count`/`pin_count`, plus `parasitics.*` when `--parasitics` was given (issue #1848). See below. |
 | `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors and bipolars (both issue #462), and junction diodes (issue #542) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
 | `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. Does **not** catch a layer that is read for device recognition only, never as a `metals`/`vias` connectivity level — see `device_recognition_only_layers` below (issue #619). Every entry here already carries a material (`shapes > 0`) count — empty-layer entries are dropped before they reach this field — so a non-empty `ignored_layers` also appends a single aggregate prose entry to `warnings[]` (issue #666), naming the affected layer(s) and their total shape count, so a caller checking only `warnings[]` still sees it. |
 | `device_recognition_only_layers` | array\<object\> | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck` **does** read (so they never appear in `ignored_layers` above) but only for a bipolar/capacitor/resistor/diode device-recognition role, never as a `metals`/`vias` connectivity level and never one of the deck's own MOS-core layers either (issue #619 — see "Device-recognition-only layers" below), each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Two nets joined only through such a layer will not merge, and — unlike a layer the deck never reads at all — this gap is invisible to `ignored_layers`, which can only tell "read" from "not read," not "read for connectivity" from "read for device recognition only." This is diagnostic context, not a warning: unlike `ignored_layers`, a non-empty list does **not** append to `warnings[]` (a deck's own marker/mask geometry is expected to be device-recognition-only by PDK design, not a coverage gap). Empty when every device-recognition layer is also a `metals`/`vias` level or one of the deck's own MOS-core layers, or the deck declares no `bipolars`/`capacitors`/`mom_capacitors`/`resistors`/`diodes` entries at all. |
@@ -4826,6 +4832,57 @@ The `devices[]`/`nets[]` report is a *convenience view* for agents that want
 structure without re-parsing SPICE; the **netlist file at `netlist_path` is
 the authoritative artifact**, and it is what a future `klt lvs` and `klt sim`
 consume.
+
+### `metrics` object
+
+Introduced by issue #1848, adopting `klayout_tools.metrics`'s declared
+metric namespace registry (issue #247 — see
+[`../design/metric-namespace.md`](../design/metric-namespace.md) and
+[`../json-contract.md`](../json-contract.md)'s "Declared metric namespace"
+section) into `klt extract`'s own top-level payload, beyond the registry's
+`klt layout-metrics` pilot and `klt drc`'s adoption (issue #1847). **Purely
+additive**: a re-keying of this response's fixed, non-caller-supplied
+numeric fields under their declared, METRICS2.1-style hierarchical names —
+it never replaces or changes `device_count`/`net_count`/`pin_count`/
+`parasitics.*`, which stay exactly as documented above. The three
+non-parasitics entries are always present; the eight parasitics entries are
+present only when `--parasitics` was given (i.e. exactly when `parasitics`
+above is non-`null`).
+
+| Key                                        | Source field                              | Description |
+| ------------------------------------------- | ------------------------------------------ | ------------ |
+| `extract__device__count`                    | `device_count`                             | Total extracted device count. |
+| `extract__net__count`                       | `net_count`                                | Total extracted net count. |
+| `extract__pin__count`                       | `pin_count`                                | Total promoted-pin net count. |
+| `extract__resistor__count`                  | `parasitics.r_count`                       | Parasitic resistor device count. Present only with `--parasitics`. |
+| `extract__capacitor__count`                 | `parasitics.c_count`                       | Parasitic ground-capacitor device count. Present only with `--parasitics`. |
+| `extract__coupling__capacitor__count`       | `parasitics.cc_count`                      | Net-to-net coupling-capacitor device count. Present only with `--parasitics`. |
+| `extract__inductor__count`                  | `parasitics.l_count`                       | Series-inductor device count (`--mom-rlc-net`/`--mom-rlc-inductance-nh`). Present only with `--parasitics`. |
+| `extract__resistance__ohm`                  | `parasitics.total_resistance_ohm`          | Total parasitic resistance across every net, in ohms. Present only with `--parasitics`. |
+| `extract__capacitance__ff`                  | `parasitics.total_capacitance_ff`          | Total parasitic ground capacitance across every net, in femtofarads. Present only with `--parasitics`. |
+| `extract__coupling__capacitance__ff`        | `parasitics.total_coupling_capacitance_ff` | Total net-to-net coupling capacitance, in femtofarads. Present only with `--parasitics`. |
+| `extract__inductance__nh`                   | `parasitics.total_inductance_nh`           | Total series inductance, in nanohenries. Present only with `--parasitics`. |
+
+Every entry above declares `aggregator: "sum"` and `higher_is_better: null`
+in the registry — each is a purely structural/physical count or total (a
+bigger device/net/pin count, or a bigger total parasitic R/C/L, is not by
+itself a "better or worse" outcome; it is a sizing/parasitics fact other
+decisions act on), the same polarity reasoning
+[`../design/metric-namespace.md`](../design/metric-namespace.md) applies to
+`klt layout-metrics`' structural counts, applied identically here. None are
+`critical` (unlike `klt drc`'s `drc__error__count`).
+
+**Out of scope for this registry pass**: `device_counts` (the per-device-
+class dict) and the other structural/diagnostic report shapes
+(`parasitics.substrate_dc_tie`, `parasitics.metals_without_coefficient`,
+`parasitics.overlap_pairs_without_coefficient`, etc.) are deliberately
+**not** declared here. The registry's `{aggregator, higher_is_better,
+critical}` tuple is defined for a single scalar value, not a dict keyed by
+an open-ended, deck-defined device-class vocabulary or a list of gap
+reports — the same reasoning issue #247 documented for `klt sim`'s
+caller-supplied `measurements[].name` values staying permanently out of
+scope (see [`../design/metric-namespace.md`](../design/metric-namespace.md)'s
+"Follow-on work" section).
 
 ### `devices[]` entries
 
@@ -4862,7 +4919,7 @@ Every field in this report falls into exactly one of three classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 

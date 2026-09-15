@@ -615,6 +615,92 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Declared metric namespace registry adoption (issue #1848)
+# --------------------------------------------------------------------------- #
+
+
+def test_metrics_block_reflects_base_counts_without_parasitics(tmp_path):
+    """Without `--parasitics`, `metrics` carries exactly the three always-
+    present entries, re-keying `device_count`/`net_count`/`pin_count` under
+    their declared `extract__*` names -- no parasitics entries, and every
+    existing field unchanged."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["device_count"] == 2
+    assert report["parasitics"] is None
+    assert report["metrics"] == {
+        "extract__device__count": report["device_count"],
+        "extract__net__count": report["net_count"],
+        "extract__pin__count": report["pin_count"],
+    }
+
+
+def test_metrics_block_names_are_declared_in_registry():
+    from klayout_tools.metrics import REGISTRY, MetricDef
+
+    for name in (
+        "extract__device__count",
+        "extract__net__count",
+        "extract__pin__count",
+        "extract__resistor__count",
+        "extract__capacitor__count",
+        "extract__coupling__capacitor__count",
+        "extract__inductor__count",
+        "extract__resistance__ohm",
+        "extract__capacitance__ff",
+        "extract__coupling__capacitance__ff",
+        "extract__inductance__nh",
+    ):
+        metric_def = REGISTRY[name]
+        assert isinstance(metric_def, MetricDef)
+        assert metric_def.aggregator == "sum"
+        assert metric_def.higher_is_better is None
+        assert metric_def.critical is False
+
+
+def test_metrics_block_includes_parasitics_metrics_when_requested(tmp_path):
+    """With `--parasitics`, `metrics` additionally carries all eight
+    `parasitics.*` fixed numeric fields under their declared `extract__*`
+    names, matching `parasitics`' own values exactly -- purely additive,
+    `parasitics` itself is untouched."""
+    layout = _make_sg13g2_inverter_layout()
+    top = layout.cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(19, 0, kdb.Box(1650, 250, 1950, 550))  # Via1.drawing (Metal1<->Metal2)
+    draw(10, 0, kdb.Box(1600, 200, 2000, 1200))  # Metal2.drawing
+
+    path = _write_gds(layout, tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sg13g2", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+
+    para = report["parasitics"]
+    metrics = report["metrics"]
+    assert metrics["extract__device__count"] == report["device_count"]
+    assert metrics["extract__net__count"] == report["net_count"]
+    assert metrics["extract__pin__count"] == report["pin_count"]
+    assert metrics["extract__resistor__count"] == para["r_count"]
+    assert metrics["extract__capacitor__count"] == para["c_count"]
+    assert metrics["extract__coupling__capacitor__count"] == para["cc_count"]
+    assert metrics["extract__inductor__count"] == para["l_count"]
+    assert metrics["extract__resistance__ohm"] == para["total_resistance_ohm"]
+    assert metrics["extract__capacitance__ff"] == para["total_capacitance_ff"]
+    assert (
+        metrics["extract__coupling__capacitance__ff"]
+        == para["total_coupling_capacitance_ff"]
+    )
+    assert metrics["extract__inductance__nh"] == para["total_inductance_nh"]
+    # Sanity: the fixture actually exercises non-trivial R/C, so this isn't
+    # trivially true of an all-zero parasitics report.
+    assert para["r_count"] > 0
+    assert para["c_count"] > 0
+
+
+# --------------------------------------------------------------------------- #
 # NMOS body / substrate-tap resolution (issue #490)
 # --------------------------------------------------------------------------- #
 
