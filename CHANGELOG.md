@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt version --format json` gains `klayout_version` (the
+  KLayout engine actually resolved) and `klayout_version_expected` (the
+  version this build/commit was tested against, recorded from the
+  checkout's own `uv.lock` at build time — issue #1490) — and `klt drc`/`klt
+  lvs` reports gain `provenance.klayout_version_mismatch: true|false`, with
+  a one-line stderr warning when it's `true`. Closes the gap where pinning
+  `klayout-tools` to an exact git commit SHA did not pin the KLayout engine
+  version that commit resolves (`pyproject.toml`'s `klayout>=0.30` is
+  deliberately an unbounded floor), so a "reproduced" report could silently
+  use a different engine than the one that produced a committed baseline.
+  Reproduce the exact engine with `uv tool install "klayout-tools @
+  git+...@<sha>" --with klayout==<klayout_version_expected>` (already
+  supported by `uv`, now documented). See
+  [`docs/design/klayout-engine-version-pin.md`](docs/design/klayout-engine-version-pin.md)
+  for the full decision record and
+  [`docs/json-contract.md`](docs/json-contract.md)'s "Pinning the KLayout
+  engine version" section.
 - **Fixed**: `klt synthesize`'s `schema_version` bumps `1` -> `2` (issue
   #1844, mirroring `klt pex`/`klt sim`/`klt size`/`klt extract`'s own issue
   #1261/#1376 bumps): the top-level `netlist_path`/`script_path` fields --

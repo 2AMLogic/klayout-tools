@@ -93,6 +93,99 @@ def test_build_provenance_deck_name_without_resolvable_path():
 
 
 # --------------------------------------------------------------------------- #
+# klayout_version_mismatch (issue #1490)
+# --------------------------------------------------------------------------- #
+#
+# Opt-in via `include_klayout_version_mismatch=True` -- only `klt drc`/`klt
+# lvs` pass it (see each verb's own test module for the end-to-end wiring);
+# every other `build_provenance` caller is unaffected, covered by
+# `test_build_provenance_always_reports_versions` above staying green with no
+# `klayout_version_mismatch` key.
+
+
+def test_build_provenance_omits_mismatch_by_default():
+    prov = _provenance.build_provenance()
+    assert "klayout_version_mismatch" not in prov
+
+
+def test_build_provenance_mismatch_false_when_versions_agree(monkeypatch):
+    from klayout_tools import build_identity
+
+    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.10")
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+    )
+    prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
+    assert prov["klayout_version_mismatch"] is False
+
+
+def test_build_provenance_mismatch_true_when_versions_differ(monkeypatch, capsys):
+    from klayout_tools import build_identity
+
+    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+    )
+    prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
+    assert prov["klayout_version_mismatch"] is True
+
+    # Issue #1490 acceptance criteria: a stderr warning, exactly once.
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("klt: warning:") == 1
+    assert "0.30.12" in captured.err
+    assert "0.30.10" in captured.err
+
+
+def test_build_provenance_mismatch_false_when_expected_unresolvable(monkeypatch):
+    """An editable/dev checkout with no build-time-recorded expected version
+    (or any build predating this field) must never fabricate a mismatch --
+    `False` means "no *confirmed* mismatch", not "confirmed match"."""
+    from klayout_tools import build_identity
+
+    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: None
+    )
+    prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
+    assert prov["klayout_version_mismatch"] is False
+
+
+def test_build_provenance_mismatch_false_when_actual_unresolvable(monkeypatch):
+    from klayout_tools import build_identity
+
+    monkeypatch.setattr(_provenance, "_klayout_version", lambda: None)
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+    )
+    prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
+    assert prov["klayout_version_mismatch"] is False
+
+
+def test_build_provenance_mismatch_check_does_not_shell_out(monkeypatch):
+    """Regression guard: computing `klayout_version_mismatch` must never call
+    `subprocess.run` (a live `git`/`uv.lock` probe) from this hot path -- that
+    would add a subprocess call to *every* `klt drc`/`klt lvs` run on an
+    editable/dev install, and previously leaked into unrelated tests that
+    globally monkeypatch `subprocess.run` (e.g. netgen LVS engine tests)."""
+
+    def _fail(*_args, **_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("build_provenance shelled out to compute the pin")
+
+    monkeypatch.setattr(_provenance.subprocess, "run", _fail)
+    prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
+    assert prov["klayout_version_mismatch"] in (True, False)
+
+
+def test_klayout_version_mismatch_helper_is_a_plain_boolean():
+    assert _provenance._klayout_version_mismatch("0.30.10", "0.30.10") is False
+    assert _provenance._klayout_version_mismatch("0.30.12", "0.30.10") is True
+    assert _provenance._klayout_version_mismatch(None, "0.30.10") is False
+    assert _provenance._klayout_version_mismatch("0.30.10", None) is False
+    assert _provenance._klayout_version_mismatch(None, None) is False
+
+
+# --------------------------------------------------------------------------- #
 # deck.released (issue #1193)
 # --------------------------------------------------------------------------- #
 #

@@ -970,6 +970,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "provenance": {
     "klt_version": "0.4.2",
     "klayout_version": "0.29.8",
+    "klayout_version_mismatch": false,
     "pdk": null,
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
     "input": { "content_hash": "sha256:<hex>" }
@@ -1036,7 +1037,7 @@ On a run with findings:
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
-| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (`klt drc` resolves no PDK); `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (`klt drc` resolves no PDK); `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 
 ### `metrics` object
 
@@ -1342,7 +1343,13 @@ field by field. `provenance.klt_version`/`provenance.klayout_version`/
 vary between two runs of identical inputs on different tool
 installs/PDK snapshots; every other field (including `status`,
 `violation_count`, `violations`, and the hashes cheap mode also checks) is
-load-bearing. Response shape:
+load-bearing. `provenance.klayout_version_mismatch` (issue #1490) is
+deliberately **not** excluded: unlike the raw version strings, whether the
+mismatch itself changed between the committed run and a fresh rerun is
+informative on its own (a `false` → `true` transition means the fresh
+report used a different engine than the one that produced the committed
+baseline), so it is reported as ordinary drift like any other field.
+Response shape:
 
 ```json
 {

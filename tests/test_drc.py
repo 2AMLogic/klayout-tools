@@ -566,8 +566,13 @@ def test_json_contract(tmp_path, capsys):
         "pdk",
         "deck",
         "input",
+        # Issue #1490: klt drc (unlike most other provenance-carrying
+        # verbs) additionally flags whether the resolved klayout engine
+        # differs from the version this build/commit was tested against.
+        "klayout_version_mismatch",
     }
     assert isinstance(prov["klt_version"], str)
+    assert prov["klayout_version_mismatch"] in (True, False)
     # klt drc resolves no PDK.
     assert prov["pdk"] is None
     assert prov["deck"]["name"] == "sky130"

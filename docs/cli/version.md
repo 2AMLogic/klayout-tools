@@ -2,7 +2,8 @@
 
 Report which klayout-tools build is running — its version, the git commit it
 was built from, and whether that commit is this version's release tag
-(issue #1202).
+(issue #1202) — plus the KLayout engine version actually resolved and the
+version this build/commit was tested against (issue #1490).
 
 ```
 klt version [--format text|json]
@@ -44,7 +45,9 @@ a release.
   "git_commit": "4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2",
   "git_tag": null,
   "dirty": false,
-  "is_release": false
+  "is_release": false,
+  "klayout_version": "0.30.12",
+  "klayout_version_expected": "0.30.10"
 }
 ```
 
@@ -64,6 +67,13 @@ a release.
   release build, `false` for a confirmed non-release build, `null` when the
   question is unanswerable. A consumer gating on "this is a release" must
   require `is_release === true`; `null` is not a weaker `true`.
+- `klayout_version` (issue #1490) — the KLayout engine actually resolved
+  into this process (`klayout.__version__`, same value as
+  `provenance.klayout_version`), or `null` if unresolvable.
+- `klayout_version_expected` (issue #1490) — the `klayout` version this
+  build/commit was tested against, or `null` when unresolvable (a build made
+  before this field existed, or a checkout with no reachable `uv.lock`). See
+  "Pinning the KLayout engine version" below.
 
 Always exits `0`. Identifying the running build cannot fail — an
 unrecoverable identity is reported as `+unknown` with `is_release: null`,
@@ -90,6 +100,38 @@ Two sources, in priority order:
 The **policy** (what counts as a release) lives in
 `src/klayout_tools/build_identity.py`, not in the build hook: the hook records
 raw git facts only.
+
+`klayout_version_expected` is recorded the same way, from the same
+build-time-record-first / live-probe-fallback split, reading the checkout's
+`uv.lock` (`klayout`'s pinned entry there is the version this project's own
+CI test suite actually ran against for that commit, since CI installs via
+`uv sync --locked`) instead of git facts — see
+[`../design/klayout-engine-version-pin.md`](../design/klayout-engine-version-pin.md)
+for the full mechanism and why a hard `klayout==` pin in `pyproject.toml`
+was rejected.
+
+## Pinning the KLayout engine version
+
+Pinning `klayout-tools` to an exact git commit SHA does not, by itself, pin
+the `klayout` engine version that commit resolves —
+`pyproject.toml`'s `klayout>=0.30` dependency is an unbounded floor, so the
+same commit installed on different days can resolve different `klayout`
+versions, and DRC/LVS report internals (deck content hash, `rules_skipped`,
+`category_counts`) can shift alongside it even though the verdict itself
+does not (issue #1490).
+
+`klayout_version_expected` above is the reproduction target; the fix is
+`uv`'s own dependency override, no `klt`-specific flag needed:
+
+```bash
+uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
+  --with klayout==<klayout_version_expected>
+```
+
+`klt drc`/`klt lvs` reports compare the two fields automatically —
+`provenance.klayout_version_mismatch` — with a stderr warning on drift; see
+[`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine
+version" section.
 
 ## Gating a build before doing work
 

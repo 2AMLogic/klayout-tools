@@ -167,6 +167,16 @@ section 2 and [`docs/cli/wave.md`](cli/wave.md).
   `docs/cli/version.md`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
+- `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
+  below) — `true` when this run's `klayout_version` differs from
+  `klayout_version_expected` (`klt version --format json`, next section):
+  the version this `klayout-tools` build/commit was tested against, else
+  `false`. Always a plain boolean, never `null`: an unresolvable expected
+  version (e.g. an editable/dev checkout with no build-time record) renders
+  as `false` — "no *confirmed* mismatch" — not a fabricated signal. A `true`
+  result also prints a one-line warning to stderr, so the drift is visible
+  even without inspecting the JSON. See "Pinning the KLayout engine version"
+  below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK (e.g. `klt drc`, which resolves none, or
@@ -260,6 +270,52 @@ classes: content, bookkeeping, tool metadata") before diffing, so a
 committed/fresh pair differing only in `net_id`, an anonymous `$N` net-name
 spelling, and/or `parasitics.nets[]` ordering no longer reports `status:
 "drifted"` — only genuine **content** drift does.
+
+### Pinning the KLayout engine version (issue #1490)
+
+`klayout_version` above records which KLayout engine build a report was
+generated against, but until this issue there was nothing to pin it *to*: a
+`klayout-tools` git-commit-SHA install (the documented, recommended way to
+reproduce a committed report byte-for-byte) resolves whatever `klayout` PyPI
+release is current on the day of install — `pyproject.toml`'s own
+`klayout>=0.30` dependency is deliberately an unbounded floor, not an exact
+pin (see `docs/design/klayout-engine-version-pin.md` for the full rationale,
+including why a hard pin was rejected).
+
+`klt version --format json` reports both halves of the comparison:
+
+```json
+{
+  "...": "... git_commit / git_tag / dirty / is_release, unchanged ...",
+  "klayout_version": "0.30.12",
+  "klayout_version_expected": "0.30.10"
+}
+```
+
+- `klayout_version` — the `klayout` engine actually resolved into this
+  process (same value as `provenance.klayout_version` above).
+- `klayout_version_expected` — the `klayout` version this build/commit was
+  tested against, recorded from the checkout's own `uv.lock` at build time
+  (`uv sync --locked` is how this project's own CI installs, so the
+  `klayout` entry `uv.lock` pins at a given commit *is* the version that
+  commit's test suite ran against). `null` when unresolvable — a build made
+  before this field existed, or a checkout with no reachable `uv.lock`.
+
+A caller committing `klt drc`/`klt lvs` output as evidence does not need to
+call `klt version` separately to detect drift: `provenance.klayout_version_mismatch`
+(previous section) carries the same comparison inline on every report, with
+a stderr warning when it is `true`. To reproduce the exact engine a
+committed report was generated against:
+
+```bash
+uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
+  --with klayout==<klayout_version_expected>
+```
+
+`uv`'s own `--with` flag overrides the resolved `klayout` version for that
+install without any `klt`-specific flag — see
+`docs/design/klayout-engine-version-pin.md` for why this, rather than a new
+override mechanism, is the documented fix.
 
 ## Declared metric namespace (`metrics` block, issue #247)
 
