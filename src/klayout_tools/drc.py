@@ -58,6 +58,7 @@ from .decks import (
     get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
+from .metrics import is_registered
 
 # Check kinds that operate on a single region (no other_layer).
 # "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
@@ -102,6 +103,16 @@ _ANTENNA_CHECKS = {"antenna"}
 # of silently falling through to the default derivation.
 _DERIVED_LAYER_MODES = {"sized_intersection", "overlapping", "not_interacting"}
 
+# `run_drc()`'s own field name -> its declared METRICS2.1-style name in
+# `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
+# `layout-metrics` pilot). Additive: the `metrics` block this backs is a
+# *parallel* object alongside the existing `violation_count`/`rule_counts`
+# fields above, never a replacement for them -- see
+# `docs/design/metric-namespace.md` for the additive-vs-rename decision.
+_VIOLATION_COUNT_METRIC_NAME = "drc__error__count"
+
+assert is_registered(_VIOLATION_COUNT_METRIC_NAME)
+
 
 class DrcError(Exception):
     """Raised when a layout cannot be checked: bad file, unknown deck, or a
@@ -126,6 +137,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
             "status": "clean" | "violations",
             "violation_count": <int>,
             "rule_counts": {<rule id>: <int>, ...},
+            "metrics": {"drc__error__count": <int>},
             "violations": [
                 {
                     "rule": str, "description": str, "check": str,
@@ -157,6 +169,16 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
     ``schema_version`` is versioned independently per command (see
     ``docs/json-contract.md``); it starts at ``1`` and only increments when
     this command's JSON shape changes in a way that isn't purely additive.
+
+    ``metrics`` (issue #1847, adopting the declared metric namespace
+    registry from #247 beyond its ``klt layout-metrics`` pilot) is a
+    **parallel, additive** object re-keying ``violation_count`` under its
+    declared METRICS2.1-style name from :mod:`klayout_tools.metrics`'s
+    registry -- ``violation_count`` -> ``drc__error__count``. It never
+    replaces or changes ``violation_count``/``rule_counts`` above, which stay
+    exactly as documented; ``metrics`` is always present (even in the clean,
+    zero-violation case, where ``drc__error__count`` is ``0``), purely
+    additive to the JSON contract (no ``schema_version`` bump).
 
     ``violations`` is sorted by
     ``(rule, cell, bbox.left, bbox.bottom, bbox.right, bbox.top)`` for
@@ -765,6 +787,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
         "status": "violations" if violations else "clean",
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
+        "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
         "violations": violations,
         "coverage": coverage,
         "provenance": build_provenance(

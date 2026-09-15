@@ -83,6 +83,9 @@ def test_run_drc_reports_seeded_violation(tmp_path):
     assert report["status"] == "violations"
     assert report["violation_count"] == 1
     assert report["rule_counts"] == {"poly.width.1": 1}
+    # Issue #1847: `metrics` re-keys `violation_count` under its declared
+    # METRICS2.1-style name, additive alongside the existing field.
+    assert report["metrics"] == {"drc__error__count": 1}
 
     (violation,) = report["violations"]
     assert violation["rule"] == "poly.width.1"
@@ -107,6 +110,9 @@ def test_run_drc_clean(tmp_path):
     assert report["violation_count"] == 0
     assert report["rule_counts"] == {}
     assert report["violations"] == []
+    # Issue #1847: `metrics` is present even in the clean/zero-violation
+    # case, with the same value as `violation_count`.
+    assert report["metrics"] == {"drc__error__count": 0}
 
 
 def test_run_drc_deterministic_across_runs(tmp_path):
@@ -546,6 +552,7 @@ def test_json_contract(tmp_path, capsys):
         "status",
         "violation_count",
         "rule_counts",
+        "metrics",
         "violations",
         "coverage",
         "provenance",
@@ -577,6 +584,9 @@ def test_json_contract(tmp_path, capsys):
     assert isinstance(data["violations"], list)
     assert sum(data["rule_counts"].values()) == data["violation_count"]
     assert len(data["violations"]) == data["violation_count"]
+    # Issue #1847: `metrics` is an additive, parallel object re-keying
+    # `violation_count` under its declared METRICS2.1-style name.
+    assert data["metrics"] == {"drc__error__count": data["violation_count"]}
 
     for entry in data["violations"]:
         assert set(entry.keys()) == {
@@ -680,6 +690,7 @@ def test_json_contract_clean(tmp_path, capsys):
     assert data["status"] == "clean"
     assert data["violation_count"] == 0
     assert data["rule_counts"] == {}
+    assert data["metrics"] == {"drc__error__count": 0}
     assert data["violations"] == []
 
 

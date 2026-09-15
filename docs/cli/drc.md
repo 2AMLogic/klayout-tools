@@ -957,6 +957,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "status": "clean",
   "violation_count": 0,
   "rule_counts": {},
+  "metrics": { "drc__error__count": 0 },
   "violations": [],
   "coverage": {
     "deck_layers": ["22/0", "30/0", "33/0", "34/0"],
@@ -995,6 +996,7 @@ On a run with findings:
   "status": "violations",
   "violation_count": 1,
   "rule_counts": { "poly.width.1": 1 },
+  "metrics": { "drc__error__count": 1 },
   "violations": [
     {
       "rule": "poly.width.1",
@@ -1031,9 +1033,27 @@ On a run with findings:
 | `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
+| `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (`klt drc` resolves no PDK); `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. |
+
+### `metrics` object
+
+Introduced by issue #1847, adopting `klayout_tools.metrics`'s declared
+metric namespace registry (issue #247 — see
+[`../design/metric-namespace.md`](../design/metric-namespace.md) and
+[`../json-contract.md`](../json-contract.md)'s "Declared metric namespace"
+section) into `klt drc`'s own top-level payload, beyond the registry's
+initial `klt layout-metrics` pilot. **Purely additive**: a re-keying of
+`violation_count` under its declared, METRICS2.1-style hierarchical name —
+it never replaces or changes `violation_count`/`rule_counts`, which stay
+exactly as documented above. Always present, including in the clean,
+zero-violation case (where `drc__error__count` is `0`).
+
+| Key                  | Source field       | Description                                    |
+| --------------------- | ------------------- | ------------------------------------------------- |
+| `drc__error__count`   | `violation_count`   | Total DRC violation count; `aggregator: "sum"`, `higher_is_better: false`, `critical: true` in the registry. |
 
 ### `violations[]` entries
 

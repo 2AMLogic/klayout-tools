@@ -9,6 +9,9 @@
     "diff.enclosing.licon.1": 4,
     "poly.width.1": 1
   },
+  "metrics": {
+    "drc__error__count": 5
+  },
   "violations": [
     {
       "rule": "diff.enclosing.licon.1",
