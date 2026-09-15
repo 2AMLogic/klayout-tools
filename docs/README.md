@@ -89,6 +89,7 @@ docs/
     mom-cross-validation.md
     mom-iterative-solver.md
     mom-validation.md
+    native-extension-freshness.md
     native-routing-survey.md
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md
