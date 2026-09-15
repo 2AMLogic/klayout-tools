@@ -131,6 +131,42 @@ not `klt --version`, if you need to detect this kind of drift. See
   cannot resolve. Channel-track exhaustion with a configured
   `routing.cross_block_layer_role` falls back to that cross-layer retry
   (issue #1680) instead of failing outright.
+- **Added**: `klt place-and-route` gains three additive, optional
+  `request.constraints` design-rule fields (issue #1709) —
+  `max_transition_ns` → `set_max_transition`, `max_capacitance_pf` →
+  `set_max_capacitance`, and `max_fanout` → `set_max_fanout`, each on
+  `[current_design]`, each validated as a positive number when given, each
+  independently optional (never gated on `clock_port`/`clock_period_ns`),
+  and each emitted right after the clock constraint and before the
+  `repair_design`/`repair_timing` pass the generated flow already runs. This
+  aims that already-present optimiser at a caller-given target instead of
+  only whatever limit the single resolved liberty deck happens to declare —
+  the case for a design whose implementation-corner limit is looser than a
+  downstream signoff deck's, and the only available case at all for a
+  standard-cell library that declares no fanout limit of its own. Omitting
+  all three reproduces the prior generated Tcl byte-for-byte.
+- **Added**: `klt place-and-route` response fields
+  `max_transition_violation_count` / `max_capacitance_violation_count`
+  (issue #1709) — the **design-rule-check verdict** at the same
+  `pdk.sweep_corners` decks the post-route sweep already re-times at,
+  reported at top level and per `corners[]` entry alongside
+  `worst_setup_slack_ns`/`worst_hold_slack_ns`, so a caller sees a
+  max-transition / max-capacitance violation in the report this run already
+  writes rather than in a separate downstream tool three steps later.
+  Sourced from `report_check_types -max_slew -violators` /
+  `report_check_types -max_capacitance -violators` run inside the sweep's own
+  existing OpenROAD invocation (no additional process launch, so the measured
+  sweep cost is unchanged), counted by the same marker-delimited
+  `"(VIOLATED)"` scrape `setup_violation_count`/`hold_violation_count`
+  already use. `0` on a clean run, `null` before the `"route"` stage and when
+  `sweep_corners` sweeps zero corners. Reported whether or not the new
+  constraint fields above were given. There is deliberately **no**
+  `max_fanout_violation_count`: `sta::max_fanout_violation_count` SIGSEGVs
+  inside `sta::CheckFanouts::check` on a library that declares no fanout
+  limit (reproduced at every corner on `26Q3-1510-g6cb3f2b704`, issue #1709)
+  — precisely the library class `constraints.max_fanout` exists to serve. No
+  `schema_version` bump (additive on both request and response). See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md).
 
 ## 0.5.0 (2026-09-15)
 

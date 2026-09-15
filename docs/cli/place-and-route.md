@@ -734,6 +734,53 @@ many-corner library should use `sweep_corners` to scope the sweep down to
 the corners the design actually operates at, which also caps this added
 cost at the scoped subset's own size.
 
+### Design-rule-check verdict (`max_transition_violation_count`, `max_capacitance_violation_count`, issue #1709)
+
+The sweep re-times the routed design at the `sweep_corners` decks, but until
+issue #1709 the response said nothing about **design-rule** checks at those
+same decks — a caller closing max-transition at the implementation corner had
+to discover a violation at a signoff corner in a separate downstream tool
+three steps later, even though this run already had every one of those decks
+loaded in a session.
+
+Two additive fields close that, at both top level and inside each `corners[]`
+entry:
+
+- **`max_transition_violation_count`** — pin count violating the
+  max-transition limit (`report_check_types -max_slew -violators`).
+  OpenSTA's own name for the check `set_max_transition` / the liberty's
+  `max_transition` constrains is *max slew*; the field is named after the
+  request field (`constraints.max_transition_ns`) that aims it.
+- **`max_capacitance_violation_count`** — pin count violating the
+  max-capacitance limit (`report_check_types -max_capacitance -violators`).
+
+Both are counted the same marker-delimited `"(VIOLATED)"` stdout scrape
+`setup_violation_count`/`hold_violation_count` already use (OpenROAD ships no
+`*_metric` proc for a design-rule violation *count*, only the scalar slack
+metrics), and both run **inside the sweep invocation that already exists** —
+after its `estimate_parasitics -global_routing` (a slew/capacitance check
+against an un-estimated network is not a meaningful number) and after the two
+`report_worst_slack_metric` calls. **No additional OpenROAD process launch**,
+so the wall-clock cost measured above is unchanged.
+
+The verdict is against whatever limits the loaded decks declare, so it is
+reported whether or not the caller set `constraints.max_transition_ns` /
+`.max_capacitance_pf`. With those set, it additionally answers whether the
+`repair_design` pass that was aimed at the caller's own tighter target
+actually hit it.
+
+**There is deliberately no `max_fanout_violation_count`.** `constraints.
+max_fanout` is still emitted as a *constraint*, but OpenSTA's
+`sta::max_fanout_violation_count` takes OpenROAD down with a SIGSEGV inside
+`sta::CheckFanouts::check` on a library that declares no fanout limit at all
+(no `default_max_fanout`, no per-pin `max_fanout`) — reproduced at every
+corner on `26Q3-1510-g6cb3f2b704` on a ~2500-cell design, issue #1709;
+`sta::max_fanout_check_limit` on the same session returns the `1e30` sentinel
+and is fine. That is exactly the class of library `constraints.max_fanout`
+exists to serve, so a fanout *check* is not wired in here. If fanout
+reporting is ever wanted, it has to come from the topology walk (`get_pins
+-of_objects` per net, counting inputs) — slower, but it does not crash.
+
 ## Post-route SPEF STA (`post_route_spef`, issue #948)
 
 Issue #948 (Epic #700 Phase 3's
@@ -1373,7 +1420,7 @@ live re-measurement above.
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
-| `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. |
+| `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
 | `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see `place_and_route.py`'s module docstring for the audit methodology and its limitations. |
@@ -1431,10 +1478,12 @@ unsure).
   "route_drc_violation_count": 0,
   "worst_setup_slack_ns": -4.02163,
   "worst_hold_slack_ns": 0.08421,
+  "max_transition_violation_count": 2,
+  "max_capacitance_violation_count": 0,
   "corners": [
-    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011 },
-    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882 },
-    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421 }
+    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 },
+    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "max_transition_violation_count": 2, "max_capacitance_violation_count": 0 },
+    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 }
   ],
   "estimated_power_mw": 11.6,
   "clock_skew_ns": 0.0421,
@@ -1534,7 +1583,8 @@ unsure).
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), parsed from the report's per-violation `"violation type: ..."` header lines. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
-| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ...}`. Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
+| `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate the max-transition (OpenSTA `-max_slew`) and max-capacitance limits in force at those decks, from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given — without them the verdict is against the loaded decks' own declared limits; with them, it additionally says whether the `repair_design` pass aimed at the caller's tighter target actually hit it. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
+| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ...}` (the last two added by issue #1709). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
