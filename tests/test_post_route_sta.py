@@ -146,13 +146,29 @@ def test_load_request_not_an_object(tmp_path):
         load_request(path)
 
 
-@pytest.mark.parametrize("field", ["def", "pdk", "constraints"])
+@pytest.mark.parametrize("field", ["pdk", "constraints"])
 def test_load_request_missing_required_field(tmp_path, field):
     request = _base_request()
     del request[field]
     path = _write_request(tmp_path / "request.json", request)
     with pytest.raises(PostRouteStaError, match=f"missing required field: {field}"):
         load_request(path)
+
+
+def test_load_request_missing_def_is_not_a_load_request_error(tmp_path):
+    """Issue #1825: unlike `pdk`/`constraints`, `def` is no longer a flat
+    `load_request`-level required field -- `def`/`verilog` is a
+    require-exactly-one-of relationship `run_sta` validates itself (see the
+    `run_*` tests below), not something `validate_request_shape`'s flat
+    required-fields check can express. A request missing `def` (with no
+    `verilog` either) loads fine at this layer."""
+    request = _base_request()
+    del request["def"]
+    path = _write_request(tmp_path / "request.json", request)
+
+    loaded = load_request(path)
+
+    assert "def" not in loaded
 
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +247,166 @@ def test_run_spef_not_found(tmp_path):
         tmp_path / "request.json", _base_request(spef="nope.spef")
     )
     with pytest.raises(PostRouteStaError, match="spef not found: nope.spef"):
+        run_sta(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# Netlist-input (`verilog`) mode -- issue #1825.
+# --------------------------------------------------------------------------- #
+
+
+def _verilog_base_request(**overrides) -> dict:
+    request = {
+        "verilog": "top.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": {"clock_port": "clk", "clock_period_ns": 1.1},
+    }
+    request.update(overrides)
+    return request
+
+
+def _setup_verilog_success_env(tmp_path, monkeypatch, **request_overrides) -> str:
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    return _write_request(
+        tmp_path / "request.json", _verilog_base_request(**request_overrides)
+    )
+
+
+def test_run_def_and_verilog_mutually_exclusive(tmp_path):
+    request = _base_request(verilog="top.v", hdl_toplevel="top")
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(PostRouteStaError, match="not include both 'def' and 'verilog'"):
+        run_sta(request_path)
+
+
+def test_run_requires_def_or_verilog(tmp_path):
+    request = _base_request()
+    del request["def"]
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(
+        PostRouteStaError, match="must include one of 'def' or 'verilog'"
+    ):
+        run_sta(request_path)
+
+
+def test_run_verilog_not_found(tmp_path):
+    request_path = _write_request(
+        tmp_path / "request.json", _verilog_base_request(**{"verilog": "nope.v"})
+    )
+    with pytest.raises(PostRouteStaError, match="verilog not found: nope.v"):
+        run_sta(request_path)
+
+
+def test_run_verilog_requires_hdl_toplevel(tmp_path):
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    request = _verilog_base_request()
+    del request["hdl_toplevel"]
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(
+        PostRouteStaError, match="hdl_toplevel is required when request.verilog"
+    ):
+        run_sta(request_path)
+
+
+def test_run_verilog_spef_rejected(tmp_path):
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _verilog_base_request(spef="top.spef")
+    )
+
+    with pytest.raises(
+        PostRouteStaError,
+        match="request.spef is not supported together with request.verilog",
+    ):
+        run_sta(request_path)
+
+
+def test_run_verilog_geometry_source_rejects_other_values(tmp_path):
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _verilog_base_request(geometry_source="routed"),
+    )
+
+    with pytest.raises(
+        PostRouteStaError, match="geometry_source must be 'netlist_estimate'"
+    ):
+        run_sta(request_path)
+
+
+def test_run_wire_load_model_rejected_in_def_mode(tmp_path):
+    _write(tmp_path / "top.def", "# fake routed def\n")
+    request = _base_request(
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "wire_load_model": "Small",
+        }
+    )
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(
+        PostRouteStaError, match="wire_load_model/wire_load_mode are only valid"
+    ):
+        run_sta(request_path)
+
+
+def test_run_wire_load_mode_requires_wire_load_model(tmp_path):
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    request = _verilog_base_request(
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "wire_load_mode": "top",
+        }
+    )
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(
+        PostRouteStaError,
+        match="wire_load_mode requires constraints.wire_load_model",
+    ):
+        run_sta(request_path)
+
+
+def test_run_wire_load_mode_invalid_value_rejected(tmp_path):
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    request = _verilog_base_request(
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "wire_load_model": "Small",
+            "wire_load_mode": "bogus",
+        }
+    )
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(PostRouteStaError, match="wire_load_mode must be one of"):
+        run_sta(request_path)
+
+
+def test_run_wire_load_model_must_be_nonempty_string(tmp_path):
+    _write(tmp_path / "top.v", "module top(input clk); endmodule\n")
+    request = _verilog_base_request(
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "wire_load_model": "",
+        }
+    )
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(
+        PostRouteStaError, match="wire_load_model must be a non-empty string"
+    ):
         run_sta(request_path)
 
 
@@ -418,6 +594,79 @@ def test_sta_script_lines_no_spef_has_no_annotation_evidence():
     assert post_route_sta._SPEF_READ_BEGIN not in script
     assert post_route_sta._PARASITIC_ANNOTATION_BEGIN not in script
     assert "report_checks" not in script
+
+
+def test_sta_netlist_script_lines_order():
+    """Issue #1825: the netlist-mode session links a structural netlist
+    directly (`read_verilog` + `link_design`), never `read_def` -- and the
+    liberty-before-LEF-before-verilog ordering mirrors
+    `place_and_route.py`'s own `"floorplan"`-stage load."""
+    lines = post_route_sta._sta_netlist_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        verilog_path="/design/top.v",
+        liberty_path="/pdk/lib.lib",
+        hdl_toplevel="top",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+
+    assert lines[0] == "read_liberty /pdk/lib.lib"
+    assert lines[1] == "read_lef /pdk/tech.lef"
+    assert lines[2] == "read_lef /pdk/cells.lef"
+    assert lines[3] == "read_verilog /design/top.v"
+    assert lines[4] == "link_design top"
+    assert lines[5] == "create_clock -name clk -period 2.5 [get_ports clk]"
+    assert "report_worst_slack_metric -setup" in lines
+    assert "report_worst_slack_metric -hold" in lines
+    assert "report_tns_metric -setup" in lines
+    assert "report_tns_metric -hold" in lines
+    assert "report_fmax_metric" in lines
+    assert "report_power_metric" in lines
+    assert "report_clock_skew_metric -setup" in lines
+    assert not any("read_def" in line for line in lines)
+    assert not any(line.startswith("set_wire_load") for line in lines)
+
+
+def test_sta_netlist_script_lines_with_wire_load_model():
+    lines = post_route_sta._sta_netlist_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        verilog_path="/design/top.v",
+        liberty_path="/pdk/lib.lib",
+        hdl_toplevel="top",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        wire_load_model="Medium",
+        wire_load_mode="top",
+    )
+
+    clock_idx = next(i for i, ln in enumerate(lines) if ln.startswith("create_clock"))
+    mode_idx = lines.index("set_wire_load_mode top")
+    model_idx = lines.index("set_wire_load_model -name {Medium}")
+    assert clock_idx < mode_idx < model_idx
+
+
+def test_sta_netlist_script_lines_wire_load_model_without_mode():
+    """`wire_load_mode` is optional even when `wire_load_model` is given --
+    only `set_wire_load_model` is emitted, no `set_wire_load_mode`."""
+    lines = post_route_sta._sta_netlist_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        verilog_path="/design/top.v",
+        liberty_path="/pdk/lib.lib",
+        hdl_toplevel="top",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        wire_load_model="Small",
+    )
+
+    assert "set_wire_load_model -name {Small}" in lines
+    # `startswith("set_wire_load_mode")` would also match
+    # `"set_wire_load_model ..."` -- `"mode"` is a literal prefix of
+    # `"model"` -- so check for the space-terminated `set_wire_load_mode `
+    # command instead, which only the (absent here) mode-setting line has.
+    assert not any(line.startswith("set_wire_load_mode ") for line in lines)
 
 
 def test_spef_net_check_lines_uses_unescaped_names_verbatim():
@@ -878,6 +1127,71 @@ def test_run_sta_geometry_source_invalid_value_rejected(tmp_path, monkeypatch):
         run_sta(request_path)
 
 
+def test_run_sta_netlist_mode_response_envelope(tmp_path, monkeypatch):
+    """Issue #1825: a `verilog`-mode run reports the same setup/hold
+    WNS/TNS shape a `def`-mode run does, but with `def_path: null`,
+    `verilog_path` populated, `geometry_source: "netlist_estimate"`, and the
+    wire-load estimate knob actually used echoed for provenance."""
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "wire_load_model": "Medium",
+            "wire_load_mode": "top",
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["status"] == "ok"
+    assert report["def_path"] is None
+    assert report["verilog_path"].endswith("top.v")
+    assert report["geometry_source"] == "netlist_estimate"
+    assert report["wire_load_model"] == "Medium"
+    assert report["wire_load_mode"] == "top"
+    assert report["worst_slack_ns"] == -0.15
+    assert report["total_negative_slack_ns"] == -1.2
+    assert report["worst_hold_slack_ns"] == 0.03812
+    assert report["total_negative_hold_slack_ns"] == 0.0
+    assert report["spef_path"] is None
+    assert report["spef_annotation"] is None
+
+    provenance = report["provenance"]
+    assert provenance["input"]["content_hash"] is not None
+
+
+def test_run_sta_netlist_mode_no_wire_load_knob_echoes_null(tmp_path, monkeypatch):
+    """Omitting `constraints.wire_load_model`/`.wire_load_mode` entirely is
+    legal -- OpenSTA falls back to the resolved liberty's own default wire
+    load (if any); the response echoes exactly what was requested (nothing),
+    never a guess at OpenSTA's own silent default."""
+    request_path = _setup_verilog_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["geometry_source"] == "netlist_estimate"
+    assert report["wire_load_model"] is None
+    assert report["wire_load_mode"] is None
+
+
+def test_run_sta_def_mode_wire_load_fields_are_null(tmp_path, monkeypatch):
+    """A `def`-mode response always carries `wire_load_model`/`.wire_load_mode`
+    as `null`/`null` and `verilog_path` as `null` -- same field shape as a
+    `verilog`-mode response, just the mutually-exclusive fields flipped."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["verilog_path"] is None
+    assert report["wire_load_model"] is None
+    assert report["wire_load_mode"] is None
+
+
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
     """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
     ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
@@ -1246,6 +1560,29 @@ def test_cli_text_format_prints_annotation_evidence(tmp_path, monkeypatch, capsy
     assert "unannotated_driver_count: 139 (partial: 0)" in out
     assert "reader warnings (sample):" in out
     assert "[WARNING STA-1650]" in out
+
+
+def test_cli_text_format_prints_netlist_mode_wire_load(tmp_path, monkeypatch, capsys):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "wire_load_model": "Small",
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+
+    exit_code = main(["sta", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "geometry_source: netlist_estimate" in out
+    assert "wire_load_model: Small" in out
+    assert "wire_load_mode: None" in out
+    assert "verilog_path:" in out
+    assert out.count("def_path: None") == 1
 
 
 def test_cli_error_exits_one_with_json_error(tmp_path, monkeypatch, capsys):

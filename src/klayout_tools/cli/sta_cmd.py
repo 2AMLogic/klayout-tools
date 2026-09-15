@@ -49,7 +49,11 @@ def _print_text(report: dict) -> None:
     print(f"estimated_power_mw: {report['estimated_power_mw']}")
     print()
     print(f"def_path: {report['def_path']}")
+    print(f"verilog_path: {report['verilog_path']}")
     print(f"geometry_source: {report['geometry_source']}")
+    if report["geometry_source"] == "netlist_estimate":
+        print(f"wire_load_model: {report['wire_load_model']}")
+        print(f"wire_load_mode: {report['wire_load_mode']}")
     print(f"spef_path: {report['spef_path']}")
 
     annotation = report.get("spef_annotation")
