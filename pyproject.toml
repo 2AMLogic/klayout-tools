@@ -10,6 +10,13 @@ dependencies = [
     # 0.30 floor: `klt extract --parasitics` reads per-net/per-layer geometry
     # via `LayoutToNetlist.polygons_of_net(net, layer_index)`, whose
     # layer-index form was introduced in KLayout 0.30 (issue #217).
+    # Deliberately a floor, not an exact pin -- a hard `klayout==X.Y.Z` would
+    # break installs on any point release this project's own deck test
+    # suite has never exercised. `uv.lock`'s own pinned `klayout` entry (what
+    # CI actually tests against, via `uv sync --locked`) is surfaced instead
+    # as `klt version --format json`'s `klayout_version_expected` and
+    # `klt drc`/`klt lvs`'s `provenance.klayout_version_mismatch` (issue
+    # #1490) -- see `docs/design/klayout-engine-version-pin.md`.
     "klayout>=0.30",
     # Backs `klt kb validate` (src/klayout_tools/kb.py), so it's a runtime
     # dependency, not dev-only -- it was dev-only before that command existed.

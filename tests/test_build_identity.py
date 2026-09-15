@@ -285,11 +285,19 @@ def test_version_report_shape():
         "git_tag",
         "dirty",
         "is_release",
+        "klayout_version",
+        "klayout_version_expected",
     }
     assert report["schema_version"] == 1
     assert report["package_version"] == __version__
     assert report["version"].startswith(__version__)
     assert report["is_release"] in (True, False, None)
+    assert report["klayout_version"] is None or isinstance(
+        report["klayout_version"], str
+    )
+    assert report["klayout_version_expected"] is None or isinstance(
+        report["klayout_version_expected"], str
+    )
 
 
 def test_cli_version_json(capsys):
@@ -343,6 +351,109 @@ def test_cli_version_flag_is_bare_for_a_release_build(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
     assert capsys.readouterr().out.strip() == f"klt {__version__}"
+
+
+# --------------------------------------------------------------------------- #
+# klayout_version_expected (issue #1490)
+# --------------------------------------------------------------------------- #
+
+
+def test_recorded_klayout_version_expected_reads_build_info(monkeypatch):
+    module = type(sys)("klayout_tools._build_info")
+    module.KLAYOUT_VERSION_EXPECTED = "0.30.10"
+    monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
+
+    assert build_identity._recorded_klayout_version_expected() == "0.30.10"
+
+
+def test_recorded_klayout_version_expected_none_without_build_info(monkeypatch):
+    monkeypatch.delitem(sys.modules, "klayout_tools._build_info", raising=False)
+    # This editable/source checkout carries no `_build_info` module at all
+    # (see this file's own docstring), so the real import fails -- the same
+    # `ImportError` path `_recorded_identity` already exercises.
+    assert build_identity._recorded_klayout_version_expected() is None
+
+
+def test_recorded_klayout_version_expected_tolerates_a_malformed_record(monkeypatch):
+    module = type(sys)("klayout_tools._build_info")
+    module.KLAYOUT_VERSION_EXPECTED = 17  # wrong type -- never fabricate a string
+    monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
+
+    assert build_identity._recorded_klayout_version_expected() is None
+
+
+def test_checkout_klayout_version_expected_reads_uv_lock(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "klayout"\nversion = "0.30.10"\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add uv.lock")
+
+    assert build_identity._checkout_klayout_version_expected(str(repo)) == "0.30.10"
+
+
+def test_checkout_klayout_version_expected_none_without_uv_lock(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+
+    assert build_identity._checkout_klayout_version_expected(str(repo)) is None
+
+
+def test_checkout_klayout_version_expected_none_outside_a_repo(tmp_path):
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    assert build_identity._checkout_klayout_version_expected(str(plain)) is None
+
+
+def test_checkout_klayout_version_expected_ignores_untracked_venv(tmp_path):
+    """Same guard as `_checkout_identity`: a `.venv/` sitting inside some
+    unrelated checkout must not inherit that checkout's `uv.lock`."""
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "klayout"\nversion = "0.30.10"\n'
+    )
+    site_packages = repo / ".venv" / "lib" / "site-packages" / "klayout_tools"
+    site_packages.mkdir(parents=True)
+    (site_packages / "__init__.py").write_text("")
+
+    assert build_identity._checkout_klayout_version_expected(str(site_packages)) is None
+
+
+def test_klayout_version_expected_prefers_recorded_over_live_probe(monkeypatch):
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.10"
+    )
+
+    def _fail():  # pragma: no cover - must not be reached
+        raise AssertionError("live probe ran despite a build-time record")
+
+    monkeypatch.setattr(build_identity, "_checkout_klayout_version_expected", _fail)
+
+    assert build_identity.klayout_version_expected() == "0.30.10"
+
+
+def test_klayout_version_expected_falls_back_to_live_probe(monkeypatch):
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: None
+    )
+    monkeypatch.setattr(
+        build_identity, "_checkout_klayout_version_expected", lambda: "0.30.9"
+    )
+
+    assert build_identity.klayout_version_expected() == "0.30.9"
+
+
+def test_version_report_includes_klayout_fields(monkeypatch):
+    monkeypatch.setattr(build_identity, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(build_identity, "klayout_version_expected", lambda: "0.30.10")
+
+    report = build_identity.version_report()
+    assert report["klayout_version"] == "0.30.12"
+    assert report["klayout_version_expected"] == "0.30.10"
 
 
 def test_version_flag_does_not_probe_git_for_unrelated_commands(monkeypatch):

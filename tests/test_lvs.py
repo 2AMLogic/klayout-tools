@@ -596,8 +596,13 @@ def test_clean_self_compare_reports_match(tmp_path):
         "pdk",
         "deck",
         "input",
+        # Issue #1490: klt lvs (unlike most other provenance-carrying verbs)
+        # additionally flags whether the resolved klayout engine differs
+        # from the version this build/commit was tested against.
+        "klayout_version_mismatch",
     }
     assert isinstance(prov["klt_version"], str)
+    assert prov["klayout_version_mismatch"] in (True, False)
     # LVS is topological -- no PDK resolved; and a pre-extracted `layout.netlist`
     # involves no extraction deck, so `deck` is null (mirrors device_classes).
     assert prov["pdk"] is None

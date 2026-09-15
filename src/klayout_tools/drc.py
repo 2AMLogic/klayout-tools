@@ -771,6 +771,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
             deck_name=deck_name,
             deck_path=deck_source_path(deck_name),
             input_path=path,
+            include_klayout_version_mismatch=True,
         ),
     }
 
@@ -1638,5 +1639,6 @@ def run_drc_klayout_engine(
             deck_path=deck_file,
             input_path=path,
             deck_options=deck_vars,
+            include_klayout_version_mismatch=True,
         ),
     }

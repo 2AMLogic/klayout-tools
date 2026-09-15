@@ -36,9 +36,11 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Mapping
 from typing import Any
 
+from . import build_identity
 from .decks.history import is_deck_hash_released
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
@@ -165,6 +167,42 @@ def _klayout_version() -> str | None:
     return getattr(klayout, "__version__", None)
 
 
+def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
+    """Whether the resolved ``klayout`` engine (``actual``) differs from the
+    version this ``klayout-tools`` build/commit was tested against
+    (``expected``, :func:`klayout_tools.build_identity.klayout_version_expected`)
+    -- issue #1490.
+
+    Always a plain boolean, never a tri-state: ``klayout_version_mismatch``
+    is documented as ``true|false``, so "cannot determine" (either side
+    unresolvable -- an old build predating this field, or no ``klayout``
+    importable at all) renders as ``False`` -- "no *confirmed* mismatch" --
+    rather than fabricating a signal from missing data.
+    """
+    if actual is None or expected is None:
+        return False
+    return actual != expected
+
+
+def _warn_klayout_version_mismatch(actual: str | None, expected: str | None) -> None:
+    """The stderr warning printed once per report when
+    :func:`_klayout_version_mismatch` is ``True`` (issue #1490) -- a caller
+    piping ``--format json`` to a file still sees this on the terminal,
+    since JSON output goes to stdout only (``docs/json-contract.md``)."""
+    message = (
+        f"klt: warning: resolved klayout engine version {actual!r} differs "
+        f"from klayout=={expected}, the version this klayout-tools build/"
+        "commit was tested against -- DRC/LVS report counts (deck content "
+        "hash, rules_skipped, category_counts, ...) may differ from a "
+        f"report generated with klayout=={expected}, even though the "
+        "verdict itself is unaffected. To reproduce the exact engine: "
+        f'`uv tool install "klayout-tools @ git+...@<sha>" '
+        f"--with klayout=={expected}` -- see docs/json-contract.md's "
+        '"Shared `provenance` block".'
+    )
+    print(message, file=sys.stderr)
+
+
 def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     """Normalise a :func:`klayout_tools.pdk.find_pdk`-style dict into the
     provenance ``pdk`` shape ``{name, source, version}``; ``None`` when no PDK
@@ -274,6 +312,7 @@ def build_provenance(
     pdk: dict[str, Any] | None = None,
     input_path: str | None = None,
     deck_options: Mapping[str, str] | None = None,
+    include_klayout_version_mismatch: bool = False,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
@@ -291,11 +330,48 @@ def build_provenance(
     ``deck_options`` (issue #595) is echoed onto ``provenance.deck.options``
     via :func:`_deck_block` when non-empty -- see that function's docstring.
     ``klt_version``/``klayout_version`` are read at call time.
+
+    ``include_klayout_version_mismatch`` (issue #1490, opt-in and ``False``
+    by default) adds ``provenance.klayout_version_mismatch``: ``True`` when
+    the resolved ``klayout_version`` differs from
+    :func:`klayout_tools.build_identity.klayout_version_expected` (the
+    version this ``klayout-tools`` build/commit was tested against), else
+    ``False``. Passed by ``klt drc``/``klt lvs`` only -- see
+    ``docs/design/klayout-engine-version-pin.md`` for why those two verbs and
+    not every ``build_provenance`` caller. A ``True`` result also prints a
+    one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
+    caller sees the drift even without inspecting the JSON.
     """
-    return {
+    actual_klayout_version = _klayout_version()
+    block: dict[str, Any] = {
         "klt_version": _klt_version(),
-        "klayout_version": _klayout_version(),
+        "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk),
         "deck": _deck_block(deck_name, deck_path, deck_options),
         "input": _input_block(input_path),
     }
+    if include_klayout_version_mismatch:
+        # Build-time-recorded only -- deliberately *not*
+        # `build_identity.klayout_version_expected()`'s live-checkout
+        # fallback, which shells out to `git` (issue #1490). That fallback is
+        # fine as a one-shot cost for `klt version --format json`; calling it
+        # from every `klt drc`/`klt lvs` run would add a subprocess call to
+        # every single report on a dev/editable install, and no
+        # `uv tool install ... @<sha>` install (the reproducibility scenario
+        # this field exists for) is ever editable -- `hatch_build.py` always
+        # records `KLAYOUT_VERSION_EXPECTED` for that install path, so the
+        # live probe would only ever fire for a case this field need not
+        # cover. An editable/dev checkout with no build-time record simply
+        # reports `klayout_version_mismatch: False` ("no confirmed
+        # mismatch"), matching `_klayout_version_mismatch`'s documented
+        # "unresolvable renders as False" rule.
+        expected_klayout_version = build_identity._recorded_klayout_version_expected()
+        mismatch = _klayout_version_mismatch(
+            actual_klayout_version, expected_klayout_version
+        )
+        block["klayout_version_mismatch"] = mismatch
+        if mismatch:
+            _warn_klayout_version_mismatch(
+                actual_klayout_version, expected_klayout_version
+            )
+    return block

@@ -39,11 +39,22 @@ fabricating: an unresolvable identity must never be reportable as a release.
 ``is_release`` is therefore a tri-state, mirroring
 ``provenance.deck.released`` (issue #1193) -- ``True`` (confirmed release),
 ``False`` (confirmed *not* a release), ``None`` (unanswerable).
+
+This module additionally exposes :func:`klayout_version_expected` (issue
+#1490): the ``klayout`` engine version this build/commit was tested
+against, mirroring ``identity()``'s own two-source priority (recorded at
+build time in ``_build_info.py``, else probed live from the checkout's
+``uv.lock`` for an editable/source install). ``klt version --format json``
+reports it alongside the actually-resolved ``klayout_version``, and
+``klt drc``/``klt lvs`` compare the two to populate
+``provenance.klayout_version_mismatch`` -- see
+``docs/design/klayout-engine-version-pin.md``.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from typing import Any
 
@@ -60,6 +71,14 @@ _SHORT_SHA_LEN = 12
 _UNKNOWN_LOCAL = "unknown"
 
 _GIT_TIMEOUT_S = 5
+
+#: Matches a `uv.lock` `[[package]]` entry for `klayout` -- mirrors
+#: `hatch_build._UV_LOCK_KLAYOUT_RE` exactly (issue #1490); duplicated rather
+#: than imported since `hatch_build.py` is a build-time-only script this
+#: installed package cannot import from (see that module's own docstring).
+_UV_LOCK_KLAYOUT_RE = re.compile(
+    r'\[\[package\]\]\s*\nname = "klayout"\s*\nversion = "([^"]+)"'
+)
 
 
 def _git(directory: str, *args: str) -> str | None:
@@ -177,6 +196,83 @@ def _checkout_identity(
     return _resolve(commit, tag, dirty, package_version)
 
 
+def _klayout_version() -> str | None:
+    """``klayout.__version__`` (the KLayout Python engine build actually
+    resolved into this process), or ``None`` when unresolvable.
+
+    Duplicates ``_provenance._klayout_version`` (both are a three-line
+    try/import) rather than importing it, so this module carries no
+    dependency edge back onto ``_provenance`` -- which itself imports
+    :func:`klayout_version_expected` from here to populate
+    ``provenance.klayout_version_mismatch`` (issue #1490); either direction
+    alone is fine, both together would be circular.
+    """
+    try:
+        import klayout
+    except Exception:
+        return None
+    return getattr(klayout, "__version__", None)
+
+
+def _recorded_klayout_version_expected() -> str | None:
+    """``_build_info.KLAYOUT_VERSION_EXPECTED`` (the ``klayout`` version this
+    checkout's ``uv.lock`` pinned at build time -- see ``hatch_build.py``), or
+    ``None`` when this install carries no such record."""
+    try:
+        from . import _build_info  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    value = getattr(_build_info, "KLAYOUT_VERSION_EXPECTED", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _checkout_klayout_version_expected(directory: str | None = None) -> str | None:
+    """The ``klayout`` version pinned in the checkout's own ``uv.lock``,
+    probed live -- the editable/source-install counterpart of
+    :func:`_recorded_klayout_version_expected`, mirroring
+    :func:`_checkout_identity`'s own build-time-vs-live-probe split.
+
+    Applies the same "must be a git working tree with files this directory
+    actually tracks" guard as :func:`_checkout_identity`, so a non-editable
+    install into a ``.venv/`` that happens to sit inside some unrelated
+    checkout does not inherit that checkout's ``uv.lock`` either.
+    """
+    directory = directory or os.path.dirname(os.path.abspath(__file__))
+    if _git(directory, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    if _git(directory, "ls-files", "--error-unmatch", "--", directory) is None:
+        return None
+    root = _git(directory, "rev-parse", "--show-toplevel")
+    if root is None:
+        return None
+    try:
+        with open(os.path.join(root, "uv.lock"), encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return None
+    match = _UV_LOCK_KLAYOUT_RE.search(content)
+    return match.group(1) if match else None
+
+
+def klayout_version_expected() -> str | None:
+    """The ``klayout`` engine version this build/commit was tested against
+    (issue #1490) -- the answer ``provenance.klayout_version_mismatch`` and
+    ``klt version --format json``'s ``klayout_version_expected`` compare the
+    actually-resolved ``klayout_version`` against.
+
+    Two sources, in the same priority order as :func:`identity`: recorded at
+    build time (from the checkout's ``uv.lock`` at build time, via
+    ``hatch_build.py``), else probed live from an editable/source install's
+    own ``uv.lock``. ``None`` when neither source has an answer -- a build
+    made before this field existed, or a checkout with no reachable
+    ``uv.lock`` (e.g. an unpacked sdist with no git history).
+    """
+    recorded = _recorded_klayout_version_expected()
+    if recorded is not None:
+        return recorded
+    return _checkout_klayout_version_expected()
+
+
 def identity() -> dict[str, Any]:
     """The running build's ``{git_commit, git_tag, dirty, is_release}``.
 
@@ -231,4 +327,10 @@ def version_report() -> dict[str, Any]:
         "git_tag": ident["git_tag"],
         "dirty": ident["dirty"],
         "is_release": ident["is_release"],
+        # Issue #1490: the KLayout engine this process actually resolved,
+        # and the version this build/commit was tested against -- a caller
+        # can detect a drifted engine before trusting a "reproduced" report
+        # without waiting for a `klt drc`/`klt lvs` run to say so.
+        "klayout_version": _klayout_version(),
+        "klayout_version_expected": klayout_version_expected(),
     }

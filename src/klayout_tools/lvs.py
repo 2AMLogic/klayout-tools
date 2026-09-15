@@ -1636,6 +1636,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             # shape exactly (`_deck_block` omits the key entirely when
             # `deck_options` is `None`/empty).
             deck_options=deck_options,
+            include_klayout_version_mismatch=True,
         ),
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,

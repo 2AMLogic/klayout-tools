@@ -153,6 +153,84 @@ def test_generated_module_is_consumed_by_build_identity(tmp_path, monkeypatch):
     assert build_identity.format_build_version("9.9.9", identity) == "9.9.9"
 
 
+# --------------------------------------------------------------------------- #
+# klayout_version_expected (issue #1490)
+# --------------------------------------------------------------------------- #
+
+
+def test_klayout_version_expected_parses_uv_lock(tmp_path):
+    module = _load_hatch_build()
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "\n"
+        "[[package]]\n"
+        'name = "attrs"\n'
+        'version = "26.1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "\n"
+        "[[package]]\n"
+        'name = "klayout"\n'
+        'version = "0.30.10"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
+    assert module.klayout_version_expected(str(tmp_path)) == "0.30.10"
+
+
+def test_klayout_version_expected_none_when_lockfile_missing(tmp_path):
+    module = _load_hatch_build()
+    assert module.klayout_version_expected(str(tmp_path)) is None
+
+
+def test_klayout_version_expected_none_when_no_klayout_entry(tmp_path):
+    module = _load_hatch_build()
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "attrs"\nversion = "26.1.0"\n'
+    )
+    assert module.klayout_version_expected(str(tmp_path)) is None
+
+
+def test_klayout_version_expected_matches_this_repos_own_lockfile():
+    """Sanity check against the real `uv.lock` at the repo root."""
+    module = _load_hatch_build()
+    assert module.klayout_version_expected(str(_ROOT)) is not None
+
+
+def test_render_build_info_includes_klayout_version_expected(tmp_path):
+    module = _load_hatch_build()
+    generated = tmp_path / "_build_info.py"
+    generated.write_text(
+        module.render_build_info(
+            {"commit": "a" * 40, "tag": "v9.9.9", "dirty": False}, "0.30.10"
+        )
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "klt_generated_info_with_klayout", generated
+    )
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+
+    assert loaded.KLAYOUT_VERSION_EXPECTED == "0.30.10"
+
+
+def test_render_build_info_klayout_version_expected_defaults_to_none(tmp_path):
+    """A caller passing only `identity` (the pre-#1490 call shape) keeps
+    working, with `KLAYOUT_VERSION_EXPECTED` recorded as `None`."""
+    module = _load_hatch_build()
+    generated = tmp_path / "_build_info.py"
+    generated.write_text(
+        module.render_build_info({"commit": "b" * 40, "tag": None, "dirty": None})
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "klt_generated_info_no_klayout", generated
+    )
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+
+    assert loaded.KLAYOUT_VERSION_EXPECTED is None
+
+
 def test_pyproject_registers_the_build_hook():
     """Without this registration the hook never runs, and every wheel would
     silently report an unknown identity.
