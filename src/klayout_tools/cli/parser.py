@@ -1592,6 +1592,24 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--parasitics-top-cell-only",
+        dest="parasitics_top_cell_only",
+        action="store_true",
+        help=(
+            "additionally split each net's --parasitics ground R/C into the "
+            "portion drawn directly in the top cell versus the portion "
+            "drawn inside an instantiated sub-block (issue #1704), reported "
+            "as the additive `resistance_ohm_top_cell`/"
+            "`capacitance_ff_top_cell` fields on each `parasitics.nets[]` "
+            "entry. Lets a caller who has already extracted a sub-block "
+            "separately subtract its contribution back out of a composed "
+            "top-level net's R/C. Requires --parasitics. Ground terms only "
+            "-- does not attribute coupling capacitance to a source cell. "
+            "Off by default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--parasitics-top-cell-only' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",

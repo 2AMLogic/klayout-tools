@@ -10241,6 +10241,7 @@ def test_parasitics_summary_block_shape(tmp_path):
         "critical_nets",
         "parasitics_nets",
         "distributed_rc",
+        "top_cell_only",
         "model",
         "mom_crosscheck",
         "mom_rlc_override",
@@ -10291,6 +10292,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # `distributed_rc` (issue #977) is `False` unless `--distributed-rc` was
     # given -- additive, unset here.
     assert para["distributed_rc"] is False
+    # `top_cell_only` (issue #1704) is `False` unless
+    # `--parasitics-top-cell-only` was given -- additive, unset here.
+    assert para["top_cell_only"] is False
 
     names = [n["net"] for n in para["nets"]]
     assert names == sorted(names)  # deterministic, sorted by net name
@@ -10307,7 +10311,14 @@ def test_parasitics_summary_block_shape(tmp_path):
             "segments",
             "coupled",
             "by_layer",
+            "resistance_ohm_top_cell",
+            "capacitance_ff_top_cell",
         }
+        # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` (issue #1704):
+        # `None` unless `--parasitics-top-cell-only` was given -- additive,
+        # unset here.
+        assert entry["resistance_ohm_top_cell"] is None
+        assert entry["capacitance_ff_top_cell"] is None
         # `rc_model`/`segments` (issue #977): `"lumped"`/`[]` unless
         # `--distributed-rc` named this net -- additive, unset here.
         assert entry["rc_model"] == "lumped"
@@ -11558,6 +11569,253 @@ def test_cli_parasitics_net_flag_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["parasitics"]["parasitics_nets"] == ["VIC", "AGR"]
     assert {entry["net"] for entry in out["parasitics"]["nets"]} == {"VIC", "AGR"}
+
+
+# ---------------------------------------------------------------------------
+# Top-cell-only hierarchy split (--parasitics-top-cell-only, issue #1704 --
+# the implementation half of the design spike in #1702,
+# docs/design/parasitics-hierarchy-attribution-spike.md)
+# ---------------------------------------------------------------------------
+
+
+def _make_hierarchy_layout() -> kdb.Layout:
+    """Two-level hierarchy fixture for `--parasitics-top-cell-only` (issue
+    #1704): a `SUB` cell placed once under `TOP`, with three li1 nets
+    covering the three cases the acceptance test plan calls for:
+
+    - Net ``A``: a 1x1 um li1 square drawn entirely inside ``SUB`` -- "a net
+      entirely inside a sub-block".
+    - Net ``B``: a 1x1 um li1 square drawn entirely directly in ``TOP``, far
+      from ``SUB``'s footprint -- "a net entirely in the top cell".
+    - Net ``C``: ``SUB``'s own 1x1 um li1 square (``[2000,3000]x[0,1000]``)
+      overlapped by a narrower 1x1 um li1 strap drawn directly in ``TOP``
+      (``[2500,3500]x[0,1000]``) -- "a net whose conductor crosses the
+      instance boundary". The strap's left half (500 dbu) overlaps ``SUB``'s
+      own shape -- exactly the "a top-level strap routed over a std cell's
+      own pin" normal case the spike doc's section 3.3 describes as
+      deliberately charged to the instance side, not the top cell -- and its
+      right half extends 500 dbu beyond ``SUB``'s footprint into
+      top-cell-only territory. The two pieces are *not* symmetric (a 1000 dbu
+      SUB square vs. a 1000 dbu TOP strap offset by 500 dbu) so the split's
+      top-cell share is a genuinely different shape (a 500x1000 dbu sliver)
+      from ``SUB``'s own share, making both the area and (especially) the
+      `_n_squares` resistance approximation visibly non-additive across the
+      cut -- see ``test_parasitics_top_cell_only_splits_ground_rc_by_hierarchy``.
+
+    No devices are drawn (a pure floating-cluster fixture, like
+    `_make_overlap_layout`), so every net is labelled to survive
+    `_purge_preserving_named_nets`'s "a labelled floating cluster is not
+    dead" rule (issue #539).
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    sub = layout.create_cell("SUB")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(cell, layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # Net A: wholly inside SUB.
+    draw(sub, 67, 20, kdb.Box(0, 0, 1000, 1000))
+    label(sub, 67, 5, "A", 500, 500)
+
+    # Net B: wholly drawn directly in TOP.
+    draw(top, 67, 20, kdb.Box(5000, 0, 6000, 1000))
+    label(top, 67, 5, "B", 5500, 500)
+
+    # Net C: spans the instance boundary (SUB's own square, overlapped and
+    # extended by a TOP-drawn strap).
+    draw(sub, 67, 20, kdb.Box(2000, 0, 3000, 1000))
+    label(sub, 67, 5, "C", 2500, 500)
+    draw(top, 67, 20, kdb.Box(2500, 0, 3500, 1000))
+
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(0, 0)))
+    return layout
+
+
+def test_parasitics_top_cell_only_requires_parasitics():
+    with pytest.raises(
+        ExtractError, match="--parasitics-top-cell-only requires --parasitics"
+    ):
+        run_extract("/nonexistent.gds", "sky130", parasitics_top_cell_only=True)
+
+
+def test_parasitics_top_cell_only_off_by_default_fields_are_none(tmp_path):
+    """Baseline (issue #1704): with `parasitics_top_cell_only` never given,
+    every ground entry's `resistance_ohm_top_cell`/`capacitance_ff_top_cell`
+    are `None` and `parasitics.top_cell_only` is `False` -- byte-identical
+    to this function's pre-#1704 behaviour."""
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "hier.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+    assert para["top_cell_only"] is False
+    assert para["nets"]  # sanity: the fixture's three nets all survived
+    for entry in para["nets"]:
+        assert entry["resistance_ohm_top_cell"] is None
+        assert entry["capacitance_ff_top_cell"] is None
+
+
+def test_parasitics_top_cell_only_does_not_change_existing_fields(tmp_path):
+    """The additive contract (issue #1704): turning on
+    `--parasitics-top-cell-only` changes nothing about the existing
+    `resistance_ohm`/`capacitance_ff`/`by_layer` fields (or any other
+    pre-#1704 field), and the written SPICE netlist stays byte-identical --
+    only the new, additive `*_top_cell` fields (and `top_cell_only`) differ."""
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "base.spice"), parasitics=True
+    )
+    split = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "split.spice"),
+        parasitics=True,
+        parasitics_top_cell_only=True,
+    )
+    assert base["netlist_sha256"] == split["netlist_sha256"]
+
+    base_by_net = {e["net"]: e for e in base["parasitics"]["nets"]}
+    split_by_net = {e["net"]: e for e in split["parasitics"]["nets"]}
+    assert set(base_by_net) == set(split_by_net)
+    for name, base_entry in base_by_net.items():
+        split_entry = split_by_net[name]
+        for field in (
+            "resistance_ohm",
+            "capacitance_ff",
+            "by_layer",
+            "inductance_nh",
+            "hub_net",
+            "rc_model",
+            "terminals",
+            "segments",
+            "coupled",
+        ):
+            assert split_entry[field] == base_entry[field], (name, field)
+
+
+def test_parasitics_top_cell_only_splits_ground_rc_by_hierarchy(tmp_path):
+    """Issue #1704's acceptance criteria, all three cases in one fixture
+    (`_make_hierarchy_layout`):
+
+    - Net A, wholly inside `SUB` -> `*_top_cell` fields are exactly `0.0`.
+    - Net B, wholly drawn in `TOP` -> `*_top_cell` fields equal the existing
+      scalar totals exactly (no cut at all -- `net_region - instance_drawn`
+      is a no-op subtraction of a disjoint region).
+    - Net C, whose li1 conductor crosses the instance boundary -> its own
+      `*_top_cell` values match their hand-derived numbers exactly, but the
+      complementary "instance share" (independently derived here the same
+      way `_compute_parasitics` builds it internally, via
+      `net_region & instance_drawn`) sums with it to *more* than the net's
+      own scalar total -- the split is exact in area, not in perimeter (see
+      `_compute_parasitics`'s "Known limitation" docstring paragraph and the
+      spike doc's section 4/5). This is the documented tolerance case the
+      issue's test plan calls for, not a regression.
+
+    Expected numbers, hand-computed from sky130's own li1 coefficients
+    (`klayout_tools.decks.sky130.PARASITICS.metals[0]`:
+    `cap_area_ff_um2=0.037`, `cap_perim_ff_um=0.0407`,
+    `sheet_res_ohm_sq=12.8`):
+
+    - A/B: 1x1 um square, area 1.0 um^2, perimeter 4.0 um ->
+      capacitance = 1.0*0.037 + 4.0*0.0407 = **0.1998 fF**,
+      resistance = 12.8 ohm/sq * 1 square = **12.8 ohm**.
+    - C total: the 1.5x1 um union of SUB's `[2000,3000]x[0,1000]` square and
+      TOP's `[2500,3500]x[0,1000]` strap -- area 1.5 um^2, perimeter 5.0 um
+      -> capacitance = 1.5*0.037 + 5.0*0.0407 = **0.259 fF**,
+      resistance = 12.8 * 1.5 squares = **19.2 ohm**.
+    - C's top-cell share (`net_region - instance_drawn`, spike doc section
+      3.2): the strap's own `[3000,3500]x[0,1000]` sliver not covered by
+      SUB's shape -- area 0.5 um^2, perimeter 3.0 um -> capacitance =
+      0.5*0.037 + 3.0*0.0407 = **0.1406 fF**, resistance = 12.8 * 2 squares
+      (a thin 0.5x1 um sliver -- `_n_squares` reports its long/short side
+      ratio) = **25.6 ohm**.
+    - C's instance share (`net_region & instance_drawn`, not itself a JSON
+      field -- reconstructed here purely to check the tolerance): exactly
+      SUB's own `[2000,3000]x[0,1000]` square, i.e. the same numbers as
+      A/B above -- **0.1998 fF**, **12.8 ohm**.
+    """
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "hier.spice"),
+        parasitics=True,
+        parasitics_top_cell_only=True,
+    )
+    para = report["parasitics"]
+    assert para["top_cell_only"] is True
+    by_net = {entry["net"]: entry for entry in para["nets"]}
+    assert set(by_net) == {"A", "B", "C"}
+
+    # Case (a): net A, wholly inside SUB -- exactly zero top-cell share.
+    a = by_net["A"]
+    assert a["capacitance_ff"] == pytest.approx(0.1998)
+    assert a["resistance_ohm"] == pytest.approx(12.8)
+    assert a["capacitance_ff_top_cell"] == 0.0
+    assert a["resistance_ohm_top_cell"] == 0.0
+
+    # Case (b): net B, wholly drawn in TOP -- exact equality, no cut at all.
+    b = by_net["B"]
+    assert b["capacitance_ff"] == pytest.approx(0.1998)
+    assert b["resistance_ohm"] == pytest.approx(12.8)
+    assert b["capacitance_ff_top_cell"] == pytest.approx(b["capacitance_ff"])
+    assert b["resistance_ohm_top_cell"] == pytest.approx(b["resistance_ohm"])
+
+    # Case (c): net C, crossing the instance boundary.
+    c = by_net["C"]
+    assert c["capacitance_ff"] == pytest.approx(0.259)
+    assert c["resistance_ohm"] == pytest.approx(19.2)
+    assert c["capacitance_ff_top_cell"] == pytest.approx(0.1406)
+    assert c["resistance_ohm_top_cell"] == pytest.approx(25.6)
+
+    # Documented tolerance, not exact equality (spike doc sections 4/5): the
+    # complementary instance-side share sums with the top-cell share to
+    # *more* than the net's own total, because the boundary cut inflates
+    # combined perimeter (and, for this asymmetric split, the `_n_squares`
+    # resistance approximation too) relative to the uncut shape.
+    instance_capacitance_ff = 1.0 * 0.037 + 4.0 * 0.0407  # SUB's own square
+    instance_resistance_ohm = 12.8 * 1.0
+    split_capacitance_ff = c["capacitance_ff_top_cell"] + instance_capacitance_ff
+    split_resistance_ohm = c["resistance_ohm_top_cell"] + instance_resistance_ohm
+    assert split_capacitance_ff > c["capacitance_ff"]
+    assert split_resistance_ohm > c["resistance_ohm"]
+    # But still close -- this is a documented rounding-scale discrepancy,
+    # not an order-of-magnitude bug.
+    assert split_capacitance_ff == pytest.approx(c["capacitance_ff"], rel=0.5)
+    assert split_resistance_ohm == pytest.approx(c["resistance_ohm"], rel=1.01)
+
+
+def test_cli_parasitics_top_cell_only_flag_json(tmp_path, capsys):
+    """`klt extract --parasitics-top-cell-only` (issue #1704) -- CLI-level
+    counterpart to `test_parasitics_top_cell_only_splits_ground_rc_by_hierarchy`'s
+    direct `run_extract` call."""
+    path = str(_write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds"))
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--parasitics-top-cell-only",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["top_cell_only"] is True
+    by_net = {entry["net"]: entry for entry in out["parasitics"]["nets"]}
+    assert by_net["A"]["capacitance_ff_top_cell"] == 0.0
+    assert by_net["B"]["capacitance_ff_top_cell"] == pytest.approx(
+        by_net["B"]["capacitance_ff"]
+    )
 
 
 def test_describe_parasitics_overlap_gaps_reports_truncation_and_none_entries():

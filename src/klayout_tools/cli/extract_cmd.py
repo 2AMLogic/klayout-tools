@@ -256,6 +256,11 @@ def run(args: argparse.Namespace) -> int:
             # every net in the design. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             parasitics_nets=args.parasitics_nets,
+            # `--parasitics-top-cell-only` (issue #1704): additionally
+            # splits each net's ground R/C into a top-cell-drawn/instance-
+            # drawn share. `False` when the flag was never given, unchanged
+            # from every call site that predates it.
+            parasitics_top_cell_only=args.parasitics_top_cell_only,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
@@ -379,6 +384,17 @@ def _print_text(report: dict) -> None:
                 1 for n in parasitics["nets"] if n.get("rc_model") == "distributed"
             )
             print(f"distributed_rc: {distributed_count} net(s)")
+        # Additive (issue #1704): only printed when --parasitics-top-cell-only
+        # was given -- each `parasitics.nets[]` entry's
+        # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` otherwise stay
+        # `None`, which text mode does not otherwise surface.
+        if parasitics.get("top_cell_only"):
+            top_cell_split_count = sum(
+                1
+                for n in parasitics["nets"]
+                if n.get("capacitance_ff_top_cell") is not None
+            )
+            print(f"parasitics_top_cell_only: {top_cell_split_count} net(s)")
         # Additive (issue #798): only printed when --mom-net was given.
         mom_crosscheck = parasitics.get("mom_crosscheck")
         if mom_crosscheck is not None:

@@ -47,6 +47,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/json-contract.md`](docs/json-contract.md)'s additive-envelope
   policy. See `docs/cli/mom.md`'s "Deriving a `stackup` from an installed
   PDK" section.
+- **Added**: `klt extract --parasitics-top-cell-only` (issue #1704, the
+  implementation half of the design spike in #1702/#1707) — splits each
+  net's `--parasitics` ground R/C into the portion drawn directly in the top
+  cell versus the portion drawn inside an instantiated sub-block, reported
+  as additive `resistance_ohm_top_cell`/`capacitance_ff_top_cell` fields
+  (`null` unless the flag is given) on every `parasitics.nets[]` entry. Lets
+  a caller who has already extracted a sub-block separately subtract its own
+  contribution back out of a composed top-level net's R/C. Ground terms only
+  (ignores coupling capacitance); built once per curated layer from the
+  layout's own instance tree (`Cell.begin_shapes_rec(layer, min_depth=1)`),
+  not once per net or per instance, so the cost is independent of instance
+  count. Exact in area, not exactly additive in perimeter for a net whose
+  conductor genuinely crosses an instance boundary — see
+  `docs/cli/extract.md`'s "Top-cell-only hierarchy split" section and
+  `docs/design/parasitics-hierarchy-attribution-spike.md`. Off by default —
+  byte-identical to today's behavior.
 - **Added**: `klt gen mos_array` gains `interior_channel_um` (default `0.0`,
   preserving byte-for-byte existing geometry; issue #1531, Phase 1) — extra
   gap in µm reserved between adjacent rows/columns, on top of the fixed

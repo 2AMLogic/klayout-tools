@@ -104,6 +104,17 @@ capacitor-shaped device with no computed value at all. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section for the full
 derivation.
 
+**A new opt-in flag adding `null`-by-default fields to an already-shipped
+per-entry shape is likewise additive** — the field exists on every entry
+regardless of whether the flag was given, but only carries a real value when
+the caller asked for the extra computation, so an unaware consumer never
+sees a member appear or disappear. The concrete precedent: issue #1704's
+`klt extract --parasitics-top-cell-only`, which adds
+`resistance_ohm_top_cell`/`capacitance_ff_top_cell` to every
+`parasitics.nets[]` entry — `null` unless the flag is given, a computed
+number when it is. See `docs/cli/extract.md`'s "Top-cell-only hierarchy
+split" section for the full derivation.
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`
