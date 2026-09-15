@@ -1296,10 +1296,16 @@ direction. Each candidate track goes back through every one of
 `route_two_pin()`'s own checks (obstacle overlap, via-drop resolution, the
 lot — a track is just a different fixed shape, not an exemption from
 anything) and is re-checked against the route-vs-route collision check; the
-first track that clears both is accepted, up to a bound of 24 tracks before
-the leg is reported unroutable (the original collision wording, plus a note
-naming how many tracks were tried — the same convention #1167's and #1393's
-own exhausted searches use). A resolved leg reports which track it landed on
+first track that clears both is accepted, up to a bound of 24 tracks. If
+every track is exhausted and `routing.cross_block_layer_role` is configured
+(and not already the layer this leg resolved on), the leg falls back to that
+cross-layer retry (#1680) instead of failing outright — the same fallback a
+non-eligible leg's route-vs-route collision already gets from
+`route_bundle()`. Only when no `routing.cross_block_layer_role` is
+configured (or it too is exhausted) is the leg reported unroutable (the
+original collision wording, plus a note naming how many tracks were tried —
+the same convention #1167's and #1393's own exhausted searches use). A
+resolved leg reports which track it landed on
 in its own `nets[].legs[].channel_track` field (`0` for the untracked
 default, matching every other leg field's per-leg reporting — see the
 [response schema](#response) below); an unrouted leg omits it, the same
