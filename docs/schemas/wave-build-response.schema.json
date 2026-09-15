@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/wave-build-response.schema.json",
+  "title": "klt wave build response (klt.wave_build.response/1)",
+  "description": "The report `klt wave build` prints on success -- see docs/design/waveform-query-contract-spike.md section 4 for the full field table (Epic #1585, issue #1601).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace",
+    "store",
+    "clock",
+    "reset",
+    "timescale",
+    "time_range",
+    "signal_count",
+    "value_change_count",
+    "provenance"
+  ],
+  "$defs": {
+    "time_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time_ns", "cycle"],
+      "description": "A response-side time point -- both forms always reported together (section 3). `cycle` is `null` whenever the instant precedes cycle 0's anchor point (before reset release, or before the trace's first clock edge with no reset declared).",
+      "properties": {
+        "time_ns": { "type": "number" },
+        "cycle": { "type": ["integer", "null"] }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Per-command version, per docs/json-contract.md."
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "format", "size_bytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "format": {
+          "type": "string",
+          "enum": ["vcd", "fst"],
+          "description": "Resolved -- never null in a successful response, even if the request omitted it."
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Size of the input trace file, so a caller can see the compaction ratio against `store.size_bytes` without a second filesystem call."
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes", "content_hash"],
+      "properties": {
+        "path": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "clock": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "`null` when no `clock` block was given in the request.",
+      "required": ["signal", "edge", "period_ns"],
+      "properties": {
+        "signal": { "type": "string" },
+        "edge": { "type": "string", "enum": ["rising", "falling"] },
+        "period_ns": {
+          "type": ["number", "null"],
+          "description": "The clock's own measured period (median inter-edge spacing), in nanoseconds -- `null` when `clock.signal` toggled fewer than twice in the trace."
+        }
+      }
+    },
+    "reset": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "`null` when no `reset` block was given in the request.",
+      "required": ["signal", "active", "release"],
+      "properties": {
+        "signal": { "type": "string" },
+        "active": { "type": "string", "enum": ["low", "high"] },
+        "release": {
+          "anyOf": [{ "$ref": "#/$defs/time_point" }, { "type": "null" }],
+          "description": "The resolved cycle-0 anchor point, in both time forms -- `null` when reset was declared but its release was never observed in the trace."
+        }
+      }
+    },
+    "timescale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "value"],
+      "properties": {
+        "unit": { "type": "string" },
+        "value": { "type": "number" }
+      }
+    },
+    "time_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/time_point" },
+        "to": { "$ref": "#/$defs/time_point" }
+      }
+    },
+    "signal_count": { "type": "integer", "minimum": 0 },
+    "value_change_count": { "type": "integer", "minimum": 0 },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["klt_version", "klayout_version", "pdk", "deck", "input"],
+      "description": "Shared provenance block (docs/json-contract.md). `pdk`/`deck`/`klayout_version` are always `null` for `klt wave` -- it resolves no PDK and invokes no `klayout`/`pya` engine.",
+      "properties": {
+        "klt_version": { "type": ["string", "null"] },
+        "klayout_version": { "type": "null" },
+        "pdk": { "type": "null" },
+        "deck": { "type": "null" },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["content_hash"],
+          "description": "The trace file's own content hash.",
+          "properties": {
+            "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      }
+    }
+  }
+}

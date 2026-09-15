@@ -125,6 +125,16 @@ revisions or PDK releases are otherwise indistinguishable in the output, so a
 signoff claim can't be checked or reproduced. This block is **additive** (see
 above): adopting it required no `schema_version` bump on any verb.
 
+`klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
+for a different reason: neither resolves a PDK nor applies a rule deck (a
+waveform trace has neither), so `pdk`/`deck`/`klayout_version` are always
+`null` for both verbs — `klt_version` and `input.content_hash` (the trace
+file's hash for `build`, the store file's hash for `query`) are what
+still earn the block its keep, the same reproducibility role it plays for
+every other verb below. See
+[`docs/design/waveform-query-contract-spike.md`](design/waveform-query-contract-spike.md)
+section 2 and [`docs/cli/wave.md`](cli/wave.md).
+
 ```json
 "provenance": {
   "klt_version": "0.4.2",

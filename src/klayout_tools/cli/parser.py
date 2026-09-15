@@ -52,6 +52,7 @@ from . import (
     techmap_cmd,
     trajectory_cmd,
     version_cmd,
+    wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
     yield_sensitivity_cmd,
@@ -209,6 +210,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_functional_verification_parser(subparsers)
     _add_place_and_route_parser(subparsers)
+    _add_wave_parser(subparsers)
 
     _add_sta_parser(subparsers)
 
@@ -2844,6 +2846,74 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_pdk_args(place_and_route_parser)
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
+
+
+def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``wave`` verb with nested ``build``/``query``
+    subcommands (Epic #1585, issue #1601), mirroring ``pdk``/``deck``'s
+    grouped-verb pattern (see ``_add_deck_parser``).
+
+    Query and index a functional-verification waveform trace (VCD or FST)
+    via `native/wave`'s standalone `klt-wave` binary (issues #1599/#1600) --
+    build an indexed store once (`build`), then answer one or more `value`/
+    `find`/`count`/`sample`/`stuck`/`diff`/`wave` questions against it
+    (`query`), without a GUI waveform viewer. See docs/cli/wave.md and
+    docs/design/waveform-query-contract-spike.md for the full request/
+    response contract.
+    """
+    wave_parser = subparsers.add_parser(
+        "wave",
+        help="build/query an indexed store from a VCD/FST functional-"
+        "verification waveform trace (native Rust)",
+        description=(
+            "Build an indexed FST store from a VCD/FST waveform trace "
+            "(`build`), then answer one or more query operations against "
+            "it (`query`) -- `value`, `find`, `count`, `sample`, `stuck`, "
+            "`diff`, `wave` (see docs/cli/wave.md's op table). Invokes the "
+            "standalone `klt-wave` binary as a subprocess (built via "
+            "`cargo build --release` inside native/wave/); never re-"
+            "implements the FST/VCD engine in Python. Both subcommands "
+            "take a request-document path (like `klt lvs`/`klt sim`/`klt "
+            "techmap`), not positional trace/store file args."
+        ),
+    )
+    wave_sub = wave_parser.add_subparsers(dest="wave_command", metavar="<subcommand>")
+
+    wave_parser.set_defaults(func=_no_subcommand_handler(wave_parser))
+
+    build_parser = wave_sub.add_parser(
+        "build",
+        help="build an indexed store from a VCD/FST trace",
+        description=(
+            "Index a VCD/FST waveform trace into a compact, queryable FST "
+            "store -- built once, queried many times, exactly like `klt "
+            "extract`'s netlist output. See docs/design/waveform-query-"
+            "contract-spike.md section 4 for the full "
+            "`klt.wave_build.request/1` field table."
+        ),
+    )
+    build_parser.add_argument(
+        "request", help="path to a klt.wave_build.request/1 JSON file"
+    )
+    _add_format_arg(build_parser)
+    build_parser.set_defaults(func=wave_cmd.run_build)
+
+    query_parser = wave_sub.add_parser(
+        "query",
+        help="answer one or more query ops against a built store",
+        description=(
+            "Answer one or more query operations (a single query is simply "
+            "a one-entry `ops` array) against a store `klt wave build` "
+            "produced. See docs/design/waveform-query-contract-spike.md "
+            "section 5 for the full `klt.wave_query.request/1` op "
+            "vocabulary and predicate/exit-code-3 design."
+        ),
+    )
+    query_parser.add_argument(
+        "request", help="path to a klt.wave_query.request/1 JSON file"
+    )
+    _add_format_arg(query_parser)
+    query_parser.set_defaults(func=wave_cmd.run_query)
 
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:

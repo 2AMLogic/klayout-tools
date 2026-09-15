@@ -41,6 +41,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   yet consume this field: subtracting a block's declared `navigable_regions`
   from its obstacle bbox so a `waypoints_um` backbone can be routed through
   the channel is Phase 2, filed separately as issue #1835.
+- **Added**: `klt wave build` / `klt wave query` (Epic #1585 Phase 2c, issue
+  #1601) — index a VCD/FST functional-verification waveform trace into a
+  compact FST store, then answer `value`/`find`/`count`/`sample`/`stuck`/
+  `diff`/`wave` query operations against it, closing the gap `klt
+  functional-verification`'s own "Out of scope" section named ("Waveform
+  inspection / interactive debug... no waveform artifact is contracted").
+  Thin Python wrapper (`klayout_tools/wave.py`) around the standalone
+  `klt-wave` binary (`native/wave/`, issues #1599/#1600); `klt-wave-native`
+  is not a `pyproject.toml` dependency at all (build it directly with
+  `cargo build --release` inside `native/wave/`) — a checkout without it
+  gets a clear, actionable error, never an install-time break. See
+  [`docs/cli/wave.md`](docs/cli/wave.md) and
+  [`docs/design/waveform-query-contract-spike.md`](docs/design/waveform-query-contract-spike.md)
+  for the full contract.
 
 ## 0.5.0 (2026-09-15)
 

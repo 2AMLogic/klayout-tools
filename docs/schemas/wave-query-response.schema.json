@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/wave-query-response.schema.json",
+  "title": "klt wave query response (klt.wave_query.response/1)",
+  "description": "The report `klt wave query` prints on a run that at least executed to completion (exit 0 or 3) -- see docs/design/waveform-query-contract-spike.md section 5 for the full per-op result field table (Epic #1585, issue #1601).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "store", "status", "results", "provenance"],
+  "$defs": {
+    "time_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time_ns", "cycle"],
+      "properties": {
+        "time_ns": { "type": "number" },
+        "cycle": { "type": ["integer", "null"] }
+      }
+    },
+    "value_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "at", "value"],
+      "properties": {
+        "op": { "const": "value" },
+        "signal": { "type": "string" },
+        "at": { "$ref": "#/$defs/time_point" },
+        "value": {
+          "type": "string",
+          "description": "The signal's 4-state bit vector as text, e.g. \"1\", \"01x0\"."
+        },
+        "satisfied": {
+          "type": "boolean",
+          "description": "Present only when the request op declared a `predicate`."
+        }
+      }
+    },
+    "find_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "found"],
+      "properties": {
+        "op": { "const": "find" },
+        "signal": { "type": "string" },
+        "found": { "type": "boolean" },
+        "at": {
+          "anyOf": [{ "$ref": "#/$defs/time_point" }, { "type": "null" }],
+          "description": "Omitted/null when `found: false`."
+        },
+        "satisfied": { "type": "boolean" }
+      }
+    },
+    "count_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "count"],
+      "properties": {
+        "op": { "const": "count" },
+        "signal": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 },
+        "satisfied": { "type": "boolean" }
+      }
+    },
+    "sample_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signals", "samples"],
+      "description": "Dump-shaped -- never carries `satisfied` (no predicate is defined for this op).",
+      "properties": {
+        "op": { "const": "sample" },
+        "signals": { "type": "array", "items": { "type": "string" } },
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "values"],
+            "properties": {
+              "at": { "$ref": "#/$defs/time_point" },
+              "values": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "stuck_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "stuck", "value", "span"],
+      "properties": {
+        "op": { "const": "stuck" },
+        "signal": { "type": "string" },
+        "stuck": { "type": "boolean" },
+        "value": {
+          "type": ["string", "null"],
+          "description": "The constant value, when `stuck: true`; `null` otherwise."
+        },
+        "span": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["from", "to"],
+              "properties": {
+                "from": { "$ref": "#/$defs/time_point" },
+                "to": { "$ref": "#/$defs/time_point" }
+              }
+            },
+            { "type": "null" }
+          ],
+          "description": "Bounds the longest constant run found, regardless of whether it meets `min_span`."
+        },
+        "satisfied": { "type": "boolean" }
+      }
+    },
+    "diff_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "diverges", "distance"],
+      "properties": {
+        "op": { "const": "diff" },
+        "signal": { "type": "string" },
+        "diverges": { "type": "boolean" },
+        "at": {
+          "anyOf": [{ "$ref": "#/$defs/time_point" }, { "type": "null" }],
+          "description": "First divergent instant, or `null` when `diverges: false`."
+        },
+        "distance": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of divergent value-change events across the whole window -- 0 when `diverges: false`."
+        },
+        "satisfied": { "type": "boolean" }
+      }
+    },
+    "wave_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "signal", "entries", "truncated"],
+      "description": "Dump-shaped -- never carries `satisfied` (no predicate is defined for this op).",
+      "properties": {
+        "op": { "const": "wave" },
+        "signal": { "type": "string" },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to", "value"],
+            "properties": {
+              "from": { "$ref": "#/$defs/time_point" },
+              "to": {
+                "anyOf": [{ "$ref": "#/$defs/time_point" }, { "type": "null" }]
+              },
+              "value": { "type": "string" }
+            }
+          }
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the window contained more runs than `max_entries` and the array was cut short."
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Per-command version, per docs/json-contract.md."
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "content_hash"],
+      "properties": {
+        "path": { "type": "string" },
+        "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "unsatisfied"],
+      "description": "\"ok\" when every op that declared a `predicate` is `satisfied: true` (or no op declared one); \"unsatisfied\" when at least one declared predicate is `satisfied: false`."
+    },
+    "results": {
+      "type": "array",
+      "description": "One entry per request `ops[]` entry, same order.",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/value_result" },
+          { "$ref": "#/$defs/find_result" },
+          { "$ref": "#/$defs/count_result" },
+          { "$ref": "#/$defs/sample_result" },
+          { "$ref": "#/$defs/stuck_result" },
+          { "$ref": "#/$defs/diff_result" },
+          { "$ref": "#/$defs/wave_result" }
+        ]
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["klt_version", "klayout_version", "pdk", "deck", "input"],
+      "description": "Shared provenance block (docs/json-contract.md). `pdk`/`deck`/`klayout_version` are always `null` for `klt wave`. `input.content_hash` is the store file's own hash (matching `store.content_hash` above).",
+      "properties": {
+        "klt_version": { "type": ["string", "null"] },
+        "klayout_version": { "type": "null" },
+        "pdk": { "type": "null" },
+        "deck": { "type": "null" },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["content_hash"],
+          "properties": {
+            "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      }
+    }
+  }
+}
