@@ -2337,6 +2337,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   for the full decision record and
   [`docs/json-contract.md`](docs/json-contract.md)'s "Pinning the KLayout
   engine version" section.
+- **Added**: `klt mom` PEEC inductance/resistance and full-wave S-parameter
+  requests accept a conductor built from more than one box, as long as the
+  conductor's own boxes share one current-flow axis and axial extent (issue
+  #1841). Previously a multi-box conductor was rejected outright by the
+  bar-shaped-conductor MVP restriction; now each box is validated
+  individually against that restriction, and (for PEEC) gets its own
+  filament grid attributed back to the owning conductor for the pairwise
+  solve, or (for full-wave) is combined with its sibling boxes into one
+  equivalent wire via summed cross-sectional area and an area-weighted
+  centroid. A conductor whose own boxes span more than one axis is still
+  rejected, unchanged; conductors still need not share an axis or axial
+  extent with each other (issue #1842). `inductance_matrix_nh`/
+  `resistance_ohm` still report one row/entry per conductor, not per box.
+  See `docs/cli/mom.md`'s "Worked example: multi-box conductor" section.
 - **Fixed**: `klt synthesize`'s `schema_version` bumps `1` -> `2` (issue
   #1844, mirroring `klt pex`/`klt sim`/`klt size`/`klt extract`'s own issue
   #1261/#1376 bumps): the top-level `netlist_path`/`script_path` fields --
