@@ -210,6 +210,7 @@ from .extract_parasitics import spice_safe_net_name as spice_safe_net_name
 from .extract_spef import ExtractError as ExtractError
 from .extract_spef import _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
+from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
@@ -246,6 +247,36 @@ if TYPE_CHECKING:
 #: docs/cli/env-provenance.md's "external input pinned by identity, not
 #: location" rationale.
 SCHEMA_VERSION = 3
+
+# `run_extract()`'s own field name -> its declared METRICS2.1-style name in
+# `metrics.py`'s registry (issue #1848, adopting the #247 registry beyond its
+# `layout-metrics`/`klt drc` (#1847) adopters). Additive: the `metrics` block
+# these back is a *parallel* object alongside the existing fields, never a
+# replacement for them -- see `docs/design/metric-namespace.md` for the
+# additive-vs-rename decision. `_METRIC_NAME_BY_FIELD` covers the three
+# fields always present; `_PARASITICS_METRIC_NAME_BY_FIELD` covers the eight
+# `--parasitics`-only fixed numeric fields (`parasitics_report`'s own keys,
+# not `run_extract()`'s top-level ones). `device_counts` (the per-device-class
+# dict) is deliberately excluded from both -- see `run_extract`'s docstring
+# "metrics" paragraph for why.
+_METRIC_NAME_BY_FIELD = {
+    "device_count": "extract__device__count",
+    "net_count": "extract__net__count",
+    "pin_count": "extract__pin__count",
+}
+_PARASITICS_METRIC_NAME_BY_FIELD = {
+    "r_count": "extract__resistor__count",
+    "c_count": "extract__capacitor__count",
+    "cc_count": "extract__coupling__capacitor__count",
+    "l_count": "extract__inductor__count",
+    "total_resistance_ohm": "extract__resistance__ohm",
+    "total_capacitance_ff": "extract__capacitance__ff",
+    "total_coupling_capacitance_ff": "extract__coupling__capacitance__ff",
+    "total_inductance_nh": "extract__inductance__nh",
+}
+
+assert all(is_registered(name) for name in _METRIC_NAME_BY_FIELD.values())
+assert all(is_registered(name) for name in _PARASITICS_METRIC_NAME_BY_FIELD.values())
 
 #: Decimal places `devices[].params` (`w_um`/`l_um`) are rounded to -- clears
 #: floating-point noise from KLayout's internal dbu -> um conversion (e.g.
@@ -1113,6 +1144,22 @@ def run_extract(
             "net_count": <int>,
             "pin_count": <int>,
             "device_counts": {<device class>: <int>, ...},
+            "metrics": {
+                "extract__device__count": <int>,
+                "extract__net__count": <int>,
+                "extract__pin__count": <int>,
+                # The eight entries below are present only when
+                # `--parasitics` was given -- see the "metrics" paragraph
+                # below.
+                "extract__resistor__count": <int>,
+                "extract__capacitor__count": <int>,
+                "extract__coupling__capacitor__count": <int>,
+                "extract__inductor__count": <int>,
+                "extract__resistance__ohm": <float>,
+                "extract__capacitance__ff": <float>,
+                "extract__coupling__capacitance__ff": <float>,
+                "extract__inductance__nh": <float>,
+            },
             "ignored_layers": [
                 {"layer": int, "datatype": int, "shapes": int}, ...
             ],
@@ -1298,6 +1345,41 @@ def run_extract(
     time whether a deck can even produce a given device class (e.g. before
     pairing it with a reference netlist for ``klt lvs``) reads this field
     instead of inferring "not supported" from a zero count.
+
+    ``metrics`` (issue #1848, adopting the declared metric namespace
+    registry from #247 beyond its ``klt layout-metrics``/``klt drc`` (#1847)
+    adopters) is a **parallel, additive** object re-keying this response's
+    fixed, non-caller-supplied numeric fields under their declared
+    METRICS2.1-style names from :mod:`klayout_tools.metrics`'s registry --
+    ``device_count`` -> ``extract__device__count``, ``net_count`` ->
+    ``extract__net__count``, ``pin_count`` -> ``extract__pin__count``, and,
+    only when ``--parasitics`` was given, ``parasitics.r_count`` ->
+    ``extract__resistor__count``, ``parasitics.c_count`` ->
+    ``extract__capacitor__count``, ``parasitics.cc_count`` ->
+    ``extract__coupling__capacitor__count``, ``parasitics.l_count`` ->
+    ``extract__inductor__count``, ``parasitics.total_resistance_ohm`` ->
+    ``extract__resistance__ohm``, ``parasitics.total_capacitance_ff`` ->
+    ``extract__capacitance__ff``,
+    ``parasitics.total_coupling_capacitance_ff`` ->
+    ``extract__coupling__capacitance__ff``, and
+    ``parasitics.total_inductance_nh`` -> ``extract__inductance__nh``. It
+    never replaces or changes any of those fields, which stay exactly as
+    documented; ``metrics`` always carries the three non-parasitics entries,
+    and additionally carries the eight parasitics entries only when
+    ``parasitics`` above is non-``None``. Every entry declares
+    ``aggregator="sum"`` and ``higher_is_better=None`` (a purely structural/
+    physical count or total, not itself a "better or worse" axis -- see
+    ``docs/design/metric-namespace.md``'s polarity reasoning, applied
+    identically here). ``device_counts`` (the per-device-class dict) and the
+    other structural/diagnostic report shapes (``substrate_dc_tie``,
+    ``metals_without_coefficient``, ``overlap_pairs_without_coefficient``,
+    etc. -- dicts/lists, not scalar metrics) are deliberately **not**
+    declared in this registry pass: the registry's ``{aggregator,
+    higher_is_better, critical}`` tuple is defined for a single scalar
+    value, not a dict keyed by an open-ended, deck-defined device-class
+    vocabulary (the same reasoning issue #247 documented for ``klt sim``'s
+    caller-supplied ``measurements[]`` names -- see
+    ``docs/design/metric-namespace.md``'s "Follow-on work" section).
 
     ``ignored_layers`` (issue #220) lists ``(layer, datatype)`` pairs that
     carry shapes in the input stream but are *not* read by this deck's
@@ -2519,6 +2601,26 @@ def run_extract(
     # resolved SPEF path otherwise -- see `run_extract`'s `spef_output`
     # docstring paragraph and `docs/cli/extract.md`'s "SPEF export" section.
     result["spef_path"] = spef_path
+
+    # Additive `metrics` block (issue #1848, adopting the declared metric
+    # namespace registry from #247 beyond its `layout-metrics`/`klt drc`
+    # (#1847) adopters) -- see `run_extract`'s docstring "metrics" paragraph
+    # for the full contract. Never replaces `device_count`/`net_count`/
+    # `pin_count`/`parasitics.*` above, which stay exactly as documented.
+    metrics: dict[str, int | float] = {
+        field_metric_name: result[field_name]
+        for field_name, field_metric_name in _METRIC_NAME_BY_FIELD.items()
+    }
+    if parasitics_report is not None:
+        metrics.update(
+            {
+                field_metric_name: parasitics_report[field_name]
+                for field_name, field_metric_name in (
+                    _PARASITICS_METRIC_NAME_BY_FIELD.items()
+                )
+            }
+        )
+    result["metrics"] = metrics
 
     return result
 

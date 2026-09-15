@@ -342,3 +342,128 @@ register(
         "errored). Critical: any nonzero value is a signoff blocker."
     ),
 )
+
+# --------------------------------------------------------------------------
+# `klt extract` adoption (issue #1848, extending #247's registry beyond its
+# `layout-metrics`/`drc` (#1847) adopters).
+#
+# `device_count`/`net_count`/`pin_count` are always present in `run_extract`'s
+# JSON payload; the eight `extract__*` names below (r_count, c_count,
+# total_resistance_ohm, total_capacitance_ff, cc_count, l_count,
+# total_coupling_capacitance_ff, total_inductance_nh) are declared only for
+# `run_extract`'s `--parasitics` fields -- see `extract.py`'s own
+# `_METRIC_NAME_BY_PARASITICS_FIELD` for the field -> declared-name mapping
+# actually wired into the `metrics` block.
+#
+# Naming note: `register()`'s naming grammar (`_NAME_RE` above) requires
+# every `__`-separated segment to be plain alphanumeric -- no single
+# underscores inside a segment. That rules out a literal
+# "extract__resistance__total_ohm"-style name (a single underscore inside
+# the last segment); the unit ("ohm"/"ff"/"nh") is used as its own final
+# segment instead (`extract__resistance__ohm`), with the "total" implied by
+# the declared `sum` aggregator rather than spelled out in the name.
+#
+# All eleven are purely structural/physical counts and sums with no declared
+# quality polarity -- the same `higher_is_better=None` reasoning
+# `docs/design/metric-namespace.md` applies to `layout-metrics`' structural
+# counts (`design__layer__count` et al.): a bigger device/net/pin count, or a
+# bigger total parasitic R/C/L, is not by itself a "better or worse" outcome
+# -- it is a sizing/parasitics fact other decisions act on.
+# --------------------------------------------------------------------------
+
+register(
+    "extract__device__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total extracted device count for a block (`klt extract`'s device_count)."
+    ),
+)
+register(
+    "extract__net__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description="Total extracted net count for a block (`klt extract`'s net_count).",
+)
+register(
+    "extract__pin__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description="Total promoted-pin net count for a block (`klt extract`'s pin_count).",
+)
+register(
+    "extract__resistor__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total parasitic resistor device count injected by `--parasitics` "
+        "(`klt extract`'s parasitics.r_count)."
+    ),
+)
+register(
+    "extract__capacitor__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total parasitic ground-capacitor device count injected by "
+        "`--parasitics` (`klt extract`'s parasitics.c_count)."
+    ),
+)
+register(
+    "extract__coupling__capacitor__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total net-to-net coupling-capacitor device count injected by "
+        "`--parasitics` (`klt extract`'s parasitics.cc_count)."
+    ),
+)
+register(
+    "extract__inductor__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total series-inductor device count injected by `--parasitics` "
+        "`--mom-rlc-net`/`--mom-rlc-inductance-nh` (`klt extract`'s "
+        "parasitics.l_count)."
+    ),
+)
+register(
+    "extract__resistance__ohm",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total parasitic resistance across every net, in ohms, injected by "
+        "`--parasitics` (`klt extract`'s parasitics.total_resistance_ohm)."
+    ),
+)
+register(
+    "extract__capacitance__ff",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total parasitic ground capacitance across every net, in "
+        "femtofarads, injected by `--parasitics` (`klt extract`'s "
+        "parasitics.total_capacitance_ff)."
+    ),
+)
+register(
+    "extract__coupling__capacitance__ff",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total net-to-net coupling capacitance across every coupled pair, "
+        "in femtofarads, injected by `--parasitics` (`klt extract`'s "
+        "parasitics.total_coupling_capacitance_ff)."
+    ),
+)
+register(
+    "extract__inductance__nh",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total series inductance across every `--mom-rlc-net`-substituted "
+        "net, in nanohenries (`klt extract`'s "
+        "parasitics.total_inductance_nh)."
+    ),
+)
