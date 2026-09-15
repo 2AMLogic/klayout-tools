@@ -418,15 +418,34 @@ mutual-term bundle-averaging approximation and the asymptote's own
 validation oracle is "FastHenry on a spiral fixture (2-3 turns) — a simple
 2-3 turn square or octagonal spiral with known FastHenry-computed
 inductance", since FastHenry is the standard reference filament-based PEEC
-extractor for exactly this geometry class. **FastHenry itself is not
-available in this build/CI environment** — no package registry (Homebrew,
-`apt`, `conda`) ships it, and a builder sandbox has no network access to
-fetch or build it from source — so literally running the FastHenry binary
-and citing its output was not possible here. Fabricating a specific "FastHenry
-says X nH" number from memory is exactly the "don't transcribe... without
-independent verification" discipline (#797/#836, "Why re-derived, not
-cited" above) this codebase already refuses to do for closed-form
-coefficients; the same refusal applies to an external tool's output.
+extractor for exactly this geometry class. **That oracle was not run for
+this increment, and the fixture below does not stand in for it** — the
+acceptance criterion is tracked as still-open in
+[#1886](https://github.com/2AMLogic/klayout-tools/issues/1886), not closed
+by this section.
+
+FastHenry *is* packaged for Debian/Ubuntu (`apt-get install fasthenry`), so
+the binary is installable in CI, exactly as this repo already installs other
+external oracles and simulators there rather than in a builder sandbox: the
+*"Install the external NEC2++ oracle and run the cross-validation test"*
+step on `.github/workflows/ci.yml`'s mom leg
+([`mom-cross-validation.md`](mom-cross-validation.md)), and
+`scripts/ci-apt-install.sh ngspice` in the Python test job. What blocked it
+*here* is narrower, and only applies to the environment this increment was
+developed in: the builder sandbox has no network access to install or build
+FastHenry, and inventing a specific "FastHenry says X nH" number from memory
+is exactly the "don't transcribe... without independent verification"
+discipline (#797/#836, "Why re-derived, not cited" above) this codebase
+already refuses to apply to closed-form coefficients; the same refusal
+applies to an external tool's output. Wiring an apt-installed FastHenry into
+the mom CI leg — emitting a `.inp` deck for this same fixture, running the
+binary, parsing `Zc.mat` — is a self-contained piece of work in its own
+right, and is tracked as #1886; that work should also settle the licensing
+question [`em-field-sim-spike.md`](em-field-sim-spike.md) records as
+unresolved for the FastHenry/FastCap codebases (a weaker question for
+invoking a distro-packaged binary as a subprocess oracle, as this repo
+already does for PyNEC, than for taking on the code as a dependency — but
+not one the packaging alone answers).
 
 Instead, `native/mom/src/peec.rs`'s
 `square_spiral_inductance_matches_independent_filament_oracle` validates the
@@ -441,11 +460,13 @@ and `brute_force_mutual_geom_um`'s 2-D Gauss-Legendre quadrature (not
 term. This is a genuine independent cross-check of the new physics (a real
 spiral corner turns axes; a real spiral's non-adjacent turns are parallel
 but offset and unequal in length — exactly what #1842 unlocks), even though
-it is not literally the FastHenry binary. Literal FastHenry cross-validation
-remains a natural follow-up, the same status this document already records
-for external-solver cross-validation generally (see "What is not validated
-here" below, and [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-for the full-wave sweep's identical gap).
+it is not literally the FastHenry binary. It is a cross-check of the new
+physics, **not** a substitute for the named oracle: literal FastHenry
+cross-validation stays an open gap, tracked by
+[#1886](https://github.com/2AMLogic/klayout-tools/issues/1886) (see "What is
+not validated here" below, and
+[#895](https://github.com/2AMLogic/klayout-tools/issues/895) for the
+full-wave sweep's identical gap).
 
 Fixture: a 2-turn square spiral (8 segments), starting side 60 µm, 15 µm
 pitch growth per turn, 2×2 µm cross-section, `filament_size_um = 1.0`
@@ -585,11 +606,13 @@ discussion frames the tradeoff for the capacitance solve.
   mode as the cheaper in-house cross-check for exactly this regime; either
   would be a natural follow-up, and would test something these analytic
   oracles cannot (general geometry). [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  tracks this specifically for the full-wave sweep above; "Generalized
-  filament-pair formula (issue #1842)" above records the identical gap for
-  literal FastHenry cross-validation of the spiral fixture (the oracle used
-  there is an independent re-implementation of FastHenry's own method, not
-  the FastHenry binary itself).
+  tracks this specifically for the full-wave sweep above;
+  [#1886](https://github.com/2AMLogic/klayout-tools/issues/1886) tracks the
+  identical gap for literal FastHenry cross-validation of the spiral fixture
+  in "Generalized filament-pair formula (issue #1842)" above (the oracle
+  used there is an independent re-implementation of FastHenry's own method,
+  not the FastHenry binary itself — FastHenry is apt-installable in CI, so
+  that gap is a scheduling matter, not an availability one).
 - **Multi-box-per-conductor PEEC/full-wave geometry.** Every conductor must
   still reduce to exactly one bar-shaped box —
   [#1841](https://github.com/2AMLogic/klayout-tools/issues/1841) (a separate,

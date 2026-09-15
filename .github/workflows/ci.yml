@@ -189,9 +189,30 @@ jobs:
         # #719) print in this leg's log on a green run too, not only on
         # failure. It still captures, so capsys-based CLI assertions are
         # unaffected -- unlike -s / --capture=no, which would break them.
+        #
+        # --reinstall-package klt-<crate>-native (issue #1885, found on PR
+        # #1879): the `Set up uv` step above enables setup-uv's cache with
+        # the DEFAULT `cache-dependency-glob`, which keys ~/.cache/uv on
+        # uv.lock / pyproject.toml / requirements files only -- never on
+        # `native/**/*.rs` or `native/**/Cargo.*`. A Rust-only change
+        # therefore restores the PREVIOUSLY BUILT wheel for this crate out
+        # of the uv cache and `uv sync` reports "Installed ... +
+        # klt-<crate>-native" without ever invoking maturin, so the pytest
+        # run below exercises a STALE extension: a false red when the branch
+        # fixes something (PR #1879's two new tests failed in CI against
+        # code that no longer existed), and a silent false GREEN when the
+        # branch breaks something. `--reinstall-package` implies
+        # `--refresh-package` (`uv sync --help`), which invalidates that
+        # cached build and forces a rebuild from this checkout's Rust
+        # sources; it is scoped to the one local path package, so every
+        # other wheel in the environment still comes from the cache and the
+        # step stays fast. The crate name matches
+        # pyproject.toml's [tool.uv.sources] keys: klt-mom-native,
+        # klt-congestion-native, klt-yield-native.
         working-directory: .
         run: |
-          uv sync --locked --extra dev --group ${{ matrix.group }}
+          uv sync --locked --extra dev --group ${{ matrix.group }} \
+            --reinstall-package klt-${{ matrix.crate }}-native
           uv run --frozen --extra dev --group ${{ matrix.group }} pytest \
             ${{ matrix.test_paths }} -v --capture=tee-sys
 

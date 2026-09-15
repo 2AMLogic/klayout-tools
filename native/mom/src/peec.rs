@@ -1393,21 +1393,24 @@ mod tests {
     //
     // A square spiral is the canonical geometry this issue exists to unlock
     // (`docs/design/mom-general-conductor-geometry.md`'s "A coiled/spiral
-    // on-chip inductor ... fails this classification"). `FastHenry` itself
-    // is not installable in this build/CI environment (no package registry
-    // ships it, and there is no network access from a builder sandbox to
-    // fetch/build it), so the oracle here is the same *method* FastHenry
-    // uses -- filament-based PEEC, Grover's general filament-pair formula --
+    // on-chip inductor ... fails this classification"). `FastHenry` is
+    // apt-installable on Debian/Ubuntu and so could run in CI (tracked by
+    // #1886, mirroring the NEC2++ oracle step the mom CI leg already has),
+    // but it is not reachable from the network-less builder sandbox this
+    // increment was written in, so the oracle here is the same *method*
+    // FastHenry uses -- filament-based PEEC, Grover's general filament-pair
+    // formula --
     // independently re-implemented from scratch (a single centreline
     // filament per segment, `brute_force_mutual_geom_um`'s from-scratch
     // quadrature for every segment pair, and Rosa's closed form for each
     // segment's own self term, the same independent-of-`peec.rs` self-term
     // oracle `straight_bar_self_inductance_matches_rosa_closed_form` already
     // uses above), rather than a literal comparison against the FastHenry
-    // binary. Literal FastHenry cross-validation remains a natural follow-up
-    // (the same status quo `docs/design/mom-validation.md`'s "What is not
-    // validated here" already records for external-solver cross-validation,
-    // tracked by #895 for the full-wave sweep).
+    // binary. That is a cross-check of the new physics, not a substitute for
+    // #1842's named oracle: literal FastHenry cross-validation stays an open
+    // gap, tracked by #1886 (and by #895 for the full-wave sweep's identical
+    // gap) -- see `docs/design/mom-validation.md` section 5 and its "What is
+    // not validated here".
 
     /// A right-angle square spiral's segment endpoints (centreline), for
     /// `turns` complete turns (`4 * turns` segments), starting side length
