@@ -556,9 +556,11 @@ def _resolve_options(
     list[str],
     list[str],
     dict[str, str] | None,
+    bool,
 ]:
     """Validate ``request.options`` and return
-    ``(coverage, timescale, random_seed, defines, build_args, includes, sdf)``.
+    ``(coverage, timescale, random_seed, defines, build_args, includes, sdf,
+    trace)``.
 
     Enforces the spike's hard constraint that coverage is a Verilator-only
     capability -- ``options.coverage: true`` with ``engine: "icarus"`` is a
@@ -573,6 +575,15 @@ def _resolve_options(
     returned **absolute** because the generated ``$sdf_annotate`` shim
     embeds it verbatim and ``vvp`` resolves a relative path against its own
     working directory rather than the request's (spike §4.2).
+
+    ``trace`` (Epic #1585 Phase 3, issue #1845) is a plain boolean, unlike
+    ``coverage``/``sdf``: cocotb's own ``Runner.build()``/``Runner.test()``
+    already expose a single ``waves`` switch that both Icarus and Verilator
+    understand, each writing its own engine-native format (Icarus: FST;
+    Verilator: VCD) to a location this module does not control -- there is
+    no per-request knob to validate beyond "on or off". Unlike ``coverage``
+    and ``sdf``, ``options.trace`` is not engine-restricted: both supported
+    engines have a waveform-dump path through cocotb's ``Runner``.
     """
     if options is None:
         options = {}
@@ -587,6 +598,10 @@ def _resolve_options(
             f"options.coverage requires engine 'verilator' -- engine "
             f"'{engine}' has no coverage path"
         )
+
+    trace = options.get("trace", False)
+    if not isinstance(trace, bool):
+        raise FunctionalVerificationError("request.options.trace must be a boolean")
 
     timescale = options.get("timescale")
     if timescale is None:
@@ -625,6 +640,7 @@ def _resolve_options(
         build_args,
         includes,
         sdf,
+        trace,
     )
 
 
@@ -2067,6 +2083,7 @@ def _run_build(
     timescale: tuple[str, str],
     parameters: dict[str, Any],
     log_path: str,
+    waves: bool = False,
 ):
     """``Runner.build()``, with every failure mode collapsed into
     :class:`FunctionalVerificationError`. Returns the constructed ``Runner``
@@ -2076,7 +2093,10 @@ def _run_build(
     ``generic`` values at elaboration time (see :func:`_resolve_parameters`).
     ``defines`` and ``includes`` are forwarded verbatim to cocotb's own
     ``Runner.build(defines=..., includes=...)`` (see :func:`_resolve_defines`/
-    :func:`_resolve_includes`).
+    :func:`_resolve_includes`). ``waves`` (``options.trace``, issue #1845)
+    is forwarded to cocotb's own ``Runner.build(waves=...)`` -- cocotb's own
+    contract requires ``waves=True`` at build time for ``test()``'s own
+    ``waves=True`` to take effect (see :func:`_run_test`).
     """
     try:
         # `get_runner` raises ValueError for an unknown name; an engine
@@ -2100,6 +2120,7 @@ def _run_build(
             timescale=timescale,
             parameters=parameters,
             log_file=log_path,
+            waves=waves,
         )
     except subprocess.CalledProcessError as exc:
         raise FunctionalVerificationError(
@@ -2138,6 +2159,7 @@ def _run_test(
     timescale: tuple[str, str],
     parameters: dict[str, Any],
     log_path: str,
+    waves: bool = False,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
     discarded (spike section 4): a :class:`SystemExit` here means only "the
@@ -2166,6 +2188,11 @@ def _run_test(
     :func:`_resolve_parameters` and :func:`_run_build` (the same mapping is
     passed to both the build and test steps, matching cocotb's own
     ``Runner`` contract).
+
+    ``waves`` (``options.trace``, issue #1845) is forwarded to cocotb's own
+    ``Runner.test(waves=...)``, which is what actually triggers the
+    simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
+    for where each engine writes it.
     """
     inserted = module_dir not in sys.path
     if inserted:
@@ -2183,6 +2210,7 @@ def _run_test(
             timescale=timescale,
             parameters=parameters,
             log_file=log_path,
+            waves=waves,
         )
     except (SystemExit, subprocess.CalledProcessError):
         # Expected on a failing regression -- the results file is the truth.
@@ -2314,6 +2342,83 @@ def collect_coverage(
 
 
 # ---------------------------------------------------------------------------
+# `options.trace` (Epic #1585 Phase 3, issue #1845): hand off a run's own
+# waveform to `klt wave build`/`klt wave query` (docs/cli/wave.md)
+# ---------------------------------------------------------------------------
+
+
+def _find_trace_artifact(
+    *, hdl_toplevel: str, build_dir: str, test_dir: str
+) -> tuple[str, str] | None:
+    """Locate the waveform trace cocotb's own ``waves=True`` writes when
+    ``options.trace`` was requested (see :func:`run_functional_verification`
+    and :func:`_run_build`/:func:`_run_test`).
+
+    cocotb's own ``Runner`` implementations name and place this file
+    per-engine, never accept a caller-chosen path: Icarus writes
+    ``<hdl_toplevel>.fst`` into the *build* directory (the path is embedded,
+    absolute, into the generated ``$dumpfile``/``$dumpvars`` shim --
+    ``cocotb_tools.runner.Icarus._waves_file``/``_create_iverilog_dump_file``,
+    verified against the installed cocotb), while Verilator writes
+    ``dump.vcd`` into the simulation's own working directory (``test_dir``
+    -- ``cocotb_tools.runner.Verilator._waves_file``). Both engines' own
+    candidate locations are checked regardless of which engine actually ran
+    -- cheap, and it means a future cocotb release that swaps a path (or
+    changes which directory a given engine dumps into) degrades to a
+    slightly slower fallback search rather than a false "no trace" report,
+    the same posture :func:`_find_coverage_dat` already takes for
+    ``coverage.dat``.
+
+    Returns ``(path, format)``, or ``None`` if no trace file can be found.
+    """
+    candidates = (
+        (os.path.join(build_dir, f"{hdl_toplevel}.fst"), "fst"),
+        (os.path.join(test_dir, "dump.vcd"), "vcd"),
+        (os.path.join(test_dir, f"{hdl_toplevel}.fst"), "fst"),
+        (os.path.join(build_dir, "dump.vcd"), "vcd"),
+    )
+    for path, fmt in candidates:
+        if os.path.isfile(path):
+            return path, fmt
+    for root in (test_dir, build_dir):
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                if filename.endswith(".fst"):
+                    return os.path.join(dirpath, filename), "fst"
+                if filename == "dump.vcd":
+                    return os.path.join(dirpath, filename), "vcd"
+    return None
+
+
+def _resolve_trace(
+    *, hdl_toplevel: str, build_dir: str, test_dir: str
+) -> dict[str, Any]:
+    """Build the response's ``trace`` block -- ``{"path", "format",
+    "size_bytes"}``, the identical shape ``klt wave build``'s own ``trace``
+    field already uses (``docs/schemas/wave-build-response.schema.json``),
+    so the object this verb hands back can be dropped straight into a
+    ``klt wave build`` request's own ``trace`` field unchanged.
+
+    Raises :class:`FunctionalVerificationError` when ``options.trace`` was
+    requested but the run produced no waveform file -- a requested-and-
+    missing trace would otherwise be indistinguishable from "not requested"
+    (``null``), the same posture :func:`collect_coverage` already takes for
+    a requested-and-missing ``coverage.dat``.
+    """
+    found = _find_trace_artifact(
+        hdl_toplevel=hdl_toplevel, build_dir=build_dir, test_dir=test_dir
+    )
+    if found is None:
+        raise FunctionalVerificationError(
+            "options.trace was requested but the run produced no waveform "
+            "file -- verify the resolved engine (icarus/verilator) actually "
+            "supports waveform dumping on this host"
+        )
+    path, fmt = found
+    return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
+
+
+# ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 
@@ -2366,6 +2471,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         user_build_args,
         includes,
         sdf,
+        trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
     parameters = _resolve_parameters(request_doc.get("parameters"))
 
@@ -2499,6 +2605,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         timescale=timescale,
         parameters=parameters,
         log_path=build_log,
+        waves=trace_requested,
     )
     _run_test(
         engine_runner,
@@ -2514,6 +2621,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         timescale=timescale,
         parameters=parameters,
         log_path=test_log,
+        waves=trace_requested,
     )
 
     sdf_dropped_counts: dict[str, int] = {}
@@ -2580,6 +2688,18 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             info_path=os.path.join(output_dir, "coverage.info"),
         )
 
+    # Additive (Epic #1585 Phase 3, issue #1845): `null` on a run that did
+    # not ask for a trace, an object -- `{"path", "format", "size_bytes"}`,
+    # the identical shape `klt wave build`'s own `trace` field already uses
+    # -- on one that did. Resolved *after* the verdict/coverage above so a
+    # missing waveform (options.trace requested but unproducible) is never
+    # mistaken for the run's own pass/fail outcome.
+    trace = None
+    if trace_requested:
+        trace = _resolve_trace(
+            hdl_toplevel=build_hdl_toplevel, build_dir=build_dir, test_dir=output_dir
+        )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
@@ -2592,6 +2712,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         "skipped_count": skipped_count,
         "tests": tests,
         "coverage": coverage,
+        "trace": trace,
         "environment": {
             "engine": engine,
             "engine_version": _engine_version(engine),
@@ -2754,7 +2875,21 @@ def run_functional_verification_with_mutations(
         user_build_args,
         includes,
         sdf,
+        trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
+    if trace_requested:
+        # Also not designed (issue #1845/Epic #1585 Phase 3 only wires
+        # `options.trace` into the base contract): each isolated per-mutant
+        # variant (:func:`_run_isolated_variant`) builds in its own
+        # throwaway `build_dir` this function never surfaces, so there is no
+        # single trace artifact a `mutation_testing` response block could
+        # point at -- a request error is safer than silently tracing only
+        # the baseline (or dropping the flag) with no signal either way.
+        raise FunctionalVerificationError(
+            "options.trace cannot currently be combined with --mutations -- "
+            "not yet designed (Epic #1585 Phase 3 wires options.trace into "
+            "the base contract only)"
+        )
     if coverage_requested:
         # Explicitly out of scope (issue #1592, per the spike's "Open
         # questions"): the N+1-multiplied Verilator cost of coverage-per-

@@ -399,6 +399,17 @@ def test_coverage_must_be_boolean(tmp_path):
         run_functional_verification(request_path)
 
 
+def test_trace_must_be_boolean(tmp_path):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"trace": "yes"})
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="options.trace must be a boolean"
+    ):
+        run_functional_verification(request_path)
+
+
 def test_coverage_with_icarus_is_rejected(tmp_path):
     """`options.coverage: true` + `engine: "icarus"` is an error (exit 1),
     never a silent no-op -- Icarus has no coverage path (spike section 1)."""
@@ -834,6 +845,10 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     assert report["failed_count"] == 1
     assert report["skipped_count"] == 0
     assert report["coverage"] is None
+    # Additive (Epic #1585 Phase 3, issue #1845): `null` when `options.trace`
+    # was not requested -- see `test_stubbed_trace_run_populates_the_trace_block`
+    # for the present case.
+    assert report["trace"] is None
     assert report["environment"] == {
         "engine": "icarus",
         "engine_version": "13.0",
@@ -863,6 +878,10 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     # No `options.random_seed` in the request -- cocotb generates its own,
     # so `Runner.test()`'s `seed` kwarg is left unset (`None`).
     assert runner.test_kwargs["seed"] is None
+    # No `options.trace` in the request -- `waves` stays off on both calls
+    # (issue #1845).
+    assert runner.build_kwargs["waves"] is False
+    assert runner.test_kwargs["waves"] is False
 
 
 def test_stubbed_run_honors_testbench_search_path(tmp_path, monkeypatch):
@@ -1364,6 +1383,92 @@ def test_coverage_tool_failure_is_an_error(tmp_path, monkeypatch):
         FunctionalVerificationError, match="could not launch verilator_coverage"
     ):
         run_functional_verification(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# `options.trace` (Epic #1585 Phase 3, issue #1845): the trace artifact
+# `klt wave build`/`klt wave query` (docs/cli/wave.md) can query.
+# --------------------------------------------------------------------------- #
+
+
+def test_stubbed_trace_run_populates_the_trace_block(tmp_path, monkeypatch):
+    """`options.trace: true` turns on `waves=True` on both `Runner.build()`
+    and `Runner.test()` (cocotb's own contract -- see `_run_build`'s
+    docstring), and the response's `trace` block names the resulting
+    artifact -- the identical `{"path", "format", "size_bytes"}` shape
+    `klt wave build`'s own `trace` field already uses."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"trace": True}),
+    )
+    runner = _stub_runner(
+        monkeypatch,
+        _FakeRunner(_RESULTS_XML_WITH_FAILURE, trace_bytes=b"fake fst bytes"),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert runner.build_kwargs["waves"] is True
+    assert runner.test_kwargs["waves"] is True
+    trace = report["trace"]
+    assert trace["format"] == "fst"
+    assert trace["path"].endswith("gcd.fst")
+    assert os.path.isabs(trace["path"])
+    assert os.path.isfile(trace["path"])
+    assert trace["size_bytes"] == len(b"fake fst bytes")
+
+
+def test_trace_requested_but_no_waveform_file_is_an_error(tmp_path, monkeypatch):
+    """A requested-and-missing trace must never be indistinguishable from
+    "not requested" (`null`) -- the same posture `collect_coverage` already
+    takes for a requested-and-missing `coverage.dat`."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"trace": True}),
+    )
+    # No `trace_bytes` -- the fake runner never writes a waveform file, even
+    # though `waves=True` is passed through.
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.trace was requested but the run produced no waveform file",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_trace_run_on_verilator_reports_vcd_format(tmp_path, monkeypatch):
+    """Verilator's own `waves=True` convention (`dump.vcd`, written into the
+    simulation's working directory) is recognised too -- `options.trace` is
+    not engine-restricted, unlike `options.coverage`/`options.sdf`."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(engine="verilator", options={"trace": True}),
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    def fake_test(**kwargs):
+        runner.test_kwargs = kwargs
+        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
+            handle.write("fake test log\n")
+        with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
+            handle.write(_RESULTS_XML_WITH_SKIP)
+        # Verilator's own `dump.vcd` convention: written into `test_dir`,
+        # not `build_dir` (see `_find_trace_artifact`'s own docstring).
+        with open(os.path.join(kwargs["test_dir"], "dump.vcd"), "wb") as handle:
+            handle.write(b"fake vcd bytes")
+
+    monkeypatch.setattr(runner, "test", fake_test)
+
+    report = run_functional_verification(request_path)
+
+    trace = report["trace"]
+    assert trace["format"] == "vcd"
+    assert trace["path"].endswith("dump.vcd")
+    assert trace["size_bytes"] == len(b"fake vcd bytes")
 
 
 # --------------------------------------------------------------------------- #
@@ -3716,6 +3821,29 @@ def test_mutations_sdf_option_is_rejected(tmp_path, monkeypatch):
     proposals_path = _write_mutation_proposals(tmp_path)
 
     with pytest.raises(FunctionalVerificationError, match="options.sdf"):
+        run_functional_verification_with_mutations(request_path, proposals_path)
+
+
+def test_mutations_trace_option_is_rejected(tmp_path, monkeypatch):
+    """`options.trace` + `--mutations` is also rejected (issue #1845/Epic
+    #1585 Phase 3 only wires `options.trace` into the base contract): each
+    isolated per-mutant variant builds in its own throwaway directory this
+    path never surfaces, so there is no single trace artifact a
+    `mutation_testing` response block could point at."""
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            sources=["dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+            options={"coverage": False, "trace": True},
+        ),
+    )
+    proposals_path = _write_mutation_proposals(tmp_path)
+
+    with pytest.raises(FunctionalVerificationError, match="options.trace"):
         run_functional_verification_with_mutations(request_path, proposals_path)
 
 

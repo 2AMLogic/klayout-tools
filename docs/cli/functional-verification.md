@@ -125,6 +125,7 @@ synthesize` already use — and kept, never deleted:
 | `klt_sdf_annotate.v` | The generated `$sdf_annotate` elaboration root, on `options.sdf` runs only — kept, so the exact annotation call a run used is inspectable after the fact. |
 | `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
 | `klt_sdf_safe.sdf` / `klt_sdf_deferred_bus_ports.sdf` | Written only when the input SDF contains an `INTERCONNECT` entry touching a bit-selected top-level *vector* port (e.g. `y[0]`) — works around a second Icarus `INTERCONNECT`-resolution failure where such an entry can poison a same-net sibling entry annotated in the same `$sdf_annotate` call (issue #1619). `klt_sdf_safe.sdf` is the input SDF with every such entry removed (annotated first); `klt_sdf_deferred_bus_ports.sdf` holds only the removed entries (annotated second, via a later `$sdf_annotate` call in `klt_sdf_annotate.v`). Absent when the input SDF has no vector-port-touching `INTERCONNECT` entry, which is unchanged from before this issue. |
+| `sim_build_icarus/<hdl_toplevel>.fst` (Icarus) or `dump.vcd` (Verilator) | The waveform trace, on `options.trace: true` runs only (Epic #1585 Phase 3, issue #1845) — location and format are cocotb's own per-engine convention, not a request choice: Icarus writes into `sim_build_icarus/`, Verilator writes directly into `.klt/functional-verification/`. Echoed by path/format/size in the response's `trace` field. Feed it straight into [`klt wave build`](wave.md) to query it. |
 
 ## Coverage
 
@@ -662,7 +663,8 @@ exactly.
     "defines": { "USE_POWER_PINS": null, "FUNCTIONAL": "1" },
     "build_args": ["-Wall"],
     "includes": ["cells"],
-    "sdf": { "file": "gcd_route.sdf", "corner": "typ" }
+    "sdf": { "file": "gcd_route.sdf", "corner": "typ" },
+    "trace": false
   }
 }
 ```
@@ -684,6 +686,7 @@ exactly.
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
+| `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. |
 
 ## Response
@@ -712,6 +715,7 @@ exactly.
     }
   ],
   "coverage": null,
+  "trace": null,
   "environment": {
     "engine": "icarus",
     "engine_version": "13.0",
@@ -720,6 +724,20 @@ exactly.
     "random_seed": 1785780800,
     "sdf": null
   }
+}
+```
+
+`trace` (Epic #1585 Phase 3, issue #1845) is only populated when the request
+set `options.trace: true`; on such a run it looks like this — the identical
+`{"path", "format", "size_bytes"}` shape [`klt wave build`](wave.md)'s own
+`trace` field already uses, so this object can be dropped straight into a
+`klt wave build` request's `trace` field unchanged:
+
+```json
+"trace": {
+  "path": "/abs/path/.klt/functional-verification/sim_build_icarus/gcd.fst",
+  "format": "fst",
+  "size_bytes": 2065
 }
 ```
 
@@ -732,6 +750,7 @@ exactly.
 | `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure. `test_count` includes skipped tests, so `passed + failed + skipped == test_count`. |
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
+| `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when any benign diagnostic class (currently only `TIMINGCHECK`) was filtered out of the transcript scan, and `dropped` names each such class with `{count, reason}`; see "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
@@ -743,7 +762,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | Every test passed (`status: "pass"`). |
-| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
+| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
@@ -908,14 +927,16 @@ relative to the request's own directory).
   is a separate question.
 - **Functional coverage.** Structural (line/toggle/branch/expr) coverage
   only — see "Coverage".
-- **Waveform inspection / interactive debug.** Batch pass-fail + coverage is
-  the contract; `--trace` is enabled on coverage builds as a side effect of
-  Verilator's coverage recipe, but no waveform artifact is contracted by
-  this verb. [`klt wave build`/`klt wave query`](wave.md) (Epic #1585)
-  fills this gap as a separate, standalone pair of verbs -- point `klt
-  wave build`'s `trace.path` at whatever VCD/FST your own simulation run
-  wrote to disk. Wiring `klt functional-verification` to emit a `trace`
-  field of its own directly is Epic #1585 Phase 3, not yet implemented.
+- **Waveform indexing/querying and interactive debug.** This verb only
+  *names* the trace artifact (`options.trace`, see
+  "Request"/"Response"/"Artifacts") -- it does not index or query one.
+  [`klt wave build`/`klt wave query`](wave.md) (Epic #1585) is the
+  separate, standalone pair of verbs that does: point `klt wave build`'s
+  `trace` field at this verb's own `trace` response block (the shapes
+  match unchanged) to get a queryable store, then ask it "when did
+  `o_valid` first go high after reset?"-shaped questions instead of
+  reasoning from RTL and log text. No GUI, no REPL -- both `klt wave`
+  verbs are batch/JSON only.
 - **Commercial simulators.** cocotb supports several; open-tooling posture
   keeps them out (the same reasoning that excludes Calibre/HSPICE-class
   tools from the LVS and SPICE contracts).

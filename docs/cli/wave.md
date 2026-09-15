@@ -4,12 +4,15 @@ Index a VCD/FST functional-verification waveform trace into a compact,
 queryable store, then answer one or more questions against it — the piece
 that closes the gap
 [`klt functional-verification`'s own "Out of scope"](functional-verification.md#out-of-scope)
-section names: *"Waveform inspection / interactive debug. Batch pass-fail +
-coverage is the contract... no waveform artifact is contracted."* Without
-`klt wave`, an agent debugging a failing cocotb regression has only RTL and
-log text to reason from — no way to ask "when did `o_valid` first go high
-after reset?" or "how many handshakes happened between 1,000 ns and 2,000
-ns?" against the simulation that actually ran.
+named before Epic #1585 Phase 3 wired the two verbs together: *"Batch
+pass-fail + coverage is the contract... no waveform artifact is
+contracted."* Without `klt wave`, an agent debugging a failing cocotb
+regression has only RTL and log text to reason from — no way to ask "when
+did `o_valid` first go high after reset?" or "how many handshakes happened
+between 1,000 ns and 2,000 ns?" against the simulation that actually ran.
+`klt functional-verification`'s own `options.trace` (Phase 3, issue #1845)
+now names that artifact directly — its `trace` response field drops
+straight into this verb's own `trace` request field unchanged.
 
 Phase 2c of [Epic #1585](https://github.com/2AMLogic/klayout-tools/issues/1585)
 ("`klt wave` — waveform query surface for functional-verification traces").

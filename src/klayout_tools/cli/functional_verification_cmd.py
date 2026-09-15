@@ -109,6 +109,17 @@ def _print_text(report: dict) -> None:
             print(f"  {key}: {'n/a' if value is None else value}")
         print(f"  info_path: {coverage['info_path']}")
 
+    # Printed only when `options.trace` was requested (Epic #1585 Phase 3,
+    # issue #1845) -- the artifact `klt wave build`'s own `trace` field
+    # accepts unchanged (docs/cli/wave.md).
+    trace = report.get("trace")
+    if trace is not None:
+        print()
+        print(
+            f"trace: {trace['path']}  format: {trace['format']}  "
+            f"size_bytes: {trace['size_bytes']}"
+        )
+
     print()
     print(f"results_xml: {environment['results_xml']}")
     random_seed = environment.get("random_seed")
