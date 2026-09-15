@@ -208,11 +208,57 @@ $ klt wave query query-count.json --format json
 encoding is visible directly in the trace as soon as any query names it, no
 RTL read required to learn that `2` is *a* meaningfully distinct phase, only
 that this particular encoding is the one worth asking about next.) 18
-matches the spec-predicted pass count exactly, on **both** this failing
-trace and the known-good trace
-(`examples/wave/modexp-known-good.fst`, same query, same `count: 18`) — so
-the bug is not "a pass went missing or ran twice." Something is wrong
-*inside* how long each pass takes, not how many passes ran.
+matches the spec-predicted pass count exactly.
+
+The known-good trace agrees on 18 — but **not** under a literally identical
+query. It needs its own store, and its own end cycle:
+
+```
+$ cat > build-good.json <<'EOF'
+{
+  "schema": "klt.wave_build.request/1",
+  "trace": { "path": "modexp-known-good.fst", "format": "fst" },
+  "clock": { "signal": "modexp.clk", "edge": "rising" },
+  "reset": { "signal": "modexp.rst_n", "active": "low" },
+  "signals": null,
+  "store": { "path": ".klt/wave/modexp-known-good.klwave" }
+}
+EOF
+$ klt wave build build-good.json --format json      # time_range.to: cycle 2373
+$ cat > query-count-good.json <<'EOF'
+{
+  "schema": "klt.wave_query.request/1",
+  "store": ".klt/wave/modexp-known-good.klwave",
+  "ops": [
+    {
+      "op": "count",
+      "signal": "modexp.state",
+      "match": { "value": "2" },
+      "window": { "from": { "cycle": 0 }, "to": { "cycle": 344 } }
+    }
+  ]
+}
+EOF
+$ klt wave query query-count-good.json --format json
+```
+
+```json
+{ "...": "...", "results": [
+  { "op": "count", "signal": "modexp.state", "count": 18 }
+] }
+```
+
+**That window closes at `344`, not `380`, and the difference matters.** The
+failing trace stops at cycle 381, just after its single `done` (Step 3); the
+known-good trace is a 2373-cycle run of all 7 `test_modexp_known_vectors`
+vectors whose *first* `done` rises at cycle 344 —
+`examples/wave/README.md` tabulates both. Reusing `380` against the good
+trace spills past the end of vector 1 into vector 2 and returns `count: 20`:
+two passes belonging to the *next* multiply, not evidence of a discrepancy
+in this one. Comparing pass counts across traces of different lengths means
+bounding each by its own unit of work — do that, and both run exactly 18
+passes, so the bug is not "a pass went missing or ran twice." Something is
+wrong *inside* how long each pass takes, not how many passes ran.
 
 ## Step 5 — stuck: is one signal parked somewhere it shouldn't be?
 
@@ -256,13 +302,46 @@ exit=3
 16-cycle bound the spec promises — with `predicate: {"expect": false}`
 declared, `satisfied: false` and exit code `3` mechanize "this is the
 anomaly" into a script-checkable verdict instead of an eyeballed number.
-Running the identical query (same `min_span`) against
-`examples/wave/modexp-known-good.fst` returns `"stuck": false`, span 16
-cycles (325→341) — under the threshold, `predicate` satisfied, exit `0`.
-Same signal, same phase encoding, same query, two different trace files:
-one out of every 18 modular-multiply passes in the failing run — the exact
-one containing the wrong-answer computation — ran two cycles longer than
-every pass in the passing run. That single fact (not a `case` statement
+Running the same `stuck` op — same `min_span`, same `predicate` — against
+the known-good store, windowed to *its* completion cycle `344` for the
+reason Step 4 gives, tells the other half of the story:
+
+```
+$ cat > query-stuck-good.json <<'EOF'
+{
+  "schema": "klt.wave_query.request/1",
+  "store": ".klt/wave/modexp-known-good.klwave",
+  "ops": [
+    {
+      "op": "stuck",
+      "signal": "modexp.state",
+      "window": { "from": { "cycle": 0 }, "to": { "cycle": 344 } },
+      "min_span": { "cycles": 17 },
+      "predicate": { "expect": false }
+    }
+  ]
+}
+EOF
+$ klt wave query query-stuck-good.json --format json; echo "exit=$?"
+```
+
+```json
+{ "...": "...", "status": "ok", "results": [
+  {
+    "op": "stuck", "signal": "modexp.state", "stuck": false, "value": "2",
+    "span": { "from": { "cycle": 325, "time_ns": 3270.0 }, "to": { "cycle": 341, "time_ns": 3430.0 } },
+    "satisfied": true
+  }
+] }
+exit=0
+```
+
+`"stuck": false`, longest span cycle 325→341 — **16 cycles**, exactly the
+bound the spec promises — `predicate` satisfied, exit `0`. Same signal, same
+phase encoding, same op and threshold, two different trace files: one out of
+every 18 modular-multiply passes in the failing run — the exact one
+containing the wrong-answer computation — ran two cycles longer than every
+pass in the passing run. That single fact (not a `case` statement
 read, not a shifted-register trace stepped through by hand) is the whole
 diagnosis: whatever decides when a modular-multiply pass ends is off by a
 fixed two-cycle amount, consistently. `examples/wave/README.md` names the
