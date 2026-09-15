@@ -78,7 +78,11 @@ OpenROAD has **no** ``*_metric`` proc for setup/hold timing-*violation
 counts* (only the scalar WNS/TNS) -- :func:`_count_violations` falls back to
 counting ``"(VIOLATED)"`` lines in ``report_check_types -max_delay/-min_delay
 -violators -format end``'s own stdout, exactly the fallback the contract
-spike's build/wrap section authorises.
+spike's build/wrap section authorises. Issue #1709's post-route
+max-transition/max-capacitance verdict
+(:func:`_design_rule_check_lines`, ``max_transition_violation_count``/
+``max_capacitance_violation_count``) reuses that same fallback for the same
+reason.
 
 Floorplan methods
 ------------------
@@ -1121,6 +1125,18 @@ _SETUP_VIOLATIONS_END = "===KLT_SETUP_VIOLATIONS_END==="
 _HOLD_VIOLATIONS_BEGIN = "===KLT_HOLD_VIOLATIONS_BEGIN==="
 _HOLD_VIOLATIONS_END = "===KLT_HOLD_VIOLATIONS_END==="
 
+#: Same marker convention as the setup/hold pair above, isolating the
+#: post-route corner sweep's own design-rule-check reports (issue #1709's
+#: "Two smaller things found alongside" item 1, folded into that issue's own
+#: Builder scope by its 2026-09-15 revision) so :func:`_count_violations` can
+#: isolate the max-transition block from the max-capacitance block within the
+#: sweep invocation's own combined stdout -- see
+#: :func:`_design_rule_check_lines`.
+_MAX_TRANSITION_VIOLATIONS_BEGIN = "===KLT_MAX_TRANSITION_VIOLATIONS_BEGIN==="
+_MAX_TRANSITION_VIOLATIONS_END = "===KLT_MAX_TRANSITION_VIOLATIONS_END==="
+_MAX_CAPACITANCE_VIOLATIONS_BEGIN = "===KLT_MAX_CAPACITANCE_VIOLATIONS_BEGIN==="
+_MAX_CAPACITANCE_VIOLATIONS_END = "===KLT_MAX_CAPACITANCE_VIOLATIONS_END==="
+
 #: Same marker convention as the setup/hold pair above, isolating
 #: `check_antennas`'s own stdout (run post-`repair_antennas`, `"route"`
 #: stage only) so :func:`_count_antenna_violations` can parse its summary
@@ -1194,6 +1210,13 @@ _TOP_LEVEL_METRIC_KEYS = (
     # `[]`) on any stage before `"route"`, matching `worst_setup_slack_ns`'s
     # own convention.
     "corners",
+    # Additive (issue #1709): the design-rule-check verdict measured at the
+    # same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns`
+    # above, and `null` on the same pre-`"route"` stages for the same reason
+    # -- the sweep invocation is the only session that loads every swept
+    # deck's own max-transition/max-capacitance limits.
+    "max_transition_violation_count",
+    "max_capacitance_violation_count",
 )
 
 
@@ -1318,7 +1341,13 @@ def run_place_and_route(
     io_spec = _validate_io(request.get("io"))
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     power = _validate_power(request.get("power"))
-    clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
+    (
+        clock_port,
+        clock_period_ns,
+        max_transition_ns,
+        max_capacitance_pf,
+        max_fanout,
+    ) = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
@@ -1461,6 +1490,9 @@ def run_place_and_route(
             power=power,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
+            max_transition_ns=max_transition_ns,
+            max_capacitance_pf=max_capacitance_pf,
+            max_fanout=max_fanout,
             cell_library=cell_library,
             seed=seed,
             output_dir=output_dir,
@@ -1489,6 +1521,8 @@ def run_place_and_route(
         worst_setup_slack_ns = None
         worst_hold_slack_ns = None
         corner_breakdown: list[dict[str, Any]] | None = None
+        max_transition_violation_count: int | None = None
+        max_capacitance_violation_count: int | None = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
             # Same deterministic path `_stage_script_lines`'s own `route`
@@ -1529,16 +1563,25 @@ def run_place_and_route(
                 corners = [
                     corner for corner in corners if corner["name"] in sweep_corners
                 ]
-            worst_setup_slack_ns, worst_hold_slack_ns, corner_breakdown = (
-                _run_corner_sweep(
-                    checkpoint_in=next_checkpoint,
-                    corners=corners,
-                    io_spec=io_spec,
-                    clock_port=clock_port,
-                    clock_period_ns=clock_period_ns,
-                    output_dir=output_dir,
-                    hdl_toplevel=hdl_toplevel,
-                )
+            (
+                worst_setup_slack_ns,
+                worst_hold_slack_ns,
+                corner_breakdown,
+                # Issue #1709: the design-rule-check verdict measured in that
+                # same sweep invocation -- no extra OpenROAD launch of its own.
+                max_transition_violation_count,
+                max_capacitance_violation_count,
+            ) = _run_corner_sweep(
+                checkpoint_in=next_checkpoint,
+                corners=corners,
+                io_spec=io_spec,
+                clock_port=clock_port,
+                clock_period_ns=clock_period_ns,
+                max_transition_ns=max_transition_ns,
+                max_capacitance_pf=max_capacitance_pf,
+                max_fanout=max_fanout,
+                output_dir=output_dir,
+                hdl_toplevel=hdl_toplevel,
             )
 
         stages.append(
@@ -1552,6 +1595,8 @@ def run_place_and_route(
                 worst_setup_slack_ns=worst_setup_slack_ns,
                 worst_hold_slack_ns=worst_hold_slack_ns,
                 corners=corner_breakdown,
+                max_transition_violation_count=max_transition_violation_count,
+                max_capacitance_violation_count=max_capacitance_violation_count,
             )
         )
         checkpoint_path = next_checkpoint
@@ -1608,6 +1653,9 @@ def run_place_and_route(
                 liberty_path=liberty_path,
                 clock_port=clock_port,
                 clock_period_ns=clock_period_ns,
+                max_transition_ns=max_transition_ns,
+                max_capacitance_pf=max_capacitance_pf,
+                max_fanout=max_fanout,
                 checkpoint_in=checkpoint_path,
                 # Issue #1002: `write_sdf` inside that same session, right
                 # after its `read_spef` -- see `_validate_post_route_sdf`.
@@ -2369,25 +2417,84 @@ def _reject_wired_port_less_pins(
             )
 
 
-def _validate_constraints(constraints: Any) -> tuple[str | None, float | None]:
+def _validate_constraints(
+    constraints: Any,
+) -> tuple[str | None, float | None, float | None, float | None, float | None]:
+    """Validate ``request.constraints``.
+
+    Returns ``(clock_port, clock_period_ns, max_transition_ns,
+    max_capacitance_pf, max_fanout)``. The first two are the pre-existing
+    clock fields -- required together, `None`/`None` when both are
+    omitted (unchanged behavior). The three design-rule-constraint fields
+    (issue #1709) are each independently optional regardless of clock
+    presence: a caller may set e.g. `max_fanout` alone, or alongside the
+    clock fields, or not at all -- `None` per field when omitted, matching
+    this function's own pre-existing "omitted preserves prior behavior
+    exactly" convention.
+    """
     if constraints is None:
-        return None, None
+        return None, None, None, None, None
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
 
     clock_port = constraints.get("clock_port")
     clock_period_ns = constraints.get("clock_period_ns")
-    if clock_port is None and clock_period_ns is None:
-        return None, None
-    if not (isinstance(clock_port, str) and clock_port):
-        raise PlaceAndRouteError(
-            "request.constraints.clock_port must be a non-empty string"
-        )
-    if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
-        raise PlaceAndRouteError(
-            "request.constraints.clock_period_ns must be a positive number"
-        )
-    return clock_port, float(clock_period_ns)
+    if clock_port is not None or clock_period_ns is not None:
+        if not (isinstance(clock_port, str) and clock_port):
+            raise PlaceAndRouteError(
+                "request.constraints.clock_port must be a non-empty string"
+            )
+        if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
+            raise PlaceAndRouteError(
+                "request.constraints.clock_period_ns must be a positive number"
+            )
+        clock_period_ns = float(clock_period_ns)
+    else:
+        clock_port, clock_period_ns = None, None
+
+    max_transition_ns = constraints.get("max_transition_ns")
+    if max_transition_ns is not None:
+        if not (
+            isinstance(max_transition_ns, (int, float))
+            and not isinstance(max_transition_ns, bool)
+            and max_transition_ns > 0
+        ):
+            raise PlaceAndRouteError(
+                "request.constraints.max_transition_ns must be a positive number"
+            )
+        max_transition_ns = float(max_transition_ns)
+
+    max_capacitance_pf = constraints.get("max_capacitance_pf")
+    if max_capacitance_pf is not None:
+        if not (
+            isinstance(max_capacitance_pf, (int, float))
+            and not isinstance(max_capacitance_pf, bool)
+            and max_capacitance_pf > 0
+        ):
+            raise PlaceAndRouteError(
+                "request.constraints.max_capacitance_pf must be a positive number"
+            )
+        max_capacitance_pf = float(max_capacitance_pf)
+
+    max_fanout = constraints.get("max_fanout")
+    if max_fanout is not None:
+        if not (
+            isinstance(max_fanout, (int, float))
+            and not isinstance(max_fanout, bool)
+            and max_fanout > 0
+        ):
+            raise PlaceAndRouteError(
+                "request.constraints.max_fanout must be a positive number"
+            )
+        max_fanout = float(max_fanout)
+
+    return (
+        clock_port,
+        clock_period_ns,
+        max_transition_ns,
+        max_capacitance_pf,
+        max_fanout,
+    )
 
 
 def _validate_seed(seed: Any) -> int:
@@ -2728,6 +2835,37 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     ]
 
 
+def _design_rule_constraint_lines(
+    max_transition_ns: float | None,
+    max_capacitance_pf: float | None,
+    max_fanout: float | None,
+) -> list[str]:
+    """``set_max_transition``/``set_max_capacitance``/``set_max_fanout`` on
+    ``[current_design]`` -- issue #1709's ``request.constraints.
+    max_transition_ns``/``.max_capacitance_pf``/``.max_fanout``, aiming the
+    ``repair_design``/``repair_timing`` optimiser already present in the
+    generated flow (see :func:`_stage_script_lines`'s ``"place"`` branch) at
+    a caller-given design-rule target instead of only whatever limit the
+    single ``read_liberty`` deck happens to declare.
+
+    Mirrors :func:`_clock_lines`'s shape exactly: threaded through the same
+    call sites, at the same point (immediately after ``_clock_lines``,
+    before ``repair_design``/``repair_timing``), and each field emits its
+    own line only when given -- a field omitted from
+    ``request.constraints`` emits no corresponding line, so a request with
+    none of the three set produces Tcl byte-identical to before this
+    function existed.
+    """
+    lines = []
+    if max_transition_ns is not None:
+        lines.append(f"set_max_transition {max_transition_ns} [current_design]")
+    if max_capacitance_pf is not None:
+        lines.append(f"set_max_capacitance {max_capacitance_pf} [current_design]")
+    if max_fanout is not None:
+        lines.append(f"set_max_fanout {max_fanout} [current_design]")
+    return lines
+
+
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     method = floorplan["method"]
     if method == "def":
@@ -2792,6 +2930,51 @@ def _violation_count_lines() -> list[str]:
         f'puts "{_HOLD_VIOLATIONS_BEGIN}"',
         "report_check_types -min_delay -violators -format end",
         f'puts "{_HOLD_VIOLATIONS_END}"',
+    ]
+
+
+def _design_rule_check_lines() -> list[str]:
+    """Post-route **design-rule check** reports run inside the multi-corner
+    sweep session
+    (:func:`~klayout_tools.place_and_route_sta._corner_sweep_script_lines`)
+    -- issue #1709's "Two smaller things found alongside" item 1, folded into
+    that issue's own Builder scope by its 2026-09-15 revision: the run already
+    re-times the routed design at the ``request.pdk.sweep_corners`` decks, so
+    the max-transition / max-capacitance verdict at those same decks belongs in
+    the report the run already writes rather than in a separate downstream
+    tool three steps later.
+
+    Two separately-delimited ``report_check_types ... -violators`` blocks
+    (rather than one combined call) so :func:`_count_violations` can attribute
+    a violation to the limit it actually broke -- the same marker convention
+    :func:`_violation_count_lines` already uses to split its own
+    ``-max_delay`` block from its ``-min_delay`` one, and counted by the same
+    ``"(VIOLATED)"`` scrape for the same reason (OpenROAD ships no
+    ``*_metric`` proc for a design-rule violation *count*, only the scalar
+    slack metrics).
+
+    ``-max_slew`` is OpenSTA's own name for the check
+    ``set_max_transition``/the liberty's ``max_transition`` constrains -- the
+    exact pair (``-max_slew`` + ``-max_capacitance``)
+    OpenROAD-flow-scripts' own post-route ``report_metrics`` reporting uses.
+
+    Deliberately **no** fanout report here. ``request.constraints.max_fanout``
+    is still emitted as a *constraint* (:func:`_design_rule_constraint_lines`),
+    but ``sta::max_fanout_violation_count`` takes OpenROAD down with a SIGSEGV
+    inside ``sta::CheckFanouts::check`` on a library that declares no fanout
+    limit at all (reproduced at every corner on ``26Q3-1510-g6cb3f2b704``,
+    issue #1709) -- a class of library this repo explicitly supports. Fanout
+    reporting, if it is ever wanted here, has to come from the topology walk
+    (``get_pins -of_objects`` per net, counting inputs) that issue names as
+    the safe-but-slower alternative, not from this call.
+    """
+    return [
+        f'puts "{_MAX_TRANSITION_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_slew -violators",
+        f'puts "{_MAX_TRANSITION_VIOLATIONS_END}"',
+        f'puts "{_MAX_CAPACITANCE_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_capacitance -violators",
+        f'puts "{_MAX_CAPACITANCE_VIOLATIONS_END}"',
     ]
 
 
@@ -3033,6 +3216,9 @@ def _stage_script_lines(
     power: dict[str, Any] | None,
     clock_port: str | None,
     clock_period_ns: float | None,
+    max_transition_ns: float | None,
+    max_capacitance_pf: float | None,
+    max_fanout: float | None,
     cell_library: str,
     seed: int,
     output_dir: str,
@@ -3058,6 +3244,9 @@ def _stage_script_lines(
             f"link_design {hdl_toplevel}",
         ]
         lines += _clock_lines(clock_port, clock_period_ns)
+        lines += _design_rule_constraint_lines(
+            max_transition_ns, max_capacitance_pf, max_fanout
+        )
         lines += _floorplan_init_lines(floorplan)
         # `place_macro` fixes each declared hard-macro instance at its
         # caller-given location -- must run after the floorplan's own die/
@@ -3090,6 +3279,9 @@ def _stage_script_lines(
     # `read_liberty` directly here -- unlike the floorplan stage above.
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
 
     if stage == "place":
         assert io_spec is not None
@@ -3590,6 +3782,8 @@ def _extract_stage_metrics(
     worst_setup_slack_ns: float | None = None,
     worst_hold_slack_ns: float | None = None,
     corners: list[dict[str, Any]] | None = None,
+    max_transition_violation_count: int | None = None,
+    max_capacitance_violation_count: int | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -3671,6 +3865,18 @@ def _extract_stage_metrics(
         # pre-`"route"` stage reports.
         if corners is not None:
             entry["corners"] = corners
+        # Issue #1709: the design-rule-check verdict at those same swept
+        # corners -- absent (never present-but-null) on every stage but
+        # `"route"`, exactly like the two slack aggregates above, since the
+        # corner-sweep invocation is the only session that loads the swept
+        # decks' own max-transition/max-capacitance limits. `is not None`
+        # (not truthiness) so a genuinely clean run reports an explicit `0`
+        # rather than dropping the field, the same way
+        # `route_drc_violation_count` already does.
+        if max_transition_violation_count is not None:
+            entry["max_transition_violation_count"] = max_transition_violation_count
+        if max_capacitance_violation_count is not None:
+            entry["max_capacitance_violation_count"] = max_capacitance_violation_count
 
     return entry
 

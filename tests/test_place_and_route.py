@@ -513,6 +513,51 @@ def test_run_constraints_clock_port_and_period_required_together(tmp_path):
         run_place_and_route(request_path)
 
 
+# Issue #1709: `request.constraints.max_transition_ns`/`.max_capacitance_pf`/
+# `.max_fanout` -- each independently optional, validated as a positive
+# number when given (mirroring `clock_period_ns`'s own validation), and
+# never required for `clock_port`/`clock_period_ns` to also be present.
+@pytest.mark.parametrize(
+    "field", ["max_transition_ns", "max_capacitance_pf", "max_fanout"]
+)
+@pytest.mark.parametrize("bad_value", [-1.0, 0, "fast", True, None])
+def test_run_constraints_design_rule_fields_reject_non_positive(
+    tmp_path, field, bad_value
+):
+    if bad_value is None:
+        # `None` means "omitted" for every other field in this request --
+        # not a rejection case for *this* field, so skip it here (covered by
+        # the "none set" Tcl-generation test instead).
+        pytest.skip("None means omitted, not a validation failure")
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            constraints={"clock_port": "clk", "clock_period_ns": 1.1, field: bad_value}
+        ),
+    )
+    with pytest.raises(PlaceAndRouteError, match=f"{field} must be a positive number"):
+        run_place_and_route(request_path)
+
+
+def test_run_constraints_design_rule_field_valid_without_clock(tmp_path, monkeypatch):
+    """The three design-rule-constraint fields are independently optional
+    regardless of clock presence (issue #1709 acceptance criteria) -- a
+    caller may set `max_fanout` alone, at `target_stage: "floorplan"` even,
+    with no `clock_port`/`clock_period_ns` given at all."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        constraints={"max_fanout": 4},
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+
+
 def test_run_target_stage_place_requires_clock(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path,
@@ -1662,11 +1707,34 @@ def _stub_openroad_success(
     route_drc_violations: int = 0,
     corner_sweep_metrics: dict[str, float] | None = None,
     per_corner_sweep_metrics: dict[str, dict[str, float]] | None = None,
+    max_transition_violations: int = 0,
+    max_capacitance_violations: int = 0,
+    per_corner_design_rule_violations: dict[str, tuple[int, int]] | None = None,
     version: str = "26Q3-771-gdeadbeef",
 ) -> None:
     setup_violations = setup_violations or {}
     hold_violations = hold_violations or {}
     antenna_violations = antenna_violations or {}
+    # Issue #1709: the corner-sweep invocation's own design-rule-check
+    # stdout (`_design_rule_check_lines`'s two marker-delimited
+    # `report_check_types ... -violators` blocks), scraped the same
+    # `"(VIOLATED)"` way the setup/hold blocks below already are. Defaults to
+    # a clean run (0/0), and per-corner defaults to the combined session's own
+    # pair unless a test overrides a specific corner name.
+    per_corner_design_rule_violations = per_corner_design_rule_violations or {}
+
+    def _design_rule_stdout(transition: int, capacitance: int) -> str:
+        return "\n".join(
+            [
+                place_and_route._MAX_TRANSITION_VIOLATIONS_BEGIN,
+                *[f"pin_{i}/A 0.75 1.20 -0.45 (VIOLATED)" for i in range(transition)],
+                place_and_route._MAX_TRANSITION_VIOLATIONS_END,
+                place_and_route._MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+                *[f"pin_{i}/A 0.05 0.09 -0.04 (VIOLATED)" for i in range(capacitance)],
+                place_and_route._MAX_CAPACITANCE_VIOLATIONS_END,
+            ]
+        )
+
     corner_sweep_metrics = (
         _CORNER_SWEEP_METRICS if corner_sweep_metrics is None else corner_sweep_metrics
     )
@@ -1693,12 +1761,17 @@ def _stub_openroad_success(
             # The post-route corner-sweep script (issue #949,
             # `_corner_sweep_script_lines`) -- a second, standalone OpenROAD
             # invocation, never one of `STAGE_ORDER`'s own four stages, so it
-            # never reaches `_stage_from_script_path` below. It writes only
-            # its own `-metrics` dump -- no `write_db`/`write_def` line to
-            # fake, no violation-marker stdout to emit.
+            # never reaches `_stage_from_script_path` below. It writes its own
+            # `-metrics` dump -- no `write_db`/`write_def` line to fake -- plus
+            # (issue #1709) its own design-rule-check marker blocks on stdout.
             with open(metrics_path, "w", encoding="utf-8") as handle:
                 json.dump(corner_sweep_metrics, handle)
-            return fake_completed(returncode=0, stdout="")
+            return fake_completed(
+                returncode=0,
+                stdout=_design_rule_stdout(
+                    max_transition_violations, max_capacitance_violations
+                ),
+            )
         corner_script_match = re.match(
             r".*_route_corner_(?P<name>.+)\.tcl$", os.path.basename(script_path)
         )
@@ -1714,7 +1787,16 @@ def _stub_openroad_success(
                     per_corner_sweep_metrics.get(corner_name, corner_sweep_metrics),
                     handle,
                 )
-            return fake_completed(returncode=0, stdout="")
+            corner_transition, corner_capacitance = (
+                per_corner_design_rule_violations.get(
+                    corner_name,
+                    (max_transition_violations, max_capacitance_violations),
+                )
+            )
+            return fake_completed(
+                returncode=0,
+                stdout=_design_rule_stdout(corner_transition, corner_capacitance),
+            )
         stage = _stage_from_script_path(script_path)
         assert stage in stages
 
@@ -3375,6 +3457,418 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# `constraints.max_transition_ns`/`.max_capacitance_pf`/`.max_fanout` --
+# design-rule-constraint Tcl generation (issue #1709)
+# --------------------------------------------------------------------------- #
+
+
+def test_design_rule_constraint_lines_helper_emits_only_given_fields():
+    """Direct unit coverage of `_design_rule_constraint_lines` -- mirrors
+    `_clock_lines`'s own shape: each field emits its own `set_max_*` line
+    only when given, in `max_transition_ns`/`max_capacitance_pf`/
+    `max_fanout` order, on `[current_design]`."""
+    assert place_and_route._design_rule_constraint_lines(None, None, None) == []
+    assert place_and_route._design_rule_constraint_lines(1.5, None, None) == [
+        "set_max_transition 1.5 [current_design]"
+    ]
+    assert place_and_route._design_rule_constraint_lines(None, 0.2, None) == [
+        "set_max_capacitance 0.2 [current_design]"
+    ]
+    assert place_and_route._design_rule_constraint_lines(None, None, 4.0) == [
+        "set_max_fanout 4.0 [current_design]"
+    ]
+    assert place_and_route._design_rule_constraint_lines(1.5, 0.2, 4.0) == [
+        "set_max_transition 1.5 [current_design]",
+        "set_max_capacitance 0.2 [current_design]",
+        "set_max_fanout 4.0 [current_design]",
+    ]
+
+
+@pytest.mark.parametrize("target_stage", ["place", "route"])
+def test_stubbed_design_rule_constraints_all_three_emitted_after_clock(
+    tmp_path, monkeypatch, target_stage
+):
+    """All three `constraints.max_*` fields set produces all three
+    `set_max_*` lines, positioned after `create_clock` and before
+    `repair_design` -- repeated across two different `target_stage` values
+    (issue #1709's test plan: this is what catches a missed call site among
+    the 4 real `_clock_lines`-shaped sites, since a single-stage test would
+    not)."""
+    stages = (
+        ("floorplan", "place")
+        if target_stage == "place"
+        else place_and_route.STAGE_ORDER
+    )
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage=target_stage,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=stages)
+    if target_stage == "route":
+        _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    place_script = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_place.tcl"
+    )
+    lines = _script_lines(place_script)
+
+    expected = [
+        "set_max_transition 1.5 [current_design]",
+        "set_max_capacitance 0.2 [current_design]",
+        "set_max_fanout 4.0 [current_design]",
+    ]
+    for line in expected:
+        assert line in lines
+
+    create_clock_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("create_clock")
+    )
+    repair_design_idx = lines.index("repair_design")
+    max_transition_idx = lines.index(expected[0])
+    max_capacitance_idx = lines.index(expected[1])
+    max_fanout_idx = lines.index(expected[2])
+    assert (
+        create_clock_idx
+        < max_transition_idx
+        < max_capacitance_idx
+        < max_fanout_idx
+        < repair_design_idx
+    )
+
+
+def test_stubbed_design_rule_constraint_single_field_emits_only_that_line(
+    tmp_path, monkeypatch
+):
+    """A request with only `max_fanout` set (the other two omitted) produces
+    a generated script containing exactly `set_max_fanout <n>
+    [current_design]` and no `set_max_transition`/`set_max_capacitance`
+    line."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    place_script = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_place.tcl"
+    )
+    lines = _script_lines(place_script)
+
+    assert "set_max_fanout 4.0 [current_design]" in lines
+    assert not any(line.startswith("set_max_transition") for line in lines)
+    assert not any(line.startswith("set_max_capacitance") for line in lines)
+
+
+def test_stubbed_no_design_rule_constraints_emits_no_set_max_lines(
+    tmp_path, monkeypatch
+):
+    """A request with none of the three fields set emits no `set_max_*`
+    line at all -- the regression guard for "omitted preserves prior
+    behavior exactly" (issue #1709's acceptance criteria)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    for stage in ("floorplan", "place", "cts", "route"):
+        script = os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            f"pnr_gcd_{stage}.tcl",
+        )
+        lines = _script_lines(script)
+        assert not any(line.startswith("set_max_") for line in lines)
+
+
+def test_stubbed_design_rule_constraints_reach_corner_sweep_script(
+    tmp_path, monkeypatch
+):
+    """`_corner_sweep_script_lines` (issue #949) is one of the 4 real
+    `_clock_lines`-shaped call sites this issue threads through -- a
+    dedicated check beyond the "place"/"route" stage-script assertions
+    above, since the post-route corner-sweep script is generated by a
+    wholly separate function (`place_and_route_sta.py`) reached only via
+    `_run_corner_sweep`, not `_stage_script_lines`."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    corner_sweep_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_route_corners.tcl",
+    )
+    lines = _script_lines(corner_sweep_script)
+    assert "set_max_transition 1.5 [current_design]" in lines
+    assert "set_max_capacitance 0.2 [current_design]" in lines
+    assert "set_max_fanout 4.0 [current_design]" in lines
+
+
+def test_stubbed_design_rule_constraints_reach_spef_sta_script(tmp_path, monkeypatch):
+    """`_spef_sta_script_lines` (issue #948) is the 4th real
+    `_clock_lines`-shaped call site -- reached only when `request.
+    post_route_spef` is set, via `_post_route_spef_metrics`."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        post_route_spef=True,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+    assert report["spef_sta"] is not None
+
+    spef_sta_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_route_spef.tcl",
+    )
+    lines = _script_lines(spef_sta_script)
+    assert "set_max_transition 1.5 [current_design]" in lines
+    assert "set_max_capacitance 0.2 [current_design]" in lines
+    assert "set_max_fanout 4.0 [current_design]" in lines
+
+
+# --------------------------------------------------------------------------- #
+# Design-rule-check verdict at the swept corners (issue #1709, the body's
+# "Two smaller things found alongside" item 1).
+# --------------------------------------------------------------------------- #
+
+
+def test_design_rule_check_lines_reports_slew_and_cap_but_never_fanout():
+    """`_design_rule_check_lines` emits exactly two marker-delimited
+    `report_check_types ... -violators` blocks -- max-slew and
+    max-capacitance -- and **no** fanout report of any kind: issue #1709
+    reproduced a SIGSEGV inside `sta::CheckFanouts::check` on a library that
+    declares no fanout limit, so the fanout *constraint* is emitted without a
+    fanout *check*."""
+    lines = place_and_route._design_rule_check_lines()
+
+    assert lines == [
+        f'puts "{place_and_route._MAX_TRANSITION_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_slew -violators",
+        f'puts "{place_and_route._MAX_TRANSITION_VIOLATIONS_END}"',
+        f'puts "{place_and_route._MAX_CAPACITANCE_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_capacitance -violators",
+        f'puts "{place_and_route._MAX_CAPACITANCE_VIOLATIONS_END}"',
+    ]
+    assert not any("fanout" in line for line in lines)
+    assert not any("max_fanout_violation_count" in line for line in lines)
+
+
+def test_corner_sweep_script_runs_design_rule_checks_after_parasitics(
+    tmp_path, monkeypatch
+):
+    """The generated corner-sweep script runs the two design-rule reports
+    inside the *same* invocation as the slack metrics (no extra OpenROAD
+    launch), and only **after** `estimate_parasitics` -- a slew/capacitance
+    check against an un-estimated network is not a meaningful number."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    lines = _script_lines(_corner_sweep_script(request_path))
+    assert "report_check_types -max_slew -violators" in lines
+    assert "report_check_types -max_capacitance -violators" in lines
+    assert lines.index("estimate_parasitics -global_routing") < lines.index(
+        "report_check_types -max_slew -violators"
+    )
+    # No fanout check anywhere in the generated Tcl (SIGSEGV hazard).
+    assert not any("max_fanout_violation_count" in line for line in lines)
+    assert not any("-max_fanout" in line for line in lines)
+
+
+def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypatch):
+    """The sweep invocation's own `report_check_types` stdout populates
+    `max_transition_violation_count`/`max_capacitance_violation_count` at
+    both top level and the `"route"` stage entry, next to
+    `worst_setup_slack_ns`/`worst_hold_slack_ns` (issue #1709)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(
+        monkeypatch, max_transition_violations=3, max_capacitance_violations=2
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["max_transition_violation_count"] == 3
+    assert report["max_capacitance_violation_count"] == 2
+    route_stage = report["stages"][-1]
+    assert route_stage["name"] == "route"
+    assert route_stage["max_transition_violation_count"] == 3
+    assert route_stage["max_capacitance_violation_count"] == 2
+    # The single swept corner's own entry carries the same verdict.
+    assert report["corners"] == [
+        {
+            "name": "tt_025C_1v80",
+            "setup_slack_ns": pytest.approx(-4.02163),
+            "hold_slack_ns": pytest.approx(0.08421),
+            "max_transition_violation_count": 3,
+            "max_capacitance_violation_count": 2,
+        }
+    ]
+
+
+def test_design_rule_violation_counts_are_zero_on_a_clean_run(tmp_path, monkeypatch):
+    """A design-rule-clean run reports an explicit `0`, not a missing field
+    -- the same present-but-zero convention `route_drc_violation_count`
+    already follows, so a caller can distinguish "checked, clean" from
+    "never checked" (issue #1709)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["max_transition_violation_count"] == 0
+    assert report["max_capacitance_violation_count"] == 0
+    assert report["stages"][-1]["max_capacitance_violation_count"] == 0
+
+
+def test_design_rule_violation_counts_null_before_route_stage(tmp_path, monkeypatch):
+    """A `target_stage: "place"` run never reaches the sweep, so the verdict
+    is `null` at top level and absent from every stage entry -- the same
+    pre-`"route"` convention `worst_setup_slack_ns` already follows."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "place"
+    assert report["max_transition_violation_count"] is None
+    assert report["max_capacitance_violation_count"] is None
+    for stage in report["stages"]:
+        assert "max_transition_violation_count" not in stage
+        assert "max_capacitance_violation_count" not in stage
+
+
+def test_design_rule_violation_counts_reported_per_swept_corner(tmp_path, monkeypatch):
+    """A multi-corner sweep attributes the verdict per corner, from each
+    corner's own single-corner invocation -- exactly the per-corner
+    attribution issue #1092 added for slack, so a caller can see which
+    deck's limits a pin actually breaks (issue #1709)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", corner="ss_100C_1v60")
+    _stub_openroad_success(
+        monkeypatch,
+        max_transition_violations=7,
+        max_capacitance_violations=1,
+        per_corner_design_rule_violations={
+            "tt_025C_1v80": (0, 0),
+            "ss_100C_1v60": (7, 1),
+        },
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    # The aggregate comes from the combined, every-corner-loaded session.
+    assert report["max_transition_violation_count"] == 7
+    assert report["max_capacitance_violation_count"] == 1
+    corners_by_name = {entry["name"]: entry for entry in report["corners"]}
+    assert corners_by_name["tt_025C_1v80"]["max_transition_violation_count"] == 0
+    assert corners_by_name["ss_100C_1v60"]["max_transition_violation_count"] == 7
+    assert corners_by_name["ss_100C_1v60"]["max_capacitance_violation_count"] == 1
+
+
+def test_design_rule_violation_counts_null_when_sweeping_zero_corners(
+    tmp_path, monkeypatch
+):
+    """An explicit `sweep_corners: []` short-circuits the sweep entirely, so
+    the verdict degrades to `null` alongside the slack aggregates rather
+    than fabricating a `0` nothing measured (issue #1709)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corner": "tt_025C_1v80",
+            "sweep_corners": [],
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["corners"] == []
+    assert report["max_transition_violation_count"] is None
+    assert report["max_capacitance_violation_count"] is None
+
+
+def test_design_rule_verdict_independent_of_constraint_fields(tmp_path, monkeypatch):
+    """The verdict is a statement about whatever limits the *loaded decks*
+    declare, so it is reported even when the caller sets none of
+    `constraints.max_transition_ns`/`.max_capacitance_pf`/`.max_fanout` --
+    issue #1709's own "useful *even if* none of the constraint options above
+    lands" framing."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(
+        monkeypatch, max_transition_violations=1, max_capacitance_violations=4
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    sweep_lines = _script_lines(_corner_sweep_script(request_path))
+    assert not any(line.startswith("set_max_") for line in sweep_lines)
+    assert report["max_transition_violation_count"] == 1
+    assert report["max_capacitance_violation_count"] == 4
+
+
+# --------------------------------------------------------------------------- #
 # `DRT-0305` constant-tie diagnosis (issue #854)
 # --------------------------------------------------------------------------- #
 
@@ -4244,7 +4738,10 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
     assert f"read_db {os.path.dirname(request_path)}" in "".join(
         line for line in sweep_lines if line.startswith("read_db")
     )
-    assert sweep_lines[-2:] == [
+    # Issue #1709 appends `_design_rule_check_lines`'s own 6 lines after
+    # these, so the slack pair is no longer the script's own tail -- it now
+    # sits immediately before those 6.
+    assert sweep_lines[-8:-6] == [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
     ]
@@ -4316,7 +4813,15 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
     # aggregate above -- no second OpenROAD invocation needed (see
     # `_run_corner_sweep`'s own `len(corners) == 1` docstring note).
     assert report["corners"] == [
-        {"name": "tt_025C_1v80", "setup_slack_ns": -7.5, "hold_slack_ns": 0.25}
+        {
+            "name": "tt_025C_1v80",
+            "setup_slack_ns": -7.5,
+            "hold_slack_ns": 0.25,
+            # Issue #1709: the same entry now also carries that corner's own
+            # design-rule verdict -- 0/0 here (the stub's clean-run default).
+            "max_transition_violation_count": 0,
+            "max_capacitance_violation_count": 0,
+        }
     ]
     assert route_stage["corners"] == report["corners"]
 
@@ -4389,6 +4894,10 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         "name": "tt_025C_1v80",
         "setup_slack_ns": pytest.approx(-1.94402),
         "hold_slack_ns": pytest.approx(0.5),
+        # Issue #1709: per-corner design-rule verdict rides in the same
+        # entry -- 0/0 here (the stub's clean-run default).
+        "max_transition_violation_count": 0,
+        "max_capacitance_violation_count": 0,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)

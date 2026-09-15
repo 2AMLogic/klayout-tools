@@ -29,10 +29,13 @@ dependency: this module's own already-shared helpers (``_run_openroad``/
 scope -- neither creates a cycle, since neither of those modules imports
 back from here or from ``place_and_route.py``. The handful of names that
 *are* still defined in ``place_and_route.py`` itself (``PlaceAndRouteError``,
-``_write_script``, ``_clock_lines``, ``_metrics_report_lines``,
+``_write_script``, ``_clock_lines``, ``_design_rule_constraint_lines``,
+``_design_rule_check_lines``, ``_metrics_report_lines``,
 ``_violation_count_lines``, ``_read_metrics``, ``_engine_error_message``,
 ``_EXTRACT_DECK_FOR_CELL_LIBRARY``, and the ``_SETUP_VIOLATIONS_*``/
-``_HOLD_VIOLATIONS_*``/``_SPEF_NET_CHECK_*`` markers) are imported *inside*
+``_HOLD_VIOLATIONS_*``/``_MAX_TRANSITION_VIOLATIONS_*``/
+``_MAX_CAPACITANCE_VIOLATIONS_*``/``_SPEF_NET_CHECK_*`` markers) are
+imported *inside*
 the functions that use them, deferred rather than at module scope, because
 ``place_and_route.py`` in turn imports this module's own public entry
 points back (module scope, no cycle -- this module never imports
@@ -58,6 +61,9 @@ def _corner_sweep_script_lines(
     io_spec: dict[str, str],
     clock_port: str | None,
     clock_period_ns: float | None,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> list[str]:
     """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
     ``docs/design/post-route-sta-survey.md`` section 4.2) -- a **second**,
@@ -109,8 +115,26 @@ def _corner_sweep_script_lines(
     at the fastest, exactly the industrial "setup at slow PVT, hold at fast
     PVT" convention this survey's section 3.3 describes -- no manual
     slow/fast corner classification needed in Python).
+
+    The trailing ``report_check_types`` pair (issue #1709's "Two smaller
+    things found alongside" item 1, folded into that issue's own Builder
+    scope by its 2026-09-15 revision -- see
+    :func:`~klayout_tools.place_and_route._design_rule_check_lines`) is the
+    **design-rule** counterpart of the two slack metrics above, and rides in
+    this same session for exactly the same reason they do: this is the only
+    session that loads every swept deck's own ``max_transition``/
+    ``max_capacitance`` limits, so it is the only place a max-transition /
+    max-capacitance verdict at those decks can be measured at all. Run
+    **after** ``estimate_parasitics``, since a slew/capacitance check against
+    an un-estimated network is not a meaningful number. Adds no OpenROAD
+    invocation of its own -- only two more report calls inside an invocation
+    the ``"route"`` stage already pays for.
     """
-    from .place_and_route import _clock_lines
+    from .place_and_route import (
+        _clock_lines,
+        _design_rule_check_lines,
+        _design_rule_constraint_lines,
+    )
 
     lines = [f"read_db {checkpoint_in}"]
     lines += ["define_corners " + " ".join(corner["name"] for corner in corners)]
@@ -118,12 +142,16 @@ def _corner_sweep_script_lines(
         f"read_liberty -corner {corner['name']} {corner['path']}" for corner in corners
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
     lines += [
         f"set_wire_rc -layer {io_spec['layer_v']}",
         "estimate_parasitics -global_routing",
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
     ]
+    lines += _design_rule_check_lines()
     return lines
 
 
@@ -141,6 +169,9 @@ def _spef_sta_script_lines(
     spef_path: str,
     net_names: list[str],
     sdf_path: str | None = None,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> list[str]:
     """Build the Tcl script for the second, ``post_route_spef``-only
     ``openroad`` invocation (issue #948, Epic #700 Phase 3) -- a fresh
@@ -205,12 +236,16 @@ def _spef_sta_script_lines(
         _SPEF_NET_CHECK_BEGIN,
         _SPEF_NET_CHECK_END,
         _clock_lines,
+        _design_rule_constraint_lines,
         _metrics_report_lines,
         _violation_count_lines,
     )
 
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
     lines += [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -362,6 +397,9 @@ def _post_route_spef_metrics(
     clock_period_ns: float | None,
     checkpoint_in: str,
     write_sdf: bool = False,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -598,6 +636,9 @@ def _post_route_spef_metrics(
         spef_path=spef_path,
         net_names=net_names,
         sdf_path=sdf_path,
+        max_transition_ns=max_transition_ns,
+        max_capacitance_pf=max_capacitance_pf,
+        max_fanout=max_fanout,
     )
     _write_script(script_path, lines)
 
@@ -689,27 +730,48 @@ def _run_corner_sweep(
     clock_period_ns: float | None,
     output_dir: str,
     hdl_toplevel: str,
-) -> tuple[float | None, float | None, list[dict[str, Any]]]:
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
+) -> tuple[float | None, float | None, list[dict[str, Any]], int | None, int | None]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
     already written ``checkpoint_in`` -- see :func:`_corner_sweep_script_lines`
     for why this cannot be folded into that script's own session.
 
-    Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners)``. The
+    Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners,
+    max_transition_violation_count, max_capacitance_violation_count)``. The
     first two, each rounded to 5 decimal places (matching
     :func:`~klayout_tools.place_and_route._extract_stage_metrics`'s own
     ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
     ``-metrics`` dump didn't populate the corresponding key, are issue #949's
     original aggregate fields -- unchanged by issue #1092, still sourced from
     this same combined, every-``corners``-loaded-at-once session's own
-    unscoped ``report_worst_slack_metric -setup``/``-hold`` calls. ``([],
-    [], [])`` (well, ``(None, None, [])``) when ``corners`` is empty --
+    unscoped ``report_worst_slack_metric -setup``/``-hold`` calls.
+    ``(None, None, [], None, None)`` when ``corners`` is empty --
     either the "should not happen in practice" case the original #949
     docstring named (a resolved ``liberty_path`` implies at least one
     shipped ``.lib``), or issue #1092's own explicit
     ``request.pdk.sweep_corners: []`` (sweep zero corners) -- degrading to
     ``null``/``[]`` rather than raising on an empty sweep target list keeps
     this helper total either way.
+
+    The last two elements are issue #1709's own addition: the
+    **design-rule-check verdict** at those same swept decks -- how many pins
+    violate the max-transition (``-max_slew``) and max-capacitance limits in
+    force at the corners actually loaded, counted out of this same combined
+    invocation's own stdout by the identical marker-delimited
+    ``"(VIOLATED)"`` scrape ``setup_violation_count``/``hold_violation_count``
+    already use (see
+    :func:`~klayout_tools.place_and_route._design_rule_check_lines`). They
+    are a *verdict against whatever limits the loaded decks declare*, so they
+    are meaningful whether or not the caller set
+    ``request.constraints.max_transition_ns``/``.max_capacitance_pf`` -- with
+    those set, they additionally say whether the ``repair_design`` pass that
+    was aimed at the caller's own tighter target actually hit it. No
+    **fanout** counterpart is reported, deliberately: see
+    ``_design_rule_check_lines``'s own docstring for the
+    ``sta::max_fanout_violation_count`` SIGSEGV this avoids.
 
     The third element is issue #1092's own addition: a per-corner
     breakdown, ``[{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
@@ -747,6 +809,10 @@ def _run_corner_sweep(
     to support (T1 checklist item 5, ``docs/design-evidence-tiers.md``).
     """
     from .place_and_route import (
+        _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+        _MAX_CAPACITANCE_VIOLATIONS_END,
+        _MAX_TRANSITION_VIOLATIONS_BEGIN,
+        _MAX_TRANSITION_VIOLATIONS_END,
         PlaceAndRouteError,
         _engine_error_message,
         _read_metrics,
@@ -754,7 +820,7 @@ def _run_corner_sweep(
     )
 
     if not corners:
-        return None, None, []
+        return None, None, [], None, None
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
     metrics_path = os.path.join(
@@ -766,6 +832,9 @@ def _run_corner_sweep(
         io_spec=io_spec,
         clock_port=clock_port,
         clock_period_ns=clock_period_ns,
+        max_transition_ns=max_transition_ns,
+        max_capacitance_pf=max_capacitance_pf,
+        max_fanout=max_fanout,
     )
     _write_script(script_path, lines)
 
@@ -781,6 +850,22 @@ def _run_corner_sweep(
     worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
     worst_hold = round(worst_hold_raw, 5) if worst_hold_raw is not None else None
 
+    # Issue #1709: the design-rule verdict at the swept decks. Scraped from
+    # this same combined invocation's own stdout -- with every swept corner
+    # loaded, `report_check_types` reports a pin that violates the limit at
+    # *any* of them, the same worst-case-across-loaded-corners semantics
+    # `report_worst_slack_metric` above already has.
+    max_transition_violations = _count_violations(
+        completed.stdout,
+        _MAX_TRANSITION_VIOLATIONS_BEGIN,
+        _MAX_TRANSITION_VIOLATIONS_END,
+    )
+    max_capacitance_violations = _count_violations(
+        completed.stdout,
+        _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+        _MAX_CAPACITANCE_VIOLATIONS_END,
+    )
+
     if len(corners) == 1:
         # The combined session's own aggregate already *is* this single
         # corner's own value -- no second invocation needed (see docstring).
@@ -789,9 +874,17 @@ def _run_corner_sweep(
                 "name": corners[0]["name"],
                 "setup_slack_ns": worst_setup,
                 "hold_slack_ns": worst_hold,
+                "max_transition_violation_count": max_transition_violations,
+                "max_capacitance_violation_count": max_capacitance_violations,
             }
         ]
-        return worst_setup, worst_hold, corner_breakdown
+        return (
+            worst_setup,
+            worst_hold,
+            corner_breakdown,
+            max_transition_violations,
+            max_capacitance_violations,
+        )
 
     corner_breakdown = []
     for corner in corners:
@@ -808,6 +901,9 @@ def _run_corner_sweep(
             io_spec=io_spec,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
+            max_transition_ns=max_transition_ns,
+            max_capacitance_pf=max_capacitance_pf,
+            max_fanout=max_fanout,
         )
         _write_script(corner_script_path, corner_lines)
 
@@ -832,7 +928,28 @@ def _run_corner_sweep(
                 "hold_slack_ns": (
                     round(corner_hold_raw, 5) if corner_hold_raw is not None else None
                 ),
+                # Issue #1709: this corner's *own* design-rule verdict, from
+                # its own single-corner invocation's stdout -- the per-corner
+                # counterpart of the combined aggregates above, letting a
+                # caller see which deck's limits a pin actually breaks
+                # (exactly the per-corner attribution #1092 added for slack).
+                "max_transition_violation_count": _count_violations(
+                    corner_completed.stdout,
+                    _MAX_TRANSITION_VIOLATIONS_BEGIN,
+                    _MAX_TRANSITION_VIOLATIONS_END,
+                ),
+                "max_capacitance_violation_count": _count_violations(
+                    corner_completed.stdout,
+                    _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+                    _MAX_CAPACITANCE_VIOLATIONS_END,
+                ),
             }
         )
 
-    return worst_setup, worst_hold, corner_breakdown
+    return (
+        worst_setup,
+        worst_hold,
+        corner_breakdown,
+        max_transition_violations,
+        max_capacitance_violations,
+    )
