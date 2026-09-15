@@ -203,6 +203,7 @@ import re
 import subprocess
 from typing import Any
 
+from . import env_provenance
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import (
     _combined_content_hash,
@@ -226,7 +227,23 @@ from .sta import StaError, compute_critical_path
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #1844): `netlist_path`/`script_path` (top level),
+#: each `arithmetic.candidates[].measured.netlist_path`/`script_path`,
+#: `restructuring.restructured_netlist_path` (when not `null`), and
+#: `baseline.ref`'s literal-path fallback changed from a raw (often
+#: absolute) path string to the `{path, scope}` shape
+#: `env_provenance.repo_relative_path` already defines for `klt pex`/`klt
+#: sim` (issue #1261) -- a committed evidence record wraps this response
+#: unmodified (`docs/design/sim-evidence-discipline-spike.md`), so an
+#: absolute path here used to leak the author's home directory/worktree
+#: layout into every such record. See `_report_path` below.
+#: `equivalence.artifacts.{script_path,netlist_path}` is `klt equiv`'s own
+#: response shape (echoed through unmodified) and is deliberately **not**
+#: normalized here -- doing so would be a `klt equiv` contract change,
+#: which needs its own `schema_version` bump on that command, out of this
+#: issue's scope.
+SCHEMA_VERSION = 2
 
 #: ``"yosys"`` is the only engine implemented today; the field is present in
 #: the request from day one (contract spike section 2) so a later backend is
@@ -590,6 +607,64 @@ class SynthesizeError(Exception):
     """
 
 
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise one output-path field for this module's own JSON response
+    (issue #1844) -- a thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
+    second normalizer, so `klt synthesize`'s reports and `klt
+    env-provenance`'s own emitter agree on exactly one `{path, scope}`
+    shape, matching the precedent `klt pex`/`klt sim` set for issue #1261.
+
+    Deliberately applied only at the point a path is inserted into the
+    response dict -- every internal caller (`_run_yosys`, `_read_sta_timing`,
+    the equivalence gate, `_run_timing_restructuring`, `_compute_baseline`,
+    arithmetic candidate measurement) keeps using the real absolute path
+    variable for actual file I/O; only the reported *value* changes.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _script_path_text(path: str, *, repo_root: str | None) -> str:
+    """The text :func:`_write_script` embeds for one filesystem path (issue
+    #1844) -- ``path`` unchanged (absolute) when ``repo_root`` is ``None``
+    or ``path`` does not resolve inside it, preserving :func:`_write_script`'s
+    original cwd-independence invariant exactly for those cases; ``path``
+    rewritten relative to ``repo_root`` (POSIX separators) when it does, via
+    the same :func:`~klayout_tools.env_provenance.repo_relative_path` this
+    module's own response fields use -- one normalizer, not two. A caller
+    embedding any relative-form path this way must run the script with
+    ``cwd=repo_root``; see :func:`_write_script`'s own docstring.
+    """
+    if repo_root is None:
+        return path
+    normalized = env_provenance.repo_relative_path(path, repo_root=repo_root)
+    if normalized["scope"] == "repo":
+        return normalized["path"]
+    return path
+
+
+def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
+    """`baseline.ref`'s default value (issue #1844) when
+    `request.baseline.ref` is omitted -- previously the literal
+    `response_path`/`netlist_path` request string, verbatim, which leaked an
+    absolute path into the response whenever the caller's own request named
+    one (e.g. a prior run's `netlist_path`, itself absolute before this
+    issue's fix).
+
+    `ref` stays a plain string either way (unlike `netlist_path`/
+    `script_path`, it is a caller-facing label, not one of this issue's
+    `{path, scope}` object fields) -- reuses
+    :func:`~klayout_tools.env_provenance.render_path_field`, the same
+    `{path, scope}` -> text projection `klt pex`/`klt sim`'s own `--format
+    text` output already uses, so the fallback reads as the repo-relative
+    path when it resolves inside the invocation's repo, or `<outside
+    repo>` when it does not -- never the absolute path.
+    """
+    return env_provenance.render_path_field(
+        env_provenance.repo_relative_path(resolved_path, repo_root=repo_root)
+    )
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt synthesize`` request JSON file.
 
@@ -687,6 +762,15 @@ def run_synthesize(
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #1844: every output-path field this run's own JSON response
+    # echoes (`netlist_path`/`script_path` and the nested occurrences --
+    # `arithmetic.candidates[].measured.*`, `restructuring.
+    # restructured_netlist_path`, `baseline.ref`'s literal-path fallback) is
+    # normalised against this one repo root, resolved once from the request
+    # file's own location -- the same "walk up from the input" default
+    # `env_provenance.find_repo_root` uses for its own caller, and the same
+    # convention `klt pex`/`klt sim` established for issue #1261.
+    repo_root = env_provenance.find_repo_root(request_dir)
 
     engine = request.get("engine", "yosys")
     if engine not in SUPPORTED_ENGINES:
@@ -769,8 +853,22 @@ def run_synthesize(
             hdl_toplevel=hdl_toplevel,
             engine_options=engine_options,
             equiv_timeout_s=equiv_timeout_s,
+            repo_root=repo_root,
         )
 
+    # Issue #1844: `repo_root` is threaded into this run's own script so
+    # that inputs resolving inside the invocation's repo (RTL sources, and
+    # the `.klt/synthesize/` output paths for `tee -o`/`write_verilog`) are
+    # embedded as repo-relative text rather than an absolute path -- the
+    # resolved liberty stays absolute regardless (see `_write_script`'s own
+    # docstring for why). Trial/probe/baseline scripts elsewhere in this
+    # module deliberately do **not** get this treatment (`repo_root` is left
+    # at its default `None` for those `_write_script` calls) -- they are
+    # ephemeral internal working artifacts, never the response's own
+    # `script_path`, so keeping them fully absolute (and their own
+    # `_run_yosys` calls `cwd`-independent, unchanged) is lower-risk than
+    # extending the relative-path/explicit-`cwd` pairing to every script
+    # this module writes.
     _write_script(
         script_path=script_path,
         sources=resolved_sources,
@@ -785,9 +883,17 @@ def run_synthesize(
         tie_cells=_TIE_CELLS.get(cell_library),
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
+        repo_root=repo_root,
     )
 
-    yosys_log = _run_yosys(script_path)
+    # `cwd=repo_root` is what makes the relative paths `_write_script` just
+    # embedded (when `repo_root` is not `None`) resolve correctly -- see
+    # `_write_script`'s docstring "Commit-safety vs. cwd-independence"
+    # section. When `repo_root` is `None` (no repo resolved for this
+    # request), `_write_script` wrote only absolute paths, so `cwd=None`
+    # (subprocess's own default: the invoking process's cwd) is exactly as
+    # correct as it always was.
+    yosys_log = _run_yosys(script_path, cwd=repo_root)
 
     if not os.path.isfile(netlist_path):
         raise SynthesizeError(
@@ -840,6 +946,7 @@ def run_synthesize(
             resolved_sources=resolved_sources,
             max_iterations=restructure_max_iterations,
             equiv_timeout_s=equiv_timeout_s,
+            repo_root=repo_root,
         )
 
     response: dict[str, Any] = {
@@ -865,8 +972,8 @@ def run_synthesize(
         "sta": sta,
         "structural": structural,
         "warnings": warnings_summary,
-        "netlist_path": netlist_path,
-        "script_path": script_path,
+        "netlist_path": _report_path(netlist_path, repo_root=repo_root),
+        "script_path": _report_path(script_path, repo_root=repo_root),
         "provenance": provenance,
         "equivalence": equivalence,
         "restructuring": restructuring,
@@ -890,6 +997,7 @@ def run_synthesize(
         liberty_path=liberty_path,
         hdl_toplevel=hdl_toplevel,
         output_dir=output_dir,
+        repo_root=repo_root,
     )
     return response
 
@@ -1019,6 +1127,7 @@ def _run_timing_restructuring(
     resolved_sources: list[str],
     max_iterations: int | None,
     equiv_timeout_s: float | None,
+    repo_root: str | None = None,
 ) -> dict[str, Any]:
     """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
     ``sta`` stage: runs
@@ -1048,6 +1157,13 @@ def _run_timing_restructuring(
     it is non-``null``, and fall back to ``netlist_path`` otherwise --
     exactly the same "additive sibling, never required" posture ``sta``
     already has relative to ``timing``.
+
+    ``restructured_netlist_path`` is normalized to the ``{path, scope}``
+    shape (issue #1844) exactly like ``netlist_path``/``script_path`` --
+    but only when a resize was actually applied; the field stays the bare
+    JSON ``null`` (never ``{"path": null, "scope": "absent"}``) when no
+    resize happened, so "not applicable" stays distinguishable from "an
+    unresolved path".
     """
     if delay_target_ps is None:
         raise SynthesizeError(
@@ -1093,6 +1209,15 @@ def _run_timing_restructuring(
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
             request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
+        )
+
+    # Issue #1844: `restructured_netlist_path` is `restructure_for_timing`'s
+    # own real absolute path, useful for every internal caller above -- only
+    # the value handed back to `run_synthesize`'s response is normalized,
+    # and only when it is not already `None` (no resize applied).
+    if report["restructured_netlist_path"] is not None:
+        report["restructured_netlist_path"] = _report_path(
+            report["restructured_netlist_path"], repo_root=repo_root
         )
 
     return report
@@ -1228,6 +1353,7 @@ def _run_arithmetic_selection(
     hdl_toplevel: str,
     engine_options: _EngineOptions,
     equiv_timeout_s: float | None,
+    repo_root: str | None = None,
 ) -> tuple[dict[str, Any], tuple[str, ...], str | None]:
     """Resolve ``request.arithmetic`` into a concrete adder substitution.
 
@@ -1344,6 +1470,7 @@ def _run_arithmetic_selection(
             engine_options=engine_options,
             adder_sources=(),
             adder_techmap_path=None,
+            repo_root=repo_root,
         ),
     }
     rows.append(default_row)
@@ -1368,6 +1495,7 @@ def _run_arithmetic_selection(
                 engine_options=engine_options,
                 adder_sources=tuple(entry["sources"]),
                 adder_techmap_path=entry["techmap_path"],
+                repo_root=repo_root,
             )
         rows.append(row)
 
@@ -1700,6 +1828,7 @@ def _measure_candidate(
     engine_options: _EngineOptions,
     adder_sources: tuple[str, ...],
     adder_techmap_path: str | None,
+    repo_root: str | None = None,
 ) -> dict[str, Any] | None:
     """Run one full trial synthesis for a candidate architecture and report
     what it measured.
@@ -1762,8 +1891,11 @@ def _measure_candidate(
         target_period_ns=engine_options.target_period_ns,
     )
     measurement["label"] = label
-    measurement["netlist_path"] = netlist_path
-    measurement["script_path"] = script_path
+    # Issue #1844: only the values reported back in `candidates[].measured`
+    # are normalized -- `netlist_path`/`script_path` above stay the real
+    # absolute paths used for this trial's own I/O throughout this function.
+    measurement["netlist_path"] = _report_path(netlist_path, repo_root=repo_root)
+    measurement["script_path"] = _report_path(script_path, repo_root=repo_root)
     return measurement
 
 
@@ -2035,6 +2167,7 @@ def _write_script(
     tie_cells: tuple[tuple[str, str], tuple[str, str]] | None = None,
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
+    repo_root: str | None = None,
 ) -> None:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2091,29 +2224,84 @@ def _write_script(
     that was not generated) is left untouched for Yosys's own expansion, so
     this is always a subset substitution.
 
-    Every path embedded in the script is absolute, so the script runs
+    Commit-safety vs. cwd-independence (issue #1844): every path embedded in
+    the script used to be absolute unconditionally, so the script ran
     correctly regardless of the invoking process's own working directory --
-    :func:`_run_yosys` never sets ``cwd=``.
+    :func:`_run_yosys` never set ``cwd=``. A generated ``.ys`` is exactly
+    the kind of artifact a harness wants to commit as reproducible evidence
+    (``docs/design/sim-evidence-discipline-spike.md``), and an absolute path
+    in it leaks the author's home directory / Loom worktree layout the same
+    way an unnormalized response field does.
+
+    ``repo_root``, when given (:func:`~klayout_tools.env_provenance.
+    find_repo_root`'s answer for the request that produced this script),
+    resolves that tension by rewriting -- only for a path that resolves
+    *inside* ``repo_root`` -- the absolute form to a path relative to
+    ``repo_root`` instead: every ``sources``/``adder_sources`` entry,
+    ``stats_path``, ``netlist_path``, ``constr_path``, and ``abc_log_path``.
+    ``liberty_path`` is deliberately **exempt** even when it happens to sit
+    inside the repo -- Yosys must be able to actually open it wherever it
+    is installed, and a PDK install essentially never lives inside the repo
+    anyway (see this issue's own investigation); its *identity* for
+    commit-safety purposes is already covered by the response's
+    ``provenance.deck`` (name + content hash), so only its filesystem
+    location -- never its content -- is asked to be resolvable, in either
+    form. Any path that does not resolve inside ``repo_root`` (or when
+    ``repo_root`` is ``None`` -- no repo found for this request at all)
+    keeps the original absolute form unchanged, exactly as before this
+    issue.
+
+    A script written with a relative form for any path **must** be run with
+    ``cwd=repo_root`` (:func:`_run_yosys`'s own ``cwd`` keyword) -- passing
+    ``repo_root`` here and then invoking with no explicit ``cwd=`` (or a
+    different one) would send a relative ``read_verilog``/``write_verilog``
+    argument to the wrong directory. ``repo_root=None`` (every call site in
+    this module except :func:`run_synthesize`'s own top-level script -- the
+    trial/probe/baseline scripts stay fully absolute and fully
+    cwd-independent, unchanged) reproduces the original invariant exactly:
+    no relative path is ever written, so no ``cwd=`` is ever required.
     """
-    abc_command = f"abc -liberty {liberty_path}"
-    if constr_path is not None:
-        abc_command += f" -constr {constr_path}"
+    liberty_text = liberty_path
+    stats_text = _script_path_text(stats_path, repo_root=repo_root)
+    netlist_text = _script_path_text(netlist_path, repo_root=repo_root)
+    constr_text = (
+        None
+        if constr_path is None
+        else _script_path_text(constr_path, repo_root=repo_root)
+    )
+    abc_log_text = (
+        None
+        if abc_log_path is None
+        else _script_path_text(abc_log_path, repo_root=repo_root)
+    )
+
+    abc_command = f"abc -liberty {liberty_text}"
+    if constr_text is not None:
+        abc_command += f" -constr {constr_text}"
     if delay_target_ps is not None:
         abc_command += f" -D {delay_target_ps}"
     for glob in dont_use_globs:
         abc_command += f" -dont_use {glob}"
-    if constr_path is not None and abc_log_path is not None:
-        abc_command = f"tee -q -o {abc_log_path} {abc_command}"
+    if constr_text is not None and abc_log_text is not None:
+        abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
-    lines = [f"read_verilog {path}" for path in sources]
+    lines = [
+        f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
+        for path in sources
+    ]
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
         lines += ["proc", "opt_expr", "opt_clean"]
-        lines += [f"read_verilog {path}" for path in adder_sources]
-        lines.append(f"techmap -map {adder_techmap_path}")
+        lines += [
+            f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
+            for path in adder_sources
+        ]
+        lines.append(
+            f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
+        )
     lines += [
         f"synth -top {hdl_toplevel}",
-        f"dfflibmap -liberty {liberty_path}",
+        f"dfflibmap -liberty {liberty_text}",
         abc_command,
         "clean",
     ]
@@ -2121,9 +2309,9 @@ def _write_script(
         (hi_cell, hi_port), (lo_cell, lo_port) = tie_cells
         lines.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
     lines += [
-        f"tee -q -o {stats_path} "
-        f"stat -liberty {liberty_path} -json -top {hdl_toplevel}",
-        f"write_verilog -noattr {netlist_path}",
+        f"tee -q -o {stats_text} "
+        f"stat -liberty {liberty_text} -json -top {hdl_toplevel}",
+        f"write_verilog -noattr {netlist_text}",
     ]
     try:
         with open(script_path, "w", encoding="utf-8") as handle:
@@ -2152,7 +2340,10 @@ DEFAULT_YOSYS_TIMEOUT_S = 300.0
 
 
 def _run_yosys(
-    script_path: str, *, timeout_s: float | None = DEFAULT_YOSYS_TIMEOUT_S
+    script_path: str,
+    *,
+    timeout_s: float | None = DEFAULT_YOSYS_TIMEOUT_S,
+    cwd: str | None = None,
 ) -> str:
     """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
     on any failure to run (missing binary, non-zero exit, or a run that
@@ -2174,6 +2365,16 @@ def _run_yosys(
     arithmetic-architecture candidate's trial synthesis the same way it
     already treats any other failed trial: disqualified, not fatal to the
     rest of the ``"auto"`` sweep.
+
+    ``cwd`` (issue #1844) is passed straight through to
+    ``subprocess.run``'s own ``cwd``; ``script_path`` itself is always
+    given as an absolute path, so ``cwd`` never affects locating the script
+    -- it only matters for a script :func:`_write_script` wrote with any
+    relative-form embedded path (``repo_root`` given), which must be run
+    with ``cwd=<that same repo_root>`` to resolve correctly. The default
+    ``None`` reproduces the pre-#1844 behaviour exactly (subprocess's own
+    default: the invoking process's cwd), correct for every script that
+    embeds only absolute paths.
     """
     try:
         completed = subprocess.run(
@@ -2181,6 +2382,7 @@ def _run_yosys(
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            cwd=cwd,
         )
     except OSError as exc:
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
@@ -2937,6 +3139,7 @@ def _compute_baseline(
     liberty_path: str,
     hdl_toplevel: str,
     output_dir: str,
+    repo_root: str | None = None,
 ) -> dict[str, Any] | None:
     """Build the response's optional ``baseline`` field (issue #1588) --
     ``None`` unless ``request.baseline`` names a prior run to compare
@@ -2946,10 +3149,11 @@ def _compute_baseline(
     resolved liberty).
 
     ``ref`` identifies what was compared against: ``request.baseline.ref``
-    when given, else the literal ``response_path``/``netlist_path`` string
-    -- always present, never ``null``, so a caller can always tell what a
-    ``baseline`` object was measured against even without an explicit
-    label.
+    when given, else -- since issue #1844 -- the resolved ``response_path``/
+    ``netlist_path``'s repo-relative form (via :func:`_baseline_ref_fallback`,
+    never the absolute path). Always present, never ``null``, so a caller
+    can always tell what a ``baseline`` object was measured against even
+    without an explicit label.
 
     ``area_um2``/``critical_path_ns`` (and their ``delta_pct`` siblings) are
     included only when both this run and the baseline produced a number --
@@ -2997,7 +3201,7 @@ def _compute_baseline(
             else os.path.join(request_dir, response_path)
         )
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
-        ref = ref or response_path
+        ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
         resolved = (
             netlist_path
@@ -3007,7 +3211,7 @@ def _compute_baseline(
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
         )
-        ref = ref or netlist_path
+        ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
 
     current_critical_path_ns = _critical_path_ns(response)
 

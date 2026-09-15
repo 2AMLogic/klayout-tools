@@ -244,6 +244,22 @@ def _side(sources: list[str], top: str = "top", **extra) -> dict:
     return {"sources": sources, "top": top, **extra}
 
 
+def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str) -> str:
+    """The real absolute path `run_synthesize` wrote its mapped netlist to.
+
+    Issue #1844 normalized the response's own `netlist_path` field to the
+    `{path, scope}` shape (and `tmp_path` is not a git repo, so it reports
+    `scope: "external"`, `path: None` -- correctly omitting the absolute
+    path). These integration tests still need the real filesystem path to
+    wire into a downstream request, so this reconstructs it directly from
+    `run_synthesize`'s own documented convention (`synthesize.py`'s module
+    docstring): `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the
+    request file.
+    """
+    request_dir = os.path.dirname(os.path.abspath(synth_request_path))
+    return os.path.join(request_dir, ".klt", "synthesize", f"{hdl_toplevel}_synth.v")
+
+
 HAVE_YOSYS = shutil.which("yosys") is not None
 HAVE_IVERILOG = shutil.which("iverilog") is not None
 
@@ -2103,7 +2119,7 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
         pnr_dir / "pnr.json",
         {
             "engine": "openroad",
-            "netlist": synth_report["netlist_path"],
+            "netlist": _synth_netlist_path(synth_request, "gcd"),
             "hdl_toplevel": "gcd",
             "pdk": {"cell_library": cell_library, "corner": corner},
             "floorplan": {
@@ -2133,7 +2149,9 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
         equiv_dir / "equiv.json",
         {
             "gold": _side(
-                [synth_report["netlist_path"]], top="gcd", liberty=liberty_path
+                [_synth_netlist_path(synth_request, "gcd")],
+                top="gcd",
+                liberty=liberty_path,
             ),
             "gate": _side(
                 [pnr_report["verilog_path"]], top="gcd", liberty=liberty_path
@@ -2226,7 +2244,7 @@ def test_sequential_engine_real_pnr_mult8_register_preserving_transformation(
         pnr_dir / "pnr.json",
         {
             "engine": "openroad",
-            "netlist": synth_report["netlist_path"],
+            "netlist": _synth_netlist_path(synth_request, "mult8"),
             "hdl_toplevel": "mult8",
             "pdk": {"cell_library": cell_library, "corner": corner},
             "floorplan": {
@@ -2256,7 +2274,9 @@ def test_sequential_engine_real_pnr_mult8_register_preserving_transformation(
         equiv_dir / "equiv.json",
         {
             "gold": _side(
-                [synth_report["netlist_path"]], top="mult8", liberty=liberty_path
+                [_synth_netlist_path(synth_request, "mult8")],
+                top="mult8",
+                liberty=liberty_path,
             ),
             "gate": _side(
                 [pnr_report["verilog_path"]], top="mult8", liberty=liberty_path
@@ -2524,7 +2544,7 @@ def test_corpus_rtl_vs_real_synthesized_gates(tmp_path, monkeypatch):
         {
             "gold": _side([gold_rtl], top="adder4"),
             "gate": _side(
-                [good_synth_report["netlist_path"]],
+                [_synth_netlist_path(good_synth_request, "adder4")],
                 top="adder4",
                 liberty=liberty_path,
             ),
@@ -2540,7 +2560,7 @@ def test_corpus_rtl_vs_real_synthesized_gates(tmp_path, monkeypatch):
         {
             "gold": _side([gold_rtl], top="adder4"),
             "gate": _side(
-                [bad_synth_report["netlist_path"]],
+                [_synth_netlist_path(bad_synth_request, "adder4")],
                 top="adder4",
                 liberty=liberty_path,
             ),

@@ -40,6 +40,7 @@ lacking one of those three, matching `tests/test_equiv.py`'s own posture.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -94,6 +95,21 @@ def _write(path: Path, text: str) -> str:
 def _write_request(path: Path, request: dict) -> str:
     path.write_text(json.dumps(request), encoding="utf-8")
     return str(path)
+
+
+def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str) -> str:
+    """The real absolute path `run_synthesize` wrote its mapped netlist to.
+
+    Issue #1844 normalized the response's own `netlist_path`/`script_path`
+    fields to the `{path, scope}` shape (and `tmp_path` is not a git repo,
+    so they report `scope: "external"`, `path: None` -- correctly omitting
+    the absolute path). This reconstructs the real filesystem path directly
+    from `run_synthesize`'s own documented convention (`synthesize.py`'s
+    module docstring): `.klt/synthesize/<hdl_toplevel>_synth.v`, next to
+    the request file.
+    """
+    request_dir = os.path.dirname(os.path.abspath(synth_request_path))
+    return os.path.join(request_dir, ".klt", "synthesize", f"{hdl_toplevel}_synth.v")
 
 
 def _netlist_path_from_script(script_path: str) -> str:
@@ -215,7 +231,9 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
     )
     bad_report = run_synthesize(bad_request_path)
     assert bad_report["status"] == "ok"
-    with open(bad_report["netlist_path"], encoding="utf-8") as handle:
+    with open(
+        _synth_netlist_path(bad_request_path, "adder4"), encoding="utf-8"
+    ) as handle:
         broken_netlist_text = handle.read()
 
     # Seed the mismatch: after the *good* design's own real Yosys run
@@ -238,8 +256,13 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
 
     original_run_yosys = synthesize._run_yosys
 
-    def _seed_mismatch_after_synthesis(script_path: str) -> str:
-        log_text = original_run_yosys(script_path)
+    def _seed_mismatch_after_synthesis(script_path: str, **kwargs) -> str:
+        # Issue #1844 added `_run_yosys`'s own `cwd` keyword (`run_synthesize`
+        # now always passes it); this monkeypatch replacement accepts and
+        # forwards it (along with `timeout_s`) rather than hardcoding the
+        # pre-#1844 positional-only signature, so it keeps working across
+        # whatever keyword arguments `run_synthesize` passes through.
+        log_text = original_run_yosys(script_path, **kwargs)
         netlist_path = _netlist_path_from_script(script_path)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write(broken_netlist_text)

@@ -121,7 +121,20 @@ def run_yosys_oracle(design: str, liberty: str, scratch: str) -> dict:
         text=True,
         env=env,
     )
-    return json.loads(result.stdout)
+    report = json.loads(result.stdout)
+    # `klt synthesize`'s own `netlist_path` is now (issue #1844) the
+    # `{path, scope}` shape -- `design_dir` sits under a
+    # `tempfile.TemporaryDirectory()` scratch dir, not a git repo, so it
+    # reports `scope: "external"`, `path: None`. Reconstruct the real
+    # filesystem path directly from `run_synthesize`'s own documented
+    # convention (`synthesize.py`'s module docstring):
+    # `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the request file
+    # (`request_path` above), and stash it under a key this script owns
+    # rather than overwriting the response's own (now-normalized) field.
+    report["_netlist_path"] = os.path.join(
+        design_dir, ".klt", "synthesize", f"{design}_synth.v"
+    )
+    return report
 
 
 def run_techmap(
@@ -215,7 +228,7 @@ def main() -> int:
             )
 
             oracle_sta = run_statime(
-                statime_binary, oracle["netlist_path"], liberty, design, scratch
+                statime_binary, oracle["_netlist_path"], liberty, design, scratch
             )
             mapped_sta = run_statime(
                 statime_binary, mapped["mapped_netlist_path"], liberty, design, scratch

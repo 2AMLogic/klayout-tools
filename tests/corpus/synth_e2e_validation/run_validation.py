@@ -109,6 +109,23 @@ def klt_synthesize(
         ) from exc
 
 
+def synth_netlist_path(workdir: Path, hdl_toplevel: str) -> Path:
+    """The real filesystem path `klt synthesize` wrote its mapped netlist
+    to, reconstructed directly from its own documented convention
+    (`synthesize.py`'s module docstring): `.klt/synthesize/
+    <hdl_toplevel>_synth.v`, next to the request file (`klt_synthesize`
+    above always writes it to `workdir / "req.json"`).
+
+    Issue #1844 normalized the JSON response's own `netlist_path` field to
+    the `{path, scope}` shape -- `workdir` is a
+    `tempfile.TemporaryDirectory()`, not a git repo, so it reports `scope:
+    "external"`, `path: None`, correctly omitting the absolute path from
+    the (potentially-committed) response. Callers that need the real path
+    reconstruct it via this helper instead of reading the response field.
+    """
+    return workdir / ".klt" / "synthesize" / f"{hdl_toplevel}_synth.v"
+
+
 def seq_equiv_check(
     workdir: Path, top: str, gate_netlist: str, seq_depth: int, gold_files: list[str]
 ) -> tuple[bool, str]:
@@ -378,7 +395,7 @@ def validate_modexp() -> dict:
         report = klt_synthesize(
             workdir, ["modexp.v"], "modexp", verify_equivalence=False
         )
-        gate_netlist = Path(report["netlist_path"])
+        gate_netlist = synth_netlist_path(workdir, "modexp")
 
         seq_proven, seq_log_tail = seq_equiv_check(
             workdir, "modexp", str(gate_netlist), 16, ["modexp.v"]
@@ -435,7 +452,7 @@ def validate_tt_design(
         report = klt_synthesize(
             workdir, sources, top, verify_equivalence=verify_equivalence
         )
-        gate_netlist = Path(report["netlist_path"])
+        gate_netlist = synth_netlist_path(workdir, top)
 
         result: dict = {
             "design": macro,

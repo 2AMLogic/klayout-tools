@@ -116,8 +116,35 @@ tee -q -o <stats path> stat -liberty <resolved liberty path> -json -top <hdl_top
 write_verilog -noattr <netlist path>
 ```
 
-Every path embedded in the script is absolute, so the script runs correctly
-regardless of the invoking process's own working directory.
+**Embedded paths (issue #1844).** Every path embedded in the script *except*
+the resolved liberty is repo-relative when it resolves inside the invocation's
+repo — the RTL `sources`/adder sources, and the `.klt/synthesize/` output
+paths (`tee -o`, `write_verilog`) — so a `.ys` produced inside a repo can be
+committed as a reproducible evidence artifact without leaking the author's
+home directory or worktree layout. Such a script is **run with `cwd` set to
+that repo root**, which is what makes those relative paths resolve; when no
+repo is found for the request at all, every embedded path stays absolute and
+the script is run with no `cwd` override, exactly as before this change (see
+"cwd-independence" below).
+
+The **resolved liberty path stays absolute, always** — Yosys must actually
+open it, and a PDK install essentially never lives inside the repo. Its
+commit-safe *identity* is the response's `provenance.deck` (name + content
+hash) instead. A consequence, and a known remaining gap: on a machine whose
+PDK sits under `$HOME` (the common case — `~/.ciel`, `~/.volare`), `klt
+env-provenance scan` still flags the generated `.ys` on its liberty lines,
+so the script is commit-safe in its *input/output* paths but not yet
+byte-for-byte scan-clean. Tracked separately as issue #1870.
+
+**cwd-independence.** The pre-#1844 invariant — every embedded path absolute,
+so the script runs correctly from any working directory — is preserved for
+every script this command writes *other* than the top-level production one
+(the arithmetic-candidate trial scripts, the ABC probe, and the baseline
+re-derivation script all still embed only absolute paths and are still run
+with no `cwd`), and for the top-level script too whenever the request does
+not resolve inside a repo. Where relative paths *are* written, the pairing is
+explicit and local: the same `repo_root` is both the rewrite base and the
+`cwd` the script is run with.
 
 ### Artifacts written to `.klt/synthesize/`
 
@@ -541,7 +568,7 @@ to verify.
   "resizes_applied": [
     {"instance": "_377_", "from_cell": "sky130_fd_sc_hd__xnor2_1", "to_cell": "sky130_fd_sc_hd__xnor2_2"}
   ],
-  "restructured_netlist_path": "/abs/path/.klt/synthesize/gcd_synth_restructured.v",
+  "restructured_netlist_path": { "path": ".klt/synthesize/gcd_synth_restructured.v", "scope": "repo" },
   "equivalence": {"status": "equivalent", "engine": "yosys", "engine_version": "0.67+post", "timeout_s": 60.0, "elapsed_s": 0.05, "artifacts": {"...": "..."}}
 }
 ```
@@ -555,7 +582,7 @@ to verify.
 | `iterations_used` | integer | Resize attempts actually made (including a final non-improving one that ended the loop), never more than `max_iterations`. |
 | `gave_up_reason` | string \| null | `null` when `converged` is `true`; otherwise why the loop stopped short — no candidate available, a non-improving candidate, an unanalyzable candidate, or the iteration cap. |
 | `resizes_applied` | array | `{instance, from_cell, to_cell}` per resize actually kept, in order; empty if none. |
-| `restructured_netlist_path` | string \| null | The resized netlist's path when `resizes_applied` is non-empty, else `null`. **This is the netlist-handoff contract for #700 (`klt par`)**: once that epic reaches its own timing phase, it should prefer this path over the plain `netlist_path` whenever it is non-`null`, falling back to `netlist_path` otherwise — the same additive-sibling posture `sta` already has relative to `timing`. |
+| `restructured_netlist_path` | object \| null | The resized netlist's path, the same `{path, scope}` shape as the top-level `netlist_path`/`script_path` (issue #1844), when `resizes_applied` is non-empty, else the bare `null` (never `{"path": null, "scope": "absent"}` — "not applicable" stays distinguishable from "an unresolved path"). **This is the netlist-handoff contract for #700 (`klt par`)**: once that epic reaches its own timing phase, it should prefer this path over the plain `netlist_path` whenever it is non-`null`, falling back to `netlist_path` otherwise — the same additive-sibling posture `sta` already has relative to `timing`. |
 | `equivalence` | object \| null | Same shape as the top-level `equivalence` field (see "Equivalence gate" below), `null` unless a resize was actually applied. A non-`"equivalent"` verdict never reaches this field — it is a `SynthesizeError` instead. |
 
 **Known limitations**, inherited from the `sta` stage this loop measures
@@ -726,8 +753,8 @@ The `arithmetic` field, `null` unless `request.arithmetic` was given:
         "delay_source": "abc_stime",
         "meets_constraint": false,
         "label": "default",
-        "netlist_path": "/abs/path/.klt/synthesize/arith/default/modexp_synth.v",
-        "script_path": "/abs/path/.klt/synthesize/arith/default/synth_modexp.ys"
+        "netlist_path": { "path": ".klt/synthesize/arith/default/modexp_synth.v", "scope": "repo" },
+        "script_path": { "path": ".klt/synthesize/arith/default/synth_modexp.ys", "scope": "repo" }
       }
     },
     {
@@ -764,7 +791,7 @@ The `arithmetic` field, `null` unless `request.arithmetic` was given:
 | `candidates[].prefix_cells` / `.logic_levels` / `.max_fanout` | integer \| null | The generated network's structural metrics, summed/maximised over every substituted width. `null` on the `"default"` row — Yosys's own expansion has no cell map. |
 | `candidates[].adder_equivalence` | array | `{width, status, detail}` per proven adder. Empty when `verify_adders` is `false` or on the `"default"` row. `status` is `klt equiv`'s own verdict, plus `"error"` when the proof could not be attempted at all. |
 | `candidates[].disqualified_reason` | string \| null | Why this candidate was excluded from selection (an unproven adder). `null` for an eligible candidate. |
-| `candidates[].measured` | object \| null | `{instance_count, area_um2, delay_ns, delay_source, meets_constraint, label, netlist_path, script_path}` from that candidate's own trial synthesis. `null` when the candidate was disqualified, when its trial synthesis failed outright (one architecture Yosys cannot map is not a reason to abandon the others), or in explicit mode. |
+| `candidates[].measured` | object \| null | `{instance_count, area_um2, delay_ns, delay_source, meets_constraint, label, netlist_path, script_path}` from that candidate's own trial synthesis — `netlist_path`/`script_path` are the same `{path, scope}` shape as the top-level fields (issue #1844). `null` when the candidate was disqualified, when its trial synthesis failed outright (one architecture Yosys cannot map is not a reason to abandon the others), or in explicit mode. |
 | `selected_measured` | object \| null | The **real** run's own measurement in the same comparable shape (without the trial-specific `label`/paths) — always present when `arithmetic` is non-`null` and a netlist was produced. |
 
 ### Worked example: `modexp` at `WIDTH=16`
@@ -848,6 +875,15 @@ scope error, even though synthesis succeeded. `--verify-equivalence` is not
 yet usable on sequential designs — see `docs/cli/equiv.md`'s "Scope"
 section and Out of scope below.
 
+**`equivalence.artifacts` is not normalized (known gap, issue #1844).**
+Unlike `netlist_path`/`script_path` above, `equivalence.artifacts.
+{script_path, netlist_path, log_path}` is `klt equiv`'s *own* response
+shape, echoed through unmodified — it is still a raw (potentially
+absolute) path string, `klt equiv`'s own `schema_version` unaffected.
+Normalizing it would be a `klt equiv` contract change, needing its own
+`schema_version` bump on that command; out of scope for this issue, tracked
+separately if it turns out to matter for evidence-record committing.
+
 ## Request
 
 ```json
@@ -875,7 +911,7 @@ section and Out of scope below.
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
 | `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
 | `baseline.response_path` \| `baseline.netlist_path` | string | Optional; names a prior run to compare this one against — see "`baseline`" below. Set **exactly one**, resolved relative to the request file's own directory (like `sources`). |
-| `baseline.ref` | string \| omitted | A label identifying the baseline (e.g. a git ref or `"main"`), echoed verbatim into the response's `baseline.ref`. Defaults to the literal `response_path`/`netlist_path` string when omitted. |
+| `baseline.ref` | string \| omitted | A label identifying the baseline (e.g. a git ref or `"main"`), echoed verbatim into the response's `baseline.ref`. Defaults, when omitted, to the resolved `response_path`/`netlist_path`'s repo-relative form — or `<outside repo>` when it resolves outside the invocation's repo (issue #1844); never the literal, potentially-absolute request string. |
 | `arithmetic.adders` | string \| omitted | `"auto"`, `"default"`, or a prefix-adder architecture name — substitute a generated parallel-prefix adder for Yosys's own `$add` expansion, and (with `"auto"`) pick the architecture by measured synthesis. Omitted entirely leaves every pre-#1722 request unaffected. See "Arithmetic architecture" above. |
 | `arithmetic.min_width` \| `.candidates` \| `.verify_adders` | integer \| array\<string\> \| boolean | Optional modifiers on the above — see the field table in "Arithmetic architecture". |
 
@@ -897,7 +933,7 @@ caller decision rather than something this command should pick.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "yosys",
   "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
@@ -943,8 +979,8 @@ caller decision rather than something this command should pick.
     "by_category": {},
     "representatives": []
   },
-  "netlist_path": "/abs/path/.klt/synthesize/gcd_synth.v",
-  "script_path": "/abs/path/.klt/synthesize/synth_gcd.ys",
+  "netlist_path": { "path": ".klt/synthesize/gcd_synth.v", "scope": "repo" },
+  "script_path": { "path": ".klt/synthesize/synth_gcd.ys", "scope": "repo" },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -975,13 +1011,13 @@ caller decision rather than something this command should pick.
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log, never the raw log itself: `{total, by_category, representatives}`. `total` is a raw line count (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
-| `netlist_path` | string | The mapped gate-level netlist (`write_verilog -noattr`'s output), an absolute path. Never re-derive `instance_count`/`area_um2` by parsing this file. |
-| `script_path` | string | The generated `.ys` script, an absolute path — kept as a debuggable artifact. |
+| `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
+| `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 | `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
-| `arithmetic` | object \| null | `null` unless `request.arithmetic` was given (issue #1722) — the arithmetic-architecture substitution and, in `"auto"` mode, the per-candidate delay/area table it selected from: `{mode, requested, min_width, status, reason, adder_widths, target_period_ns, selected_architecture, candidates, selected_measured}`. See "Arithmetic architecture" above for the full field-by-field description. |
-| `baseline` | object \| null | `null` unless `request.baseline` was given (issue #1588) — a comparison against a prior run: `{ref, instance_count, area_um2, critical_path_ns, delta_pct}`. `ref` identifies what was compared against — `request.baseline.ref` when given, else the literal `response_path`/`netlist_path` string. `area_um2`/`critical_path_ns` (and their `delta_pct` siblings) are present only when both this run and the baseline produced a number; `instance_count` is always present. `delta_pct` is `(current - baseline) / baseline * 100` per metric — see "`baseline`" below. |
+| `arithmetic` | object \| null | `null` unless `request.arithmetic` was given (issue #1722) — the arithmetic-architecture substitution and, in `"auto"` mode, the per-candidate delay/area table it selected from: `{mode, requested, min_width, status, reason, adder_widths, target_period_ns, selected_architecture, candidates, selected_measured}`. See "Arithmetic architecture" above for the full field-by-field description; each `candidates[].measured.netlist_path`/`script_path` is the same `{path, scope}` shape as the top-level fields (issue #1844). |
+| `baseline` | object \| null | `null` unless `request.baseline` was given (issue #1588) — a comparison against a prior run: `{ref, instance_count, area_um2, critical_path_ns, delta_pct}`. `ref` identifies what was compared against — `request.baseline.ref` when given, else (issue #1844) the resolved `response_path`/`netlist_path`'s repo-relative form (or `<outside repo>` when it resolves outside the invocation's repo) — never the literal, potentially-absolute request string. `ref` itself stays a plain string either way. `area_um2`/`critical_path_ns` (and their `delta_pct` siblings) are present only when both this run and the baseline produced a number; `instance_count` is always present. `delta_pct` is `(current - baseline) / baseline * 100` per metric — see "`baseline`" below. |
 
 ## `structural`: latches, combinational loops, multiply-driven nets
 
@@ -1057,9 +1093,11 @@ the design bigger or slower?" — without diffing two JSON files by hand.
   when that optional extension is not installed, mirroring `sta`'s own
   degradation).
 
-`baseline.ref` labels what was compared against (e.g. a git ref) — defaults
-to the literal `response_path`/`netlist_path` string when omitted, so
-`baseline.ref` is never `null`. `critical_path_ns` (both this run's own and
+`baseline.ref` labels what was compared against (e.g. a git ref) — defaults,
+when omitted, to the resolved `response_path`/`netlist_path`'s
+repo-relative form (or `<outside repo>` when it resolves outside the
+invocation's repo — issue #1844, never the literal, potentially-absolute
+request string), so `baseline.ref` is never `null`. `critical_path_ns` (both this run's own and
 the baseline's) prefers the real `sta` stage's `worst_path.delay_ns`
 (already nanoseconds); falls back to `timing`'s ABC `stime -p` estimate,
 converted, when `sta` is unavailable on either side. `delta_pct` is `(current
@@ -1139,7 +1177,7 @@ against `sky130_fd_sc_hd`'s typical corner:
 ```console
 $ klt synthesize request.json --format json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "yosys",
   "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
@@ -1223,7 +1261,7 @@ own worked example uses), synthesized with the gate enabled:
 ```console
 $ klt synthesize adder4_request.json --verify-equivalence --format json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "yosys",
   "hdl_toplevel": "adder4",
   "status": "ok",
@@ -1256,7 +1294,7 @@ A design with a missing `else` branch (an inferred latch) — `structural`
 ```console
 $ klt synthesize latch_request.json --format json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "yosys",
   "hdl_toplevel": "latch_bad",
   "status": "ok",
@@ -1352,7 +1390,15 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
 - **Place-and-route.** `netlist_path` is this command's own deliverable and
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
   contract's `netlist` request field) — this command does not floorplan,
-  place, or route.
+  place, or route. Since issue #1844 that handoff is the `{path, scope}`
+  object, not a bare path string: a caller wiring the two commands together
+  takes `netlist_path.path` when `scope` is `"repo"` (a repo-relative path,
+  which `klt place-and-route` resolves against its own request file's
+  directory like any other relative `netlist`), or reconstructs the path
+  from this command's own deterministic output convention
+  (`<request_dir>/.klt/synthesize/<hdl_toplevel>_synth.v`, see "Artifacts"
+  above) when `scope` is `"external"` — `klayout_tools.digital_fleet`
+  already does the latter.
 - **Fleet-scale evaluation of many design-space candidates.** See
   [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation of
   digital candidates" section (Epic #391 Phase 6) — `klayout_tools.digital_fleet`
