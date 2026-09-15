@@ -12,9 +12,14 @@
 //!
 //! This reuses exactly the same "bar-shaped-conductor" geometric MVP
 //! restriction PEEC's `compute_inductance` already established
-//! (`geometry::classify_shared_axis_bars`: every conductor is a single box,
-//! all conductors share one current-flow axis and axial extent) -- see
-//! docs/cli/mom.md's "PEEC inductance/resistance" section for why. Where
+//! (`geometry::classify_shared_axis_bars`: every box, of every conductor, is
+//! individually bar-shaped, and every box -- across every conductor,
+//! including a multi-box conductor's own boxes -- shares one current-flow
+//! axis and axial extent) -- see docs/cli/mom.md's "PEEC inductance/
+//! resistance" section for why. A multi-box conductor's boxes are combined
+//! into one equivalent thin wire (`geometry::classify_full_wave_bars`
+//! sums each box's cross-sectional area and area-weights their centroids)
+//! before this module's own per-conductor mesh below. Where
 //! PEEC's static solve (`peec.rs`) discretises each conductor's
 //! *cross-section* into a filament bundle (refining the bundle grid to
 //! converge the static self/mutual inductance), this module keeps each
@@ -889,6 +894,117 @@ mod tests {
         let err =
             solve_full_wave_sweep(&conductors, 1.0, &[1.0e9], 0.1, &capacitance, &[]).unwrap_err();
         assert!(err.contains("segments"), "unexpected error: {err}");
+    }
+
+    // --- multi-box conductors (#1841, PEEC increment (i)) -------------------
+
+    #[test]
+    fn multi_box_conductor_combines_into_one_equivalent_wire() {
+        // Two boxes of the same electrical conductor, sharing the x
+        // current-flow axis and the same [0, 100]um axial span, at
+        // different transverse (y) positions -- classify_full_wave_bars
+        // must combine them into a single equivalent thin wire: summed
+        // cross-sectional area and an area-weighted transverse centroid.
+        let go = ConductorRequest {
+            name: "go".to_string(),
+            boxes: vec![
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: 0.0,
+                    x1_um: 100.0,
+                    y1_um: 2.0, // 2um wide -> area 2 * 2(z) = 4um^2, centroid y=1
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                },
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: 10.0,
+                    x1_um: 100.0,
+                    y1_um: 14.0, // 4um wide -> area 4 * 2(z) = 8um^2, centroid y=12
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                },
+            ],
+            conductivity_s_per_m: None,
+        };
+        let conductors = [go];
+        let layout = geometry::classify_full_wave_bars(&conductors).unwrap();
+
+        assert_eq!(layout.conductors.len(), 1);
+        let geom = layout.conductors[0];
+        assert!(
+            (geom.area_um2 - 12.0).abs() < 1e-9,
+            "expected combined area 4 + 8 = 12um^2, got {}",
+            geom.area_um2
+        );
+        // Area-weighted centroid: y = (4*1 + 8*12) / 12 = 100/12; z = 1.0
+        // (identical in both boxes).
+        assert!(
+            (geom.centroid_transverse_um[0] - 100.0 / 12.0).abs() < 1e-9,
+            "unexpected transverse centroid: {:?}",
+            geom.centroid_transverse_um
+        );
+        assert!(
+            (geom.centroid_transverse_um[1] - 1.0).abs() < 1e-9,
+            "unexpected transverse centroid: {:?}",
+            geom.centroid_transverse_um
+        );
+    }
+
+    #[test]
+    fn multi_box_conductor_full_wave_sweep_runs_end_to_end() {
+        // A two-conductor request where "go" is built from two boxes (the
+        // shape classify_full_wave_bars's sibling test above validates in
+        // isolation) -- confirms the full solve, not just classification,
+        // picks up the relaxation and still reports a per-*conductor* (not
+        // per-box) impedance matrix.
+        let go = ConductorRequest {
+            name: "go".to_string(),
+            boxes: vec![
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: 0.0,
+                    x1_um: 100.0,
+                    y1_um: 2.0,
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                },
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: -4.0,
+                    x1_um: 100.0,
+                    y1_um: -2.0,
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                },
+            ],
+            conductivity_s_per_m: None,
+        };
+        let ret = bar_conductor(
+            "return",
+            BoxRequest {
+                x0_um: 0.0,
+                y0_um: 50.0,
+                x1_um: 100.0,
+                y1_um: 52.0,
+                z0_um: 0.0,
+                z1_um: 2.0,
+            },
+        );
+        let conductors = [go, ret];
+        let capacitance_matrix_ff = vec![vec![1.0, -0.5], vec![-0.5, 1.0]];
+
+        let (points, segment_count) =
+            solve_full_wave_sweep(&conductors, 1.0, &[1.0e9], 5.0, &capacitance_matrix_ff, &[])
+                .unwrap();
+
+        assert_eq!(points.len(), 1);
+        assert!(segment_count > 0);
+        // Two conductors -> a 2x2 impedance matrix (one row/column per
+        // conductor, not per box) and the two-conductor derived quantities.
+        assert_eq!(points[0].impedance_matrix_real_ohm.len(), 2);
+        assert_eq!(points[0].impedance_matrix_real_ohm[0].len(), 2);
+        assert!(points[0].characteristic_impedance_real_ohm.is_some());
     }
 
     // --- ports and de-embedding (issue #894) --------------------------------
