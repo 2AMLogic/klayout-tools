@@ -2010,10 +2010,19 @@ def route_two_pin(
     within a bundle) order, and each one claims the lowest-numbered track
     that is actually free by the time it is processed, exactly as first-fit
     packing would -- just decided lazily, on rejection, rather than by a
-    separate up-front sort. When every track up to the bound still conflicts,
-    the leg is reported unroutable with ``leg_conflict``'s own wording plus a
-    note naming how many tracks were tried, the same convention #1167's and
-    #1393's own exhausted searches use. A resolved leg reports which track it
+    separate up-front sort. When every track up to the bound still conflicts
+    and no ``cross_block_route_layer`` is configured (or this leg already
+    resolved on it), the leg is reported unroutable with ``leg_conflict``'s
+    own wording plus a note naming how many tracks were tried, the same
+    convention #1167's and #1393's own exhausted searches use. When a
+    ``cross_block_route_layer`` *is* configured and available, exhaustion
+    instead reports the untracked fixed shape as routed on the primary
+    layer (exactly as a non-eligible leg would) so :func:`route_bundle`'s own
+    ``leg_conflict`` check and its ``_retry_leg_on_cross_layer`` fallback
+    (issue #1680) get the chance to resolve it on the cross layer instead --
+    returning a terminal unroutable result here would make that bundle-level
+    retry unreachable, since it only ever fires once ``route_two_pin`` has
+    already reported a leg as routed. A resolved leg reports which track it
     landed on in its own ``channel_track`` field (0 for the untracked
     default, matching :func:`route_bundle`'s own per-leg passthrough) -- see
     the return-value doc below.
@@ -3061,6 +3070,34 @@ def route_two_pin(
             if track_conflict is None:
                 retry["channel_track"] = track_index
                 return retry
+        if (
+            cross_block_route_layer is not None
+            and effective_route_layer != cross_block_route_layer
+        ):
+            # Every channel track is exhausted, but a caller-configured
+            # `cross_block_route_layer` may still resolve this leg on a
+            # different physical layer with no route-vs-route collision at
+            # all (issue #1680) -- exactly what would already happen for a
+            # non-`channel_track_eligible` leg (see the untracked "routed:
+            # True" fallthrough below). Report the untracked fixed shape as
+            # routed here too, so `route_bundle()`'s own `leg_conflict`
+            # check runs against it and its `_retry_leg_on_cross_layer`
+            # fallback gets the chance it would otherwise never see --
+            # returning a terminal "routed": False from *inside*
+            # route_two_pin (as below) would make that bundle-level retry
+            # unreachable, since it only ever fires when `result["routed"]`
+            # is already True.
+            return {
+                "routed": True,
+                "route_length_um": _polyline_length_um(points),
+                "points_um": points,
+                "via_drops": via_drops,
+                "stub_widen": stub_widen,
+                "route_layer": effective_route_layer,
+                "width_um": effective_width_um,
+                "channel_track": 0,
+                "reason": None,
+            }
         return {
             "routed": False,
             "route_length_um": None,

@@ -6553,6 +6553,128 @@ def test_compose_channel_track_retry_two_row_fold_is_independent(tmp_path, pdk_r
     assert len(set(tracks_b)) == num_nets
 
 
+def test_compose_channel_track_exhaustion_falls_back_to_cross_block_layer_role(
+    tmp_path, pdk_root
+):
+    # Judge follow-up on issue #1467: a *crossing* (non-nested) span pair is
+    # this mechanism's own documented capability ceiling -- no y-offset track
+    # ever clears a crossing pair, only a nested one (see
+    # `docs/cli/gen-compose.md`'s "Channel track assignment (#1467)"
+    # section). Those same docs claim a caller can work around that ceiling
+    # with a caller-supplied `waypoints_um` detour or `routing.
+    # cross_block_layer_role` (#1680)'s own route-vs-route retry -- but
+    # before this fix, that claim was false for exactly the leg shape the
+    # channel-track retry is eligible for: `route_two_pin`'s channel-track-
+    # exhaustion path returned a terminal `"routed": False` from *inside*
+    # route_two_pin, so `route_bundle`'s own `_retry_leg_on_cross_layer`
+    # (armed only when `result["routed"]` is already `True`) never got a
+    # chance to run.
+    #
+    # Two nets, *same-order* (not reversed) pin assignment -- unlike
+    # `_channel_bus_fixture`'s nested spans, this makes NET_0's and NET_1's
+    # horizontal jogs partially overlap without either containing the other:
+    # a genuine crossing pair no channel track can resolve.
+    #
+    # Wider port spacing/margin and a wider route than `_channel_bus_fixture`
+    # uses (unrelated to the mechanism under test): `route_two_pin`'s own
+    # `stub_um` equals `width_um`, and the retried leg's via-drop landing pad
+    # at each pin is a fixed physical size independent of `width_um` -- too
+    # tight a pitch here would produce a genuine physical short (the via pad
+    # reaching into a neighboring pin's own stub, or into this net's own jog
+    # before it clears the shared pin row) that has nothing to do with the
+    # channel-track/cross-layer interaction this test exists to verify.
+    num_nets = 2
+    height_um = 1.2
+    spacing_um = 1.5
+    margin_um = 0.5
+    width_um = 0.6
+    block_w_um = margin_um * 2 + (num_nets - 1) * spacing_um + 0.4
+    gap_um = 2.0
+    bl_gds = _write_empty_library_gds(tmp_path / "cbl.gds", "cbl")
+    br_gds = _write_empty_library_gds(tmp_path / "cbr.gds", "cbr")
+    bbox_um = {"x0": 0.0, "y0": 0.0, "x1": block_w_um, "y1": height_um}
+    left_ports = _channel_bus_ports(
+        num_nets, height_um, spacing_um=spacing_um, margin_um=margin_um
+    )
+    right_ports = _channel_bus_ports(
+        num_nets, height_um, spacing_um=spacing_um, margin_um=margin_um
+    )
+    output = tmp_path / "channel_bus_crossing.gds"
+    request = {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "cbl",
+                "cell": {
+                    "gds_path": bl_gds,
+                    "cell_name": "cbl",
+                    "bbox_um": bbox_um,
+                    "ports": left_ports,
+                },
+            },
+            {
+                "id": "cbr",
+                "cell": {
+                    "gds_path": br_gds,
+                    "cell_name": "cbr",
+                    "bbox_um": bbox_um,
+                    "ports": right_ports,
+                },
+            },
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["cbl", "cbr"],
+            "origins_um": {
+                "cbl": {"x": 0.0, "y": 0.0},
+                "cbr": {"x": block_w_um + gap_um, "y": 0.0},
+            },
+        },
+        "connectivity": [
+            {
+                "net": f"NET_{i}",
+                "pins": [
+                    {"block": "cbl", "port": f"P{i}"},
+                    {"block": "cbr", "port": f"P{i}"},
+                ],
+            }
+            for i in range(num_nets)
+        ],
+        "routing": {
+            "layer_role": "metal",
+            "width_um": width_um,
+            "cross_block_layer_role": "metal2",
+        },
+        "options": {"cell_name": "channel_bus_crossing", "output": str(output)},
+    }
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    for net in report["nets"]:
+        assert net["routed"] is True, (net["net"], net["legs"])
+        assert net["legs"][0]["reason"] is None
+
+    # NET_0 (processed first) never contends with anything and stays on the
+    # primary `"metal"` plane (li1, GDS layer (67, 20)); NET_1's crossing
+    # span exhausts every channel track and instead resolves by hopping onto
+    # `cross_block_layer_role` (GDS layer (68, 20)) -- the #1680 mechanism,
+    # not a channel track.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("channel_bus_crossing")
+    li1_paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    metal2_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    assert len(li1_paths) == 1  # NET_0 only
+    assert len(metal2_paths) == 1  # NET_1's cross-layer retry
+
+    # No short: the composed layout extracts NET_0 and NET_1 as two distinct
+    # nodes, never merged onto one.
+    result = extract.run_extract(str(output), "sky130", top="channel_bus_crossing")
+    assert result["merged_net_labels"] == []
+
+
 def test_compose_rejects_same_block_self_net_pair_whose_via_landing_pads_cross(
     tmp_path, pdk_root
 ):
