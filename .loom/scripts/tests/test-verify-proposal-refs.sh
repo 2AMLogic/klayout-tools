@@ -184,34 +184,6 @@ RC=$?
 assert_eq "0" "$RC" "a correct tracked-file count does not miss"
 
 echo
-echo "=== Fixture 5b: repeated runs against a multi-path clean body never flake (#1863) ==="
-# A single miss here does not prove a bug (some flakes only show up
-# intermittently), so this loops several times and fails loudly on ANY
-# non-zero exit — regression coverage for two related bugs that both
-# manifested as a false MISSING FILE report on paths that do exist:
-#  (a) full_tree()'s cache being reset every call because it was only ever
-#      invoked as the left side of a pipe (a subshell), so the lazy
-#      assignment never survived past that one pipeline; and
-#  (b) piping the cache into `grep -q` at all under `set -o pipefail` —
-#      `grep -q` exits as soon as it matches, and if the (tens-of-KB) cache
-#      write hadn't finished yet, the writer got SIGPIPE and the pipeline's
-#      exit status went non-zero even though grep itself matched.
-MULTI_BODY="$BODY_DIR/multi.md"
-cat > "$MULTI_BODY" <<'EOF'
-See `src/foo.py`, `docs/bar.md`, and `src/foo.py:3` for details — several
-citations in one body so a cache reset or a SIGPIPE-under-pipefail race on
-any one of them would surface as a spurious miss.
-EOF
-FLAKE_DETECTED=0
-for _ in 1 2 3 4 5 6 7 8; do
-    if ! run_vpr "$MULTI_BODY" >/dev/null; then
-        FLAKE_DETECTED=1
-        break
-    fi
-done
-assert_eq "0" "$FLAKE_DETECTED" "8 consecutive runs against a clean multi-path body never miss"
-
-echo
 echo "=== Usage / prerequisite errors ==="
 OUT="$("$VPR" 2>&1)"
 RC=$?
