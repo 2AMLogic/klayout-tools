@@ -121,11 +121,15 @@ is_recognized_top() {
 # top-level dir" means.
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 
-FULL_TREE_CACHE=""
+# Populated once via a plain command substitution (NOT inside a pipe) so the
+# assignment survives for the whole script. full_tree() is always called as
+# the left side of a pipe (`full_tree | grep ...` below); piping into a
+# command forks a subshell, so an assignment made lazily *inside* full_tree()
+# would only ever live for that one pipeline and never be visible on the next
+# call — defeating the cache and forcing a fresh `git ls-tree` subprocess per
+# path reference (#1863).
+FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
 full_tree() {
-    if [[ -z "$FULL_TREE_CACHE" ]]; then
-        FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
-    fi
     printf '%s' "$FULL_TREE_CACHE"
 }
 
