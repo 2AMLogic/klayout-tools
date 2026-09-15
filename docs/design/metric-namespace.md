@@ -262,12 +262,17 @@ and `--check`/`--rerun` already used:
   METRICS2.1's `timing__setup__ws__corner:ss` pattern) is a `klt
   sim`-specific design question for that follow-on issue, not resolved
   here.
-- **`signoff.py` (issue #309) consuming the registry** — once at least two
-  verbs emit `metrics` blocks with declared `critical` metrics, teach
-  `build_signoff()`/`build_tier_report()` to read `critical: true` metrics
-  mechanically instead of relying solely on each envelope's own `status`.
-  Not attempted in this pass since a single-verb pilot gives the aggregator
-  nothing genuinely cross-block to aggregate yet.
+- **`signoff.py` (issue #309) consuming the registry** — **done (issue
+  #1850)**. `build_signoff()`/`build_tier_report()` now read any registered
+  `critical: true` metric present in a consumed envelope's own `metrics`
+  block (via `is_registered()`/`get_metric()`) and mechanically block that
+  check when the metric's value fails its own declared `higher_is_better`
+  polarity, independent of the envelope's own `status`. This is generic
+  over every kind and every declared critical metric — never hard-coded
+  per-verb knowledge — so `klt extract`/`klt sim` landing more critical
+  metrics (see their own follow-on issues above) is picked up automatically
+  with no further wiring. See `_critical_metric_blockers()` in
+  `src/klayout_tools/signoff.py`.
 
 ## Out of scope for this decision
 
@@ -282,5 +287,6 @@ and `--check`/`--rerun` already used:
   #248) are untouched; unifying the two conventions is explicitly not
   attempted here (see "The `tests/golden_metrics/` naming is a separate,
   pre-existing convention" above).
-- A mechanical `signoff.py` consumer of `critical` metrics is named as
-  follow-on work, not built here.
+- A mechanical `signoff.py` consumer of `critical` metrics was named as
+  follow-on work, not built in this decision's original pass — see
+  "Follow-on work" above, done as issue #1850.

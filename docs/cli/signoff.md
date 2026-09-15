@@ -114,6 +114,25 @@ consistent; `"fail"` if provenance was consistent but at least one check did
 not pass; `"refused"` if provenance was inconsistent (regardless of whether
 the individual checks themselves passed — see the worked example below).
 
+**Critical-metric consumption (issue #1850).** Independently of the
+kind-specific `status` rules above, a check also fails if the envelope's own
+`metrics` block ([`../design/metric-namespace.md`](../design/metric-namespace.md),
+issue #247 — populated so far by `klt drc`, issue #1847) names a metric
+registered with `critical: true` whose value fails that metric's own
+declared `higher_is_better` polarity — e.g. a nonzero
+`metrics.drc__error__count` (`higher_is_better: false`) forces `passed:
+false` even if `status` was `"clean"`. This is read generically from the
+registry (`is_registered()`/`get_metric()`), never hard-coded per-verb, so
+any future verb's newly-declared critical metric is picked up automatically
+the moment it appears in a `metrics` block, with no `klt signoff` change
+needed. An envelope with no `metrics` block, or none marked `critical`, is
+unaffected. When a critical metric blocks a check, the offending metric(s)
+are named in that check's `detail.critical_metric_blockers` (see "`checks[]`
+entries" below) — `[{"metric": <name>, "value": <number>, "higher_is_better":
+<bool | null>}, ...]`. `--manifest`/`--fleet` tier reports inherit the same
+mechanism for free, since they grade evidence through this same per-check
+pass/fail logic.
+
 `klt signoff` never re-runs the underlying verb — like `klt report`, it is a
 pure, additive transform of JSON envelopes that already exist on disk, so it
 composes into a pipeline:
@@ -843,7 +862,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"generic"`, or `"error"` — see "What it does" above. |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
-| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). |
+| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
 ## Exit codes and errors

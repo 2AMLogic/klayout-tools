@@ -128,7 +128,14 @@ With the kind resolved:
    both this step and step 1's provenance-freshness comparison for you in
    one pass — read its `checks[]`/`provenance_consistency` output instead
    of re-deriving pass/fail and staleness by eye, and cite its `status`
-   (`pass`/`fail`/`refused`) directly on items 3/4/7.
+   (`pass`/`fail`/`refused`) directly on items 3/4/7. `klt signoff` (issue
+   #1850) also mechanically blocks a check when any registered `critical:
+   true` metric (`docs/design/metric-namespace.md`) in that envelope's own
+   `metrics` block fails its declared `higher_is_better` polarity, even if
+   the envelope's own `status` alone would have passed — a `checks[]` entry
+   blocked this way names the offending metric(s) in
+   `detail.critical_metric_blockers`; cite that list alongside `status`
+   rather than treating a passing `status` as sufficient on its own.
 3. **Carry coverage caveats into the verdict.** Deck coverage metadata
    (rule-free layers, skipped rules), warning-level LVS mismatches,
    MC legs not combined with process corners, known false negatives

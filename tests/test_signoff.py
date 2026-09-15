@@ -567,6 +567,150 @@ def test_extract_check_always_passes(tmp_path):
     assert check["detail"]["device_count"] == 4
 
 
+# --------------------------------------------------------------------------- #
+# Critical-metric consumption (issue #1850): a declared `critical: true`
+# metric (klayout_tools.metrics.REGISTRY) mechanically blocks signoff
+# independent of the envelope's own `status`, per its own declared
+# `higher_is_better` polarity -- never hard-coded per-verb knowledge.
+# --------------------------------------------------------------------------- #
+
+
+def test_critical_metric_blocks_signoff_despite_passing_status(tmp_path):
+    """A `drc` envelope whose own `status` is `"clean"` (would otherwise
+    pass) is mechanically blocked when its `metrics` block carries a
+    nonzero value for the registered `critical: true`, `higher_is_better:
+    False` metric `drc__error__count` -- e.g. a caller that hand-edited
+    `violation_count` without updating `status`, or any other producer
+    whose `metrics` block disagrees with its own `status`."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "metrics": {"drc__error__count": 3},
+    }
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["status"] == "clean"  # the envelope's own status still passes
+    assert check["passed"] is False  # but the critical metric blocks it
+    assert check["detail"]["critical_metric_blockers"] == [
+        {"metric": "drc__error__count", "value": 3, "higher_is_better": False}
+    ]
+
+
+def test_critical_metric_at_passing_value_does_not_block(tmp_path):
+    """The same critical metric at its passing value (`0`) never blocks --
+    a critical metric present is not, by itself, a signoff blocker."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "metrics": {"drc__error__count": 0},
+    }
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "critical_metric_blockers" not in check["detail"]
+
+
+def test_unregistered_metric_name_in_metrics_block_is_ignored(tmp_path):
+    """A `metrics` block naming an unregistered/unknown metric is ignored,
+    not raised -- registry lookups are read-only and defensive."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "metrics": {"not__a__registered__metric": 999},
+    }
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "critical_metric_blockers" not in check["detail"]
+
+
+def test_envelope_with_no_metrics_block_behaves_as_before(tmp_path):
+    """An envelope with no `metrics` block at all (e.g. `klt lvs`, which
+    has not adopted the registry) is completely unaffected -- pre-existing
+    `status`-only behavior."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    assert "metrics" not in LVS_MATCH_ENVELOPE
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "critical_metric_blockers" not in check["detail"]
+
+
+def test_non_critical_registered_metric_never_blocks(tmp_path):
+    """A registered metric that is *not* `critical` (e.g.
+    `design__instance__count`) never blocks signoff, no matter its value --
+    only `critical: True` metrics are mechanical blockers."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "metrics": {"design__instance__count": 0},
+    }
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    assert result["checks"][0]["passed"] is True
+
+
+def test_multiple_critical_metrics_all_named_in_blockers(tmp_path):
+    """A `sim` envelope with two failing critical metrics
+    (`sim__corner__failed_count`, `sim__corner__errored_count`) names both
+    in `critical_metric_blockers`, even though its own `status` already
+    fails independently -- the mechanism is additive, not just a fallback
+    for a status that would otherwise pass."""
+    envelope = {
+        **SIM_FAIL_ENVELOPE,
+        "metrics": {
+            "sim__corner__failed_count": 1,
+            "sim__corner__errored_count": 2,
+        },
+    }
+    path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["passed"] is False
+    blockers = check["detail"]["critical_metric_blockers"]
+    blocker_metrics = {b["metric"] for b in blockers}
+    assert blocker_metrics == {
+        "sim__corner__failed_count",
+        "sim__corner__errored_count",
+    }
+
+
+def test_critical_metric_blocks_signoff_in_tier_report(tmp_path):
+    """`build_tier_report` inherits the same critical-metric mechanism via
+    `_grade_evidence`'s delegation to `_check_passed` -- a critical metric
+    renders a T1 item `"unmet"` with `check_failed`, exactly like a failing
+    `status` would, with no separate wiring needed."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "metrics": {"drc__error__count": 5},
+    }
+    drc_path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_failed"
+    assert item_3["citation"] is None
+
+
 def test_error_envelope_never_passes(tmp_path):
     path = _write(tmp_path, "error.json", DRC_ERROR_ENVELOPE)
 
