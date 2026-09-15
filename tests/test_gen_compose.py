@@ -12751,3 +12751,159 @@ def test_compose_rejects_a_per_net_plane_whose_floor_exceeds_the_inherited_width
     message = str(excinfo.value)
     assert "metal2.width.1" in message
     assert "request.connectivity[0] (net 'GBUS').width_um" in message
+
+
+def test_compose_per_leg_layer_role_rejected_on_its_named_plane_is_not_rerouted(
+    tmp_path, pdk_root
+):
+    # Regression for the "explicit wins, no retry" guarantee (#1655): a leg
+    # pinned to its own `layer_role` that the router *rejects* on that plane
+    # must stay rejected. Before this was fixed, only the override branch
+    # itself declined to retry -- the pins were left in separate components,
+    # so `route_bundle()`'s ordinary automatic candidate loop (#1529) picked
+    # the very same pair back up and drew it on the *net's* plane instead,
+    # silently landing the leg on the plane the caller had deliberately moved
+    # it off (and leaving two `legs[]` entries for one pin pair, one rejected
+    # and one accepted, for a consumer trying to line `legs[]` up with the
+    # request's own).
+    #
+    # The fixture pins the u0->u1 drain leg to "metal" (li1), where that
+    # same-facing pair has no drawable path, while the net itself routes on
+    # "metal2" (met1), where the identical pair routes fine -- so the old
+    # fallback is not merely possible here, it is what used to happen.
+    output = tmp_path / "per_leg_pinned_reject.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "per_leg_pinned_reject")
+    request["connectivity"][0]["layer_role"] = "metal2"
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "u0", "port": "U0_D"},
+            "to_pin": {"block": "u1", "port": "U0_D"},
+            "layer_role": "metal",
+        }
+    ]
+    report = compose(request)
+
+    net = report["nets"][0]
+    pinned_pair = [
+        {"block": "u0", "port": "U0_D"},
+        {"block": "u1", "port": "U0_D"},
+    ]
+    entries_for_pinned_pair = [
+        leg
+        for leg in net["legs"]
+        if sorted(map(repr, leg["pins"])) == sorted(map(repr, pinned_pair))
+    ]
+    # Exactly one entry for the named pair, and it is the rejection -- never a
+    # rejected-then-accepted duplicate.
+    assert len(entries_for_pinned_pair) == 1, net["legs"]
+    assert entries_for_pinned_pair[0]["routed"] is False
+    assert "through its own pin's block 'u1'" in entries_for_pinned_pair[0]["reason"]
+
+    # Blocking the named pair is scoped to that pair: the net may still reach
+    # those two pins *indirectly* (u0->u2->u1 here), which is an ordinary
+    # spanning-tree detour, not a redraw of the named leg.
+    assert report["unrouted_nets"] == []
+    assert net["status"] == "routed"
+    routed_pairs = {
+        tuple(sorted((leg["pins"][0]["block"], leg["pins"][1]["block"])))
+        for leg in net["legs"]
+        if leg["routed"]
+    }
+    assert routed_pairs == {("u0", "u2"), ("u1", "u2")}
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("per_leg_pinned_reject")
+    # Nothing was drawn on the plane the rejected leg named, and the two
+    # detour legs are the only backbones on the net's own plane.
+    assert [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()] == []
+    assert len([s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]) == 2
+
+
+def test_compose_per_leg_width_um_alone_keeps_the_cross_block_fallback(
+    tmp_path, pdk_root
+):
+    # Regression for the other half of the same gate (#1655): only an actual
+    # `layer_role` override takes control of a leg's plane. A leg carrying
+    # *only* `width_um` draws wider on the net's own plane and keeps every
+    # fallback an ordinary leg has -- exactly as a net-level `width_um` with
+    # no `layer_role` does. Before this was fixed the leg-level branch was
+    # gated on "either field is present", so a width-only leg was routed
+    # through the no-fallback path and lost `route_two_pin`'s own
+    # same-layer-short retry onto `routing.cross_block_layer_role`
+    # (#1168/#1393): it was rejected on li1 and only rescued -- on a second,
+    # duplicate `legs[]` entry -- by the automatic candidate loop.
+    #
+    # This is the #433 same-block self-net reproduction (see
+    # test_compose_cross_block_layer_role_routes_the_exact_433_reproduction),
+    # whose EBUS1 leg only routes *because* of that cross-block retry, with a
+    # width-only per-leg override added to it.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "per_leg_width_only.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                    "legs": [
+                        {
+                            "from_pin": {"block": "arr", "port": "Q0_E"},
+                            "to_pin": {"block": "arr", "port": "Q1_E"},
+                            "width_um": 0.2,
+                        }
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {"cell_name": "per_leg_width_only", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    # One entry for the named pair -- the leg itself took the fallback, so
+    # there is no rejected-then-rescued duplicate.
+    assert len(net["legs"]) == 1, net["legs"]
+    assert net["legs"][0]["routed"] is True
+    assert net["legs"][0]["reason"] is None
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("per_leg_width_only")
+    # The fallback actually fired: the backbone is on met1, not li1 ...
+    assert [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()] == []
+    met1_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    assert len(met1_paths) == 1
+    # ... at the *cross* plane's own width (`routing.cross_block_width_um`,
+    # defaulted here to met1's 0.14um deck floor), which is the #1620 rule for
+    # any leg that lands on the fallback plane and is itself further evidence
+    # the leg took that path rather than the override branch. A per-leg
+    # `width_um` governs the plane the leg was asked to draw on, exactly as a
+    # net-level `width_um` does -- it does not widen the fallback plane.
+    assert met1_paths[0].path.width * layout.dbu == pytest.approx(0.14)

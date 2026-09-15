@@ -94,7 +94,17 @@ Resolution rules, in one place so the contract is unambiguous:
   moving it to a third one would make the drawn layer unpredictable — and is
   ill-defined when the two roles name one metal. A net that genuinely needs two
   planes says so with a per-leg override instead. `legs[].layer_role` follows
-  the same rule for the one leg it names.
+  the same rule for the one leg it names — and, because a leg (unlike a net) is
+  also a candidate the spanning-tree search would otherwise re-pick, the rule
+  extends there: a layer-pinned leg rejected on the plane it named is left
+  `routed: false`, and the automatic nearest-first search **skips that pin
+  pair** rather than reconnecting it with the net's own plane/fallback. The
+  net may still reach those two pins *indirectly*, through other pins — that is
+  an ordinary detour around an unroutable pair, not a redraw of the named leg
+  on a plane the caller moved it off. Only `layer_role` carries this: a leg
+  naming just `width_um` has taken control of no plane, so it keeps the
+  cross-block fallback and every retry an ordinary leg has, exactly as a
+  net-level `width_um` with no `layer_role` does.
 - **No `schema_version` bump.** Both fields are optional and additive; a
   request that omits them is byte-identical on disk to what it produced before
   (asserted directly, as raw GDS bytes, by

@@ -78,10 +78,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   (an inherited width that does not clear a stricter plane's floor is an
   error naming that entry's own `width_um`, never a silent widening of every
   other net's routing — the `routing.cross_block_width_um` rule, #1620,
-  applied per net). An explicit per-net plane wins over the automatic
-  `routing.cross_block_layer_role` fallback, which still applies unchanged to
-  every net that names no plane of its own; legs of one net that span two
-  planes stitch at their shared pin through the existing #454 via-drop. All
+  applied per net). An explicit plane — `layer_role`, at either tier — wins
+  over the automatic `routing.cross_block_layer_role` fallback, which still
+  applies unchanged to every net (and every leg) that names no plane of its
+  own: a *layer-pinned leg* is neither retried onto the cross-block plane nor
+  picked back up by the automatic spanning-tree search if it is rejected on
+  the plane it named, so it is reported `routed: false` rather than silently
+  redrawn on the net's own plane (the net may still reach those two pins
+  indirectly, through other pins). A `width_um` with no `layer_role` takes
+  control of no plane and keeps every fallback, at both tiers. Legs of one net
+  that span two planes stitch at their shared pin through the existing #454
+  via-drop. All
   four fields are optional and additive — a request that omits them composes
   byte-for-byte identically — so there is no `schema_version` bump. See
   `docs/cli/gen-compose.md`'s "Per-net routing planes" section and the

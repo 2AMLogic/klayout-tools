@@ -2685,13 +2685,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
         # Per-leg overrides (#1655): resolved copies of this net's own
         # `legs[]` entries, each carrying the (layer, width) it actually
-        # draws at -- `route_bundle()` routes a leg that carries either on
-        # that plane instead of the net's own, with no cross-block retry (the
-        # same "explicit wins" rule as the net level). A net's legs spanning
-        # two planes are stitched at their shared pin by the existing #454
-        # via-drop mechanics: every leg drops to each endpoint pin's own
-        # reported layer at that pin, so two legs meeting at one pin meet on
-        # that pin's own pad regardless of which plane each ran on.
+        # draws at. A leg that named a `layer_role` of its own carries a
+        # resolved `route_layer`, and `route_bundle()` routes it on that plane
+        # instead of the net's own with no cross-block retry and no automatic
+        # re-pickup if it is rejected (the same "explicit wins" rule as the net
+        # level). A leg that named only a `width_um` carries `route_layer:
+        # None` and keeps every fallback the net itself has -- widening a leg
+        # is not taking control of its plane. A net's legs spanning two planes
+        # are stitched at their shared pin by the existing #454 via-drop
+        # mechanics: every leg drops to each endpoint pin's own reported layer
+        # at that pin, so two legs meeting at one pin meet on that pin's own
+        # pad regardless of which plane each ran on.
         resolved_legs: list[dict[str, Any]] | None = None
         leg_layer_widths: dict[tuple[int, int], float] = {}
         if entry.get("legs") is not None and not declare_only:
@@ -2705,14 +2709,25 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     else _resolve_override_layer(leg_role, f"{leg_where}.layer_role")
                 )
                 resolved_leg = dict(leg)
-                if leg_layer != net_route_layer or leg.get("width_um") is not None:
+                if leg_role is not None or leg.get("width_um") is not None:
                     leg_width_um = _effective_width_um(
                         leg_layer,
                         leg.get("width_um"),
                         net_width_um,
                         f"{leg_where}.width_um",
                     )
-                    resolved_leg["route_layer"] = leg_layer
+                    # Only an actual `layer_role` override hands `route_bundle()`
+                    # a plane of its own -- and only that override is exempt
+                    # from the cross-block fallback (and from the automatic
+                    # candidate loop's re-pickup on rejection). A leg carrying
+                    # *only* `width_um` draws wider on the net's own plane and
+                    # otherwise routes exactly as it did before this field
+                    # existed, keeping `route_two_pin`'s own same-layer-short
+                    # retry (#1168/#1393) -- the same distinction the net level
+                    # above already makes with `net_route_layer != route_layer`.
+                    resolved_leg["route_layer"] = (
+                        leg_layer if leg_role is not None else None
+                    )
                     resolved_leg["width_um"] = leg_width_um
                     if leg_layer != net_route_layer:
                         # Resolved eagerly (result re-read per drawn leg

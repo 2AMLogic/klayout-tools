@@ -3346,11 +3346,16 @@ def route_bundle(
     the request named a ``connectivity[].legs[].layer_role``/``width_um``
     override (resolved through the same ``_resolve_route_layer`` path
     ``routing.layer_role`` uses, and floored against that layer's own deck
-    minimum width, before this function ever sees them). A leg carrying
-    either is routed on *that* plane instead of the net's own
-    ``route_layer``/``width_um``, with **no** cross-block retry -- the caller
-    took explicit control of this leg's plane, so silently moving it to a
-    third one would make the drawn layer unpredictable. ``geometry_for_layer``
+    minimum width, before this function ever sees them). A leg carrying a
+    ``"route_layer"`` is routed on *that* plane instead of the net's own, with
+    **no** cross-block retry -- the caller took explicit control of this leg's
+    plane, so silently moving it to a third one would make the drawn layer
+    unpredictable. A leg carrying only a ``"width_um"`` is **not** a plane
+    override: it draws wider on the net's own ``route_layer`` and keeps every
+    fallback an ordinary leg has (including :func:`route_two_pin`'s own
+    same-layer-short retry onto ``cross_block_route_layer``, #1168/#1393),
+    exactly as a net-level ``width_um`` with no ``layer_role`` does.
+    ``geometry_for_layer``
     is how this function gets that plane's drawn-block geometry: an optional
     callable taking a ``(layer, datatype)`` pair and returning a
     ``block_geometry_for``-shaped fetcher for it, so every one of
@@ -3374,6 +3379,22 @@ def route_bundle(
     A named leg is caller intent, not a router guess: silently dropping it
     would let ``status: "routed"`` hide the fact that the requested path
     was never drawn.
+
+    **One exception, for a layer-pinned leg (#1655):** when the rejected
+    explicit leg carried a ``"route_layer"`` of its own, the automatic search
+    does *not* retry that same pin pair. It has only the net's own
+    ``route_layer``/``cross_block_route_layer``/``width_um`` to route with, so
+    picking the pair back up would draw the leg on the very plane the caller
+    deliberately moved it off -- silently violating the explicit plane choice
+    (and leaving two entries for one pin pair in ``legs[]``, one rejected and
+    one accepted, for a consumer trying to correlate ``legs[]`` with the
+    request's own). The pair is blocked *only* as a direct candidate: the net
+    may still connect those two pins **indirectly**, through other pins, if a
+    spanning tree exists that way -- that is an ordinary detour around an
+    unroutable pair, not a redraw of the named leg. This exception is scoped
+    to an actual plane override; a rejected explicit leg with no
+    ``"route_layer"`` (including a width-only one) behaves exactly as it did
+    before #1655.
 
     Returns ``{"routed": bool, "route_length_um": float | None, "legs": [...],
     "reason": str | None, "status": str}``, where ``routed`` is ``True`` only
@@ -3552,6 +3573,12 @@ def route_bundle(
 
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
+    # Pin pairs an explicit *layer-pinned* leg (#1655) tried and failed on its
+    # own named plane, keyed by (block, port) rather than by pin index so a pin
+    # listed twice in this net cannot re-open the pair under a second index.
+    # The automatic candidate loop below skips them: see the explicit-legs
+    # loop's own comment for why.
+    pinned_failed_pairs: set[frozenset[tuple[str, str]]] = set()
 
     # Explicit legs (#1529): caller-steered pin pairs, routed and seeded into
     # the spanning tree *before* the automatic nearest-first search below.
@@ -3580,15 +3607,19 @@ def route_bundle(
                 "direct caller with a mismatched pins/explicit_legs pair"
             )
         # Per-leg routing-plane override (#1655): a leg the caller pinned to
-        # its own layer/width routes on that plane, against that plane's own
-        # drawn-block geometry, and is never retried onto the cross-block
-        # plane (see this function's docstring). A leg with neither override
-        # takes the identical pre-#1655 path below.
+        # its own *layer* routes on that plane, against that plane's own
+        # drawn-block geometry, is never retried onto the cross-block plane,
+        # and -- if it is rejected there -- is never silently re-picked-up by
+        # the automatic candidate loop below (see this function's docstring).
+        # A leg carrying only a `width_um` is *not* a plane override: it draws
+        # wider on the net's own plane and keeps every fallback an ordinary
+        # leg has, so it takes the pre-#1655 path below with its own width.
         leg_route_layer = leg_spec.get("route_layer")
         leg_width_um = leg_spec.get("width_um")
+        leg_effective_width_um = width_um if leg_width_um is None else leg_width_um
         geometry, cross_geometry = _leg_geometry(i, j)
-        if leg_route_layer is not None or leg_width_um is not None:
-            override_layer = route_layer if leg_route_layer is None else leg_route_layer
+        if leg_route_layer is not None:
+            override_layer = leg_route_layer
             override_geometry = (
                 geometry
                 if override_layer == route_layer
@@ -3611,7 +3642,7 @@ def route_bundle(
                 blocks,
                 offsets_um,
                 placed_bboxes_um,
-                width_um if leg_width_um is None else leg_width_um,
+                leg_effective_width_um,
                 override_layer,
                 extraction_deck,
                 override_geometry,
@@ -3627,6 +3658,22 @@ def route_bundle(
                     result.get("stub_widen", []),
                     result.get("route_layer"),
                 )
+            if reason is not None or not result["routed"]:
+                # "Explicit wins, no retry" is only a real guarantee if the
+                # automatic candidate loop below cannot quietly reconnect the
+                # very pins this override just failed on -- on the *net's*
+                # plane, the one the caller deliberately moved this leg off.
+                # Block that pin pair there; the net may still reach these two
+                # pins through other pins (an ordinary spanning-tree detour),
+                # but never by redrawing this named leg somewhere else.
+                pinned_failed_pairs.add(
+                    frozenset(
+                        (
+                            (pins[i]["block"], pins[i]["port"]),
+                            (pins[j]["block"], pins[j]["port"]),
+                        )
+                    )
+                )
         else:
             result = route_two_pin(
                 pins[i],
@@ -3634,7 +3681,7 @@ def route_bundle(
                 blocks,
                 offsets_um,
                 placed_bboxes_um,
-                width_um,
+                leg_effective_width_um,
                 route_layer,
                 extraction_deck,
                 geometry,
@@ -3704,6 +3751,22 @@ def route_bundle(
             break
         if _find(i) == _find(j):
             continue  # already connected through other legs -- no leg needed
+        if (
+            frozenset(
+                (
+                    (pins[i]["block"], pins[i]["port"]),
+                    (pins[j]["block"], pins[j]["port"]),
+                )
+            )
+            in pinned_failed_pairs
+        ):
+            # An explicit per-leg `layer_role` override (#1655) already failed
+            # for these two pins on the plane the caller named. Retrying them
+            # here would route them on the *net's* plane/`cross_block_layer_
+            # role` instead -- silently undoing the explicit plane choice, the
+            # one thing the override exists to guarantee. The rejected leg is
+            # already in `legs[]` with its own `reason`; leave it at that.
+            continue
 
         geometry, cross_geometry = _leg_geometry(i, j)
         result = route_two_pin(
