@@ -10,18 +10,20 @@
 //!
 //! ## Method: retarded thin-wire partial impedance, reusing PEEC's bar scope
 //!
-//! This reuses exactly the same "bar-shaped-conductor" geometric MVP
-//! restriction PEEC's `compute_inductance` already established
-//! (`geometry::classify_shared_axis_bars`: every conductor is a single box,
-//! all conductors share one current-flow axis and axial extent) -- see
-//! docs/cli/mom.md's "PEEC inductance/resistance" section for why. Where
-//! PEEC's static solve (`peec.rs`) discretises each conductor's
+//! This reuses exactly the same "bar-shaped-conductor" geometric scope PEEC's
+//! `compute_inductance` already established (`geometry::classify_bars`: every
+//! conductor is a single box, and that box is a bar) -- see
+//! docs/cli/mom.md's "PEEC inductance/resistance" section for why. Since
+//! issue #1842 that no longer includes the old shared-current-flow-axis and
+//! shared-axial-span restrictions: conductors may run along different axes
+//! and over different spans, exactly as in PEEC's static solve. Where PEEC's
+//! static solve (`peec.rs`) discretises each conductor's
 //! *cross-section* into a filament bundle (refining the bundle grid to
 //! converge the static self/mutual inductance), this module keeps each
 //! conductor as a **single equivalent thin wire** (radius `a_eff =
 //! sqrt(area / pi)`, the same "equal-area circle" convention `peec.rs`'s own
 //! test oracles use) and instead refines the wire **axially**: each
-//! conductor's shared axial extent is subdivided into `n` segments (target
+//! conductor's own axial extent is subdivided into `n` segments (target
 //! length `segment_size_um`), and the conductor-pair partial impedance is the
 //! Riemann-sum (point-collocation) approximation of the classical partial
 //! mutual/self impedance double integral, generalised from PEEC's static
@@ -29,22 +31,27 @@
 //! `exp(-jkR)/R`:
 //!
 //! ```text
-//! Z_pq(omega) = j*omega*mu0/(4*pi) * integral_0^l integral_0^l
-//!               exp(-j*k*R(z,z')) / R(z,z') dz dz'
+//! Z_pq(omega) = j*omega*mu0/(4*pi) * (u_p . u_q) * integral_0^l_p integral_0^l_q
+//!               exp(-j*k*R(s,t)) / R(s,t) ds dt
 //! ```
 //!
-//! for conductors `p`/`q` sharing axial length `l`, wavenumber `k = omega *
+//! for conductors `p`/`q` of axial lengths `l_p`/`l_q` and unit current-flow
+//! directions `u_p`/`u_q`, wavenumber `k = omega *
 //! sqrt(background_permittivity) / c0` (a single homogeneous background
 //! dielectric -- the same MVP restriction the capacitance solve already
-//! documents). `R(z,z')` is the straight-line distance between the two
-//! points: `sqrt(d^2 + (z-z')^2)` for `p != q` (`d` the fixed transverse
-//! distance between the two conductors' centroids), or the standard
+//! documents). `u_p . u_q` is the `dl . dl'` factor of the vector-potential
+//! double integral -- identically `1` under the old shared-axis restriction,
+//! which is why it never appeared before #1842, and identically `0` for
+//! perpendicular conductors (so a cross-axis pair contributes exactly
+//! nothing, matching the static kernel's own perpendicular case in
+//! `peec::mutual_geom_um`). `R(s,t)` is the straight-line distance between
+//! the two segment-center points for `p != q`, or the standard
 //! "reduced kernel" thin-wire regularisation `sqrt(a_eff^2 + (z-z')^2)` for
 //! `p == q` (avoiding the `R=0` self-singularity -- the same regularisation
 //! classical thin-wire antenna/transmission-line MoM codes use, see e.g.
 //! Harrington, *Field Computation by Moment Methods*).
 //!
-//! Unlike the static Neumann formula (`peec.rs`'s `mutual_inductance_h`),
+//! Unlike the static Neumann formula (`peec.rs`'s `mutual_geom_um`),
 //! the retarded double integral has no simple closed form, so it is
 //! evaluated by the same **point-collocation** (Riemann-sum, segment
 //! midpoint-to-midpoint) approximation `solver.rs`'s own capacitance fill
@@ -64,8 +71,10 @@
 //!
 //! ## The canonical structure: a two-conductor transmission-line segment
 //!
-//! When exactly two conductors are present, this module additionally derives
-//! the per-unit-length telegrapher's-equation quantities and, from them, the
+//! When exactly two conductors are present **and they share one current-flow
+//! axis and one axial span** (`geometry::shared_axial_span`), this module
+//! additionally derives the per-unit-length telegrapher's-equation
+//! quantities and, from them, the
 //! **characteristic impedance** and **propagation constant** -- the
 //! observable this issue's acceptance criteria ask for:
 //!
@@ -189,18 +198,25 @@ fn retarded_phase(k_r: f64) -> Complex64 {
     Complex64::new(k_r.cos(), -k_r.sin())
 }
 
-fn transverse_distance_um(a: [f64; 2], b: [f64; 2]) -> f64 {
-    let du = a[0] - b[0];
-    let dv = a[1] - b[1];
-    (du * du + dv * dv).sqrt()
+fn distance_um(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let mut acc = 0.0;
+    for k in 0..3 {
+        let d = a[k] - b[k];
+        acc += d * d;
+    }
+    acc.sqrt()
 }
 
-/// One conductor's axial segment centers (um, along the shared axis) and
-/// effective thin-wire radius (um).
+/// One conductor's axial segment centers -- as 3-D points on its own
+/// centreline, since issue #1842 lets conductors run along different axes and
+/// over different spans -- plus its current-flow direction (a unit vector,
+/// for the retarded kernel's `dl . dl'` factor), its own segment length, and
+/// its effective thin-wire radius (um).
 struct ConductorMesh {
-    centers_um: Vec<f64>,
+    centers_um: Vec<[f64; 3]>,
+    direction: [f64; 3],
+    delta_um: f64,
     a_eff_um: f64,
-    centroid_transverse_um: [f64; 2],
 }
 
 fn build_mesh(
@@ -212,31 +228,53 @@ fn build_mesh(
             "segment_size_um must be positive, got {segment_size_um}"
         ));
     }
-    let centers_um: Vec<f64> =
-        geometry::subdivide_1d(layout.axis_lo_um, layout.axis_hi_um, segment_size_um)
-            .into_iter()
-            .map(|(center, _len)| center)
-            .collect();
 
-    let total_segments = centers_um.len().saturating_mul(layout.conductors.len());
-    if total_segments > MAX_TOTAL_SEGMENTS {
-        return Err(format!(
-            "the full-wave solve's axial mesh would produce {total_segments} total segments \
-             (across every conductor), exceeding the {MAX_TOTAL_SEGMENTS} cap -- increase \
-             segment_size_um, or check for a scale mismatch between the request's axial \
-             length and segment_size_um"
-        ));
+    let mut meshes: Vec<ConductorMesh> = Vec::with_capacity(layout.conductors.len());
+    let mut total_segments: usize = 0;
+    for c in &layout.conductors {
+        let length_um = c.length_um();
+        if length_um <= 0.0 {
+            return Err(
+                "the full-wave solve needs a conductor of non-zero axial length -- check for \
+                 degenerate conductor geometry"
+                    .to_string(),
+            );
+        }
+        let direction = [
+            (c.end_um[0] - c.start_um[0]) / length_um,
+            (c.end_um[1] - c.start_um[1]) / length_um,
+            (c.end_um[2] - c.start_um[2]) / length_um,
+        ];
+        let axial = geometry::subdivide_1d(0.0, length_um, segment_size_um);
+        let delta_um = length_um / axial.len() as f64;
+        let centers_um: Vec<[f64; 3]> = axial
+            .into_iter()
+            .map(|(offset, _len)| {
+                [
+                    c.start_um[0] + direction[0] * offset,
+                    c.start_um[1] + direction[1] * offset,
+                    c.start_um[2] + direction[2] * offset,
+                ]
+            })
+            .collect();
+        total_segments = total_segments.saturating_add(centers_um.len());
+        if total_segments > MAX_TOTAL_SEGMENTS {
+            return Err(format!(
+                "the full-wave solve's axial mesh would produce more than \
+                 {MAX_TOTAL_SEGMENTS} total segments (across every conductor) -- increase \
+                 segment_size_um, or check for a scale mismatch between the request's axial \
+                 length and segment_size_um"
+            ));
+        }
+        meshes.push(ConductorMesh {
+            centers_um,
+            direction,
+            delta_um,
+            a_eff_um: (c.area_um2 / std::f64::consts::PI).sqrt(),
+        });
     }
 
-    Ok(layout
-        .conductors
-        .iter()
-        .map(|c| ConductorMesh {
-            centers_um: centers_um.clone(),
-            a_eff_um: (c.area_um2 / std::f64::consts::PI).sqrt(),
-            centroid_transverse_um: c.centroid_transverse_um,
-        })
-        .collect())
+    Ok(meshes)
 }
 
 /// Retarded partial-impedance matrix (complex, ohms) between every conductor
@@ -245,7 +283,6 @@ fn build_mesh(
 fn impedance_matrix(
     meshes: &[ConductorMesh],
     k_per_um: f64,
-    delta_um: f64,
 ) -> Result<Vec<Vec<Complex64>>, String> {
     let n = meshes.len();
     let mut z = vec![vec![Complex64::new(0.0, 0.0); n]; n];
@@ -255,35 +292,40 @@ fn impedance_matrix(
                 z[p][q] = z[q][p];
                 continue;
             }
-            let mut sum = Complex64::new(0.0, 0.0);
             let same_conductor = p == q;
-            let d_um = if same_conductor {
-                0.0
-            } else {
-                let d = transverse_distance_um(
-                    mesh_p.centroid_transverse_um,
-                    mesh_q.centroid_transverse_um,
-                );
-                if d < 1e-9 {
-                    return Err(format!(
-                        "full-wave conductors {p} and {q} coincide (zero transverse \
-                         separation) -- overlapping conductor geometry is not physical"
-                    ));
-                }
-                d
-            };
-            for &zi in &mesh_p.centers_um {
-                for &zj in &mesh_q.centers_um {
-                    let dz = zi - zj;
+            // The `dl . dl'` factor of the vector-potential double integral,
+            // constant over a straight-wire pair (issue #1842: before this,
+            // every conductor shared one axis, so it was identically 1 and
+            // never appeared). Exactly zero for perpendicular conductors --
+            // no arithmetic, and no singularity to guard against.
+            let dot = mesh_p.direction[0] * mesh_q.direction[0]
+                + mesh_p.direction[1] * mesh_q.direction[1]
+                + mesh_p.direction[2] * mesh_q.direction[2];
+            if dot == 0.0 {
+                z[p][q] = Complex64::new(0.0, 0.0);
+                continue;
+            }
+            let mut sum = Complex64::new(0.0, 0.0);
+            for &ci in &mesh_p.centers_um {
+                for &cj in &mesh_q.centers_um {
                     let r_um = if same_conductor {
+                        let dz = distance_um(ci, cj);
                         (mesh_p.a_eff_um * mesh_p.a_eff_um + dz * dz).sqrt()
                     } else {
-                        (d_um * d_um + dz * dz).sqrt()
+                        let r = distance_um(ci, cj);
+                        if r < 1e-9 {
+                            return Err(format!(
+                                "full-wave conductors {p} and {q} coincide (zero separation \
+                                 between axial segment centers) -- overlapping conductor \
+                                 geometry is not physical"
+                            ));
+                        }
+                        r
                     };
                     sum += retarded_phase(k_per_um * r_um) / r_um;
                 }
             }
-            z[p][q] = sum * (delta_um * delta_um);
+            z[p][q] = sum * (dot * mesh_p.delta_um * mesh_q.delta_um);
         }
     }
     Ok(z)
@@ -521,12 +563,15 @@ pub fn solve_full_wave_sweep(
 ) -> Result<(Vec<FullWavePoint>, usize), String> {
     let layout = geometry::classify_full_wave_bars(conductors)?;
     let meshes = build_mesh(&layout, segment_size_um)?;
-    let axis_length_um = layout.axis_hi_um - layout.axis_lo_um;
-    let axis_length_m = axis_length_um * 1e-6;
-    let delta_um = axis_length_um / meshes[0].centers_um.len() as f64;
-    let total_segments = meshes[0].centers_um.len() * meshes.len();
+    let total_segments: usize = meshes.iter().map(|m| m.centers_um.len()).sum();
 
+    // The retarded impedance fill itself no longer needs a shared axial span
+    // (issue #1842), but every *derived transmission-line* quantity below
+    // -- characteristic impedance, propagation constant, port de-embedding --
+    // is defined per unit length of a common line, so those stay gated on
+    // one.
     let two_conductor = meshes.len() == 2;
+    let shared_span = layout.shared_axial_span;
     if two_conductor && capacitance_matrix_ff.len() != 2 {
         return Err(
             "full-wave two-conductor derivation requires a 2x2 capacitance matrix".to_string(),
@@ -543,7 +588,14 @@ pub fn solve_full_wave_sweep(
                 meshes.len()
             ));
         }
-        Some(resolve_ports(ports, layout.axis_lo_um, layout.axis_hi_um)?)
+        let (axis_lo_um, axis_hi_um) = shared_span.ok_or_else(|| {
+            "ports/S-parameter extraction requires both conductors to share one current-flow \
+             axis and the same axial span -- a port position is an offset along that common \
+             span, so there is nothing to de-embed against for cross-axis or axially-offset \
+             conductors (the impedance matrix itself is still reported)"
+                .to_string()
+        })?;
+        Some(resolve_ports(ports, axis_lo_um, axis_hi_um)?)
     };
 
     let mut points = Vec::with_capacity(frequencies_hz.len());
@@ -557,7 +609,7 @@ pub fn solve_full_wave_sweep(
         let k_per_m = omega * background_permittivity.sqrt() / C0_M_PER_S;
         let k_per_um = k_per_m * 1e-6;
 
-        let z = impedance_matrix(&meshes, k_per_um, delta_um)?;
+        let z = impedance_matrix(&meshes, k_per_um)?;
         // um-valued geometric sum -> SI ohms: the double integral was
         // evaluated with z/R in micrometers, so it is 1e6x the equivalent
         // integral in meters (see module docs' derivation, mirroring
@@ -585,22 +637,23 @@ pub fn solve_full_wave_sweep(
             );
         }
 
-        let two_conductor_line = if two_conductor {
-            let line =
-                derive_two_conductor_line(&z_ohm, capacitance_matrix_ff, axis_length_m, omega)?;
-            Some((line.z0, line.gamma))
-        } else {
-            None
+        let two_conductor_line = match (two_conductor, shared_span) {
+            (true, Some((axis_lo_um, axis_hi_um))) => {
+                let axis_length_m = (axis_hi_um - axis_lo_um) * 1e-6;
+                let line =
+                    derive_two_conductor_line(&z_ohm, capacitance_matrix_ff, axis_length_m, omega)?;
+                Some((line.z0, line.gamma))
+            }
+            // Two conductors that do not share one axis and span are not a
+            // uniform transmission line, so there is no per-unit-length
+            // `Z0`/`gamma` to report -- the impedance matrix still is.
+            _ => None,
         };
 
-        let s_parameters = match (&resolved_ports, two_conductor_line) {
-            (Some(ports), Some((z0, gamma))) => Some(de_embedded_s_parameters(
-                z0,
-                gamma,
-                layout.axis_lo_um,
-                layout.axis_hi_um,
-                ports,
-            )?),
+        let s_parameters = match (&resolved_ports, two_conductor_line, shared_span) {
+            (Some(ports), Some((z0, gamma)), Some((axis_lo_um, axis_hi_um))) => Some(
+                de_embedded_s_parameters(z0, gamma, axis_lo_um, axis_hi_um, ports)?,
+            ),
             _ => None,
         };
 
@@ -687,14 +740,13 @@ mod tests {
         let conductors = [go, ret];
         let layout = geometry::classify_full_wave_bars(&conductors).unwrap();
         let meshes = build_mesh(&layout, 5.0).unwrap();
-        let delta_um = 2000.0 / meshes[0].centers_um.len() as f64;
 
         // 1 kHz: k*length = 2*pi*1e3/3e8 * 2000e-6 ~= 4e-8, deeply
         // quasi-static.
         let frequency_hz = 1.0e3_f64;
         let omega = 2.0 * std::f64::consts::PI * frequency_hz;
         let k_per_um = omega / C0_M_PER_S * 1e-6;
-        let z = impedance_matrix(&meshes, k_per_um, delta_um).unwrap();
+        let z = impedance_matrix(&meshes, k_per_um).unwrap();
         let prefactor = Complex64::new(
             0.0,
             omega * MU0_H_PER_M / (4.0 * std::f64::consts::PI) * 1e-6,
@@ -734,9 +786,7 @@ mod tests {
 
         let make = |segment_size_um: f64| {
             let meshes = build_mesh(&layout, segment_size_um).unwrap();
-            let delta_um =
-                (layout.axis_hi_um - layout.axis_lo_um) / meshes[0].centers_um.len() as f64;
-            let z = impedance_matrix(&meshes, k_per_um, delta_um).unwrap();
+            let z = impedance_matrix(&meshes, k_per_um).unwrap();
             z[0][0] * prefactor
         };
 

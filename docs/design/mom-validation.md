@@ -264,6 +264,26 @@ definitions by quadrature, not transcribed. See `native/mom/src/peec.rs`'s
 module docs for the full derivation of both the #797 mutual term and the
 #836 self term.
 
+[#1842](https://github.com/2AMLogic/klayout-tools/issues/1842) (increment
+(ii) of `mom-general-conductor-geometry.md`'s two-increment plan) extends the
+#797 mutual-term formula from parallel/aligned/equal-length filament pairs
+to **arbitrary relative orientation and offset** — Grover's general
+filament-pair result — which is what lets `classify_bars` (formerly
+`classify_shared_axis_bars`) drop its shared-axis and shared-axial-span
+checks, unlocking cross-axis and offset conductor geometry (an L-shaped
+loop, a coiled/spiral winding). The same discipline applies again: the
+general closed form is **re-derived, not transcribed**, and checked three
+independent ways in `native/mom/src/peec.rs` —
+`skew_antiderivative_is_the_double_antiderivative_of_the_static_kernel`
+(the defining-property finite-difference check, the same technique
+`f_is_the_sixfold_antiderivative_of_the_static_kernel` uses),
+`skew_formula_matches_brute_force_quadrature` (a from-scratch 2-D
+Gauss-Legendre quadrature over the raw double integral, sharing no code with
+the closed form), and `skew_formula_reduces_to_the_parallel_closed_form`
+(the required regression: the general formula reproduces the #797 closed
+form exactly, in the parallel/aligned/equal-length degenerate case, to the
+same `max_relative = 1e-6` that formula is already validated to).
+
 ### 0. Self-inductance closed form vs the mean-distance asymptote
 
 The oracle #836 added, and the one that is *not* shape-substituted (unlike
@@ -392,6 +412,71 @@ The remaining residual (all `< 0.05%`, vs. the `~0.3%` before) is the
 mutual-term bundle-averaging approximation and the asymptote's own
 `O((a/l)^2)` remainder, not the self-GMD substitution #836 removed.
 
+### 5. Generalized filament-pair formula (issue #1842): a spiral fixture
+
+[#1842](https://github.com/2AMLogic/klayout-tools/issues/1842)'s stated
+validation oracle is "FastHenry on a spiral fixture (2-3 turns) — a simple
+2-3 turn square or octagonal spiral with known FastHenry-computed
+inductance", since FastHenry is the standard reference filament-based PEEC
+extractor for exactly this geometry class. **FastHenry itself is not
+available in this build/CI environment** — no package registry (Homebrew,
+`apt`, `conda`) ships it, and a builder sandbox has no network access to
+fetch or build it from source — so literally running the FastHenry binary
+and citing its output was not possible here. Fabricating a specific "FastHenry
+says X nH" number from memory is exactly the "don't transcribe... without
+independent verification" discipline (#797/#836, "Why re-derived, not
+cited" above) this codebase already refuses to do for closed-form
+coefficients; the same refusal applies to an external tool's output.
+
+Instead, `native/mom/src/peec.rs`'s
+`square_spiral_inductance_matches_independent_filament_oracle` validates the
+new capability against **the same method FastHenry uses** — filament-based
+PEEC with Grover's general filament-pair formula — via a from-scratch,
+independent second implementation that shares no code with
+`native/mom/src/peec.rs`'s production path: each spiral segment reduced to a
+single centreline filament (no cross-section bundle averaging), Rosa's
+closed-form self term (the same independent oracle §1 above already uses),
+and `brute_force_mutual_geom_um`'s 2-D Gauss-Legendre quadrature (not
+`mutual_geom_um`/`skew_antiderivative`) for every segment pair's mutual
+term. This is a genuine independent cross-check of the new physics (a real
+spiral corner turns axes; a real spiral's non-adjacent turns are parallel
+but offset and unequal in length — exactly what #1842 unlocks), even though
+it is not literally the FastHenry binary. Literal FastHenry cross-validation
+remains a natural follow-up, the same status this document already records
+for external-solver cross-validation generally (see "What is not validated
+here" below, and [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
+for the full-wave sweep's identical gap).
+
+Fixture: a 2-turn square spiral (8 segments), starting side 60 µm, 15 µm
+pitch growth per turn, 2×2 µm cross-section, `filament_size_um = 1.0`
+(2×2 filaments per segment). Each segment is modeled as its own PEEC
+conductor (multi-box-per-conductor spirals are
+[#1841](https://github.com/2AMLogic/klayout-tools/issues/1841)'s separate,
+still-open scope); the total spiral inductance is the signed sum
+`sum_i sum_j sign_i * sign_j * L[i][j]` over the full partial-inductance
+matrix, `sign_i` correcting for the segments whose physical winding
+direction runs opposite to `discretize_bars`' box-low-to-high filament
+convention (the same external sign correction the two-wire "loop" fixtures
+elsewhere in this document apply via `L[0][0] + L[1][1] - 2*L[0][1]`,
+generalised to more than two segments).
+
+| measured total (klt mom PEEC) | independent single-filament oracle | rel. error |
+| ------------------------------ | ------------------------------------- | ---------- |
+| 0.637718 nH                     | 0.638065 nH                            | 0.0542%    |
+
+**Stated tolerance**: 2% (measured: 0.054%) — looser than the measured value
+to leave headroom, the same convention every oracle in this document uses;
+the residual is expected (the oracle's single-filament-per-segment
+approximation skips the cross-section bundle averaging the production path
+does).
+
+Unlike the rest of this "Inductance/resistance" section, this fixture's
+executable form is a **Rust** unit test (there is no Python-level
+equivalent yet) — re-run `cargo test -p klt-mom-native
+square_spiral_inductance -- --nocapture` from `native/mom` to reprint the
+number above, not the `pytest tests/test_mom_peec_validation.py` command
+this document's introduction gives for the rest of this section.
+
 ## Full-wave frequency sweep
 
 Phase 2a of the Method-of-Moments epic, delivered by
@@ -500,12 +585,18 @@ discussion frames the tradeoff for the capacitance solve.
   mode as the cheaper in-house cross-check for exactly this regime; either
   would be a natural follow-up, and would test something these analytic
   oracles cannot (general geometry). [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  tracks this specifically for the full-wave sweep above.
-- **Non-bar-shaped PEEC/full-wave geometry, ports, S-parameters.** The PEEC
-  and full-wave solves' shared MVP scope (a single, elongated, axis-aligned
-  bar per conductor — see `docs/cli/mom.md`'s "PEEC inductance/resistance")
-  is a separate, documented restriction, not something this section's
-  oracles exercise; general-mesh PEEC, port definition/de-embedding
+  tracks this specifically for the full-wave sweep above; "Generalized
+  filament-pair formula (issue #1842)" above records the identical gap for
+  literal FastHenry cross-validation of the spiral fixture (the oracle used
+  there is an independent re-implementation of FastHenry's own method, not
+  the FastHenry binary itself).
+- **Multi-box-per-conductor PEEC/full-wave geometry.** Every conductor must
+  still reduce to exactly one bar-shaped box —
+  [#1841](https://github.com/2AMLogic/klayout-tools/issues/1841) (a separate,
+  still-open increment) is what would let a single electrical conductor span
+  several boxes (e.g. a coax shield's wall segments, or a real spiral
+  modeled as one continuous net rather than one conductor per segment, as
+  the spiral fixture above does). Ports, S-parameter de-embedding
   ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)), and
   skin-effect (frequency-dependent resistance/capacitance) behavior remain
   later phases of #701.
