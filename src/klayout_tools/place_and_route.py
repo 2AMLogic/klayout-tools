@@ -1318,7 +1318,13 @@ def run_place_and_route(
     io_spec = _validate_io(request.get("io"))
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     power = _validate_power(request.get("power"))
-    clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
+    (
+        clock_port,
+        clock_period_ns,
+        max_transition_ns,
+        max_capacitance_pf,
+        max_fanout,
+    ) = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
@@ -1461,6 +1467,9 @@ def run_place_and_route(
             power=power,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
+            max_transition_ns=max_transition_ns,
+            max_capacitance_pf=max_capacitance_pf,
+            max_fanout=max_fanout,
             cell_library=cell_library,
             seed=seed,
             output_dir=output_dir,
@@ -1536,6 +1545,9 @@ def run_place_and_route(
                     io_spec=io_spec,
                     clock_port=clock_port,
                     clock_period_ns=clock_period_ns,
+                    max_transition_ns=max_transition_ns,
+                    max_capacitance_pf=max_capacitance_pf,
+                    max_fanout=max_fanout,
                     output_dir=output_dir,
                     hdl_toplevel=hdl_toplevel,
                 )
@@ -1608,6 +1620,9 @@ def run_place_and_route(
                 liberty_path=liberty_path,
                 clock_port=clock_port,
                 clock_period_ns=clock_period_ns,
+                max_transition_ns=max_transition_ns,
+                max_capacitance_pf=max_capacitance_pf,
+                max_fanout=max_fanout,
                 checkpoint_in=checkpoint_path,
                 # Issue #1002: `write_sdf` inside that same session, right
                 # after its `read_spef` -- see `_validate_post_route_sdf`.
@@ -2369,25 +2384,84 @@ def _reject_wired_port_less_pins(
             )
 
 
-def _validate_constraints(constraints: Any) -> tuple[str | None, float | None]:
+def _validate_constraints(
+    constraints: Any,
+) -> tuple[str | None, float | None, float | None, float | None, float | None]:
+    """Validate ``request.constraints``.
+
+    Returns ``(clock_port, clock_period_ns, max_transition_ns,
+    max_capacitance_pf, max_fanout)``. The first two are the pre-existing
+    clock fields -- required together, `None`/`None` when both are
+    omitted (unchanged behavior). The three design-rule-constraint fields
+    (issue #1709) are each independently optional regardless of clock
+    presence: a caller may set e.g. `max_fanout` alone, or alongside the
+    clock fields, or not at all -- `None` per field when omitted, matching
+    this function's own pre-existing "omitted preserves prior behavior
+    exactly" convention.
+    """
     if constraints is None:
-        return None, None
+        return None, None, None, None, None
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
 
     clock_port = constraints.get("clock_port")
     clock_period_ns = constraints.get("clock_period_ns")
-    if clock_port is None and clock_period_ns is None:
-        return None, None
-    if not (isinstance(clock_port, str) and clock_port):
-        raise PlaceAndRouteError(
-            "request.constraints.clock_port must be a non-empty string"
-        )
-    if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
-        raise PlaceAndRouteError(
-            "request.constraints.clock_period_ns must be a positive number"
-        )
-    return clock_port, float(clock_period_ns)
+    if clock_port is not None or clock_period_ns is not None:
+        if not (isinstance(clock_port, str) and clock_port):
+            raise PlaceAndRouteError(
+                "request.constraints.clock_port must be a non-empty string"
+            )
+        if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
+            raise PlaceAndRouteError(
+                "request.constraints.clock_period_ns must be a positive number"
+            )
+        clock_period_ns = float(clock_period_ns)
+    else:
+        clock_port, clock_period_ns = None, None
+
+    max_transition_ns = constraints.get("max_transition_ns")
+    if max_transition_ns is not None:
+        if not (
+            isinstance(max_transition_ns, (int, float))
+            and not isinstance(max_transition_ns, bool)
+            and max_transition_ns > 0
+        ):
+            raise PlaceAndRouteError(
+                "request.constraints.max_transition_ns must be a positive number"
+            )
+        max_transition_ns = float(max_transition_ns)
+
+    max_capacitance_pf = constraints.get("max_capacitance_pf")
+    if max_capacitance_pf is not None:
+        if not (
+            isinstance(max_capacitance_pf, (int, float))
+            and not isinstance(max_capacitance_pf, bool)
+            and max_capacitance_pf > 0
+        ):
+            raise PlaceAndRouteError(
+                "request.constraints.max_capacitance_pf must be a positive number"
+            )
+        max_capacitance_pf = float(max_capacitance_pf)
+
+    max_fanout = constraints.get("max_fanout")
+    if max_fanout is not None:
+        if not (
+            isinstance(max_fanout, (int, float))
+            and not isinstance(max_fanout, bool)
+            and max_fanout > 0
+        ):
+            raise PlaceAndRouteError(
+                "request.constraints.max_fanout must be a positive number"
+            )
+        max_fanout = float(max_fanout)
+
+    return (
+        clock_port,
+        clock_period_ns,
+        max_transition_ns,
+        max_capacitance_pf,
+        max_fanout,
+    )
 
 
 def _validate_seed(seed: Any) -> int:
@@ -2728,6 +2802,37 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     ]
 
 
+def _design_rule_constraint_lines(
+    max_transition_ns: float | None,
+    max_capacitance_pf: float | None,
+    max_fanout: float | None,
+) -> list[str]:
+    """``set_max_transition``/``set_max_capacitance``/``set_max_fanout`` on
+    ``[current_design]`` -- issue #1709's ``request.constraints.
+    max_transition_ns``/``.max_capacitance_pf``/``.max_fanout``, aiming the
+    ``repair_design``/``repair_timing`` optimiser already present in the
+    generated flow (see :func:`_stage_script_lines`'s ``"place"`` branch) at
+    a caller-given design-rule target instead of only whatever limit the
+    single ``read_liberty`` deck happens to declare.
+
+    Mirrors :func:`_clock_lines`'s shape exactly: threaded through the same
+    call sites, at the same point (immediately after ``_clock_lines``,
+    before ``repair_design``/``repair_timing``), and each field emits its
+    own line only when given -- a field omitted from
+    ``request.constraints`` emits no corresponding line, so a request with
+    none of the three set produces Tcl byte-identical to before this
+    function existed.
+    """
+    lines = []
+    if max_transition_ns is not None:
+        lines.append(f"set_max_transition {max_transition_ns} [current_design]")
+    if max_capacitance_pf is not None:
+        lines.append(f"set_max_capacitance {max_capacitance_pf} [current_design]")
+    if max_fanout is not None:
+        lines.append(f"set_max_fanout {max_fanout} [current_design]")
+    return lines
+
+
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     method = floorplan["method"]
     if method == "def":
@@ -3033,6 +3138,9 @@ def _stage_script_lines(
     power: dict[str, Any] | None,
     clock_port: str | None,
     clock_period_ns: float | None,
+    max_transition_ns: float | None,
+    max_capacitance_pf: float | None,
+    max_fanout: float | None,
     cell_library: str,
     seed: int,
     output_dir: str,
@@ -3058,6 +3166,9 @@ def _stage_script_lines(
             f"link_design {hdl_toplevel}",
         ]
         lines += _clock_lines(clock_port, clock_period_ns)
+        lines += _design_rule_constraint_lines(
+            max_transition_ns, max_capacitance_pf, max_fanout
+        )
         lines += _floorplan_init_lines(floorplan)
         # `place_macro` fixes each declared hard-macro instance at its
         # caller-given location -- must run after the floorplan's own die/
@@ -3090,6 +3201,9 @@ def _stage_script_lines(
     # `read_liberty` directly here -- unlike the floorplan stage above.
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
 
     if stage == "place":
         assert io_spec is not None

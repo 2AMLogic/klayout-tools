@@ -58,6 +58,9 @@ def _corner_sweep_script_lines(
     io_spec: dict[str, str],
     clock_port: str | None,
     clock_period_ns: float | None,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> list[str]:
     """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
     ``docs/design/post-route-sta-survey.md`` section 4.2) -- a **second**,
@@ -110,7 +113,7 @@ def _corner_sweep_script_lines(
     PVT" convention this survey's section 3.3 describes -- no manual
     slow/fast corner classification needed in Python).
     """
-    from .place_and_route import _clock_lines
+    from .place_and_route import _clock_lines, _design_rule_constraint_lines
 
     lines = [f"read_db {checkpoint_in}"]
     lines += ["define_corners " + " ".join(corner["name"] for corner in corners)]
@@ -118,6 +121,9 @@ def _corner_sweep_script_lines(
         f"read_liberty -corner {corner['name']} {corner['path']}" for corner in corners
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
     lines += [
         f"set_wire_rc -layer {io_spec['layer_v']}",
         "estimate_parasitics -global_routing",
@@ -141,6 +147,9 @@ def _spef_sta_script_lines(
     spef_path: str,
     net_names: list[str],
     sdf_path: str | None = None,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> list[str]:
     """Build the Tcl script for the second, ``post_route_spef``-only
     ``openroad`` invocation (issue #948, Epic #700 Phase 3) -- a fresh
@@ -205,12 +214,16 @@ def _spef_sta_script_lines(
         _SPEF_NET_CHECK_BEGIN,
         _SPEF_NET_CHECK_END,
         _clock_lines,
+        _design_rule_constraint_lines,
         _metrics_report_lines,
         _violation_count_lines,
     )
 
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
     lines += [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -362,6 +375,9 @@ def _post_route_spef_metrics(
     clock_period_ns: float | None,
     checkpoint_in: str,
     write_sdf: bool = False,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -598,6 +614,9 @@ def _post_route_spef_metrics(
         spef_path=spef_path,
         net_names=net_names,
         sdf_path=sdf_path,
+        max_transition_ns=max_transition_ns,
+        max_capacitance_pf=max_capacitance_pf,
+        max_fanout=max_fanout,
     )
     _write_script(script_path, lines)
 
@@ -689,6 +708,9 @@ def _run_corner_sweep(
     clock_period_ns: float | None,
     output_dir: str,
     hdl_toplevel: str,
+    max_transition_ns: float | None = None,
+    max_capacitance_pf: float | None = None,
+    max_fanout: float | None = None,
 ) -> tuple[float | None, float | None, list[dict[str, Any]]]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
@@ -766,6 +788,9 @@ def _run_corner_sweep(
         io_spec=io_spec,
         clock_port=clock_port,
         clock_period_ns=clock_period_ns,
+        max_transition_ns=max_transition_ns,
+        max_capacitance_pf=max_capacitance_pf,
+        max_fanout=max_fanout,
     )
     _write_script(script_path, lines)
 
@@ -808,6 +833,9 @@ def _run_corner_sweep(
             io_spec=io_spec,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
+            max_transition_ns=max_transition_ns,
+            max_capacitance_pf=max_capacitance_pf,
+            max_fanout=max_fanout,
         )
         _write_script(corner_script_path, corner_lines)
 

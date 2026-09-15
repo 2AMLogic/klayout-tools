@@ -497,6 +497,51 @@ def test_run_constraints_clock_port_and_period_required_together(tmp_path):
         run_place_and_route(request_path)
 
 
+# Issue #1709: `request.constraints.max_transition_ns`/`.max_capacitance_pf`/
+# `.max_fanout` -- each independently optional, validated as a positive
+# number when given (mirroring `clock_period_ns`'s own validation), and
+# never required for `clock_port`/`clock_period_ns` to also be present.
+@pytest.mark.parametrize(
+    "field", ["max_transition_ns", "max_capacitance_pf", "max_fanout"]
+)
+@pytest.mark.parametrize("bad_value", [-1.0, 0, "fast", True, None])
+def test_run_constraints_design_rule_fields_reject_non_positive(
+    tmp_path, field, bad_value
+):
+    if bad_value is None:
+        # `None` means "omitted" for every other field in this request --
+        # not a rejection case for *this* field, so skip it here (covered by
+        # the "none set" Tcl-generation test instead).
+        pytest.skip("None means omitted, not a validation failure")
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            constraints={"clock_port": "clk", "clock_period_ns": 1.1, field: bad_value}
+        ),
+    )
+    with pytest.raises(PlaceAndRouteError, match=f"{field} must be a positive number"):
+        run_place_and_route(request_path)
+
+
+def test_run_constraints_design_rule_field_valid_without_clock(tmp_path, monkeypatch):
+    """The three design-rule-constraint fields are independently optional
+    regardless of clock presence (issue #1709 acceptance criteria) -- a
+    caller may set `max_fanout` alone, at `target_stage: "floorplan"` even,
+    with no `clock_port`/`clock_period_ns` given at all."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        constraints={"max_fanout": 4},
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+
+
 def test_run_target_stage_place_requires_clock(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path,
@@ -3356,6 +3401,227 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
         PlaceAndRouteError, match=r"openroad 'place' stage failed:.*PPL-0001"
     ):
         run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# `constraints.max_transition_ns`/`.max_capacitance_pf`/`.max_fanout` --
+# design-rule-constraint Tcl generation (issue #1709)
+# --------------------------------------------------------------------------- #
+
+
+def test_design_rule_constraint_lines_helper_emits_only_given_fields():
+    """Direct unit coverage of `_design_rule_constraint_lines` -- mirrors
+    `_clock_lines`'s own shape: each field emits its own `set_max_*` line
+    only when given, in `max_transition_ns`/`max_capacitance_pf`/
+    `max_fanout` order, on `[current_design]`."""
+    assert place_and_route._design_rule_constraint_lines(None, None, None) == []
+    assert place_and_route._design_rule_constraint_lines(1.5, None, None) == [
+        "set_max_transition 1.5 [current_design]"
+    ]
+    assert place_and_route._design_rule_constraint_lines(None, 0.2, None) == [
+        "set_max_capacitance 0.2 [current_design]"
+    ]
+    assert place_and_route._design_rule_constraint_lines(None, None, 4.0) == [
+        "set_max_fanout 4.0 [current_design]"
+    ]
+    assert place_and_route._design_rule_constraint_lines(1.5, 0.2, 4.0) == [
+        "set_max_transition 1.5 [current_design]",
+        "set_max_capacitance 0.2 [current_design]",
+        "set_max_fanout 4.0 [current_design]",
+    ]
+
+
+@pytest.mark.parametrize("target_stage", ["place", "route"])
+def test_stubbed_design_rule_constraints_all_three_emitted_after_clock(
+    tmp_path, monkeypatch, target_stage
+):
+    """All three `constraints.max_*` fields set produces all three
+    `set_max_*` lines, positioned after `create_clock` and before
+    `repair_design` -- repeated across two different `target_stage` values
+    (issue #1709's test plan: this is what catches a missed call site among
+    the 4 real `_clock_lines`-shaped sites, since a single-stage test would
+    not)."""
+    stages = (
+        ("floorplan", "place")
+        if target_stage == "place"
+        else place_and_route.STAGE_ORDER
+    )
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage=target_stage,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=stages)
+    if target_stage == "route":
+        _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    place_script = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_place.tcl"
+    )
+    lines = _script_lines(place_script)
+
+    expected = [
+        "set_max_transition 1.5 [current_design]",
+        "set_max_capacitance 0.2 [current_design]",
+        "set_max_fanout 4.0 [current_design]",
+    ]
+    for line in expected:
+        assert line in lines
+
+    create_clock_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("create_clock")
+    )
+    repair_design_idx = lines.index("repair_design")
+    max_transition_idx = lines.index(expected[0])
+    max_capacitance_idx = lines.index(expected[1])
+    max_fanout_idx = lines.index(expected[2])
+    assert (
+        create_clock_idx
+        < max_transition_idx
+        < max_capacitance_idx
+        < max_fanout_idx
+        < repair_design_idx
+    )
+
+
+def test_stubbed_design_rule_constraint_single_field_emits_only_that_line(
+    tmp_path, monkeypatch
+):
+    """A request with only `max_fanout` set (the other two omitted) produces
+    a generated script containing exactly `set_max_fanout <n>
+    [current_design]` and no `set_max_transition`/`set_max_capacitance`
+    line."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    place_script = os.path.join(
+        os.path.dirname(request_path), ".klt", "place-and-route", "pnr_gcd_place.tcl"
+    )
+    lines = _script_lines(place_script)
+
+    assert "set_max_fanout 4.0 [current_design]" in lines
+    assert not any(line.startswith("set_max_transition") for line in lines)
+    assert not any(line.startswith("set_max_capacitance") for line in lines)
+
+
+def test_stubbed_no_design_rule_constraints_emits_no_set_max_lines(
+    tmp_path, monkeypatch
+):
+    """A request with none of the three fields set emits no `set_max_*`
+    line at all -- the regression guard for "omitted preserves prior
+    behavior exactly" (issue #1709's acceptance criteria)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    for stage in ("floorplan", "place", "cts", "route"):
+        script = os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            f"pnr_gcd_{stage}.tcl",
+        )
+        lines = _script_lines(script)
+        assert not any(line.startswith("set_max_") for line in lines)
+
+
+def test_stubbed_design_rule_constraints_reach_corner_sweep_script(
+    tmp_path, monkeypatch
+):
+    """`_corner_sweep_script_lines` (issue #949) is one of the 4 real
+    `_clock_lines`-shaped call sites this issue threads through -- a
+    dedicated check beyond the "place"/"route" stage-script assertions
+    above, since the post-route corner-sweep script is generated by a
+    wholly separate function (`place_and_route_sta.py`) reached only via
+    `_run_corner_sweep`, not `_stage_script_lines`."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    corner_sweep_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_route_corners.tcl",
+    )
+    lines = _script_lines(corner_sweep_script)
+    assert "set_max_transition 1.5 [current_design]" in lines
+    assert "set_max_capacitance 0.2 [current_design]" in lines
+    assert "set_max_fanout 4.0 [current_design]" in lines
+
+
+def test_stubbed_design_rule_constraints_reach_spef_sta_script(tmp_path, monkeypatch):
+    """`_spef_sta_script_lines` (issue #948) is the 4th real
+    `_clock_lines`-shaped call site -- reached only when `request.
+    post_route_spef` is set, via `_post_route_spef_metrics`."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        post_route_spef=True,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+            "max_fanout": 4,
+        },
+    )
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+    assert report["spef_sta"] is not None
+
+    spef_sta_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_route_spef.tcl",
+    )
+    lines = _script_lines(spef_sta_script)
+    assert "set_max_transition 1.5 [current_design]" in lines
+    assert "set_max_capacitance 0.2 [current_design]" in lines
+    assert "set_max_fanout 4.0 [current_design]" in lines
 
 
 # --------------------------------------------------------------------------- #
