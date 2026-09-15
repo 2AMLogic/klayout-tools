@@ -70,10 +70,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   generator — and `mos_array` itself at the default `interior_channel_um:
   0.0` — reports an empty list. Additive field on `klt gen` only, no
   `schema_version` bump, per [`docs/json-contract.md`](docs/json-contract.md)
-  (same precedent as `dbu_um`, issue #1496). `klt gen-compose` does **not**
-  yet consume this field: subtracting a block's declared `navigable_regions`
-  from its obstacle bbox so a `waypoints_um` backbone can be routed through
-  the channel is Phase 2, filed separately as issue #1835.
+  (same precedent as `dbu_um`, issue #1496). `klt gen-compose`'s own
+  consumption of this field (subtracting a block's declared
+  `navigable_regions` from its obstacle bbox) is issue #1835, below.
+- **Added**: `klt gen-compose` subtracts a block's own declared
+  `navigable_regions` (issue #1531) from that block's obstacle bbox before
+  its obstacle-overlap check runs (issue #1835) — a `waypoints_um` backbone
+  that stays inside a block's declared channel (e.g. a `mos_array` placed
+  with `interior_channel_um > 0`) is no longer rejected as crossing its own
+  block. `navigable_regions` is parsed on `blocks[].generator_report` and
+  `blocks[].cell` alongside `ports[]`/`bbox_um`, and run through the same
+  `orientation` transform (#1166) every other per-block geometry already
+  goes through. Absent or empty `navigable_regions` — every block predating
+  this field, and every `mos_array` call with `interior_channel_um: 0.0`
+  (the default) — leaves the obstacle-overlap check byte-for-byte
+  unchanged. See `docs/cli/gen-compose.md`'s "A block's own declared
+  interior routing channel is no longer treated as its own obstacle"
+  section.
 - **Added**: `klt wave build` / `klt wave query` (Epic #1585 Phase 2c, issue
   #1601) — index a VCD/FST functional-verification waveform trace into a
   compact FST store, then answer `value`/`find`/`count`/`sample`/`stuck`/
