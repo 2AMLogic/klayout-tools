@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: a declared metric namespace registry
+  (`src/klayout_tools/metrics.py`, issue #247) — data-only mapping from a
+  METRICS2.1-style hierarchical metric name (e.g. `design__instance__count`,
+  `drc__error__count`) to `{aggregator, higher_is_better, critical}`,
+  modeled on LibreLane/OpenROAD's METRICS2.1 convention. Piloted on `klt
+  layout-metrics`, which now emits an additive, parallel `metrics` object
+  re-keying `layer_count`/`cell_count`/`instance_count`/
+  `drc.violation_count` under their declared name — the existing fields are
+  unchanged and unrenamed, and no `schema_version` bump was required. See
+  [`docs/design/metric-namespace.md`](docs/design/metric-namespace.md) for
+  the design decision and [`docs/json-contract.md`](docs/json-contract.md)'s
+  "Declared metric namespace" section for the cross-verb convention. Other
+  verbs (`klt drc`, `klt extract`, `klt sim`) adopt the registry via their
+  own follow-on issues.
 - **Added**: `klt gen mos_array` gains `interior_channel_um` (default `0.0`,
   preserving byte-for-byte existing geometry; issue #1531, Phase 1) — extra
   gap in µm reserved between adjacent rows/columns, on top of the fixed

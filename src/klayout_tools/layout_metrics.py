@@ -47,6 +47,12 @@ source data is absent or unavailable.
       "cell_count": 34,
       "instance_count": 120,
       "drc": {"deck": "sky130", "status": "clean", "violation_count": 0},
+      "metrics": {
+        "design__layer__count": 12,
+        "design__cell__count": 34,
+        "design__instance__count": 120,
+        "drc__error__count": 0
+      },
       "renders": {"metal1": "renders/metal1.png"},
       "signals": {
         "schema_version": 1,
@@ -81,6 +87,21 @@ that is wrong would be written straight into the contract, and the site's
 GDS-viewer layer table keys off it. Additive, like ``renders``/``drc``:
 introducing it required no ``schema_version`` bump.
 
+``metrics`` (issue #247) is a **parallel, additive** object re-keying a
+subset of this report's own already-computed fields under declared,
+METRICS2.1-style hierarchical names from :mod:`klayout_tools.metrics`'s
+registry -- ``layer_count`` -> ``design__layer__count``, ``cell_count`` ->
+``design__cell__count``, ``instance_count`` -> ``design__instance__count``,
+``drc.violation_count`` -> ``drc__error__count``. It never replaces or
+renames the fields it re-keys (see ``docs/design/metric-namespace.md`` for
+why additive, not a rename, was the chosen path); each key is present only
+when its source field is present, and the whole ``metrics`` object is
+omitted when it would otherwise be empty (e.g. an unparsed layout with no
+``--deck``, or ``no_artifacts``). ``signals`` (a verbatim ``klt sim``
+response) is deliberately **not** re-keyed here -- its caller-supplied
+``measurements[]`` names are out of scope for this registry; see the design
+doc's "Follow-on work" section.
+
 ``drc`` is populated only when a ``--deck`` is supplied *and* the DRC run
 succeeds; it never affects ``status`` (DRC is opt-in per invocation, not a
 required artifact). ``renders`` is populated only when at least one PNG is
@@ -108,6 +129,7 @@ from .cells import CellsError, cells_report
 from .decks import deck_names
 from .drc import DrcError, run_drc
 from .layers import LayersError, layers_report
+from .metrics import is_registered
 
 __all__ = [
     "LayoutMetricsError",
@@ -232,6 +254,43 @@ def _attach_signals(metrics: dict[str, Any], output_dir: Path) -> None:
         metrics["signals"] = data
 
 
+#: Maps this module's own field names to their declared METRICS2.1-style
+#: name in `metrics.py`'s registry (issue #247). Additive: the `metrics`
+#: block these back is a *parallel* object alongside the existing
+#: `layer_count`/`cell_count`/`instance_count`/`drc.violation_count` fields
+#: above, never a replacement for them -- see
+#: `docs/design/metric-namespace.md` for the additive-vs-rename decision.
+_TOP_LEVEL_METRIC_NAMES = {
+    "layer_count": "design__layer__count",
+    "cell_count": "design__cell__count",
+    "instance_count": "design__instance__count",
+}
+_DRC_VIOLATION_METRIC_NAME = "drc__error__count"
+
+assert all(is_registered(name) for name in _TOP_LEVEL_METRIC_NAMES.values())
+assert is_registered(_DRC_VIOLATION_METRIC_NAME)
+
+
+def _build_metrics_block(report: dict[str, Any]) -> dict[str, Any]:
+    """Build the additive, registry-backed `metrics` block from fields
+    already present in `report`.
+
+    Purely a re-keying step -- it never computes a value `report` does not
+    already carry, and never removes/renames anything already in `report`.
+    Returns an empty dict when none of the source fields are present (e.g.
+    an unparsed layout with no `--deck` given), so the caller can omit
+    `metrics` entirely rather than write an empty object.
+    """
+    block: dict[str, Any] = {}
+    for source_field, metric_name in _TOP_LEVEL_METRIC_NAMES.items():
+        if source_field in report:
+            block[metric_name] = report[source_field]
+    drc = report.get("drc")
+    if isinstance(drc, dict) and "violation_count" in drc:
+        block[_DRC_VIOLATION_METRIC_NAME] = drc["violation_count"]
+    return block
+
+
 def layout_metrics_report(
     block_dir: str, deck: str | None = None, pdk: str | None = None
 ) -> dict[str, Any]:
@@ -319,6 +378,10 @@ def layout_metrics_report(
 
     _attach_renders(metrics, output_dir)
     _attach_signals(metrics, output_dir)
+
+    metrics_block = _build_metrics_block(metrics)
+    if metrics_block:
+        metrics["metrics"] = metrics_block
 
     metrics["status"] = "ok" if parsed_ok else "partial"
     return metrics

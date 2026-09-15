@@ -246,6 +246,61 @@ def test_report_omits_drc_on_unsupported_deck_without_affecting_status(tmp_path)
     assert report["status"] == "ok"
 
 
+# --- metrics block (issue #247: declared metric namespace registry) -------
+
+
+def test_report_includes_metrics_block_without_deck(tmp_path):
+    """The additive `metrics` block appears alongside the existing
+    `layer_count`/`cell_count`/`instance_count` fields -- never replacing
+    them -- even when no `--deck` was given (so `drc__error__count` is
+    absent, matching `drc`'s own absence)."""
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    report = layout_metrics_report(str(block_dir))
+    assert report["metrics"] == {
+        "design__layer__count": report["layer_count"],
+        "design__cell__count": report["cell_count"],
+        "design__instance__count": report["instance_count"],
+    }
+    assert "drc__error__count" not in report["metrics"]
+
+
+def test_report_metrics_block_includes_drc_error_count_when_deck_given(tmp_path):
+    block_dir = _write_block(tmp_path, layout=_make_violation_layout())
+
+    report = layout_metrics_report(str(block_dir), deck="sky130")
+    assert report["metrics"]["drc__error__count"] == 1
+    assert report["metrics"]["drc__error__count"] == report["drc"]["violation_count"]
+
+
+def test_report_omits_metrics_block_when_no_artifacts(tmp_path):
+    block_dir = tmp_path / "empty-block"
+    block_dir.mkdir()
+
+    report = layout_metrics_report(str(block_dir))
+    assert report["status"] == "no_artifacts"
+    assert "metrics" not in report
+
+
+def test_report_omits_metrics_block_on_corrupt_layout(tmp_path):
+    block_dir = tmp_path / "example-block"
+    block_dir.mkdir()
+    (block_dir / "layout.gds").write_text("this is not a gds stream\n" * 4)
+
+    report = layout_metrics_report(str(block_dir))
+    assert report["status"] == "partial"
+    assert "metrics" not in report
+
+
+def test_cli_json_format_includes_metrics_block(tmp_path, capsys):
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+
+    assert main(["layout-metrics", str(block_dir), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "metrics" in data
+    assert data["metrics"]["design__instance__count"] == data["instance_count"]
+
+
 # --- pdk field (issue #1285) --------------------------------------------
 
 

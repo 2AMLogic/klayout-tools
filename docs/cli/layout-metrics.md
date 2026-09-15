@@ -80,6 +80,12 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "cell_count": 34,
   "instance_count": 120,
   "drc": { "deck": "sky130", "status": "clean", "violation_count": 0 },
+  "metrics": {
+    "design__layer__count": 12,
+    "design__cell__count": 34,
+    "design__instance__count": 120,
+    "drc__error__count": 0
+  },
   "renders": { "metal1": "renders/metal1.png" },
   "signals": {
     "schema_version": 1,
@@ -126,6 +132,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `cell_count`       | integer         | **Optional.** From `klt cells`. Omitted when the layout could not be parsed.                        |
 | `instance_count`   | integer         | **Optional.** Sum of every cell's `instances` from `klt cells` (total placement records).           |
 | `drc`              | object          | **Optional.** Present only when `--deck` was supplied and the run succeeded. See below.             |
+| `metrics`          | object          | **Optional.** Declared-namespace re-keying of a subset of this report's own fields (issue #247). See below. |
 | `renders`          | object          | **Optional.** Present only when at least one PNG exists under `output/renders/`. Filename stem -> path relative to `output/`. |
 | `signals`          | object          | **Optional.** Present only when `output/sim/signals.json` exists. See below.                        |
 | `status`           | string          | One of `"ok"`, `"partial"`, `"no_artifacts"` — see below.                                           |
@@ -162,6 +169,31 @@ own slug-prefix heuristic (issue #1060) for blocks that carry no `pdk`.
 | `deck`              | string  | The deck name passed via `--deck`.              |
 | `status`            | string  | `"clean"` or `"violations"`, from `klt drc`.    |
 | `violation_count`   | integer | Total violation count, from `klt drc`.          |
+
+### `metrics` object
+
+Introduced by issue #247 (the pilot integration of `klayout_tools.metrics`'s
+declared metric registry — see
+[`../design/metric-namespace.md`](../design/metric-namespace.md) and
+[`../json-contract.md`](../json-contract.md)'s "Declared metric namespace"
+section). **Purely additive**: a re-keying of a subset of this report's own
+already-computed fields under a declared, METRICS2.1-style hierarchical
+name — it never replaces `layer_count`/`cell_count`/`instance_count`/
+`drc.violation_count`, which stay exactly as documented above. Present only
+when at least one underlying field is present (omitted for `status:
+"no_artifacts"`/`"partial"` reports that have nothing to re-key).
+
+| Key                          | Source field                | Description                                             |
+| ----------------------------- | ---------------------------- | --------------------------------------------------------- |
+| `design__layer__count`        | `layer_count`                | Present whenever `layer_count` is.                       |
+| `design__cell__count`         | `cell_count`                 | Present whenever `cell_count` is.                        |
+| `design__instance__count`     | `instance_count`             | Present whenever `instance_count` is.                    |
+| `drc__error__count`           | `drc.violation_count`        | Present only when `drc` is (i.e. `--deck` was given and the run succeeded). |
+
+`signals` (attached verbatim from a separate `klt sim` run) is **not**
+re-keyed into `metrics` — its `measurements[]` names are caller-supplied via
+the sim request spec, not declared by `klt` itself, so they are out of scope
+for this registry (see the design doc's "Follow-on work" section).
 
 ### `signals` object
 
