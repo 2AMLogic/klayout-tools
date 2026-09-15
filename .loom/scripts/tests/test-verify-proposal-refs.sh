@@ -94,10 +94,10 @@ CHAMPION_PROMO_MD="$PROMPT_DIR/champion-issue-promo.md"
 FIXTURE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE_ROOT" 2>/dev/null || true' EXIT
 
-# --- Build a tiny fixture repo with a fake origin/main ref (no network: a
+# --- Build a fixture repo with a fake origin/main ref (no network: a
 # local `update-ref` pointing at HEAD stands in for a fetched remote branch).
 FIXTURE_REPO="$FIXTURE_ROOT/repo"
-mkdir -p "$FIXTURE_REPO/src" "$FIXTURE_REPO/docs"
+mkdir -p "$FIXTURE_REPO/src" "$FIXTURE_REPO/docs" "$FIXTURE_REPO/filler"
 (
     cd "$FIXTURE_REPO" || exit 1
     git init -q -b main .
@@ -105,6 +105,16 @@ mkdir -p "$FIXTURE_REPO/src" "$FIXTURE_REPO/docs"
     git config user.name "Test"
     seq 1 5 > src/foo.py            # 5 lines
     printf 'line1\nline2\n' > docs/bar.md   # 2 lines
+    # Pad the tree well past the platform pipe-buffer size (~64KB on Linux)
+    # so `git ls-tree -r origin/main --name-only` produces enough output to
+    # actually reproduce the SIGPIPE race a `full_tree | grep -qFx "$path"`
+    # reintroduction would cause (#1883): with only the two files above, the
+    # ls-tree output is a few dozen bytes and Fixture 5b below passes
+    # vacuously even against the pre-fix (buggy) script. 3000 filler files
+    # with ~30-byte names comfortably clears 64KB.
+    for i in $(seq -w 1 3000); do
+        printf 'x\n' > "filler/generated-file-$i.txt"
+    done
     git add .
     git commit -qm "init" >/dev/null
     git update-ref refs/remotes/origin/main refs/heads/main
@@ -196,6 +206,10 @@ echo "=== Fixture 5b: repeated runs against a multi-path clean body never flake 
 #      `grep -q` exits as soon as it matches, and if the (tens-of-KB) cache
 #      write hadn't finished yet, the writer got SIGPIPE and the pipeline's
 #      exit status went non-zero even though grep itself matched.
+# Bug (b) only manifests once the piped `git ls-tree` output exceeds the
+# platform pipe buffer (~64KB on Linux), which is why FIXTURE_REPO above is
+# padded with 3000 filler files rather than just the two originals (#1883) —
+# without that padding this fixture passed even against the pre-fix script.
 MULTI_BODY="$BODY_DIR/multi.md"
 cat > "$MULTI_BODY" <<'EOF'
 See `src/foo.py`, `docs/bar.md`, and `src/foo.py:3` for details — several
