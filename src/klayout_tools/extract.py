@@ -647,6 +647,7 @@ def run_extract(
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
+    parasitics_top_cell_only: bool = False,
     distributed_rc: bool = False,
     def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     mom_rlc_net: str | None = None,
@@ -949,6 +950,24 @@ def run_extract(
     ``critical_nets`` rather than ``mom_net``'s stricter contract.
     ``None``/empty (the default) runs the full-layout pass -- byte-identical
     to before this feature existed.
+
+    ``parasitics_top_cell_only`` (``klt extract --parasitics-top-cell-only``,
+    issue #1704) additionally splits each net's ground R/C into the portion
+    drawn directly in the top cell versus the portion drawn inside an
+    instantiated sub-block -- the additive ``resistance_ohm_top_cell``/
+    ``capacitance_ff_top_cell`` fields on each ``parasitics.nets[]`` entry
+    (``None`` unless this flag is given). Lets a caller who has already
+    extracted a sub-block separately subtract its contribution back out of a
+    composed top-level net's R/C, rather than only having one undifferentiated
+    scalar. Ground terms only (Pass 1) -- coupling capacitance attribution is
+    out of scope for this increment. See :func:`_compute_parasitics`'s
+    docstring for the algorithm (built once per curated layer, not per net or
+    instance) and its documented "exact in area, not exactly additive in
+    perimeter" caveat for a net whose conductor spans an instance boundary.
+    Requires ``parasitics=True``, same convention as ``critical_nets``/
+    ``parasitics_nets`` above. ``False`` (the default) computes neither field
+    and runs no extra ``Region`` work at all -- byte-identical to before this
+    feature existed.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -1633,6 +1652,13 @@ def run_extract(
     if parasitics_nets_set is not None and not parasitics:
         raise ExtractError("--parasitics-net requires --parasitics")
 
+    # `--parasitics-top-cell-only` (issue #1704) requires `--parasitics`:
+    # it splits the same lumped-RC ground pass this flag piggybacks on into
+    # a top-cell-drawn/instance-drawn share -- same reasoning as
+    # `--parasitics-net`/`--critical-net` above.
+    if parasitics_top_cell_only and not parasitics:
+        raise ExtractError("--parasitics-top-cell-only requires --parasitics")
+
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
@@ -1728,6 +1754,7 @@ def run_extract(
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
         parasitics_nets=parasitics_nets_set,
+        parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
     )
@@ -2290,6 +2317,12 @@ def run_extract(
                     "distributed ladder (nothing to chain). See "
                     "docs/cli/extract.md's '--distributed-rc' section."
                 )
+        # Additive field (issue #1704): `True` only when
+        # `--parasitics-top-cell-only` was given -- distinguishes a run whose
+        # `nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` are
+        # real computed splits from one where they are `None` because the
+        # flag was never asked for.
+        parasitics_report["top_cell_only"] = bool(parasitics_top_cell_only)
         # Additive field (issue #728, updated by #760, #976): declares the
         # parasitic model's own scope machine-readably (net-to-ground
         # capacitance plus vertical-overlap net-to-net coupling, plus
@@ -2845,6 +2878,7 @@ def extract_netlist_from_layout(
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
 ) -> tuple[
@@ -2901,6 +2935,15 @@ def extract_netlist_from_layout(
     :data:`_DEF_NET_NAME_PROPERTY_ID`, rather than from text labels. Off by
     default (unchanged behavior). See :func:`run_extract` for the full
     rationale.
+
+    ``parasitics_top_cell_only`` (issue #1704): forwarded to
+    ``_extract_netlist``/:func:`_compute_parasitics` -- ``True`` additionally
+    splits each net's ground R/C into the portion drawn directly in the top
+    cell versus the portion drawn inside an instantiated sub-block, reported
+    as the additive ``resistance_ohm_top_cell``/``capacitance_ff_top_cell``
+    ground-entry fields. Off by default -- byte-identical to this flag's
+    pre-#1704 behavior. See :func:`_compute_parasitics`'s docstring for the
+    algorithm and :func:`run_extract` for the full CLI contract.
 
     ``apply_resistor_fixed_offset`` (issue #559): forwarded to
     ``_extract_netlist`` -- ``True`` (the default) applies each opted-in
@@ -3085,6 +3128,7 @@ def extract_netlist_from_layout(
         def_net_names=def_net_names,
         critical_nets=critical_nets,
         parasitics_nets=parasitics_nets,
+        parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
     )
@@ -5001,6 +5045,7 @@ def _extract_netlist(
     def_net_names: bool = False,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
 ) -> tuple[
@@ -6758,8 +6803,11 @@ def _extract_netlist(
             parasitics_deck,
             layer_index,
             metal_index,
+            layout=layout,
+            top_cell=top_cell,
             critical_nets=critical_nets,
             parasitics_nets=parasitics_nets,
+            parasitics_top_cell_only=parasitics_top_cell_only,
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
@@ -7095,17 +7143,61 @@ def _n_squares(area_um2: float, perimeter_um: float) -> float:
     return max(1.0, length / width)
 
 
+def _instance_drawn_mask(
+    layout: kdb.Layout, top_cell: kdb.Cell, drawn_layer: tuple[int, int] | None
+) -> kdb.Region:
+    """The merged union of ``drawn_layer``'s geometry across every instance
+    placed (directly or transitively) under ``top_cell`` -- i.e. everything
+    *not* drawn directly in ``top_cell`` itself -- for the
+    ``--parasitics-top-cell-only`` hierarchy split (issue #1704; see
+    ``docs/design/parasitics-hierarchy-attribution-spike.md`` section 3.1).
+
+    Built from the **layout layer index** (``layout.find_layer(*drawn_layer)``),
+    never from an ``l2n.register()`` handle -- the latter are
+    ``LayoutToNetlist``-internal identifiers meaningful only to
+    ``polygons_of_net``, an unrelated integer space from a ``kdb.Layout``
+    layer index; mixing the two silently reads a plausible-looking wrong
+    layer rather than raising.
+
+    ``min_depth = 1`` on the recursive shape iterator skips the depth-0
+    shapes (the ones drawn directly on ``top_cell``), so the result is
+    exactly the instance subtree's own geometry, transforms applied --
+    deliberately *not* ``all_drawn - own_drawn``: that difference form hands
+    any top-cell/instance overlap back to the top cell, the bias the spike
+    doc's section 3.3 rejects. ``net_region - instance_drawn`` (this mask)
+    charges the overlap to the instance side instead, so a caller who has
+    already extracted a sub-block separately can cleanly subtract its
+    contribution back out of a composed top-level net's R/C.
+
+    Returns an empty ``Region`` when ``drawn_layer`` is ``None`` or the layer
+    carries no shapes anywhere in the stream (``find_layer`` returns
+    ``None``) -- in either case any net's geometry on that role is empty too
+    (built the same way, via ``_layout.region()``), so the split is a no-op.
+    """
+    import klayout.db as kdb
+
+    if drawn_layer is None:
+        return kdb.Region()
+    layer_index = layout.find_layer(*drawn_layer)
+    if layer_index is None:
+        return kdb.Region()
+    it = top_cell.begin_shapes_rec(layer_index)
+    it.min_depth = 1
+    return kdb.Region(it).merged()
+
+
 def _net_area_perim_um(
     l2n: kdb.LayoutToNetlist,
     net: kdb.Net,
     dbu: float,
     indices: list[int],
     subtract_indices: list[int] | None = None,
-) -> tuple[float, float]:
-    """Total ``(area_um2, perimeter_um)`` of ``net``'s shapes across the
-    given registered layer ``indices`` (each an index returned by
-    ``LayoutToNetlist.register``), with any ``subtract_indices`` layers
-    geometrically removed first.
+    instance_mask: kdb.Region | None = None,
+) -> tuple[float, float, float, float]:
+    """``(area_um2, perimeter_um, top_cell_area_um2, top_cell_perim_um)`` of
+    ``net``'s shapes across the given registered layer ``indices`` (each an
+    index returned by ``LayoutToNetlist.register``), with any
+    ``subtract_indices`` layers geometrically removed first.
 
     ``subtract_indices`` lets the poly role exclude the transistor gate
     regions from a net's poly shapes before measuring (issue #226): the gate
@@ -7113,7 +7205,18 @@ def _net_area_perim_um(
     its capacitance is already captured by the device model. The subtraction
     is a purely local operation on the per-net ``Region`` returned by
     ``polygons_of_net`` -- it registers no extra ``LayoutToNetlist`` layer, so
-    the connectivity graph is untouched."""
+    the connectivity graph is untouched.
+
+    ``instance_mask`` (``--parasitics-top-cell-only``, issue #1704) is this
+    role's :func:`_instance_drawn_mask` -- the merged union of the role's
+    drawn layer under every instance beneath the top cell. When given, the
+    returned tuple's trailing ``(top_cell_area_um2, top_cell_perim_um)`` are
+    ``region - instance_mask``'s area/perimeter: the portion of this net's
+    shapes on this role attributed to the top cell rather than an instance
+    (spike doc sections 3.2/3.3). ``None`` (the default) skips this
+    entirely -- both trailing elements are ``0.0`` and no extra ``Region``
+    subtraction runs, byte-identical to this function's pre-#1704
+    behaviour."""
     import klayout.db as kdb
 
     region = kdb.Region()
@@ -7123,7 +7226,13 @@ def _net_area_perim_um(
         region -= l2n.polygons_of_net(net, index)
     area_um2 = region.area() * dbu * dbu
     perim_um = region.perimeter() * dbu
-    return area_um2, perim_um
+    top_cell_area_um2 = 0.0
+    top_cell_perim_um = 0.0
+    if instance_mask is not None:
+        top_cell_part = region - instance_mask
+        top_cell_area_um2 = top_cell_part.area() * dbu * dbu
+        top_cell_perim_um = top_cell_part.perimeter() * dbu
+    return area_um2, perim_um, top_cell_area_um2, top_cell_perim_um
 
 
 def _bbox_overlap(a: kdb.Box, b: kdb.Box) -> bool:
@@ -7156,8 +7265,11 @@ def _compute_parasitics(
     parasitics_deck: ParasiticsDeck,
     layer_index: dict[str, int],
     metal_index: list[int],
+    layout: kdb.Layout | None = None,
+    top_cell: kdb.Cell | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    parasitics_top_cell_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -7243,6 +7355,53 @@ def _compute_parasitics(
     subtracts work, so a caller trading completeness for runtime must say so
     explicitly.
 
+    **Top-cell-only hierarchy split, ground terms only (issue #1704, the
+    implementation half of the spike in #1702 --
+    ``docs/design/parasitics-hierarchy-attribution-spike.md``):**
+    ``parasitics_top_cell_only`` (``klt extract --parasitics-top-cell-only``)
+    additionally splits each net's ground R/C into the portion drawn
+    directly in ``top_cell`` versus the portion drawn inside an instantiated
+    sub-block, reported as the additive ``resistance_ohm_top_cell``/
+    ``capacitance_ff_top_cell`` ground-entry fields below. ``None``/``False``
+    (the default) computes neither field and runs no extra ``Region`` work
+    at all -- byte-identical to this function's pre-#1704 behaviour.
+
+    Built once per curated layer (poly, diffusion's constituent SD indices,
+    each ``metals[i]``), **not** once per net or per instance -- via
+    :func:`_instance_drawn_mask`, the merged union of that role's *drawn*
+    layer (``deck.poly``/``deck.active``/``deck.metals[i]``, **not** the
+    ``layer_index``/``metal_index`` values this function otherwise reads --
+    those are ``LayoutToNetlist.register()`` handles, an unrelated integer
+    space) across every instance beneath ``top_cell``
+    (``top_cell.begin_shapes_rec(layer, min_depth=1)``). Each net's
+    already-computed ground ``Region`` for that role (before any coupling
+    deduction -- this stays entirely inside Pass 1, no new state enters Pass
+    2's coupling bookkeeping) is then split as ``net_region -
+    instance_drawn``: the **subtraction** form, not an intersection with an
+    "own-drawn" mask, so any top-cell/instance overlap (e.g. a top-level
+    strap routed over a std cell's own pin, the normal case rather than a
+    corner case) is charged to the **instance** side -- the only form that
+    keeps "subtract what I already extracted for this sub-block separately"
+    arithmetically sound (spike doc section 3.3). The top-cell portion is
+    fed through the exact same ``cap_area_ff_um2``/``cap_perim_ff_um``/
+    ``sheet_res_ohm_sq`` + ``_n_squares`` formulas Pass 1 already applies to
+    the raw (pre-coupling-deduction) totals.
+
+    **Known limitation, documented rather than fixed: the split is exact in
+    area but not in perimeter.** A conductor that genuinely straddles the
+    instance/top-cell boundary is geometrically cut by the subtraction, and
+    cutting a shape adds ``2 x (cut-line length)`` to the two pieces'
+    combined perimeter relative to the uncut shape. Both the fringe-C term
+    and the ``_n_squares`` sheet-R approximation are perimeter-sensitive, so
+    for a net whose conductor actually crosses an instance boundary,
+    ``resistance_ohm_top_cell`` plus the complementary instance-side R (and
+    likewise C) comes out **slightly larger** than this net's own
+    ``resistance_ohm``/``capacitance_ff`` total -- proportional to the
+    number and length of such crossings. This is expected, not a bug: a net
+    lying wholly on one side of the boundary (fully top-cell-drawn, or fully
+    inside one instance) stays exactly additive; only a genuinely spanning
+    net's split needs a tolerance rather than exact equality.
+
     For each metal level ``i`` with a curated
     ``parasitics_deck.metal_sidewalls[i]`` coefficient and
     ``parasitics_deck.metal_sidewall_lookback_um[i]`` lookback distance, and
@@ -7265,7 +7424,8 @@ def _compute_parasitics(
 
     - Ground list (sorted by ``(net name, net_id)`` for deterministic
       output): ``{"net", "net_id", "resistance_ohm", "capacitance_ff",
-      "by_layer"}`` for every net with non-zero *raw* (pre-coupling-deduction)
+      "by_layer", "resistance_ohm_top_cell", "capacitance_ff_top_cell"}`` for
+      every net with non-zero *raw* (pre-coupling-deduction)
       ground-eligible geometry --
       including a net whose ground capacitance was fully moved to coupling
       by the correction above (``capacitance_ff`` can be ``0.0`` in that
@@ -7274,7 +7434,10 @@ def _compute_parasitics(
       all is omitted, exactly as before this feature existed. ``by_layer``
       (issue #1701) is a per-role/per-metal-level breakdown -- see the "Pass
       3" comment above `results.append` for the exact shape and the
-      sum-equals-total invariant it satisfies.
+      sum-equals-total invariant it satisfies. ``resistance_ohm_top_cell``/
+      ``capacitance_ff_top_cell`` (issue #1704) are ``None`` unless
+      ``parasitics_top_cell_only`` was given -- see this docstring's
+      "Top-cell-only hierarchy split" paragraph above.
     - Coupled-pair list (sorted by ``(net_a, net_b)`` for deterministic
       output): ``{"net_a", "net_b", "capacitance_ff", "levels",
       "lateral_levels"}`` for every distinct net pair with non-zero
@@ -7456,11 +7619,50 @@ def _compute_parasitics(
     net_role_c_ff: dict[tuple[kdb.Net, str], float] = {}
     net_metal_r_ohm: dict[tuple[kdb.Net, int], float] = {}
 
+    # `--parasitics-top-cell-only` (issue #1704): one `_instance_drawn_mask`
+    # per curated layer, built once here -- independent of net count *and*
+    # instance count -- rather than inside the per-net loop below. `deck`
+    # (not `parasitics_deck`) is the source of each role's *drawn*
+    # (layer, datatype) pair; `layer_index`/`metal_index` are deliberately
+    # never consulted here (see `_instance_drawn_mask`'s docstring). Both
+    # dicts/lists stay empty when the flag is off, so every lookup below is a
+    # no-op `dict.get(..., None)`/`None` and no extra `Region` work runs at
+    # all -- byte-identical to this function's pre-#1704 behaviour.
+    non_metal_masks: dict[str, kdb.Region] = {}
+    metal_masks: list[kdb.Region | None] = [None] * num_metals
+    top_cell_c_ff: dict[kdb.Net, float] = {}
+    top_cell_r_ohm: dict[kdb.Net, float] = {}
+    if parasitics_top_cell_only:
+        assert layout is not None and top_cell is not None, (
+            "parasitics_top_cell_only requires layout/top_cell"
+        )
+        role_drawn_layer = {"diffusion": deck.active, "poly": deck.poly}
+        for role_name, _layer_rc, _indices, _subtract in non_metal_roles:
+            non_metal_masks[role_name] = _instance_drawn_mask(
+                layout, top_cell, role_drawn_layer.get(role_name)
+            )
+        for i in range(num_metals):
+            if parasitics_deck.metals[i] is None:
+                continue
+            drawn_layer = deck.metals[i] if i < len(deck.metals) else None
+            metal_masks[i] = _instance_drawn_mask(layout, top_cell, drawn_layer)
+
     for net in nets:
         r_ohm = 0.0
         c_ff = 0.0
+        top_r_ohm = 0.0
+        top_c_ff = 0.0
         for role_name, layer_rc, indices, subtract in non_metal_roles:
-            area_um2, perim_um = _net_area_perim_um(l2n, net, dbu, indices, subtract)
+            area_um2, perim_um, top_area_um2, top_perim_um = _net_area_perim_um(
+                l2n,
+                net,
+                dbu,
+                indices,
+                subtract,
+                instance_mask=(
+                    non_metal_masks.get(role_name) if parasitics_top_cell_only else None
+                ),
+            )
             if area_um2 <= 0.0:
                 continue
             role_c_ff = (
@@ -7472,6 +7674,14 @@ def _compute_parasitics(
             r_ohm += role_r_ohm
             net_role_c_ff[(net, role_name)] = role_c_ff
             net_role_r_ohm[(net, role_name)] = role_r_ohm
+            if parasitics_top_cell_only and top_area_um2 > 0.0:
+                top_c_ff += (
+                    top_area_um2 * layer_rc.cap_area_ff_um2
+                    + top_perim_um * layer_rc.cap_perim_ff_um
+                )
+                top_r_ohm += layer_rc.sheet_res_ohm_sq * _n_squares(
+                    top_area_um2, top_perim_um
+                )
         base_c_ff[net] = c_ff
         base_r_ohm[net] = r_ohm
 
@@ -7492,6 +7702,26 @@ def _compute_parasitics(
             net_metal_r_ohm[(net, i)] = metal_r_ohm
             base_r_ohm[net] += metal_r_ohm
             metal_regions[i][net] = region
+            # `--parasitics-top-cell-only` (issue #1704): the metal role's
+            # top-cell share, computed from this net's raw (pre-coupling-
+            # deduction) metal region -- deliberately outside Pass 2/3's
+            # coupling bookkeeping, see this function's own docstring.
+            if parasitics_top_cell_only and metal_masks[i] is not None:
+                top_cell_part = region - metal_masks[i]
+                top_area_um2 = top_cell_part.area() * dbu * dbu
+                top_perim_um = top_cell_part.perimeter() * dbu
+                if top_area_um2 > 0.0:
+                    top_c_ff += (
+                        top_area_um2 * layer_rc.cap_area_ff_um2
+                        + top_perim_um * layer_rc.cap_perim_ff_um
+                    )
+                    top_r_ohm += layer_rc.sheet_res_ohm_sq * _n_squares(
+                        top_area_um2, top_perim_um
+                    )
+
+        if parasitics_top_cell_only:
+            top_cell_c_ff[net] = top_c_ff
+            top_cell_r_ohm[net] = top_r_ohm
 
     # Pass 2: vertical-overlap coupling between adjacent metal levels.
     # `deduction_regions[(net, i)]` accumulates the *geometry* of `net`'s
@@ -7773,6 +8003,20 @@ def _compute_parasitics(
                 "resistance_ohm": round(base_r_ohm.get(net, 0.0), 4),
                 "capacitance_ff": round(max(0.0, c_ff), 6),
                 "by_layer": by_layer,
+                # Additive fields (issue #1704): the top-cell-drawn share of
+                # this net's ground R/C -- see this function's own
+                # "Top-cell-only hierarchy split" docstring paragraph.
+                # `None` unless `parasitics_top_cell_only` was given (the
+                # accumulator dicts stay empty otherwise, so `.get()` misses
+                # rather than reporting a computed `0.0`).
+                "resistance_ohm_top_cell": (
+                    round(top_cell_r_ohm[net], 4) if net in top_cell_r_ohm else None
+                ),
+                "capacitance_ff_top_cell": (
+                    round(max(0.0, top_cell_c_ff[net]), 6)
+                    if net in top_cell_c_ff
+                    else None
+                ),
             }
         )
 
@@ -8521,6 +8765,16 @@ def _inject_parasitics(
                 # first place. Passed through verbatim: layer names are not
                 # net names, so no `spice_safe_net_name` re-escaping applies.
                 "by_layer": entry.get("by_layer", []),
+                # Additive fields (issue #1704): this net's top-cell-drawn
+                # share of ground R/C, computed by `_compute_parasitics` when
+                # `--parasitics-top-cell-only` was given -- see that
+                # function's "Top-cell-only hierarchy split" docstring
+                # paragraph for the algorithm and the documented
+                # not-exactly-additive-in-perimeter caveat for a net whose
+                # conductor spans an instance boundary. `None` (the default,
+                # via `entry.get`) when the flag was never given.
+                "resistance_ohm_top_cell": entry.get("resistance_ohm_top_cell"),
+                "capacitance_ff_top_cell": entry.get("capacitance_ff_top_cell"),
                 # Additive field (issue #988): the series inductor spliced in
                 # for this net by `mom_rlc_inductor` -- `0.0` (the default)
                 # for every net unless `--mom-rlc-net`/

@@ -4376,6 +4376,8 @@ Each `nets[]` entry:
 | `terminals`      | array\<object\> | One entry per device terminal moved onto its own leg net. For `rc_model == "lumped"`: `{"device", "terminal", "leg_net", "resistance_ohm"}` — `device` is the owning device's `expanded_name()`, `terminal` its terminal name (e.g. `"D"`, `"G"`, `"A"`), `leg_net` the fresh internal node that terminal now connects to (`<net>__t<i>`, or a collision-suffixed variant), and `resistance_ohm` that leg's own series resistance back to `hub_net`. For `rc_model == "distributed"` the shape differs (issue #977): `{"device", "terminal", "leg_net", "order", "capacitance_ff"}` — `order` is the terminal's 0-based position in the ladder's node sequence and `capacitance_ff` its own per-node ground capacitance; resistance lives on `segments[]` instead (between adjacent nodes), not per terminal. **Empty** for the no-device-terminal fallback case above. |
 | `coupled`        | array\<object\> | This net's vertical-overlap coupling counterparts (issue #760), `{"net", "capacitance_ff", "levels"}`, sorted by counterpart `net`. `capacitance_ff` is the pair's total coupling capacitance summed over every contributing level pair; `levels` lists the contributing `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs. **Empty** when the net has no inter-net crossover. Each pair appears on both endpoints' lists — see `total_coupling_capacitance_ff`. |
 | `by_layer`       | array\<object\> | Additive field (issue #1701). This net's `resistance_ohm`/`capacitance_ff` totals broken down by contributing conductor: `{"layer", "resistance_ohm", "capacitance_ff"}` per role/level with non-zero geometry on this net. See below. |
+| `resistance_ohm_top_cell` | number \| `null` | Additive field (issue #1704). This net's series resistance attributable to geometry drawn directly in the top cell (as opposed to inside an instantiated sub-block) — `null` unless `--parasitics-top-cell-only` was given. See "Top-cell-only hierarchy split" below. |
+| `capacitance_ff_top_cell` | number \| `null` | Additive field (issue #1704). This net's ground capacitance attributable to geometry drawn directly in the top cell — `null` unless `--parasitics-top-cell-only` was given. See "Top-cell-only hierarchy split" below. |
 
 Two device terminals on the same net now sit in series through their two
 `terminals[]` legs (`leg_a --Ra--> hub_net <--Rb-- leg_b`) — the
@@ -4428,6 +4430,67 @@ computation, just retained intermediates from the same Pass 1/3 measurement
   caller-supplied override — see their own sections below); `by_layer` for
   that net keeps reporting the pre-substitution lumped-RC decomposition, so
   the invariant above does not hold for a net named by either flag.
+
+### Top-cell-only hierarchy split (`--parasitics-top-cell-only`, issue #1704)
+
+A net's `resistance_ohm`/`capacitance_ff` above are a single scalar covering
+its *whole* conductor, even when that conductor spans a hierarchy — part
+drawn inside an instantiated sub-block, part drawn directly in the top cell
+to join blocks together. A caller who has already extracted a sub-block
+separately (e.g. via a recursive `klt gen-compose`/`klt extract` build) has
+no way to subtract that sub-block's own R/C back out of a composed
+top-level net's total, because nothing distinguishes "this R/C came from
+inside an instance" from "this R/C was drawn directly in the top cell."
+`--parasitics-top-cell-only` (requires `--parasitics`) closes that gap for
+the **ground** R/C terms:
+
+```
+klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --format json
+```
+
+- **What it adds.** Two additive fields on every `parasitics.nets[]` entry:
+  `resistance_ohm_top_cell`/`capacitance_ff_top_cell` — this net's ground R/C
+  attributable to geometry drawn directly in the top cell, using the exact
+  same per-role coefficients (`cap_area_ff_um2`/`cap_perim_ff_um`/
+  `sheet_res_ohm_sq` + `_n_squares`) `resistance_ohm`/`capacitance_ff`
+  already apply, just to a geometrically-split portion of the net's own
+  shapes. `null` on every entry unless this flag is given.
+- **The split, precisely.** For each curated conductor role (poly,
+  diffusion, each metal level), a mask is built once — independent of net
+  count *and* instance count — from the merged union of that role's
+  *drawn* layer across every instance placed (directly or transitively)
+  under the top cell. A net's top-cell share is `net_region -
+  instance_drawn`: **subtraction**, not intersection with an "own-drawn"
+  mask, so any top-cell/instance overlap (a top-level strap routed over a
+  std cell's own pin is the *normal* case, not a corner case) is charged to
+  the **instance** side. That is deliberate: the whole point is "let a
+  caller subtract what it already extracted separately for the sub-block,"
+  and only this bias keeps that arithmetic sound.
+- **Ground terms only.** This is Pass 1 (per-net ground R/C) only — it does
+  not attribute *coupling* capacitance (vertical-overlap or
+  `--critical-net`'s lateral pass) to a source cell. A coupled pair's own
+  `capacitance_ff` is unaffected by this flag.
+- **Exact in area, not exactly additive in perimeter.** A net lying wholly
+  on one side of the instance boundary (fully top-cell-drawn, or fully
+  inside one instance) is exactly additive: `capacitance_ff_top_cell`/
+  `resistance_ohm_top_cell` are either `0.0` or equal to the net's own
+  `resistance_ohm`/`capacitance_ff` totals. A net whose conductor genuinely
+  *crosses* the boundary is geometrically cut by the split — area is exact
+  across a cut, but perimeter is not: cutting a shape adds `2 x (cut-line
+  length)` to the combined perimeter of the resulting pieces relative to the
+  uncut shape. Since both the fringe-C term and the `_n_squares` sheet-R
+  approximation are perimeter-sensitive, `resistance_ohm_top_cell` plus the
+  complementary (unreported) instance-side share can come out **larger**
+  than the net's own `resistance_ohm`/`capacitance_ff` scalar total for a
+  spanning net — expected, not a bug, and proportional to the number and
+  length of boundary crossings.
+- **Off by default.** Omitting the flag leaves every `parasitics.nets[]`
+  entry, the written SPICE, and `parasitics.top_cell_only` (`false`) exactly
+  as before this feature existed — purely additive.
+
+| Field | Meaning |
+|---|---|
+| `parasitics.top_cell_only` | `true` only when `--parasitics-top-cell-only` was given (`false` otherwise) — distinguishes a run whose `nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` are real computed splits from one where they are `null` because the flag was never asked for. |
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 
@@ -4799,7 +4862,7 @@ Every field in this report falls into exactly one of three classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 
