@@ -687,11 +687,16 @@ def test_run_mom_peec_accepts_cross_axis_and_offset_conductors(tmp_path):
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
-    # Leg "a" along x, length 100um; leg "b" along y, length 60um, starting
-    # where "a" ends -- an L-shaped loop, not a straight bar or a shared-axis
-    # pair.
+    # Leg "a" along x, length 100um; leg "b" along y, length 60um, offset
+    # away from "a" (not touching -- two distinct conductors sharing a
+    # boundary would make the *capacitance* solve's matrix singular, a
+    # separate, pre-existing restriction unrelated to this issue's PEEC/
+    # full-wave scope) -- a cross-axis, axially-offset pair, not a straight
+    # bar or a shared-axis pair.
     top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(2)))
-    top.shapes(layout.layer(2, 0)).insert(kdb.Box.new(_um(100), _um(0), _um(102), _um(60)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(120), _um(10), _um(122), _um(70))
+    )
     gds = tmp_path / "l_shape.gds"
     layout.write(str(gds))
 
@@ -826,8 +831,12 @@ def test_run_mom_full_wave_accepts_cross_axis_conductors(tmp_path):
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
+    # Offset away from each other -- see the sibling PEEC test's comment on
+    # why two distinct conductors must not share a boundary.
     top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(2)))
-    top.shapes(layout.layer(2, 0)).insert(kdb.Box.new(_um(100), _um(0), _um(102), _um(60)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(120), _um(10), _um(122), _um(70))
+    )
     gds = tmp_path / "l_shape.gds"
     layout.write(str(gds))
 
@@ -855,9 +864,9 @@ def test_run_mom_full_wave_accepts_cross_axis_conductors(tmp_path):
     assert z_re[0][1] == 0.0
     assert z_re[1][0] == 0.0
     # No shared axial span -- the derived transmission-line fields are
-    # omitted, not silently wrong.
-    assert point["characteristic_impedance_real_ohm"] is None
-    assert point["phase_rad_per_m"] is None
+    # omitted entirely, not silently wrong.
+    assert "characteristic_impedance_real_ohm" not in point
+    assert "phase_rad_per_m" not in point
 
 
 def test_run_mom_without_frequencies_hz_omits_full_wave_fields(tmp_path):
