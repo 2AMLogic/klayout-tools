@@ -79,6 +79,7 @@ from . import remote_transport as remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from ._text import line_containing as _line_containing
+from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
@@ -128,6 +129,25 @@ SCHEMA_VERSION = 3
 #: Per-corner wall-clock budget applied when the request omits
 #: ``options.timeout_s``.
 DEFAULT_TIMEOUT_S = 120
+
+#: ``run_sim()``'s own corner-sweep rollup field names -> their declared
+#: METRICS2.1-style names in ``metrics.py``'s registry (issue #1849,
+#: adopting the #247 registry beyond its ``klt layout-metrics``/``klt drc``
+#: (#1847) precedent). Additive: the ``metrics`` block this backs is a
+#: *parallel* object alongside the existing ``corner_count``/``passed``/
+#: ``failed``/``errored`` fields, never a replacement for them -- see
+#: ``docs/design/metric-namespace.md`` for the additive-vs-rename decision.
+#: ``measurements[].name`` stays out of scope -- those names are
+#: caller-supplied via the request spec, not ``klt``-declared.
+_CORNER_COUNT_METRIC_NAME = "sim__corner__count"
+_CORNER_PASSED_COUNT_METRIC_NAME = "sim__corner__passed_count"
+_CORNER_FAILED_COUNT_METRIC_NAME = "sim__corner__failed_count"
+_CORNER_ERRORED_COUNT_METRIC_NAME = "sim__corner__errored_count"
+
+assert is_registered(_CORNER_COUNT_METRIC_NAME)
+assert is_registered(_CORNER_PASSED_COUNT_METRIC_NAME)
+assert is_registered(_CORNER_FAILED_COUNT_METRIC_NAME)
+assert is_registered(_CORNER_ERRORED_COUNT_METRIC_NAME)
 
 #: ``ngspice`` is the only implemented engine in v1; see this module's
 #: docstring and the spike's engine survey for why.
@@ -670,6 +690,19 @@ def run_sim(
     ("local", "local-parallel")`` (including any ``hosts > 1`` shard built
     on them) and only when ``analysis.kind == "tran"``; ``None``/``False``
     (the default) runs no probe at all, exactly today's behaviour.
+
+    ``metrics`` (issue #1849, adopting the declared metric namespace
+    registry from #247 beyond its ``klt layout-metrics``/``klt drc`` (#1847)
+    precedent) is a **parallel, additive** object re-keying
+    ``corner_count``/``passed``/``failed``/``errored`` under their declared
+    METRICS2.1-style names from :mod:`klayout_tools.metrics`'s registry --
+    ``sim__corner__count``/``sim__corner__passed_count``/
+    ``sim__corner__failed_count``/``sim__corner__errored_count``. It never
+    replaces or changes those existing fields, which stay exactly as
+    documented; ``metrics`` is always present, purely additive to the JSON
+    contract (no ``schema_version`` bump).
+    ``measurements[].name`` stays out of scope for this registry -- those
+    names are caller-supplied via the request spec, not ``klt``-declared.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
@@ -1245,6 +1278,12 @@ def run_sim(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        "metrics": {
+            _CORNER_COUNT_METRIC_NAME: len(corners),
+            _CORNER_PASSED_COUNT_METRIC_NAME: passed,
+            _CORNER_FAILED_COUNT_METRIC_NAME: failed,
+            _CORNER_ERRORED_COUNT_METRIC_NAME: errored,
+        },
         "environment": environment,
         "provenance": build_provenance(
             deck_name=(os.path.basename(models_lib) if models_lib else None),

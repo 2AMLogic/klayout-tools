@@ -85,6 +85,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   zero-violation case. The existing `violation_count`/`rule_counts` fields
   are unchanged and no `schema_version` bump was required. See
   [`docs/cli/drc.md`](docs/cli/drc.md)'s `metrics` field.
+- **Added**: `klt sim` adopts the declared metric namespace registry (issue
+  #1849, following #1847's `klt drc` adoption) — `run_sim()` now emits an
+  additive, parallel `metrics` object under a new `sim__corner__*`
+  namespace (`{"sim__corner__count": <corner_count>,
+  "sim__corner__passed_count": <passed>, "sim__corner__failed_count":
+  <failed>, "sim__corner__errored_count": <errored>}`), always present. The
+  existing `corner_count`/`passed`/`failed`/`errored`/`measurements`/
+  `corners` fields are unchanged and no `schema_version` bump was required.
+  `measurements[].name` stays explicitly out of scope for this registry —
+  those names are caller-supplied via the request spec, not `klt`-declared.
+  See [`docs/cli/sim.md`](docs/cli/sim.md)'s `metrics` field.
 - **Added**: `klt mom` spec field `stackup_from_pdk` (issue #1617) —
   `{"pdk": "<variant>", "layers": ["<conductor name>", ...], "corner":
   "<optional, default 'nom'>"}` resolves the named conductors from an

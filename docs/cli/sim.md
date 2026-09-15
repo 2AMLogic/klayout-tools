@@ -1426,6 +1426,12 @@ the *response* echoes back.
   "passed": 8,
   "failed": 0,
   "errored": 0,
+  "metrics": {
+    "sim__corner__count": 8,
+    "sim__corner__passed_count": 8,
+    "sim__corner__failed_count": 0,
+    "sim__corner__errored_count": 0
+  },
   "environment": {
     "engine": "ngspice",
     "engine_version": "46",
@@ -1510,11 +1516,42 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
+| `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
+
+#### `metrics` object
+
+Introduced by issue #1849, adopting `klayout_tools.metrics`'s declared
+metric namespace registry (issue #247 — see
+[`../design/metric-namespace.md`](../design/metric-namespace.md) and
+[`../json-contract.md`](../json-contract.md)'s "Declared metric namespace"
+section) into `klt sim`'s own top-level payload, following `klt drc`'s own
+adoption (issue #1847). **Purely additive**: a re-keying of
+`corner_count`/`passed`/`failed`/`errored` under their declared,
+METRICS2.1-style hierarchical names — it never replaces or changes those
+fields, which stay exactly as documented above. Always present.
+
+| Key                            | Source field   | Description                                                                                                    |
+| ------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `sim__corner__count`            | `corner_count` | Total number of corners in the sweep; `aggregator: "sum"`, no declared quality polarity in the registry.       |
+| `sim__corner__passed_count`     | `passed`       | Number of corners that passed; `aggregator: "sum"`, `higher_is_better: true` in the registry.                  |
+| `sim__corner__failed_count`     | `failed`       | Number of corners that failed; `aggregator: "sum"`, `higher_is_better: false`, `critical: true` in the registry. |
+| `sim__corner__errored_count`    | `errored`      | Number of corners that errored; `aggregator: "sum"`, `higher_is_better: false`, `critical: true` in the registry. |
+
+**`measurements[].name` stays permanently out of scope for this registry.**
+Each measurement's `name` (e.g. `"vout"`, `"gain_db"`) is defined by the
+*caller's own request spec* above, not by `klt` — `klt` has no way to
+declare ahead of time what a caller will choose to measure, so there is no
+`measurements__*`-style declared name for an individual measurement's value
+or status. A future corner-qualified convention for declaring the *shape*
+of a caller-supplied measurement (e.g. METRICS2.1's
+`timing__setup__ws__corner:ss`-style corner qualifier) remains an open
+design question for a future issue, not resolved here — only the four fixed
+corner-sweep rollup fields above are declared.
 
 #### `corners[]` entries
 

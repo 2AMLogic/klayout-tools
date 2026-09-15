@@ -1831,6 +1831,21 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     (corner,) = report["corners"]
     assert corner["measurements"][0]["value"] == 1.0
     assert corner["measurements"][0]["status"] == "pass"
+    # Issue #1849: `metrics` re-keys the corner_count/passed/failed/errored
+    # rollup under its declared METRICS2.1-style names, additive alongside
+    # the existing fields.
+    assert report["metrics"] == {
+        "sim__corner__count": report["corner_count"],
+        "sim__corner__passed_count": report["passed"],
+        "sim__corner__failed_count": report["failed"],
+        "sim__corner__errored_count": report["errored"],
+    }
+    assert report["metrics"] == {
+        "sim__corner__count": 1,
+        "sim__corner__passed_count": 1,
+        "sim__corner__failed_count": 0,
+        "sim__corner__errored_count": 0,
+    }
 
 
 @pytest.mark.parametrize("netlist_source", ["schematic", "extracted"])
@@ -4048,6 +4063,15 @@ def test_run_sim_stubbed_fail(tmp_path, monkeypatch):
 
     assert report["status"] == "fail"
     assert report["failed"] == 1
+    # Issue #1849: `metrics` reflects the at-least-one-failure case too,
+    # matching the existing `failed` field exactly.
+    assert report["metrics"] == {
+        "sim__corner__count": report["corner_count"],
+        "sim__corner__passed_count": report["passed"],
+        "sim__corner__failed_count": report["failed"],
+        "sim__corner__errored_count": report["errored"],
+    }
+    assert report["metrics"]["sim__corner__failed_count"] == 1
 
 
 def test_run_sim_stubbed_missing_measurement_is_error(tmp_path, monkeypatch):
@@ -5093,10 +5117,20 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "passed",
         "failed",
         "errored",
+        "metrics",
         "environment",
         "provenance",
         "measurements",
         "corners",
+    }
+    # Issue #1849: `metrics` re-keys the corner_count/passed/failed/errored
+    # rollup under its declared METRICS2.1-style names, additive alongside
+    # the existing fields.
+    assert data["metrics"] == {
+        "sim__corner__count": data["corner_count"],
+        "sim__corner__passed_count": data["passed"],
+        "sim__corner__failed_count": data["failed"],
+        "sim__corner__errored_count": data["errored"],
     }
     prov = data["provenance"]
     assert set(prov.keys()) == {
