@@ -11,10 +11,28 @@
 //!
 //! See `tests/fixtures/README.md` for the full timeline table this file
 //! implements.
+//!
+//! **Post-write verification (issue #1606):** every fixture written here
+//! is immediately re-opened and cross-checked with
+//! `klt_wave_native::verify::verify_store` -- the same read-after-write
+//! guard `klt wave build` applies to its own output -- against the known
+//! `fst-writer` 0.3.1 / `fst-reader` 0.17.0 zlib-compressed time-table
+//! size-tie defect (`native/wave/src/verify.rs`'s doc comment has the full
+//! writeup). A spot-check confirmed none of the three fixtures below
+//! currently hit that tie (all decode with the expected `end_time`/last
+//! time-table entry), but calling `verify_store` here -- rather than only
+//! spot-checking once by hand -- turns that one-off confirmation into a
+//! standing regression guard: if a future edit to these timelines
+//! happens to produce a time table whose zlib-compressed size exactly
+//! equals its uncompressed size, `cargo run --example gen_fixtures` fails
+//! loudly instead of silently committing a corrupted fixture.
+
+use std::path::Path;
 
 use fst_writer::{
     open_fst, FstFileType, FstInfo, FstScopeType, FstSignalType, FstVarDirection, FstVarType,
 };
+use klt_wave_native::verify::verify_store;
 
 fn build(path: &str, o_valid_first_assert: u64) {
     let info = FstInfo {
@@ -105,6 +123,8 @@ fn build(path: &str, o_valid_first_assert: u64) {
     }
 
     body.finish().unwrap();
+    verify_store(Path::new(path), Some(100))
+        .unwrap_or_else(|e| panic!("fixture '{path}' failed post-write verification: {e}"));
 }
 
 /// Same `tb.clk`/`tb.rst_n` timeline as `build()` (reset deasserts at t=22,
@@ -178,6 +198,8 @@ fn build_pre_reset_glitch(path: &str) {
     }
 
     body.finish().unwrap();
+    verify_store(Path::new(path), Some(100))
+        .unwrap_or_else(|e| panic!("fixture '{path}' failed post-write verification: {e}"));
 }
 
 fn main() {
