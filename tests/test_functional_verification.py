@@ -2706,6 +2706,316 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
     }
 
 
+# --------------------------------------------------------------------------- #
+# Integration: a bit-selected top-level-port `INTERCONNECT` entry poisons a
+# *sibling* entry on the same net (issue #1619).
+#
+# #1069/#1056 fixed a *scalar* bare top-level-port endpoint. This is a
+# distinct Icarus 13.0 behaviour, confirmed live with a minimal fixture: once
+# an `INTERCONNECT` entry whose endpoint is a bit-selected top-level *vector*
+# port (`y[0]`) is annotated, every *subsequent* `INTERCONNECT` entry on that
+# same net fails with "Could not find intermodpath!" within the same
+# `$sdf_annotate` call -- regardless of that later entry's own shape (a
+# purely internal instance-pin-to-instance-pin entry is equally affected).
+# `_split_sdf_bus_port_interconnects` defers every such entry to its own,
+# later `$sdf_annotate` call, which resolves every entry. Both reported
+# shapes are covered here: (a) an output net driving both a vector top-level
+# port bit and an internal gate input; (b) a vector top-level input port bit
+# driving both an ordinary cell input and a single-pin (antenna/diode-style)
+# load.
+# --------------------------------------------------------------------------- #
+
+_BUS_PORT_FANOUT_OUTPUT_DUT_V = """\
+module klt_inv (input wire in, output wire out);
+  assign out = ~in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_buf (input wire in, output wire out);
+  assign out = in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module bus_fanout_out (input wire d, output wire [1:0] y);
+  klt_inv u_q (.in(d), .out(y[0]));
+  wire g2out;
+  klt_buf u_g2 (.in(y[0]), .out(g2out));
+  klt_buf u_q1 (.in(d), .out(y[1]));
+endmodule
+"""
+
+_BUS_PORT_FANOUT_OUTPUT_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_output_settles_within_one_ns(dut):
+    """`y[0]` inverts `d` through `u_q`, which also fans out internally to
+    `u_g2` on the same net. At zero delay `y[0]` tracks `~d` immediately, so
+    this passes; once the real INTERCONNECT delay on `u_q.out -> y[0]` is
+    annotated, `y[0]` has not yet responded 1 ns after `d` rises and this
+    fails -- the same "does the testbench's own verdict change" coverage
+    metric #1069's own regression above uses. The sibling entry
+    (`u_q.out -> u_g2.in`, the one issue #1619 reports failing) is not
+    independently observable through the wrapper-nested build this
+    testbench also runs against, so its own resolution is instead asserted
+    on `environment.sdf.partial`/`.dropped` below -- a failed sibling entry
+    raises `FunctionalVerificationError` before a report is even returned
+    (finding 6), so simply reaching that assertion is already load-bearing.
+    """
+    dut.d.value = 0
+    await Timer(10, unit="ns")
+    dut.d.value = 1
+    await Timer(1, unit="ns")
+    # cocotb 2.x cannot index a packed vector handle directly (`dut.y[0]`
+    # raises `TypeError: Packed objects ... cannot be indexed`) -- read the
+    # whole value and slice it instead, per cocotb's own guidance.
+    y = dut.y.value
+    assert y[0] == 0, f"y[0]={y[0]} 1 ns after d rose (expected 0)"
+'''
+
+
+def _bus_port_fanout_output_sdf_text() -> str:
+    """A minimal SDF whose top design `CELL` mixes a bit-selected top-level
+    *output* port `INTERCONNECT` entry (`u_q.out y[0]`) with a purely
+    internal sibling entry on the *same* net (`u_q.out u_g2.in`) -- the
+    exact shape issue #1619 reports for the output side. Before the fix,
+    `u_q.out y[0]` resolved but `u_q.out u_g2.in` failed with `Could not
+    find intermodpath!`, confirmed live against Icarus 13.0."""
+    return """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "bus_fanout_out")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "bus_fanout_out")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT u_q.out y[0] (2.000:2.000:2.000) (2.000:2.000:2.000))
+      (INTERCONNECT u_q.out u_g2.in (2.000:2.000:2.000) (2.000:2.000:2.000))
+    ))
+  )
+)
+"""
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_resolves_bus_port_output_fanout_sibling(tmp_path):
+    """Issue #1619 shape (a): a driver net fans out to both a bit-selected
+    top-level output port and an internal instance-pin load. Before the fix,
+    the port-touching entry resolved and the sibling did not; now both do,
+    verified via the same "does the testbench's own verdict change"
+    coverage metric #1069's own regression above uses."""
+    tmp_path.joinpath("bus_fanout_out.v").write_text(
+        _BUS_PORT_FANOUT_OUTPUT_DUT_V, encoding="utf-8"
+    )
+    _write(tmp_path / "test_bus_fanout_out.py", _BUS_PORT_FANOUT_OUTPUT_TESTBENCH_PY)
+    _write(tmp_path / "route_bus_out.sdf", _bus_port_fanout_output_sdf_text())
+
+    request = {
+        "sources": ["bus_fanout_out.v"],
+        "hdl_toplevel": "bus_fanout_out",
+        "testbench": {"module": "test_bus_fanout_out"},
+    }
+    zero_delay = _write_request(tmp_path / "request-plain.json", request)
+    annotated_request = dict(request)
+    annotated_request["options"] = {
+        "sdf": {"file": "route_bus_out.sdf", "corner": "typ"}
+    }
+    annotated = _write_request(tmp_path / "request-sdf.json", annotated_request)
+
+    plain_report = run_functional_verification(zero_delay)
+    annotated_report = run_functional_verification(annotated)
+
+    assert plain_report["status"] == "pass"
+    # This is the assertion that would previously raise
+    # FunctionalVerificationError ("Could not find intermodpath!" on the
+    # sibling entry) instead of returning a report at all.
+    assert annotated_report["status"] == "fail"
+    assert annotated_report["environment"]["sdf"] == {
+        "file": str(tmp_path / "route_bus_out.sdf"),
+        "corner": "typ",
+        "annotated": True,
+        "partial": False,
+        "dropped": {},
+    }
+
+
+_BUS_PORT_FANOUT_INPUT_DUT_V = """\
+module klt_inv (input wire in, output wire out);
+  assign out = ~in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_buf (input wire in, output wire out);
+  assign out = in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_diode (input wire in);
+  // Antenna-diode-style single-pin load: no output, no specify block.
+endmodule
+
+module bus_fanout_in (input wire [1:0] a, output wire b);
+  wire w;
+  klt_inv u1 (.in(a[0]), .out(w));
+  klt_buf u2 (.in(w), .out(b));
+  klt_diode u_d (.in(a[0]));
+endmodule
+"""
+
+
+def _bus_port_fanout_input_sdf_text() -> str:
+    """A minimal SDF whose top design `CELL` mixes a bit-selected top-level
+    *input* port `INTERCONNECT` entry (`a[0] u1.in`, an ordinary cell input)
+    with a sibling entry on the *same* net to a single-pin antenna/diode-
+    style load (`a[0] u_d.in`) -- the shape issue #1619 reports for the
+    input side."""
+    return """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "bus_fanout_in")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "bus_fanout_in")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a[0] u1.in (1.000:5.000:9.000) (1.000:5.000:9.000))
+      (INTERCONNECT a[0] u_d.in (1.000:5.000:9.000) (1.000:5.000:9.000))
+      (INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))
+      (INTERCONNECT u2.out b (0.000:0.000:0.000) (0.000:0.000:0.000))
+    ))
+  )
+)
+"""
+
+
+_BUS_PORT_FANOUT_INPUT_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_output_settles_within_two_ns(dut):
+    """`b` inverts `a[0]` through u1 then u2 unchanged: at zero delay `b`
+    tracks `~a[0]` immediately, so this passes; once the real INTERCONNECT
+    delay on `a[0]`'s own fanout (to u1.in *and* to the diode-style u_d.in)
+    is annotated, `b` has not yet responded 2 ns after `a[0]` rises."""
+    dut.a.value = 0
+    await Timer(10, unit="ns")
+    dut.a.value = 1
+    await Timer(2, unit="ns")
+    assert dut.b.value == 0, f"b={dut.b.value} 2 ns after a[0] rose (expected 0)"
+'''
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tmp_path):
+    """Issue #1619 shape (b), root-caused rather than fixed -- see the
+    module-level comment above :func:`_split_sdf_bus_port_interconnects` for
+    the full writeup.
+
+    Live testing found this shape's failure mode is a *different* Icarus
+    behaviour than shape (a)'s, and not one `_split_sdf_bus_port_
+    interconnects`'s deferral strategy can work around: with a **no-op**
+    cocotb testbench (a test coroutine that returns immediately, never
+    `await`s a trigger), the exact same split fixture used here resolves
+    every entry cleanly -- but with *any* testbench that actually drives the
+    DUT and awaits a `Timer` (the realistic case, and every other test in
+    this file), the run deterministically raises with the deferred entry
+    unresolved, reproduced identically across a clean `.klt/` build
+    directory, a fresh Python interpreter, and a fresh `klt` CLI subprocess
+    invocation. The no-op-vs-driven-testbench split points at a genuine race
+    between Icarus's own `$sdf_annotate` intermodpath insertion and VPI
+    callback scheduling once the simulator actually advances past time 0 --
+    not something this module's own generated wrapper/shim/SDF-splitting
+    code can control from the outside. This test pins the *realistic*
+    (driven-testbench) outcome down: it must keep raising, not silently
+    start passing (which would mean either Icarus's own behaviour changed,
+    or a future change here papered over the failure without actually
+    resolving it)."""
+    tmp_path.joinpath("bus_fanout_in.v").write_text(
+        _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
+    )
+    _write(tmp_path / "test_bus_fanout_in.py", _BUS_PORT_FANOUT_INPUT_TESTBENCH_PY)
+    _write(tmp_path / "route_bus_in.sdf", _bus_port_fanout_input_sdf_text())
+
+    request = {
+        "sources": ["bus_fanout_in.v"],
+        "hdl_toplevel": "bus_fanout_in",
+        "testbench": {"module": "test_bus_fanout_in"},
+        "options": {"sdf": {"file": "route_bus_in.sdf", "corner": "typ"}},
+    }
+    annotated = _write_request(tmp_path / "request-sdf.json", request)
+
+    with pytest.raises(fv.FunctionalVerificationError, match="did not fully apply"):
+        run_functional_verification(annotated)
+
+
+# --------------------------------------------------------------------------- #
+# Unit: `_split_sdf_bus_port_interconnects` itself (issue #1619) -- the
+# splitting/deferral logic the integration tests above exercise end-to-end.
+# --------------------------------------------------------------------------- #
+
+
+def test_split_sdf_bus_port_interconnects_no_vector_ports_is_a_noop(tmp_path):
+    """No vector top-level ports at all (the overwhelmingly common case,
+    including every existing scalar-port design/test) -- the function must
+    not even read the file."""
+    sdf_path = tmp_path / "does-not-exist.sdf"
+    assert fv._split_sdf_bus_port_interconnects(str(sdf_path), set()) is None
+
+
+def test_split_sdf_bus_port_interconnects_no_bus_entries_returns_none(tmp_path):
+    """Vector ports are declared, but no `INTERCONNECT` entry actually
+    touches a bit-select of one -- nothing to defer."""
+    sdf_path = _write(tmp_path / "route.sdf", _toplevel_port_sdf_text())
+    result = fv._split_sdf_bus_port_interconnects(sdf_path, {"y"})
+    assert result is None
+
+
+def test_split_sdf_bus_port_interconnects_defers_only_matching_entries(tmp_path):
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_fanout_output_sdf_text())
+    result = fv._split_sdf_bus_port_interconnects(sdf_path, {"y"})
+    assert result is not None
+    safe_text, deferred_text = result
+
+    # The bit-selected top-level-port entry is removed from the "safe" text
+    # entirely -- it never runs in the first (unpoisoned) $sdf_annotate call.
+    assert "y[0]" not in safe_text
+
+    # ...and lands, alone, in the deferred text, inside a syntactically
+    # complete SDF file (own DELAYFILE/CELL/DELAY(ABSOLUTE wrapping).
+    assert "INTERCONNECT u_q.out y[0]" in deferred_text
+    assert deferred_text.count("INTERCONNECT") == 1
+    assert deferred_text.startswith("(DELAYFILE")
+    assert '(CELLTYPE "bus_fanout_out")' in deferred_text
+    assert "(INSTANCE)" in deferred_text
+
+    # The internal-pin sibling entry (the one issue #1619 reports failing)
+    # is *not* deferred -- only the bit-selected-port entry is, which is
+    # exactly what makes the sibling resolve in the first (now unpoisoned)
+    # call.
+    assert "u_q.out u_g2.in" in safe_text
+
+
 # Sanity: `subprocess` really is the module this file's coverage stubs patch
 # (guards against a future refactor silently making them a no-op).
 def test_functional_verification_uses_stdlib_subprocess():

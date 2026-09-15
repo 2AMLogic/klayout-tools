@@ -365,6 +365,104 @@ wrong scope. A follow-on could reformat the override to target
 `<wrapper>.<nested-instance>.<name>` directly instead of relying on cocotb's
 own injection, but no design in this repo's own corpus needs both today.
 
+### 3.7 A bit-selected top-level-port `INTERCONNECT` entry can poison a sibling entry on the same net
+
+Found live during issue #1619, after §3.6's scalar-port fix (#1056/#1069)
+shipped. §3.6 fixed `INTERCONNECT a u1.in` / `INTERCONNECT u2.out b` — a
+*scalar* bare top-level-port endpoint. Once that fix let a **vector** port
+*bit* (`y[0]`, `a[0]` — what any real post-route netlist's bus ports
+produce) resolve too, a *new*, narrower failure appeared: a driver net
+fanning out to both a bit-selected top-level port and a purely internal
+instance-pin load resolves the port-touching entry but not the sibling, on
+an otherwise-identical-shaped net with no port touch resolving 100%. Both
+reported shapes were reproduced with a minimal fixture, live against Icarus
+13.0, via raw `iverilog`/`vvp` directly (§3.2's own methodology) as well as
+through this repo's actual wrapper/shim generator and the real cocotb
+`Runner`.
+
+**The issue's own hypothesis, refuted.** The issue body speculated Icarus
+"loses track of (or double-binds)" a net's identity once the wrapper
+resolves *one* `INTERCONNECT` entry against it. That is not what happens.
+Two *separate* mechanisms were found instead, depending on which side of the
+entry carries the bit-selected port — neither is an identity/double-bind
+problem, both are confirmed by evidence a genuine double-bind would not
+produce:
+
+**Shape (a) — bit-selected port as a destination** (an output net fanning
+out to a vector output-port bit *and* an internal pin, or any entry sharing
+a source with one): **order-dependent, and fixed.** Once an entry touching
+a bit-selected port is annotated, every entry *later in the same
+`$sdf_annotate` call* that shares that entry's physical net fails with
+`Could not find intermodpath!` — regardless of its own shape (a purely
+internal instance-pin-to-instance-pin entry is equally affected). Reordering
+the entries (bit-selected-port entry *last* instead of first) makes every
+entry resolve — which a genuine net-identity double-bind would not fix, since
+the same physical net is still touched twice either way, just in a different
+order. **Fix, verified live end-to-end through real cocotb + Icarus 13.0:**
+defer every bit-selected-top-level-port-touching entry to its own, later
+`$sdf_annotate` call, after every other entry has already been annotated.
+Nothing in the deferred call's own entries runs after a poisoning entry on
+that entry's own net (each vector port bit is its own physically distinct
+net), so nothing is left to fail. Implemented in
+`_split_sdf_bus_port_interconnects` (`src/klayout_tools/functional_
+verification.py` **[REPO]**).
+
+**Shape (b) — bit-selected port as a source** (an input net fanning out to
+an ordinary cell input *and* a single-pin antenna/diode-style load):
+**not order-dependent, and not fixable from this module.** A *single* such
+entry, entirely alone with no sibling at all, already fails whenever its
+destination pin declares its own `specify`/`IOPATH` block — which an
+ordinary standard cell always does; it resolves cleanly only against a
+destination with no `specify` block at all (an antenna/diode-style cell).
+Reordering or deferring the entry to its own call changes nothing here,
+ruling out shape (a)'s workaround. More surprising still: **the outcome
+depends on the testbench**, not just the SDF/netlist. The identical fixture,
+run through this repo's actual wrapper/shim/split pipeline, resolves cleanly
+with a **no-op** cocotb test (a coroutine that returns without ever
+`await`ing a trigger) but **deterministically fails** once the testbench
+actually drives the DUT and `await`s a `Timer` — reproduced identically
+across a clean `.klt/` build directory, a fresh Python interpreter, and a
+fresh `klt` CLI subprocess (**[RUN]**, ruling out build-directory or
+process-state reuse as the cause). This points at a genuine race inside
+Icarus itself between `$sdf_annotate`'s own intermodpath insertion and VPI
+callback scheduling once the simulator actually advances past time 0 — not
+something a generated wrapper, shim, or SDF split can control from the
+outside. **Left unfixed, deliberately**: implementing a workaround for a
+mechanism this module cannot observe or control would risk papering over a
+still-unresolved entry rather than actually fixing it. Pinned down by
+`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
+(`tests/test_functional_verification.py` **[REPO]**), which must keep
+raising — a future change making it pass silently would need to *explain*
+why, not just observe the new behaviour.
+
+Both this module's own regression (finding 7/§3.6's
+`test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect`)
+and the wrapper/shim mechanism itself are unaffected by this section: no
+change to `_write_sdf_dut_wrapper`, `_write_sdf_annotate_shim`'s scope
+argument, or `_parse_toplevel_ports` was needed. `_write_sdf_annotate_shim`
+was extended to accept a list of SDF paths (one `$sdf_annotate` call per
+path, in order) rather than a single path, purely additive — a design with
+no vector top-level ports (every existing test/design prior to this issue)
+still gets exactly one call, byte-identical to before.
+
+**Deferred, deliberately not investigated here:** issue #1619 also flagged a
+"possibly-related second-order effect" — with the same non-`FUNCTIONAL`
+sources, a regression with `options.sdf` omitted entirely passes cleanly,
+but adding it back (even with only a minority of `INTERCONNECT` entries
+unresolved) turns the run into a uniform, constant-zero result on every
+case, not merely a subtly different timing outcome. The issue body itself
+asked that this not be conflated with the primary `INTERCONNECT`-count bug
+above, and this pass leaves it that way: shape (b)'s testbench-sensitivity
+(§3.7 above) shows this repo's own minimal fixtures can already reach
+Icarus-internal, `$sdf_annotate`-presence-dependent behaviour that is
+sensitive to details (a no-op test vs. a driven one) well outside SDF
+content — a plausible *adjacent* symptom of the same general fragility
+class, but reproducing the specific "constant-zero on any partial-failure
+run" shape needs a design closer to the sky130-scale one the issue's own
+run used (1927 `INTERCONNECT` entries), not a hand-written unit fixture, to
+be confident it is the same mechanism rather than a superficially similar
+one. Filed as its own follow-up rather than guessed at here — issue #1854.
+
 ---
 
 ## 4. Follow-on sketch (§4.3, Icarus half)

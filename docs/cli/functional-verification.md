@@ -124,6 +124,7 @@ synthesize` already use — and kept, never deleted:
 | `coverage.info` | lcov-format coverage, on coverage runs only (see below). |
 | `klt_sdf_annotate.v` | The generated `$sdf_annotate` elaboration root, on `options.sdf` runs only — kept, so the exact annotation call a run used is inspectable after the fact. |
 | `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
+| `klt_sdf_safe.sdf` / `klt_sdf_deferred_bus_ports.sdf` | Written only when the input SDF contains an `INTERCONNECT` entry touching a bit-selected top-level *vector* port (e.g. `y[0]`) — works around a second Icarus `INTERCONNECT`-resolution failure where such an entry can poison a same-net sibling entry annotated in the same `$sdf_annotate` call (issue #1619). `klt_sdf_safe.sdf` is the input SDF with every such entry removed (annotated first); `klt_sdf_deferred_bus_ports.sdf` holds only the removed entries (annotated second, via a later `$sdf_annotate` call in `klt_sdf_annotate.v`). Absent when the input SDF has no vector-port-touching `INTERCONNECT` entry, which is unchanged from before this issue. |
 
 ## Coverage
 
