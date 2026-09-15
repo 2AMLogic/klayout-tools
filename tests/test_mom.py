@@ -676,6 +676,65 @@ def test_run_mom_peec_loop(tmp_path):
     assert l_nh[0][0] > l_nh[0][1] > 0
 
 
+def test_run_mom_peec_accepts_cross_axis_and_offset_conductors(tmp_path):
+    """Issue #1842: conductors on different current-flow axes, of different
+    length, and axially offset -- an L-shaped loop -- used to be rejected
+    outright (`classify_shared_axis_bars`'s shared-axis/shared-span checks,
+    "a request mixing axes ... needs the general Ruehli mesh, a follow-up").
+    With the Neumann formula generalized to arbitrary filament orientation
+    and offset, this is now accepted end to end, and the two perpendicular
+    legs must report exactly zero mutual inductance (`dl1 . dl2 == 0`)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    # Leg "a" along x, length 100um; leg "b" along y, length 60um, offset
+    # away from "a" (not touching -- two distinct conductors sharing a
+    # boundary would make the *capacitance* solve's matrix singular, a
+    # separate, pre-existing restriction unrelated to this issue's PEEC/
+    # full-wave scope) -- a cross-axis, axially-offset pair, not a straight
+    # bar or a shared-axis pair.
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(2)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(120), _um(10), _um(122), _um(70))
+    )
+    gds = tmp_path / "l_shape.gds"
+    layout.write(str(gds))
+
+    spec = tmp_path / "l_shape.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "compute_inductance": True,
+                "filament_size_um": 0.5,
+                "stackup": [
+                    {
+                        "layer": "1/0",
+                        "conductor": "a",
+                        "z0_um": 0.0,
+                        "z1_um": 2.0,
+                        "conductivity_S_per_m": 5.96e7,
+                    },
+                    {
+                        "layer": "2/0",
+                        "conductor": "b",
+                        "z0_um": 0.0,
+                        "z1_um": 2.0,
+                        "conductivity_S_per_m": 5.96e7,
+                    },
+                ],
+            }
+        )
+    )
+
+    report = run_mom(str(gds), str(spec))
+    l_nh = report["inductance_matrix_nh"]
+    assert l_nh[0][0] > 0 and l_nh[1][1] > 0
+    # Perpendicular legs: the mutual term is exactly zero.
+    assert l_nh[0][1] == 0.0
+    assert l_nh[1][0] == 0.0
+
+
 def test_cli_text_output_renders_peec_fields(tmp_path, capsys):
     gds = tmp_path / "wire.gds"
     spec = tmp_path / "wire.mom.json"
@@ -759,6 +818,55 @@ def test_run_mom_full_wave_sweep(tmp_path):
         assert point["characteristic_impedance_real_ohm"] is not None
         assert point["characteristic_impedance_real_ohm"] > 0
         assert point["phase_rad_per_m"] > 0
+
+
+def test_run_mom_full_wave_accepts_cross_axis_conductors(tmp_path):
+    """Issue #1842: the full-wave retarded kernel gets the same
+    cross-axis/offset generalization as PEEC's static solve above -- an
+    L-shaped pair (perpendicular legs, no shared axial span) is accepted,
+    reports the raw impedance matrix, and -- since these two conductors do
+    not share one axis/span -- omits the derived characteristic-impedance/
+    propagation-constant fields (only meaningful for a uniform
+    transmission line)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    # Offset away from each other -- see the sibling PEEC test's comment on
+    # why two distinct conductors must not share a boundary.
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(2)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(120), _um(10), _um(122), _um(70))
+    )
+    gds = tmp_path / "l_shape.gds"
+    layout.write(str(gds))
+
+    spec = tmp_path / "l_shape.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "frequencies_hz": [1.0e9],
+                "segment_size_um": 5.0,
+                "stackup": [
+                    {"layer": "1/0", "conductor": "a", "z0_um": 0.0, "z1_um": 2.0},
+                    {"layer": "2/0", "conductor": "b", "z0_um": 0.0, "z1_um": 2.0},
+                ],
+            }
+        )
+    )
+
+    report = run_mom(str(gds), str(spec))
+    point = report["full_wave_sweep"][0]
+    z_re = point["impedance_matrix_real_ohm"]
+    assert len(z_re) == 2 and len(z_re[0]) == 2
+    # Perpendicular legs: the mutual term is exactly zero (the `dl . dl'`
+    # factor vanishes identically).
+    assert z_re[0][1] == 0.0
+    assert z_re[1][0] == 0.0
+    # No shared axial span -- the derived transmission-line fields are
+    # omitted entirely, not silently wrong.
+    assert "characteristic_impedance_real_ohm" not in point
+    assert "phase_rad_per_m" not in point
 
 
 def test_run_mom_without_frequencies_hz_omits_full_wave_fields(tmp_path):

@@ -429,31 +429,56 @@ to a single well-defined current-flow "bar":
   model and is rejected — this mirrors how the capacitance solver's own
   "Scope and limitations" documents *its* MVP simplifications rather than
   silently returning a number that doesn't mean what it looks like it means.
-- **Every conductor must share the same current-flow axis and the same
-  axial extent** (start/end coordinate along that axis). This is what lets
-  the mutual-inductance formula below (parallel, equal-length, aligned
-  filaments) apply directly; a request mixing axes, or with offset/unequal
-  bar lengths (e.g. an L-shaped loop, or two loop sides that don't line up
-  end-to-end), is rejected. The general unequal-length/off-axis Neumann
-  formula is a follow-up.
 - Every conductor must set `conductivity_S_per_m` (used for DC resistance;
   see "Spec file" above).
 
-A rectangular loop (two long, parallel, aligned bars — "Worked example:
-straight wire and loop" below) and a single straight bar both satisfy this
-scope; a coax shield, a pad, or an L-shaped trace do not (yet).
+Conductors no longer need to share a current-flow axis or an axial extent
+([issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842)) — the
+mutual-inductance formula below now handles filament pairs of arbitrary
+relative orientation and offset, not just the parallel/aligned/equal-length
+special case. A rectangular loop, a single straight bar, an L-shaped trace
+(two bars meeting at a right angle), and an offset loop (two bars of
+different length or axial position) all satisfy this scope; a coax shield
+(several boxes per conductor) or a pad (not elongated enough to have a
+well-defined current-flow axis) do not (yet).
 
 ### Method: filament bundle + Neumann's formula
 
 Each PEEC-eligible conductor's cross-section is discretised into a grid of
 filaments (target edge length `filament_size_um`), each spanning the full
-bar length. The partial mutual inductance between two parallel, equal-length,
-axially-aligned filaments separated by perpendicular distance `d` is the
-closed-form Neumann double integral:
+bar length. The partial mutual inductance between two thin filaments of
+**arbitrary relative orientation and offset**
+([issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
+generalising Grover's filament-pair result, "Inductance Calculations:
+Working Formulas and Tables", Grover 1946) is the classical Neumann double
+integral `M = (mu0/4*pi) * (u1 . u2) * integral integral ds dt / R(s,t)`,
+evaluated by one of three closed forms depending on the pair's relative
+direction:
 
-```
-M(l, d) = (mu0 / 2*pi) * l * [ asinh(l/d) - sqrt(1 + (d/l)^2) + d/l ]
-```
+- **Perpendicular** filaments (`u1 . u2 == 0`): exactly zero — the `dl1 . dl2`
+  factor vanishes identically, so a corner of an L-shaped or spiral
+  conductor contributes nothing between its two legs.
+- **Parallel/antiparallel** filaments: the exact axial double antiderivative,
+  valid for arbitrary axial offset and unequal lengths — the equal-length,
+  zero-offset case of this is exactly the classical closed form used before
+  #1842:
+
+  ```
+  M(l, d) = (mu0 / 2*pi) * l * [ asinh(l/d) - sqrt(1 + (d/l)^2) + d/l ]
+  ```
+
+- **Skew** filaments (everything else): the exact double antiderivative of
+  `1/R` in the common-perpendicular coordinate frame (Grover's general
+  filament-pair result).
+
+Like the rest of this codebase's PEEC formulas, the general closed form is
+**re-derived, not transcribed** from the literature, and checked
+independently of any inductance formula (a finite-difference check that it
+is the exact double antiderivative of the static `1/R` kernel, and a
+brute-force numerical quadrature cross-check that shares no code with the
+closed form) — see `native/mom/src/peec.rs`'s module docs for the full
+derivation, and `docs/design/mom-validation.md`'s "Why re-derived, not
+cited".
 
 A filament's own self term is computed exactly, via Hoer & Love's closed
 form for the partial inductance of a rectangular bar against itself (rather
@@ -499,11 +524,23 @@ single static R/L/C matrix to genuine frequency-swept network parameters.
 
 The full-wave solve requires the **exact same** bar-shaped-conductor
 restriction as `compute_inductance` above — every conductor reduces to a
-single well-defined bar (one box, a true 3-D elongated shape, sharing a
-common current-flow axis and axial extent with every other conductor in the
-request) — see "The bar-shaped-conductor MVP restriction" above for the
-full detail and why. This applies independent of whether
-`compute_inductance` is also set in the same request.
+single well-defined bar (one box, a true 3-D elongated shape) — see "The
+bar-shaped-conductor MVP restriction" above for the full detail and why.
+This applies independent of whether `compute_inductance` is also set in the
+same request.
+
+Since [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
+conductors no longer need to share a current-flow axis or axial extent for
+the retarded impedance matrix itself — the same generalised Neumann-style
+`dl . dl'` kernel PEEC's static solve uses (see "Method: filament bundle +
+Neumann's formula" above) extends to the retarded kernel below. The derived
+**characteristic impedance, propagation constant, and port/S-parameter**
+quantities ("The canonical structure" and "Port definition and de-embedding"
+below) remain gated on exactly two conductors that *do* share one axis and
+one axial span — those quantities are only meaningful for a uniform
+transmission line, which a cross-axis or axially-offset conductor pair is
+not. A request outside that shared span still gets the raw partial-impedance
+matrix, just not those derived fields.
 
 ### Method: retarded thin-wire partial impedance
 
@@ -511,16 +548,23 @@ Where PEEC's static solve discretises each conductor's *cross-section* into
 a filament bundle, the full-wave solve keeps each conductor as a single
 **equivalent thin wire** (radius `a_eff = sqrt(area / pi)`, the same
 "equal-area circle" convention the PEEC oracles above use) and instead
-refines the wire **axially**: its shared axial extent is subdivided into
-segments (target length `segment_size_um`), and each conductor pair's
-partial impedance is the point-collocation (Riemann-sum) approximation of
-the classical partial mutual/self impedance double integral, generalised
-from PEEC's static Neumann-formula kernel to the retarded kernel:
+refines the wire **axially**: each conductor's own axial extent is
+subdivided into segments (target length `segment_size_um`), and each
+conductor pair's partial impedance is the point-collocation (Riemann-sum)
+approximation of the classical partial mutual/self impedance double
+integral, generalised from PEEC's static Neumann-formula kernel to the
+retarded kernel:
 
 ```text
-Z_pq(omega) = j*omega*mu0/(4*pi) * integral_0^l integral_0^l
-              exp(-j*k*R(z,z')) / R(z,z') dz dz'
+Z_pq(omega) = j*omega*mu0/(4*pi) * (u_p . u_q) * integral_0^l_p integral_0^l_q
+              exp(-j*k*R(s,t)) / R(s,t) ds dt
 ```
+
+`u_p . u_q` is the `dl . dl'` factor of the vector-potential double integral
+— identically `1` under the pre-#1842 shared-axis restriction (which is why
+it never appeared before), and identically `0` for perpendicular conductors
+(so a corner of an L-shaped or spiral structure contributes nothing, exactly
+as in PEEC's static kernel above).
 
 for conductors `p`/`q` sharing axial length `l`, wavenumber
 `k = omega * sqrt(background_permittivity) / c0`. As `omega -> 0`, this
@@ -936,14 +980,19 @@ oracles), for the exact geometry and measured accuracy.
 - **PEEC inductance/resistance and the full-wave solve are both
   bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
   above's "bar-shaped-conductor MVP restriction" — a materially narrower
-  scope than the capacitance solve's (single box, true 3-D, elongated,
-  shared axis/extent across every conductor in the request). A request that
-  does not fit is rejected with a clear error naming which restriction it
-  violates, not silently approximated. The full-wave solve's derived
-  characteristic-impedance/propagation-constant fields are further
-  restricted to exactly two conductors (the canonical transmission-line
-  case); larger conductor counts still get the raw partial-impedance
-  matrix, just not those derived fields.
+  scope than the capacitance solve's (single box, true 3-D, elongated). A
+  request that does not fit is rejected with a clear error naming which
+  restriction it violates, not silently approximated. Since
+  [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
+  conductors no longer need to share a current-flow axis or axial extent —
+  a coiled/spiral winding or an L-shaped loop is in scope, provided every
+  conductor is still exactly one bar-shaped box (a multi-box conductor,
+  e.g. a coax shield's wall segments, is a separate, still-open follow-up).
+  The full-wave solve's derived characteristic-impedance/propagation-constant
+  fields are further restricted to exactly two conductors that *do* share
+  one axis and axial span (the canonical transmission-line case); a request
+  outside that still gets the raw partial-impedance matrix, just not those
+  derived fields.
 - **Full-wave solve keeps each conductor as a single equivalent thin wire.**
   Unlike PEEC's cross-section filament bundle, the full-wave solve does not
   discretise a conductor's cross-section — it uses one equal-area-circle

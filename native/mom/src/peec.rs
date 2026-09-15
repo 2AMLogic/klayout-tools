@@ -33,28 +33,76 @@
 //! extractors (e.g. FastHenry) for conductors too wide/thick to treat as a
 //! single ideal thin wire.
 //!
-//! ## Mutual terms: the thin-filament Neumann formula
+//! ## Mutual terms: the general thin-filament Neumann formula
 //!
-//! `M_ij` (`i != j`), the partial mutual inductance between two parallel,
-//! equal-length, axially-aligned *thin* filaments (exactly the geometry
-//! `discretize_bars` guarantees -- see its own doc for the alignment/length
-//! restrictions this MVP enforces), is the classical Neumann-formula double
-//! integral:
+//! `M_ij` (`i != j`) is the partial mutual inductance between two *thin*
+//! filaments, i.e. the classical Neumann double integral over their two
+//! centrelines:
 //!
 //! ```text
-//! M(l, d) = (mu0 / 4*pi) * integral_0^l integral_0^l dz1 dz2 / sqrt((z1-z2)^2 + d^2)
-//!         = (mu0 / 2*pi) * l * [ asinh(l/d) - sqrt(1 + (d/l)^2) + d/l ]
+//! M = (mu0 / 4*pi) * integral integral (dl1 . dl2) / R
+//!   = (mu0 / 4*pi) * (u1 . u2) * integral_0^l1 integral_0^l2 ds dt / R(s, t)
 //! ```
 //!
-//! for two filaments of length `l`, separated by perpendicular distance `d`.
-//! This was independently re-derived here from the first-principles Neumann
-//! double integral and checked to be an exact closed form via symbolic
-//! integration (`sympy`); see #797's PR description for the verification
-//! transcript. It needs no external citation to trust: it is the exact
-//! evaluation of the definition of partial mutual inductance in the
-//! thin-filament (zero-cross-section) limit, and `discretize_bars`'s
-//! filament grid keeps every *pair* of distinct filaments well separated
-//! relative to their own cross-section, where that limit is accurate.
+//! for straight filaments `P1(s) = A1 + s*u1` and `P2(t) = A2 + t*u2` with
+//! unit directions `u1`, `u2` and `R(s,t) = |P1(s) - P2(t)|`. `mutual_geom_um`
+//! below evaluates the inner double integral (the "geometric factor", um) for
+//! filament pairs of **arbitrary relative orientation and offset** (issue
+//! #1842, increment (ii) of `docs/design/mom-general-conductor-geometry.md`).
+//! Until then the only case implemented was the parallel/aligned/equal-length
+//! special case `M(l, d) = (mu0 / 2*pi) * l * [asinh(l/d) - sqrt(1+(d/l)^2) +
+//! d/l]`, which is why `geometry::classify_shared_axis_bars` had to reject
+//! cross-axis and axially-offset requests outright.
+//!
+//! Three regimes, dispatched on the pair's relative direction:
+//!
+//! 1. **Perpendicular** (`u1 . u2 == 0`): exactly zero, no arithmetic needed
+//!    -- the `dl1 . dl2` factor vanishes identically. (Every cross-axis pair
+//!    in an axis-aligned layout lands here, e.g. the corners of a square
+//!    spiral.)
+//! 2. **Parallel / antiparallel** (`|u1 x u2|` at or below
+//!    `PARALLEL_SIN_TOL`): `axial_filament_um` below, the *exact* double
+//!    antiderivative of the axial thin-filament kernel, already valid for
+//!    arbitrary axial offset and unequal lengths -- it is the equal-length,
+//!    zero-offset case of that same function that reproduces the classical
+//!    closed form above.
+//! 3. **Skew** (everything else): `skew_antiderivative` below, the exact
+//!    double antiderivative `F(s,t)` of `1/R` after shifting `s`/`t` to the
+//!    feet of the two lines' common perpendicular, which puts `R` in the
+//!    canonical form `R^2 = d^2 + s^2 + t^2 - 2*s*t*cos(theta)`:
+//!
+//! ```text
+//! F(s,t) = t*asinh((s - t*cos)/rho_t) + s*asinh((t - s*cos)/rho_s)
+//!          - (d/sin) * atan((sin^2*s*t + d^2*cos) / (d*sin*R))
+//! rho_s = sqrt(sin^2*s^2 + d^2),  rho_t = sqrt(sin^2*t^2 + d^2)
+//! ```
+//!
+//! **The closed form is not taken on trust.** It is Grover's general
+//! filament-pair result, but it is *re-derived* here rather than
+//! transcribed (the #797/#836 discipline -- see
+//! `docs/design/mom-validation.md`'s "Why re-derived, not cited"). The
+//! derivation is short enough to state: the two `asinh` terms differentiate
+//! to `1/R + d^2/R^3` (each `asinh` term's first mixed derivative is
+//! `s/R`/`t/R`, and `s*(s - t*cos) + t*(t - s*cos) = R^2 - d^2`), and the
+//! `atan` term supplies exactly the missing `-d^2/R^3` -- its numerator and
+//! denominator satisfy `N^2 + D^2 = rho_s^2 * rho_t^2`, which is what makes
+//! `d/ds atan(N/D) = sin*d*(t - s*cos)/(rho_s^2 * R)` collapse. Two tests
+//! check the result independently of any inductance formula:
+//! `skew_antiderivative_is_the_double_antiderivative_of_the_static_kernel`
+//! finite-differences `d^2 F / ds dt` against `1/R` (the *defining*
+//! property, the same technique `hoer_love_f` is checked by), and
+//! `skew_formula_matches_brute_force_quadrature` compares whole filament
+//! pairs against a plain 2-D Gauss-Legendre quadrature that shares no code
+//! with the closed form. `skew_formula_reduces_to_the_parallel_closed_form`
+//! is the regression the generalization must satisfy: the degenerate
+//! parallel/aligned/equal-length case still reproduces the specific formula
+//! it replaces.
+//!
+//! The thin-filament (zero-cross-section) limit itself is unchanged, and is
+//! still what makes this exact rather than approximate:
+//! `discretize_bars`'s filament grid keeps every *pair* of distinct
+//! filaments well separated relative to their own cross-section, where that
+//! limit is accurate.
 //!
 //! ## Self terms: the exact rectangular-bar closed form
 //!
@@ -126,7 +174,7 @@
 //! formulation above.
 
 use crate::contract::ConductorRequest;
-use crate::geometry::{BarLayout, AXIS_NAMES};
+use crate::geometry::{BarLayout, Filament};
 
 /// Vacuum permeability, H/m. Exact by definition under the pre-2019 SI
 /// (`4*pi*1e-7` exactly); post-2019 it is a measured quantity that differs
@@ -156,24 +204,158 @@ const GAUSS3_NODES: [f64; 3] = [-0.774_596_669_241_483_4, 0.0, 0.774_596_669_241
 /// so they sum to 1 and the rule computes an *average* over the interval.
 const GAUSS3_WEIGHTS: [f64; 3] = [5.0 / 18.0, 8.0 / 18.0, 5.0 / 18.0];
 
-/// Partial mutual inductance (henries) between two parallel, equal-length,
-/// axially-aligned *thin* filaments of length `length_m`, separated by
-/// perpendicular distance `distance_m` (both in meters) -- the closed-form
-/// Neumann double integral; see module docs. `distance_m` must be strictly
-/// positive. Not used for a filament's own self term -- see
-/// `self_partial_inductance_nh`.
-fn mutual_inductance_h(length_m: f64, distance_m: f64) -> f64 {
-    let ratio = length_m / distance_m;
-    let inv_ratio = distance_m / length_m;
-    MU0_H_PER_M / (2.0 * std::f64::consts::PI)
-        * length_m
-        * (ratio.asinh() - (1.0 + inv_ratio * inv_ratio).sqrt() + inv_ratio)
+/// `|u1 x u2|` at or below which a filament pair is treated as
+/// parallel/antiparallel and routed to `axial_filament_um` rather than the
+/// skew closed form (see module docs' three regimes).
+///
+/// Both branches are accurate well past this crossover, from opposite
+/// directions, which is what makes the threshold safe rather than a tuned
+/// fudge:
+///
+/// - The **skew** form shifts `s`/`t` to the feet of the common
+///   perpendicular, whose distance from the segments grows like
+///   `1/sin^2(theta)`; the resulting cancellation costs roughly
+///   `eps * offset / (sin^2 * length)` relative accuracy. Measured against
+///   brute-force quadrature on a deliberately adversarial fixture (140um and
+///   100um filaments, 0.5um apart, 37um axially offset): `4e-15` at
+///   `sin = 1e-1`, `1.3e-11` at `1e-3`, `1.5e-8` at `1e-4`.
+/// - The **parallel** form's modelling error is the ignored misalignment,
+///   `O((sin * length / separation)^2)`: on the same fixture `4.4e-4` at
+///   `sin = 1e-3`, `4.4e-6` at `1e-4`, `4.4e-8` at `1e-5`.
+///
+/// `1e-4` sits where both are at or below ~1e-5; the two branches are
+/// checked against each other at exactly this crossover by
+/// `skew_and_parallel_branches_agree_at_the_crossover`, the same
+/// "the switch is not a discontinuity" guarantee
+/// `far_field_and_closed_form_agree_at_the_crossover` gives the far-field
+/// branch. In practice nothing near the crossover ever arises from a real
+/// request: `BoxRequest` is axis-aligned, so a filament pair's
+/// `|u1 x u2|` is exactly `0` or exactly `1`.
+const PARALLEL_SIN_TOL: f64 = 1e-4;
+
+/// Separation (um) below which two *parallel* filaments whose axial spans
+/// also overlap are rejected as unphysical -- the thin-filament kernel
+/// genuinely diverges there (two conductors occupying the same space).
+const COINCIDENT_TOL_UM: f64 = 1e-9;
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn transverse_distance_um(a: [f64; 2], b: [f64; 2]) -> f64 {
-    let du = a[0] - b[0];
-    let dv = a[1] - b[1];
-    (du * du + dv * dv).sqrt()
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn norm3(a: [f64; 3]) -> f64 {
+    dot3(a, a).sqrt()
+}
+
+fn scale3(a: [f64; 3], k: f64) -> [f64; 3] {
+    [a[0] * k, a[1] * k, a[2] * k]
+}
+
+/// The Neumann *geometric factor* (um) between two distinct thin filaments of
+/// arbitrary relative orientation and offset:
+/// `(u1 . u2) * int_0^l1 int_0^l2 ds dt / R(s, t)`.
+///
+/// Multiply by `GEOM_UM_TO_NH` for nanohenries. See module docs for the three
+/// regimes and for the derivation of the skew closed form. Not used for a
+/// filament's own self term -- see `self_partial_inductance_nh`.
+fn mutual_geom_um(a: &Filament, b: &Filament) -> Result<f64, String> {
+    let v1 = sub3(a.end_um, a.start_um);
+    let v2 = sub3(b.end_um, b.start_um);
+    let (l1, l2) = (norm3(v1), norm3(v2));
+    if l1 <= 0.0 || l2 <= 0.0 {
+        return Err(
+            "PEEC filament has zero length -- check for degenerate conductor geometry".to_string(),
+        );
+    }
+    let u1 = scale3(v1, 1.0 / l1);
+    let u2 = scale3(v2, 1.0 / l2);
+    let cos = dot3(u1, u2);
+    if cos == 0.0 {
+        // Perpendicular filaments: `dl1 . dl2` vanishes identically, so the
+        // mutual term is exactly zero however close they are.
+        return Ok(0.0);
+    }
+    let normal = cross3(u1, u2);
+    let sin = norm3(normal).min(1.0);
+
+    if sin <= PARALLEL_SIN_TOL {
+        // Parallel / antiparallel: project filament `b` onto `a`'s own axis
+        // and use the exact axial double antiderivative, which already
+        // handles unequal lengths and arbitrary axial offset.
+        let w = sub3(b.start_um, a.start_um);
+        let axial = dot3(w, u1);
+        let rho = (dot3(w, w) - axial * axial).max(0.0).sqrt();
+        let beta_other = axial + dot3(v2, u1);
+        let (b0, b1) = if axial <= beta_other {
+            (axial, beta_other)
+        } else {
+            (beta_other, axial)
+        };
+        if rho < COINCIDENT_TOL_UM && b0 < l1 - COINCIDENT_TOL_UM && b1 > COINCIDENT_TOL_UM {
+            return Err(
+                "PEEC filaments coincide (two parallel filaments at zero separation with \
+                 overlapping axial spans) -- overlapping conductor geometry is not physical"
+                    .to_string(),
+            );
+        }
+        return Ok(cos * axial_filament_um(0.0, l1, b0, b1, rho));
+    }
+
+    // Skew: shift both parameters to the feet of the common perpendicular.
+    let w = sub3(a.start_um, b.start_um);
+    let wa = dot3(w, u1);
+    let wb = dot3(w, u2);
+    let sin2 = sin * sin;
+    let s0 = (wb * cos - wa) / sin2;
+    let t0 = (wb - wa * cos) / sin2;
+    // `|W . n_hat|` rather than `|W + s0*u1 - t0*u2|`: algebraically identical
+    // (that vector *is* the common perpendicular) but free of the
+    // cancellation the large `s0`/`t0` shift would otherwise introduce.
+    let d = (dot3(w, normal) / sin).abs();
+    let f = |s: f64, t: f64| skew_antiderivative(s, t, d, cos, sin);
+    let (s1, s2) = (-s0, l1 - s0);
+    let (t1, t2) = (-t0, l2 - t0);
+    Ok(cos * (f(s2, t2) - f(s2, t1) - f(s1, t2) + f(s1, t1)))
+}
+
+/// `F(s, t)`, the exact double antiderivative of `1/R` for two skew
+/// filaments in common-perpendicular coordinates:
+/// `R^2 = d^2 + s^2 + t^2 - 2*s*t*cos`, `sin = sqrt(1 - cos^2) > 0`.
+/// `d^2 F / ds dt == 1/R`; see module docs for the derivation and
+/// `skew_antiderivative_is_the_double_antiderivative_of_the_static_kernel`
+/// for the finite-difference check of exactly that property.
+fn skew_antiderivative(s: f64, t: f64, d: f64, cos: f64, sin: f64) -> f64 {
+    let r = (d * d + s * s + t * t - 2.0 * s * t * cos).max(0.0).sqrt();
+    let rho_s = (sin * s).hypot(d);
+    let rho_t = (sin * t).hypot(d);
+    let mut acc = 0.0;
+    if rho_t > 0.0 {
+        acc += t * ((s - t * cos) / rho_t).asinh();
+    }
+    if rho_s > 0.0 {
+        acc += s * ((t - s * cos) / rho_s).asinh();
+    }
+    if d > 0.0 {
+        // `atan2` rather than `atan(N / D)`: the denominator `d*sin*R` is
+        // non-negative by construction, so this is the same principal value,
+        // but it stays finite as `D -> 0` (grazing filaments) instead of
+        // dividing by zero.
+        let numerator = sin * sin * s * t + d * d * cos;
+        let denominator = d * sin * r;
+        acc -= d / sin * numerator.atan2(denominator);
+    }
+    acc
 }
 
 // --- exact rectangular-bar self term (Hoer & Love) --------------------------
@@ -433,40 +615,29 @@ pub fn solve_inductance_matrix_nh(
     layout: &BarLayout,
     conductor_count: usize,
 ) -> Result<Vec<Vec<f64>>, String> {
-    let length_m = layout.length_um * 1e-6;
-    let mut sum_h = vec![vec![0.0_f64; conductor_count]; conductor_count];
+    let mut sum_nh = vec![vec![0.0_f64; conductor_count]; conductor_count];
     let mut pair_count = vec![vec![0.0_f64; conductor_count]; conductor_count];
 
     for (i, fi) in layout.filaments.iter().enumerate() {
         for (j, fj) in layout.filaments.iter().enumerate() {
-            let term_h = if i == j {
-                self_partial_inductance_nh(layout.length_um, fi.extent_um[0], fi.extent_um[1])
-                    * 1e-9
+            let term_nh = if i == j {
+                self_partial_inductance_nh(fi.length_um(), fi.extent_um[0], fi.extent_um[1])
             } else {
-                let d_um = transverse_distance_um(fi.transverse_um, fj.transverse_um);
-                if d_um < 1e-9 {
-                    return Err(format!(
-                        "PEEC filaments coincide (zero separation transverse to the shared \
-                         {} current-flow axis) -- overlapping conductor geometry is not \
-                         physical",
-                        AXIS_NAMES[layout.axis]
-                    ));
-                }
-                mutual_inductance_h(length_m, d_um * 1e-6)
+                GEOM_UM_TO_NH * mutual_geom_um(fi, fj)?
             };
-            sum_h[fi.conductor_index][fj.conductor_index] += term_h;
+            sum_nh[fi.conductor_index][fj.conductor_index] += term_nh;
             pair_count[fi.conductor_index][fj.conductor_index] += 1.0;
         }
     }
 
     let mut inductance_nh = vec![vec![0.0_f64; conductor_count]; conductor_count];
-    for (row_sum, (row_count, row_out)) in sum_h
+    for (row_sum, (row_count, row_out)) in sum_nh
         .iter()
         .zip(pair_count.iter().zip(inductance_nh.iter_mut()))
     {
         for ((&s, &n), out) in row_sum.iter().zip(row_count.iter()).zip(row_out.iter_mut()) {
             if n > 0.0 {
-                *out = s / n * 1e9;
+                *out = s / n;
             }
         }
     }
@@ -486,7 +657,10 @@ pub fn solve_inductance_matrix_nh(
 /// cross_sectional_area)` (Ohm's law -- exact, not asymptotic). The
 /// cross-sectional area is summed directly from `layout`'s filament areas
 /// (rather than re-derived from the original box), so resistance is always
-/// consistent with exactly the geometry the inductance solve used.
+/// consistent with exactly the geometry the inductance solve used. Since
+/// issue #1842 each conductor carries its own bar length, so a request whose
+/// conductors differ in length gets a per-conductor `R`, not one shared
+/// length for all of them.
 pub fn resistance_ohm(
     layout: &BarLayout,
     conductors: &[ConductorRequest],
@@ -497,7 +671,6 @@ pub fn resistance_ohm(
         area_um2[f.conductor_index] += f.area_um2;
     }
 
-    let length_m = layout.length_um * 1e-6;
     let mut resistance = vec![0.0_f64; conductor_count];
     for (index, conductor) in conductors.iter().enumerate() {
         let sigma = conductor.conductivity_s_per_m.ok_or_else(|| {
@@ -515,6 +688,7 @@ pub fn resistance_ohm(
             ));
         }
         let area_m2 = area_um2[index] * 1e-12;
+        let length_m = layout.conductor_length_um[index] * 1e-6;
         resistance[index] = length_m / (sigma * area_m2);
     }
     Ok(resistance)
@@ -1017,6 +1191,380 @@ mod tests {
             error < 1e-4,
             "self term {computed} nH vs asymptote {oracle} nH, rel.err {error:.3e} -- a \
              far-field misfire would show up as ~6.3% low, not this"
+        );
+    }
+
+    // --- generalized filament-pair formula (issue #1842) -------------------
+    //
+    // `mutual_geom_um` generalizes the Neumann mutual-inductance formula from
+    // parallel/aligned/equal-length filament pairs to arbitrary relative
+    // orientation and offset (module docs' "Mutual terms" section). These
+    // tests check the generalization the same way the rest of this module
+    // checks a closed form: independently of any inductance formula
+    // (`skew_antiderivative_is_the_double_antiderivative_of_the_static_kernel`,
+    // the defining-property check), against a from-scratch numerical
+    // quadrature that shares no code with the closed form
+    // (`skew_formula_matches_brute_force_quadrature`), and as a strict-
+    // superset regression against the specific formula it replaces
+    // (`skew_formula_reduces_to_the_parallel_closed_form`, the "Regression
+    // against the existing analytic two-parallel-bars case" oracle
+    // `docs/design/mom-general-conductor-geometry.md`'s increment (ii)
+    // requires).
+
+    fn filament(start_um: [f64; 3], end_um: [f64; 3]) -> Filament {
+        Filament {
+            conductor_index: 0,
+            start_um,
+            end_um,
+            area_um2: 1.0,
+            extent_um: [1.0, 1.0],
+        }
+    }
+
+    /// Central second mixed difference of `f`, approximating `d^2 f / ds dt`.
+    fn second_mixed_difference(f: impl Fn(f64, f64) -> f64, s: f64, t: f64, h: f64) -> f64 {
+        (f(s + h, t + h) - f(s + h, t - h) - f(s - h, t + h) + f(s - h, t - h)) / (4.0 * h * h)
+    }
+
+    #[test]
+    fn skew_antiderivative_is_the_double_antiderivative_of_the_static_kernel() {
+        // `skew_antiderivative`'s defining property: `d^2 F / ds dt == 1/R`,
+        // `R = sqrt(d^2 + s^2 + t^2 - 2*s*t*cos)`. Checked at a handful of
+        // (d, theta) pairs and (s, t) points -- including negative s/t,
+        // which the common-perpendicular shift in `mutual_geom_um` produces
+        // routinely -- independently of any inductance formula, the same
+        // technique `f_is_the_sixfold_antiderivative_of_the_static_kernel`
+        // uses for the self-term closed form.
+        let h = 1e-2;
+        for (d, theta) in [(5.0_f64, 1.0_f64), (2.0, 0.3), (0.5, 2.0), (10.0, 1.5)] {
+            let (cos, sin) = (theta.cos(), theta.sin());
+            for (s, t) in [
+                (-3.0, 4.0),
+                (2.0, -1.0),
+                (7.0, 7.0),
+                (0.1, 0.1),
+                (-6.0, -2.0),
+            ] {
+                let numeric =
+                    second_mixed_difference(|s, t| skew_antiderivative(s, t, d, cos, sin), s, t, h);
+                let r = (d * d + s * s + t * t - 2.0 * s * t * cos).sqrt();
+                let exact = 1.0 / r;
+                assert_relative_eq!(numeric, exact, max_relative = 1e-4);
+            }
+        }
+    }
+
+    /// `mutual_geom_um`'s raw double integral
+    /// `(u1 . u2) * int_0^l1 int_0^l2 ds dt / R(s, t)`, evaluated by a
+    /// from-scratch 2-D Gauss-Legendre quadrature over the filaments'
+    /// parametrisations directly -- shares no code with `mutual_geom_um`'s
+    /// closed form (no `skew_antiderivative`, no branch dispatch).
+    fn brute_force_mutual_geom_um(a: &Filament, b: &Filament) -> f64 {
+        let v1 = sub3(a.end_um, a.start_um);
+        let v2 = sub3(b.end_um, b.start_um);
+        let (l1, l2) = (norm3(v1), norm3(v2));
+        let u1 = scale3(v1, 1.0 / l1);
+        let u2 = scale3(v2, 1.0 / l2);
+        let cos = dot3(u1, u2);
+        let (nodes, weights) = gauss_legendre(60);
+        let mut acc = 0.0;
+        for (i, &ns) in nodes.iter().enumerate() {
+            let s = 0.5 * l1 * (1.0 + ns);
+            let p1 = [
+                a.start_um[0] + u1[0] * s,
+                a.start_um[1] + u1[1] * s,
+                a.start_um[2] + u1[2] * s,
+            ];
+            for (j, &nt) in nodes.iter().enumerate() {
+                let t = 0.5 * l2 * (1.0 + nt);
+                let p2 = [
+                    b.start_um[0] + u2[0] * t,
+                    b.start_um[1] + u2[1] * t,
+                    b.start_um[2] + u2[2] * t,
+                ];
+                let r = norm3(sub3(p1, p2));
+                acc += weights[i] * weights[j] / r;
+            }
+        }
+        // Weights average over each interval -- scale back up to the actual
+        // integral over [0, l1] x [0, l2].
+        cos * acc * l1 * l2
+    }
+
+    /// A genuinely skew filament pair, parametrised directly by the pair's
+    /// relative angle (`sin_theta`), perpendicular separation `d_um`, and
+    /// axial offset -- filament `a` fixed along +x from the origin, filament
+    /// `b` rotated by `theta` in the xy-plane and offset by `d_um` along z
+    /// (so `d_um` is exactly the common-perpendicular distance: both
+    /// directions lie in the xy-plane, so z is perpendicular to both).
+    fn skew_filament_pair(
+        l1_um: f64,
+        l2_um: f64,
+        sin_theta: f64,
+        d_um: f64,
+        axial_offset_um: f64,
+    ) -> (Filament, Filament) {
+        let theta = sin_theta.asin();
+        let a = filament([0.0, 0.0, 0.0], [l1_um, 0.0, 0.0]);
+        let u2 = [theta.cos(), theta.sin(), 0.0];
+        let b_start = [axial_offset_um, 0.0, d_um];
+        let b_end = [
+            b_start[0] + u2[0] * l2_um,
+            b_start[1] + u2[1] * l2_um,
+            b_start[2] + u2[2] * l2_um,
+        ];
+        (a, filament(b_start, b_end))
+    }
+
+    #[test]
+    fn skew_formula_matches_brute_force_quadrature() {
+        // A deliberately generic skew pair: unequal lengths, a ~35 degree
+        // relative angle (well clear of both the perpendicular and parallel
+        // special cases), a modest offset and separation.
+        let (a, b) = skew_filament_pair(140.0, 90.0, 0.57, 12.0, 37.0);
+        let closed_form = mutual_geom_um(&a, &b).unwrap();
+        let brute_force = brute_force_mutual_geom_um(&a, &b);
+        println!(
+            "skew mutual geometric factor: closed form {closed_form:.9} um, brute-force \
+             quadrature {brute_force:.9} um"
+        );
+        assert_relative_eq!(closed_form, brute_force, max_relative = 1e-8);
+    }
+
+    #[test]
+    fn skew_formula_reduces_to_the_parallel_closed_form() {
+        // The required regression (`docs/design/mom-general-conductor-geometry.md`'s
+        // increment (ii) validation oracle #2): for a parallel, aligned,
+        // equal-length... here, exactly parallel and aligned but at a
+        // distinct (l, d) from every other fixture in this file, so this is
+        // a dedicated check of `mutual_geom_um` itself, not a reuse of an
+        // existing self/far-field fixture -- filament pair, the general
+        // formula must reproduce Grover's classical closed form to the same
+        // `max_relative = 1e-6` this module already validates that formula
+        // to.
+        let (l, d) = (250.0_f64, 30.0_f64);
+        let a = filament([0.0, 0.0, 0.0], [l, 0.0, 0.0]);
+        let b = filament([0.0, d, 0.0], [l, d, 0.0]);
+
+        let computed_nh = GEOM_UM_TO_NH * mutual_geom_um(&a, &b).unwrap();
+        let classical_geom = 2.0 * (l * (l / d).asinh() - (l * l + d * d).sqrt() + d);
+        let classical_nh = GEOM_UM_TO_NH * classical_geom;
+
+        assert_relative_eq!(computed_nh, classical_nh, max_relative = 1e-6);
+    }
+
+    #[test]
+    fn skew_and_parallel_branches_agree_at_the_crossover() {
+        // The adversarial fixture from `PARALLEL_SIN_TOL`'s own module docs
+        // (140um and 100um filaments, 0.5um apart, 37um axially offset),
+        // evaluated on both sides of the crossover -- confirming the branch
+        // switch is not a discontinuity, the same guarantee
+        // `far_field_and_closed_form_agree_at_the_crossover` gives the
+        // self-term branch switch.
+        let just_above = PARALLEL_SIN_TOL * 1.5;
+        let just_below = PARALLEL_SIN_TOL * 0.5;
+        let (a1, b1) = skew_filament_pair(140.0, 100.0, just_above, 0.5, 37.0);
+        let (a2, b2) = skew_filament_pair(140.0, 100.0, just_below, 0.5, 37.0);
+
+        let skew_side = mutual_geom_um(&a1, &b1).unwrap();
+        let parallel_side = mutual_geom_um(&a2, &b2).unwrap();
+        let rel_err = (skew_side - parallel_side).abs() / skew_side.abs();
+        println!(
+            "crossover: skew-branch {skew_side:.9} um (sin={just_above:e}) vs \
+             parallel-branch {parallel_side:.9} um (sin={just_below:e}), rel.err {rel_err:e}"
+        );
+        assert!(
+            rel_err < 1e-3,
+            "the two branches should agree tightly right at the crossover, got rel.err {rel_err:e}"
+        );
+    }
+
+    #[test]
+    fn perpendicular_filaments_have_exactly_zero_mutual_term() {
+        // Every cross-axis pair in an axis-aligned layout (e.g. the corners
+        // of a square spiral) lands here: `dl1 . dl2` vanishes identically,
+        // however close the filaments are.
+        let a = filament([0.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
+        let b = filament([50.0, 0.0, 0.0], [50.0, 80.0, 0.0]);
+        assert_eq!(mutual_geom_um(&a, &b).unwrap(), 0.0);
+    }
+
+    // --- spiral fixture: multi-segment, cross-axis, offset structure -------
+    //
+    // A square spiral is the canonical geometry this issue exists to unlock
+    // (`docs/design/mom-general-conductor-geometry.md`'s "A coiled/spiral
+    // on-chip inductor ... fails this classification"). `FastHenry` is
+    // apt-installable on Debian/Ubuntu and so could run in CI (tracked by
+    // #1886, mirroring the NEC2++ oracle step the mom CI leg already has),
+    // but it is not reachable from the network-less builder sandbox this
+    // increment was written in, so the oracle here is the same *method*
+    // FastHenry uses -- filament-based PEEC, Grover's general filament-pair
+    // formula --
+    // independently re-implemented from scratch (a single centreline
+    // filament per segment, `brute_force_mutual_geom_um`'s from-scratch
+    // quadrature for every segment pair, and Rosa's closed form for each
+    // segment's own self term, the same independent-of-`peec.rs` self-term
+    // oracle `straight_bar_self_inductance_matches_rosa_closed_form` already
+    // uses above), rather than a literal comparison against the FastHenry
+    // binary. That is a cross-check of the new physics, not a substitute for
+    // #1842's named oracle: literal FastHenry cross-validation stays an open
+    // gap, tracked by #1886 (and by #895 for the full-wave sweep's identical
+    // gap) -- see `docs/design/mom-validation.md` section 5 and its "What is
+    // not validated here".
+
+    /// A right-angle square spiral's segment endpoints (centreline), for
+    /// `turns` complete turns (`4 * turns` segments), starting side length
+    /// `start_len_um`, growing by `pitch_um` after every two segments -- the
+    /// standard non-self-intersecting square-spiral construction -- in the
+    /// z=0 plane. Segments are in winding order, so each segment's direction
+    /// (`end - start`) is the physical current-flow direction around the
+    /// spiral.
+    fn square_spiral_segments(
+        turns: usize,
+        start_len_um: f64,
+        pitch_um: f64,
+    ) -> Vec<([f64; 2], [f64; 2])> {
+        let directions = [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]];
+        let mut pos = [0.0_f64, 0.0];
+        let mut len = start_len_um;
+        let mut segments = Vec::new();
+        for k in 0..(turns * 4) {
+            let dir = directions[k % 4];
+            let next = [pos[0] + dir[0] * len, pos[1] + dir[1] * len];
+            segments.push((pos, next));
+            pos = next;
+            if k % 2 == 1 {
+                len += pitch_um;
+            }
+        }
+        segments
+    }
+
+    /// One spiral segment as a `(box, sign)` pair: `sign` is `+1` when the
+    /// segment's physical winding direction (`end - start` above) already
+    /// matches the box's assigned low-to-high filament direction (every
+    /// `discretize_bars` filament runs from a box's axial low coordinate to
+    /// its high coordinate, regardless of which end the caller called `x0`
+    /// vs `x1`), and `-1` when the winding direction is the reverse of that
+    /// (the square spiral's "west"/"south" legs) -- the same external sign
+    /// correction the "go"/"return" loop fixtures elsewhere in this module
+    /// apply via `L[0][0] + L[1][1] - 2*L[0][1]`, generalised to more than
+    /// two segments.
+    fn spiral_segment_box(
+        start: [f64; 2],
+        end: [f64; 2],
+        w_um: f64,
+        t_um: f64,
+    ) -> (BoxRequest, f64) {
+        if (end[0] - start[0]).abs() > (end[1] - start[1]).abs() {
+            let sign = if end[0] > start[0] { 1.0 } else { -1.0 };
+            (
+                BoxRequest {
+                    x0_um: start[0].min(end[0]),
+                    x1_um: start[0].max(end[0]),
+                    y0_um: start[1] - w_um / 2.0,
+                    y1_um: start[1] + w_um / 2.0,
+                    z0_um: 0.0,
+                    z1_um: t_um,
+                },
+                sign,
+            )
+        } else {
+            let sign = if end[1] > start[1] { 1.0 } else { -1.0 };
+            (
+                BoxRequest {
+                    x0_um: start[0] - w_um / 2.0,
+                    x1_um: start[0] + w_um / 2.0,
+                    y0_um: start[1].min(end[1]),
+                    y1_um: start[1].max(end[1]),
+                    z0_um: 0.0,
+                    z1_um: t_um,
+                },
+                sign,
+            )
+        }
+    }
+
+    /// A box's centreline as a single filament, in the same low-to-high
+    /// convention `discretize_bars` uses (see `spiral_segment_box`'s docs).
+    fn box_centerline(b: &BoxRequest) -> Filament {
+        let (x0, x1) = (b.x0_um.min(b.x1_um), b.x0_um.max(b.x1_um));
+        let (y0, y1) = (b.y0_um.min(b.y1_um), b.y0_um.max(b.y1_um));
+        let (z0, z1) = (b.z0_um.min(b.z1_um), b.z0_um.max(b.z1_um));
+        let zc = 0.5 * (z0 + z1);
+        if (x1 - x0) > (y1 - y0) {
+            let yc = 0.5 * (y0 + y1);
+            filament([x0, yc, zc], [x1, yc, zc])
+        } else {
+            let xc = 0.5 * (x0 + x1);
+            filament([xc, y0, zc], [xc, y1, zc])
+        }
+    }
+
+    #[test]
+    fn square_spiral_inductance_matches_independent_filament_oracle() {
+        let (w_um, t_um) = (2.0_f64, 2.0_f64);
+        let segments = square_spiral_segments(2, 60.0, 15.0); // 2 turns, 8 segments
+        let boxes_and_signs: Vec<(BoxRequest, f64)> = segments
+            .iter()
+            .map(|&(start, end)| spiral_segment_box(start, end, w_um, t_um))
+            .collect();
+
+        let conductors: Vec<ConductorRequest> = boxes_and_signs
+            .iter()
+            .enumerate()
+            .map(|(i, (b, _))| bar_conductor(&format!("seg{i}"), None, *b))
+            .collect();
+        let signs: Vec<f64> = boxes_and_signs.iter().map(|(_, s)| *s).collect();
+        let n = conductors.len();
+
+        // Production path: the real filament-bundle PEEC solve.
+        let layout = discretize_bars(&conductors, 1.0).unwrap();
+        let l_nh = solve_inductance_matrix_nh(&layout, n).unwrap();
+        let mut total_nh = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                total_nh += signs[i] * signs[j] * l_nh[i][j];
+            }
+        }
+
+        // Independent oracle: each segment as a single centreline filament
+        // (no cross-section bundle averaging), Rosa's closed form for each
+        // segment's own self term, and `brute_force_mutual_geom_um`'s
+        // from-scratch quadrature (no `mutual_geom_um`/`skew_antiderivative`
+        // in this path at all) for every distinct pair.
+        let centerlines: Vec<Filament> = boxes_and_signs
+            .iter()
+            .map(|(b, _)| box_centerline(b))
+            .collect();
+        let mut oracle_nh = 0.0;
+        let a_eq_m = (w_um * t_um * 1e-12 / PI).sqrt();
+        for i in 0..n {
+            let length_m = centerlines[i].length_um() * 1e-6;
+            oracle_nh += rosa_self_inductance_h(length_m, a_eq_m) * 1e9;
+            for j in (i + 1)..n {
+                let geom_um = brute_force_mutual_geom_um(&centerlines[i], &centerlines[j]);
+                oracle_nh += 2.0 * signs[i] * signs[j] * GEOM_UM_TO_NH * geom_um;
+            }
+        }
+
+        let rel_err = (total_nh - oracle_nh).abs() / oracle_nh;
+        println!(
+            "\n2-turn square spiral: klt mom PEEC total {total_nh:.6} nH vs independent \
+             single-filament FastHenry-method oracle {oracle_nh:.6} nH, rel.err {:.4}%",
+            rel_err * 100.0
+        );
+        assert!(total_nh > 0.0, "spiral self-inductance must be positive");
+        // Stated tolerance 2% (measured: 0.054%) -- looser than the measured
+        // value to leave headroom, matching this module's convention
+        // elsewhere (e.g. `loop_inductance_matches_two_wire_transmission_line_formula`'s
+        // 5%-stated/0.76%-measured band).
+        assert!(
+            rel_err < 0.02,
+            "spiral total inductance {total_nh} nH vs independent oracle {oracle_nh} nH, \
+             rel.err {:.4}% exceeds the 2% tolerance (the oracle uses a coarser \
+             single-filament-per-segment approximation, no cross-section bundle averaging)",
+            rel_err * 100.0
         );
     }
 }
