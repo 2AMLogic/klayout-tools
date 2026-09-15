@@ -1336,6 +1336,467 @@ def test_run_sim_stubbed_plausible_timeout_omits_preflight_warning(
     assert "timeout_preflight_warning" not in report["environment"]
 
 
+# --------------------------------------------------------------------------- #
+# Two-pass fail-fast probe (issue #1694)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_tran_window_parses_step_and_window():
+    parsed = sim._parse_tran_window({"kind": "tran", "args": "1n 100u"})
+    assert parsed == ("1n", "100u", pytest.approx(1e-9), pytest.approx(100e-6))
+
+
+def test_parse_tran_window_none_for_non_tran_analysis():
+    assert sim._parse_tran_window({"kind": "ac", "args": "dec 10 1 1meg"}) is None
+
+
+def test_parse_tran_window_none_for_unparseable_args():
+    assert sim._parse_tran_window({"kind": "tran", "args": "not-a-number"}) is None
+
+
+def test_probe_window_and_timeout_scales_from_window_and_timeout():
+    # timeout_s=200 -> 200 * 0.1 = 20s, comfortably between the floor (1s)
+    # and the cap (60s), so the plain fraction applies unmodified.
+    probe_window_s, probe_timeout_s = sim._probe_window_and_timeout(
+        window_s=100.0, timeout_s=200.0
+    )
+    assert probe_window_s == pytest.approx(100.0 * sim._PROBE_WINDOW_FRACTION)
+    assert probe_timeout_s == pytest.approx(200.0 * sim._PROBE_TIMEOUT_FRACTION)
+
+
+def test_probe_window_and_timeout_floors_tiny_timeout():
+    _window_s, probe_timeout_s = sim._probe_window_and_timeout(
+        window_s=1.0, timeout_s=2.0
+    )
+    # 2.0 * 0.1 = 0.2, below the floor.
+    assert probe_timeout_s == pytest.approx(sim._PROBE_TIMEOUT_FLOOR_S)
+
+
+def test_probe_window_and_timeout_caps_huge_timeout():
+    _window_s, probe_timeout_s = sim._probe_window_and_timeout(
+        window_s=1.0, timeout_s=100_000.0
+    )
+    assert probe_timeout_s == pytest.approx(sim._PROBE_TIMEOUT_CAP_S)
+
+
+def test_probe_window_and_timeout_never_exceeds_real_timeout():
+    # A `timeout_s` below the floor must not let the probe run *longer* than
+    # the real corner would ever be allowed to.
+    _window_s, probe_timeout_s = sim._probe_window_and_timeout(
+        window_s=1.0, timeout_s=0.5
+    )
+    assert probe_timeout_s == pytest.approx(0.5)
+
+
+def test_run_calibration_probe_measures_wall_time(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    point = sim.CornerPoint(None, {}, 27.0)
+    probe_timeouts: list[float] = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        probe_timeouts.append(timeout)
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    ticks = iter([100.0, 100.25])
+    monkeypatch.setattr(sim.time, "monotonic", lambda: next(ticks))
+
+    result = sim._run_calibration_probe(
+        point=point,
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        step_token="1n",
+        probe_window_s=2e-8,
+        probe_timeout_s=5.0,
+        artifacts_dir=str(tmp_path / ".klt" / "sim"),
+        keep_artifacts=False,
+    )
+
+    assert result == {"wall_s": pytest.approx(0.25), "timed_out": False, "error": None}
+    assert probe_timeouts == [5.0]
+
+
+def test_run_calibration_probe_timeout_reports_timed_out(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    point = sim.CornerPoint(None, {}, 27.0)
+
+    def fake_run(cmd, capture_output, text, timeout):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    ticks = iter([0.0, 5.0])
+    monkeypatch.setattr(sim.time, "monotonic", lambda: next(ticks))
+
+    result = sim._run_calibration_probe(
+        point=point,
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        step_token="1n",
+        probe_window_s=2e-8,
+        probe_timeout_s=5.0,
+        artifacts_dir=str(tmp_path / ".klt" / "sim"),
+        keep_artifacts=False,
+    )
+
+    assert result["timed_out"] is True
+    assert result["error"] is None
+    assert result["wall_s"] == pytest.approx(5.0)
+
+
+def test_run_calibration_probe_missing_binary_is_inconclusive(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    point = sim.CornerPoint(None, {}, 27.0)
+
+    def fake_run(cmd, capture_output, text, timeout):
+        raise FileNotFoundError("no ngspice")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    result = sim._run_calibration_probe(
+        point=point,
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        step_token="1n",
+        probe_window_s=2e-8,
+        probe_timeout_s=5.0,
+        artifacts_dir=str(tmp_path / ".klt" / "sim"),
+        keep_artifacts=False,
+    )
+
+    assert result["error"] is not None
+    assert "ngspice" in result["error"]
+
+
+def test_run_calibration_probe_aborted_analysis_is_inconclusive(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    point = sim.CornerPoint(None, {}, 27.0)
+
+    def fake_run(cmd, capture_output, text, timeout):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("Warning: singular matrix\nsimulation(s) aborted\n")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    result = sim._run_calibration_probe(
+        point=point,
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        step_token="1n",
+        probe_window_s=2e-8,
+        probe_timeout_s=5.0,
+        artifacts_dir=str(tmp_path / ".klt" / "sim"),
+        keep_artifacts=False,
+    )
+
+    assert result["error"] is not None
+
+
+def test_run_fail_fast_probe_none_for_non_tran_analysis():
+    result = sim._run_fail_fast_probe(
+        corner_points=[sim.CornerPoint(None, {}, 27.0)],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "ac", "args": "dec 10 1 1meg"},
+        timeout_s=10.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+    assert result is None
+
+
+def test_run_fail_fast_probe_none_for_empty_grid():
+    result = sim._run_fail_fast_probe(
+        corner_points=[],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        timeout_s=10.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+    assert result is None
+
+
+def test_run_fail_fast_probe_none_when_probe_inconclusive(monkeypatch):
+    monkeypatch.setattr(
+        sim,
+        "_run_calibration_probe",
+        lambda **kwargs: {"wall_s": 0.0, "timed_out": False, "error": "boom"},
+    )
+
+    result = sim._run_fail_fast_probe(
+        corner_points=[sim.CornerPoint(None, {}, 27.0)],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        timeout_s=10.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+    assert result is None
+
+
+def test_run_fail_fast_probe_none_when_wall_time_is_zero(monkeypatch):
+    monkeypatch.setattr(
+        sim,
+        "_run_calibration_probe",
+        lambda **kwargs: {"wall_s": 0.0, "timed_out": False, "error": None},
+    )
+
+    result = sim._run_fail_fast_probe(
+        corner_points=[sim.CornerPoint(None, {}, 27.0)],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        timeout_s=10.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+    assert result is None
+
+
+def test_run_fail_fast_probe_aborts_when_rate_cannot_meet_timeout(monkeypatch):
+    # The probe's own bounded slice took its full `probe_timeout_s` to run
+    # (without actually timing out) -- an extremely slow measured rate that
+    # cannot possibly cover the full window within `timeout_s`.
+    monkeypatch.setattr(
+        sim,
+        "_run_calibration_probe",
+        lambda **kwargs: {
+            "wall_s": kwargs["probe_timeout_s"],
+            "timed_out": False,
+            "error": None,
+        },
+    )
+
+    result = sim._run_fail_fast_probe(
+        corner_points=[sim.CornerPoint(None, {}, 27.0)],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        timeout_s=1.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+
+    assert result is not None
+    assert result["abort"] is True
+    assert result["rate_is_upper_bound"] is False
+    assert result["estimated_wall_s"] > result["timeout_s"] * sim._PROBE_ABORT_MARGIN
+    assert result["estimated_reached_s"] == pytest.approx(
+        result["measured_rate_s_per_s"] * result["timeout_s"]
+    )
+    assert result["estimated_fraction"] == pytest.approx(
+        result["estimated_reached_s"] / result["analysis_window_s"]
+    )
+
+
+def test_run_fail_fast_probe_no_abort_when_rate_is_fast(monkeypatch):
+    monkeypatch.setattr(
+        sim,
+        "_run_calibration_probe",
+        lambda **kwargs: {
+            "wall_s": kwargs["probe_timeout_s"] / 1000.0,
+            "timed_out": False,
+            "error": None,
+        },
+    )
+
+    result = sim._run_fail_fast_probe(
+        corner_points=[sim.CornerPoint(None, {}, 27.0)],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        timeout_s=10.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+
+    assert result is not None
+    assert result["abort"] is False
+    # The estimated coverage caps at the real window -- never reports more
+    # than 100% "reached".
+    assert result["estimated_reached_s"] <= result["analysis_window_s"]
+
+
+def test_run_fail_fast_probe_timed_out_probe_uses_upper_bound_rate(monkeypatch):
+    monkeypatch.setattr(
+        sim,
+        "_run_calibration_probe",
+        lambda **kwargs: {
+            "wall_s": kwargs["probe_timeout_s"],
+            "timed_out": True,
+            "error": None,
+        },
+    )
+
+    result = sim._run_fail_fast_probe(
+        corner_points=[sim.CornerPoint(None, {}, 27.0)],
+        netlist_path="body.spice",
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        timeout_s=1.0,
+        artifacts_dir="/tmp/does-not-matter",
+        keep_artifacts=False,
+    )
+
+    assert result is not None
+    assert result["rate_is_upper_bound"] is True
+    assert result["abort"] is True
+
+
+def test_run_sim_fail_fast_probe_disabled_by_default_never_runs(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    probe_calls: list[int] = []
+    monkeypatch.setattr(
+        sim,
+        "_run_fail_fast_probe",
+        lambda **kwargs: probe_calls.append(1) or None,
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert probe_calls == []
+    assert report["status"] == "pass"
+    assert "fail_fast_probe" not in report["environment"]
+
+
+@pytest.mark.parametrize("backend", ["local", "local-parallel"])
+def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
+    tmp_path, monkeypatch, backend
+):
+    _write_body(tmp_path)
+    options = {"fail_fast_probe": True, "timeout_s": 100}
+    if backend == "local-parallel":
+        options["max_workers"] = 1
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": backend,
+            "corners": {"temperature_c": [10, 20, 30]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": options,
+        },
+    )
+
+    probe_report = {
+        "corner_id": "10C",
+        "probe_window_s": 2e-8,
+        "probe_timeout_s": 10.0,
+        "probe_wall_s": 10.0,
+        "measured_rate_s_per_s": 2e-9,
+        "rate_is_upper_bound": True,
+        "analysis_window_s": 1e-6,
+        "timeout_s": 100.0,
+        "estimated_wall_s": 500.0,
+        "estimated_reached_s": 2e-7,
+        "estimated_fraction": 0.2,
+        "abort_margin": 1.5,
+        "abort": True,
+    }
+    monkeypatch.setattr(
+        sim, "_run_fail_fast_probe", lambda **kwargs: dict(probe_report)
+    )
+    real_corner_calls: list[int] = []
+    monkeypatch.setattr(
+        sim.subprocess,
+        "run",
+        lambda *a, **k: real_corner_calls.append(1),
+    )
+
+    report = sim.run_sim(str(request))
+
+    # `_run_fail_fast_probe` itself is monkeypatched away here (its own
+    # subprocess use is covered by the dedicated `_run_calibration_probe`
+    # tests above) -- this asserts the *dispatch loop* never spawns a real
+    # per-corner `ngspice` once the probe says to abort.
+    assert real_corner_calls == []
+    assert report["status"] == "error"
+    assert report["errored"] == 3
+    for corner in report["corners"]:
+        assert corner["status"] == "error"
+        (diag,) = corner["diagnostics"]
+        assert diag["code"] == "timeout_budget_unreachable"
+        assert diag["reached_s"] == pytest.approx(2e-7)
+        assert diag["fraction"] == pytest.approx(0.2)
+        assert "sim-corner-reached-s.md" in diag["message"]
+
+    assert report["environment"]["fail_fast_probe"] == probe_report
+
+
+def test_run_sim_fail_fast_probe_no_abort_leaves_normal_path_unaffected(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"temperature_c": [10, 20]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"fail_fast_probe": True},
+        },
+    )
+    probe_report = {
+        "corner_id": "10C",
+        "probe_window_s": 2e-8,
+        "probe_timeout_s": 1.0,
+        "probe_wall_s": 0.001,
+        "measured_rate_s_per_s": 2e-5,
+        "rate_is_upper_bound": False,
+        "analysis_window_s": 1e-6,
+        "timeout_s": 10.0,
+        "estimated_wall_s": 0.05,
+        "estimated_reached_s": 1e-6,
+        "estimated_fraction": 1.0,
+        "abort_margin": 1.5,
+        "abort": False,
+    }
+    monkeypatch.setattr(
+        sim, "_run_fail_fast_probe", lambda **kwargs: dict(probe_report)
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    assert [c["status"] for c in report["corners"]] == ["pass", "pass"]
+    assert report["environment"]["fail_fast_probe"]["abort"] is False
+
+
+def test_run_sim_fail_fast_probe_skipped_for_remote_backend(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(options={"fail_fast_probe": True}),
+    )
+    probe_calls: list[int] = []
+    monkeypatch.setattr(
+        sim,
+        "_run_fail_fast_probe",
+        lambda **kwargs: probe_calls.append(1) or None,
+    )
+    _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert probe_calls == []
+
+
 def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     _write_body(tmp_path)
     request = _write_request(

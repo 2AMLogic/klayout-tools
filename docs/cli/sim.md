@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -37,6 +37,12 @@ this document (and the code) win.
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
   orphan safety, and resume" below.
+- `--fail-fast-probe` — before dispatching any real corner, run a short
+  bounded `tran` calibration slice on the grid's first corner and abort the
+  whole grid up front if the measured rate implies `options.timeout_s`
+  cannot plausibly cover the full analysis window, overriding the
+  request's own `options.fail_fast_probe` when given. See "Timeout-budget
+  preflight" below.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -481,16 +487,98 @@ it is not a substitute for verifying a real campaign's actual throughput.
 
 A stronger, dispatch-time guard that aborts a grid once early corners prove
 the budget itself (not one slow corner) is the problem was scoped by the
-same issue but is **not implemented**: it requires recovering how far a
-timed-out corner's simulated time actually got (`reached_s`), and every
-mechanism investigated for that turned out to be unsafe or non-functional
-against this module's actual per-corner deck shape (ngspice's `-r`
-streaming rawfile is silently disabled by the `.control` block every real
-corner deck uses for its `alter` supply-override cards; a `stop`/`resume`
-checkpoint workaround around that corrupts `.meas` evaluation for ordinary,
-non-timeout sweeps). See issue
-[#1694](https://github.com/2AMLogic/klayout-tools/issues/1694), which tracks
-this open design question with the full empirical findings.
+same issue. Recovering how far a *dispatched* corner's simulated time
+actually got when it is killed by its own `options.timeout_s`
+(`reached_s`) remains unimplemented: every mechanism investigated for that
+turned out to be unsafe or non-functional against this module's actual
+per-corner deck shape (ngspice's `-r` streaming rawfile is silently
+disabled by the `.control` block every real corner deck uses for its
+`alter` supply-override cards; a `stop`/`resume` checkpoint workaround
+around that corrupts `.meas` evaluation for ordinary, non-timeout sweeps).
+**A corner that actually runs and times out still reports `reached_s:
+null`** in its `timeout` diagnostic — that gap has not closed.
+
+Issue [#1694](https://github.com/2AMLogic/klayout-tools/issues/1694) ships
+the dispatch-time fail-fast guard itself via a different mechanism than
+that blocked per-corner recovery: a **two-pass calibration probe**, opt-in
+via `options.fail_fast_probe` (`bool`, default `false`) or `--fail-fast-probe`.
+See [`docs/design/sim-corner-reached-s.md`](../design/sim-corner-reached-s.md)
+for the full design decision.
+
+### Two-pass fail-fast probe (`options.fail_fast_probe`)
+
+When enabled, before any real corner is dispatched, `klt sim` runs one
+short, bounded `tran` slice of the grid's *first* corner (same `alter`
+cards and `.control` wrapper as a real corner, a much shorter window, no
+`.meas` cards) to measure that corner/deck's own
+simulated-seconds-per-wall-clock-second rate. That measured rate is used to
+estimate whether `options.timeout_s` can plausibly cover the *full*
+analysis window — the direct, evidence-based counterpart to the static
+timepoints-per-second heuristic above. If the estimate says the full run
+would need more than 1.5x `timeout_s`, the **entire grid is aborted**
+before a single real corner runs, and the response looks like this:
+
+```json
+{
+  "environment": {
+    "fail_fast_probe": {
+      "corner_id": "tt/27C",
+      "probe_window_s": 2e-08,
+      "probe_timeout_s": 10.0,
+      "probe_wall_s": 10.0,
+      "measured_rate_s_per_s": 2e-09,
+      "rate_is_upper_bound": true,
+      "analysis_window_s": 1e-06,
+      "timeout_s": 100.0,
+      "estimated_wall_s": 500.0,
+      "estimated_reached_s": 2e-07,
+      "estimated_fraction": 0.2,
+      "abort_margin": 1.5,
+      "abort": true
+    }
+  },
+  "corners": [
+    {
+      "corner_id": "tt/27C",
+      "status": "error",
+      "diagnostics": [
+        {
+          "severity": "error",
+          "code": "timeout_budget_unreachable",
+          "message": "the two-pass fail-fast probe (issue #1694) measured 2e-09s of simulated time per wall-clock second at corner 'tt/27C' (an upper bound -- the probe itself was killed at its own bounded timeout before finishing its calibration slice), implying the full 1e-06s tran window would need an estimated 500s of wall-clock time per corner -- more than 1.5x the configured options.timeout_s (100s). Aborting the whole grid now rather than letting every corner burn its full timeout for a partial result -- see docs/design/sim-corner-reached-s.md.",
+          "reached_s": 2e-07,
+          "fraction": 0.2
+        }
+      ]
+    }
+  ]
+}
+```
+
+`environment.fail_fast_probe` is present whenever the probe ran and came
+back conclusive, **whether or not it aborted** — `abort: false` still
+reports the measured rate/estimate, so a passing sweep shows how much
+margin it actually had. `rate_is_upper_bound: true` means the probe itself
+was killed at its own (much shorter than `timeout_s`) bounded timeout
+before finishing its calibration slice — the measured rate is then a
+worst-case upper bound (the true rate could only be slower), which is
+still sufficient to prove infeasibility. The probe is silently skipped
+(no `environment.fail_fast_probe` at all, and the sweep proceeds exactly
+as if `fail_fast_probe` were unset) when: the analysis isn't `kind:
+"tran"`; the backend is `remote` (probing this process's own host is not a
+representative sample of a provisioned remote box's hardware — see
+`_run_remote`'s docstring); or the probe itself is inconclusive (`ngspice`
+missing, or the probe's own shortened analysis did not converge cleanly).
+
+**Every corner aborted this way carries an *estimated* `reached_s`/
+`fraction`** on its `timeout_budget_unreachable` diagnostic, derived from
+the measured rate — this is explicitly an estimate of how far that corner
+*would have* gotten before `options.timeout_s` killed it, computed because
+the corner was never actually dispatched, and is not to be confused with a
+real per-corner progress measurement. A corner that *is* dispatched (probe
+disabled, or the probe did not trigger an abort) and then times out on its
+own still reports `reached_s: null`, exactly as described above — this
+issue does not change that.
 
 ## Deviation from the spike
 
@@ -898,6 +986,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
 | `lost_shard`       | The corner's `hosts > 1` shard never returned (Epic #375). See "Fleet sharding" above. |
+| `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 
 **A `diagnostics` entry at `severity: "error"` makes that corner
 `status: "error"`**, which always outranks a clean limit violation
@@ -1322,6 +1411,7 @@ the *response* echoes back.
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag. |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
+| `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 
@@ -1420,7 +1510,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case; see "Timeout-budget preflight" above. |
+| `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
@@ -1495,7 +1585,7 @@ the full reasoning):
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded or the launching process exited (`budget_exceeded`/`orphaned` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" above. |
+| `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a

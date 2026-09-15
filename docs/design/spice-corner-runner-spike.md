@@ -396,12 +396,29 @@ analysis's own step/window under a deliberately generous throughput floor —
 see `docs/cli/sim.md`'s "Timeout-budget preflight" section for the shipped
 `environment.timeout_preflight_warning` field. This issue also scoped a
 stronger, dispatch-time fail-fast guard (abort the grid once early corners
-prove the budget itself is unmeetable, not just one slow corner) — that
-guard is **not implemented**: it requires recovering how far a timed-out
-corner's simulated time actually got, and every mechanism investigated
-turned out to be unsafe or non-functional against this spike's own
-`.control`-block-based per-corner deck (see `docs/cli/sim.md`'s section for
-the empirical findings and issue
-[#1694](https://github.com/2AMLogic/klayout-tools/issues/1694), which tracks
-this open design question). No contract decision this spike made changed;
+prove the budget itself is unmeetable, not just one slow corner). A first
+Builder pass on this shipped only the preflight above: the guard needs
+recovering how far a timed-out corner's simulated time actually got, and
+every mechanism investigated turned out to be unsafe or non-functional
+against this spike's own `.control`-block-based per-corner deck (see
+`docs/cli/sim.md`'s section for the empirical findings) — tracked as issue
+[#1694](https://github.com/2AMLogic/klayout-tools/issues/1694).
+
+## Update (issue #1694): two-pass fail-fast probe
+
+Issue #1694 ships the dispatch-time fail-fast guard the update above left
+open, via a different mechanism than the blocked per-corner `reached_s`
+recovery: a short, bounded calibration `tran` slice run once per grid (not
+once per corner) measures this corner/deck's own
+simulated-time-per-wall-clock-second rate, which is used to estimate
+whether `options.timeout_s` can plausibly cover the *full* analysis window
+before any real corner is dispatched. See
+[`docs/design/sim-corner-reached-s.md`](sim-corner-reached-s.md) for the
+design decision (including why the `.control`-avoiding deck redesign and
+dropping the guard entirely were both rejected) and `docs/cli/sim.md`'s
+"Timeout-budget preflight" section for the shipped
+`environment.fail_fast_probe` field and `options.fail_fast_probe` opt-in.
+A corner actually dispatched and then killed by its own `options.timeout_s`
+still reports `reached_s: null` — that per-corner recovery gap is
+unchanged by this issue. No contract decision this spike made changed;
 this is additive.

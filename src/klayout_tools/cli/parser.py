@@ -466,6 +466,23 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--fail-fast-probe",
+        dest="fail_fast_probe",
+        action="store_true",
+        default=None,
+        help=(
+            "before dispatching any real corner, run a short bounded `tran` "
+            "calibration slice on the grid's first corner to measure this "
+            "deck's own simulated-time-per-wall-clock-second rate, and "
+            "abort the whole grid up front if that rate implies "
+            "`options.timeout_s` cannot plausibly cover the full analysis "
+            "window (issue #1694's two-pass probe model); overrides the "
+            "request's own `options.fail_fast_probe` when given. Only "
+            "applies to `tran` analyses on the `local`/`local-parallel` "
+            "backends -- see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--plot",
         dest="plot",
         default=None,

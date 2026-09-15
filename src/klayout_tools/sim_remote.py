@@ -126,6 +126,11 @@ def _shard_corner_points(
 #: Human-readable message for each :func:`_unrun_corner_report` diagnostic
 #: code -- shared between the ``local``/``local-parallel`` dispatch loops
 #: (issue #473) so both backends report a skipped corner identically.
+#: ``timeout_budget_unreachable`` (issue #1694) is not listed here because
+#: its message is built dynamically from the calibration probe's own
+#: measurement (corner id, measured rate, estimated wall time) -- see
+#: ``sim.py``'s ``_run_fail_fast_probe``, which always passes an explicit
+#: ``message`` for that code.
 _UNRUN_MESSAGES: dict[str, str] = {
     "budget_exceeded": (
         "sweep options.wall_clock_budget_s was exceeded before this corner "
@@ -140,21 +145,46 @@ _UNRUN_MESSAGES: dict[str, str] = {
 
 
 def _unrun_corner_report(
-    point: CornerPoint, measurements_spec: list[dict[str, Any]], code: str
+    point: CornerPoint,
+    measurements_spec: list[dict[str, Any]],
+    code: str,
+    *,
+    message: str | None = None,
+    reached_s: float | None = None,
+    fraction: float | None = None,
 ) -> dict[str, Any]:
     """Synthesize an ``error`` corner report for a unit that never got the
     chance to run: the sweep's own wall-clock budget was exceeded before its
     turn (``code="budget_exceeded"``), the launching process died first
-    (``code="orphaned"``), or its shard never returned at all
-    (``code="lost_shard"``, via :func:`_lost_shard_corner`).
+    (``code="orphaned"``), its shard never returned at all
+    (``code="lost_shard"``, via :func:`_lost_shard_corner`), or the
+    dispatch-time fail-fast probe determined ``options.timeout_s`` cannot
+    plausibly cover the analysis window for the whole grid
+    (``code="timeout_budget_unreachable"``, issue #1694).
 
     Mirrors :func:`_run_corner`'s own ``error``-status shape field-for-field,
     so an unrun unit is indistinguishable, downstream, from a corner that
     ran and errored on its own -- ``_rollup_measurements``, the CLI's
     text/JSON renderers, and the ``errored`` count all need no special case
     for any of these codes.
+
+    ``message``, when given, overrides the static :data:`_UNRUN_MESSAGES`
+    lookup -- used by the fail-fast probe path to report the actual measured
+    rate/estimate rather than a fixed string. ``reached_s``/``fraction``,
+    when given, are attached as additional fields on the single diagnostic
+    entry: an *estimate* of how far this corner would have gotten before
+    ``options.timeout_s`` would have killed it (derived from the probe's
+    measured rate, since this corner was never actually run) -- distinct
+    from, and not to be confused with, a real per-corner progress
+    measurement of a corner that *was* dispatched and then timed out (which
+    this module does not recover -- see
+    docs/design/sim-corner-reached-s.md). Both default to ``None`` (the
+    field is omitted from the diagnostic), exactly today's shape for every
+    other code.
     """
-    message = _UNRUN_MESSAGES.get(code, code)
+    resolved_message = (
+        message if message is not None else _UNRUN_MESSAGES.get(code, code)
+    )
     measurements = [
         {
             "name": spec["name"],
@@ -174,6 +204,15 @@ def _unrun_corner_report(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+    diagnostic: dict[str, Any] = {
+        "severity": "error",
+        "code": code,
+        "message": resolved_message,
+    }
+    if reached_s is not None:
+        diagnostic["reached_s"] = reached_s
+    if fraction is not None:
+        diagnostic["fraction"] = fraction
     return {
         "corner_id": point.corner_id,
         "process": point.process,
@@ -182,7 +221,7 @@ def _unrun_corner_report(
         "status": "error",
         "runtime_s": 0.0,
         "measurements": measurements,
-        "diagnostics": [{"severity": "error", "code": code, "message": message}],
+        "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
     }
@@ -333,6 +372,7 @@ def _run_remote(
     deadline: float | None = None,
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
+    probe_abort: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``remote`` backend: provision one EC2 instance sized for the whole
     corner matrix, push the netlist + a request-specific copy of ``request``
@@ -379,11 +419,18 @@ def _run_remote(
     this process, so this function has no dispatch loop of its own to gate.
     Wiring the remote backend into the same budget/orphan/resume machinery
     is tracked as follow-up work, not silently promised by this signature.
+
+    ``probe_abort`` (issue #1694) is likewise accepted but never populated
+    for this backend today -- ``run_sim`` only runs the calibration probe
+    for ``backend in ("local", "local-parallel")`` (see
+    ``_run_fail_fast_probe``'s caller): the probe spawns ``ngspice`` on
+    *this* process's own host, which is not a representative sample of the
+    provisioned remote box's hardware.
     """
     from .sim import RemoteLauncher, SimError
 
     del analysis, measurements_spec, models_lib, max_workers  # see docstring
-    del deadline, initial_ppid, checkpoint  # not yet honored -- see docstring
+    del deadline, initial_ppid, checkpoint, probe_abort  # not yet honored
 
     remote_spec = request.get("remote") or {}
     region = remote_spec.get("region")

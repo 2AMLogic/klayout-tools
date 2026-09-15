@@ -54,6 +54,7 @@ def run(args: argparse.Namespace) -> int:
             budget_s=args.budget_s,
             resume=args.resume,
             plot_dir=args.plot,
+            fail_fast_probe=args.fail_fast_probe,
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)
@@ -161,6 +162,14 @@ def _print_text(report: dict) -> None:
         )
     if env.get("orphaned"):
         print("orphaned: launching process exited; sweep stopped early")
+    probe = env.get("fail_fast_probe")
+    if probe is not None:
+        print(
+            f"fail_fast_probe: rate={probe['measured_rate_s_per_s']:.4g}s/s"
+            f"{'(upper bound)' if probe['rate_is_upper_bound'] else ''}  "
+            f"estimated_wall_s={probe['estimated_wall_s']:.4g}  "
+            f"timeout_s={probe['timeout_s']:g}  abort={probe['abort']}"
+        )
     resume = env.get("resume")
     if resume is not None:
         print(
