@@ -37,8 +37,8 @@ one and only geometry analysed.
 Deliberately duplicates a couple of small helpers already defined in
 ``place_and_route.py`` (``_clock_lines``, ``_read_metrics``) rather than
 importing them -- this repo's own stated convention (see
-``place_and_route.py``'s ``_resolve_liberty`` docstring) is that each verb
-module stays self-contained; every existing cross-module import between verb
+``place_and_route.py``'s ``_resolve_layer_map`` docstring) is that each verb
+module stays self-contained. Every existing cross-module import between verb
 modules in this repo is of a *public* name (``run_place_and_route``,
 ``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
 ``_run_openroad``, ``_count_violations``, ``_openroad_version``, and (issue
@@ -52,7 +52,15 @@ shared ``_openroad_engine``/``_paths.py`` internal utility modules both
 import from (issues #1637/#1703) -- following the same precedent as
 ``_paths.py`` (issue #642). ``_openroad_engine``/``_paths.py`` are shared
 utility modules, not verb modules, so importing their (underscore-prefixed)
-helpers by name does not violate the convention above.
+helpers by name does not violate the convention above. ``_resolve_liberty``
+(this module's own thin wrapper, below) follows the same precedent one level
+further: its body is a one-line call into
+:func:`klayout_tools.pdk.resolve_liberty_for_cell_library`, a *public* name
+in the ``pdk.py`` shared utility module (issue #1652) -- PDK-resolution
+logic is the one part of the "self-contained" convention that must not
+drift silently between verb modules, since a resolution bug in one copy
+(issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
+bug, not just duplicated code.
 
 Scope deliberately excluded from this first version (tracked as follow-up,
 not required for this issue): a ``propagated_clock`` request option (the
@@ -144,7 +152,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import build_provenance
-from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
+from .pdk import lef_files, resolve_liberty_for_cell_library
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -771,54 +779,24 @@ def _resolve_liberty(
     variant: str | None = None,
     root: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
-    """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library`` --
-    this module's own copy of ``place_and_route.py``'s identical resolution
-    (each verb module in this repo is self-contained). Raises
-    :class:`PostRouteStaError` (never
-    :class:`~klayout_tools.pdk.PdkNotFoundError`)."""
-    try:
-        info = find_pdk(variant=variant, root=root)
-    except PdkNotFoundError as exc:
-        raise PostRouteStaError(str(exc)) from exc
+    """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library``.
+    Raises :class:`PostRouteStaError` (never
+    :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    libs_ref = info["assets"]["libs_ref"]
-    if libs_ref is None:
-        raise PostRouteStaError(
-            f"liberty not found for deck: resolved PDK install "
-            f"'{info['variant']}' at '{info['root']}' ships no libs_ref asset"
-        )
-
-    lib_dir = os.path.join(libs_ref, cell_library)
-    if not os.path.isdir(lib_dir):
-        raise PostRouteStaError(
-            f"liberty not found for deck: standard-cell library "
-            f"'{cell_library}' not found under resolved PDK install "
-            f"'{info['variant']}' at '{info['root']}'"
-        )
-
-    corner = requested_corner
-    if corner is None:
-        libraries = list_cell_libraries(variant=info["variant"], root=info["root"])
-        entry = next(
-            (lib for lib in libraries["libraries"] if lib["name"] == cell_library),
-            None,
-        )
-        corner = entry["nominal_corner"] if entry else None
-        if corner is None:
-            raise PostRouteStaError(
-                f"liberty not found for deck: could not determine a nominal "
-                f"corner for '{cell_library}' -- pass request.pdk.corner "
-                "explicitly"
-            )
-
-    liberty_path = os.path.join(lib_dir, "lib", f"{cell_library}__{corner}.lib")
-    if not os.path.isfile(liberty_path):
-        raise PostRouteStaError(
-            f"liberty not found for deck: no '{corner}' corner for "
-            f"'{cell_library}' under resolved PDK install '{info['variant']}' "
-            f"(expected '{liberty_path}')"
-        )
-    return liberty_path, corner, info
+    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    (issue #1652) -- that shared implementation (including the IHP
+    single-underscore liberty-filename fallback, issue #1790) is what
+    ``synthesize.py`` and ``place_and_route.py``'s own ``_resolve_liberty``
+    wrappers call too, so all three modules stay in sync by construction;
+    only the exception type raised on each failure differs per module.
+    """
+    return resolve_liberty_for_cell_library(
+        cell_library,
+        requested_corner,
+        PostRouteStaError,
+        variant=variant,
+        root=root,
+    )
 
 
 def _resolve_lef(cell_library: str, pdk_info: dict[str, Any]) -> tuple[str, str]:

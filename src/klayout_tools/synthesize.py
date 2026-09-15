@@ -220,7 +220,7 @@ from .arith_gen import (
     normalize_architecture,
 )
 from .equiv import EquivError, run_equiv
-from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
+from .pdk import resolve_liberty_for_cell_library
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -1870,70 +1870,17 @@ def _resolve_liberty(
     ``corner`` (explicit or nominal-default) liberty view -- the "liberty
     not found for deck" posture this module's docstring describes.
 
-    Liberty filename convention: tries open_pdks' double-underscore
-    ``<cell_library>__<corner>.lib`` first, falling back to a single
-    underscore (``<cell_library>_<corner>.lib``) only when that file does
-    not exist -- IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
-    `sg13cmos5l_stdcell`) uses the single-underscore form (issue #1790,
-    verified live against a real fetched IHP-Open-PDK v0.3.0 install).
+    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    (issue #1652) -- that shared implementation (including the IHP
+    single-underscore liberty-filename fallback, issue #1790) is what
+    ``place_and_route.py`` and ``post_route_sta.py``'s own
+    ``_resolve_liberty`` wrappers call too, so all three modules stay in
+    sync by construction; only the exception type raised on each failure
+    differs per module.
     """
-    try:
-        info = find_pdk(variant=variant, root=root)
-    except PdkNotFoundError as exc:
-        raise SynthesizeError(str(exc)) from exc
-
-    libs_ref = info["assets"]["libs_ref"]
-    if libs_ref is None:
-        raise SynthesizeError(
-            f"liberty not found for deck: resolved PDK install "
-            f"'{info['variant']}' at '{info['root']}' ships no libs_ref asset"
-        )
-
-    lib_dir = os.path.join(libs_ref, cell_library)
-    if not os.path.isdir(lib_dir):
-        raise SynthesizeError(
-            f"liberty not found for deck: standard-cell library "
-            f"'{cell_library}' not found under resolved PDK install "
-            f"'{info['variant']}' at '{info['root']}'"
-        )
-
-    corner = requested_corner
-    if corner is None:
-        libraries = list_cell_libraries(variant=info["variant"], root=info["root"])
-        entry = next(
-            (lib for lib in libraries["libraries"] if lib["name"] == cell_library),
-            None,
-        )
-        corner = entry["nominal_corner"] if entry else None
-        if corner is None:
-            raise SynthesizeError(
-                f"liberty not found for deck: could not determine a nominal "
-                f"corner for '{cell_library}' -- pass request.pdk.corner "
-                "explicitly"
-            )
-
-    liberty_path = os.path.join(lib_dir, "lib", f"{cell_library}__{corner}.lib")
-    if not os.path.isfile(liberty_path):
-        # Issue #1790: IHP-Open-PDK's `sg13g2_stdcell` (and per issue #1786,
-        # `sg13cmos5l_stdcell`) names its liberty views with a single
-        # underscore before the corner tag (`sg13g2_stdcell_typ_1p20V_25C.lib`),
-        # not open_pdks' double-underscore convention
-        # (`sky130_fd_sc_hd__tt_025C_1v80.lib`). Fall back to that naming
-        # only when the double-underscore file does not exist, so this never
-        # masks a genuinely-missing corner on an open_pdks-shaped install
-        # with a false "found" from an unrelated same-named file.
-        single_underscore_path = os.path.join(
-            lib_dir, "lib", f"{cell_library}_{corner}.lib"
-        )
-        if os.path.isfile(single_underscore_path):
-            liberty_path = single_underscore_path
-    if not os.path.isfile(liberty_path):
-        raise SynthesizeError(
-            f"liberty not found for deck: no '{corner}' corner for "
-            f"'{cell_library}' under resolved PDK install '{info['variant']}' "
-            f"(expected '{liberty_path}')"
-        )
-    return liberty_path, corner, info
+    return resolve_liberty_for_cell_library(
+        cell_library, requested_corner, SynthesizeError, variant=variant, root=root
+    )
 
 
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
