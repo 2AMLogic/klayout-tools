@@ -49,8 +49,8 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from klayout_tools import env_provenance, synthesize
 from klayout_tools import pdk as pdk_module
-from klayout_tools import synthesize
 from klayout_tools.cli import main
 from klayout_tools.equiv import EquivError
 from klayout_tools.synthesize import SynthesizeError, load_request, run_synthesize
@@ -121,6 +121,45 @@ def _base_request(**overrides) -> dict:
     }
     request.update(overrides)
     return request
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Shadows pytest's own built-in `tmp_path` fixture for every test in
+    this module (issue #1844): seeds a `.git` marker so `tmp_path` itself
+    resolves as this run's own repo root (`env_provenance.find_repo_root`
+    only checks for a `.git` entry -- no real `git` binary/working tree is
+    needed). Every test below writes its request -- and therefore its
+    `.klt/synthesize/` artifacts -- somewhere under `tmp_path`, so
+    `netlist_path`/`script_path` (and the nested occurrences) now resolve
+    to `scope: "repo"` with a real, non-null repo-relative `path` -- the
+    same "happy path" shape a real invocation gets when it runs inside a
+    real repo. `_abs_path()` below reconstitutes the real filesystem path
+    from that shape for the many existing assertions that need to actually
+    open/parse the produced file, not just check its reported shape.
+
+    `test_repo_relative_paths_resolve_absent_outside_any_repo` (this
+    module's own edge-case test for issue #1844's other branch) explicitly
+    works outside of `tmp_path` instead, so this override does not mask the
+    "no repo at all" behaviour it exists to check.
+    """
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
+def _abs_path(field: dict, tmp_path: Path) -> str:
+    """Reconstitute the real absolute filesystem path from one of this
+    module's own `{path, scope}` response fields (issue #1844:
+    `netlist_path`/`script_path` and the nested occurrences) -- every test
+    in this module runs inside a `tmp_path` seeded with a `.git` marker
+    (see the `tmp_path` fixture override above), so `scope` is always
+    `"repo"` and `path` is always non-`None`; asserts that invariant
+    (rather than silently degrading) so a test that stops resolving inside
+    the repo fails loudly instead of returning a bogus path.
+    """
+    assert field["scope"] == "repo", field
+    assert field["path"] is not None, field
+    return str(tmp_path / field["path"])
 
 
 def _isolate_pdk(monkeypatch, tmp_path: Path) -> None:
@@ -542,7 +581,21 @@ _GCD_MODULE_STATS = {
 }
 
 
-def _script_output_paths(script_path: str) -> tuple[str, str]:
+def _resolve_against(path: str, cwd: str | None) -> str:
+    """Resolve `path` (as parsed from a generated `.ys` script's own line)
+    against `cwd` -- mirrors how a real `yosys` subprocess launched with
+    that `cwd` (`_run_yosys`'s own `cwd` keyword, issue #1844) would
+    resolve a relative embedded path. Absolute paths pass through
+    unchanged; `cwd=None` resolves against the current process's own cwd,
+    matching `subprocess.run`'s own default when no `cwd=` is given."""
+    if os.path.isabs(path):
+        return path
+    return os.path.join(cwd or os.getcwd(), path)
+
+
+def _script_output_paths(
+    script_path: str, *, cwd: str | None = None
+) -> tuple[str, str]:
     stats_path = None
     netlist_path = None
     with open(script_path, encoding="utf-8") as handle:
@@ -557,17 +610,17 @@ def _script_output_paths(script_path: str) -> tuple[str, str]:
     assert stats_path is not None and netlist_path is not None, (
         "generated .ys script is missing a `tee -q -o`/`write_verilog` line"
     )
-    return stats_path, netlist_path
+    return _resolve_against(stats_path, cwd), _resolve_against(netlist_path, cwd)
 
 
-def _script_abc_log_path(script_path: str) -> str | None:
+def _script_abc_log_path(script_path: str, *, cwd: str | None = None) -> str | None:
     """The path the generated script `tee`s the `abc` pass's own output to,
     or `None` when the script does not capture it (no `-constr`)."""
     with open(script_path, encoding="utf-8") as handle:
         for line in handle:
             match = _ABC_TEE_RE.match(line.rstrip("\n"))
             if match:
-                return match.group(1)
+                return _resolve_against(match.group(1), cwd)
     return None
 
 
@@ -581,17 +634,19 @@ def _script_abc_line(script_path: str) -> str:
     raise AssertionError("generated .ys script has no `abc` line")
 
 
-def _script_stat_path(script_path: str) -> str:
+def _script_stat_path(script_path: str, *, cwd: str | None = None) -> str:
     """The path a generated ``.ys`` script's `` tee -q -o <path> stat ``
     line writes to -- works for both the main synthesis script and the
     ``baseline.netlist_path`` re-`stat` script (issue #1588's
-    `_baseline_metrics_from_netlist`), which has no `write_verilog` line at
-    all, unlike :func:`_script_output_paths`."""
+    `_baseline_metrics_from_netlist`, which never embeds a repo-relative
+    path -- see that function's own docs -- so `cwd` is a no-op there),
+    which has no `write_verilog` line at all, unlike
+    :func:`_script_output_paths`."""
     with open(script_path, encoding="utf-8") as handle:
         for line in handle:
             match = _TEE_RE.match(line.rstrip("\n"))
             if match:
-                return match.group(1)
+                return _resolve_against(match.group(1), cwd)
     raise AssertionError("generated .ys script has no `tee -q -o ... stat` line")
 
 
@@ -636,20 +691,28 @@ def _stub_yosys_success(
             )
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
+        # Issue #1844: `_run_yosys` now passes `cwd=` through to
+        # `subprocess.run` whenever `_write_script` embedded a relative
+        # (repo-relative) path -- a real `yosys` process resolves those
+        # relative to that `cwd`, so every `_script_*_path` helper below
+        # takes the same `cwd` this call received and resolves against it,
+        # or this stub would silently fall back to resolving against the
+        # *test runner's own* cwd instead and open the wrong file.
+        cwd = kwargs.get("cwd")
         if os.path.basename(script_path).endswith("_baseline.ys"):
-            stats_path = _script_stat_path(script_path)
+            stats_path = _script_stat_path(script_path, cwd=cwd)
             baseline_stats = (
                 baseline_module_stats if baseline_module_stats is not None else stats
             )
             with open(stats_path, "w", encoding="utf-8") as handle:
                 json.dump({"modules": {f"\\{hdl_toplevel}": baseline_stats}}, handle)
             return fake_completed(returncode=0)
-        stats_path, netlist_path = _script_output_paths(script_path)
+        stats_path, netlist_path = _script_output_paths(script_path, cwd=cwd)
         with open(stats_path, "w", encoding="utf-8") as handle:
             json.dump({"modules": {f"\\{hdl_toplevel}": stats}}, handle)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write("// fake mapped netlist\n")
-        abc_log_path = _script_abc_log_path(script_path)
+        abc_log_path = _script_abc_log_path(script_path, cwd=cwd)
         if abc_log_path is not None:
             with open(abc_log_path, "w", encoding="utf-8") as handle:
                 handle.write(abc_log + "\n")
@@ -673,7 +736,7 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
 
     report = run_synthesize(request_path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["engine"] == "yosys"
     assert report["engine_version"] == "0.67+post"
     assert report["hdl_toplevel"] == "gcd"
@@ -723,13 +786,23 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     assert report["warnings"] == {"total": 0, "by_category": {}, "representatives": []}
     assert report["baseline"] is None
 
-    assert os.path.isabs(report["netlist_path"])
-    assert os.path.isfile(report["netlist_path"])
-    assert os.path.isabs(report["script_path"])
-    assert os.path.isfile(report["script_path"])
-    assert report["netlist_path"].endswith("gcd_synth.v")
-    assert report["script_path"].endswith("synth_gcd.ys")
-    assert ".klt/synthesize" in report["netlist_path"].replace(os.sep, "/")
+    # Issue #1844: `netlist_path`/`script_path` are the `{path, scope}`
+    # shape `env_provenance.repo_relative_path` defines, never a raw
+    # (potentially absolute) path string -- `tmp_path` resolves as this
+    # test's own repo root (see the `tmp_path` fixture override above), so
+    # both report `scope: "repo"` with a real, non-null, repo-relative
+    # `path` (never an absolute one -- that is the whole point).
+    assert report["netlist_path"]["scope"] == "repo"
+    assert not os.path.isabs(report["netlist_path"]["path"])
+    assert report["script_path"]["scope"] == "repo"
+    assert not os.path.isabs(report["script_path"]["path"])
+    netlist_path = _abs_path(report["netlist_path"], tmp_path)
+    script_path = _abs_path(report["script_path"], tmp_path)
+    assert os.path.isfile(netlist_path)
+    assert os.path.isfile(script_path)
+    assert netlist_path.endswith("gcd_synth.v")
+    assert script_path.endswith("synth_gcd.ys")
+    assert ".klt/synthesize" in report["netlist_path"]["path"].replace(os.sep, "/")
 
     provenance = report["provenance"]
     assert provenance["klt_version"]
@@ -737,6 +810,74 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
     assert provenance["deck"]["content_hash"].startswith("sha256:")
     assert provenance["input"]["content_hash"].startswith("sha256:")
+
+
+def test_repo_relative_paths_resolve_absent_outside_any_repo(
+    tmp_path_factory, monkeypatch
+):
+    """Issue #1844's other branch: a request whose sources/output resolve
+    **outside** any git repo -- `env_provenance.repo_relative_path`'s
+    existing "no repo root at all" behaviour degrades `netlist_path`/
+    `script_path` to `{"path": None, "scope": "external"}` rather than
+    raising or (the whole point) leaking the absolute path. Uses
+    `tmp_path_factory` directly (bypassing this module's own `tmp_path`
+    fixture override, which seeds a `.git` marker) so this is a genuinely
+    unmarked directory."""
+    no_repo_dir = tmp_path_factory.mktemp("no-repo")
+    assert env_provenance.find_repo_root(str(no_repo_dir)) is None
+
+    _isolate_pdk(monkeypatch, no_repo_dir)
+    install_root = no_repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(no_repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(no_repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"] == {"path": None, "scope": "external"}
+    assert report["script_path"] == {"path": None, "scope": "external"}
+
+
+def test_json_response_and_generated_script_are_leak_free_inside_a_repo(
+    tmp_path, monkeypatch
+):
+    """The issue's own repro, automated: `klt synthesize --format json`'s
+    response, and the `.ys` script it generates, both pass
+    `env_provenance.find_leaks()`/`scan_files()` clean when the request's
+    sources live inside a repo (`tmp_path`, seeded with a `.git` marker by
+    this module's own `tmp_path` fixture override) -- no home-directory
+    path, no worktree-specific absolute path, in either artifact."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    response_text = json.dumps(report, indent=2)
+    response_leaks = env_provenance.find_leaks(response_text)
+    assert response_leaks == [], response_leaks
+
+    script_path = _abs_path(report["script_path"], tmp_path)
+    scan = env_provenance.scan_files([script_path])
+    assert scan["status"] == "clean", scan
+
+    # The RTL source and the `.klt/synthesize/` output paths (`tee -o`/
+    # `write_verilog`) are repo-relative text in the script -- never an
+    # absolute path naming `tmp_path` (this test's own stand-in for a real
+    # worktree). The liberty path is the one deliberate exception
+    # (`_write_script`'s own docstring, issue #1844): it stays a real
+    # absolute filesystem path in the script text so Yosys can actually
+    # open it -- exercised here too (the fabricated liberty in
+    # `_make_pdk_install` happens to live under `tmp_path`, i.e. *inside*
+    # the repo, yet still appears absolute), which is exactly why the
+    # scan above checks for *leaked identifiers*, not "zero absolute
+    # paths": `tmp_path` itself is not a home-directory-shaped path, so an
+    # absolute liberty line does not trip `find_leaks()`.
+    script_text = Path(script_path).read_text(encoding="utf-8")
+    assert "read_verilog gcd.v" in script_text
+    assert f"write_verilog -noattr {report['netlist_path']['path']}" in script_text
+    assert f"abc -liberty {tmp_path}" in script_text
 
 
 def test_run_synthesize_missing_sequential_area_degrades_to_none(tmp_path, monkeypatch):
@@ -1190,7 +1331,7 @@ def test_run_synthesize_stubbed_missing_stats_output(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
-            _, netlist_path = _script_output_paths(script_path)
+            _, netlist_path = _script_output_paths(script_path, cwd=kwargs.get("cwd"))
             with open(netlist_path, "w", encoding="utf-8") as handle:
                 handle.write("// fake netlist, no stats written\n")
             return fake_completed(returncode=0)
@@ -1208,7 +1349,9 @@ def test_run_synthesize_stubbed_stats_missing_top_module(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
-            stats_path, netlist_path = _script_output_paths(script_path)
+            stats_path, netlist_path = _script_output_paths(
+                script_path, cwd=kwargs.get("cwd")
+            )
             with open(stats_path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {"modules": {"\\some_other_module": _GCD_MODULE_STATS}}, handle
@@ -1233,7 +1376,9 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
-            stats_path, netlist_path = _script_output_paths(script_path)
+            stats_path, netlist_path = _script_output_paths(
+                script_path, cwd=kwargs.get("cwd")
+            )
             with open(stats_path, "w", encoding="utf-8") as handle:
                 json.dump({"modules": {"\\gcd": _GCD_MODULE_STATS}}, handle)
             with open(netlist_path, "w", encoding="utf-8") as handle:
@@ -1328,7 +1473,8 @@ def _stub_hierarchical_yosys(
             return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
-        stats_path, netlist_path = _script_output_paths(script_path)
+        cwd = kwargs.get("cwd")
+        stats_path, netlist_path = _script_output_paths(script_path, cwd=cwd)
         payload: dict = {"modules": modules}
         if design is not None:
             payload["design"] = design
@@ -1336,7 +1482,7 @@ def _stub_hierarchical_yosys(
             json.dump(payload, handle)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write("// fake mapped netlist\n")
-        abc_log_path = _script_abc_log_path(script_path)
+        abc_log_path = _script_abc_log_path(script_path, cwd=cwd)
         if abc_log_path is not None:
             with open(abc_log_path, "w", encoding="utf-8") as handle:
                 handle.write(_ABC_STIME_LINE + "\n")
@@ -1736,9 +1882,16 @@ def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
     _stub_yosys_success(monkeypatch)
 
     report = run_synthesize(request_path)
-    abc_line = _script_abc_line(report["script_path"])
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
 
-    constr_path = os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+    # Issue #1844: the `.klt/synthesize/` output paths embedded in the
+    # generated script (including `-constr`'s own argument) are
+    # repo-relative -- `tmp_path` resolves as this test's own repo root
+    # (see the `tmp_path` fixture override above) -- never the absolute
+    # form `os.path.dirname`/`_abs_path` would reconstruct.
+    constr_path = os.path.join(
+        os.path.dirname(report["script_path"]["path"]), "gcd_abc.constr"
+    )
     assert f"-constr {constr_path}" in abc_line
     assert " -D " not in abc_line
 
@@ -1766,7 +1919,10 @@ def test_generated_script_delay_target_from_clock_period_ns(tmp_path, monkeypatc
 
     report = run_synthesize(request_path)
 
-    assert " -D 2500 " in _script_abc_line(report["script_path"]) + " "
+    assert (
+        " -D 2500 "
+        in _script_abc_line(_abs_path(report["script_path"], tmp_path)) + " "
+    )
     assert report["timing"]["delay_target_ps"] == 2500
 
 
@@ -1803,7 +1959,9 @@ def test_abc_constr_file_is_written_from_the_table(tmp_path, monkeypatch):
 
     report = run_synthesize(request_path)
 
-    constr_path = os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+    constr_path = os.path.join(
+        os.path.dirname(_abs_path(report["script_path"], tmp_path)), "gcd_abc.constr"
+    )
     driving_cell, load_ff = synthesize._ABC_CONSTR_INPUTS["sky130_fd_sc_hd"]
     with open(constr_path, encoding="utf-8") as handle:
         assert (
@@ -1821,7 +1979,7 @@ def test_dont_use_omitted_when_abc_pass_does_not_support_it(tmp_path, monkeypatc
     _stub_yosys_success(monkeypatch, version="0.33", supports_dont_use=False)
 
     report = run_synthesize(request_path)
-    abc_line = _script_abc_line(report["script_path"])
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
 
     assert "-dont_use" not in abc_line
     assert "-constr " in abc_line
@@ -1846,14 +2004,17 @@ def test_cell_library_without_table_entries_keeps_the_pre_807_script(
     _stub_yosys_success(monkeypatch)
 
     report = run_synthesize(request_path)
-    abc_line = _script_abc_line(report["script_path"])
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
 
     assert abc_line.startswith("abc -liberty ")
     assert "-constr" not in abc_line
     assert "-dont_use" not in abc_line
     assert report["timing"] is None
     assert not os.path.isfile(
-        os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+        os.path.join(
+            os.path.dirname(_abs_path(report["script_path"], tmp_path)),
+            "gcd_abc.constr",
+        )
     )
 
 
@@ -1885,7 +2046,7 @@ def test_generated_script_maps_constants_to_tie_cells(tmp_path, monkeypatch):
 
     report = run_synthesize(request_path)
 
-    assert _script_hilomap_line(report["script_path"]) == (
+    assert _script_hilomap_line(_abs_path(report["script_path"], tmp_path)) == (
         "hilomap -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO"
     )
 
@@ -1899,7 +2060,7 @@ def test_hilomap_runs_after_mapping_and_before_stat(tmp_path, monkeypatch):
     _stub_yosys_success(monkeypatch)
 
     report = run_synthesize(request_path)
-    lines = _script_lines(report["script_path"])
+    lines = _script_lines(_abs_path(report["script_path"], tmp_path))
     index = {
         "clean": lines.index("clean"),
         "hilomap": next(
@@ -1941,7 +2102,7 @@ def test_generated_script_maps_constants_to_tie_cells_gf180mcu(tmp_path, monkeyp
 
     report = run_synthesize(request_path)
 
-    assert _script_hilomap_line(report["script_path"]) == (
+    assert _script_hilomap_line(_abs_path(report["script_path"], tmp_path)) == (
         "hilomap -hicell gf180mcu_fd_sc_mcu9t5v0__tieh Z "
         "-locell gf180mcu_fd_sc_mcu9t5v0__tiel ZN"
     )
@@ -1973,7 +2134,7 @@ def test_generated_script_maps_constants_to_tie_cells_sg13g2_stdcell(
 
     report = run_synthesize(request_path)
 
-    assert _script_hilomap_line(report["script_path"]) == (
+    assert _script_hilomap_line(_abs_path(report["script_path"], tmp_path)) == (
         "hilomap -hicell sg13g2_tiehi L_HI -locell sg13g2_tielo L_LO"
     )
 
@@ -1997,7 +2158,7 @@ def test_cell_library_without_tie_cell_entry_emits_no_hilomap(tmp_path, monkeypa
 
     report = run_synthesize(request_path)
 
-    assert _script_hilomap_line(report["script_path"]) is None
+    assert _script_hilomap_line(_abs_path(report["script_path"], tmp_path)) is None
 
 
 def test_tie_cell_table_entries_are_hi_then_lo(tmp_path):
@@ -2134,7 +2295,7 @@ def test_run_synthesize_stubbed_success_gf180mcu(tmp_path, monkeypatch):
     # -- ORFS's own `DONT_USE_CELLS = *_1` for this platform is a P&R
     # congestion policy, measured here to cost +31% area at synthesis time.
     # See `_ABC_DONT_USE_GLOBS`'s own docstring.
-    abc_line = _script_abc_line(report["script_path"])
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
     assert "-constr " in abc_line
     assert "-dont_use" not in abc_line
     assert "gf180mcu_fd_sc_mcu9t5v0" not in synthesize._ABC_DONT_USE_GLOBS
@@ -2171,7 +2332,7 @@ def test_run_synthesize_stubbed_success_sg13g2_stdcell(tmp_path, monkeypatch):
     assert report["provenance"]["deck"]["name"] == "sg13g2_stdcell__tt_025C_1v20"
     assert report["timing"]["source"] == "abc_stime"
 
-    abc_line = _script_abc_line(report["script_path"])
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
     assert "-constr " in abc_line
 
     globs = synthesize._ABC_DONT_USE_GLOBS["sg13g2_stdcell"]
@@ -2486,7 +2647,7 @@ def test_run_synthesize_structural_comb_loop_fixture_still_produces_netlist(
     report = run_synthesize(request_path)
 
     assert report["status"] == "ok"
-    assert os.path.isfile(report["netlist_path"])
+    assert os.path.isfile(_abs_path(report["netlist_path"], tmp_path))
     assert report["structural"]["comb_loops"] == 1
     assert report["structural"]["has_critical"] is True
 
@@ -2928,7 +3089,13 @@ def test_verify_equivalence_true_attaches_report_on_pass(tmp_path, monkeypatch):
     assert equiv_request["gold"]["top"] == "gcd"
     assert equiv_request["gold"]["sources"][0].endswith("gcd.v")
     assert equiv_request["gate"]["top"] == "gcd"
-    assert equiv_request["gate"]["sources"] == [report["netlist_path"]]
+    # `_verify_synthesis_equivalence` writes the *real* absolute netlist
+    # path into the equiv request on disk (issue #1844: only the
+    # response's own `netlist_path` field is normalized) -- reconstitute
+    # it from the response for the comparison.
+    assert equiv_request["gate"]["sources"] == [
+        _abs_path(report["netlist_path"], tmp_path)
+    ]
     assert equiv_request["gate"]["liberty"].endswith(
         "sky130_fd_sc_hd__tt_025C_1v80.lib"
     )
@@ -3205,15 +3372,18 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
             stacklevel=1,
         )
 
-    assert os.path.isfile(report["netlist_path"])
-    assert os.path.isfile(report["script_path"])
+    assert os.path.isfile(_abs_path(report["netlist_path"], tmp_path))
+    assert os.path.isfile(_abs_path(report["script_path"], tmp_path))
     assert os.path.isfile(
-        os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+        os.path.join(
+            os.path.dirname(_abs_path(report["script_path"], tmp_path)),
+            "gcd_abc.constr",
+        )
     )
 
     # `write_verilog -noattr`'s own output is a real, non-trivial netlist --
     # sanity-check it names the top module and at least one mapped cell.
-    with open(report["netlist_path"], encoding="utf-8") as handle:
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
         netlist_text = handle.read()
     assert "module gcd" in netlist_text
     assert "sky130_fd_sc_hd__dfrtp_1" in netlist_text
@@ -3343,7 +3513,7 @@ def test_integration_real_yosys_constant_ties_become_tie_cells(tmp_path, monkeyp
     report = run_synthesize(request_path)
 
     assert report["status"] == "ok"
-    with open(report["netlist_path"], encoding="utf-8") as handle:
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
         netlist_text = handle.read()
 
     body = "\n".join(
@@ -3507,6 +3677,10 @@ def test_restructure_timing_no_violation_skips_equiv_gate(tmp_path, monkeypatch)
     assert report["restructuring"]["resizes_applied"] == []
     assert report["restructuring"]["equivalence"] is None
     assert equiv_calls == []
+    # Issue #1844: no resize applied -> `restructured_netlist_path` stays
+    # the bare JSON `null`, never `{"path": None, "scope": "absent"}` --
+    # "not applicable" stays distinguishable from "an unresolved path".
+    assert report["restructuring"]["restructured_netlist_path"] is None
 
 
 def test_restructure_timing_applied_resize_is_verified_by_equiv(tmp_path, monkeypatch):
@@ -3554,6 +3728,15 @@ def test_restructure_timing_applied_resize_is_verified_by_equiv(tmp_path, monkey
 
     assert report["restructuring"]["resizes_applied"] != []
     assert report["restructuring"]["equivalence"]["status"] == "equivalent"
+    # Issue #1844: `restructured_netlist_path` normalizes to the
+    # `{path, scope}` shape (like the top-level `netlist_path`/
+    # `script_path`) exactly when it is not `None` -- this is the
+    # "resize actually applied" branch, so it must be the object shape
+    # here, never a bare (potentially absolute) path string.
+    assert report["restructuring"]["restructured_netlist_path"]["scope"] == "repo"
+    assert not os.path.isabs(
+        report["restructuring"]["restructured_netlist_path"]["path"]
+    )
     assert len(captured_request_paths) == 1
     assert (
         os.path.basename(captured_request_paths[0])
@@ -3562,8 +3745,12 @@ def test_restructure_timing_applied_resize_is_verified_by_equiv(tmp_path, monkey
 
     with open(captured_request_paths[0], encoding="utf-8") as handle:
         equiv_request = json.load(handle)
+    # Issue #1844: `restructured_netlist_path` is the `{path, scope}`
+    # shape when not `None` -- `_verify_synthesis_equivalence` writes the
+    # *real* absolute path into the equiv request on disk, so reconstitute
+    # the response's own normalized value for the comparison.
     assert equiv_request["gate"]["sources"] == [
-        report["restructuring"]["restructured_netlist_path"]
+        _abs_path(report["restructuring"]["restructured_netlist_path"], tmp_path)
     ]
 
 

@@ -373,15 +373,24 @@ def validate_design(
         _copy_sources(design_dir, workdir)
 
         synth_report = klt_synthesize(workdir, sources, top)
+        # `klt synthesize`'s own `netlist_path` is now (issue #1844) the
+        # `{path, scope}` shape -- `workdir` is a
+        # `tempfile.TemporaryDirectory()`, not a git repo, so it reports
+        # `scope: "external"`, `path: None`. Reconstruct the real
+        # filesystem path directly from `run_synthesize`'s own documented
+        # convention (`synthesize.py`'s module docstring):
+        # `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the request
+        # file (`workdir / "synth_request.json"`, see `klt_synthesize`
+        # above).
+        #
         # `workdir` is a `tempfile.TemporaryDirectory()` path, which on
         # macOS is a `/var/folders/...` symlink to `/private/var/folders/
         # ...` -- resolve both sides before computing the relative path, or
         # a mismatched symlink/real-path prefix produces a bogus `../../..`
         # chain that no longer resolves once rebased onto the container's
         # `/workdir/scratch` mount point.
-        netlist_rel = os.path.relpath(
-            Path(synth_report["netlist_path"]).resolve(), workdir.resolve()
-        )
+        netlist_path = workdir / ".klt" / "synthesize" / f"{top}_synth.v"
+        netlist_rel = os.path.relpath(netlist_path.resolve(), workdir.resolve())
 
         par_report = klt_place_and_route(
             workdir, netlist_rel, top, clock_port, clock_period_ns, utilization_pct

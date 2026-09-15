@@ -296,7 +296,16 @@ def _run_validation(workdir: Path) -> int:
     synth = klt_synthesize(workdir)
     if synth.get("status") != "ok":
         raise RuntimeError(f"klt synthesize failed: {synth}")
-    netlist_rel = str(Path(synth["netlist_path"]).relative_to(workdir))
+    # `klt synthesize`'s own `netlist_path` is now (issue #1844) the
+    # `{path, scope}` shape -- `workdir` is a plain tmp directory, not a
+    # git repo, so it reports `scope: "external"`, `path: None`.
+    # Reconstruct the real filesystem path directly from `run_synthesize`'s
+    # own documented convention (`synthesize.py`'s module docstring):
+    # `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the request file
+    # (`klt_synthesize` above always writes `synth_request.json`).
+    netlist_rel = str(
+        (workdir / ".klt" / "synthesize" / "modexp_synth.v").relative_to(workdir)
+    )
 
     print("--> klt place-and-route modexp (real OpenROAD, openroad/orfs)")
     par = klt_place_and_route(workdir, netlist_rel)

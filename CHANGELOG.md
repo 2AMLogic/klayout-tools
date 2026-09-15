@@ -14,6 +14,39 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt synthesize`'s `schema_version` bumps `1` -> `2` (issue
+  #1844, mirroring `klt pex`/`klt sim`/`klt size`/`klt extract`'s own issue
+  #1261/#1376 bumps): the top-level `netlist_path`/`script_path` fields --
+  plus every nested occurrence, `arithmetic.candidates[].measured.
+  netlist_path`/`script_path`, and `restructuring.restructured_netlist_path`
+  when a resize was applied -- changed from a raw (often absolute) path
+  string to the `{path, scope}` shape `env_provenance.repo_relative_path()`
+  already defines. `baseline.ref`'s literal-`response_path`/`netlist_path`
+  fallback is also normalized (rendered via `render_path_field()` -- still a
+  plain string, since `ref` is a caller-facing label, not one of the
+  `{path, scope}` object fields). A committed evidence record wraps a `klt
+  synthesize --format json` response unmodified
+  (`docs/design/sim-evidence-discipline-spike.md`), so the old shape leaked
+  the author's home directory / Loom worktree layout into any such record.
+  Independently, the generated `.ys` script no longer embeds an absolute
+  path for an RTL source or a `.klt/synthesize/` output path (`tee -o`/
+  `write_verilog`) that resolves inside the invocation's repo -- only for
+  the top-level production script, run with an explicit `cwd=` so the
+  embedded relative paths still resolve correctly (`_run_yosys`'s own
+  cwd-independence invariant is otherwise unchanged: every other script this
+  module writes, and every call with no repo resolved at all, still embeds
+  only absolute paths and runs with no `cwd=`). The resolved liberty stays a
+  real absolute path in the script (Yosys must actually open it, and a PDK
+  install essentially never lives inside the repo) -- its commit-safe
+  identity is already the response's `provenance.deck` (name + content
+  hash), so on a machine whose PDK sits under `$HOME` the generated `.ys`
+  is still flagged by `klt env-provenance scan` on its liberty lines: a
+  known remaining gap, tracked as issue #1870.
+  `equivalence.artifacts.{script_path, netlist_path}` is `klt
+  equiv`'s own response shape, deliberately left un-normalized (a known,
+  documented remaining gap -- changing it needs its own `schema_version`
+  bump on `klt equiv`). See `docs/cli/synthesize.md`'s field table and the
+  "Equivalence gate" section.
 - **Added**: a declared metric namespace registry
   (`src/klayout_tools/metrics.py`, issue #247) — data-only mapping from a
   METRICS2.1-style hierarchical metric name (e.g. `design__instance__count`,

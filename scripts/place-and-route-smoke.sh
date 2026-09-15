@@ -134,9 +134,15 @@ JSON
     echo "--> klt synthesize $DESIGN"
     SYNTH_JSON="$SCRATCH/synth_report.json"
     run_klt "$SCRATCH" synthesize synth_request.json --format json >"$SYNTH_JSON"
-    NETLIST_PATH="$(jq -r '.netlist_path' "$SYNTH_JSON")"
-    [[ -n "$NETLIST_PATH" && "$NETLIST_PATH" != "null" ]] || die "$DESIGN: klt synthesize did not report a netlist_path"
-    [[ -f "$NETLIST_PATH" ]] || die "$DESIGN: synthesize's reported netlist_path '$NETLIST_PATH' does not exist"
+    # Issue #1844: `netlist_path` is now the `{path, scope}` shape --
+    # `$SCRATCH` is a plain `mktemp -d` directory, not a git repo, so it
+    # reports `scope: "external"`, `path: null` (correctly omitting the
+    # absolute path). Reconstruct the real filesystem path directly from
+    # `klt synthesize`'s own documented convention (`docs/cli/
+    # synthesize.md`): `.klt/synthesize/<hdl_toplevel>_synth.v`, next to
+    # the request file (`$SCRATCH/synth_request.json` above).
+    NETLIST_PATH="$SCRATCH/.klt/synthesize/${DESIGN}_synth.v"
+    [[ -f "$NETLIST_PATH" ]] || die "$DESIGN: synthesize did not produce the expected netlist '$NETLIST_PATH'"
 
     cat >"$SCRATCH/par_request.json" <<JSON
 {

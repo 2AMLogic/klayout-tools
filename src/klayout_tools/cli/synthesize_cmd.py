@@ -31,6 +31,7 @@ concept is `structural.has_critical` above, see docs/cli/synthesize.md's
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..synthesize import SynthesizeError, run_synthesize
 from .output import emit_error, emit_success, render_table
 
@@ -125,8 +126,13 @@ def _print_text(report: dict) -> None:
         print(f"  {category}: {warnings['by_category'][category]}")
 
     print()
-    print(f"netlist_path: {report['netlist_path']}")
-    print(f"script_path: {report['script_path']}")
+    # Issue #1844: `netlist_path`/`script_path` are the `{path, scope}`
+    # shape `env_provenance.repo_relative_path` defines -- `render_path_field`
+    # is the same courtesy-rendering helper `klt pex`/`klt sim`'s own text
+    # output already uses (issue #1261) so text mode never prints a Python
+    # dict repr here.
+    print(f"netlist_path: {render_path_field(report['netlist_path'])}")
+    print(f"script_path: {render_path_field(report['script_path'])}")
 
     baseline = report.get("baseline")
     if baseline is not None:
@@ -158,9 +164,13 @@ def _print_text(report: dict) -> None:
         if restructuring["gave_up_reason"]:
             print(f"  gave_up_reason: {restructuring['gave_up_reason']}")
         if restructuring["restructured_netlist_path"]:
+            # `restructured_netlist_path` stays the bare `None` (falsy,
+            # never printed) when no resize was applied; when it is the
+            # `{path, scope}` object (issue #1844), render it the same way
+            # as `netlist_path`/`script_path` above.
             print(
                 "  restructured_netlist_path: "
-                f"{restructuring['restructured_netlist_path']}"
+                f"{render_path_field(restructuring['restructured_netlist_path'])}"
             )
 
     arithmetic = report.get("arithmetic")

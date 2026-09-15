@@ -422,6 +422,20 @@ def _write_request(tmp_path, arithmetic, **extra):
     return str(request_path)
 
 
+def _synth_script_path(tmp_path, hdl_toplevel: str = "adders") -> str:
+    """The real absolute path `run_synthesize` wrote its `.ys` script to.
+
+    Issue #1844 normalized the response's own `script_path` field to the
+    `{path, scope}` shape (and `tmp_path` is not a git repo, so it reports
+    `scope: "external"`, `path: None` -- correctly omitting the absolute
+    path). This reconstructs the real filesystem path directly from
+    `run_synthesize`'s own documented convention (`synthesize.py`'s module
+    docstring): `.klt/synthesize/synth_<hdl_toplevel>.ys`, next to the
+    request file.
+    """
+    return str(tmp_path / ".klt" / "synthesize" / f"synth_{hdl_toplevel}.ys")
+
+
 @requires_engine
 def test_integration_arithmetic_absent_leaves_the_response_unchanged(tmp_path):
     report = run_synthesize(
@@ -458,6 +472,14 @@ def test_integration_auto_sweep_reports_a_per_architecture_table(tmp_path):
         assert row["measured"] is not None, name
         assert row["measured"]["instance_count"] > 0, name
         assert row["measured"]["area_um2"] > 0, name
+        # Issue #1844: `candidates[].measured.netlist_path`/`script_path`
+        # are the same `{path, scope}` shape as the top-level fields, not
+        # a raw (potentially absolute) path string -- `tmp_path` has no
+        # `.git` ancestor here, so both resolve `scope: "external"`.
+        assert row["measured"]["netlist_path"]["scope"] == "external"
+        assert row["measured"]["netlist_path"]["path"] is None
+        assert row["measured"]["script_path"]["scope"] == "external"
+        assert row["measured"]["script_path"]["path"] is None
     # Every substituted adder was proven equivalent to `a + b + cin` first.
     for name in ("ripple", "kogge-stone"):
         assert rows[name]["adder_equivalence"] == [
@@ -492,7 +514,7 @@ def test_integration_explicit_architecture_substitutes_and_stays_equivalent(tmp_
     assert arithmetic["selected_measured"] is not None
     assert report["equivalence"]["status"] == "equivalent"
 
-    script = open(report["script_path"], encoding="utf-8").read()
+    script = open(_synth_script_path(tmp_path), encoding="utf-8").read()
     assert "techmap -map" in script
     assert "klt_add_kogge_stone_16.v" in script
 
@@ -521,7 +543,7 @@ def test_integration_adders_default_is_an_explicit_no_op(tmp_path):
     arithmetic = report["arithmetic"]
     assert arithmetic["status"] == "not-requested"
     assert arithmetic["candidates"] == []
-    script = open(report["script_path"], encoding="utf-8").read()
+    script = open(_synth_script_path(tmp_path), encoding="utf-8").read()
     assert "techmap -map" not in script
 
 
