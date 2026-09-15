@@ -217,9 +217,12 @@ The spec file is a JSON object:
     electrical conductor. This is how a conductor spread across several GDS
     layers (e.g. a coax-style shield's four wall segments, each its own
     layer) is expressed as a single node; see "Worked example: coax" below.
-    (PEEC's bar-shaped-conductor restriction below means a
-    `compute_inductance: true` request cannot use this to merge several
-    boxes into one conductor — see "PEEC inductance/resistance".)
+    (`compute_inductance: true`/`frequencies_hz` can also merge several
+    boxes into one PEEC-eligible conductor this way, *provided* every box
+    shares one current-flow axis with every other box in the request — see
+    "PEEC inductance/resistance"'s "bar-shaped-conductor MVP restriction".
+    The coax shield's own four walls do not satisfy that — see "Worked
+    example: coax" below.)
   - `z0_um`/`z1_um` (numbers) — the conductor's z-extent at this layer.
     `z0_um == z1_um` models an idealised zero-thickness flat plate (the
     common case for a simple parallel-plate test); `z1_um > z0_um` models a
@@ -409,39 +412,53 @@ the capacitance solve's — read this section before turning it on.
 
 ### The bar-shaped-conductor MVP restriction
 
-`compute_inductance: true` requires every conductor in the request to reduce
-to a single well-defined current-flow "bar":
+`compute_inductance: true` requires every *box*, of every conductor in the
+request, to individually reduce to a well-defined current-flow "bar", and
+every box — across every conductor, including a multi-box conductor's own
+boxes — to share one current-flow axis and axial extent:
 
-- **Exactly one box per conductor.** A conductor merged from several
-  `stackup` entries (e.g. the coax shield's four wall segments in "Worked
-  example: coax" below) has no single well-defined bar cross-section under
-  this MVP's model, and is rejected with a clear error. Multi-box PEEC
-  (Ruehli's general mesh) is a follow-up.
+- **Multi-box conductors are supported, as long as every box shares one
+  axis.** A conductor merged from several `stackup` entries (e.g. a "go"
+  rail spread across two GDS layers) is fine, *provided* every one of its
+  boxes is individually bar-shaped (see below) and shares the same
+  current-flow axis and axial extent as every other box in the request —
+  see "Worked example: multi-box conductor" below.
+  ([#1841](https://github.com/2AMLogic/klayout-tools/issues/1841), PEEC
+  increment (i).) **Mixed-axis geometry stays out of scope**: the coax
+  shield's four wall segments in "Worked example: coax" below sit on two
+  *different* current-flow axes (north/south run along one axis, east/west
+  along the perpendicular one), so that shape is still rejected — see the
+  general Ruehli mesh note below. That is increment (ii)'s territory, a
+  follow-up.
 - **A true 3-D bar.** All three of a box's extents (x, y, z) must be
   non-zero — a flat, zero-thickness plate (fine for capacitance) has no
   cross-sectional area to carry current.
-- **Bar-shaped, not cubic.** The box's longest extent (the current-flow
+- **Bar-shaped, not cubic.** A box's longest extent (the current-flow
   axis — the MVP's simplest defensible choice: **current flows along the
   box's longest axis**, matching how bar/wire conductors are treated in
   introductory PEEC codes) must be at least 3x each of the other two
-  extents. A conductor closer to square/cubic than that (e.g. a pad or a
-  via) has no well-defined single current-flow direction under this MVP's
-  model and is rejected — this mirrors how the capacitance solver's own
-  "Scope and limitations" documents *its* MVP simplifications rather than
-  silently returning a number that doesn't mean what it looks like it means.
-- **Every conductor must share the same current-flow axis and the same
-  axial extent** (start/end coordinate along that axis). This is what lets
-  the mutual-inductance formula below (parallel, equal-length, aligned
-  filaments) apply directly; a request mixing axes, or with offset/unequal
-  bar lengths (e.g. an L-shaped loop, or two loop sides that don't line up
-  end-to-end), is rejected. The general unequal-length/off-axis Neumann
-  formula is a follow-up.
+  extents. A box closer to square/cubic than that (e.g. a pad or a via) has
+  no well-defined single current-flow direction under this MVP's model and
+  is rejected — this mirrors how the capacitance solver's own "Scope and
+  limitations" documents *its* MVP simplifications rather than silently
+  returning a number that doesn't mean what it looks like it means.
+- **Every box (across every conductor) must share the same current-flow
+  axis and the same axial extent** (start/end coordinate along that axis).
+  This is what lets the mutual-inductance formula below (parallel,
+  equal-length, aligned filaments) apply directly; a request mixing axes
+  anywhere — whether between two conductors or between two boxes of the
+  *same* conductor — or with offset/unequal bar lengths (e.g. an L-shaped
+  loop, or two loop sides that don't line up end-to-end), is rejected. The
+  general unequal-length/off-axis Neumann formula (Ruehli's full mesh) is a
+  follow-up.
 - Every conductor must set `conductivity_S_per_m` (used for DC resistance;
   see "Spec file" above).
 
 A rectangular loop (two long, parallel, aligned bars — "Worked example:
-straight wire and loop" below) and a single straight bar both satisfy this
-scope; a coax shield, a pad, or an L-shaped trace do not (yet).
+straight wire and loop" below), a single straight bar, and a multi-box
+conductor whose boxes all share one axis (e.g. a dual-strip rail — "Worked
+example: multi-box conductor" below) all satisfy this scope; a coax shield
+(mixed-axis walls) or a pad/L-shaped trace (non-bar geometry) do not (yet).
 
 ### Method: filament bundle + Neumann's formula
 
@@ -498,12 +515,15 @@ single static R/L/C matrix to genuine frequency-swept network parameters.
 ### The bar-shaped-conductor MVP restriction (shared with PEEC)
 
 The full-wave solve requires the **exact same** bar-shaped-conductor
-restriction as `compute_inductance` above — every conductor reduces to a
-single well-defined bar (one box, a true 3-D elongated shape, sharing a
-common current-flow axis and axial extent with every other conductor in the
-request) — see "The bar-shaped-conductor MVP restriction" above for the
-full detail and why. This applies independent of whether
-`compute_inductance` is also set in the same request.
+restriction as `compute_inductance` above — every box, of every conductor,
+reduces to a well-defined bar (a true 3-D elongated shape), and every box —
+across every conductor, including a multi-box conductor's own boxes —
+shares a common current-flow axis and axial extent — see "The
+bar-shaped-conductor MVP restriction" above for the full detail and why.
+This applies independent of whether `compute_inductance` is also set in the
+same request. A multi-box conductor's several boxes are combined into one
+equivalent thin wire (summed cross-sectional area, area-weighted transverse
+centroid) before the retarded-kernel solve below.
 
 ### Method: retarded thin-wire partial impedance
 
@@ -846,7 +866,53 @@ shield:
 }
 ```
 
-See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
+See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry. Note
+that this particular shield is a **mixed-axis** multi-box conductor (the
+north/south walls run along one current-flow axis, east/west along the
+perpendicular one), so it stays out of scope for `compute_inductance`/
+`frequencies_hz` even after the "Worked example: multi-box conductor"
+relaxation below — see "The bar-shaped-conductor MVP restriction".
+
+## Worked example: multi-box conductor
+
+`compute_inductance: true`/`frequencies_hz` accept a conductor built from
+more than one box, as long as every box (across every conductor in the
+request) shares one current-flow axis and axial extent
+([#1841](https://github.com/2AMLogic/klayout-tools/issues/1841)). Here
+`"go"` is a dual-strip rail spread across two GDS layers, both 500 µm long
+along the same axis as the single-box `"return"` conductor:
+
+```json
+{
+  "background_permittivity": 1.0,
+  "panel_size_um": 5.0,
+  "compute_inductance": true,
+  "filament_size_um": 0.5,
+  "stackup": [
+    {
+      "layer": "1/0", "conductor": "go",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    },
+    {
+      "layer": "3/0", "conductor": "go",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    },
+    {
+      "layer": "2/0", "conductor": "return",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    }
+  ]
+}
+```
+
+`inductance_matrix_nh`/`resistance_ohm` still have one row/entry per
+*conductor* (two, here: `"go"` and `"return"`), not per box — every filament
+from `"go"`'s two boxes is attributed back to `"go"` for the PEEC solve. See
+`tests/test_mom.py`'s `test_run_mom_peec_accepts_multi_box_conductor` for
+the exact fixture.
 
 ## Worked example: straight wire and loop
 
@@ -936,10 +1002,13 @@ oracles), for the exact geometry and measured accuracy.
 - **PEEC inductance/resistance and the full-wave solve are both
   bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
   above's "bar-shaped-conductor MVP restriction" — a materially narrower
-  scope than the capacitance solve's (single box, true 3-D, elongated,
-  shared axis/extent across every conductor in the request). A request that
-  does not fit is rejected with a clear error naming which restriction it
-  violates, not silently approximated. The full-wave solve's derived
+  scope than the capacitance solve's (every box true 3-D and elongated,
+  sharing one axis/extent across every box in the request — a conductor may
+  contribute more than one box, as long as they all share that axis; a
+  request mixing axes anywhere, even within one conductor's own boxes,
+  remains out of scope). A request that does not fit is rejected with a
+  clear error naming which restriction it violates, not silently
+  approximated. The full-wave solve's derived
   characteristic-impedance/propagation-constant fields are further
   restricted to exactly two conductors (the canonical transmission-line
   case); larger conductor counts still get the raw partial-impedance

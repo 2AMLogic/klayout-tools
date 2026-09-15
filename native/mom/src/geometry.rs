@@ -267,12 +267,17 @@ fn discretize_box(
 
 // --- PEEC bar/filament discretisation ---------------------------------------
 //
-// Turns each conductor's single box into a "bar": a current-flow axis (the
+// Turns each of a conductor's box(es) into a "bar": a current-flow axis (the
 // box's longest dimension -- see `MIN_BAR_ASPECT_RATIO`) plus a grid of
-// cross-section filaments spanning the bar's full length. This is a
-// *volumetric* discretisation (unlike `discretize`'s surface panels), feeding
-// `peec::solve_inductance_matrix_nh`/`peec::resistance_ohm` rather than
-// `solver::solve_capacitance_matrix_ff`. See docs/cli/mom.md's "PEEC
+// cross-section filaments spanning the bar's full length. A conductor may
+// contribute more than one box (e.g. a coax shield's several wall segments,
+// #1841's "increment (i)") -- each box is classified and discretised
+// independently, with every resulting filament tagged back to the owning
+// conductor (see `Filament::conductor_index`), so `peec.rs`'s pairwise fill
+// naturally sums contributions across a multi-box conductor's filaments. This
+// is a *volumetric* discretisation (unlike `discretize`'s surface panels),
+// feeding `peec::solve_inductance_matrix_nh`/`peec::resistance_ohm` rather
+// than `solver::solve_capacitance_matrix_ff`. See docs/cli/mom.md's "PEEC
 // inductance/resistance" section for the full scope and the reasoning behind
 // the restrictions below.
 
@@ -328,11 +333,13 @@ pub struct BarLayout {
     pub filaments: Vec<Filament>,
 }
 
-/// One conductor's box reduced to "bar" terms. `pub(crate)` (rather than
-/// module-private): both `discretize_bars` (PEEC filament discretisation)
-/// and `fullwave::classify_conductors` (the frequency-domain retarded solve,
-/// #893) need this shared shape -- see `classify_shared_axis_bars` below,
-/// the common validation both paths call through.
+/// One box (of a conductor, which may contribute more than one -- see the
+/// "PEEC bar/filament discretisation" module docs above) reduced to "bar"
+/// terms. `pub(crate)` (rather than module-private): both `discretize_bars`
+/// (PEEC filament discretisation) and `fullwave::classify_conductors` (the
+/// frequency-domain retarded solve, #893) need this shared shape -- see
+/// `classify_shared_axis_bars` below, the common validation both paths call
+/// through.
 pub(crate) struct Bar {
     pub(crate) axis: usize,
     pub(crate) axis_lo_um: f64,
@@ -388,22 +395,34 @@ pub(crate) fn classify_bar(name: &str, b: &BoxRequest) -> Result<Bar, String> {
     })
 }
 
-/// Validate that every conductor reduces to a single bar-shaped box (see
-/// `MIN_BAR_ASPECT_RATIO`) sharing a common current-flow axis and the same
-/// `[lo, hi]` extent along it -- the precondition **both** `discretize_bars`
-/// (PEEC filament discretisation, #797) and `fullwave::classify_conductors`
-/// (the frequency-domain retarded solve, #893) require, factored out so the
-/// two callers can never drift apart on what "bar-shaped" means. See
+/// Validate that every box, of every conductor, is individually bar-shaped
+/// (see `MIN_BAR_ASPECT_RATIO`) and that every box -- across every conductor,
+/// including a multi-box conductor's own boxes -- shares one common
+/// current-flow axis and the same `[lo, hi]` extent along it. This is the
+/// precondition **both** `discretize_bars` (PEEC filament discretisation,
+/// #797) and `fullwave::classify_full_wave_bars` (the frequency-domain
+/// retarded solve, #893) require, factored out so the two callers can never
+/// drift apart on what "bar-shaped" means. A conductor may contribute more
+/// than one box (e.g. a coax shield's several wall segments -- #1841's
+/// "increment (i)"); a conductor whose boxes span more than one axis, or a
+/// non-bar single box, remain out of scope (mixed-axis geometry needs the
+/// general Ruehli mesh -- increment (ii), a follow-up beyond this MVP). See
 /// docs/cli/mom.md's "PEEC inductance/resistance" section for why these MVP
 /// restrictions exist and what a follow-up would need to relax them.
 ///
-/// `(axis, axis_lo_um, axis_hi_um, bars)` -- `bars` (named, in request order,
-/// borrowing each conductor's name) is what `classify_shared_axis_bars`
-/// returns.
-type SharedAxisBars<'a> = (usize, f64, f64, Vec<(&'a str, Bar)>);
+/// `(axis, axis_lo_um, axis_hi_um, bars)` -- `bars` has one entry **per box**
+/// (not per conductor, now that a conductor may contribute more than one),
+/// in request order (conductor order, then box order within each
+/// conductor). Each entry is `(conductor_index, conductor_name, Bar)`:
+/// `conductor_index` is the owning conductor's position in `conductors` (not
+/// the entry's own position in `bars`, which no longer lines up 1:1 with
+/// conductor position) -- this is what lets `discretize_bars` attribute a
+/// box's filaments back to the right conductor, and what lets
+/// `classify_full_wave_bars` aggregate a multi-box conductor's boxes into
+/// one equivalent wire.
+type SharedAxisBars<'a> = (usize, f64, f64, Vec<(usize, &'a str, Bar)>);
 
-/// Returns `(axis, axis_lo_um, axis_hi_um, bars)`, `bars` in the same order
-/// as `conductors` (borrowing its names).
+/// Returns `(axis, axis_lo_um, axis_hi_um, bars)` -- see [`SharedAxisBars`].
 pub(crate) fn classify_shared_axis_bars(
     conductors: &[ConductorRequest],
 ) -> Result<SharedAxisBars<'_>, String> {
@@ -411,44 +430,44 @@ pub(crate) fn classify_shared_axis_bars(
         return Err("at least one conductor is required".to_string());
     }
 
-    let mut bars: Vec<(&str, Bar)> = Vec::with_capacity(conductors.len());
-    for c in conductors {
-        if c.boxes.len() != 1 {
+    let mut bars: Vec<(usize, &str, Bar)> = Vec::new();
+    for (conductor_index, c) in conductors.iter().enumerate() {
+        if c.boxes.is_empty() {
             return Err(format!(
                 "conductor {:?}: this bar-shaped-conductor discretisation requires every \
-                 conductor to be exactly one box (got {}) -- a conductor built from several \
-                 boxes (e.g. a coax shield's wall segments) has no single well-defined bar \
-                 cross-section under this MVP's model; this is a follow-up",
-                c.name,
-                c.boxes.len()
+                 conductor to have at least one box (got 0)",
+                c.name
             ));
         }
-        bars.push((c.name.as_str(), classify_bar(&c.name, &c.boxes[0])?));
+        for b in &c.boxes {
+            bars.push((conductor_index, c.name.as_str(), classify_bar(&c.name, b)?));
+        }
     }
 
-    let axis = bars[0].1.axis;
-    for (name, bar) in &bars[1..] {
+    let axis = bars[0].2.axis;
+    for (_, name, bar) in &bars[1..] {
         if bar.axis != axis {
             return Err(format!(
-                "this bar-shaped-conductor discretisation requires every conductor to share \
-                 the same current-flow axis -- conductor {:?} is along {}, but conductor \
-                 {:?} is along {}; a request mixing axes (e.g. an L-shaped loop) needs the \
-                 general Ruehli mesh, a follow-up beyond this MVP's single-axis bar model",
-                bars[0].0, AXIS_NAMES[axis], name, AXIS_NAMES[bar.axis]
+                "this bar-shaped-conductor discretisation requires every box (across every \
+                 conductor -- including a multi-box conductor's own boxes) to share the same \
+                 current-flow axis -- conductor {:?}'s first box is along {}, but conductor \
+                 {:?} has a box along {}; a request mixing axes (e.g. an L-shaped loop) needs \
+                 the general Ruehli mesh, a follow-up beyond this MVP's single-axis bar model",
+                bars[0].1, AXIS_NAMES[axis], name, AXIS_NAMES[bar.axis]
             ));
         }
     }
 
-    let (axis_lo, axis_hi) = (bars[0].1.axis_lo_um, bars[0].1.axis_hi_um);
-    for (name, bar) in &bars[1..] {
+    let (axis_lo, axis_hi) = (bars[0].2.axis_lo_um, bars[0].2.axis_hi_um);
+    for (_, name, bar) in &bars[1..] {
         if (bar.axis_lo_um - axis_lo).abs() > EPS_UM || (bar.axis_hi_um - axis_hi).abs() > EPS_UM {
             return Err(format!(
-                "this bar-shaped-conductor discretisation requires every conductor's bar to \
-                 share the same length and axial alignment -- conductor {:?} spans \
-                 [{axis_lo:.4}, {axis_hi:.4}] um along {}, but conductor {name:?} spans \
-                 [{:.4}, {:.4}] um; differing extents (e.g. an offset loop) need the general \
-                 unequal-length Neumann formula, a follow-up beyond this MVP",
-                bars[0].0, AXIS_NAMES[axis], bar.axis_lo_um, bar.axis_hi_um
+                "this bar-shaped-conductor discretisation requires every box's bar to share \
+                 the same length and axial alignment -- conductor {:?}'s first box spans \
+                 [{axis_lo:.4}, {axis_hi:.4}] um along {}, but conductor {name:?} has a box \
+                 spanning [{:.4}, {:.4}] um; differing extents (e.g. an offset loop) need the \
+                 general unequal-length Neumann formula, a follow-up beyond this MVP",
+                bars[0].1, AXIS_NAMES[axis], bar.axis_lo_um, bar.axis_hi_um
             ));
         }
     }
@@ -456,13 +475,17 @@ pub(crate) fn classify_shared_axis_bars(
     Ok((axis, axis_lo, axis_hi, bars))
 }
 
-/// Discretise every conductor's single box into a shared-axis bar layout,
-/// target filament edge length `filament_size_um`. Every conductor must
-/// reduce to exactly one bar-shaped box (see `MIN_BAR_ASPECT_RATIO`), and
-/// every conductor's bar must share the same current-flow axis and the same
-/// `[lo, hi]` extent along it -- see docs/cli/mom.md's "PEEC
-/// inductance/resistance" section for why these MVP restrictions exist and
-/// what a follow-up would need to relax them.
+/// Discretise every conductor's box(es) into a shared-axis bar layout,
+/// target filament edge length `filament_size_um`. Every box, of every
+/// conductor, must be individually bar-shaped (see `MIN_BAR_ASPECT_RATIO`),
+/// and every box (across every conductor) must share the same current-flow
+/// axis and the same `[lo, hi]` extent along it -- see docs/cli/mom.md's
+/// "PEEC inductance/resistance" section for why these MVP restrictions exist
+/// and what a follow-up would need to relax them. A multi-box conductor's
+/// several boxes each get their own filament grid; every filament is tagged
+/// with `Filament::conductor_index` (the owning conductor's position in
+/// `conductors`), so `peec.rs`'s pairwise fill sums a multi-box conductor's
+/// filaments together transparently.
 pub fn discretize_bars(
     conductors: &[ConductorRequest],
     filament_size_um: f64,
@@ -480,7 +503,7 @@ pub fn discretize_bars(
     // `discretize`'s panel guard -- fail fast on a scale-mismatched request
     // rather than materialise an astronomical filament count.
     let mut estimated_total: u64 = 0;
-    for (_, bar) in &bars {
+    for (_, _, bar) in &bars {
         let n0 = face_segment_count(
             bar.transverse_um[0].1 - bar.transverse_um[0].0,
             filament_size_um,
@@ -500,14 +523,14 @@ pub fn discretize_bars(
     }
 
     let mut filaments = Vec::new();
-    for (conductor_index, (name, bar)) in bars.iter().enumerate() {
+    for (conductor_index, name, bar) in &bars {
         let before = filaments.len();
         let (u0, u1) = bar.transverse_um[0];
         let (v0, v1) = bar.transverse_um[1];
         for (uc, ulen) in subdivide_1d(u0, u1, filament_size_um) {
             for (vc, vlen) in subdivide_1d(v0, v1, filament_size_um) {
                 filaments.push(Filament {
-                    conductor_index,
+                    conductor_index: *conductor_index,
                     transverse_um: [uc, vc],
                     area_um2: ulen * vlen,
                     extent_um: [ulen, vlen],
@@ -607,28 +630,50 @@ pub struct FullWaveBarLayout {
     pub conductors: Vec<FullWaveConductorGeom>,
 }
 
-/// Classify every conductor's box into the shared-axis bar geometry the
+/// Classify every conductor's box(es) into the shared-axis bar geometry the
 /// full-wave retarded solve needs -- see `classify_shared_axis_bars` for the
-/// validation this shares with PEEC's `discretize_bars` (single box per
-/// conductor, shared current-flow axis, shared axial extent). The shared
-/// axis index itself is not part of [`FullWaveBarLayout`] -- unlike PEEC's
-/// `BarLayout`, `fullwave.rs` never needs to name it (its error messages
-/// only reference axial positions/distances, already axis-agnostic).
+/// validation this shares with PEEC's `discretize_bars` (every box
+/// individually bar-shaped, every box across every conductor sharing one
+/// current-flow axis and axial extent). A multi-box conductor's several
+/// boxes are combined into the single equivalent thin wire this module's
+/// docs describe: total cross-sectional area is the sum of each box's
+/// transverse rectangle area, and the transverse centroid is that same
+/// area-weighted average -- the natural generalisation of "one equivalent
+/// wire per conductor" from one box to several (e.g. a coax shield's wall
+/// segments combine into one effective shield wire). The shared axis index
+/// itself is not part of [`FullWaveBarLayout`] -- unlike PEEC's `BarLayout`,
+/// `fullwave.rs` never needs to name it (its error messages only reference
+/// axial positions/distances, already axis-agnostic).
 pub fn classify_full_wave_bars(
     conductors: &[ConductorRequest],
 ) -> Result<FullWaveBarLayout, String> {
     let (_axis, axis_lo_um, axis_hi_um, bars) = classify_shared_axis_bars(conductors)?;
-    let conductors = bars
-        .into_iter()
-        .map(|(_, bar)| {
-            let (u0, u1) = bar.transverse_um[0];
-            let (v0, v1) = bar.transverse_um[1];
-            FullWaveConductorGeom {
-                centroid_transverse_um: [0.5 * (u0 + u1), 0.5 * (v0 + v1)],
-                area_um2: (u1 - u0) * (v1 - v0),
-            }
+
+    let mut area_um2 = vec![0.0_f64; conductors.len()];
+    let mut weighted_centroid_um = vec![[0.0_f64; 2]; conductors.len()];
+    for (conductor_index, _name, bar) in &bars {
+        let (u0, u1) = bar.transverse_um[0];
+        let (v0, v1) = bar.transverse_um[1];
+        let area = (u1 - u0) * (v1 - v0);
+        area_um2[*conductor_index] += area;
+        weighted_centroid_um[*conductor_index][0] += area * 0.5 * (u0 + u1);
+        weighted_centroid_um[*conductor_index][1] += area * 0.5 * (v0 + v1);
+    }
+
+    // `area_um2[i]` is a sum of strictly-positive per-box areas (every box
+    // passed `classify_bar`'s non-zero-extent check above), and every
+    // conductor contributed at least one box (`classify_shared_axis_bars`
+    // rejects zero boxes) -- so this division is never by zero.
+    let conductors: Vec<FullWaveConductorGeom> = (0..conductors.len())
+        .map(|i| FullWaveConductorGeom {
+            centroid_transverse_um: [
+                weighted_centroid_um[i][0] / area_um2[i],
+                weighted_centroid_um[i][1] / area_um2[i],
+            ],
+            area_um2: area_um2[i],
         })
         .collect();
+
     Ok(FullWaveBarLayout {
         axis_lo_um,
         axis_hi_um,
@@ -911,14 +956,90 @@ mod tests {
     }
 
     #[test]
-    fn multi_box_conductor_is_rejected_for_peec() {
-        let c = ConductorRequest {
+    fn multi_box_conductor_is_accepted_and_each_box_gets_its_own_filament_grid() {
+        // "shield" is built from two wall-segment boxes -- the coax-shield
+        // shape (#1841's "increment (i)"): a north wall and a south wall,
+        // each its own box of the *same* electrical conductor, sharing the
+        // x current-flow axis and the same [0, 100]um axial span. "core" is
+        // an ordinary single-box conductor on the same axis/span.
+        let shield = ConductorRequest {
             name: "shield".to_string(),
-            boxes: vec![bar_box(100.0, 2.0, 2.0), bar_box(100.0, 2.0, 2.0)],
+            boxes: vec![
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: 8.0,
+                    x1_um: 100.0,
+                    y1_um: 9.0,
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                },
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: -9.0,
+                    x1_um: 100.0,
+                    y1_um: -8.0,
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                },
+            ],
             conductivity_s_per_m: None,
         };
-        let err = discretize_bars(&[c], 1.0).unwrap_err();
-        assert!(err.contains("exactly one box"), "unexpected error: {err}");
+        let core = one_box_conductor("core", bar_box(100.0, 2.0, 2.0));
+        let layout = discretize_bars(&[shield, core], 1.0).unwrap();
+
+        assert_eq!(layout.axis, 0);
+        assert_eq!(layout.length_um, 100.0);
+
+        // Each shield wall is 1um(y) x 2um(z) -> 1x2 = 2 filaments per wall,
+        // two walls -> 4 filaments, all tagged conductor_index 0 (shield's
+        // position in the request). Core is 2x2um -> 4 filaments, tagged
+        // conductor_index 1.
+        let shield_filaments = layout
+            .filaments
+            .iter()
+            .filter(|f| f.conductor_index == 0)
+            .count();
+        let core_filaments = layout
+            .filaments
+            .iter()
+            .filter(|f| f.conductor_index == 1)
+            .count();
+        assert_eq!(
+            shield_filaments, 4,
+            "expected 4 filaments across shield's 2 boxes"
+        );
+        assert_eq!(
+            core_filaments, 4,
+            "expected 4 filaments for core's single box"
+        );
+        assert_eq!(layout.filaments.len(), 8);
+    }
+
+    #[test]
+    fn multi_box_conductor_with_boxes_on_different_axes_is_still_rejected() {
+        // A conductor's own boxes must also share one current-flow axis --
+        // mixed-axis geometry (even within one electrical conductor) is
+        // increment (ii)'s territory, not this increment's.
+        let l_shaped = ConductorRequest {
+            name: "l".to_string(),
+            boxes: vec![
+                bar_box(100.0, 2.0, 2.0), // along x
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: 0.0,
+                    x1_um: 2.0,
+                    y1_um: 100.0,
+                    z0_um: 0.0,
+                    z1_um: 2.0,
+                }, // along y
+            ],
+            conductivity_s_per_m: None,
+        };
+        let err = discretize_bars(&[l_shaped], 1.0).unwrap_err();
+        assert!(
+            err.contains("same current-flow axis"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
