@@ -254,6 +254,25 @@ prose structure" caveat). So a ``"power"``-kind citation is recognised by
 how :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` scopes ``"generic"`` to item
 8 alone, just with an empty accept-set instead of ``{8}`` today.
 
+## Critical-metric consumption (issue #1850)
+
+Before this phase, every kind above derived ``passed`` purely from the
+envelope's own ``status`` (or, for ``power``, ``em_verdict``) -- this module
+had no mechanical way to reason about a *specific* metric's value.
+:func:`_check_passed` now also reads ``envelope["metrics"]`` (the
+declared, METRICS2.1-style registry from :mod:`klayout_tools.metrics`,
+issue #247, adopted so far by ``klt drc``/``klt extract``/``klt sim`` --
+issues #1847/#1848/#1849): any metric registered with ``critical=True``
+whose value fails its own declared ``higher_is_better`` polarity (see
+:func:`_critical_metric_blockers`) forces ``passed: False``, independent
+of the envelope's own ``status``. This applies to every kind uniformly
+(never hard-coded per-verb knowledge), and to both entry points --
+:func:`build_signoff` calls :func:`_check_passed` directly, and
+:func:`build_tier_report`/:func:`build_fleet_report` inherit it for free
+through :func:`_grade_evidence`, which already delegates to the same
+function. The offending metric(s), when any block a check, are named in
+:func:`build_signoff`'s ``checks[].detail.critical_metric_blockers``.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -285,6 +304,7 @@ from .design_evidence_tiers import (
     doc_source_label,
     parse_tier_doc,
 )
+from .metrics import get_metric, is_registered
 
 __all__ = [
     "SignoffError",
@@ -475,6 +495,18 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
     verdict is worse than a loud refusal (see this module's docstring,
     point 2). Otherwise ``status`` is ``"fail"`` if any check's ``passed``
     is ``False``, else ``"pass"``.
+
+    ``passed`` (issue #1850) also factors in any registered ``critical:
+    true`` metric present in the envelope's own ``metrics`` block (see
+    :mod:`klayout_tools.metrics`, populated by verbs such as ``klt drc``,
+    ``klt extract``, ``klt sim``): a critical metric whose value fails its
+    own declared ``higher_is_better`` polarity forces ``passed: False``,
+    independent of (and in addition to) the envelope's own ``status``. When
+    that happens, the offending metric(s) are named in the check's
+    ``detail.critical_metric_blockers`` list -- see
+    :func:`_critical_metric_blockers` and :func:`_detail`. This is purely
+    additive: an envelope with no ``metrics`` block, or none marked
+    ``critical``, behaves exactly as before.
 
     Raises :class:`SignoffError` if ``sources`` is empty, any entry cannot
     be read/parsed as JSON, is not a JSON object, or does not match a
@@ -667,6 +699,76 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    """Mechanically evaluate every *declared* ``critical: true`` metric
+    present in ``envelope``'s own ``metrics`` block (issue #1850, following
+    on from #247's metric-namespace registry and #1847/#1848/#1849's
+    per-verb adoption of it).
+
+    Returns a list of blocker entries -- ``{"metric": <name>, "value":
+    <number>, "higher_is_better": <bool | None>}`` -- one per critical
+    metric whose value fails its own declared ``higher_is_better`` polarity.
+    An empty list means no critical metric blocked this envelope (including
+    the common case of no ``metrics`` block at all, or a ``metrics`` block
+    with no critical entries).
+
+    This reads *any* registered ``critical`` metric generically, purely from
+    :mod:`klayout_tools.metrics`'s own registry -- never hard-coded per-verb
+    knowledge, so a future verb's newly-declared critical metric is picked
+    up automatically the moment it starts emitting a ``metrics`` block,
+    with no change needed here.
+
+    Polarity is applied per the metric's own declared
+    :attr:`~klayout_tools.metrics.MetricDef.higher_is_better`:
+
+    - ``False`` (smaller is better, e.g. an error/failure count): a nonzero
+      value blocks.
+    - ``True`` (larger is better): a zero-or-lower value blocks.
+    - ``None`` (no declared polarity): every ``critical: true`` metric
+      registered as of this issue declares a polarity, so this case is not
+      currently reachable -- but a nonzero value is treated as blocking on
+      the same "0 is the only passing value" shape every declared critical
+      metric shares today, rather than silently ignoring a future
+      polarity-less critical metric.
+
+    An unregistered/unknown metric name, or a non-numeric value, is silently
+    ignored (not raised) -- a caller-provided ``metrics`` block is read-only
+    external data, not something this module validates on the aggregating
+    side (that is each verb's own responsibility when it builds its
+    ``metrics`` block in the first place).
+    """
+    metrics_block = envelope.get("metrics")
+    if not isinstance(metrics_block, dict):
+        return []
+
+    blockers: list[dict[str, Any]] = []
+    for name, value in metrics_block.items():
+        if not is_registered(name):
+            continue
+        metric_def = get_metric(name)
+        if not metric_def.critical:
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+
+        if metric_def.higher_is_better is False:
+            failing = value > 0
+        elif metric_def.higher_is_better is True:
+            failing = value <= 0
+        else:
+            failing = value != 0
+
+        if failing:
+            blockers.append(
+                {
+                    "metric": name,
+                    "value": value,
+                    "higher_is_better": metric_def.higher_is_better,
+                }
+            )
+    return blockers
+
+
 def _build_check(kind: str, envelope: dict[str, Any], source: str) -> dict[str, Any]:
     status = envelope.get("status") if kind != "error" else "error"
     return {
@@ -681,6 +783,15 @@ def _build_check(kind: str, envelope: dict[str, Any], source: str) -> dict[str, 
 
 def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     """Whether this one check counts as passing.
+
+    Independent of every kind-specific rule below (issue #1850): if the
+    envelope's own ``metrics`` block (issue #247/#1847) carries any
+    registered ``critical: true`` metric whose value fails its declared
+    ``higher_is_better`` polarity -- see :func:`_critical_metric_blockers`
+    -- this check never passes, even when the kind-specific rule below
+    would otherwise have counted it as passing. This mechanism is generic
+    over every kind and every declared critical metric, not specific to
+    ``drc``.
 
     - ``drc`` passes on ``status == "clean"``.
     - ``lvs`` passes on ``status == "match"``.
@@ -724,23 +835,28 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     - ``error`` never passes.
     """
     if kind == "drc":
-        return envelope.get("status") == "clean"
-    if kind == "lvs":
-        return envelope.get("status") == "match"
-    if kind == "sim":
-        return envelope.get("status") == "pass"
-    if kind == "yield":
-        return envelope.get("status") in ("pass", "reported")
-    if kind == "extract":
-        return True
-    if kind == "pex":
-        return envelope.get("status") == "pass"
-    if kind == "power":
+        passed = envelope.get("status") == "clean"
+    elif kind == "lvs":
+        passed = envelope.get("status") == "match"
+    elif kind == "sim":
+        passed = envelope.get("status") == "pass"
+    elif kind == "yield":
+        passed = envelope.get("status") in ("pass", "reported")
+    elif kind == "extract":
+        passed = True
+    elif kind == "pex":
+        passed = envelope.get("status") == "pass"
+    elif kind == "power":
         em_verdict = envelope.get("em_verdict")
-        return isinstance(em_verdict, dict) and em_verdict.get("status") == "pass"
-    if kind == "generic":
-        return envelope.get("status") == "pass"
-    return False  # kind == "error"
+        passed = isinstance(em_verdict, dict) and em_verdict.get("status") == "pass"
+    elif kind == "generic":
+        passed = envelope.get("status") == "pass"
+    else:
+        passed = False  # kind == "error"
+
+    if passed and _critical_metric_blockers(envelope):
+        return False
+    return passed
 
 
 def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
@@ -748,46 +864,55 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
     re-export of the full contract (a consumer that wants the raw
     ``violations[]``/``mismatches[]``/``devices[]``/``corners[]`` detail
     should read the original envelope file directly, exactly as
-    ``report.py``'s ``sections[]`` documents for the same reason)."""
+    ``report.py``'s ``sections[]`` documents for the same reason).
+
+    Additionally (issue #1850), when :func:`_critical_metric_blockers` finds
+    at least one registered ``critical: true`` metric in ``envelope``'s
+    ``metrics`` block failing its declared polarity, this appends a
+    ``critical_metric_blockers`` key -- naming exactly which metric(s)
+    forced :func:`_check_passed` to ``False`` -- to every kind's detail dict
+    (including ``error``, though a critical metric alongside an ``error``
+    kind is not expected in practice). Absent when there are no blockers,
+    so this stays purely additive to every existing detail shape."""
     if kind == "drc":
-        return {
+        detail: dict[str, Any] = {
             "file": envelope.get("file"),
             "deck": envelope.get("deck"),
             "violation_count": envelope.get("violation_count"),
         }
-    if kind == "lvs":
-        return {
+    elif kind == "lvs":
+        detail = {
             "layout": envelope.get("layout"),
             "reference": envelope.get("reference"),
             "mismatch_count": envelope.get("mismatch_count"),
             "counts": envelope.get("counts"),
         }
-    if kind == "sim":
-        return {
+    elif kind == "sim":
+        detail = {
             "netlist": envelope.get("netlist"),
             "corner_count": envelope.get("corner_count"),
             "passed": envelope.get("passed"),
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
         }
-    if kind == "yield":
+    elif kind == "yield":
         source = envelope.get("source") or {}
-        return {
+        detail = {
             "samples": envelope.get("samples"),
             "limits": envelope.get("limits"),
             "measurement_count": envelope.get("measurement_count"),
             "source_kind": source.get("kind"),
             "sample_count": source.get("sample_count"),
         }
-    if kind == "extract":
-        return {
+    elif kind == "extract":
+        detail = {
             "file": envelope.get("file"),
             "deck": envelope.get("deck"),
             "device_count": envelope.get("device_count"),
             "net_count": envelope.get("net_count"),
         }
-    if kind == "pex":
-        return {
+    elif kind == "pex":
+        detail = {
             "netlist": envelope.get("netlist"),
             "reference_netlist": envelope.get("reference_netlist"),
             "corner_count": envelope.get("corner_count"),
@@ -795,9 +920,9 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
         }
-    if kind == "power":
+    elif kind == "power":
         em_verdict = envelope.get("em_verdict") or {}
-        return {
+        detail = {
             "file": envelope.get("file"),
             "spec": envelope.get("spec"),
             "worst_case_droop_mv": envelope.get("worst_case_droop_mv"),
@@ -805,14 +930,20 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "em_verdict_fail_count": em_verdict.get("fail_count"),
             "em_verdict_checked_edge_count": em_verdict.get("checked_edge_count"),
         }
-    if kind == "generic":
-        return {
+    elif kind == "generic":
+        detail = {
             "summary": envelope.get("summary"),
             "source": envelope.get("source"),
         }
-    # kind == "error"
-    error = envelope.get("error") or {}
-    return {"command": error.get("command"), "message": error.get("message")}
+    else:
+        # kind == "error"
+        error = envelope.get("error") or {}
+        detail = {"command": error.get("command"), "message": error.get("message")}
+
+    blockers = _critical_metric_blockers(envelope)
+    if blockers:
+        detail["critical_metric_blockers"] = blockers
+    return detail
 
 
 # --------------------------------------------------------------------------- #
@@ -972,6 +1103,13 @@ def build_tier_report(
     drc``/``klt lvs``/``klt extract`` (netlist regeneration)/``klt sim``
     (corner sim) -- as a subprocess and grade *that run's* exit status and
     stdout). See :func:`_normalize_evidence_entry`/:func:`_grade_evidence`.
+
+    ``_grade_evidence`` grades an item's evidence by calling the same
+    :func:`_check_passed` :func:`build_signoff` uses, so a registered
+    ``critical: true`` metric (issue #1850) failing its declared
+    ``higher_is_better`` polarity mechanically renders that item
+    ``"unmet"`` with :data:`_REASON_CHECK_FAILED`, exactly as a failing
+    ``status`` would -- no separate wiring needed in this function.
 
     Returns (JSON out)::
 

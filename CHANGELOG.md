@@ -31,6 +31,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   policy — see
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Per-corner
   total negative slack" section for the full contract.
+- **Added**: `klt signoff` (envelope-aggregation mode and `--manifest`/
+  `--fleet` tier reports alike) now mechanically consumes any registered
+  `critical: true` metric (`docs/design/metric-namespace.md`, issue #247)
+  present in a consumed envelope's own `metrics` block — issue #1850. A
+  critical metric whose value fails its own declared `higher_is_better`
+  polarity (e.g. a nonzero `drc__error__count`, `higher_is_better: false`)
+  forces that check's `passed: false`, independent of the envelope's own
+  `status`, and names the offending metric(s) in the check's new
+  `detail.critical_metric_blockers` field. Read generically from
+  `klayout_tools.metrics`'s registry, never hard-coded per-verb, so a
+  future verb's newly-declared critical metric is picked up automatically.
+  Purely additive: an envelope with no `metrics` block, or none marked
+  `critical`, behaves exactly as before. No `schema_version` bump. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Critical-metric
+  consumption" section.
 - **Added**: `klt functional-verification` gains an opt-in `options.trace`
   field (Epic #1585 Phase 3, issue #1845) — `true` turns on cocotb's own
   `Runner(waves=True)` on both the build and test steps, so the run's
