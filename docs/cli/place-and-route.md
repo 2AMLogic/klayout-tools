@@ -693,7 +693,10 @@ families), the aggregate is dominated by decks a design running on one rail
 never operates at. Issue #1092 closes both gaps additively:
 
 - **`corners`** — a `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
-  ...}` entry per swept corner (see the response field table above). The
+  ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns":
+  ...}` entry per swept corner (see the response field table above; the two
+  TNS fields are issue #1866 — see "Per-corner total negative slack" below).
+  The
   entry with the lowest `setup_slack_ns` is the corner `worst_setup_slack_ns`
   came from; likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`.
   When exactly one corner is swept (today's common case — a single-supply
@@ -780,6 +783,42 @@ and is fine. That is exactly the class of library `constraints.max_fanout`
 exists to serve, so a fanout *check* is not wired in here. If fanout
 reporting is ever wanted, it has to come from the topology walk (`get_pins
 -of_objects` per net, counting inputs) — slower, but it does not crash.
+
+### Per-corner total negative slack (`total_negative_setup_slack_ns`, `total_negative_hold_slack_ns`, issue #1866)
+
+Each `corners[]` entry's `setup_slack_ns`/`hold_slack_ns` are **worst-slack**
+(WNS) only — how bad the single worst path at that corner is. They say
+nothing about how *much* of the design fails at that corner: a corner with
+WNS `-0.05 ns` from one marginal path and a corner with WNS `-0.05 ns` from
+thousands of failing paths reported identically before this field existed.
+
+Two additive fields close that, inside each `corners[]` entry only (the
+top-level `total_negative_slack_ns` field already reports this for the
+single nominal `pdk.corner` the design was built against, and is unaffected):
+
+- **`total_negative_setup_slack_ns`** — that corner's own setup TNS
+  (`report_tns_metric -setup`).
+- **`total_negative_hold_slack_ns`** — that corner's own hold TNS
+  (`report_tns_metric -hold`).
+
+Both run in the exact same OpenSTA session that already produces that
+corner's `setup_slack_ns`/`hold_slack_ns` — the combined sweep invocation
+when exactly one corner is swept, or that corner's own single-corner
+invocation otherwise (see "Per-corner breakdown" above) — mirroring the
+`report_tns_metric -setup`/`-hold` pair `klt sta`'s own script already
+issues alongside `report_worst_slack_metric`. **No additional OpenROAD
+process launch**, so the wall-clock cost documented above is unchanged.
+Before this field, recovering per-corner TNS cost one extra `klt sta`
+invocation per corner against the same routed `def_path` — a full second
+OpenSTA session re-reading the same ODB/DEF and liberty files this sweep's
+own session already had loaded.
+
+Naming deliberately spells both sides explicitly
+(`total_negative_setup_slack_ns` / `total_negative_hold_slack_ns`), unlike
+`klt sta`'s own implicit-setup `total_negative_slack_ns` — `corners[]`
+already carries both an explicit `setup_slack_ns` and `hold_slack_ns` next
+to each other, so an implicit-setup TNS field there would read
+inconsistently.
 
 ## Post-route SPEF STA (`post_route_spef`, issue #948)
 
@@ -1481,9 +1520,9 @@ unsure).
   "max_transition_violation_count": 2,
   "max_capacitance_violation_count": 0,
   "corners": [
-    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 },
-    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "max_transition_violation_count": 2, "max_capacitance_violation_count": 0 },
-    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 }
+    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "total_negative_setup_slack_ns": -12.4103, "total_negative_hold_slack_ns": 0.0, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 },
+    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "total_negative_setup_slack_ns": -82.8171, "total_negative_hold_slack_ns": 0.0, "max_transition_violation_count": 2, "max_capacitance_violation_count": 0 },
+    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "total_negative_setup_slack_ns": -35.2841, "total_negative_hold_slack_ns": 0.0, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 }
   ],
   "estimated_power_mw": 11.6,
   "clock_skew_ns": 0.0421,
@@ -1584,7 +1623,7 @@ unsure).
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), parsed from the report's per-violation `"violation type: ..."` header lines. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
 | `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate the max-transition (OpenSTA `-max_slew`) and max-capacitance limits in force at those decks, from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given — without them the verdict is against the loaded decks' own declared limits; with them, it additionally says whether the `repair_design` pass aimed at the caller's tighter target actually hit it. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
-| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ...}` (the last two added by issue #1709). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
+| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ...}` (the two `max_*_violation_count` fields added by issue #1709; the two `total_negative_*_slack_ns` fields added by issue #1866). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |

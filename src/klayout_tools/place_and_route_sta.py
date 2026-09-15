@@ -116,6 +116,19 @@ def _corner_sweep_script_lines(
     PVT" convention this survey's section 3.3 describes -- no manual
     slow/fast corner classification needed in Python).
 
+    ``report_tns_metric -setup``/``-hold`` (issue #1866) rides alongside the
+    two ``report_worst_slack_metric`` calls above, in the same session and
+    for the same reason: it is the matching total-negative-slack pair
+    ``klt sta``'s own script (:func:`~klayout_tools.post_route_sta.
+    _sta_script_lines`) already issues, writing ``timing__setup__tns``/
+    ``timing__hold__tns`` into this invocation's own ``-metrics`` dump. Its
+    caller (:func:`_run_corner_sweep`) reads those two keys the same way it
+    already reads the worst-slack pair, to populate each ``corners[]``
+    entry's ``total_negative_setup_slack_ns``/``total_negative_hold_slack_ns``
+    fields -- without this, recovering TNS per swept corner cost a caller one
+    extra ``klt sta`` run (and OpenSTA session) per corner, re-reading the
+    same ODB/DEF and liberty this session already has loaded.
+
     The trailing ``report_check_types`` pair (issue #1709's "Two smaller
     things found alongside" item 1, folded into that issue's own Builder
     scope by its 2026-09-15 revision -- see
@@ -150,6 +163,8 @@ def _corner_sweep_script_lines(
         "estimate_parasitics -global_routing",
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
+        "report_tns_metric -setup",
+        "report_tns_metric -hold",
     ]
     lines += _design_rule_check_lines()
     return lines
@@ -777,7 +792,18 @@ def _run_corner_sweep(
     breakdown, ``[{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
     ...}, ...]``, naming which corner produced each of the two aggregates
     above -- closing the "response never names the corner that decided
-    either one" gap #1092 reports. Deliberately **not** derived by adding a
+    either one" gap #1092 reports. Each entry also carries
+    ``total_negative_setup_slack_ns``/``total_negative_hold_slack_ns``
+    (issue #1866): the matching *total*-negative-slack pair alongside the
+    *worst*-slack pair above, from that same corner's own
+    ``report_tns_metric -setup``/``-hold`` call
+    (:func:`_corner_sweep_script_lines`) -- purely additive, so a caller who
+    only ever read ``setup_slack_ns``/``hold_slack_ns`` sees no change.
+    Naming mirrors ``klt sta``'s own explicit-setup/explicit-hold pair
+    (``total_negative_slack_ns``/``total_negative_hold_slack_ns``) but
+    spells both sides explicitly here, since ``corners[]`` already has both
+    an explicit ``setup_slack_ns`` and ``hold_slack_ns`` sitting next to
+    each other. Deliberately **not** derived by adding a
     ``-corner`` argument to ``report_worst_slack_metric`` inside the
     existing combined session: this module's own live-verified finding
     (``docs/cli/place-and-route.md``'s "Multi-corner setup/hold sweep"
@@ -849,6 +875,15 @@ def _run_corner_sweep(
     worst_hold_raw = metrics.get("timing__hold__ws")
     worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
     worst_hold = round(worst_hold_raw, 5) if worst_hold_raw is not None else None
+    # Issue #1866: the combined session's own TNS pair, read the same way as
+    # the worst-slack pair above -- used only in the `len(corners) == 1`
+    # branch below (the combined aggregate *is* that single corner's own
+    # value there); the `len(corners) > 1` loop below reads each corner's
+    # own single-corner invocation's TNS instead.
+    tns_setup_raw = metrics.get("timing__setup__tns")
+    tns_hold_raw = metrics.get("timing__hold__tns")
+    tns_setup = round(tns_setup_raw, 5) if tns_setup_raw is not None else None
+    tns_hold = round(tns_hold_raw, 5) if tns_hold_raw is not None else None
 
     # Issue #1709: the design-rule verdict at the swept decks. Scraped from
     # this same combined invocation's own stdout -- with every swept corner
@@ -874,6 +909,8 @@ def _run_corner_sweep(
                 "name": corners[0]["name"],
                 "setup_slack_ns": worst_setup,
                 "hold_slack_ns": worst_hold,
+                "total_negative_setup_slack_ns": tns_setup,
+                "total_negative_hold_slack_ns": tns_hold,
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
             }
@@ -919,6 +956,13 @@ def _run_corner_sweep(
         corner_metrics = _read_metrics(corner_metrics_path, corner_stage_name)
         corner_setup_raw = corner_metrics.get("timing__setup__ws")
         corner_hold_raw = corner_metrics.get("timing__hold__ws")
+        # Issue #1866: this corner's own TNS pair, from this same
+        # single-corner invocation's `report_tns_metric -setup`/`-hold`
+        # (`_corner_sweep_script_lines`) -- the per-corner counterpart of
+        # the worst-slack pair above, exactly like the design-rule verdict
+        # below is.
+        corner_tns_setup_raw = corner_metrics.get("timing__setup__tns")
+        corner_tns_hold_raw = corner_metrics.get("timing__hold__tns")
         corner_breakdown.append(
             {
                 "name": corner_name,
@@ -927,6 +971,16 @@ def _run_corner_sweep(
                 ),
                 "hold_slack_ns": (
                     round(corner_hold_raw, 5) if corner_hold_raw is not None else None
+                ),
+                "total_negative_setup_slack_ns": (
+                    round(corner_tns_setup_raw, 5)
+                    if corner_tns_setup_raw is not None
+                    else None
+                ),
+                "total_negative_hold_slack_ns": (
+                    round(corner_tns_hold_raw, 5)
+                    if corner_tns_hold_raw is not None
+                    else None
                 ),
                 # Issue #1709: this corner's *own* design-rule verdict, from
                 # its own single-corner invocation's stdout -- the per-corner

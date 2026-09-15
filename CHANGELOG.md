@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt place-and-route`'s post-route multi-corner sweep
+  (`response.corners[]`, issue #1092) gains two additive fields per corner —
+  `total_negative_setup_slack_ns` / `total_negative_hold_slack_ns` (issue
+  #1866) — from that same corner's own already-running OpenSTA session's
+  `report_tns_metric -setup`/`-hold` (the matching TNS pair `klt sta`
+  already reports as `total_negative_slack_ns`/`total_negative_hold_slack_ns`).
+  Previously each `corners[]` entry reported only worst-slack
+  (`setup_slack_ns`/`hold_slack_ns`), which says how bad the single worst
+  path is but nothing about how much of the design fails at that corner;
+  recovering that meant a separate `klt sta` run per corner against the same
+  routed `def_path`, re-reading the same ODB/DEF and liberty files the sweep
+  had already loaded. No additional OpenROAD invocation and no
+  `schema_version` bump, per
+  [`docs/json-contract.md`](docs/json-contract.md)'s additive-envelope
+  policy — see
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Per-corner
+  total negative slack" section for the full contract.
 - **Added**: `klt functional-verification` gains an opt-in `options.trace`
   field (Epic #1585 Phase 3, issue #1845) — `true` turns on cocotb's own
   `Runner(waves=True)` on both the build and test steps, so the run's
