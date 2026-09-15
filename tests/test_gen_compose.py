@@ -12146,3 +12146,608 @@ def test_compose_mos_array_interior_channel_enables_previously_blocked_route(
         }
     )
     assert stripped_report["nets"][0]["routed"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Per-net / per-leg routing plane (connectivity[].layer_role, #1655)
+#
+# `routing.layer_role` resolves ONE plane for the whole composition, so a
+# composition whose net-connectivity graph is non-planar -- a K3,3 subdivision,
+# the canonical smallest non-planar shape -- cannot be drawn in one call: some
+# pair of nets must cross, and two crossing nets on one layer are a short the
+# route-vs-route check (#1057) correctly rejects. `connectivity[].layer_role`
+# (and `connectivity[].legs[].layer_role`) lets the caller name a different
+# plane per net/leg, resolved through the same `_resolve_route_layer()` path.
+# See docs/design/gen-compose-per-net-layer.md for the decision record.
+# --------------------------------------------------------------------------- #
+
+#: Block ids of the K3,3 fixture below, in placement order. The two sides of
+#: the bipartition (`a*`/`b*`) are deliberately interleaved along the row --
+#: every edge of K3,3 joins an `a` to a `b`, so interleaving keeps six of the
+#: nine nets short.
+_K33_ORDER = ["a1", "b1", "a2", "b2", "a3", "b3"]
+
+#: Placement pitch (um) for the K3,3 row -- wide enough that every port's own
+#: escape riser sits in a channel rather than over a neighbour.
+_K33_PITCH_UM = 8.0
+
+#: `mos_array` 1x1 geometry the fixture's waypoints are derived from: block
+#: width, the S/D ports' shared y, and how far outside a block an S/D escape
+#: riser is placed.
+_K33_BLOCK_W_UM = 1.12
+_K33_SD_PORT_Y_UM = 0.21
+_K33_ESCAPE_UM = 2.0
+
+#: The nine K3,3 edges: (net, a-block, a-port, b-block, b-port, track_y_um,
+#: layer_role). Each block spends its three ports (S/D/G) on its three edges,
+#: which is what makes this a genuine K3,3 rather than a multigraph. The
+#: tracks and layer roles together are a 4-page book embedding of K3,3: two
+#: metal planes x two sides of the row (above/below), which is the minimum
+#: this floorplan admits -- K3,3 is not sub-hamiltonian planar, so it has no
+#: 2-page (single-plane) embedding at all, whatever the tracks.
+_K33_NETS = [
+    # metal (li1), above the row
+    ("N_A1B1", "a1", "U0_G", "b1", "U0_G", 3.0, None),
+    ("N_A2B2", "a2", "U0_G", "b2", "U0_G", 3.0, None),
+    ("N_A3B3", "a3", "U0_G", "b3", "U0_G", 3.0, None),
+    ("N_A2B1", "a2", "U0_S", "b1", "U0_D", 3.0, None),
+    ("N_A3B2", "a3", "U0_S", "b2", "U0_D", 3.0, None),
+    ("N_A1B3", "a1", "U0_S", "b3", "U0_D", 5.0, None),
+    # metal (li1), below the row
+    ("N_A1B2", "a1", "U0_D", "b2", "U0_S", -2.0, None),
+    # metal2 (met1), above the row -- crosses N_A1B1/N_A3B3 in plan view
+    ("N_A3B1", "a3", "U0_D", "b1", "U0_S", 3.0, "metal2"),
+    # metal2 (met1), below the row -- crosses N_A1B2 in plan view
+    ("N_A2B3", "a2", "U0_D", "b3", "U0_S", -2.0, "metal2"),
+]
+
+
+def _k33_riser_x_um(block_id, port):
+    """The x this port's escape riser runs on, in the composed frame."""
+    x0 = _K33_ORDER.index(block_id) * _K33_PITCH_UM
+    if port == "U0_S":
+        return x0 - _K33_ESCAPE_UM
+    if port == "U0_D":
+        return x0 + _K33_BLOCK_W_UM + _K33_ESCAPE_UM
+    return x0 + 0.56  # U0_G -- the block's own centre line
+
+
+def _k33_request(tmp_path, pdk_root, output, *, per_net_layers):
+    """Build the K3,3 composition request.
+
+    ``per_net_layers=False`` is the same request with every
+    ``connectivity[].layer_role`` dropped -- i.e. exactly what a caller could
+    express before #1655, used as the control below.
+    """
+    reports = {
+        block_id: _gen_block(
+            tmp_path,
+            pdk_root,
+            "mos_array",
+            block_id,
+            rows=1,
+            cols=1,
+            dummy=0,
+            gate_contact=True,
+        )
+        for block_id in _K33_ORDER
+    }
+    connectivity = []
+    for net, block_a, port_a, block_b, port_b, track_um, role in _K33_NETS:
+        riser_b_x_um = _k33_riser_x_um(block_b, port_b)
+        waypoints_um = [
+            [_k33_riser_x_um(block_a, port_a), track_um],
+            [riser_b_x_um, track_um],
+        ]
+        if port_b != "U0_G":
+            # Drop back to the S/D port's own row *at the riser*, so the
+            # descent stays in the channel instead of cutting down through
+            # the destination block's own bbox to reach its stub.
+            waypoints_um.append([riser_b_x_um, _K33_SD_PORT_Y_UM])
+        entry = {
+            "net": net,
+            "pins": [
+                {"block": block_a, "port": port_a},
+                {"block": block_b, "port": port_b},
+            ],
+            "waypoints_um": waypoints_um,
+        }
+        if per_net_layers and role is not None:
+            entry["layer_role"] = role
+        connectivity.append(entry)
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": block_id, "generator_report": reports[block_id]}
+            for block_id in _K33_ORDER
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": _K33_ORDER,
+            "origins_um": {
+                block_id: {"x": index * _K33_PITCH_UM, "y": 0.0}
+                for index, block_id in enumerate(_K33_ORDER)
+            },
+        },
+        "connectivity": connectivity,
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {"cell_name": "k33", "output": str(output)},
+    }
+
+
+def test_compose_k33_non_planar_graph_is_unroutable_on_one_layer(tmp_path, pdk_root):
+    # The "before #1655" half of the pair: the identical six-block K3,3
+    # composition with no per-net layer_role, so every net resolves to the one
+    # `routing.layer_role` plane. The two nets whose plan-view paths cross an
+    # already-drawn net are rejected by the route-vs-route check (#1057) --
+    # correctly: on one layer they *are* shorts. No floorplan or track
+    # assignment fixes this, because K3,3 has no single-plane embedding.
+    output = tmp_path / "k33_one_layer.gds"
+    report = compose(_k33_request(tmp_path, pdk_root, output, per_net_layers=False))
+
+    assert sorted(report["unrouted_nets"]) == ["N_A2B3", "N_A3B1"]
+    reasons = [
+        leg["reason"]
+        for net in report["nets"]
+        if not net["routed"]
+        for leg in net["legs"]
+    ]
+    assert all("crosses already-routed net" in reason for reason in reasons), reasons
+
+
+def test_compose_k33_non_planar_graph_routes_in_one_call_with_per_net_layer_role(
+    tmp_path, pdk_root
+):
+    # #1655's own reproduction: the same six blocks and the same nine nets,
+    # with two of them naming `"metal2"` as their own `connectivity[].
+    # layer_role`. One `gen-compose` call now draws the whole non-planar graph
+    # -- seven nets on li1, two on met1, each met1 net via-dropping back to its
+    # pins' own li1 pads at both ends (the #454 mechanics, unchanged).
+    output = tmp_path / "k33_two_layers.gds"
+    report = compose(_k33_request(tmp_path, pdk_root, output, per_net_layers=True))
+
+    assert report["unrouted_nets"] == []
+    assert all(net["routed"] is True for net in report["nets"])
+    assert output.is_file()
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("k33")
+    li1_paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    met1_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    mcon_shapes = list(top.shapes(layout.layer(67, 44)).each())
+    assert len(li1_paths) == 7
+    assert len(met1_paths) == 2
+    # One via-drop square per met1 net endpoint (2 nets x 2 pins).
+    assert len(mcon_shapes) == 4
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Electrical proof, not just geometry: every one of the six devices sees
+    # three distinct named nets, and the s/g/d bindings reproduce the K3,3
+    # bipartite adjacency exactly -- including for the two met1 nets, whose
+    # connection to their own pins exists only through the via drops. A
+    # stitching failure would show up here as an unnamed (or merged) net.
+    result = extract.run_extract(str(output), "sky130", top="k33")
+    devices = [d for d in result["devices"] if d["class"] == "nfet"]
+    assert len(devices) == 6
+    adjacency = {
+        frozenset(net for terminal, net in device["nets"].items() if terminal != "b")
+        for device in devices
+    }
+    assert adjacency == {
+        frozenset({"N_A1B1", "N_A1B2", "N_A1B3"}),
+        frozenset({"N_A2B1", "N_A2B2", "N_A2B3"}),
+        frozenset({"N_A3B1", "N_A3B2", "N_A3B3"}),
+        frozenset({"N_A1B1", "N_A2B1", "N_A3B1"}),
+        frozenset({"N_A1B2", "N_A2B2", "N_A3B2"}),
+        frozenset({"N_A1B3", "N_A2B3", "N_A3B3"}),
+    }
+    assert result["merged_net_labels"] == []
+
+
+def test_compose_per_net_layer_role_naming_the_primary_plane_is_byte_identical(
+    tmp_path, pdk_root
+):
+    # The additive-field guarantee (#1655): a `connectivity[].layer_role` that
+    # names the *same* role as `routing.layer_role` must change nothing at all
+    # -- same report, same bytes on disk -- so an existing single-layer request
+    # cannot be perturbed by the field's mere existence. Compared as raw GDS
+    # bytes, not just as a report: the composed stream is the actual contract.
+    baseline_output = tmp_path / "primary_baseline.gds"
+    request = _k33_request(tmp_path, pdk_root, baseline_output, per_net_layers=False)
+    baseline = compose(request)
+
+    explicit_output = tmp_path / "primary_explicit.gds"
+    request["options"]["output"] = str(explicit_output)
+    for entry in request["connectivity"]:
+        entry["layer_role"] = "metal"
+    explicit = compose(request)
+
+    assert explicit["nets"] == baseline["nets"]
+    assert explicit["unrouted_nets"] == baseline["unrouted_nets"]
+    assert explicit["drc_hints"] == baseline["drc_hints"]
+    assert explicit_output.read_bytes() == baseline_output.read_bytes()
+
+
+def test_compose_per_net_layer_role_wins_over_cross_block_layer_role(
+    tmp_path, pdk_root
+):
+    # The documented interaction (#1655 vs. #1168): an explicit per-net
+    # `layer_role` decides that net's plane, while `routing.cross_block_
+    # layer_role` keeps applying -- unchanged -- to every net that named no
+    # layer of its own. Same three-block shape as
+    # test_compose_cross_block_layer_role_leaves_non_crossing_nets_on_primary_layer
+    # above, except the block-to-block net (DLINK) names `"metal3"` for
+    # itself: EBUS1 still falls back to met1 through the #1168 retry it
+    # always did, and DLINK moves off li1 onto met2 because it asked to, so
+    # each of the two upper planes carries exactly one routed path.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    m1 = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m1",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    m2 = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m2",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    output = tmp_path / "per_net_vs_cross_block.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["arr", "b1", "b2"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                {
+                    "net": "DLINK",
+                    "layer_role": "metal3",
+                    "pins": [
+                        {"block": "b1", "port": "U0_D"},
+                        {"block": "b2", "port": "U0_S"},
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {
+                "cell_name": "per_net_vs_cross_block",
+                "output": str(output),
+            },
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["net"] == "EBUS1"
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["net"] == "DLINK"
+    assert report["nets"][1]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("per_net_vs_cross_block")
+    li1_paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    met1_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    met2_paths = [s for s in top.shapes(layout.layer(69, 20)).each() if s.is_path()]
+    # EBUS1 fell back to met1 (#1168's own retry, untouched); DLINK drew on
+    # met2 because it named it; nothing is left on the primary li1 plane.
+    assert len(li1_paths) == 0
+    assert len(met1_paths) == 1
+    assert len(met2_paths) == 1
+    # DLINK's pins are li1 pads two stack levels below met2, so its own
+    # via-drop is the full #1567 ladder: mcon (li1<->met1) plus via1
+    # (met1<->met2) at each end.
+    assert len(list(top.shapes(layout.layer(67, 44)).each())) == 4
+    assert len(list(top.shapes(layout.layer(68, 44)).each())) == 2
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+#: Waypoints (composed frame) for the u1->u2 drain leg of the bundle fixture
+#: below: both `U0_D` ports face +x, so the fixed one-jog shape would have to
+#: reach u2's pin through u2's own body. The path lifts over the row instead
+#: and comes back down to the right of u2, approaching that pin from its own
+#: outward side. Derived from the fixture's own geometry: 1.12um-wide blocks
+#: on a 3.0um row spacing put u1 at x=[4.12, 5.24] and u2 at x=[8.24, 9.36],
+#: with both drain pads on the y=0.21 row.
+_DRAIN_BUS_LEG_WAYPOINTS_UM = [[5.6, 2.5], [9.8, 2.5], [9.8, 0.21]]
+
+
+def _drain_bus_request(tmp_path, pdk_root, output, cell_name):
+    """Three 1x1 `mos_array` blocks in a row, one 3-pin drain bundle net."""
+    blocks = [
+        _gen_block(
+            tmp_path,
+            pdk_root,
+            "mos_array",
+            f"u{index}",
+            rows=1,
+            cols=1,
+            dummy=0,
+            gate_contact=True,
+        )
+        for index in range(3)
+    ]
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": f"u{index}", "generator_report": report}
+            for index, report in enumerate(blocks)
+        ],
+        "placement": {
+            "strategy": "row",
+            "order": ["u0", "u1", "u2"],
+            "spacing_um": 3.0,
+        },
+        "connectivity": [
+            {
+                "net": "DBUS",
+                "pins": [
+                    {"block": "u0", "port": "U0_D"},
+                    {"block": "u1", "port": "U0_D"},
+                    {"block": "u2", "port": "U0_D"},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {"cell_name": cell_name, "output": str(output)},
+    }
+
+
+def test_compose_per_leg_layer_role_routes_one_leg_of_a_bundle_on_a_second_plane(
+    tmp_path, pdk_root
+):
+    # The per-leg tier of the override (#1655): one named leg of a 3-pin
+    # bundle net is pinned to `"metal2"` while the rest of the net's spanning
+    # tree stays on the request's own plane. The two planes meet at the leg's
+    # own endpoint pins -- the met1 leg via-drops back to each pin's li1 pad
+    # (the #454 mechanics), which is what keeps the net one conductor rather
+    # than two islands.
+    output = tmp_path / "per_leg_layer.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "per_leg_layer")
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "u0", "port": "U0_D"},
+            "to_pin": {"block": "u1", "port": "U0_D"},
+            "layer_role": "metal2",
+        },
+        {
+            "from_pin": {"block": "u1", "port": "U0_D"},
+            "to_pin": {"block": "u2", "port": "U0_D"},
+            "waypoints_um": _DRAIN_BUS_LEG_WAYPOINTS_UM,
+        },
+    ]
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert net["status"] == "routed"
+    assert len(net["legs"]) == 2
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("per_leg_layer")
+    li1_paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
+    met1_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    mcon_shapes = list(top.shapes(layout.layer(67, 44)).each())
+    # One leg per plane, plus a via drop at each end of the met1 leg.
+    assert len(li1_paths) == 1
+    assert len(met1_paths) == 1
+    assert len(mcon_shapes) == 2
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # One conductor, not two: all three drains land on the same extracted net.
+    result = extract.run_extract(str(output), "sky130", top="per_leg_layer")
+    drain_nets = {d["nets"]["d"] for d in result["devices"] if d["class"] == "nfet"}
+    assert drain_nets == {"DBUS"}
+
+
+def test_compose_per_leg_layer_role_defaults_to_the_nets_own_plane(tmp_path, pdk_root):
+    # Control for the test above: the identical request with `layer_role`
+    # dropped from the first leg leaves that leg on the net's own plane (li1),
+    # where the same-facing drain pair it names has no drawable path -- the
+    # backbone would have to reach u1's pad through u1's own body. So the
+    # bundle only partially routes, and the *only* difference between the two
+    # tests is the one field. (This is also why the leg-level tier exists at
+    # all: the net's other leg is perfectly routable on li1, so moving the
+    # whole net to met1 would be a bigger hammer than the problem.)
+    output = tmp_path / "per_leg_default.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "per_leg_default")
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "u0", "port": "U0_D"},
+            "to_pin": {"block": "u1", "port": "U0_D"},
+        },
+        {
+            "from_pin": {"block": "u1", "port": "U0_D"},
+            "to_pin": {"block": "u2", "port": "U0_D"},
+            "waypoints_um": _DRAIN_BUS_LEG_WAYPOINTS_UM,
+        },
+    ]
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["DBUS"]
+    net = report["nets"][0]
+    assert net["status"] == "partial"
+    named_leg = net["legs"][0]
+    assert named_leg["pins"] == [
+        {"block": "u0", "port": "U0_D"},
+        {"block": "u1", "port": "U0_D"},
+    ]
+    assert named_leg["routed"] is False
+    assert "through its own pin's block 'u1'" in named_leg["reason"]
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("per_leg_default")
+    # The routable leg is still drawn (#1169), on li1; nothing lands on met1.
+    assert len([s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]) == 1
+    assert list(top.shapes(layout.layer(68, 20)).each()) == []
+
+
+def test_compose_rejects_unknown_per_net_layer_role(tmp_path, pdk_root):
+    # A per-net role resolves through the same table `routing.layer_role`
+    # does, and an unknown one is the same application error -- named against
+    # the caller's own field, not the request-level one.
+    output = tmp_path / "bad_role.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "bad_role")
+    request["connectivity"][0]["layer_role"] = "not-a-real-role"
+
+    with pytest.raises(GenComposeError) as excinfo:
+        compose(request)
+    assert "request.connectivity[0] (net 'DBUS').layer_role" in str(excinfo.value)
+    assert "not a known layer role" in str(excinfo.value)
+
+
+def test_compose_rejects_non_string_per_net_layer_role(tmp_path, pdk_root):
+    output = tmp_path / "bad_role_type.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "bad_role_type")
+    request["connectivity"][0]["layer_role"] = 42
+
+    with pytest.raises(GenComposeError, match="must be a non-empty layer role string"):
+        compose(request)
+
+
+def test_compose_rejects_unknown_connectivity_key(tmp_path, pdk_root):
+    # #1548's guard still holds for the keys #1655 did *not* add.
+    output = tmp_path / "bad_key.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "bad_key")
+    request["connectivity"][0]["layer_roles"] = ["metal2"]
+
+    with pytest.raises(GenComposeError, match="unrecognized key"):
+        compose(request)
+
+
+def test_compose_rejects_per_net_width_um_below_the_named_layers_floor(
+    tmp_path, pdk_root
+):
+    # A per-net width is floored against the plane that net actually draws
+    # on, from the same curated deck `klt drc` judges the composed layout
+    # with -- never silently drawing sub-minimum metal.
+    output = tmp_path / "narrow_net.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "narrow_net")
+    request["connectivity"][0]["layer_role"] = "metal2"
+    request["connectivity"][0]["width_um"] = 0.1
+
+    with pytest.raises(GenComposeError) as excinfo:
+        compose(request)
+    message = str(excinfo.value)
+    assert "request.connectivity[0] (net 'DBUS').width_um" in message
+    assert "met1.width.1" in message
+
+
+def test_compose_rejects_a_per_net_plane_whose_floor_exceeds_the_inherited_width(
+    tmp_path, both_pdk_root
+):
+    # The #1620 guarantee, extended to this field: naming a plane with a
+    # stricter deck minimum must never silently widen `routing.width_um` for
+    # every *other* net. gf180mcu's metal2 floor (0.28um) is wider than its
+    # metal1 floor (0.23um), so an inherited 0.23um width on a net that named
+    # "metal2" is an error naming that net's own width_um as the fix.
+    block = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "u0",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    block2 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "u1",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    with pytest.raises(GenComposeError) as excinfo:
+        compose(
+            {
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "blocks": [
+                    {"id": "u0", "generator_report": block},
+                    {"id": "u1", "generator_report": block2},
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["u0", "u1"],
+                    "spacing_um": 3.0,
+                },
+                "connectivity": [
+                    {
+                        "net": "GBUS",
+                        "layer_role": "metal2",
+                        "pins": [
+                            {"block": "u0", "port": "U0_G"},
+                            {"block": "u1", "port": "U0_G"},
+                        ],
+                    }
+                ],
+                "routing": {"layer_role": "metal", "width_um": 0.23},
+                "options": {
+                    "cell_name": "inherited_narrow",
+                    "output": str(tmp_path / "inherited_narrow.gds"),
+                },
+            }
+        )
+    message = str(excinfo.value)
+    assert "metal2.width.1" in message
+    assert "request.connectivity[0] (net 'GBUS').width_um" in message

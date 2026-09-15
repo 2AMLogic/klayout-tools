@@ -105,6 +105,24 @@ Scope (phase 2, this module's current state):
   a bounded set of lanes looped clear of the block's own bbox
   (:func:`_self_net_cross_layer_lane_waypoints_um`), the same pattern the
   #1167 detour search applies to an unrelated block in the channel.
+* **Per-net routing planes** (issue #1655): every mechanism above allocates
+  *one* plane per request -- ``routing.layer_role`` resolves a single
+  ``(layer, datatype)`` pair, and ``routing.cross_block_layer_role`` is a
+  fallback the *router* reaches for, not a caller-directed choice. So a
+  composition whose net-connectivity graph is non-planar (a K3,3
+  subdivision) could not be drawn by one call at all: some pair of nets must
+  cross, and two crossing nets on one layer are a short the route-vs-route
+  check correctly rejects. ``connectivity[].layer_role`` (and
+  ``connectivity[].legs[].layer_role``, plus a ``width_um`` beside each)
+  names the plane an individual net -- or one named leg of it -- draws on,
+  resolved through the same :func:`_resolve_route_layer` path and floored
+  against that plane's own deck minimum width. An explicit per-net plane
+  wins over the ``cross_block_layer_role`` fallback; a net that names none
+  keeps it unchanged. Legs of one net that span two planes stitch at their
+  shared pin through the existing #454 via-drop, which already drops every
+  leg to each endpoint pin's own reported layer. Optional and additive, so
+  a request that omits them composes byte-for-byte as before -- see
+  ``docs/design/gen-compose-per-net-layer.md`` for the decision record.
 * **Blocks this command did not generate** (issue #1189): a ``blocks[]``
   entry names its geometry source in exactly one of two ways. ``generator_report``
   is a ``klt`` verb's own JSON response (``klt gen``, ``klt draw``, or -- since
@@ -1554,13 +1572,55 @@ def _parse_waypoints_um(
     return parsed
 
 
+def _parse_layer_role_override(raw_role: Any, where: str) -> str | None:
+    """Type-check an optional per-net/per-leg ``layer_role`` override (#1655).
+
+    ``None``/absent means "inherit" (``routing.layer_role`` for a net, the
+    net's own effective role for a leg) -- today's behaviour for every
+    request written before this field existed, and the reason this whole
+    field is purely additive with no ``schema_version`` bump. Anything else
+    must be a non-empty string naming a layer role; it is *resolved* against
+    the request's own PDK variant later, by :func:`compose`, through the
+    same :func:`_resolve_route_layer` path ``routing.layer_role`` goes
+    through (never a second, private layer map).
+    """
+    if raw_role is None:
+        return None
+    if not isinstance(raw_role, str) or not raw_role:
+        raise GenComposeError(
+            f"{where} must be a non-empty layer role string (such as "
+            "'metal2') when given"
+        )
+    return raw_role
+
+
+def _parse_width_override(raw_width: Any, where: str) -> float | None:
+    """Type-check an optional per-net/per-leg ``width_um`` override (#1655).
+
+    ``None``/absent means "inherit" (``routing.width_um`` for a net, the
+    net's own effective width for a leg). Floored against the *effective*
+    layer's own minimum-width rule by :func:`compose` (the same
+    :func:`_min_width_um_for_layer` lookup ``routing.width_um`` and
+    ``routing.cross_block_width_um`` already go through), not here.
+    """
+    if raw_width is None:
+        return None
+    if (
+        isinstance(raw_width, bool)
+        or not isinstance(raw_width, (int, float))
+        or raw_width <= 0
+    ):
+        raise GenComposeError(f"{where} must be a positive number when given")
+    return float(raw_width)
+
+
 #: Allowed keys in a ``connectivity[].legs[]`` entry (#1529). Any other key
 #: is an application error rather than a silently dropped no-op field --
 #: see #1548: a request written for a newer ``klt`` build (e.g. a
 #: not-yet-supported field name) would otherwise be accepted and simply
 #: ignored, with no indication the caller's intent was only partially
 #: honored.
-_LEG_ENTRY_KEYS = {"from_pin", "to_pin", "waypoints_um"}
+_LEG_ENTRY_KEYS = {"from_pin", "to_pin", "waypoints_um", "layer_role", "width_um"}
 
 #: Allowed keys in a ``connectivity[].legs[]`` entry's ``from_pin``/``to_pin``
 #: endpoint object (#1529). Same rationale as :data:`_LEG_ENTRY_KEYS` (#1548).
@@ -1605,6 +1665,17 @@ def _parse_legs(
       leaving the path itself to :func:`route_two_pin`'s default backbone;
       supplying it steers that leg's path exactly as the top-level
       ``waypoints_um`` field steers a 2-pin net's only leg.
+    - ``layer_role``/``width_um`` are optional *per leg* (issue #1655): the
+      leg-level tier of the per-net routing-plane override (see
+      :func:`_parse_connectivity` for the net-level field and
+      ``docs/design/gen-compose-per-net-layer.md`` for the decision record).
+      Each overrides the *net*'s own effective choice for this one leg,
+      which is what lets a single net's legs span two metals, stitched at
+      the shared pin by the existing #454 via-drop mechanics. Resolved (and
+      floored against the named layer's own deck minimum width) in
+      :func:`compose`, not here -- this function only type-checks them,
+      since the PDK variant a role resolves against is not in scope at
+      request-parse time.
 
     Malformed input is an application error (exit 1), the same treatment
     every other ``connectivity[]`` field gets.
@@ -1666,7 +1737,17 @@ def _parse_legs(
             field=f"legs[{leg_index}].waypoints_um",
         )
         legs.append(
-            {"from_pin": from_pin, "to_pin": to_pin, "waypoints_um": leg_waypoints}
+            {
+                "from_pin": from_pin,
+                "to_pin": to_pin,
+                "waypoints_um": leg_waypoints,
+                "layer_role": _parse_layer_role_override(
+                    raw_leg.get("layer_role"), f"{where}[{leg_index}].layer_role"
+                ),
+                "width_um": _parse_width_override(
+                    raw_leg.get("width_um"), f"{where}[{leg_index}].width_um"
+                ),
+            }
         )
     return legs
 
@@ -1677,7 +1758,16 @@ def _parse_legs(
 #: ``legs[]`` before #1529/#1536 added support for it) would otherwise
 #: compose "successfully" against a stale build while the field's own
 #: intent -- e.g. a caller-steered route -- was simply never read.
-_CONNECTIVITY_ENTRY_KEYS = {"net", "pins", "waypoints_um", "legs"}
+_CONNECTIVITY_ENTRY_KEYS = {
+    "net",
+    "pins",
+    "waypoints_um",
+    "legs",
+    # Per-net routing-plane override (#1655) -- see
+    # docs/design/gen-compose-per-net-layer.md.
+    "layer_role",
+    "width_um",
+}
 
 
 def _parse_connectivity(
@@ -1773,6 +1863,16 @@ def _parse_connectivity(
                 "pins": parsed_pins,
                 "waypoints_um": waypoints_um,
                 "legs": legs,
+                # Per-net routing-plane override (#1655). Type-checked here,
+                # resolved against the request's PDK variant in compose().
+                "layer_role": _parse_layer_role_override(
+                    entry.get("layer_role"),
+                    f"request.connectivity[{index}] (net '{net}').layer_role",
+                ),
+                "width_um": _parse_width_override(
+                    entry.get("width_um"),
+                    f"request.connectivity[{index}] (net '{net}').width_um",
+                ),
             }
         )
 
@@ -2297,6 +2397,147 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return own_block_layer_geometry_cache[key]
 
+    # --- Per-net/per-leg routing-plane override (#1655) ----------------------
+    # `routing.layer_role` resolves ONE plane for the whole composition, so a
+    # composition whose net-connectivity graph is non-planar (a K3,3-style
+    # subdivision) could not be drawn in one call at all: some pair of nets
+    # must cross, and two crossing nets on one layer are a short the
+    # route-vs-route check (#1057) correctly rejects. `connectivity[].
+    # layer_role` (and `legs[].layer_role`) lets a caller name a *different*
+    # plane per net (per leg), resolved through the same
+    # `_resolve_route_layer()` path `routing.layer_role` goes through. See
+    # docs/design/gen-compose-per-net-layer.md for the decision record --
+    # including why an explicit per-net choice wins over the
+    # `routing.cross_block_layer_role` fallback (which still applies, exactly
+    # as before, to every net that did not name a layer of its own).
+    _override_role_layers: dict[str, tuple[int, int]] = {}
+    _override_label_layers: dict[tuple[int, int], tuple[int, int] | None] = {}
+    _override_geometry_fetchers: dict[tuple[int, int], Any] = {}
+    _labelless_override_roles: set[str] = set()
+
+    def _resolve_override_layer(role: str, where: str) -> tuple[int, int]:
+        """Resolve a per-net/per-leg ``layer_role`` to ``(layer, datatype)``.
+
+        Deliberately the *same* resolver (and therefore the same role table,
+        the same unknown-role/absent-layer errors) ``routing.layer_role``
+        uses -- only the field name quoted in the message is re-labelled, so
+        a bad per-net role points the caller at their own field rather than
+        at the request-level one (mirrors
+        :func:`_resolve_cross_block_route_layer`'s own re-labelling).
+        """
+        if role not in _override_role_layers:
+            try:
+                _override_role_layers[role] = _resolve_route_layer(
+                    pdk_info["variant"], role
+                )
+            except GenComposeError as exc:
+                raise GenComposeError(
+                    str(exc).replace("routing.layer_role", where)
+                ) from exc
+        return _override_role_layers[role]
+
+    def _override_label_layer(
+        layer: tuple[int, int], role: str
+    ) -> tuple[int, int] | None:
+        """Label layer for an overridden plane, noted once per role when the
+        PDK has no label convention for it (mirrors the primary/cross planes'
+        own notes above -- an unlabelled net still draws, it just will not
+        survive as a named ``.SUBCKT`` pin)."""
+        if layer not in _override_label_layers:
+            _override_label_layers[layer] = _resolve_label_layer(
+                pdk_info["variant"], layer
+            )
+        resolved = _override_label_layers[layer]
+        if resolved is None and role not in _labelless_override_roles:
+            _labelless_override_roles.add(role)
+            notes.append(
+                f"per-net layer_role '{role}' has no PDK label-layer "
+                "convention `klt extract` recognises -- nets routed on this "
+                "layer will not carry a net label, so they will not survive "
+                "as named .SUBCKT pins after extraction"
+            )
+        return resolved
+
+    def _label_layer_for(layer: tuple[int, int] | None) -> tuple[int, int] | None:
+        """The net-label layer for whichever plane a drawn leg landed on.
+
+        The request-level planes keep their already-resolved values (so a
+        request with no per-net override resolves exactly the layers it did
+        before #1655); any other plane -- reachable only through a per-net or
+        per-leg ``layer_role`` -- resolves through the same
+        :func:`_resolve_label_layer` convention, cached per layer.
+        """
+        if layer is None:
+            return None
+        if layer == route_layer:
+            return label_layer
+        if cross_route_layer is not None and layer == cross_route_layer:
+            return cross_label_layer
+        if layer not in _override_label_layers:
+            _override_label_layers[layer] = _resolve_label_layer(
+                pdk_info["variant"], layer
+            )
+        return _override_label_layers[layer]
+
+    def _geometry_for_layer(layer: tuple[int, int]) -> Any:
+        """A ``block_geometry_for``-shaped fetcher for an arbitrary drawing
+        layer -- the per-net counterpart of ``_block_geometry_for``/
+        ``_cross_block_geometry_for`` above, backed by the same per-(block,
+        layer) read cache the pad self-notch check uses, so a block's drawn
+        geometry on any one layer is still read at most once per request."""
+        if layer not in _override_geometry_fetchers:
+            cache: dict[str, dict[str, Any] | None] = {}
+
+            def _fetch(
+                block_id: str, _cache=cache, _layer=layer
+            ) -> dict[str, dict[str, Any] | None]:
+                if block_id not in _cache:
+                    _cache[block_id] = _own_block_layer_geometry(block_id, _layer)
+                return _cache
+
+            _override_geometry_fetchers[layer] = _fetch
+        return _override_geometry_fetchers[layer]
+
+    def _effective_width_um(
+        layer: tuple[int, int] | None,
+        requested_um: float | None,
+        inherited_um: float,
+        where: str,
+    ) -> float:
+        # `where` names this entry's own width field (e.g.
+        # "request.connectivity[2] (net 'VBIAS').width_um").
+        """Resolve (and floor-check) one net's/leg's own drawn width.
+
+        ``requested_um`` is that entry's own ``width_um`` when it declared
+        one; otherwise the width is *inherited* (``routing.width_um`` for a
+        net, the net's own effective width for a leg), which is what keeps a
+        request that names only a ``layer_role`` from silently changing the
+        width it draws at. Either way the result is floored against the
+        effective layer's own minimum-width rule from the same curated deck
+        `klt drc` judges the composed layout with (#1501's lookup, reused) --
+        an inherited width that does not clear a *different* plane's stricter
+        floor is an application error naming this entry's own ``width_um``
+        as the fix, never a silent widening of the primary plane (the
+        regression #1620 fixed for ``cross_block_width_um``).
+        """
+        width = inherited_um if requested_um is None else requested_um
+        floor = _min_width_um_for_layer(pdk_info["variant"], layer)
+        if floor is not None and width < floor[0] - 1e-9:
+            floor_um, rule_id = floor
+            if requested_um is None:
+                raise GenComposeError(
+                    f"the layer this entry routes on has a stricter PDK deck "
+                    f"minimum width ('{rule_id}', >= {floor_um}um) than the "
+                    f"inherited routing width ({width}um) -- set {where} "
+                    "rather than widening routing.width_um for every net"
+                )
+            raise GenComposeError(
+                f"{where} ({width}um) is narrower than the resolved PDK "
+                "deck's own minimum width for the layer this entry routes on "
+                f"-- '{rule_id}' requires >= {floor_um}um"
+            )
+        return width
+
     # dbu for the route-vs-route collision check below (#1057), read lazily
     # (only once connectivity[] actually has a net to check) from any one
     # block's own GDS -- this pre-flight check only ever compares continuous
@@ -2396,10 +2637,111 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             _min_spacing_um_cache[layer] = best
         return _min_spacing_um_cache[layer]
 
-    for entry in connectivity:
+    for net_index, entry in enumerate(connectivity):
         net_label = entry["net"]
         pins = entry["pins"]
         net_pin_set = frozenset((pin["block"], pin["port"]) for pin in pins)
+
+        # --- This net's own effective routing plane (#1655) ------------------
+        # Defaults are exactly the request-level ones resolved above, so a
+        # net that names no layer_role of its own routes byte-identically to
+        # how it did before this field existed -- including keeping the
+        # `routing.cross_block_layer_role` fallback. A net that *does* name
+        # one routes on that plane instead, and the automatic cross-block
+        # fallback no longer applies to it: the caller has taken explicit
+        # control of this net's plane, and silently retrying it on a second,
+        # request-level plane it never asked for would make the drawn layer
+        # unpredictable (and is ill-defined when the two name one metal).
+        # The per-leg escape hatch (`legs[].layer_role`) is how a net that
+        # genuinely needs two planes says so explicitly.
+        net_where = f"request.connectivity[{net_index}] (net '{net_label}')"
+        net_layer_role = entry.get("layer_role")
+        net_route_layer = route_layer
+        net_block_geometry_for = _block_geometry_for
+        net_cross_route_layer = cross_route_layer
+        net_cross_geometry_for = _cross_block_geometry_for
+        net_cross_width_um = cross_block_width_um
+        net_width_um = width_um
+        if not declare_only:
+            if net_layer_role is not None:
+                net_route_layer = _resolve_override_layer(
+                    net_layer_role, f"{net_where}.layer_role"
+                )
+            net_width_um = _effective_width_um(
+                net_route_layer,
+                entry.get("width_um"),
+                width_um,
+                f"{net_where}.width_um",
+            )
+            if net_route_layer != route_layer:
+                # Resolved eagerly (re-read per drawn leg below, via
+                # `_label_layer_for`) so a plane with no label convention is
+                # noted once, at request-resolution time.
+                _override_label_layer(net_route_layer, net_layer_role or "")
+                net_block_geometry_for = _geometry_for_layer(net_route_layer)
+                net_cross_route_layer = None
+                net_cross_geometry_for = None
+                net_cross_width_um = None
+
+        # Per-leg overrides (#1655): resolved copies of this net's own
+        # `legs[]` entries, each carrying the (layer, width) it actually
+        # draws at -- `route_bundle()` routes a leg that carries either on
+        # that plane instead of the net's own, with no cross-block retry (the
+        # same "explicit wins" rule as the net level). A net's legs spanning
+        # two planes are stitched at their shared pin by the existing #454
+        # via-drop mechanics: every leg drops to each endpoint pin's own
+        # reported layer at that pin, so two legs meeting at one pin meet on
+        # that pin's own pad regardless of which plane each ran on.
+        resolved_legs: list[dict[str, Any]] | None = None
+        leg_layer_widths: dict[tuple[int, int], float] = {}
+        if entry.get("legs") is not None and not declare_only:
+            resolved_legs = []
+            for leg_index, leg in enumerate(entry["legs"]):
+                leg_where = f"{net_where}.legs[{leg_index}]"
+                leg_role = leg.get("layer_role")
+                leg_layer = (
+                    net_route_layer
+                    if leg_role is None
+                    else _resolve_override_layer(leg_role, f"{leg_where}.layer_role")
+                )
+                resolved_leg = dict(leg)
+                if leg_layer != net_route_layer or leg.get("width_um") is not None:
+                    leg_width_um = _effective_width_um(
+                        leg_layer,
+                        leg.get("width_um"),
+                        net_width_um,
+                        f"{leg_where}.width_um",
+                    )
+                    resolved_leg["route_layer"] = leg_layer
+                    resolved_leg["width_um"] = leg_width_um
+                    if leg_layer != net_route_layer:
+                        # Resolved eagerly (result re-read per drawn leg
+                        # below) so a plane with no label convention is
+                        # noted once, at request-resolution time.
+                        _override_label_layer(leg_layer, leg_role or "")
+                    if leg_layer is not None:
+                        leg_layer_widths[leg_layer] = max(
+                            leg_layer_widths.get(leg_layer, 0.0), leg_width_um
+                        )
+                else:
+                    resolved_leg["route_layer"] = None
+                    resolved_leg["width_um"] = None
+                resolved_legs.append(resolved_leg)
+
+        # Effective drawn width per layer, for the route-vs-route footprint
+        # comparison below: this net's own plane, the cross-block fallback
+        # plane it may still retry onto, and any plane one of its own legs
+        # overrode to. A layer named by two legs at different widths takes
+        # the wider (a conservative footprint is never a missed conflict).
+        net_layer_widths: dict[tuple[int, int], float] = {}
+        if net_route_layer is not None:
+            net_layer_widths[net_route_layer] = net_width_um
+        if net_cross_route_layer is not None and net_cross_width_um is not None:
+            net_layer_widths[net_cross_route_layer] = net_cross_width_um
+        for override_layer, override_width in leg_layer_widths.items():
+            net_layer_widths[override_layer] = max(
+                net_layer_widths.get(override_layer, 0.0), override_width
+            )
 
         def _leg_conflict(
             points_um: list[tuple[float, float]],
@@ -2407,6 +2749,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             stub_widen: list[dict[str, Any]],
             layer: tuple[int, int] | None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
+            _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
+            _net_width_um: float = net_width_um,
         ) -> str | None:
             """Route-vs-route collision check (#1057, spacing-aware since
             #1386) for one candidate leg.
@@ -2474,16 +2818,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             """
             # candidate_width_um (#1620): this candidate's own drawn width --
             # cross_block_width_um when it resolved on cross_route_layer,
-            # width_um otherwise -- so the compared footprint matches what
-            # _write_composed_gds actually draws for it, not the primary
-            # plane's width for a leg that never drew on that plane.
-            candidate_width_um = (
-                cross_block_width_um
-                if cross_route_layer is not None
-                and layer == cross_route_layer
-                and cross_block_width_um is not None
-                else width_um
-            )
+            # this net's own width otherwise -- so the compared footprint
+            # matches what _write_composed_gds actually draws for it, not the
+            # primary plane's width for a leg that never drew on that plane.
+            # `net_layer_widths` (#1655) generalises that to whichever plane
+            # this net (or one of its own legs) actually named.
+            candidate_width_um = _net_layer_widths.get(layer, _net_width_um)
             region = _drawn_leg_footprint_region(
                 points_um,
                 candidate_width_um,
@@ -2632,16 +2972,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 blocks,
                 offsets_um,
                 placed_bboxes_um,
-                width_um,
-                route_layer,
+                net_width_um,
+                net_route_layer,
                 extraction_deck,
-                block_geometry_for=_block_geometry_for,
+                block_geometry_for=net_block_geometry_for,
                 leg_conflict=_leg_conflict,
                 waypoints_um=entry.get("waypoints_um"),
-                cross_block_route_layer=cross_route_layer,
-                cross_block_geometry_for=_cross_block_geometry_for,
-                cross_block_width_um=cross_block_width_um,
-                explicit_legs=entry.get("legs"),
+                cross_block_route_layer=net_cross_route_layer,
+                cross_block_geometry_for=net_cross_geometry_for,
+                cross_block_width_um=net_cross_width_um,
+                explicit_legs=resolved_legs,
+                geometry_for_layer=_geometry_for_layer,
             )
         nets.append(
             {
@@ -2694,14 +3035,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # (rather than after the `accepted_route_regions.append` below)
             # so `_leg_conflict`'s own layer-aware comparison (#1386) has it
             # for every accepted entry.
-            leg_route_layer = leg.get("route_layer") or route_layer
+            # Since #1655 this can also be a plane the *caller* named for
+            # this net (`connectivity[].layer_role`) or for this one leg
+            # (`connectivity[].legs[].layer_role`) -- route_bundle reports the
+            # effective layer per leg either way, so nothing here has to know
+            # which of the three chose it.
+            leg_route_layer = leg.get("route_layer") or net_route_layer
             # leg_width_um (#1620): the width this leg actually drew at --
             # route_two_pin/route_bundle report it per leg since it can
             # differ from the primary plane's own width_um whenever the leg
             # fell back to cross_route_layer (drawn at cross_block_width_um
             # instead). Falls back to width_um for a leg that predates this
             # field (defensive; every leg compose() produces itself sets it).
-            leg_width_um = leg.get("width_um", width_um)
+            leg_width_um = leg.get("width_um", net_width_um)
             accepted_route_regions.append(
                 (
                     net_label,
@@ -2717,12 +3063,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     ),
                 )
             )
-            leg_label_layer = (
-                cross_label_layer
-                if cross_route_layer is not None
-                and leg_route_layer == cross_route_layer
-                else label_layer
-            )
+            leg_label_layer = _label_layer_for(leg_route_layer)
             routed_geometry.append(
                 {
                     "net": net_label,
