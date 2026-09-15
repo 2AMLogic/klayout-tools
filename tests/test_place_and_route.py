@@ -1694,6 +1694,12 @@ _STAGE_METRICS = {
 _CORNER_SWEEP_METRICS = {
     "timing__setup__ws": -4.02163,
     "timing__hold__ws": 0.08421,
+    # Issue #1866: the matching TNS pair, deliberately distinct from the WNS
+    # values above so a test asserting `total_negative_setup_slack_ns`/
+    # `total_negative_hold_slack_ns` catches an accidental alias onto the
+    # worst-slack fields.
+    "timing__setup__tns": -82.8171,
+    "timing__hold__tns": -1.5,
 }
 
 
@@ -3754,6 +3760,8 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "name": "tt_025C_1v80",
             "setup_slack_ns": pytest.approx(-4.02163),
             "hold_slack_ns": pytest.approx(0.08421),
+            "total_negative_setup_slack_ns": pytest.approx(-82.8171),
+            "total_negative_hold_slack_ns": pytest.approx(-1.5),
             "max_transition_violation_count": 3,
             "max_capacitance_violation_count": 2,
         }
@@ -4739,11 +4747,14 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
         line for line in sweep_lines if line.startswith("read_db")
     )
     # Issue #1709 appends `_design_rule_check_lines`'s own 6 lines after
-    # these, so the slack pair is no longer the script's own tail -- it now
-    # sits immediately before those 6.
-    assert sweep_lines[-8:-6] == [
+    # these, so the WNS pair is no longer the script's own tail; issue #1866
+    # then inserts the matching TNS pair immediately after the WNS pair,
+    # still ahead of those 6 design-rule-check lines.
+    assert sweep_lines[-10:-6] == [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
+        "report_tns_metric -setup",
+        "report_tns_metric -hold",
     ]
     # No `write_db`/`write_def`/`read_verilog`/`link_design` -- this session
     # only re-derives timing over the route stage's own already-written
@@ -4795,6 +4806,8 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
         corner_sweep_metrics={
             "timing__setup__ws": -7.5,
             "timing__hold__ws": 0.25,
+            "timing__setup__tns": -140.0,
+            "timing__hold__tns": 0.0,
         },
     )
     _stub_merge_def_to_gds(monkeypatch)
@@ -4817,6 +4830,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             "name": "tt_025C_1v80",
             "setup_slack_ns": -7.5,
             "hold_slack_ns": 0.25,
+            # Issue #1866: that same combined session's own TNS pair.
+            "total_negative_setup_slack_ns": -140.0,
+            "total_negative_hold_slack_ns": 0.0,
             # Issue #1709: the same entry now also carries that corner's own
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
@@ -4871,14 +4887,20 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
             "tt_025C_1v80": {
                 "timing__setup__ws": -1.94402,
                 "timing__hold__ws": 0.5,
+                "timing__setup__tns": -3.88804,
+                "timing__hold__tns": 0.0,
             },
             "ss_100C_1v60": {
                 "timing__setup__ws": -22.2093,
                 "timing__hold__ws": 1.2,
+                "timing__setup__tns": -940.0,
+                "timing__hold__tns": 0.0,
             },
             "ff_n40C_1v95": {
                 "timing__setup__ws": -3.1,
                 "timing__hold__ws": 0.28443,
+                "timing__setup__tns": -6.2,
+                "timing__hold__tns": -0.05,
             },
         },
     )
@@ -4894,6 +4916,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         "name": "tt_025C_1v80",
         "setup_slack_ns": pytest.approx(-1.94402),
         "hold_slack_ns": pytest.approx(0.5),
+        # Issue #1866: that corner's own single-corner invocation's TNS pair.
+        "total_negative_setup_slack_ns": pytest.approx(-3.88804),
+        "total_negative_hold_slack_ns": pytest.approx(0.0),
         # Issue #1709: per-corner design-rule verdict rides in the same
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
@@ -4901,6 +4926,19 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)
+    # Issue #1866: two corners can share the same WNS while differing wildly
+    # in TNS -- `ss_100C_1v60`'s -940ns (thousands of failing paths) versus
+    # `ff_n40C_1v95`'s -6.2ns is exactly the "same row, very different design
+    # state" gap this field closes.
+    assert corners_by_name["ss_100C_1v60"][
+        "total_negative_setup_slack_ns"
+    ] == pytest.approx(-940.0)
+    assert corners_by_name["ff_n40C_1v95"][
+        "total_negative_setup_slack_ns"
+    ] == pytest.approx(-6.2)
+    assert corners_by_name["ff_n40C_1v95"][
+        "total_negative_hold_slack_ns"
+    ] == pytest.approx(-0.05)
     # The aggregate's deciding corner is derivable from the array: the
     # minimum (worst) setup slack among the three is `ss_100C_1v60`'s own
     # -22.2093, matching `worst_setup_slack_ns` above; the minimum hold
