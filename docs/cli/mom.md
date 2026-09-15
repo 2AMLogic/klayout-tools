@@ -174,9 +174,12 @@ The spec file is a JSON object:
 }
 ```
 
-- `background_permittivity` (required, number) — relative permittivity of
-  the uniform dielectric surrounding every conductor. The MVP solves a
-  single homogeneous medium (see "Scope and limitations" below).
+- `background_permittivity` (required unless derivable from
+  `stackup_from_pdk`, number) — relative permittivity of the uniform
+  dielectric surrounding every conductor. The MVP solves a single
+  homogeneous medium (see "Scope and limitations" below). When omitted and
+  `stackup_from_pdk` is set, it is derived — see "Deriving a `stackup` from
+  an installed PDK" below.
 - `panel_size_um` (optional, number, default `0.5`) — target discretisation
   panel edge length in micrometers. Smaller values give more panels (more
   accurate, more expensive); the solver rejects a request whose panel count
@@ -203,8 +206,10 @@ The spec file is a JSON object:
   segment edge length in micrometers for the full-wave solve. Only
   consulted when `frequencies_hz` is non-empty; same "smaller is more
   accurate, more expensive" tradeoff as `panel_size_um`/`filament_size_um`.
-- `stackup` (required, non-empty array) — each entry maps one GDS
-  `(layer, datatype)` pair's shapes to an electrical conductor's z-extent:
+- `stackup` (required unless `stackup_from_pdk` is set, non-empty array) —
+  each entry maps one GDS `(layer, datatype)` pair's shapes to an electrical
+  conductor's z-extent. **Wins over `stackup_from_pdk` when both are
+  present** — nothing already shipped changes.
   - `layer` (string, `"<layer>/<datatype>"`) — the GDS layer/datatype to
     read shapes from.
   - `conductor` (string) — the electrical node name. **Multiple entries may
@@ -242,26 +247,60 @@ or the command fails with a clear "matched no shapes" error.
 
 ### Deriving a `stackup` from an installed PDK
 
-The `stackup[]` entries above are hand-authored today, but they do not have
-to be invented: [`klt pdk stackup`](pdk.md#klt-pdk-stackup) (issue #1609)
-emits the same per-conductor shape — `gds_layer`, `z0_um`, `z1_um`,
-`conductivity_S_per_m` — derived from a resolved PDK install, so a real
-sky130 MoM-cap spec can be generated instead of transcribed:
+The `stackup[]` entries above do not have to be hand-authored: a spec can
+instead set `stackup_from_pdk`, naming PDK conductors directly (issue
+#1617), and `klt mom` resolves them from an installed PDK via
+[`klayout_tools.pdk_stackup.stackup()`](pdk.md#klt-pdk-stackup) (the same
+data `klt pdk stackup` itself reports — issue #1609) rather than requiring a
+caller to transcribe elevations and conductivities into JSON by hand:
 
-```bash
-klt pdk stackup --pdk sky130A --format json \
-  | jq '{background_permittivity: (.dielectrics[] | select(.name == "ild3") | .permittivity),
-         stackup: [.conductors[] | select(.kind == "conductor")
-                   | {layer: .gds_layer, conductor: .name,
-                      z0_um, z1_um, conductivity_S_per_m}]}'
+```json
+{
+  "stackup_from_pdk": {
+    "pdk": "sky130A",
+    "layers": ["met4", "met5"],
+    "corner": "nom"
+  }
+}
 ```
 
-Note that `klt mom`'s MVP solves a **single homogeneous medium**
-(`background_permittivity`), so a stackup whose slabs carry different ε_r
-values cannot be represented faithfully; picking the ε_r of the slab the
-conductors of interest sit in is the right approximation for now. sky130
-reports the same 3.9 for every interlayer dielectric, so this is not a
-practical limitation there.
+- `pdk` (required, string) — the PDK variant to resolve (e.g. `"sky130A"`),
+  matching `klt pdk stackup --pdk`'s own argument. PDK resolution otherwise
+  uses `klayout_tools.pdk.find_pdk`'s own environment/store search (e.g.
+  `$PDK_ROOT`) — there is deliberately no spec- or CLI-level root override
+  here, so a `stackup_from_pdk` spec has exactly one way to name a PDK
+  install, not two.
+- `layers` (required, non-empty array of strings) — the PDK's own conductor
+  names to include (e.g. `"met4"`, `"li1"` for sky130), each expanded into
+  a `stackup[]` entry with that conductor's `gds_layer`, `z0_um`, `z1_um`,
+  and (when the PDK reports one) `conductivity_S_per_m`. A name absent from
+  the resolved PDK's stackup is a clear error, not a silently dropped entry.
+- `corner` (optional, string, default `"nom"`) — the parasitic corner to
+  resolve `conductivity_S_per_m` against, matching `klt pdk stackup
+  --corner`'s own default. Recorded in the run's output (see below) so a
+  re-run against a different corner is distinguishable.
+
+Thickness mode is always the curated (gap-free) one — `klt mom`'s panel
+discretisation cannot represent the ~10 nm gaps `klt pdk stackup`'s
+`--thickness tech-lef` mode introduces (they would mesh as opens), so that
+mode is never exposed through this path at all.
+
+`background_permittivity` is derived from this too, when the spec omits it:
+`klt mom`'s MVP solves a **single homogeneous medium**, so the resolved
+dielectric slab every named conductor's z-extent sits inside must agree on
+permittivity across every named conductor. sky130 and gf180mcu each report
+one uniform ε_r across every interlayer dielectric, so this derivation
+always succeeds for them today; a PDK curated with per-slab ε_r that
+differs across the named conductors' slabs raises a clear error instead of
+averaging or picking one — set an explicit `background_permittivity` in
+that case. An explicit `background_permittivity` in the spec is always
+honored over the derived value.
+
+The resolved request is echoed back under a top-level `stackup_from_pdk`
+object in the output (present only when it was actually used — an explicit
+`stackup[]` always wins, per above) for reproducibility, since a re-run
+against a different PDK release could resolve differently — see the JSON
+schema below.
 
 ## JSON schema (the contract)
 
@@ -304,6 +343,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `full_wave_segment_count` | integer           | **Only present when `frequencies_hz` is non-empty.** Total axial segment count across every conductor for the full-wave mesh (informational, mirrors `panel_count`/`filament_count`; identical at every swept frequency). |
 | `full_wave_sweep`         | array\<object\>   | **Only present when `frequencies_hz` is non-empty.** One entry per requested frequency, in the same order — see "Full-wave frequency sweep" below. Each entry additionally gains an `s_parameters` field when `ports` is set — see "Port definition and de-embedding" below. |
 | `ports`                   | array\<object\>   | **Only present when the spec sets a two-entry `ports` array.** Echoes the resolved port config (`position_um`/`reference_impedance_ohm`, defaults applied) — see "Port definition and de-embedding" below. |
+| `stackup_from_pdk`        | object            | **Only present when the spec's `stackup_from_pdk` object actually drove the resolved stackup** (an explicit `stackup[]` wins and this stays absent). `{"pdk", "root", "corner", "conductors"}` — the resolved PDK variant, absolute install root, resolved corner, and the expanded per-conductor entries used, for reproducibility (#1617). See "Deriving a `stackup` from an installed PDK" above. |
 
 ### Reading the matrix
 
