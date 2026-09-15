@@ -32,6 +32,7 @@ class FakeCocotbRunner:
         coverage_dat_text=None,
         extra_build_log="",
         extra_test_log="",
+        trace_bytes=None,
     ):
         self.results_xml_text = results_xml_text
         self.build_exc = build_exc
@@ -45,6 +46,13 @@ class FakeCocotbRunner:
         # standing in for Verilator flushing coverage data as part of *this*
         # run, the way `results_xml_text` stands in for `results.xml`.
         self.coverage_dat_text = coverage_dat_text
+        # When set, `test()` writes a fake waveform trace whenever the
+        # library requested `waves=True` (`options.trace`, issue #1845) --
+        # standing in for cocotb's own Icarus backend dumping
+        # `<hdl_toplevel>.fst` into `build_dir` (the real, verified shape --
+        # see `_find_trace_artifact`'s own docstring), the way
+        # `coverage_dat_text` stands in for a real `coverage.dat`.
+        self.trace_bytes = trace_bytes
         self.build_kwargs = None
         self.test_kwargs = None
 
@@ -69,5 +77,11 @@ class FakeCocotbRunner:
             coverage_dat = os.path.join(kwargs["test_dir"], "coverage.dat")
             with open(coverage_dat, "w", encoding="utf-8") as handle:
                 handle.write(self.coverage_dat_text)
+        if self.trace_bytes is not None and kwargs.get("waves"):
+            trace_path = os.path.join(
+                kwargs["build_dir"], f"{kwargs['hdl_toplevel']}.fst"
+            )
+            with open(trace_path, "wb") as handle:
+                handle.write(self.trace_bytes)
         if self.test_exc is not None:
             raise self.test_exc

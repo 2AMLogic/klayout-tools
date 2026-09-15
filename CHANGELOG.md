@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt functional-verification` gains an opt-in `options.trace`
+  field (Epic #1585 Phase 3, issue #1845) — `true` turns on cocotb's own
+  `Runner(waves=True)` on both the build and test steps, so the run's
+  engine dumps its own native waveform (Icarus: `<hdl_toplevel>.fst`;
+  Verilator: `dump.vcd`), and the response's new `trace` field names it:
+  `{"path", "format", "size_bytes"}`, the identical shape [`klt wave
+  build`](docs/cli/wave.md)'s own `trace` field already uses, so the object
+  drops straight into a `klt wave build` request unchanged — no more
+  copy/pasting a path by hand to go from a failed cocotb run to a queryable
+  waveform store. `null` on a run that did not request a trace; requesting
+  one and getting no waveform file is exit 1, never a silent `null`. Not
+  engine-restricted (unlike `options.coverage`/`options.sdf`) and not yet
+  combinable with `--mutations` (exit 1, undesigned — each isolated
+  per-mutant variant builds in its own throwaway directory this path never
+  surfaces). No `schema_version` bump, per
+  [`docs/json-contract.md`](docs/json-contract.md)'s additive-envelope
+  policy. Retires the "Waveform inspection / interactive debug" out-of-scope
+  bullet [`docs/cli/functional-verification.md`](docs/cli/functional-verification.md)
+  carried since `klt wave` shipped (Epic #1585 Phase 2) — see that page's
+  "Request"/"Response"/"Artifacts"/"Out of scope" sections for the full
+  contract.
 - **Added**: `klt version --format json` gains `klayout_version` (the
   KLayout engine actually resolved) and `klayout_version_expected` (the
   version this build/commit was tested against, recorded from the
