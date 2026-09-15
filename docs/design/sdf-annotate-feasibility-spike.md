@@ -462,6 +462,142 @@ run" shape needs a design closer to the sky130-scale one the issue's own
 run used (1927 `INTERCONNECT` entries), not a hand-written unit fixture, to
 be confident it is the same mechanism rather than a superficially similar
 one. Filed as its own follow-up rather than guessed at here — issue #1854.
+**Answered in §3.8 below** (2026-09-15): reproduced at sky130 scale, and it
+is *not* the same mechanism — not an annotation failure at all.
+
+### 3.8 The "constant-zero on every test case" shape is a timing outcome, not a broken annotation
+
+Found live during issue #1854, closing out the question §3.7 deferred. The
+claim under test, from #1619's own report:
+
+> with the same non-`FUNCTIONAL` sources and the same design, a regression
+> against these cell models with `options.sdf` **omitted entirely** (no
+> `$sdf_annotate` call in the compiled design at all) passes cleanly. Adding
+> `options.sdf` back — even with only a minority of `INTERCONNECT` entries
+> unresolved — turns the same regression into a uniform, constant-zero result
+> on every case, not merely a subtly-different timing outcome.
+
+**What was run** — a real sky130 post-route design generated for this pass,
+not a hand-written fixture, per #1854's own acceptance criterion **[RUN]**:
+
+| | |
+|---|---|
+| Design | `examples/functional-verification/gcd.v` → `klt synthesize` (native Yosys) → `klt place-and-route` (native OpenROAD, `target_stage: "route"`, `post_route_spef: true`, `post_route_sdf: true`, 1.1 ns target clock) |
+| Netlist | OpenROAD `write_verilog`, **460** `sky130_fd_sc_hd__*` instances |
+| SDF | OpenSTA `write_sdf` from the same post-`read_spef` session: **1049** `INTERCONNECT`, **1068** `IOPATH`, **50** `TIMINGCHECK` entries |
+| STA | `spef_sta.worst_slack_ns` −2.0508 ns, 50 setup violations at the 1.1 ns target (`annotation_complete: true`, 494/494 design nets) |
+| Models | `sky130_fd_sc_hd.v` + `primitives.v`, **`FUNCTIONAL` undefined** (required — `options.sdf` rejects a `FUNCTIONAL` define) |
+| Testbench | `examples/functional-verification/test_gcd.py` verbatim, plus a non-asserting probe variant that *logs* `done`/`result` per case instead of raising |
+| Tools | Icarus Verilog 13.0 (stable), cocotb 2.0.1, `klt` 0.5.0 |
+
+Every row below uses `corner: "min"`. That is not a free choice: the default
+`corner: "typ"` cannot read an OpenSTA `write_sdf` header at all, a *separate*
+defect found on the way here and filed as issue #1880 (`(VOLTAGE 1.800::1.800)`
+/ `(TEMPERATURE 25.000::25.000)` are `min::max` triples with an empty typ
+member; `iverilog -T typ` answers `SDF ERROR: … Chosen value not defined.`
+twice, which the transcript gate turns into exit 1). `"min"`/`"max"` read the
+identical file cleanly.
+
+**The isolation table** — every row is the same design, the same netlist, the
+same cell models, the same testbench source **[RUN]**:
+
+| # | `options.sdf` | unresolved `INTERCONNECT` | testbench clock | outcome |
+|---|---|---|---|---|
+| a | omitted | — | 10 ns | 2 pass / 1 deliberate fail; `result` correct on every case |
+| b | set, all 1049 applied | **0** | 10 ns | **identical to (a)**: same verdicts, and the probe's logged `result` *and* done-cycle counts match (a) exactly |
+| c | set, 20 entries hand-broken | 19 | 10 ns | transcript gate raises (as designed); `results.xml` verdicts and values still identical to (a) |
+| d | set, splitter disabled to reproduce the pre-#1857 single `$sdf_annotate` call | **16** genuine §3.7 shape-(a) failures | 10 ns | verdicts and values still identical to (a) |
+| e | set, all 1049 applied | **0** | **2 ns** | **`done` never asserts; `result` = `0000000000000000` on every case** |
+| f | omitted | — | 2 ns | correct on every case |
+| g | set, every delay ×4, all applied | **0** | 10 ns | **constant zero on every case** |
+
+Rows (e)/(f) and (g) *are* the reported effect, reproduced. Rows (b)/(c)/(d)
+are what refutes the mechanism it was attributed to.
+
+**The clock-period sweep**, same design, same SDF, probe testbench **[RUN]**:
+
+| testbench clock | annotated `result` per case |
+|---|---|
+| 10.0 / 3.5 / 3.2 / 3.0 ns | correct (6, 21, 1) |
+| 2.8 ns | first case correct, every later case hangs — the narrow "subtly different" band |
+| 2.5 / 2.0 ns | `0000000000000000`, `done` never asserts, **every** case |
+
+The threshold (between 2.5 and 3.0 ns) is the design's own annotated critical
+path. It sits below OpenSTA's 3.15 ns data-arrival figure for the same design
+because Icarus models no setup time at all (§3.4) — the simulated path only
+has to settle, not to settle *and* meet a setup window.
+
+**Mechanism.** `gcd`'s `result` is a registered output that loads only when the
+iterative subtractor reaches its exit condition; the 16-bit compare/subtract
+feedback path is the design's critical path. Once the annotated delay on that
+path exceeds the testbench's clock period, the `a`/`b` registers capture stale
+values every cycle, the loop never converges, `busy` never clears, `done` never
+pulses — and `result` is still holding the `0` its reset put there. Every test
+case drives the same FSM down the same broken path, so every case reads exactly
+zero. The uniformity that made this look like an engine-level fault is the
+*expected* signature: a gate-level design clocked past its critical path fails
+catastrophically and identically, not subtly. (Holding `start` high for 10
+cycles instead of 1 changes nothing, which rules out inertial rejection of the
+one-cycle `start` pulse as the cause on this design — the settling failure is
+in the datapath feedback, not the handshake.)
+
+And the other half of the contrast: **a zero-delay run cannot fail for timing
+at any clock period at all.** Row (f) passing at 2 ns is not evidence that the
+design meets a 2 ns clock; it is evidence that there is nothing there to meet.
+"Passes without `options.sdf`, fails uniformly with it" is precisely the
+coverage signal §2.2/§4.3 exists to produce, firing — not an engine defect.
+
+**#1619's suspected mechanism is refuted, measured directly.** The hypothesis
+was that Icarus's compile-time fallback ("Delayed reference and data signals
+become copies of the original reference and data signals", §3.4) is disabled
+once any `$sdf_annotate` call exists in the design. It is not **[RUN]**:
+
+- The annotated build emits that warning class **479** times (310 carrying the
+  "delayed signals become copies" sentence — the `$setuphold`/`$recrem` checks
+  that declare delayed-signal arguments — and 169 without, the `$width` checks
+  that declare none).
+- A build with the generated wrapper and `-gspecify -ginterconnect` but **no
+  `$sdf_annotate` call at all** emits the identical **479 / 310** counts, and
+  passes. The fallback is gated on `-gspecify`, not on the presence of an
+  annotate call.
+- The unannotated baseline emits the warning **0** times only because
+  `options.sdf` is also what adds `-gspecify`. "No `$sdf_annotate` ⇒ no
+  warning" is a correlation through that flag, not a causal link.
+- With the fallback demonstrably active, row (b)'s verdicts and values are
+  identical to row (a)'s.
+
+**Not the same mechanism as §3.7 shape (b)** — confirmed distinct on three
+independent axes, which is #1854's other acceptance criterion:
+
+1. **Diagnostic signature.** Shape (b) always leaves an `SDF ERROR: … Could
+   not find intermodpath!` in the transcript (this module raises on it). The
+   constant-zero shape leaves **zero** actionable diagnostics; the only dropped
+   class is the benign `TIMINGCHECK` one, and `environment.sdf` reports
+   `annotated: true` with every delay applied.
+2. **Testbench sensitivity.** Shape (b) flips on whether the cocotb test ever
+   `await`s a trigger, against a byte-identical SDF. The constant-zero shape is
+   a deterministic function of one number — the testbench's clock period versus
+   the annotated critical path — and reproduces on any testbench that drives
+   the design.
+3. **Unresolved-entry count is not the driver.** Rows (c)/(d) carry 19 and 16
+   unresolved entries and produce *correct* results; rows (e)/(g) carry **zero**
+   and produce the constant-zero one. The two axes are independent.
+
+**Decision: no fix in `functional_verification.py`, and nothing to raise
+upstream with Icarus.** There is no defect in either: the annotation applied
+completely, and the simulator reported what the annotated design does. What was
+missing was a way to *read* the result — a uniform every-case failure under
+`options.sdf` looks identical to a broken engine if you have not separated the
+two. That is what this section and the regression test
+`test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome`
+(`tests/test_functional_verification.py` **[REPO]**) supply: a PDK-free
+three-row fixture — fast clock unannotated (passes), fast clock annotated
+(constant zero on every case, zero diagnostics), slow clock annotated (passes
+again) — that must keep holding, so a future change cannot quietly turn a real
+annotation failure into "oh, that's just the timing shape". The reading
+guidance is mirrored for callers in
+[`docs/cli/functional-verification.md`](../cli/functional-verification.md)
+§"SDF back-annotation".
 
 ---
 
@@ -576,6 +712,33 @@ another design (the `modexp` row in §2.2 was produced that way). Like
 `tests/corpus/statime/regenerate.sh`, this is a deliberate operator-run
 study, not a CI step: it depends on a host PDK install CI does not
 provision.
+
+### 5.1 Reproducing §3.8's sky130-scale run
+
+§3.8's table is not produced by the script above — it needs a *real* post-route
+SDF, so it runs the shipped verbs end to end. In a scratch directory, with
+`iverilog` **13.0** and a native `openroad` on `$PATH` and a volare `sky130A`:
+
+1. `klt synthesize` `examples/functional-verification/gcd.v` against
+   `sky130_fd_sc_hd` / `tt_025C_1v80` (the request in
+   `tests/corpus/place_and_route/regenerate.sh` verbatim).
+2. `klt place-and-route` that netlist with `"target_stage": "route"`,
+   `"post_route_spef": true`, `"post_route_sdf": true`, `clock_port: "clk"`,
+   `clock_period_ns: 1.1` — yielding `verilog_path` and `spef_sta.sdf_path`.
+3. `klt functional-verification` against `[primitives.v,
+   sky130_fd_sc_hd.v, <verilog_path>]` with `hdl_toplevel: "gcd"`,
+   `testbench.module: "test_gcd"`, **no** `FUNCTIONAL` define, once with
+   `options.sdf` omitted and once with
+   `{"file": "<sdf_path>", "corner": "min"}` (not `"typ"` — issue #1880).
+
+Rows (e)/(f) need only one further change: a copy of `test_gcd.py` whose
+`Clock(dut.clk, 10, unit="ns")` becomes `2`. Row (g) needs a copy of the SDF
+with every `(a:b:c)` delay triple multiplied by 4. Row (d) needs
+`_split_sdf_bus_port_interconnects` stubbed to return `None` (the pre-#1857
+single-call shape). The PDK-free distillation of the finding, which *does* run
+anywhere with cocotb + Icarus 13.0, is
+`test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome` in
+`tests/test_functional_verification.py`.
 
 ---
 

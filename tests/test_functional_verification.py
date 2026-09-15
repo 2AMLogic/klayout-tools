@@ -2970,6 +2970,210 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
 
 
 # --------------------------------------------------------------------------- #
+# Integration: the "constant-zero result on every test case" shape (issue
+# #1854), pinned as a *timing* outcome rather than an annotation failure.
+#
+# Issue #1619 flagged, and #1854 investigated, a second-order effect: a
+# gate-level regression that passes with `options.sdf` omitted turns into a
+# uniform, constant-zero result on every test case once `options.sdf` is set,
+# which looked like Icarus disabling some fallback the moment any
+# `$sdf_annotate` call exists in the design. It is not: it is what a genuine
+# annotated-delay failure looks like once the annotated path delay crosses the
+# testbench's own clock period -- the design never advances out of reset, so
+# every output register holds its reset value and every case reads zero. See
+# `docs/design/sdf-annotate-feasibility-spike.md` section 3.8 for the
+# sky130-scale run this fixture distils.
+#
+# The load-bearing property is that the constant-zero run has **zero**
+# actionable SDF diagnostics: every entry resolved, so no transcript scan
+# would ever flag it. Only the three-way comparison below separates "the
+# annotation is broken" from "the annotation worked and the design does not
+# meet this clock".
+# --------------------------------------------------------------------------- #
+
+_CONSTANT_ZERO_DUT_V = """\
+module klt_slow (input wire in, output wire out);
+  assign out = in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module capture_once (
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire       start,
+    input  wire [3:0] d,
+    output reg  [3:0] q,
+    output reg        done
+);
+  wire start_q;
+  klt_slow u_slow (.in(start), .out(start_q));
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      q    <= 4'b0;
+      done <= 1'b0;
+    end else if (start_q) begin
+      q    <= d;
+      done <= 1'b1;
+    end
+  end
+endmodule
+"""
+
+_CONSTANT_ZERO_TESTBENCH_TEMPLATE = '''\
+"""Three cases, each loading a different value through the same one-cycle
+`start` handshake -- so a failure that is *uniform and constant-zero across
+every case* is distinguishable from a per-case wrong answer."""
+
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import ClockCycles, RisingEdge
+
+PERIOD_NS = @PERIOD@
+
+
+async def _load(dut, value):
+    cocotb.start_soon(Clock(dut.clk, PERIOD_NS, unit="ns").start())
+    dut.rst_n.value = 0
+    dut.start.value = 0
+    dut.d.value = 0
+    await ClockCycles(dut.clk, 3)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    dut.d.value = value
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    await ClockCycles(dut.clk, 8)
+
+    got = str(dut.q.value)
+    assert got == format(value, "04b"), f"q={got} after loading d={value}"
+
+
+@cocotb.test()
+async def test_load_nine(dut):
+    await _load(dut, 9)
+
+
+@cocotb.test()
+async def test_load_five(dut):
+    await _load(dut, 5)
+
+
+@cocotb.test()
+async def test_load_three(dut):
+    await _load(dut, 3)
+'''
+
+
+def _constant_zero_sdf_text() -> str:
+    """Annotate `u_slow`'s own `in -> out` arc with 6 ns -- longer than the
+    fast testbench's whole clock period, shorter than the slow one's. Nothing
+    here is unresolvable: the entry names an arc the cell's own `specify`
+    block declares, on an instance that exists."""
+    return """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "capture_once")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "klt_slow")
+    (INSTANCE u_slow)
+    (DELAY (ABSOLUTE
+      (IOPATH in out (6.000:6.000:6.000) (6.000:6.000:6.000))
+    ))
+  )
+)
+"""
+
+
+def _stage_constant_zero_design(tmp_path: Path, *, period_ns: int) -> None:
+    _write(tmp_path / "capture_once.v", _CONSTANT_ZERO_DUT_V)
+    _write(
+        tmp_path / "test_capture_once.py",
+        _CONSTANT_ZERO_TESTBENCH_TEMPLATE.replace("@PERIOD@", str(period_ns)),
+    )
+    _write(tmp_path / "route.sdf", _constant_zero_sdf_text())
+
+
+def _constant_zero_request(tmp_path: Path, name: str, *, sdf: bool) -> str:
+    request: dict = {
+        "sources": ["capture_once.v"],
+        "hdl_toplevel": "capture_once",
+        "testbench": {"module": "test_capture_once"},
+        "options": {"timescale": ["1ns", "1ps"]},
+    }
+    if sdf:
+        request["options"]["sdf"] = {"file": "route.sdf", "corner": "typ"}
+    return _write_request(tmp_path / name, request)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome(tmp_path):
+    """Issue #1854: the reported "constant-zero result on every test case once
+    `options.sdf` is set" shape, reproduced and attributed.
+
+    Three runs, same design and same SDF:
+
+    1. fast clock, **no** `options.sdf` -- passes (a zero-delay run cannot
+       fail for timing at *any* clock period, which is exactly why the
+       contrast looks alarming);
+    2. fast clock, `options.sdf` -- every case fails with `q` reading
+       `0000`, the design never leaving its reset state;
+    3. slow clock, the **same** `options.sdf` -- passes again.
+
+    Row 3 is the load-bearing one: the annotation is not broken in row 2, and
+    row 2 raises no SDF diagnostic at all (the run returns a report instead of
+    raising `FunctionalVerificationError`, and `environment.sdf.dropped` is
+    empty). Only the clock period changed.
+    """
+    fast = tmp_path / "fast"
+    slow = tmp_path / "slow"
+    fast.mkdir()
+    slow.mkdir()
+    _stage_constant_zero_design(fast, period_ns=2)
+    _stage_constant_zero_design(slow, period_ns=20)
+
+    unannotated = run_functional_verification(
+        _constant_zero_request(fast, "request-plain.json", sdf=False)
+    )
+    annotated_fast = run_functional_verification(
+        _constant_zero_request(fast, "request-sdf.json", sdf=True)
+    )
+    annotated_slow = run_functional_verification(
+        _constant_zero_request(slow, "request-sdf.json", sdf=True)
+    )
+
+    # 1. Zero delay, fast clock: every case loads its own value.
+    assert unannotated["status"] == "pass"
+    assert unannotated["environment"]["sdf"] is None
+
+    # 2. Annotated, same fast clock: uniform constant zero on every case --
+    #    and *not* because any annotation failed. A single unresolved entry
+    #    would have raised instead of returning this report.
+    assert annotated_fast["status"] == "fail"
+    assert annotated_fast["failed_count"] == 3
+    assert [test["status"] for test in annotated_fast["tests"]] == ["failed"] * 3
+    assert all(
+        "q=0000" in (test["error_message"] or "") for test in annotated_fast["tests"]
+    )
+    assert annotated_fast["environment"]["sdf"]["annotated"] is True
+    assert annotated_fast["environment"]["sdf"]["dropped"] == {}
+
+    # 3. Same SDF, slower clock: correct again. The annotation was never the
+    #    problem -- the design simply does not meet a 2 ns clock once its own
+    #    delay is modelled.
+    assert annotated_slow["status"] == "pass"
+    assert annotated_slow["environment"]["sdf"]["annotated"] is True
+
+
+# --------------------------------------------------------------------------- #
 # Unit: `_split_sdf_bus_port_interconnects` itself (issue #1619) -- the
 # splitting/deferral logic the integration tests above exercise end-to-end.
 # --------------------------------------------------------------------------- #
