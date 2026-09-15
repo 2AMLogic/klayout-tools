@@ -1191,6 +1191,95 @@ def _segment_bbox_interior_overlap_um(
     return 0.0
 
 
+def _segment_obstacle_overlap_um(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    bbox_um: dict[str, float],
+    navigable_regions_um: list[dict[str, float]] | None = None,
+) -> float:
+    """:func:`_segment_bbox_interior_overlap_um`, minus whatever portion of
+    that overlap also lies inside one of the block's own declared
+    ``navigable_regions_um`` (issues #1531/#1835).
+
+    A block that reserves an interior routing channel (``mos_array``'s
+    ``interior_channel_um``, #1531) reports that channel back as one or more
+    rectangles a route may pass through without being treated as "crossing"
+    the block's obstacle bbox, even though the channel still sits
+    geometrically inside that bbox. ``navigable_regions_um`` entries are
+    used here exactly as declared -- full rectangles, not shrunk to a strict
+    interior the way ``bbox_um``'s own interior test is -- so a backbone
+    running along a channel's own boundary still counts as staying inside
+    it. Both ``bbox_um`` and every ``navigable_regions_um`` entry must
+    already be in the same (composed) coordinate frame as ``p0``/``p1``.
+
+    ``navigable_regions_um`` omitted/empty (the default for every block that
+    predates #1531, and every ``mos_array`` call with
+    ``interior_channel_um=0.0``) reproduces
+    :func:`_segment_bbox_interior_overlap_um` exactly -- this function is a
+    strict no-op change for those callers.
+    """
+    base = _segment_bbox_interior_overlap_um(p0, p1, bbox_um)
+    if base <= 0.0 or not navigable_regions_um:
+        return base
+
+    x0, y0 = p0
+    x1, y1 = p1
+    horizontal = abs(y0 - y1) < 1e-9
+    vertical = abs(x0 - x1) < 1e-9
+    if horizontal == vertical:
+        return base  # degenerate/diagonal segment -- unreachable in practice
+
+    # Recompute the same bbox-interior-clamped interval `base` above
+    # measured, so the subtraction below stays in exact agreement with it.
+    eps = 1e-9
+    bx0, by0 = bbox_um["x0"] + eps, bbox_um["y0"] + eps
+    bx1, by1 = bbox_um["x1"] - eps, bbox_um["y1"] - eps
+    if horizontal:
+        lo, hi = sorted((x0, x1))
+        lo, hi = max(lo, bx0), min(hi, bx1)
+        fixed = y0
+    else:
+        lo, hi = sorted((y0, y1))
+        lo, hi = max(lo, by0), min(hi, by1)
+        fixed = x0
+    if lo >= hi:
+        return 0.0
+
+    # Each navigable region only "opens" the obstacle for a route actually
+    # running through the region's own span -- restrict to regions whose
+    # perpendicular extent contains this segment's fixed coordinate, then
+    # clip the region's own extent along the segment's axis to [lo, hi].
+    covered: list[tuple[float, float]] = []
+    for region in navigable_regions_um:
+        if horizontal:
+            if not (region["y0"] <= fixed <= region["y1"]):
+                continue
+            r_lo, r_hi = region["x0"], region["x1"]
+        else:
+            if not (region["x0"] <= fixed <= region["x1"]):
+                continue
+            r_lo, r_hi = region["y0"], region["y1"]
+        r_lo, r_hi = max(r_lo, lo), min(r_hi, hi)
+        if r_lo < r_hi:
+            covered.append((r_lo, r_hi))
+
+    if not covered:
+        return base
+
+    # Merge overlapping/adjacent covered intervals before summing -- two
+    # regions covering the same stretch of the segment must not have their
+    # lengths double-counted.
+    covered.sort()
+    merged: list[list[float]] = []
+    for c_lo, c_hi in covered:
+        if merged and c_lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], c_hi)
+        else:
+            merged.append([c_lo, c_hi])
+    navigable_length = sum(c_hi - c_lo for c_lo, c_hi in merged)
+    return max(0.0, base - navigable_length)
+
+
 def read_block_layer_geometry(
     block_id: str,
     block: dict[str, Any],
@@ -1615,9 +1704,19 @@ def route_two_pin(
        as two separate ``blocks[]`` entries -- was being rejected for
        "crossing" metal it never comes near. Both exemptions remove false
        positives only: a leg that does reach a block's real drawn shapes is
-       still measured, and rejected or detoured, exactly as before. A
-       crossing this check finds against a block neither exemption clears is
-       not automatically
+       still measured, and rejected or detoured, exactly as before. A block
+       that declares one or more ``navigable_regions`` (issues #1531/#1835 --
+       e.g. ``mos_array``'s ``interior_channel_um``) gets a third exemption:
+       the portion of the backbone's interior overlap that falls inside one
+       of that block's own declared channels is subtracted before this
+       check's threshold comparison (:func:`_segment_obstacle_overlap_um`),
+       so a route that stays inside the declared channel is not "crossing"
+       the block's obstacle even though the channel geometrically sits
+       inside its bbox. Absent/empty ``navigable_regions`` (every block that
+       predates #1531, and every ``mos_array`` call with
+       ``interior_channel_um=0.0``) leaves this check byte-for-byte
+       unchanged. A crossing this check finds against a block none of these
+       exemptions clears is not automatically
        fatal (#1167): when the *only* blocks crossed are ones neither pin
        sits on, the net is retried around them first -- see "Bounded detour
        search" below -- and reported unroutable only if no alternate lane
@@ -2469,6 +2568,33 @@ def route_two_pin(
         }
         for block_id, bbox in placed_bboxes_um.items()
     }
+
+    # navigable_regions (issues #1531/#1835): a block may declare one or more
+    # rectangles of its own interior as a navigable channel (e.g.
+    # `mos_array`'s `interior_channel_um`) -- reported in the block's own
+    # local frame, oriented but not yet translated by `_parse_blocks`
+    # (mirroring `bbox_um`), so translate each one by this block's own
+    # `offsets_um` entry here, the same translation every other per-block
+    # geometry (ports, bbox_um) already receives before comparison against
+    # real composed coordinates. Empty/absent for every block that predates
+    # this field -- the obstacle-overlap loop below then behaves exactly as
+    # before (see `_segment_obstacle_overlap_um`'s own docstring).
+    navigable_regions_by_block_um: dict[str, list[dict[str, float]]] = {}
+    for block_id in obstacle_bboxes_um:
+        local_regions = blocks.get(block_id, {}).get("navigable_regions") or []
+        if not local_regions:
+            continue
+        offset = offsets_um.get(block_id, {"x": 0.0, "y": 0.0})
+        navigable_regions_by_block_um[block_id] = [
+            {
+                "x0": region["x0"] + offset["x"],
+                "y0": region["y0"] + offset["y"],
+                "x1": region["x1"] + offset["x"],
+                "y1": region["y1"] + offset["y"],
+            }
+            for region in local_regions
+        ]
+
     allowances_um: dict[str, float] = {}
     if not same_block_self_net:
         allowances_um[own_a] = (
@@ -2549,7 +2675,12 @@ def route_two_pin(
                 continue  # a self-net is expected to cross its own block
             if other_id in exempt_block_ids:
                 continue
-            length = _segment_bbox_interior_overlap_um(seg_p0, seg_p1, other_bbox)
+            length = _segment_obstacle_overlap_um(
+                seg_p0,
+                seg_p1,
+                other_bbox,
+                navigable_regions_by_block_um.get(other_id),
+            )
             if length > 0.0:
                 overlap_by_block_um[other_id] = (
                     overlap_by_block_um.get(other_id, 0.0) + length

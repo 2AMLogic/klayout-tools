@@ -433,6 +433,29 @@ into the circuit.)
   declaring which other block ids an entry shares a footprint with — was not
   needed: no new request-schema surface is involved, and nothing has to
   declare that a ring and its content are the same logical region.)
+- **A block's own declared interior routing channel is no longer treated as
+  its own obstacle (issues #1531/#1835, fixed).** A generator (so far only
+  [`klt gen mos_array`](gen.md)'s `interior_channel_um` parameter) can
+  report one or more `navigable_regions` rectangles alongside its `ports[]`
+  — metal-free space it has deliberately reserved for a route to reach an
+  otherwise-enclosed interior pin. Before this, the obstacle-overlap check
+  above still measured a leg's crossing against a block's **whole**
+  `bbox_um`, so a `waypoints_um` backbone that stayed entirely inside a
+  declared channel was still rejected as "crossing its own pin's block" —
+  the reserved space existed in the generator's own geometry but
+  `gen-compose` had no way to know about it. `klt gen-compose` now parses an
+  optional `navigable_regions` field on `blocks[].generator_report` (and
+  `blocks[].cell`, for symmetry with `ports[]`/`bbox_um`) — the same
+  `{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangle shape `mos_array` reports
+  — runs each one through the same `orientation` transform every other
+  per-block geometry already goes through, and subtracts a block's own
+  (composed-frame) `navigable_regions` from its obstacle bbox before the
+  overlap check runs. A crossing that falls entirely inside a declared
+  channel is no longer counted; a crossing outside one (including a
+  different block's bbox) is measured exactly as before. Absent or empty
+  `navigable_regions` — every block predating this field, and every
+  `mos_array` call with `interior_channel_um: 0.0` (the default) — leaves
+  this check byte-for-byte unchanged.
 - **Routing same-facing port pairs with `waypoints_um` (#634, fixed).** Case
   **(1)** above has no remedy when the caller cannot choose which ports get
   wired — e.g. a hand-drawn cell that legitimately puts its input and output
@@ -1391,6 +1414,7 @@ exit codes).
 | `blocks[].cell.cell_name` | string | Required. The cell to place, by name. A stream with no such cell is an application error (exit 1) that lists the names the stream does contain. |
 | `blocks[].cell.ports[]` | array\<object\> | Optional, defaults to `[]`. Named terminals in the **cell's own** coordinate frame, using exactly the shape [`klt gen`](gen.md) reports (`name`, and optional `x_um`/`y_um`, `width_um`, `direction_deg`, `layer: {layer, datatype}`, `net`) — this is what lets a library cell participate in `connectivity[]` and `pins[]`. Unlike a `generator_report`'s ports (which a `klt` verb produced), these are hand-declared and therefore validated: a duplicate `name`, an `x_um` without a `y_um`, a non-positive `width_um`, a non-orthogonal `direction_deg`, or a malformed `layer` is an application error (exit 1). A port may carry a `name` only — it is then placeable but neither routable nor labellable, exactly like an under-reported generated port. |
 | `blocks[].cell.bbox_um` | object | Optional. The cell's own (pre-placement) `{x0, y0, x1, y1}` footprint. **When omitted it is read from the stream** — `kdb.Cell.dbbox()`, i.e. the same box [`klt cells`](cells.md) reports under its `{left, bottom, right, top}` field names, translated here so the caller never has to. Declare it explicitly when the placement footprint should differ from the drawn extent (e.g. a standard cell's row-abutment box), or when the cell draws no geometry at all (an empty cell has no readable bbox — that is an application error, exit 1, naming this field as the fix). |
+| `blocks[].generator_report.navigable_regions[]` / `blocks[].cell.navigable_regions[]` | array\<object\> | Optional, defaults to `[]` (issues #1531/#1835). A list of `{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles, in the block's own pre-placement coordinate frame — metal-free space the block's own generator has deliberately reserved for a route (e.g. [`klt gen mos_array`](gen.md)'s `interior_channel_um`). Subtracted from that block's own obstacle bbox before the obstacle-overlap check below runs, so a `waypoints_um` backbone that stays inside a declared region is not rejected as crossing its own block. Absent or empty leaves that check byte-for-byte unchanged — see "A block's own declared interior routing channel is no longer treated as its own obstacle" below. |
 | `blocks[].orientation` | string | Optional, default `"none"` (#1166). `"none"`, `"mirror_x"`, `"mirror_y"`, or `"rotate_180"` — this block's own mirror/rotation, applied about its own local origin *before* placement translates it. See "Block orientation (mirror/rotate, #1166)" below for the exact transform and the same-facing-port case it unblocks. An unrecognised value is an application error (exit 1). |
 | `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |

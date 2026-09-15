@@ -207,6 +207,9 @@ from .gen_compose_routing import (
     _segment_bbox_interior_overlap_um as _segment_bbox_interior_overlap_um,
 )
 from .gen_compose_routing import (
+    _segment_obstacle_overlap_um as _segment_obstacle_overlap_um,
+)
+from .gen_compose_routing import (
     _self_net_cross_layer_lane_waypoints_um as _self_net_cross_layer_lane_waypoints_um,
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
@@ -817,6 +820,48 @@ def _require_bbox(value: Any, where: str) -> dict[str, float]:
         ) from exc
 
 
+def _require_navigable_regions(value: Any, where: str) -> list[dict[str, float]]:
+    """Parse the optional ``navigable_regions`` field a block's
+    ``generator_report`` (or ``cell``) may declare (issues #1531/#1835).
+
+    ``None``/absent defaults to ``[]`` -- a block predating this field (or
+    one that reports an empty list, e.g. every ``mos_array`` call with the
+    default ``interior_channel_um=0.0``) is completely unaffected by
+    :func:`route_two_pin`'s obstacle-overlap subtraction downstream. Each
+    entry is the same ``{"x0_um", "y0_um", "x1_um", "y1_um"}`` shape #1531
+    established for `mos_array`'s own generator response; parsed here into
+    this module's own bbox convention (``{"x0", "y0", "x1", "y1"}`` -- the
+    same shape :func:`_require_bbox` returns for ``bbox_um``) so a region can
+    be run through the identical :func:`_orient_bbox_um` orientation pipeline
+    every other per-block bbox already goes through.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise GenComposeError(f"{where}.navigable_regions must be a JSON array")
+    regions: list[dict[str, float]] = []
+    for i, raw_region in enumerate(value):
+        if not isinstance(raw_region, dict):
+            raise GenComposeError(
+                f"{where}.navigable_regions[{i}] must be a JSON object"
+            )
+        try:
+            regions.append(
+                {
+                    "x0": float(raw_region["x0_um"]),
+                    "y0": float(raw_region["y0_um"]),
+                    "x1": float(raw_region["x1_um"]),
+                    "y1": float(raw_region["y1_um"]),
+                }
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GenComposeError(
+                f"{where}.navigable_regions[{i}] must have numeric "
+                "x0_um/y0_um/x1_um/y1_um fields"
+            ) from exc
+    return regions
+
+
 def _orient_bbox_um(bbox_um: dict[str, float], orientation: str) -> dict[str, float]:
     """``bbox_um``, transformed by a block's own ``orientation`` (#1166),
     still pre-translation (in the block's own local frame).
@@ -1039,7 +1084,10 @@ def _parse_cell_block(
     -- a PDK library cell never produced a ``klt gen`` report to copy a bbox
     out of.
 
-    Returns ``{"cell_name", "gds_path", "bbox_um", "ports"}``.
+    ``navigable_regions`` (#1531/#1835) is likewise optional and defaults to
+    ``[]`` -- see :func:`_require_navigable_regions`.
+
+    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions"}``.
     """
     if not isinstance(raw_cell, dict):
         raise GenComposeError(f"{where} must be a JSON object")
@@ -1060,11 +1108,16 @@ def _parse_cell_block(
     else:
         bbox_um = _require_bbox(raw_bbox, where=where)
 
+    navigable_regions = _require_navigable_regions(
+        raw_cell.get("navigable_regions"), where=where
+    )
+
     return {
         "cell_name": cell_name,
         "gds_path": gds_path,
         "bbox_um": bbox_um,
         "ports": ports,
+        "navigable_regions": navigable_regions,
     }
 
 
@@ -1120,6 +1173,7 @@ def _parse_blocks(
             gds_path = parsed_cell["gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports = parsed_cell["ports"]
+            navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
         else:
             source = "generator_report"
@@ -1152,6 +1206,10 @@ def _parse_blocks(
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
             )
             ports = report.get("ports") or []
+            navigable_regions = _require_navigable_regions(
+                report.get("navigable_regions"),
+                where=f"blocks[{index}] (id '{block_id}').generator_report",
+            )
         ports_by_name: dict[str, dict[str, Any]] = {
             p["name"]: p
             for p in ports
@@ -1162,10 +1220,11 @@ def _parse_blocks(
         # on the request-level blocks[] entry, not inside generator_report
         # (which is immutable klt gen output). Defaults to "none" (today's
         # translation-only behaviour, unchanged). Applied here, once, to
-        # this block's own bbox_um/ports[] -- every downstream consumer
-        # (placement math, routing, GDS write) then reads already-oriented
-        # (but still pre-translation) metadata and never repeats this
-        # transform itself; see _ORIENTATIONS's docstring.
+        # this block's own bbox_um/ports[]/navigable_regions (#1835) --
+        # every downstream consumer (placement math, routing, GDS write)
+        # then reads already-oriented (but still pre-translation) metadata
+        # and never repeats this transform itself; see _ORIENTATIONS's
+        # docstring.
         orientation = raw_block.get("orientation", "none")
         if orientation not in _ORIENTATIONS:
             allowed = ", ".join(sorted(_ORIENTATIONS))
@@ -1179,6 +1238,13 @@ def _parse_blocks(
                 name: _orient_port(port, orientation)
                 for name, port in ports_by_name.items()
             }
+            # navigable_regions (#1531/#1835) is per-block geometry in the
+            # same local frame as bbox_um/ports[] -- run it through the
+            # identical orientation transform so it lands correctly before
+            # translation, exactly like bbox_um/ports[] just above.
+            navigable_regions = [
+                _orient_bbox_um(region, orientation) for region in navigable_regions
+            ]
 
         drc_hints = report.get("drc_hints")
         matched_group_id = None
@@ -1207,6 +1273,7 @@ def _parse_blocks(
             "matched_group_id": matched_group_id,
             "min_spacing_um": min_spacing_um,
             "orientation": orientation,
+            "navigable_regions": navigable_regions,
         }
 
     return blocks

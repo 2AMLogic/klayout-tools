@@ -631,6 +631,114 @@ def test_parse_blocks_rejects_unsupported_orientation():
 
 
 # --------------------------------------------------------------------------- #
+# _parse_blocks() -- navigable_regions (issues #1531/#1835): a block's own
+# declared interior routing channel, parsed the same place bbox_um/ports[]
+# already are and run through the identical orientation pipeline.
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_blocks_navigable_regions_defaults_to_empty_list_when_absent():
+    # No `navigable_regions` field at all -- every block that predates
+    # #1531/#1835 (and every existing test fixture) must parse to `[]`, not
+    # error or default to something else.
+    blocks = _parse_blocks([{"id": "a", "generator_report": _fake_mos_block_report()}])
+    assert blocks["a"]["navigable_regions"] == []
+
+
+def test_parse_blocks_navigable_regions_empty_list_is_unaffected():
+    report = _fake_mos_block_report()
+    report["navigable_regions"] = []
+    blocks = _parse_blocks([{"id": "a", "generator_report": report}])
+    assert blocks["a"]["navigable_regions"] == []
+
+
+def test_parse_blocks_navigable_regions_parses_into_bbox_convention():
+    report = _fake_mos_block_report()
+    report["navigable_regions"] = [
+        {"x0_um": 0.5, "y0_um": 0.0, "x1_um": 1.5, "y1_um": 1.0}
+    ]
+    blocks = _parse_blocks([{"id": "a", "generator_report": report}])
+    # Parsed into this module's own {"x0", "y0", "x1", "y1"} bbox shape (the
+    # same one `_require_bbox` returns for `bbox_um`), not left in the
+    # `mos_array`-response `*_um`-suffixed key shape.
+    assert blocks["a"]["navigable_regions"] == [
+        {"x0": 0.5, "y0": 0.0, "x1": 1.5, "y1": 1.0}
+    ]
+
+
+def test_parse_blocks_navigable_regions_multiple_disjoint_rectangles_preserved():
+    report = _fake_mos_block_report()
+    report["navigable_regions"] = [
+        {"x0_um": 0.0, "y0_um": 0.0, "x1_um": 0.5, "y1_um": 1.0},
+        {"x0_um": 1.5, "y0_um": 0.0, "x1_um": 2.0, "y1_um": 1.0},
+    ]
+    blocks = _parse_blocks([{"id": "a", "generator_report": report}])
+    assert blocks["a"]["navigable_regions"] == [
+        {"x0": 0.0, "y0": 0.0, "x1": 0.5, "y1": 1.0},
+        {"x0": 1.5, "y0": 0.0, "x1": 2.0, "y1": 1.0},
+    ]
+
+
+def test_parse_blocks_navigable_regions_oriented_by_mirror_x():
+    # Same orientation pipeline bbox_um/ports[] already go through (#1166) --
+    # a region reported in the block's own local frame must land correctly
+    # before translation. `mirror_x` negates x and re-sorts, exactly like
+    # `_orient_bbox_um` on `bbox_um` itself.
+    report = _fake_mos_block_report()
+    report["navigable_regions"] = [
+        {"x0_um": 0.5, "y0_um": 0.0, "x1_um": 1.5, "y1_um": 1.0}
+    ]
+    blocks = _parse_blocks(
+        [{"id": "a", "generator_report": report, "orientation": "mirror_x"}]
+    )
+    assert blocks["a"]["navigable_regions"] == [
+        {"x0": -1.5, "y0": 0.0, "x1": -0.5, "y1": 1.0}
+    ]
+
+
+def test_parse_blocks_navigable_regions_via_cell_block():
+    # `blocks[].cell` (#1189) accepts the same field, mirroring `ports`/
+    # `bbox_um` -- exercised via `_parse_cell_block`, not `generator_report`.
+    blocks = _parse_blocks(
+        [
+            {
+                "id": "a",
+                "cell": {
+                    "gds_path": "lib.gds",
+                    "cell_name": "unit",
+                    "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0},
+                    "navigable_regions": [
+                        {"x0_um": 0.5, "y0_um": 0.0, "x1_um": 1.5, "y1_um": 1.0}
+                    ],
+                },
+            }
+        ]
+    )
+    assert blocks["a"]["navigable_regions"] == [
+        {"x0": 0.5, "y0": 0.0, "x1": 1.5, "y1": 1.0}
+    ]
+
+
+def test_parse_blocks_rejects_non_list_navigable_regions():
+    report = _fake_mos_block_report()
+    report["navigable_regions"] = {
+        "x0_um": 0.0,
+        "y0_um": 0.0,
+        "x1_um": 1.0,
+        "y1_um": 1.0,
+    }
+    with pytest.raises(GenComposeError, match="navigable_regions must be a JSON array"):
+        _parse_blocks([{"id": "a", "generator_report": report}])
+
+
+def test_parse_blocks_rejects_malformed_navigable_region_entry():
+    report = _fake_mos_block_report()
+    report["navigable_regions"] = [{"x0_um": 0.0, "y0_um": 0.0, "x1_um": 1.0}]
+    with pytest.raises(GenComposeError, match="numeric x0_um/y0_um/x1_um/y1_um fields"):
+        _parse_blocks([{"id": "a", "generator_report": report}])
+
+
+# --------------------------------------------------------------------------- #
 # compose() -- request-shape validation
 # --------------------------------------------------------------------------- #
 
@@ -11265,3 +11373,408 @@ def test_route_two_pin_own_block_escape_check_needs_a_cell_sourced_block(
     # see test_compose_rejects_a_leg_whose_own_block_escape_crosses_its_own_net
     # above, whose fixture this mirrors exactly.
     assert result["routed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# _segment_obstacle_overlap_um() -- subtracting a block's own declared
+# navigable_regions from its obstacle-overlap length (issues #1531/#1835).
+# --------------------------------------------------------------------------- #
+
+
+def test_segment_obstacle_overlap_um_no_regions_matches_bbox_only():
+    # Absent/empty navigable_regions must reproduce
+    # _segment_bbox_interior_overlap_um exactly -- the byte-identical-
+    # behavior bar every additive param in this codebase is held to.
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    p0, p1 = (5.0, -1.0), (5.0, 11.0)
+    base = gen_compose._segment_bbox_interior_overlap_um(p0, p1, bbox)
+    assert gen_compose._segment_obstacle_overlap_um(p0, p1, bbox, None) == base
+    assert gen_compose._segment_obstacle_overlap_um(p0, p1, bbox, []) == base
+    assert base == pytest.approx(10.0)
+
+
+def test_segment_obstacle_overlap_um_region_fully_covering_segment_exempts_it():
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    # A vertical segment straight through a channel spanning the segment's
+    # own x and the segment's full y-extent -- entirely exempted.
+    region = {"x0": 4.0, "y0": -5.0, "x1": 6.0, "y1": 15.0}
+    p0, p1 = (5.0, -1.0), (5.0, 11.0)
+    assert gen_compose._segment_obstacle_overlap_um(p0, p1, bbox, [region]) == 0.0
+
+
+def test_segment_obstacle_overlap_um_partial_region_subtracts_only_covered_part():
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    # The channel only covers the upper half (y in [5, 10]) of the segment's
+    # crossing of the bbox -- only that half is exempted.
+    region = {"x0": 4.0, "y0": 5.0, "x1": 6.0, "y1": 10.0}
+    p0, p1 = (5.0, -1.0), (5.0, 11.0)
+    result = gen_compose._segment_obstacle_overlap_um(p0, p1, bbox, [region])
+    assert result == pytest.approx(5.0)  # only the [0, 5] remainder counts
+
+
+def test_segment_obstacle_overlap_um_region_outside_perpendicular_extent_ignored():
+    # A region whose *perpendicular* extent does not contain the segment
+    # (a channel elsewhere in the block, not on this segment's own line)
+    # must not exempt anything -- only a region the segment actually runs
+    # through "opens" the obstacle.
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    region = {"x0": 4.0, "y0": -5.0, "x1": 6.0, "y1": 15.0}
+    p0, p1 = (1.0, -1.0), (1.0, 11.0)  # x=1.0, outside region's [4, 6]
+    base = gen_compose._segment_bbox_interior_overlap_um(p0, p1, bbox)
+    assert gen_compose._segment_obstacle_overlap_um(p0, p1, bbox, [region]) == base
+
+
+def test_segment_obstacle_overlap_um_horizontal_segment_uses_region_y_range():
+    # Mirrors the vertical cases above for a horizontal segment -- the
+    # "fixed" coordinate checked against a region's perpendicular extent is
+    # the segment's own y, and the covered interval is along x.
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    region = {"x0": -5.0, "y0": 4.0, "x1": 15.0, "y1": 6.0}
+    p0, p1 = (-1.0, 5.0), (11.0, 5.0)
+    assert gen_compose._segment_obstacle_overlap_um(p0, p1, bbox, [region]) == 0.0
+
+
+def test_segment_obstacle_overlap_um_multiple_disjoint_regions_not_double_counted():
+    # Two regions each covering a third of the segment's crossing -- their
+    # lengths must simply add, not double-count any shared point (they do
+    # not overlap each other here, but the merge step must still behave).
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 12.0, "y1": 10.0}
+    region_a = {"x0": 4.0, "y0": -5.0, "x1": 6.0, "y1": 15.0}
+    region_b = {"x0": 8.0, "y0": -5.0, "x1": 10.0, "y1": 15.0}
+    p0, p1 = (-1.0, 5.0), (13.0, 5.0)
+    base = gen_compose._segment_bbox_interior_overlap_um(p0, p1, bbox)
+    assert base == pytest.approx(12.0)
+    result = gen_compose._segment_obstacle_overlap_um(
+        p0, p1, bbox, [region_a, region_b]
+    )
+    assert result == pytest.approx(8.0)  # 12.0 total minus 2.0 + 2.0 exempted
+
+
+def test_segment_obstacle_overlap_um_overlapping_regions_not_double_counted():
+    # Two regions that overlap each other along the segment's axis (a=[2,6],
+    # b=[4,8], overlapping on [4,6]) must have their exempted lengths merged
+    # before subtracting -- naively summing each region's own length
+    # (4.0 + 4.0 = 8.0) would over-subtract past their true 6.0-long union
+    # ([2, 8]), under-reporting the remaining (non-exempt) crossing.
+    bbox = {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    region_a = {"x0": 2.0, "y0": -5.0, "x1": 6.0, "y1": 15.0}
+    region_b = {"x0": 4.0, "y0": -5.0, "x1": 8.0, "y1": 15.0}
+    p0, p1 = (-1.0, 5.0), (11.0, 5.0)
+    base = gen_compose._segment_bbox_interior_overlap_um(p0, p1, bbox)
+    assert base == pytest.approx(10.0)
+    result = gen_compose._segment_obstacle_overlap_um(
+        p0, p1, bbox, [region_a, region_b]
+    )
+    assert result == pytest.approx(4.0)  # 10.0 total minus their 6.0-long union
+
+
+# --------------------------------------------------------------------------- #
+# route_two_pin() -- a block's own declared navigable_regions (#1531/#1835)
+# are subtracted from its own obstacle bbox before the crossing check runs.
+# --------------------------------------------------------------------------- #
+
+
+def _own_block_channel_fixture(navigable_regions):
+    """Two blocks: 'arr' (the mos_array-shaped obstacle a leg must leave
+    through its own bbox) and 'dest' (an unrelated block east of it). 'arr'
+    is 2um wide x 5um tall; its 'D' pin sits at (1.0, 2.0) facing east, 1um
+    short of arr's own east edge (x1=2.0) -- a comfortably generous
+    east-facing margin (`_port_edge_margin_um`), mirroring how a `dummy`-
+    padded real `mos_array` gives an interior pin plenty of east-facing
+    slack (see the `compose()`-level tests below). The leg must still jog
+    *north* off that east-facing line to reach 'dest' at y=2.5 -- an
+    orthogonal detour the east-facing margin alone does not budget for.
+    ``navigable_regions`` (already in this module's own bbox convention) is
+    'arr''s declared channel (y 2.1-3.1, spanning arr's own x-extent) --
+    passed empty by the baseline test below and non-empty by the "is
+    exempted" test; the numbers are sized so the identical leg is rejected
+    without it and routes with it (see this fixture's own two callers for
+    the arithmetic each one exercises).
+    """
+    blocks = {
+        "arr": {
+            "id": "arr",
+            "port_names": {"D"},
+            "ports": {
+                "D": {"x_um": 1.0, "y_um": 2.0, "direction_deg": 0, "width_um": 0.2}
+            },
+            "navigable_regions": navigable_regions,
+        },
+        "dest": {
+            "id": "dest",
+            "port_names": {"A"},
+            "ports": {
+                "A": {"x_um": 5.0, "y_um": 2.5, "direction_deg": 180, "width_um": 0.2}
+            },
+            "navigable_regions": [],
+        },
+    }
+    offsets = {"arr": {"x": 0.0, "y": 0.0}, "dest": {"x": 0.0, "y": 0.0}}
+    placed_bboxes_um = {
+        "arr": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 5.0},
+        "dest": {"x0": 5.0, "y0": 2.0, "x1": 8.0, "y1": 3.0},
+    }
+    pin_a = {"block": "arr", "port": "D"}
+    pin_b = {"block": "dest", "port": "A"}
+    return blocks, offsets, placed_bboxes_um, pin_a, pin_b
+
+
+# (D_x + width_um, waypoint_y) -- a pure vertical jog off D's own east stub,
+# landing at y=2.5 (inside the y=2.1-3.1 channel the "is exempted" test
+# below declares) before running east to 'dest'.
+_OWN_BLOCK_CHANNEL_WAYPOINTS = [(1.2, 2.5)]
+_OWN_BLOCK_CHANNEL_WIDTH_UM = 0.2
+
+
+def test_route_two_pin_rejects_own_block_crossing_when_navigable_regions_absent():
+    # Baseline (today's behavior, unchanged): with no declared channel, the
+    # vertical detour off D's own east-facing line counts fully against
+    # 'arr''s east-facing margin -- an orthogonal crossing that margin was
+    # never sized to cover -- so the leg is rejected.
+    blocks, offsets, bboxes, pin_a, pin_b = _own_block_channel_fixture([])
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        _OWN_BLOCK_CHANNEL_WIDTH_UM,
+        waypoints_um=_OWN_BLOCK_CHANNEL_WAYPOINTS,
+    )
+    assert result["routed"] is False
+    assert "own pin's block 'arr'" in result["reason"]
+
+
+def test_route_two_pin_own_block_navigable_region_permits_crossing_its_channel():
+    # Same leg, same waypoints, same width -- only difference is 'arr' now
+    # declares the y=2.1-3.1 band as a navigable_regions channel. The
+    # portion of the backbone's vertical detour that runs inside the
+    # declared channel no longer counts as "crossing" arr's obstacle, so the
+    # identical path that was rejected above now routes.
+    channel = [{"x0": 0.0, "y0": 2.1, "x1": 2.0, "y1": 3.1}]
+    blocks, offsets, bboxes, pin_a, pin_b = _own_block_channel_fixture(channel)
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        _OWN_BLOCK_CHANNEL_WIDTH_UM,
+        waypoints_um=_OWN_BLOCK_CHANNEL_WAYPOINTS,
+    )
+    assert result["routed"] is True, result["reason"]
+
+
+def test_route_two_pin_navigable_region_does_not_exempt_a_different_blocks_bbox():
+    # A navigable_regions channel is scoped to its *own* block -- an
+    # unrelated third block sitting in the same path is still a real
+    # obstacle even when the leg's own endpoint block declares a channel.
+    channel = [{"x0": 0.0, "y0": 2.1, "x1": 2.0, "y1": 3.1}]
+    blocks, offsets, bboxes, pin_a, pin_b = _own_block_channel_fixture(channel)
+    blocks["blocker"] = {
+        "id": "blocker",
+        "port_names": set(),
+        "ports": {},
+        "navigable_regions": [],
+    }
+    offsets["blocker"] = {"x": 0.0, "y": 0.0}
+    bboxes["blocker"] = {"x0": 3.0, "y0": 2.0, "x1": 4.0, "y1": 3.0}
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        _OWN_BLOCK_CHANNEL_WIDTH_UM,
+        waypoints_um=_OWN_BLOCK_CHANNEL_WAYPOINTS,
+    )
+    assert result["routed"] is False
+    assert "unrelated block 'blocker'" in result["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# compose() -- a real `klt gen mos_array` `interior_channel_um`/
+# `navigable_regions` block (#1531), consumed end-to-end (#1835): a route
+# from an interior-row pin to the composition's exterior via `waypoints_um`
+# through the declared channel, previously rejected, now routable.
+# --------------------------------------------------------------------------- #
+
+
+def _mos_array_with_channel(tmp_path, pdk_root, cell_name, interior_channel_um):
+    """A 3-row, 1-column `mos_array` with a generous `dummy` count (so the
+    array's own east edge sits far from any single unit's S/D contacts,
+    giving each interior pin a large east-facing approach margin --
+    :func:`_port_edge_margin_um` -- and enough headroom that a detour into
+    the array's own interior_channel_um band is what tips a leg from
+    rejected to routable, not the sheer size of that margin alone).
+    `topology` defaults to "common_centroid", which places unit index 0 in
+    the array's *middle* row -- exactly the trapped interior pin #1531/#1835
+    exist to free."""
+    return _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        cell_name,
+        rows=3,
+        cols=1,
+        dummy=4,
+        interior_channel_um=interior_channel_um,
+    )
+
+
+def test_compose_mos_array_zero_interior_channel_navigable_regions_empty_and_unaffected(
+    tmp_path, pdk_root
+):
+    # Acceptance criteria: a `mos_array` block at `interior_channel_um=0.0`
+    # reports empty `navigable_regions` (#1531) and -- the #1835 side of the
+    # bar -- gen-compose's own obstacle-overlap check must reject the exact
+    # detour-through-the-interior-row-gap leg exactly as it does today.
+    arr = _mos_array_with_channel(tmp_path, pdk_root, "arr0", 0.0)
+    assert arr["navigable_regions"] == []
+    u0_d = next(p for p in arr["ports"] if p["name"] == "U0_D")
+    entry_x = u0_d["x_um"] + 0.17
+    # Aim for the y just below the interior row's own body (an arbitrary
+    # detour north that would, with a declared channel, land inside it) --
+    # with no channel this band is ordinary array interior, not free space.
+    entry_y = u0_d["y_um"] - 0.3
+    dest = _gen_block(tmp_path, pdk_root, "resistor_strip", "dest0")
+    dest_x = arr["bbox_um"]["x1"] + 3.0
+    dest_y = entry_y - dest["ports"][0]["y_um"]
+    output = tmp_path / "zero_channel.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "dest", "generator_report": dest},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["arr", "dest"],
+                "origins_um": {
+                    "arr": {"x": 0.0, "y": 0.0},
+                    "dest": {"x": dest_x, "y": dest_y},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "arr", "port": "U0_D"},
+                        {"block": "dest", "port": "P1"},
+                    ],
+                    "waypoints_um": [[entry_x, entry_y]],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "zero_channel_0", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is False
+    assert report["unrouted_nets"] == ["N1"]
+    assert "own pin's block 'arr'" in report["nets"][0]["legs"][0]["reason"]
+
+
+def test_compose_mos_array_interior_channel_enables_previously_blocked_route(
+    tmp_path, pdk_root
+):
+    # The repro this issue exists for: with a positive interior_channel_um,
+    # the identical detour into the interior row's own inter-row gap is now
+    # inside a declared navigable_regions channel, so the leg from the
+    # interior pin to the composition's exterior routes.
+    channel_um = 2.0
+    arr = _mos_array_with_channel(tmp_path, pdk_root, "arr1", channel_um)
+    assert len(arr["navigable_regions"]) == 2  # 3 rows -> 2 interior row gaps
+    u0_d = next(p for p in arr["ports"] if p["name"] == "U0_D")
+    width_um = 0.17
+    entry_x = u0_d["x_um"] + width_um
+
+    # Pick whichever declared channel is closer to U0's own row -- mirrors
+    # `mos_array`'s own centroid placement (unit 0 sits in the middle row,
+    # so both channels are candidates; the nearer one needs the smaller
+    # non-channel "remainder" crossing to reach).
+    def _distance_to_region_um(region):
+        if region["y0_um"] <= u0_d["y_um"] <= region["y1_um"]:
+            return 0.0
+        return min(
+            abs(region["y0_um"] - u0_d["y_um"]), abs(region["y1_um"] - u0_d["y_um"])
+        )
+
+    nearest_region = min(arr["navigable_regions"], key=_distance_to_region_um)
+    entry_y = (nearest_region["y0_um"] + nearest_region["y1_um"]) / 2.0
+    dest = _gen_block(tmp_path, pdk_root, "resistor_strip", "dest1")
+    dest_x = arr["bbox_um"]["x1"] + 3.0
+    dest_y = entry_y - dest["ports"][0]["y_um"]
+    output = tmp_path / "with_channel.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "dest", "generator_report": dest},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["arr", "dest"],
+                "origins_um": {
+                    "arr": {"x": 0.0, "y": 0.0},
+                    "dest": {"x": dest_x, "y": dest_y},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "arr", "port": "U0_D"},
+                        {"block": "dest", "port": "P1"},
+                    ],
+                    "waypoints_um": [[entry_x, entry_y]],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": width_um},
+            "options": {"cell_name": "with_channel_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    # Confirm the causal mechanism, not just a coincidental pass: stripping
+    # `navigable_regions` from the identical geometry (same GDS, same
+    # positions, same waypoints) reproduces the pre-#1835 rejection exactly
+    # -- the field, not something else, is what makes this leg routable.
+    arr_no_regions = dict(arr)
+    arr_no_regions["navigable_regions"] = []
+    output_stripped = tmp_path / "with_channel_stripped.gds"
+    stripped_report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr_no_regions},
+                {"id": "dest", "generator_report": dest},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["arr", "dest"],
+                "origins_um": {
+                    "arr": {"x": 0.0, "y": 0.0},
+                    "dest": {"x": dest_x, "y": dest_y},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "arr", "port": "U0_D"},
+                        {"block": "dest", "port": "P1"},
+                    ],
+                    "waypoints_um": [[entry_x, entry_y]],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": width_um},
+            "options": {
+                "cell_name": "with_channel_stripped_0",
+                "output": str(output_stripped),
+            },
+        }
+    )
+    assert stripped_report["nets"][0]["routed"] is False
