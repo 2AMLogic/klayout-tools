@@ -1601,9 +1601,9 @@ li1 0.9361..1.0361 um  588235.2941176471 S/m
 met1 1.3761..1.7361 um  19157088.12260537 S/m
 …
 
-# Turn the same report into a `klt mom` spec's `stackup[]` entries:
-$ klt pdk stackup --pdk sky130A --format json \
-    | jq '[.conductors[] | select(.kind == "conductor")
-           | {layer: .gds_layer, conductor: .name,
-              z0_um, z1_um, conductivity_S_per_m}]'
+# `klt mom` can resolve a stackup from this data directly -- a spec's
+# `"stackup_from_pdk": {"pdk": "sky130A", "layers": ["met4", "met5"]}` field
+# expands into the same per-conductor entries this report carries, with no
+# hand-authored transcription step; see docs/cli/mom.md's "Deriving a
+# `stackup` from an installed PDK" section (issue #1617).
 ```

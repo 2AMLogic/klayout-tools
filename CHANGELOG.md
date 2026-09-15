@@ -28,6 +28,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   "Declared metric namespace" section for the cross-verb convention. Other
   verbs (`klt drc`, `klt extract`, `klt sim`) adopt the registry via their
   own follow-on issues.
+- **Added**: `klt mom` spec field `stackup_from_pdk` (issue #1617) —
+  `{"pdk": "<variant>", "layers": ["<conductor name>", ...], "corner":
+  "<optional, default 'nom'>"}` resolves the named conductors from an
+  installed PDK via `klayout_tools.pdk_stackup.stackup()` (issue #1609) and
+  expands them into the same `stackup[]` entry shape a hand-authored spec
+  uses, instead of transcribing elevations/conductivities by hand. Thickness
+  mode is always the curated (gap-free) one — `tech-lef` is never exposed
+  through this path. `background_permittivity` is derived from the resolved
+  dielectric slab every named conductor sits inside when the spec omits it;
+  conductors spanning slabs with differing (non-null) permittivity raise a
+  clear error instead of averaging or picking one. An explicit `stackup[]`
+  or `background_permittivity` in the spec always wins over the derived
+  values, so every existing spec's behavior is unaffected. The resolved
+  request is echoed back under a new, additive `stackup_from_pdk` field in
+  the output (present only when it was actually used) for reproducibility —
+  no `schema_version` bump, per
+  [`docs/json-contract.md`](docs/json-contract.md)'s additive-envelope
+  policy. See `docs/cli/mom.md`'s "Deriving a `stackup` from an installed
+  PDK" section.
 - **Added**: `klt gen mos_array` gains `interior_channel_um` (default `0.0`,
   preserving byte-for-byte existing geometry; issue #1531, Phase 1) — extra
   gap in µm reserved between adjacent rows/columns, on top of the fixed

@@ -69,6 +69,13 @@ def _print_text(report: dict, args: argparse.Namespace) -> None:
     print(f"panel_size_um: {report['panel_size_um']}")
     print(f"panel_count: {report['panel_count']}")
 
+    if "stackup_from_pdk" in report:
+        derived = report["stackup_from_pdk"]
+        print(
+            f"stackup_from_pdk: pdk={derived['pdk']} corner={derived['corner']} "
+            f"conductors={[c['conductor'] for c in derived['conductors']]}"
+        )
+
     conductors = report["conductors"]
     matrix = report["capacitance_matrix_ff"]
     print(f"conductors: {len(conductors)}")

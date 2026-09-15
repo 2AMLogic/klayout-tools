@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import pdk_stackup
 from ._layout import load_layout, select_top_cells
 from ._native import _load_native_extension
 from ._paths import _load_spec_json, _parse_layer_datatype
@@ -167,6 +168,148 @@ def _stackup_boxes(
     return order, boxes, conductivity
 
 
+#: Tolerance for "a conductor's z-extent sits inside this dielectric slab" --
+#: same rationale/magnitude as ``pdk_stackup.py``'s own ``_VALUE_ABS_TOL``:
+#: the curated stackup tables are contiguous by construction, so this only
+#: absorbs floating-point noise, never a genuine gap.
+_SLAB_MATCH_ABS_TOL = 1e-9
+
+
+def _slab_for_conductor(
+    dielectrics: list[dict[str, Any]], conductor: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The single dielectric slab (from ``pdk_stackup.stackup()``'s
+    ``dielectrics``) whose z-range contains ``conductor``'s z-extent, or
+    ``None`` if none does (should not happen for a curated stack -- see
+    ``pdk_stackup.py``'s own "dielectrics form a contiguous partition"
+    invariant -- but this stays a lookup miss rather than an assertion, so a
+    future curated family that violates it fails as "cannot derive
+    background_permittivity" rather than an internal crash)."""
+    z0, z1 = conductor["z0_um"], conductor["z1_um"]
+    for slab in dielectrics:
+        if (
+            slab["z0_um"] <= z0 + _SLAB_MATCH_ABS_TOL
+            and z1 <= slab["z1_um"] + _SLAB_MATCH_ABS_TOL
+        ):
+            return slab
+    return None
+
+
+def _resolve_stackup_from_pdk(
+    request: Any, spec_path: str
+) -> tuple[list[dict[str, Any]], dict[str, Any], float | None]:
+    """Expand a spec's ``stackup_from_pdk`` object into the same per-entry
+    shape a hand-authored ``stackup[]`` array uses, resolved against
+    :func:`klayout_tools.pdk_stackup.stackup` -- see ``docs/cli/mom.md``'s
+    "Deriving a `stackup` from an installed PDK" section.
+
+    ``request`` is the spec's ``stackup_from_pdk`` value:
+    ``{"pdk": <variant>, "layers": [<conductor name>, ...], "corner":
+    <optional, default "nom">}``. PDK resolution itself always uses
+    :func:`klayout_tools.pdk.find_pdk`'s own environment-variable/store
+    search (``$PDK_ROOT``, etc.) -- there is deliberately no spec- or
+    CLI-level root override here, so this stays a single self-describing
+    spec field with no second source of truth (see the issue's resolved
+    design questions). Thickness mode is always ``"curated"`` (gap-free):
+    ``klt mom``'s panel discretisation cannot represent the ~10 nm gaps
+    ``"tech-lef"`` mode would introduce (they would mesh as opens), so that
+    mode is never reachable through this path.
+
+    Returns ``(entries, echo, background_permittivity)``:
+
+    - ``entries`` -- ``stackup[]``-shaped dicts (``layer``, ``conductor``,
+      ``z0_um``, ``z1_um``, and ``conductivity_S_per_m`` when the resolved
+      PDK reports one), one per named conductor, in ``request["layers"]``
+      order.
+    - ``echo`` -- the resolved request, recorded in the run's output for
+      reproducibility (a re-run against a different PDK release could
+      resolve differently): ``{"pdk", "root", "corner", "conductors"}``.
+    - ``background_permittivity`` -- derived from the dielectric slab every
+      named conductor's z-extent sits inside, when every matched slab that
+      states a permittivity agrees; ``None`` when no matched slab states
+      one (the caller only errors on that when the spec sets no explicit
+      ``background_permittivity`` of its own).
+
+    Raises :class:`MomError` for a malformed ``stackup_from_pdk`` object, an
+    unresolvable PDK install/family (wrapping
+    :class:`klayout_tools.pdk.PdkNotFoundError` /
+    :class:`klayout_tools.pdk_stackup.PdkStackupError`), a named conductor
+    absent from the resolved stackup, or named conductors whose z-extents
+    sit in dielectric slabs with differing (non-null) permittivity.
+    """
+    if not isinstance(request, dict):
+        raise MomError(f"spec '{spec_path}': 'stackup_from_pdk' must be an object")
+    if "pdk" not in request or "layers" not in request:
+        raise MomError(
+            f"spec '{spec_path}': 'stackup_from_pdk' must set 'pdk' and 'layers'"
+        )
+    variant = str(request["pdk"])
+    layers = request["layers"]
+    if not isinstance(layers, list) or not layers:
+        raise MomError(
+            f"spec '{spec_path}': 'stackup_from_pdk.layers' must be a "
+            "non-empty array of conductor names"
+        )
+    names = [str(name) for name in layers]
+    corner = str(request.get("corner", pdk_stackup.DEFAULT_CORNER))
+
+    try:
+        resolved = pdk_stackup.stackup(
+            variant=variant, corner=corner, thickness="curated"
+        )
+    except (pdk_stackup.PdkNotFoundError, pdk_stackup.PdkStackupError) as exc:
+        raise MomError(
+            f"spec '{spec_path}': could not resolve 'stackup_from_pdk': {exc}"
+        ) from exc
+
+    by_name = {c["name"]: c for c in resolved["conductors"]}
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise MomError(
+            f"spec '{spec_path}': stackup_from_pdk.layers names conductor(s) "
+            f"{missing!r} not present in the resolved '{resolved['pdk']}' "
+            f"stackup (available: {sorted(by_name)})"
+        )
+
+    entries: list[dict[str, Any]] = []
+    permittivities: dict[float, list[str]] = {}
+    for name in names:
+        conductor = by_name[name]
+        entry: dict[str, Any] = {
+            "layer": conductor["gds_layer"],
+            "conductor": name,
+            "z0_um": conductor["z0_um"],
+            "z1_um": conductor["z1_um"],
+        }
+        if conductor["conductivity_S_per_m"] is not None:
+            entry["conductivity_S_per_m"] = conductor["conductivity_S_per_m"]
+        entries.append(entry)
+
+        slab = _slab_for_conductor(resolved["dielectrics"], conductor)
+        if slab is not None and slab["permittivity"] is not None:
+            permittivities.setdefault(slab["permittivity"], []).append(name)
+
+    if len(permittivities) > 1:
+        detail = "; ".join(
+            f"{eps:g} ({', '.join(matched)})" for eps, matched in permittivities.items()
+        )
+        raise MomError(
+            f"spec '{spec_path}': stackup_from_pdk.layers span dielectric slabs "
+            f"with differing permittivity ({detail}) -- klt mom's MVP solves a "
+            "single homogeneous medium, so pick conductors that sit in one slab "
+            "or set an explicit 'background_permittivity'"
+        )
+    background_permittivity = next(iter(permittivities)) if permittivities else None
+
+    echo = {
+        "pdk": resolved["pdk"],
+        "root": resolved["root"],
+        "corner": resolved["corner"],
+        "conductors": entries,
+    }
+    return entries, echo, background_permittivity
+
+
 def _parse_ports(spec: dict[str, Any], spec_path: str) -> list[dict[str, float]]:
     """Parse the spec's optional ``ports`` array (issue #894), resolving each
     entry's ``reference_impedance_ohm`` default. Returns an empty list when
@@ -260,17 +403,36 @@ def run_mom(
 
     ``file`` is a GDSII/OASIS layout; ``spec_path`` is a JSON file with:
 
-    - ``stackup`` (required, non-empty array): entries of
-      ``{"layer": "<layer>/<datatype>", "conductor": "<name>",
-      "z0_um": <float>, "z1_um": <float>, "conductivity_S_per_m": <float>}``
-      (the last is optional -- required only when ``compute_inductance`` is
-      set), mapping each GDS layer's shapes to an electrical conductor's
-      z-extent. Several entries may share a ``conductor`` name to merge
-      shapes on different GDS layers into one electrical node.
-    - ``background_permittivity`` (required, float): relative permittivity
-      of the uniform dielectric surrounding every conductor -- the MVP
-      solves a single homogeneous medium (see docs/cli/mom.md's "Scope and
-      limitations").
+    - ``stackup`` (required unless ``stackup_from_pdk`` is set, non-empty
+      array): entries of ``{"layer": "<layer>/<datatype>", "conductor":
+      "<name>", "z0_um": <float>, "z1_um": <float>, "conductivity_S_per_m":
+      <float>}`` (the last is optional -- required only when
+      ``compute_inductance`` is set), mapping each GDS layer's shapes to an
+      electrical conductor's z-extent. Several entries may share a
+      ``conductor`` name to merge shapes on different GDS layers into one
+      electrical node. **Wins over ``stackup_from_pdk`` when both are
+      present** -- nothing already shipped changes.
+    - ``stackup_from_pdk`` (optional object, consulted only when ``stackup``
+      is absent/empty): ``{"pdk": "<variant>", "layers": ["<conductor
+      name>", ...], "corner": "<optional, default 'nom'>"}`` -- resolves the
+      named conductors from an installed PDK via
+      :func:`klayout_tools.pdk_stackup.stackup` and expands them into the
+      same ``stackup[]`` entry shape (issue #1617). PDK resolution uses
+      :func:`klayout_tools.pdk.find_pdk`'s own environment/store search
+      (``$PDK_ROOT``, etc.); there is no spec- or CLI-level root override.
+      Thickness mode is always the curated (gap-free) one -- ``"tech-lef"``
+      is never reachable through this path. A named conductor absent from
+      the resolved stackup, or an unresolvable PDK install/family, raises
+      :class:`MomError`. The resolved request is echoed back under
+      ``stackup_from_pdk`` in the output for reproducibility (see below).
+    - ``background_permittivity`` (required unless derivable from
+      ``stackup_from_pdk``, float): relative permittivity of the uniform
+      dielectric surrounding every conductor -- the MVP solves a single
+      homogeneous medium (see docs/cli/mom.md's "Scope and limitations").
+      When omitted and ``stackup_from_pdk`` was used, it is derived from the
+      dielectric slab every named conductor's z-extent sits inside;
+      conductors spanning slabs with differing (non-null) permittivity
+      raise :class:`MomError` rather than averaging or picking one.
     - ``panel_size_um`` (optional, float): target discretisation panel edge
       length in micrometers; defaults to :data:`DEFAULT_PANEL_SIZE_UM`.
     - ``compute_inductance`` (optional, bool, default ``false``): opt into
@@ -310,17 +472,29 @@ def run_mom(
     Returns a dict matching the documented ``klt mom`` JSON schema (see
     ``docs/cli/mom.md``), including ``schema_version``.
     """
-    native = _load_native()
     spec = _load_spec_json(spec_path, MomError)
 
-    if (
-        "stackup" not in spec
-        or not isinstance(spec["stackup"], list)
-        or not spec["stackup"]
-    ):
-        raise MomError(f"spec '{spec_path}' must have a non-empty 'stackup' array")
+    explicit_stackup = spec.get("stackup")
+    stackup_from_pdk_echo: dict[str, Any] | None = None
+    derived_background_permittivity: float | None = None
+
+    if not (isinstance(explicit_stackup, list) and explicit_stackup):
+        stackup_from_pdk_request = spec.get("stackup_from_pdk")
+        if stackup_from_pdk_request is None:
+            raise MomError(
+                f"spec '{spec_path}' must have a non-empty 'stackup' array "
+                "(or a 'stackup_from_pdk' object -- see docs/cli/mom.md's "
+                "'Deriving a stackup from an installed PDK' section)"
+            )
+        derived_entries, stackup_from_pdk_echo, derived_background_permittivity = (
+            _resolve_stackup_from_pdk(stackup_from_pdk_request, spec_path)
+        )
+        spec = {**spec, "stackup": derived_entries}
+
     if "background_permittivity" not in spec:
-        raise MomError(f"spec '{spec_path}' must set 'background_permittivity'")
+        if derived_background_permittivity is None:
+            raise MomError(f"spec '{spec_path}' must set 'background_permittivity'")
+        spec = {**spec, "background_permittivity": derived_background_permittivity}
 
     layout = load_layout(file, MomError)
     top_cells = select_top_cells(layout, top, MomError)
@@ -358,6 +532,7 @@ def run_mom(
         ],
     }
 
+    native = _load_native()
     try:
         response_json = native.solve_mom_json(json.dumps(request))
     except ValueError as exc:
@@ -377,6 +552,13 @@ def run_mom(
         # well-resolved solve) -- see docs/cli/mom.md's "Warnings".
         "warnings": response["warnings"],
     }
+    if stackup_from_pdk_echo is not None:
+        # Only present when 'stackup_from_pdk' actually drove the resolved
+        # stackup (an explicit 'stackup[]' array wins and this stays absent)
+        # -- additive field, echoed for reproducibility since a re-run
+        # against a different PDK release could resolve differently (issue
+        # #1617).
+        result["stackup_from_pdk"] = stackup_from_pdk_echo
     if compute_inductance:
         # Only present when requested -- mirrors the native contract's
         # Option<...>/None-omitted convention (see contract.rs's
