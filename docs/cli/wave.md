@@ -286,7 +286,10 @@ klt functional-verification (options.trace) ──► trace file ──► klt w
 Until Phase 3 lands, point `klt wave build`'s `trace.path` at whatever
 trace your own simulation run (cocotb's `$dumpfile`, Verilator's
 `--trace-fst`, or a standalone Icarus/`iverilog`+`vvp` testbench) already
-wrote to disk.
+wrote to disk. For a worked, end-to-end example of diagnosing a real
+cocotb failure this way — value-at-time, first-match, count-between, and
+`stuck` queries, no RTL read required — see
+[`docs/guides/waveform-first-debugging.md`](../guides/waveform-first-debugging.md).
 
 ## Out of scope
 

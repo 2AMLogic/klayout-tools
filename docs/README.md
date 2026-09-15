@@ -127,4 +127,5 @@ docs/
     building-klayout-macos.md
     github-action.md
     pdk-family-port-checklist.md
+    waveform-first-debugging.md
 ```
