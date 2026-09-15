@@ -115,5 +115,5 @@ Missing canonical lines for bandgap / voltage reference:
 Rationale: the topology, supply, power, and regulation rows are coherent
 and evidence-consistent; the draft fails only where the accuracy row
 collides with the no-trim decision and where canonical rows are absent —
-all enumerable. Ratification is the operator's call; this review is an
-opinion.
+all enumerable. This is the EE key of a two-key ratification (FLEET.md);
+the market-need key is decided separately.

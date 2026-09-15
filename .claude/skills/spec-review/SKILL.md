@@ -1,20 +1,26 @@
 ---
 name: spec-review
-description: "Expert-EE review of an IC block's draft target spec — per-line achievability vs. published best practice, evidence check against repo device characterization, block-class completeness checklist, corner-binding check, and a ratify / ratify-with-amendments / defer verdict. Use when reviewing a draft block spec table before operator ratification."
+description: "Expert-EE review of an IC block's draft target spec — per-line achievability vs. published best practice, evidence check against repo device characterization, block-class completeness checklist, corner-binding check, and a ratify / ratify-with-amendments / defer verdict. This verdict is the EE key of the two-key spec ratification (FLEET.md, 2AMLogic/2am#372). Use when reviewing a draft block spec table for ratification."
 ---
 
-# spec-review — expert-EE opinion on block target specs
+# spec-review — expert-EE ratification key for block target specs
 
-Render a structured, literature-grounded second opinion on a draft IC block
-spec so the operator can ratify it (or amend it) with confidence. The closed
-loop starts at "spec": an unratifiable or physically unrealistic spec poisons
-every downstream stage (see `docs/design/design-pipeline.md`, stage S3 —
-block specs). This skill is the quality gate at the loop's entry.
+Render a structured, literature-grounded expert-EE review of a draft IC block
+spec. The closed loop starts at "spec": an unratifiable or physically
+unrealistic spec poisons every downstream stage (see
+`docs/design/design-pipeline.md`, stage S3 — block specs). This skill is the
+quality gate at the loop's entry.
 
-**The skill renders opinions. Ratification always stays with the operator.**
-Never mark a spec ratified, never edit the spec table in place as part of a
-review, and never present the verdict as a decision — it is a recommendation
-with rationale.
+**The verdict is the EE key of a two-key ratification, not sole authority.**
+Per FLEET.md's two-key ratification policy (2AMLogic/2am#372), a block spec
+ratifies on a non-author EE sign-off — this skill's verdict — plus the
+product repo's market-need key; this skill supplies only the first key and
+never the second, and never completes ratification alone. The reviewer must
+be a different role/session from the spec's author — an adversarial posture,
+the same split as builder/judge — so never review a spec you authored in
+this session or a prior one. Keep the existing discipline regardless of
+verdict: never edit the spec table in place as part of a review; the review
+is a separate artifact the spec's own decision record cites.
 
 ## Inputs
 
@@ -121,13 +127,24 @@ an issue to add one.
    binding corners on adjacent lines.
 6. **Verdict** — exactly one of:
    - **ratify** — every line achievable and evidenced, checklist complete,
-     corners bound.
+     corners bound, and **every line carries a citation to its grounding**
+     (datasheet, paper, textbook, standard, PDK limit, or an in-repo devchar
+     record).
    - **ratify-with-amendments** — sound overall, but enumerate each required
      amendment (numbered A1, A2, …: changed values, added lines, corner
-     bindings). The operator can ratify by accepting the amendments.
-   - **defer** — a load-bearing line is not credible or a prerequisite
-     (devchar evidence, a decision record) is missing; state exactly what
-     must exist before re-review.
+     bindings). Ratification completes once the amendments are accepted and
+     the market-need key lands (the two-key policy described above).
+   - **defer** — a load-bearing line is not credible, lacks a citable
+     grounding anchor, or a prerequisite (devchar evidence, a decision
+     record) is missing; state exactly what must exist before re-review. **A
+     line with no external anchor gets `defer`, never `ratify`** — a
+     plausible-sounding but uncited number is not evidence.
+
+   **The verdict must be timestamped and must precede the evidence it
+   judges** (the "Reviewed: <date>" field below) — this is the anti-retrofit
+   check, and it must be checkable in git history, not merely asserted. A
+   review dated after the run it is meant to gate does not count as having
+   gated it; re-review against the spec as it stood before that run.
 
 ## Output format
 
@@ -161,14 +178,24 @@ Missing canonical lines for <block class>:
 **<ratify | ratify-with-amendments | defer>**
 
 <If amendments: numbered list A1, A2, ...>
-<Rationale paragraph. Close with: "Ratification is the operator's call; this
-review is an opinion.">
+<Rationale paragraph. Close with: "This is the EE key of a two-key
+ratification (FLEET.md); the market-need key is decided separately.">
 ```
 
 ## Rules
 
-- **Opinion, not authority.** Never ratify, never edit the spec under
-  review, never soften a "not credible" finding to be agreeable.
+- **EE key, not sole authority.** The verdict is one of two required keys
+  (FLEET.md's two-key policy, 2AMLogic/2am#372) — it never completes
+  ratification alone, and it is never issued by the spec's own author. Never
+  edit the spec under review in place, and never soften a "not credible"
+  finding to be agreeable.
+- **Timestamp precedes evidence (anti-retrofit).** The "Reviewed: <date>"
+  field must predate the evidence run(s) the verdict is judged against, and
+  that ordering must be checkable in git (commit timestamps), not merely
+  claimed in prose.
+- **No anchor, no ratify.** Every target line must cite its grounding —
+  datasheet, paper, textbook, standard, PDK limit, or an in-repo devchar
+  record. A line with no external anchor gets `defer`, never `ratify`.
 - **Numbers over adjectives.** Every achievability call cites an anchor
   (paper, survey, standard, or repo measurement). "Seems tight" is not a
   finding; "±0.5 % untrimmed 3σ is beyond the ±1–3 % untrimmed range typical
