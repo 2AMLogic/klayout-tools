@@ -165,3 +165,21 @@ docs/label-state-machine.md
 # Loom project ever adopts an equivalent section, this pin can be dropped and
 # the file resynced normally.
 commands/loom/builder-pr.md
+
+# #1898: verify-proposal-refs.sh and tests/test-verify-proposal-refs.sh carry
+# a fix for a SIGPIPE race under `set -o pipefail` and a subshell-in-pipe cache
+# bug (closing #1863 via PR #1881), both issues that produced flaky false
+# "MISSING FILE" reports on paths that actually exist, especially early-sorting
+# paths like `docs/...` entries. The fix replaces a `full_tree()` helper
+# function and `full_tree | grep -qFx` pipe with a direct `FULL_TREE_CACHE`
+# assignment and here-string match (`grep -qFx "$path" <<< "$FULL_TREE_CACHE"`),
+# and restores `Fixture 5b` (8-iteration flake-detection loop) to the test suite.
+# A same-day resync commit (fcbf52f8, 2026-09-15T17:03:12Z) reverted both halves
+# of that fix back to the buggy pre-#1881 state, so this pin prevents an
+# unlimited stream of recurrences of the same reversion pattern as #606/#662/
+# #1292/#1316/#1356/#1546/#1674. This fix was never upstreamed into
+# rjwalters/loom's own templates, so an unpinned resync would keep reverting it.
+# If the upstream Loom project ever adopts an equivalent SIGPIPE race fix and
+# flake-detection test, this pin can be dropped and the files resynced normally.
+scripts/verify-proposal-refs.sh
+scripts/tests/test-verify-proposal-refs.sh

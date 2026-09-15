@@ -121,13 +121,26 @@ is_recognized_top() {
 # top-level dir" means.
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 
-FULL_TREE_CACHE=""
-full_tree() {
-    if [[ -z "$FULL_TREE_CACHE" ]]; then
-        FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
-    fi
-    printf '%s' "$FULL_TREE_CACHE"
-}
+# Populated once via a plain command substitution (NOT inside a pipe) so the
+# assignment survives for the whole script (#1863). A prior version cached
+# this lazily inside a full_tree() helper called as `full_tree | grep ...`;
+# piping into a command forks a subshell for the left side, so that lazy
+# assignment never survived past the one pipeline it ran in — forcing a
+# fresh `git ls-tree` subprocess per path reference instead of reusing one
+# cached listing.
+#
+# Matching against the cache also avoids piping it into grep at all (see the
+# membership test below): `full_tree | grep -qFx "$path"` has a second,
+# independent bug under `set -o pipefail` (line 39) — `grep -q` exits as
+# soon as it finds a match, and if that happens before the writer finishes
+# emitting the full (tens-of-KB) listing, the writer is killed by SIGPIPE
+# and its non-zero exit status becomes the pipeline's exit status, even
+# though grep itself matched. That intermittently reported a real,
+# existing path (most reliably ones sorting early, like top-level `docs/`
+# entries) as MISSING, depending on scheduler/buffering timing. A
+# here-string (`<<<`) has no separate writer process to race, so it can't
+# be interrupted by the reader's early exit.
+FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
 
 mapfile -t CANDIDATES < <(grep -oE "$PATH_RE" "$BODY_FILE" | sort -u)
 
@@ -150,7 +163,7 @@ for raw_candidate in "${CANDIDATES[@]}"; do
     is_recognized_top "$path" || continue
     CHECKED_PATHS=$((CHECKED_PATHS + 1))
 
-    if ! full_tree | grep -qFx "$path"; then
+    if ! grep -qFx "$path" <<< "$FULL_TREE_CACHE"; then
         MISSES+=("MISSING FILE: \`$path\` does not exist on origin/main")
         continue
     fi
