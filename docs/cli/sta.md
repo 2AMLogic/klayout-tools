@@ -86,19 +86,21 @@ binary onto `$PATH`.
     "corner": "tt_025C_1v80"
   },
   "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
-  "spef": "gcd_route.spef"
+  "spef": "gcd_route.spef",
+  "geometry_source": "routed"
 }
 ```
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
-| `def` | string | The routed DEF path — typically `klt place-and-route`'s own `def_path` output. Required. Resolved relative to the request file's own directory. |
+| `def` | string | The DEF path to analyse — typically `klt place-and-route`'s own `def_path` output (routed), or (issue #1826) its `unrouted_def_path` output (pre-route, see `geometry_source` below). Required. Resolved relative to the request file's own directory. |
 | `hdl_toplevel` | string \| omitted | The design's top module name, for informational/echo purposes only — this command's Tcl script does not run `link_design` and never needs it. `null` in the response when omitted. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def` above stays byte-identical across every run in the sweep. |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
 | `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
+| `geometry_source` | string \| omitted | Additive field (issue #1826). `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error. See also issue #1825, which proposes a different (netlist-input) resolution for the same underlying "no pre-route path into `klt sta`" gap. |
 
 ## Response
 
@@ -110,6 +112,7 @@ binary onto `$PATH`.
   "hdl_toplevel": "gcd",
   "status": "ok",
   "def_path": "/abs/path/gcd.def",
+  "geometry_source": "routed",
   "spef_path": null,
   "worst_slack_ns": -0.15321,
   "total_negative_slack_ns": -1.20144,
@@ -138,6 +141,7 @@ binary onto `$PATH`.
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
 | `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `def_path` | string | The resolved, absolute path to the analysed DEF. |
+| `geometry_source` | string | Additive field (issue #1826). Echo of `request.geometry_source` — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. See "Pre-route DEFs" below. |
 | `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
@@ -268,6 +272,60 @@ backslash-escaped in the SPEF text itself (SPEF's own IEEE 1481-1999
 identifier grammar) but un-escaped back to their real, design-side spelling
 before this correlation check runs — a caller-supplied SPEF with ordinary
 bus/hierarchy naming is not penalized for it.
+
+## Pre-route DEFs (`geometry_source`, issue #1826)
+
+`klt sta`'s "Why this exists" section above frames this command around
+characterizing one fixed geometry at N corners *before* committing to a full
+route — but until issue #1826, there was no way to reach `klt sta` at all
+without first running `klt place-and-route` all the way to `"route"`:
+`klt sta` only ever accepted a routed DEF, and `klt place-and-route` never
+surfaced a pre-route one.
+
+Both halves are now closed: `klt place-and-route` surfaces its own
+`"place"`/`"cts"`-stage DEF as `unrouted_def_path` (see
+`docs/cli/place-and-route.md`), and this command accepts it like any other
+`def` — nothing about `klt sta`'s own OpenSTA session construction (`read_lef`
+x2, `read_def` with no `-floorplan_initialize`, `read_liberty`,
+`create_clock`) actually requires the DEF to be routed. The only change this
+command needed was a way to *say* the DEF is pre-route, since a bare DEF file
+carries no stage-provenance metadata of its own:
+
+```bash
+# pnr_request.json's own "target_stage": "place" (a request-body field, not
+# a CLI flag) is what stops this run short of a full route.
+klt place-and-route pnr_request.json --format json
+# -> unrouted_def_path (def_path stays null; target_stage never reached "route")
+
+cat > sta_request.json <<'JSON'
+{
+  "def": "/abs/path/.klt/place-and-route/gcd.place.def",
+  "hdl_toplevel": "gcd",
+  "pdk": { "cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80" },
+  "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
+  "geometry_source": "placement_estimate"
+}
+JSON
+
+klt sta sta_request.json --format json
+```
+
+`geometry_source: "placement_estimate"` is the caller's own declaration that
+the timing numbers this run reports rest on `estimate_parasitics
+-placement`'s bounding-box RC estimate (whatever `klt place-and-route`'s own
+`"place"`/`"cts"` stage last computed it from), not routing-derived
+parasitics — a real number, but a less accurate one than the same fields on
+a routed DEF (`geometry_source: "routed"`, the default). This is
+deliberately a *label*, not a behavior switch: the Tcl this command runs is
+identical either way, so getting the value wrong does not corrupt the
+result, only its self-description — always set it to match the DEF's actual
+provenance.
+
+See also issue #1825, which proposes a different resolution for the same
+underlying "no pre-route path into `klt sta`" gap — a from-scratch
+netlist-input mode (`verilog`/`top` fields, `read_verilog`/`link_design`, an
+explicit wire-load-model estimate) rather than reusing `klt
+place-and-route`'s own pre-route DEF artifact.
 
 ## Worked example
 

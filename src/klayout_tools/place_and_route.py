@@ -60,7 +60,8 @@ worked example, run via a real ``openroad/orfs`` container against a real
 volare-fetched ``sky130A`` install) that ``-metrics <file>.json`` captures a
 flat JSON object of every named metric a stage's own commands populated --
 both explicit ``report_*_metric`` proc calls (``report_worst_slack_metric``
--> ``timing__setup__ws``, ``report_tns_metric`` -> ``timing__setup__tns``,
+-> ``timing__setup__ws`` (``-hold`` -> ``timing__hold__ws``, issue #1826),
+``report_tns_metric`` -> ``timing__setup__tns``,
 ``report_fmax_metric`` -> ``timing__fmax``, ``report_power_metric`` ->
 ``power__total``, ``report_design_area_metrics`` -> ``design__die__area``/
 ``design__core__area``/``design__instance__utilization``, and (``"cts"``/
@@ -1162,6 +1163,13 @@ _TOP_LEVEL_METRIC_KEYS = (
     "fmax_mhz",
     "setup_violation_count",
     "hold_violation_count",
+    # Issue #1826: the single, nominal-corner hold WNS -- `null` before the
+    # `"place"` stage, matching `hold_violation_count`'s own gating just
+    # above. Distinct from `worst_hold_slack_ns` below (the corner-swept,
+    # `"route"`-stage-only aggregate); this one exists specifically so a
+    # pre-route caller can get a hold slack *number*, not just a violation
+    # count.
+    "nominal_hold_slack_ns",
     "antenna_violation_count",
     # Additive (issue #938, native-routing survey #935 section 4.5) --
     # never replaces an existing field; `null` on any stage before
@@ -1607,6 +1615,28 @@ def run_place_and_route(
     else:
         def_path = None
 
+    # Additive field (issue #1826): a pre-route DEF, populated only when
+    # `target_stage` itself is `"place"` or `"cts"` -- the same "only when
+    # this is the actual, final target" convention `def_path` above follows
+    # (never populated "along the way" to a later stage a caller didn't
+    # actually ask for). Points at the deterministic `write_def` path each
+    # of those two stages' own Tcl already writes unconditionally (`"place"`
+    # since issue #785; `"cts"` newly added by this issue) -- see
+    # `_stage_script_lines`'s own comments for why those paths are safe to
+    # recompute here rather than threaded back out, exactly like `def_path`/
+    # the DRC report path above already do. `null` at `"floorplan"` (no DEF
+    # exists yet) and at `"route"` (the routed `def_path` above is the
+    # right artifact there; this field never doubles up with it). This is
+    # gap 1's "smaller" resolution from issue #1826's own discussion --
+    # reusing the DEF `_stage_script_lines` already produces internally,
+    # rather than giving `klt sta` a from-scratch netlist-input mode (the
+    # alternative shape #1825 proposes for the same underlying gap).
+    unrouted_def_path = (
+        os.path.join(output_dir, f"{hdl_toplevel}.{target_stage}.def")
+        if target_stage in ("place", "cts")
+        else None
+    )
+
     # Additive field (issue #1091): reports what `request.power` actually
     # drove, so a caller can tell a signal-only "route" result from a
     # power-complete one without parsing the DEF for a missing
@@ -1755,6 +1785,10 @@ def run_place_and_route(
             for macro in macros
         ],
         "def_path": def_path,
+        # Additive field (issue #1826): see this function's own comment
+        # above (right before `unrouted_def_path` is computed) for the
+        # "when is this populated" contract.
+        "unrouted_def_path": unrouted_def_path,
         "gds_path": gds_path,
         # Additive field (issue #1029): whether the DEF->GDS merge above
         # actually applied a KLayout LEF/DEF layer-map file, and how it was
@@ -2774,6 +2808,16 @@ def _metrics_report_lines(
     lines = [
         "report_worst_slack_metric -setup",
         "report_tns_metric -setup",
+        # Issue #1826: the hold-side counterpart of `-setup` above, mirroring
+        # the pair `_corner_sweep_script_lines` (`place_and_route_sta.py`)
+        # already runs post-route -- captured into the same `-metrics` dump
+        # as `timing__hold__ws`, alongside `-setup`'s own `timing__setup__ws`.
+        # Extracted by `_extract_stage_metrics` into `nominal_hold_slack_ns`,
+        # gated the same "absent before place" way `hold_violation_count`
+        # already is; a distinct name from the existing, route-stage-only,
+        # corner-swept `worst_hold_slack_ns` aggregate (issue #949) -- this
+        # one is the single nominal-corner value, mirroring `worst_slack_ns`.
+        "report_worst_slack_metric -hold",
         "report_design_area_metrics",
     ]
     if include_fmax:
@@ -3190,6 +3234,18 @@ def _stage_script_lines(
             # this stage never ran at all.
             "detailed_placement",
         ]
+        # A post-CTS, still-unrouted DEF (issue #1826, reversing #785's own
+        # "internal artifact only" decision for the `"place"`-stage DEF
+        # below -- this one is surfaced in the response from the start,
+        # never internal-only). Written unconditionally, exactly like the
+        # `"place"`-stage `place_def_path` write below -- `run_place_and_
+        # route` only threads it into `unrouted_def_path` when
+        # `target_stage` is `"cts"` itself (mirroring `def_path`'s own
+        # "only when this is the actual target" convention), but the file
+        # always exists on disk once this stage runs, the same "no dead
+        # branch" reasoning `place_def_path` already established.
+        cts_def_path = os.path.join(output_dir, f"{hdl_toplevel}.cts.def")
+        lines += [f"write_def {cts_def_path}"]
     else:  # stage == "route"
         routing_range = _ROUTING_LAYER_RANGE[cell_library]
         diode_cell = _ANTENNA_DIODE_CELLS[cell_library][0]
@@ -3392,21 +3448,24 @@ def _stage_script_lines(
             write_verilog_call += f" -remove_cells {{{removed}}}"
         lines += [f"write_def {def_path}", write_verilog_call]
     elif stage == "place":
-        # A placement-only DEF, written as a side artifact (never referenced
-        # by `run_place_and_route`'s own return value) alongside the
-        # `write_db` checkpoint below. This exists purely so an out-of-band
-        # caller -- the FLUTE/RUDY-family congestion pre-check
+        # A placement-only DEF, written as a side artifact alongside the
+        # `write_db` checkpoint below. Originally added purely so an
+        # out-of-band caller -- the FLUTE/RUDY-family congestion pre-check
         # (`klayout_tools.congestion`, issue #785, Epic #700 Phase 1 §3.6)
-        # -- can read real post-placement cell/pin geometry via
+        # -- could read real post-placement cell/pin geometry via
         # `klayout.db`'s DEF parser (mirroring `_merge_def_to_gds`'s own use
         # of it) without needing the far more expensive `route` stage to
-        # have run first. Deliberately **not** added to
-        # `run_place_and_route`'s response dict or `PlaceAndRouteResult`:
-        # this is an internal artifact, not part of the public
-        # request/response contract (issue #785's own explicit acceptance
-        # criterion) -- callers that need it locate it at this same
-        # deterministic path (`<output_dir>/<hdl_toplevel>.place.def`), the
-        # same way the DSE-loop pre-check itself would.
+        # have run first; #785 deliberately kept this path internal-only
+        # (not part of the public request/response contract). Issue #1826
+        # reverses that scoping decision: `run_place_and_route` now surfaces
+        # this same deterministic path as `unrouted_def_path` whenever
+        # `target_stage` is `"place"` itself -- see that function's own
+        # comment for why -- so a caller can get a pre-route, SDC-driven
+        # `klt sta` result (via `klt sta`'s own `geometry_source` request
+        # field) without a full route. The path itself
+        # (`<output_dir>/<hdl_toplevel>.place.def`) is unchanged, so any
+        # out-of-band caller that already located it directly (as #785
+        # intended) keeps working unmodified.
         place_def_path = os.path.join(output_dir, f"{hdl_toplevel}.place.def")
         lines += [f"write_def {place_def_path}"]
 
@@ -3632,6 +3691,17 @@ def _extract_stage_metrics(
             entry["setup_violation_count"] = setup_violation_count
         if hold_violation_count is not None:
             entry["hold_violation_count"] = hold_violation_count
+        # Issue #1826: the single, nominal-corner hold WNS, populated from
+        # the same `"place"` stage onward as `hold_violation_count` above --
+        # a real slack-in-ns margin, not just the pass/fail count that field
+        # already provides. Named `nominal_hold_slack_ns` (not
+        # `worst_hold_slack_ns`) to avoid colliding with that existing,
+        # `"route"`-stage-only, corner-swept aggregate (issue #949) a few
+        # lines below -- this field never replaces it, the same way
+        # `worst_slack_ns` above is untouched by `worst_setup_slack_ns`.
+        nominal_hold_slack = metrics.get("timing__hold__ws")
+        if nominal_hold_slack is not None:
+            entry["nominal_hold_slack_ns"] = round(nominal_hold_slack, 5)
         if antenna_violation_count is not None:
             entry["antenna_violation_count"] = antenna_violation_count
         if route_drc_violation_count is not None:

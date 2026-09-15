@@ -837,6 +837,10 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert report["clock_skew_ns"] == 0.021
     assert report["estimated_power_mw"] == 8.4
     assert report["def_path"].endswith("top.def")
+    # Issue #1826: `geometry_source` defaults to `"routed"` when the request
+    # omits it -- byte-for-byte the same behaviour this command had before
+    # the field existed.
+    assert report["geometry_source"] == "routed"
     assert report["spef_path"] is None
     assert report["spef_annotation"] is None
 
@@ -844,6 +848,34 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
     assert provenance["input"]["content_hash"] is not None
+
+
+def test_run_sta_geometry_source_placement_estimate_echoed(tmp_path, monkeypatch):
+    """Issue #1826 (gap 1): a caller analysing a pre-route DEF (e.g. `klt
+    place-and-route`'s own `unrouted_def_path`) declares that explicitly via
+    `request.geometry_source`, echoed back verbatim -- so the response is
+    never silently shaped the same as a routed signoff result."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, geometry_source="placement_estimate"
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["geometry_source"] == "placement_estimate"
+    # Nothing about the OpenSTA session construction actually changes --
+    # this is a caller-supplied label, not a different Tcl script.
+    assert report["worst_slack_ns"] == -0.15
+
+
+def test_run_sta_geometry_source_invalid_value_rejected(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, geometry_source="routing")
+    _stub_openroad_success(monkeypatch)
+
+    with pytest.raises(
+        PostRouteStaError, match="request.geometry_source must be one of"
+    ):
+        run_sta(request_path)
 
 
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):

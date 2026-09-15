@@ -1423,6 +1423,7 @@ unsure).
   "fmax_mhz": 304.11,
   "setup_violation_count": 3,
   "hold_violation_count": 1,
+  "nominal_hold_slack_ns": 0.22011,
   "antenna_violation_count": 0,
   "route_drc_violation_count": 0,
   "worst_setup_slack_ns": -4.02163,
@@ -1444,6 +1445,7 @@ unsure).
     { "instance": "u_analog", "lef": "/abs/path/analog_block.lef", "x_um": 12.5, "y_um": 3.0, "orientation": "R0" }
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
+  "unrouted_def_path": null,
   "gds_path": "/abs/path/.klt/place-and-route/gcd.gds",
   "layer_map": {
     "path": "/abs/path/pdk/sky130A/libs.tech/klayout/tech/sky130A.map",
@@ -1525,6 +1527,7 @@ unsure).
 | `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. |
 | `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). |
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
+| `nominal_hold_slack_ns` | number \| null | Additive field (issue #1826). The single, nominal-corner hold WNS (`report_worst_slack_metric -hold`), mirroring `worst_slack_ns` above's setup-side value — a real slack-in-ns margin, not just the pass/fail count `hold_violation_count` already provides. `null` at the floorplan stage, matching `hold_violation_count`'s own gating. Named `nominal_hold_slack_ns` (not `worst_hold_slack_ns`) specifically to avoid colliding with the corner-swept `worst_hold_slack_ns` aggregate below — the two are independent fields that never replace one another, the same way `worst_slack_ns` and `worst_setup_slack_ns` already coexist (issue #949). |
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), parsed from the report's per-violation `"violation type: ..."` header lines. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
@@ -1534,6 +1537,7 @@ unsure).
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
+| `unrouted_def_path` | string \| null | Additive field (issue #1826). A pre-route DEF, populated only when `target_stage` itself is `"place"` or `"cts"` — the deterministic `<hdl_toplevel>.place.def`/`<hdl_toplevel>.cts.def` path each of those stages' own Tcl already writes unconditionally (the `"place"`-stage one existed on disk since issue #785 but was previously internal-only; the `"cts"`-stage one is new). `null` at `"floorplan"` (no DEF exists yet) and at `"route"` (`def_path` above is the routed artifact to use there instead — the two fields are never populated together). Feed this path into `klt sta`'s own `def` field (with `request.geometry_source: "placement_estimate"`, see `docs/cli/sta.md`) to get a real, SDC-driven setup/hold slack number before a full route — this stage's own parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so treat the result as an estimate, not a signoff number. See also issue #1825, which proposes a different (netlist-input) shape for the same underlying gap. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
 | `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
 | `def_net_names` | object \| null | Additive field (issue #1488). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own unrouted-single-pin net-name marker pass — see "Unrouted single-pin net names" above. `single_pin_markers` — how many marker shapes were synthesized (one per unrouted single-pin net whose pin geometry resolved); `0` is the normal value for a design with no tie-cell-style nets, and says nothing is missing. `unresolved_single_pin_nets` — every single-pin net the pass could **not** resolve, by DEF net name (sorted): no layer-map file to translate the LEF `PORT` layer name through, a macro or pin the LEF never declares, or a pin centre not covered by drawn conductor. Those nets keep extraction's synthesized `$<id>` name under `klt extract --def-net-names`, exactly as before this field existed — never a merge failure. |
@@ -1816,7 +1820,9 @@ detailed placement — a successful (`exit 0`) run of that request has
 `stage_reached: "place"`, `def_path`/`gds_path`/`verilog_path` all `null`
 **by design** (never requested), and every metric field populated through
 placement. This is a normal, successful, partial-by-request outcome, not a
-degraded one.
+degraded one. Unlike those three, `unrouted_def_path` (issue #1826) *is*
+populated for a `target_stage: "place"` (or `"cts"`) request — see that
+field's own description above.
 
 A request whose `target_stage` (default `"route"`) the engine fails to
 reach — an internal OpenROAD/CTS/routing error, or a validation failure —

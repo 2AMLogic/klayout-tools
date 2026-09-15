@@ -16,6 +16,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt place-and-route` response field `nominal_hold_slack_ns`
+  (issue #1826) — the single, nominal-corner hold WNS
+  (`report_worst_slack_metric -hold`), populated from the `"place"` stage
+  onward, mirroring the existing setup-side `worst_slack_ns`. Distinct from
+  the route-stage-only, corner-swept `worst_hold_slack_ns` aggregate (issue
+  #949) — this field exists so a caller can get a hold slack *number*
+  before a full route, not just `hold_violation_count`'s pass/fail count.
+- **Added**: `klt place-and-route` response field `unrouted_def_path`
+  (issue #1826) — a pre-route DEF, populated when `target_stage` itself is
+  `"place"` or `"cts"`, reusing (and, for `"cts"`, newly adding) the
+  `write_def` call each of those stages' own Tcl generator already runs.
+  `klt sta`'s new `def`/`geometry_source: "placement_estimate"` request
+  fields (below) accept this path directly, closing the gap where an SDC-
+  driven setup/hold slack characterization required a full route.
+- **Added**: `klt sta` request field `geometry_source` (`"routed"`, the
+  default, or `"placement_estimate"`; issue #1826), echoed back verbatim as
+  the response's own `geometry_source` field. Declares whether `def` is a
+  fully-routed signoff geometry or a pre-route (`klt place-and-route`
+  `"place"`/`"cts"`-stage) estimate — a caller-supplied label, since a bare
+  DEF file carries no stage-provenance metadata of its own. See
+  `docs/cli/sta.md`'s "Pre-route DEFs" section.
 - **Added**: `klt arith-gen` — generate a parallel-prefix adder as Verilog
   RTL from one of five named architectures (`ripple`, `brent-kung`,
   `han-carlson`, `sklansky`, `kogge-stone`) or from an explicit N×N binary
