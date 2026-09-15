@@ -135,6 +135,28 @@ implemented deliberately rather than rediscovered:
    entry last instead of first) resolves everything, which a genuine
    identity double-bind would not fix.
 
+10. **A run that fails on every test case under ``options.sdf`` -- often
+    with the design's outputs reading a constant zero -- while the
+    byte-identical run without it passes is (usually) a real timing result,
+    not a broken annotation** (issue #1854, live on Icarus 13.0 against a
+    real sky130 post-route design; `docs/design/sdf-annotate-feasibility-
+    spike.md` §3.8). #1619 suspected Icarus's own ``-gspecify`` fallback
+    ("Delayed reference and data signals become copies...") of being
+    disabled once *any* ``$sdf_annotate`` call exists; measured directly,
+    that fallback fires an identical 479 times with and without an annotate
+    call in the design (it is gated on ``-gspecify``, which ``options.sdf``
+    also adds), and an annotated run whose testbench clock clears the
+    design's annotated critical path is verdict-for-verdict identical to
+    the unannotated one. The constant-zero shape is instead what a design
+    clocked *past* that critical path does: it never advances out of reset,
+    so every output register holds its reset value on every case.
+    Independent of annotation success in both directions -- runs with 16
+    and 19 genuinely unresolved ``INTERCONNECT`` entries produced correct
+    results, and the constant-zero runs had **zero** actionable
+    diagnostics. Nothing to fix here or upstream; the deliverable is the
+    ability to tell the two apart, pinned by
+    ``test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome``.
+
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
 *optional* runtime dependency, deliberately not in ``pyproject.toml``'s

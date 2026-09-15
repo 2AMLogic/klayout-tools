@@ -352,6 +352,35 @@ job ([`klt place-and-route`](place-and-route.md)'s `spef_sta`). A genuine
 timing failure still surfaces here as a *functional* failure the testbench
 catches, which is the signal this feature is scoped around.
 
+**Reading a run that fails on *every* test case.** The most common shape of a
+real annotated failure is not a subtly different result on one test — it is
+every test failing identically, often with the design's outputs reading a
+constant zero, while the byte-identical run with `options.sdf` omitted passes.
+That looks like a broken annotation and is usually not one: a design clocked
+faster than its own annotated critical path never advances out of reset, so
+every output register holds its reset value and every case reads the same
+thing, whereas a zero-delay run cannot fail for timing at *any* clock period
+(so its passing says nothing about whether the design meets that clock).
+Before suspecting the engine, check three things, in this order:
+
+1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`), every
+   delay applied and no annotation failed. A genuinely failed annotation exits
+   1 with the offending transcript line, so a *returned report* already rules
+   that out.
+2. **The testbench's own clock period against the design's post-route timing**
+   — [`klt place-and-route`](place-and-route.md)'s `spef_sta.worst_slack_ns`
+   and `setup_violation_count` for the same design. A testbench clocked at or
+   near a period the design misses will fail everywhere once real delay is
+   modelled, by design.
+3. **Re-run at a slower testbench clock.** If it passes there on the same SDF,
+   the annotation was never the problem.
+
+This was reproduced end to end on a real sky130 post-route design (issue
+#1854) — see
+[`docs/design/sdf-annotate-feasibility-spike.md`](../design/sdf-annotate-feasibility-spike.md)
+§3.8 for the isolation table, the clock-period sweep, and why the "any
+`$sdf_annotate` call breaks Icarus's fallback" reading of it is wrong.
+
 An annotated run is identifiable from the JSON alone: `environment.sdf` is
 `null` on an ordinary run and an object on an annotated one.
 
