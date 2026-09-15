@@ -361,11 +361,12 @@ convention).
   pilot integration (see
   [`docs/cli/layout-metrics.md`](cli/layout-metrics.md)'s `metrics` field);
   `klt drc` adopted it next (issue #1847; see
-  [`docs/cli/drc.md`](cli/drc.md)'s `metrics` field). Each other verb (`klt
-  extract`, `klt sim`, ...) adopts the registry — and grows its own
-  `metrics` block — via its own follow-on issue; a verb that has not yet
-  adopted it simply has no `metrics` field at all, same as any other
-  not-yet-shipped optional field.
+  [`docs/cli/drc.md`](cli/drc.md)'s `metrics` field); `klt sim` adopted it
+  after that (issue #1849; see [`docs/cli/sim.md`](cli/sim.md)'s `metrics`
+  field). Each remaining verb (`klt extract`, ...) adopts the registry — and
+  grows its own `metrics` block — via its own follow-on issue; a verb that
+  has not yet adopted it simply has no `metrics` field at all, same as any
+  other not-yet-shipped optional field.
 - A caller-supplied, per-run name (e.g. `klt sim`'s `measurements[].name`,
   which a request spec defines, not `klt` itself) is out of scope for this
   registry — it cannot be declared ahead of time because `klt` does not own

@@ -301,6 +301,53 @@ def test_cli_json_format_includes_metrics_block(tmp_path, capsys):
     assert data["metrics"]["design__instance__count"] == data["instance_count"]
 
 
+def test_report_nested_signals_metrics_coexists_with_top_level_metrics(tmp_path):
+    """Issue #1849: once `klt sim`'s `run_sim()` emits its own `metrics`
+    block, a `klt sim` response attached verbatim as `signals` (see
+    `_attach_signals`) carries a *nested* `signals.metrics` alongside this
+    report's own top-level `metrics` block (from a completely separate
+    re-keying of `layer_count`/`cell_count`/`instance_count`/
+    `drc.violation_count`). The two must coexist without conflict --
+    `layout-metrics` never merges or reads into `signals`, just attaches it
+    verbatim."""
+    block_dir = _write_block(tmp_path, layout=_make_layout())
+    sim_dir = block_dir / "output" / "sim"
+    sim_dir.mkdir(parents=True)
+    sim_response = {
+        "schema_version": 3,
+        "engine": "ngspice",
+        "status": "pass",
+        "corner_count": 2,
+        "passed": 2,
+        "failed": 0,
+        "errored": 0,
+        "metrics": {
+            "sim__corner__count": 2,
+            "sim__corner__passed_count": 2,
+            "sim__corner__failed_count": 0,
+            "sim__corner__errored_count": 0,
+        },
+        "measurements": [],
+        "corners": [],
+    }
+    (sim_dir / "signals.json").write_text(json.dumps(sim_response))
+
+    report = layout_metrics_report(str(block_dir))
+
+    # This report's own top-level `metrics` is unaffected -- it re-keys
+    # layer/cell/instance counts, nothing sim-related.
+    assert report["metrics"] == {
+        "design__layer__count": report["layer_count"],
+        "design__cell__count": report["cell_count"],
+        "design__instance__count": report["instance_count"],
+    }
+    # `signals` is attached verbatim, including its own nested `metrics`.
+    assert report["signals"]["metrics"] == sim_response["metrics"]
+    # The two `metrics` objects are independent -- no key collision, no
+    # merge, no field lost from either side.
+    assert set(report["metrics"]) != set(report["signals"]["metrics"])
+
+
 # --- pdk field (issue #1285) --------------------------------------------
 
 

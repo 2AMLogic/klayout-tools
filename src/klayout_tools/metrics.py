@@ -25,15 +25,19 @@ integration (see `layout_metrics.py` for the first, pilot integration).
 
 ## Naming grammar
 
-A declared metric name is a sequence of two or more `__`-separated
-lowercase-with-underscores segments, e.g. `design__instance__count`,
-`drc__error__count`. The convention (matching METRICS2.1): the first segment
-names the owning domain/verb family (`design`, `drc`, `extract`, `sim`,
-`timing`, `route`, ...), the last segment is usually a value-kind suffix
-(`count`, `area`, `ws`, ...), and any segments in between narrow the concept.
-This module does not enforce the grammar beyond the double-underscore
-convention checked by :func:`register` — see the design doc for the full
-rationale on why enforcement stays loose in this pass.
+A declared metric name is a sequence of two or more `__`-separated segments,
+e.g. `design__instance__count`, `drc__error__count`,
+`sim__corner__passed_count`. The convention (matching METRICS2.1): the first
+segment names the owning domain/verb family (`design`, `drc`, `extract`,
+`sim`, `timing`, `route`, ...), the last segment is usually a value-kind
+suffix (`count`, `area`, `ws`, ...), and any segments in between narrow the
+concept. Each segment is itself lowercase-with-underscores
+(`[a-z0-9]+(_[a-z0-9]+)*`, e.g. `passed_count`) — a single underscore may
+appear *within* a segment, but `__` (double underscore) is reserved as the
+segment separator, so a name can never contain three or more consecutive
+underscores. This module does not enforce the grammar beyond the
+double-underscore convention checked by :func:`register` — see the design
+doc for the full rationale on why enforcement stays loose in this pass.
 
 ## `aggregator`
 
@@ -88,7 +92,14 @@ __all__ = [
 #: being importable-code-only.
 Aggregator = Literal["sum", "min", "max", "mean"]
 
-_NAME_RE = re.compile(r"^[a-z0-9]+(__[a-z0-9]+)+$")
+#: A segment is lowercase-with-underscores (e.g. `passed_count`); the full
+#: name is two or more segments joined by `__`, which stays reserved as the
+#: separator (a segment itself may contain single underscores, but never a
+#: `__` pair -- see the module docstring's "Naming grammar" section, issue
+#: #1849's `sim__corner__passed_count`-style names being the motivating
+#: case for allowing an underscore within a segment).
+_SEGMENT_RE = r"[a-z0-9]+(?:_[a-z0-9]+)*"
+_NAME_RE = re.compile(rf"^{_SEGMENT_RE}(?:__{_SEGMENT_RE})+$")
 
 
 class MetricNamespaceError(ValueError):
@@ -276,5 +287,58 @@ register(
         "`drc.violation_count`). Name follows METRICS2.1/LibreLane's "
         "`magic__drc_error__count`/`route__drc_errors` family. Critical: "
         "any nonzero value is a signoff blocker."
+    ),
+)
+
+# --------------------------------------------------------------------------
+# `klt sim` adoption (issue #1849, following #1847's `klt drc` adoption)
+#
+# Only the fixed, non-caller-supplied corner-sweep rollup fields
+# (`corner_count`/`passed`/`failed`/`errored`) are declared here.
+# `measurements[].name` stays permanently out of scope for this registry --
+# those names are defined by the caller's own request spec
+# (`docs/cli/sim.md`), not by `klt`, so `klt` cannot declare them ahead of
+# time. See the design doc's "Follow-on work" section.
+# --------------------------------------------------------------------------
+
+register(
+    "sim__corner__count",
+    aggregator="sum",
+    higher_is_better=None,
+    description=(
+        "Total number of corners in a `klt sim` sweep (`run_sim()`'s "
+        "corner_count). Purely structural/descriptive -- no declared "
+        "quality polarity."
+    ),
+)
+register(
+    "sim__corner__passed_count",
+    aggregator="sum",
+    higher_is_better=True,
+    description=(
+        "Number of corners that passed in a `klt sim` sweep (`run_sim()`'s "
+        "passed). More passing corners is a better outcome."
+    ),
+)
+register(
+    "sim__corner__failed_count",
+    aggregator="sum",
+    higher_is_better=False,
+    critical=True,
+    description=(
+        "Number of corners that failed (a measurement outside its limits) "
+        "in a `klt sim` sweep (`run_sim()`'s failed). Critical: any nonzero "
+        "value is a signoff blocker."
+    ),
+)
+register(
+    "sim__corner__errored_count",
+    aggregator="sum",
+    higher_is_better=False,
+    critical=True,
+    description=(
+        "Number of corners that errored (the simulator itself failed to "
+        "produce a usable result) in a `klt sim` sweep (`run_sim()`'s "
+        "errored). Critical: any nonzero value is a signoff blocker."
     ),
 )
