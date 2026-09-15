@@ -87,6 +87,45 @@ routing-derived RC, so its ``worst_slack_ns``/``worst_hold_slack_ns``/etc.
 are a real number but a less accurate one than the same fields on a routed
 DEF -- ``geometry_source: "placement_estimate"`` is the caller's own
 declaration of that distinction, machine-readable rather than left to prose.
+
+**From-scratch netlist input (issue #1825).** #1826 (above) closes the gap
+for a caller already willing to invoke ``klt place-and-route`` (even if only
+as far as its ``"place"``/``"cts"`` stage). This closes the *stricter* gap:
+an SDC-constrained setup/hold slack number reachable from a synthesized
+structural Verilog netlist alone, with **no place-and-route invocation of
+any kind** -- no floorplan, no macro placement, no PDN. The request's
+``def``/``verilog`` fields are mutually exclusive alternate geometry
+sources (exactly one required); when ``verilog`` is given, this module runs
+``read_lef`` x2 -> ``read_verilog`` -> ``link_design`` -> ``create_clock``
+instead of ``read_def`` -- the same sequence ``place_and_route.py``'s own
+``"floorplan"``-stage load already runs (its docstring explains the
+liberty-before-LEF-before-verilog ordering), minus that stage's
+floorplan-init/macro-placement/PDN steps, which have no meaning without any
+placement geometry at all.
+
+With no placement and no routing, there is no *measured* wire parasitic of
+any kind to load -- unlike the ``"placement_estimate"``/``"routed"`` modes
+above, which both load a real (if approximate) geometry. The only estimate
+available is OpenSTA's own liberty-driven wire-load model
+(``set_wire_load_mode``/``set_wire_load_model``, both request-optional via
+``constraints.wire_load_model``/``constraints.wire_load_mode``) -- distinct
+from both ``synthesize.py``'s ABC-derived ``WireLoad`` estimate (drives
+ABC's own ``stime``, an entirely different tool from the OpenSTA session
+this module runs) and ``place_and_route.py``'s ``estimate_parasitics
+-placement``/``-global_routing`` (which require an actual placement to
+measure a bounding box or global route from). This response labels itself
+``geometry_source: "netlist_estimate"`` -- a third, distinct value from
+``"routed"``/``"placement_estimate"`` -- so a consumer can never conflate a
+from-scratch, wire-load-model-only estimate with either a real placement's
+bounding-box RC or a routed design's actual RC. ``response.wire_load_model``/
+``wire_load_mode`` echo exactly what was (or was not) requested, mirroring
+this repo's existing precedent for a provenance-bearing estimate knob
+(``sta.py``'s ``compute_critical_path`` echoing its own
+``input_transition_ns``/``output_load_pf`` boundary condition).
+
+A caller-supplied ``spef`` is rejected together with ``verilog`` -- there is
+no routed or placement geometry in this mode for a SPEF to annotate real
+parasitics onto.
 """
 
 from __future__ import annotations
@@ -185,14 +224,25 @@ _PARTIAL_DRIVERS_RE = re.compile(
 #: ``delay_changed`` to ``null`` (unknown), never to ``false``.
 _NO_PATHS_FOUND = "no paths found"
 
-#: Issue #1826: the two ``request.geometry_source`` values this module
-#: accepts -- ``"routed"`` (the default, this command's original and only
-#: behaviour) declares the ``def`` a fully-routed, detailed-SPEF-eligible
-#: signoff geometry; ``"placement_estimate"`` declares it a pre-route
-#: (placement- or CTS-stage) DEF whose parasitics are a bounding-box
-#: estimate, not routing-derived RC. See this module's own docstring
-#: "Pre-route DEFs" section for the full rationale.
+#: Issue #1826: the two ``request.geometry_source`` values valid for a
+#: ``def``-mode request -- ``"routed"`` (the default, this command's
+#: original and only behaviour) declares the ``def`` a fully-routed,
+#: detailed-SPEF-eligible signoff geometry; ``"placement_estimate"``
+#: declares it a pre-route (placement- or CTS-stage) DEF whose parasitics
+#: are a bounding-box estimate, not routing-derived RC. See this module's
+#: own docstring "Pre-route DEFs" section for the full rationale.
+#: ``"netlist_estimate"`` (issue #1825) is the third, ``verilog``-mode-only
+#: value -- validated separately in :func:`run_sta` (not through this
+#: tuple/:func:`_validate_geometry_source`) since it is the *only* legal
+#: value in that mode, never a caller choice among several.
 _GEOMETRY_SOURCES = ("routed", "placement_estimate")
+
+#: Issue #1825: the ``constraints.wire_load_mode`` values OpenSTA/Liberty's
+#: wire-load-model mechanism accepts (``set_wire_load_mode``) -- only
+#: meaningful alongside ``constraints.wire_load_model`` in a ``verilog``-mode
+#: request (see this module's own docstring "From-scratch netlist input"
+#: section).
+_WIRE_LOAD_MODES = ("top", "enclosed", "segmented")
 
 
 class PostRouteStaError(Exception):
@@ -211,16 +261,24 @@ def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sta`` request JSON file.
 
     Raises :class:`PostRouteStaError` if the file is missing/unreadable,
-    not valid JSON, or missing a required top-level field (``def``, ``pdk``,
+    not valid JSON, or missing a required top-level field (``pdk``,
     ``constraints``). Does not require a ``schema`` field, matching every
     other request-taking verb's ``load_request``.
+
+    Unlike ``pdk``/``constraints``, neither ``def`` nor ``verilog`` is a
+    required top-level field here -- exactly one of them is required, a
+    relationship :func:`validate_request_shape`'s flat "these keys must all
+    be present" check cannot express. :func:`run_sta` validates that
+    mutual-exclusion/require-one-of relationship itself, right after calling
+    this function (see its own "Request-field resolution" section, issue
+    #1825).
     """
     request = _load_request_json(request_path, PostRouteStaError)
     return validate_request_shape(
         request,
         "request file",
         error_cls=PostRouteStaError,
-        required_fields=("def", "pdk", "constraints"),
+        required_fields=("pdk", "constraints"),
     )
 
 
@@ -230,8 +288,12 @@ def run_sta(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
 ) -> dict[str, Any]:
-    """Run a standalone OpenSTA timing/power analysis over an
-    already-routed DEF declared by the request at ``request_path``.
+    """Run a standalone OpenSTA timing/power analysis over the geometry
+    declared by the request at ``request_path`` -- either an already-routed
+    (or pre-route, issue #1826) DEF (``request.def``), or, for issue #1825's
+    from-scratch mode, a structural Verilog netlist (``request.verilog``)
+    linked directly with no DEF at all. Exactly one of the two is required;
+    see this module's own docstring for the full rationale of each mode.
 
     ``pdk_variant``/``pdk_root`` (the CLI's ``--pdk``/``--pdk-root`` flags)
     optionally pin a specific installed PDK variant/root, passed straight
@@ -251,9 +313,35 @@ def run_sta(
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
-    def_path = _resolve_def(request["def"], request_dir)
+    # Issue #1825: `def`/`verilog` are mutually exclusive alternate geometry
+    # sources -- exactly one is required (neither is a `load_request`-level
+    # required field; see that function's own docstring for why).
+    has_def = "def" in request
+    has_verilog = "verilog" in request
+    if has_def and has_verilog:
+        raise PostRouteStaError(
+            "request must not include both 'def' and 'verilog' -- provide "
+            "exactly one geometry source"
+        )
+    if not has_def and not has_verilog:
+        raise PostRouteStaError("request must include one of 'def' or 'verilog'")
+
+    def_path: str | None = None
+    verilog_path: str | None = None
+    if has_def:
+        def_path = _resolve_def(request["def"], request_dir)
+    else:
+        verilog_path = _resolve_verilog(request["verilog"], request_dir)
+
     hdl_toplevel = request.get("hdl_toplevel")
-    if hdl_toplevel is not None and (
+    if has_verilog:
+        # Unlike the `def`-mode echo-only field below, `verilog` mode
+        # actually needs this for `link_design` -- required, not optional.
+        if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
+            raise PostRouteStaError(
+                "request.hdl_toplevel is required when request.verilog is given"
+            )
+    elif hdl_toplevel is not None and (
         not isinstance(hdl_toplevel, str) or not hdl_toplevel
     ):
         raise PostRouteStaError(
@@ -275,8 +363,28 @@ def run_sta(
         )
 
     clock_port, clock_period_ns = _validate_constraints(request["constraints"])
-    spef_path = _resolve_spef(request.get("spef"), request_dir)
-    geometry_source = _validate_geometry_source(request.get("geometry_source"))
+    wire_load_model, wire_load_mode = _validate_wire_load_estimate(
+        request["constraints"], has_verilog
+    )
+
+    if has_verilog:
+        if request.get("spef") is not None:
+            raise PostRouteStaError(
+                "request.spef is not supported together with request.verilog "
+                "-- there is no routed or placement geometry in this mode "
+                "for a spef to annotate real parasitics onto"
+            )
+        spef_path = None
+        requested_geometry_source = request.get("geometry_source")
+        if requested_geometry_source not in (None, "netlist_estimate"):
+            raise PostRouteStaError(
+                "request.geometry_source must be 'netlist_estimate' (or "
+                "omitted) when request.verilog is given"
+            )
+        geometry_source = "netlist_estimate"
+    else:
+        spef_path = _resolve_spef(request.get("spef"), request_dir)
+        geometry_source = _validate_geometry_source(request.get("geometry_source"))
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -291,21 +399,38 @@ def run_sta(
             f"could not create output directory '{output_dir}': {exc}"
         ) from exc
 
-    basename = os.path.splitext(os.path.basename(def_path))[0]
+    input_path = def_path if has_def else verilog_path
+    assert input_path is not None
+    basename = os.path.splitext(os.path.basename(input_path))[0]
     script_path = os.path.join(output_dir, f"sta_{basename}.tcl")
     metrics_path = os.path.join(output_dir, f"{basename}_metrics.json")
 
-    spef_net_names = _spef_net_names(spef_path) if spef_path is not None else None
-    lines = _sta_script_lines(
-        tech_lef=tech_lef,
-        cell_lef=cell_lef,
-        def_path=def_path,
-        liberty_path=liberty_path,
-        clock_port=clock_port,
-        clock_period_ns=clock_period_ns,
-        spef_path=spef_path,
-        spef_net_names=spef_net_names,
-    )
+    if has_def:
+        spef_net_names = _spef_net_names(spef_path) if spef_path is not None else None
+        lines = _sta_script_lines(
+            tech_lef=tech_lef,
+            cell_lef=cell_lef,
+            def_path=def_path,
+            liberty_path=liberty_path,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+            spef_path=spef_path,
+            spef_net_names=spef_net_names,
+        )
+    else:
+        spef_net_names = None
+        assert verilog_path is not None and hdl_toplevel is not None
+        lines = _sta_netlist_script_lines(
+            tech_lef=tech_lef,
+            cell_lef=cell_lef,
+            verilog_path=verilog_path,
+            liberty_path=liberty_path,
+            hdl_toplevel=hdl_toplevel,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+            wire_load_model=wire_load_model,
+            wire_load_mode=wire_load_mode,
+        )
     _write_script(script_path, lines)
 
     completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
@@ -334,7 +459,7 @@ def run_sta(
         deck_name=deck_name,
         deck_path=liberty_path,
         pdk=pdk_info,
-        input_path=def_path,
+        input_path=input_path,
     )
 
     response: dict[str, Any] = {
@@ -344,12 +469,25 @@ def run_sta(
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
         "def_path": def_path,
+        # Additive field (issue #1825): `null` unless `request.verilog` was
+        # given -- the mutually-exclusive counterpart to `def_path` above.
+        "verilog_path": verilog_path,
         # Additive field (issue #1826): echo of `request.geometry_source` --
         # see this module's own docstring "Pre-route DEFs" section. Always
         # present (never `null`): `"routed"` is the default when the request
         # omits it, matching this command's pre-#1826 behaviour byte-for-
-        # byte.
+        # byte. Issue #1825 adds the third `"netlist_estimate"` value,
+        # forced (never caller-chosen) whenever `request.verilog` is given.
         "geometry_source": geometry_source,
+        # Additive fields (issue #1825): the wire-load estimate knob
+        # actually used, for provenance -- `null`/`null` unless
+        # `request.verilog` was given (see this module's own docstring
+        # "From-scratch netlist input" section). Never present on a
+        # `def`-mode response with anything but `null`/`null`, since a
+        # `def`-mode run's parasitics never come from a liberty wire-load
+        # model.
+        "wire_load_model": wire_load_model,
+        "wire_load_mode": wire_load_mode,
         "spef_path": spef_path,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
@@ -500,6 +638,33 @@ def _resolve_def(def_field: Any, request_dir: str) -> str:
     return os.path.abspath(path)
 
 
+def _resolve_verilog(verilog_field: Any, request_dir: str) -> str:
+    """Resolve ``request.verilog`` (issue #1825) -- the mutually-exclusive
+    counterpart to :func:`_resolve_def` for a from-scratch, netlist-input
+    request. Deliberately mirrors that function's own validation/resolution
+    shape byte-for-byte (non-empty string, resolve relative to the request
+    file's own directory, must exist and be readable) -- the two geometry
+    sources differ in what they feed the OpenSTA session, not in how a
+    caller-supplied path is resolved."""
+    if not isinstance(verilog_field, str) or not verilog_field:
+        raise PostRouteStaError("request.verilog must be a non-empty string")
+    path = (
+        verilog_field
+        if os.path.isabs(verilog_field)
+        else os.path.join(request_dir, verilog_field)
+    )
+    if not os.path.isfile(path):
+        raise PostRouteStaError(f"verilog not found: {verilog_field}")
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as exc:
+        raise PostRouteStaError(
+            f"could not read verilog '{verilog_field}': {exc}"
+        ) from exc
+    return os.path.abspath(path)
+
+
 def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
     if spef_field is None:
         return None
@@ -555,6 +720,48 @@ def _validate_geometry_source(geometry_source: Any) -> str:
             "request.geometry_source must be one of: " + ", ".join(_GEOMETRY_SOURCES)
         )
     return geometry_source
+
+
+def _validate_wire_load_estimate(
+    constraints: dict[str, Any], has_verilog: bool
+) -> tuple[str | None, str | None]:
+    """Validate ``constraints.wire_load_model``/``.wire_load_mode`` (issue
+    #1825), returning ``(wire_load_model, wire_load_mode)`` -- both ``None``
+    unless ``has_verilog`` (a ``def``-mode request's parasitics never come
+    from a liberty wire-load model, so both fields are rejected outright
+    rather than silently ignored there).
+
+    ``constraints`` is already known to be a JSON object by the time this is
+    called -- :func:`_validate_constraints` (always called first) raises
+    otherwise.
+    """
+    wire_load_model = constraints.get("wire_load_model")
+    wire_load_mode = constraints.get("wire_load_mode")
+    if not has_verilog:
+        if wire_load_model is not None or wire_load_mode is not None:
+            raise PostRouteStaError(
+                "constraints.wire_load_model/wire_load_mode are only valid "
+                "when request.verilog is given -- a def-mode run's "
+                "parasitics come from real (or caller-supplied spef) "
+                "geometry, never a liberty wire-load model"
+            )
+        return None, None
+
+    if wire_load_model is not None and (
+        not isinstance(wire_load_model, str) or not wire_load_model
+    ):
+        raise PostRouteStaError(
+            "constraints.wire_load_model must be a non-empty string when given"
+        )
+    if wire_load_mode is not None and wire_load_mode not in _WIRE_LOAD_MODES:
+        raise PostRouteStaError(
+            "constraints.wire_load_mode must be one of: " + ", ".join(_WIRE_LOAD_MODES)
+        )
+    if wire_load_mode is not None and wire_load_model is None:
+        raise PostRouteStaError(
+            "constraints.wire_load_mode requires constraints.wire_load_model"
+        )
+    return wire_load_model, wire_load_mode
 
 
 def _resolve_liberty(
@@ -808,6 +1015,77 @@ def _sta_script_lines(
         lines.append(f'puts "{_SPEF_READ_END}"')
         lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
         lines += _parasitic_annotation_lines()
+    lines += [
+        "report_worst_slack_metric -setup",
+        "report_worst_slack_metric -hold",
+        "report_tns_metric -setup",
+        "report_tns_metric -hold",
+        "report_fmax_metric",
+        "report_power_metric",
+        "report_clock_skew_metric -setup",
+    ]
+    lines += _violation_count_lines()
+    return lines
+
+
+def _sta_netlist_script_lines(
+    *,
+    tech_lef: str,
+    cell_lef: str,
+    verilog_path: str,
+    liberty_path: str,
+    hdl_toplevel: str,
+    clock_port: str,
+    clock_period_ns: float,
+    wire_load_model: str | None = None,
+    wire_load_mode: str | None = None,
+) -> list[str]:
+    """Build the Tcl script for a from-scratch, netlist-input OpenSTA
+    session (issue #1825): no DEF, no placement, no routing. Links a
+    structural netlist directly (``read_verilog`` + ``link_design``) --
+    the same ``read_liberty`` -> ``read_lef`` x2 -> ``read_verilog`` ->
+    ``link_design`` -> ``create_clock`` order ``place_and_route.py``'s own
+    ``"floorplan"``-stage load already runs (see that module's
+    ``_stage_script_lines`` docstring for the ordering rationale), minus
+    that stage's floorplan-init/macro-placement/PDN steps -- none of those
+    have meaning without any placement geometry.
+
+    ``wire_load_model``/``wire_load_mode`` (both optional, and only ever
+    non-``None`` here -- :func:`_validate_wire_load_estimate` rejects them
+    outright for a ``def``-mode request) drive OpenSTA's own
+    ``set_wire_load_model``/``set_wire_load_mode``, this module's chosen
+    parasitics-estimate mechanism for a geometry-free session (see this
+    module's own docstring "From-scratch netlist input" section for why
+    this -- not a flat per-net capacitance, and not either of
+    ``place_and_route.py``'s ``estimate_parasitics`` modes -- was chosen).
+    When both are omitted, no ``set_wire_load*`` command is issued at all:
+    OpenSTA falls back to whatever ``default_wire_load``/
+    ``default_wire_load_mode`` the resolved liberty itself declares (many
+    open-PDK standard-cell libraries, including ``sky130_fd_sc_hd``, ship
+    one), or to zero estimated wire parasitics if the liberty declares none
+    -- either way, ``response.wire_load_model``/``wire_load_mode`` echo
+    exactly what was (or was not) requested, never a guess at what OpenSTA
+    silently defaulted to on its own.
+
+    Reports the same timing/power/violation metrics
+    :func:`_sta_script_lines` does, via the identical ``report_*``/
+    ``puts``-marker sequence -- a caller diffing a ``def``-mode and
+    ``verilog``-mode response for the same design sees the same field
+    shapes throughout, differing only in ``geometry_source``/the estimate
+    provenance fields.
+    """
+    lines = [
+        f"read_liberty {liberty_path}",
+        f"read_lef {tech_lef}",
+        f"read_lef {cell_lef}",
+        f"read_verilog {verilog_path}",
+        f"link_design {hdl_toplevel}",
+    ]
+    lines += _clock_lines(clock_port, clock_period_ns)
+    if wire_load_mode is not None:
+        lines.append(f"set_wire_load_mode {wire_load_mode}")
+    if wire_load_model is not None:
+        lines.append(f"set_wire_load_model -name {{{wire_load_model}}}")
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",

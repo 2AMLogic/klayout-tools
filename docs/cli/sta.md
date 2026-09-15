@@ -29,16 +29,22 @@ clock constraint, it runs a single, fresh OpenSTA session (`read_lef` x2,
 `read_def`, `read_liberty`, `create_clock`, optionally `read_spef`) and
 reports the same timing/power fields `place-and-route`'s response already
 carries. **It never places, routes, or runs CTS** — there is no
-`target_stage`, no netlist, no `link_design`; the `def` handed in is the one
-and only geometry analysed. This is what makes N-corner characterization
-correct: the same DEF, unmodified, is loaded fresh for every corner run.
+`target_stage`; the `def` handed in is the one and only geometry analysed.
+This is what makes N-corner characterization correct: the same DEF,
+unmodified, is loaded fresh for every corner run.
+
+(This section describes `klt sta`'s original `def`-mode request. Issue
+#1825 additionally added a `verilog`-mode request that *does* run
+`link_design` against a from-scratch structural netlist, with no DEF at
+all — see "From-scratch netlist input" below for that mode specifically;
+everything above still applies verbatim to `def`-mode requests.)
 
 Like `klt place-and-route`/`klt synthesize`, `klt sta` takes a **request
 document**, not positional file args.
 
 - `<request>` — a path to a request JSON file. Relative paths inside the
-  request (`def`, `spef`) resolve against the **request file's own
-  directory**.
+  request (`def`, `verilog`, `spef`) resolve against the **request file's
+  own directory**.
 - `--pdk` — PDK variant to resolve (e.g. `sky130A`); overrides `$PDK`.
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
@@ -51,6 +57,21 @@ requires an `openroad` binary on `$PATH`. See
 [`docs/cli/place-and-route.md`](place-and-route.md)'s "Installing OpenROAD"
 section for one concrete, copy-pasteable path to get a plain `openroad`
 binary onto `$PATH`.
+
+## Two geometry sources: `def` vs `verilog`
+
+`klt sta` accepts **exactly one** of two mutually exclusive top-level
+geometry sources per request:
+
+- **`def`** — an already-implemented DEF (routed, or — issue #1826 — a
+  pre-route placement-/CTS-stage DEF from `klt place-and-route`'s own
+  `unrouted_def_path`). This is the mode described above and throughout most
+  of this document.
+- **`verilog`** — a synthesized structural netlist, linked directly with no
+  DEF, no floorplan, no placement, and no routing at all (issue #1825). See
+  "From-scratch netlist input" below.
+
+A request naming both, or neither, is a request error.
 
 ## What this is not
 
@@ -94,13 +115,15 @@ binary onto `$PATH`.
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
-| `def` | string | The DEF path to analyse — typically `klt place-and-route`'s own `def_path` output (routed), or (issue #1826) its `unrouted_def_path` output (pre-route, see `geometry_source` below). Required. Resolved relative to the request file's own directory. |
-| `hdl_toplevel` | string \| omitted | The design's top module name, for informational/echo purposes only — this command's Tcl script does not run `link_design` and never needs it. `null` in the response when omitted. |
+| `def` | string \| omitted | The DEF path to analyse — typically `klt place-and-route`'s own `def_path` output (routed), or (issue #1826) its `unrouted_def_path` output (pre-route, see `geometry_source` below). Required unless `verilog` is given instead — see "Two geometry sources" above; the two are mutually exclusive. Resolved relative to the request file's own directory. |
+| `verilog` | string \| omitted | (Issue #1825.) A synthesized structural Verilog netlist to link directly, with **no DEF at all** — see "From-scratch netlist input" below. Mutually exclusive with `def`; exactly one of the two is required. Resolved relative to the request file's own directory. |
+| `hdl_toplevel` | string \| omitted | The design's top module name. For a `def`-mode request this is informational/echo purposes only — this command's Tcl script does not run `link_design` in that mode and never needs it; `null` in the response when omitted. For a `verilog`-mode request this is **required** — it is `link_design`'s own argument. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
-| `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def` above stays byte-identical across every run in the sweep. |
+| `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
-| `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
-| `geometry_source` | string \| omitted | Additive field (issue #1826). `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error. See also issue #1825, which proposes a different (netlist-input) resolution for the same underlying "no pre-route path into `klt sta`" gap. |
+| `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
+| `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
+| `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
 
 ## Response
 
@@ -112,7 +135,10 @@ binary onto `$PATH`.
   "hdl_toplevel": "gcd",
   "status": "ok",
   "def_path": "/abs/path/gcd.def",
+  "verilog_path": null,
   "geometry_source": "routed",
+  "wire_load_model": null,
+  "wire_load_mode": null,
   "spef_path": null,
   "worst_slack_ns": -0.15321,
   "total_negative_slack_ns": -1.20144,
@@ -140,9 +166,11 @@ binary onto `$PATH`.
 | `engine` / `engine_version` | string | Always `"openroad"`, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
 | `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
-| `def_path` | string | The resolved, absolute path to the analysed DEF. |
-| `geometry_source` | string | Additive field (issue #1826). Echo of `request.geometry_source` — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. See "Pre-route DEFs" below. |
-| `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given. |
+| `def_path` | string \| null | The resolved, absolute path to the analysed DEF; `null` in `verilog` mode (issue #1825). |
+| `verilog_path` | string \| null | Additive field (issue #1825). The resolved, absolute path to the analysed netlist; `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
+| `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
+| `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
+| `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given (never given together with `request.verilog`). |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
@@ -321,11 +349,92 @@ identical either way, so getting the value wrong does not corrupt the
 result, only its self-description — always set it to match the DEF's actual
 provenance.
 
-See also issue #1825, which proposes a different resolution for the same
-underlying "no pre-route path into `klt sta`" gap — a from-scratch
-netlist-input mode (`verilog`/`top` fields, `read_verilog`/`link_design`, an
-explicit wire-load-model estimate) rather than reusing `klt
-place-and-route`'s own pre-route DEF artifact.
+See also "From-scratch netlist input" below, which resolves a stricter
+version of the same underlying "no pre-route path into `klt sta`" gap: no
+`klt place-and-route` invocation of any kind, not even as far as
+`"place"`/`"cts"`.
+
+## From-scratch netlist input (`verilog`, issue #1825)
+
+"Pre-route DEFs" above still requires invoking `klt place-and-route` — even
+a `target_stage: "place"` run does real floorplanning and global placement.
+This mode closes the stricter gap: SDC-constrained setup **and** hold slack
+reachable from a synthesized structural netlist alone, with **no
+place-and-route invocation of any kind** — no floorplan, no macro placement,
+no PDN, no placement, no routing.
+
+```json
+{
+  "verilog": "gcd_netlist.v",
+  "hdl_toplevel": "gcd",
+  "pdk": { "cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80" },
+  "constraints": {
+    "clock_port": "clk",
+    "clock_period_ns": 2.0,
+    "wire_load_model": "Medium",
+    "wire_load_mode": "top"
+  }
+}
+```
+
+```bash
+klt sta netlist_sta_request.json --format json
+# -> geometry_source: "netlist_estimate", def_path: null,
+#    verilog_path: "/abs/path/gcd_netlist.v"
+```
+
+With no DEF at all, this command runs `read_liberty` -> `read_lef` x2 ->
+`read_verilog` -> `link_design` -> `create_clock` instead of `read_def` —
+the same order `klt place-and-route`'s own `"floorplan"`-stage load already
+runs, minus that stage's floorplan-init/macro-placement/PDN steps (none of
+which have meaning with no placement geometry at all).
+
+**There is no measured wire parasitic in this mode, of any kind.** Unlike
+`"routed"`/`"placement_estimate"` (both load a real, if approximate,
+geometry), a from-scratch netlist has no wires to estimate a bounding box or
+route from. The only estimate available is OpenSTA's own liberty-driven
+wire-load model:
+
+- `constraints.wire_load_model` — the name of a `wire_load { ... }` group
+  declared in the resolved cell library's own liberty file (e.g.
+  `sky130_fd_sc_hd` ships `"Small"`/`"Medium"`/`"Large"`/`"Huge"`), passed to
+  OpenSTA's `set_wire_load_model -name`.
+- `constraints.wire_load_mode` — one of `"top"`/`"enclosed"`/`"segmented"`
+  (OpenSTA's `set_wire_load_mode`); requires `wire_load_model` to also be
+  given (rejected on its own as a request error).
+- **Both omitted (the default)**: no `set_wire_load*` command is issued at
+  all. OpenSTA falls back to whatever `default_wire_load`/
+  `default_wire_load_mode` the resolved liberty itself declares (many
+  open-PDK standard-cell libraries, `sky130_fd_sc_hd` included, ship one),
+  or to zero estimated wire parasitics if the liberty declares none. Either
+  way, the response's `wire_load_model`/`wire_load_mode` echo exactly what
+  was (or was not) requested — never a guess at what OpenSTA silently
+  defaulted to on its own.
+
+This is deliberately a **different, and less accurate, mechanism** from
+both `place_and_route.py`'s `estimate_parasitics -placement`/
+`-global_routing` (which require an actual placement to measure a bounding
+box or global route from) and `synthesize.py`'s ABC-derived `WireLoad`
+estimate (drives ABC's own `stime`, an entirely different tool from the
+OpenSTA session this command runs) — none of the three are interchangeable,
+which is exactly why `geometry_source: "netlist_estimate"` is a third,
+distinct value from `"routed"`/`"placement_estimate"`: a consumer must never
+conflate a wire-load-model-only estimate with either a real placement's
+bounding-box RC or a routed design's actual RC.
+
+**Not supported in this mode**: `spef` (there is no routed or placement
+geometry for a SPEF to annotate real parasitics onto — a request error if
+given together with `verilog`), and any `geometry_source` value other than
+`"netlist_estimate"` (also a request error — this mode has exactly one
+legal value, never a caller choice among several).
+
+**Not `klayout_tools.sta`.** This mode still runs a full, SDC-constrained
+OpenSTA session (`create_clock`, real setup *and* hold slack, real
+corner/liberty resolution) — unlike `klt synthesize`'s integrated,
+*unconstrained* `sta` field (`klayout_tools.sta`'s `klt_statime_native`
+engine, which has no SDC/`create_clock` and reports only a whole-netlist
+critical-path delay, never slack, and no hold analysis at all). See "What
+this is not" above for that distinction in full.
 
 ## Worked example
 
@@ -354,7 +463,7 @@ place-and-route outcomes.
 | Code | Meaning |
 | --- | --- |
 | `0` | The analysis completed. |
-| `1` | Failed to run — bad request, unresolvable `def`/PDK/LEF/`spef`, a missing clock constraint, or an OpenROAD engine error. |
+| `1` | Failed to run — bad request, unresolvable `def`/`verilog`/PDK/LEF/`spef`, a missing clock constraint, or an OpenROAD engine error. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 **No exit code `3`.** Like `klt place-and-route`, timing slack and violation
