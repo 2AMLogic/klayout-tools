@@ -1391,14 +1391,18 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
   contract's `netlist` request field) — this command does not floorplan,
   place, or route. Since issue #1844 that handoff is the `{path, scope}`
-  object, not a bare path string: a caller wiring the two commands together
-  takes `netlist_path.path` when `scope` is `"repo"` (a repo-relative path,
-  which `klt place-and-route` resolves against its own request file's
-  directory like any other relative `netlist`), or reconstructs the path
-  from this command's own deterministic output convention
+  object, not a bare path string, and its `path` (when populated) is not
+  usable as-is: `netlist_path.path` is repo-root-relative (`scope: "repo"`,
+  from `env_provenance.repo_relative_path()`) or absent (`scope:
+  "external"`), while `klt place-and-route`'s own `netlist` request field is
+  resolved against the *request file's* directory (see
+  [`docs/cli/place-and-route.md`](place-and-route.md)) — a different base
+  in the common case where the request file does not sit at the repo root.
+  Rather than reconcile the two bases, a caller wiring the two commands
+  together should use this command's own deterministic output convention
   (`<request_dir>/.klt/synthesize/<hdl_toplevel>_synth.v`, see "Artifacts"
-  above) when `scope` is `"external"` — `klayout_tools.digital_fleet`
-  already does the latter.
+  above) regardless of `netlist_path.scope` — `klayout_tools.digital_fleet`
+  already does this.
 - **Fleet-scale evaluation of many design-space candidates.** See
   [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation of
   digital candidates" section (Epic #391 Phase 6) — `klayout_tools.digital_fleet`
