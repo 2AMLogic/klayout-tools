@@ -46,7 +46,6 @@ from klayout_tools.extract import (
     _extract_netlist,
     _mom_crosscheck_gap_um,
     _mom_ground_entry_for_crosscheck,
-    _n_squares,
     _promote_orphan_named_nets,
     _purge_preserving_named_nets,
     _region,
@@ -54,6 +53,7 @@ from klayout_tools.extract import (
     run_extract,
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
+from klayout_tools.extract_parasitics import _n_squares
 from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -12926,7 +12926,10 @@ def test_distributed_rc_order_and_segments_three_point_conservation():
     given out of physical order, are re-ordered along their dominant spread
     axis, and the resulting segment resistances/node capacitances sum back
     to the given totals exactly."""
-    from klayout_tools.extract import _distributed_rc_order, _distributed_rc_segments
+    from klayout_tools.extract_parasitics import (
+        _distributed_rc_order,
+        _distributed_rc_segments,
+    )
 
     # (10, 0), (0, 0), (5, 0): the greatest-distance pair is index 0<->1
     # (10.0 apart), so the projection axis runs from index 0 (10, 0) towards
@@ -12961,7 +12964,7 @@ def test_distributed_rc_order_degenerate_coincident_positions():
     """Every terminal at the identical position (no spatial signal) falls
     back to an equal split -- still conserving both totals exactly, and
     never raising a division-by-zero."""
-    from klayout_tools.extract import _distributed_rc_segments
+    from klayout_tools.extract_parasitics import _distributed_rc_segments
 
     positions = [(3.0, 3.0), (3.0, 3.0), (3.0, 3.0)]
     order, segment_r_ohm, node_c_ff = _distributed_rc_segments(
