@@ -3952,8 +3952,9 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_pdk_args(
         drc_parser,
         pdk_help=(
-            "PDK variant to resolve the native deck from (e.g. sky130A), "
-            "for --engine klayout; overrides $PDK"
+            "PDK variant (e.g. sky130A); resolves the native deck for "
+            "--engine klayout, and, for either engine, is recorded in "
+            "provenance.pdk (issue #1901) when given. Overrides $PDK"
         ),
     )
     drc_parser.add_argument(

@@ -14,6 +14,7 @@ plus a real-binary integration tier gated by
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -385,6 +386,108 @@ def test_klayout_engine_no_deck_vars_provenance_omits_options_key(
     report = run_drc_klayout_engine(gds, deck_file)
 
     assert "options" not in report["provenance"]["deck"]
+
+
+def _make_pdk_install(tmp_path, variant: str) -> str:
+    """Minimal on-disk PDK install `find_pdk` can resolve -- mirrors
+    `tests/test_extract.py`'s helper of the same name/shape."""
+    root = tmp_path / "pdk_install"
+    (root / variant / "libs.tech").mkdir(parents=True)
+    return str(root)
+
+
+def test_klayout_engine_pdk_flags_populate_provenance_pdk(tmp_path, monkeypatch):
+    """Issue #1901: `--pdk`/`--pdk-root` must be recorded in
+    `provenance.pdk` for the `klayout` engine too -- *in addition to*, not
+    instead of, this engine's existing (separate) use of the same flags to
+    resolve the native deck script via `pdk.drc_deck_file` one layer up in
+    `cli/drc_cmd.py`."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_drc_klayout_engine(
+        gds, deck_file, pdk_variant="sky130A", pdk_root=root
+    )
+
+    assert report["provenance"]["pdk"] == {
+        "name": "sky130A",
+        "source": report["provenance"]["pdk"]["source"],
+        "version": None,
+    }
+    assert report["provenance"]["pdk"]["source"] is not None
+
+
+def test_klayout_engine_no_pdk_flags_leaves_provenance_pdk_null(tmp_path, monkeypatch):
+    """Regression guard: the existing `test_klayout_engine_clean_report`
+    already asserts this for the zero-arg call; this pins it explicitly as
+    its own test so it survives independently of that test's other
+    assertions changing."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["provenance"]["pdk"] is None
+
+
+def test_klayout_engine_unresolvable_pdk_still_fails(tmp_path, monkeypatch):
+    """An unresolvable `--pdk`/`--pdk-root` must still fail the run (issue
+    #1901's acceptance criteria), not silently resolve to `provenance.pdk:
+    null`."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError):
+        run_drc_klayout_engine(
+            gds,
+            deck_file,
+            pdk_variant="not-a-real-variant",
+            pdk_root=str(tmp_path / "empty-pdk-root"),
+        )
+
+
+def test_cli_klayout_engine_pdk_flag_populates_provenance(
+    tmp_path, monkeypatch, capsys
+):
+    """CLI-level coverage: `klt drc --engine klayout --deck-file <path>
+    --pdk <variant> --pdk-root <root> --format json` populates
+    `.provenance.pdk` (issue #1901) via `drc_cmd.py::_run`'s threading of
+    `args.pdk`/`args.pdk_root` into `run_drc_klayout_engine`. `--deck-file`
+    is given explicitly so this stays hermetic (no dependency on the fake
+    PDK install shipping a real `.lydrc` script `drc_deck_file` could
+    resolve)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    assert (
+        main(
+            [
+                "drc",
+                gds,
+                "--engine",
+                "klayout",
+                "--deck-file",
+                deck_file,
+                "--pdk",
+                "sky130A",
+                "--pdk-root",
+                root,
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["provenance"]["pdk"]["name"] == "sky130A"
 
 
 def test_klayout_engine_missing_binary_raises_actionable_error(tmp_path, monkeypatch):

@@ -62,6 +62,7 @@ from .decks import (
 )
 from .layers import layers_report
 from .metrics import is_registered
+from .pdk import PdkNotFoundError, find_pdk
 
 # Check kinds that operate on a single region (no other_layer).
 # "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
@@ -187,7 +188,13 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
-def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]:
+def run_drc(
+    path: str,
+    deck_name: str,
+    top: str | None = None,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
     Returns a dict matching the documented JSON schema (see
@@ -225,7 +232,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
                 "klayout_version": <str | None>,
-                "pdk": None,  # klt drc resolves no PDK
+                "pdk": {"name": ..., "source": ..., "version": ...} | None,
                 "deck": {"name": <deck name>, "content_hash": "sha256:..."},
             },
         }
@@ -346,10 +353,33 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
     A named cell absent from the stream is a :class:`DrcError`, matching
     ``klt ring-check --top``.
 
+    ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
+    #1901) resolve no rule content -- this curated engine's rules come
+    entirely from ``deck_name`` -- but, when either is given, are resolved
+    via :func:`klayout_tools.pdk.find_pdk` purely so ``provenance.pdk`` can
+    record which PDK revision the run was evidence for (the same shape
+    ``klt extract``/``klt sta``/``klt place-and-route`` already populate).
+    Omitting both (the default) leaves ``provenance.pdk`` ``None``, matching
+    every prior release's behaviour.
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
-    name is unknown, ``top`` names a cell absent from the stream, or a rule
-    is malformed (e.g. a two-layer check missing ``other_layer``).
+    name is unknown, ``top`` names a cell absent from the stream, a rule is
+    malformed (e.g. a two-layer check missing ``other_layer``), or
+    ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found.
     """
+    # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
+    # rules come entirely from `deck_name`, so the resolved PDK is used for
+    # nothing but `provenance.pdk` (issue #1901). Mirrors extract.py's own
+    # `pdk_variant is not None or pdk_root is not None` guard so an omitted
+    # `--pdk` still yields `provenance.pdk: null`, not a spuriously-resolved
+    # default PDK.
+    pdk_info: dict[str, Any] | None = None
+    if pdk_variant is not None or pdk_root is not None:
+        try:
+            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
+        except PdkNotFoundError as exc:
+            raise DrcError(str(exc)) from exc
+
     # Checked here (ahead of deck lookup) so a missing/bad path is reported
     # before an unknown deck name, matching this command's historical error
     # precedence; load_layout() repeats this cheap check before the read.
@@ -857,6 +887,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
         "provenance": build_provenance(
             deck_name=deck_name,
             deck_path=deck_source_path(deck_name),
+            pdk=pdk_info,
             input_path=path,
             include_klayout_version_mismatch=True,
         ),
@@ -1545,6 +1576,8 @@ def run_drc_klayout_engine(
     top: str | None = None,
     timeout_s: float = KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S,
     deck_vars: dict[str, str] | None = None,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1624,15 +1657,40 @@ def run_drc_klayout_engine(
     a known, documented limitation (see ``docs/cli/drc.md``, "Engine" ->
     "klayout").
 
+    ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
+    #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
+    is given, purely so ``provenance.pdk`` can record which PDK revision the
+    run is evidence for -- **in addition to**, not instead of, this engine's
+    existing use of ``--pdk``/``--pdk-root`` one layer up in
+    ``cli/drc_cmd.py`` to resolve ``deck_file`` itself via
+    :func:`klayout_tools.pdk.drc_deck_file` when ``--deck-file`` is omitted.
+    Omitting both leaves ``provenance.pdk`` ``None``, matching every prior
+    release's behaviour.
+
     Raises :class:`DrcError` for every failure mode above, plus a missing/
     unreadable ``path`` or ``deck_file`` (checked before the subprocess is
-    launched, the same fail-fast order :func:`run_drc` uses for ``path``).
+    launched, the same fail-fast order :func:`run_drc` uses for ``path``),
+    or ``pdk_variant``/``pdk_root`` given but no matching PDK found.
     """
     if top is not None:
         raise DrcError(
             "the klayout engine does not support --top yet -- omit --top, "
             "or use the curated deck engine (the default) instead"
         )
+
+    # Resolved only when `--pdk`/`--pdk-root` was given -- purely for
+    # `provenance.pdk` (issue #1901); this engine's own rules come from
+    # `deck_file`, resolved separately (possibly using the same flags, one
+    # layer up in `cli/drc_cmd.py`'s `drc_deck_file` call). Mirrors
+    # `run_drc`'s identical guard so an omitted `--pdk` still yields
+    # `provenance.pdk: null`.
+    pdk_info: dict[str, Any] | None = None
+    if pdk_variant is not None or pdk_root is not None:
+        try:
+            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
+        except PdkNotFoundError as exc:
+            raise DrcError(str(exc)) from exc
+
     if not os.path.isfile(deck_file):
         raise DrcError(f"deck file not found: {deck_file}")
 
@@ -1724,6 +1782,7 @@ def run_drc_klayout_engine(
         "provenance": build_provenance(
             deck_name=os.path.basename(deck_file),
             deck_path=deck_file,
+            pdk=pdk_info,
             input_path=path,
             deck_options=deck_vars,
             include_klayout_version_mismatch=True,

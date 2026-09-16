@@ -11035,6 +11035,59 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
     assert report["mismatch_count"] == 0
 
 
+def test_run_lvs_gate_level_verilog_reference_populates_provenance_pdk(tmp_path):
+    """Issue #1901: a `gate-level-verilog` reference whose `reference.pdk`/
+    `reference.pdk_root` resolve a real PDK must record it in
+    `provenance.pdk` -- reusing the resolution `_resolve_gate_level_pin_orders`
+    already performs for pin-order lookup, not a fresh/duplicate one.
+    Previously always `null` regardless of what `reference.pdk` resolved."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["provenance"]["pdk"] == {
+        "name": "myvariant",
+        "source": report["provenance"]["pdk"]["source"],
+        "version": None,
+    }
+    assert report["provenance"]["pdk"]["source"] is not None
+
+
+def test_run_lvs_plain_spice_reference_leaves_provenance_pdk_null(tmp_path):
+    """Regression guard: a plain SPICE-vs-SPICE reference (the default
+    `form`, no `reference.pdk` at all) genuinely resolves no PDK, so
+    `provenance.pdk` must stay `null`, exactly as before issue #1901."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt top a b\nM1 a b VSS VSS nfet\n.ends\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt top a b\nM1 a b VSS VSS nfet\n.ends\n",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {"netlist": reference_path, "top": "top"},
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["provenance"]["pdk"] is None
+
+
 #: The same design whose internal net and one instance name are Verilog
 #: escaped identifiers embedding a place-and-route-flattened
 #: `generate`/`genvar` hierarchy path -- `[`, `]`, `.` and `/` all inside a
@@ -11617,7 +11670,10 @@ _REAL_GF180MCU_9T5V0_VARIANT = _find_real_library_pin_order_variant(
 )
 def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
     root, variant = _REAL_SKY130_HD_VARIANT
-    lookup = lvs._resolve_gate_level_pin_orders("sky130_fd_sc_hd", variant, root).get
+    pin_orders, _pdk_info = lvs._resolve_gate_level_pin_orders(
+        "sky130_fd_sc_hd", variant, root
+    )
+    lookup = pin_orders.get
     # sky130's own declared order for a 1x inverter: signal `A`, the four
     # supply/well pins, then the output `Y` -- alphabetical, with the
     # supplies interleaved between the signal pins rather than grouped at
@@ -11648,9 +11704,10 @@ def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
 )
 def test_real_gf180mcu_library_resolves_pin_order_from_the_installed_file():
     root, variant = _REAL_GF180MCU_9T5V0_VARIANT
-    lookup = lvs._resolve_gate_level_pin_orders(
+    pin_orders, _pdk_info = lvs._resolve_gate_level_pin_orders(
         "gf180mcu_fd_sc_mcu9t5v0", variant, root
-    ).get
+    )
+    lookup = pin_orders.get
     # gf180mcu's own convention differs from sky130's on BOTH axes: pin
     # names (`I`/`ZN`, not `A`/`Y`) and order (signals first, supplies
     # last). Resolving both libraries correctly from one code path is the

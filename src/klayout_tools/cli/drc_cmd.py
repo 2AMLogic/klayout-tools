@@ -204,11 +204,19 @@ def _run(args: argparse.Namespace) -> dict:
             top=args.top,
             timeout_s=args.timeout_s,
             deck_vars=_parse_deck_vars(args.deck_var),
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
         )
 
     if not args.deck:
         raise DrcError("argument --deck is required for --engine curated")
-    return run_drc(args.file, args.deck, top=args.top)
+    return run_drc(
+        args.file,
+        args.deck,
+        top=args.top,
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+    )
 
 
 def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:

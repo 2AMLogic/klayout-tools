@@ -686,6 +686,92 @@ def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
     )
 
 
+def _make_pdk_install(tmp_path, variant: str) -> str:
+    """Minimal on-disk PDK install `find_pdk` can resolve -- mirrors
+    `tests/test_extract.py`'s helper of the same name/shape."""
+    root = tmp_path / "pdk_install"
+    (root / variant / "libs.tech").mkdir(parents=True)
+    return str(root)
+
+
+def test_run_drc_pdk_populates_provenance_pdk(tmp_path):
+    """Issue #1901: `run_drc` (the curated engine) records the resolved PDK
+    in `provenance.pdk` when `pdk_variant`/`pdk_root` is given, mirroring
+    `klt extract`/`klt sta`/`klt place-and-route` -- previously always
+    `None` regardless of what was passed."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_drc(str(path), "sky130", pdk_variant="sky130A", pdk_root=root)
+
+    assert report["provenance"]["pdk"] == {
+        "name": "sky130A",
+        "source": report["provenance"]["pdk"]["source"],
+        "version": None,
+    }
+    assert report["provenance"]["pdk"]["source"] is not None
+
+
+def test_run_drc_no_pdk_flags_leaves_provenance_pdk_null(tmp_path):
+    """Regression guard: omitting `pdk_variant`/`pdk_root` (today's default)
+    must keep `provenance.pdk` `None`, exactly as before issue #1901."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["provenance"]["pdk"] is None
+
+
+def test_run_drc_unresolvable_pdk_still_fails(tmp_path, monkeypatch):
+    """An unresolvable `--pdk`/`--pdk-root` must still fail the run (issue
+    #1901's acceptance criteria: this issue is about a `null` field on a
+    *successful* run, not about relaxing PDK-resolution failure behavior)."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+
+    with pytest.raises(DrcError):
+        run_drc(
+            str(path),
+            "sky130",
+            pdk_variant="not-a-real-variant",
+            pdk_root=str(tmp_path / "empty-pdk-root"),
+        )
+
+
+def test_cli_drc_curated_engine_pdk_flag_populates_provenance(tmp_path, capsys):
+    """CLI-level coverage: `klt drc --engine curated --pdk <variant>
+    --pdk-root <root> --format json` populates `.provenance.pdk` (issue
+    #1901) -- previously only `--engine klayout` even read `--pdk` at all,
+    and even then only to resolve the deck file, never provenance."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    assert (
+        main(
+            [
+                "drc",
+                str(path),
+                "--deck",
+                "sky130",
+                "--pdk",
+                "sky130A",
+                "--pdk-root",
+                root,
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["provenance"]["pdk"]["name"] == "sky130A"
+
+
 def test_json_contract_clean(tmp_path, capsys):
     path = tmp_path / "clean.gds"
     _make_clean_layout().write(str(path))
