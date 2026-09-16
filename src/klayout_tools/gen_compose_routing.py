@@ -262,7 +262,12 @@ def _resolve_via_drop_layer(
       ``metal_b``, all at the pin's own position, exactly as the single-hop
       case always has; consecutive hops share a landing pad at the
       intermediate level they have in common (harmless redundancy, not a
-      second, larger pad).
+      second, larger pad). Since issue #1894, a ``port_layer`` on the deck's
+      diffusion role (``deck.active``) also resolves this way: the ladder's
+      first hop is ``deck.contact`` (the licon/comp-contact that lands on
+      ``deck.metals[0]``), followed by the ordinary metals-stack hops up to
+      ``route_layer`` -- a real contact reaching the diffusion, not just a
+      metal stub sitting near it.
     * ``(None, reason)`` -- a drop is needed but not resolvable (the deck
       declares no via for one of the hops the ladder needs, or the pin sits
       on the deck's bare ``poly`` layer, which no via in the metals stack
@@ -276,7 +281,17 @@ def _resolve_via_drop_layer(
     joining the two. That is an open net (or, where the stub crosses other
     geometry, a short) that only a later ``klt drc``/``klt extract``/``klt
     lvs`` run would surface, with nothing pointing back at the cause. It is
-    now an explicit rejection naming the fix.
+    now an explicit rejection naming the fix. Issue #1894 found the same
+    failure shape one branch over: a diffusion-role port (``deck.active``)
+    fell into that same "unrelated role, nothing to do" branch, so no
+    licon/mcon contact was ever drawn between the routed metal and the
+    diffusion it was meant to strap -- ``"routed": true`` and a clean ``klt
+    drc`` both held while `klt extract` recovered either an unstrapped node
+    (the strap never landed) or a short (an unrelated net's own via-drop
+    landing pad overlapped the un-tracked stub, invisible to the same-block
+    footprint-collision check since it never saw a landing pad for this leg
+    at all). That branch is now resolved via ``deck.contact`` instead,
+    exactly like the bare-poly case above but with a real contact available.
     """
     if route_layer == port_layer:
         return None, None
@@ -299,9 +314,59 @@ def _resolve_via_drop_layer(
                 "reports a contacted metal landing pad (issue #492), or name "
                 "the gate with pins[] instead of routing to it"
             )
-        # Any other non-metals-stack role (e.g. a guard ring's active/tap
-        # port, which the ring's own metal already covers at that position)
-        # keeps the pre-#454 behavior: drawn directly on route_layer, no via.
+        if port_layer == deck.active:
+            # Issue #1894: a diffusion-role port intended for a *new* strap
+            # from outside its own generator-time footprint (e.g.
+            # `bjt_array`'s `COLL_*` collector-ring tap, reported on
+            # `deck.active` specifically so a caller can tie a fresh
+            # connection onto the ring -- see `gen.py`'s
+            # `_bjt_array_describe`). Unlike an ordinary `TAP_*` ring port
+            # (always reported on the metals-stack `"metal"` role itself,
+            # already resolved above or by the ordinary metals-ladder branch
+            # below), there is no pre-existing via at this exact landing
+            # point -- `deck.contact` (licon/comp-contact) is the one thing
+            # that connects `deck.active` up to `deck.metals[0]`, so it is
+            # prepended as the ladder's first hop, then the ordinary
+            # metals-stack ladder below carries it the rest of the way up to
+            # `route_layer`. Before this fix, this branch fell into the
+            # generic "unrelated role, nothing to do" case: no via, no
+            # landing pad, no contact ever drawn -- `gen-compose` reported
+            # the leg `routed: true` regardless, and the strap was either an
+            # open connection (`klt extract` recovers an unstrapped node) or
+            # a silent short to whatever else the resulting uncontacted metal
+            # stub happened to sit on.
+            if not deck.metals:
+                return None, (
+                    "this pin is drawn on the resolved PDK's diffusion role, "
+                    "but its extraction deck declares no metals[] stack to "
+                    "land a contact on"
+                )
+            contact_hop: _ViaDropHop = (deck.contact, port_layer, deck.metals[0])
+            ladder = [contact_hop]
+            for via_index in range(0, route_idx):
+                if via_index >= len(deck.vias):
+                    return None, (
+                        "the resolved PDK's extraction deck declares no via "
+                        f"connecting deck metals[{via_index}] and "
+                        f"metals[{via_index + 1}] -- needed for a via-drop "
+                        "ladder between routing.layer_role's metal (deck "
+                        f"metals[{route_idx}]) and this pin's own diffusion "
+                        "layer (reached via deck.contact)"
+                    )
+                ladder.append(
+                    (
+                        deck.vias[via_index],
+                        deck.metals[via_index],
+                        deck.metals[via_index + 1],
+                    )
+                )
+            return tuple(ladder), None
+        # Any other non-metals-stack role (e.g. a guard ring's ordinary
+        # substrate/well tap port drawn on a distinct `deck.tap` layer, which
+        # the ring's own metal already covers at that position -- no current
+        # `klt gen` generator reports a port this way, but the deck models
+        # the layer) keeps the pre-#454 behavior: drawn directly on
+        # route_layer, no via.
         return None, None
     lo, hi = (route_idx, port_idx) if route_idx < port_idx else (port_idx, route_idx)
     ladder: list[_ViaDropHop] = []

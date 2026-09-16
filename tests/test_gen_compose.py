@@ -6966,6 +6966,115 @@ def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
     assert error is None
 
 
+def test_resolve_via_drop_layer_diffusion_role_port_resolves_a_contact_hop():
+    # Issue #1894 (Gap 1): a port reported on the deck's diffusion role
+    # (65/20, e.g. `bjt_array`'s `COLL_*` collector-ring tap) is not a member
+    # of `deck.metals` either -- but unlike the generic "unrelated role"
+    # case above, sky130 declares a real contact (`licon1.drawing`, 66/44)
+    # connecting it up to `deck.metals[0]` (li1). Routing at the base
+    # "metal" role (li1, metals[0] itself) needs exactly that one hop.
+    deck = get_extraction_deck("sky130")
+    ladder, error = _resolve_via_drop_layer(deck, (67, 20), deck.active)
+    assert ladder == ((deck.contact, deck.active, (67, 20)),)
+    assert error is None
+
+
+def test_resolve_via_drop_layer_diffusion_role_port_resolves_a_multi_hop_ladder():
+    # Same as above, but routing on met1 (metals[1], "metal2") -- the
+    # licon hop up to li1 (metals[0]) is followed by the ordinary
+    # li1<->met1 mcon hop, exactly like a two-metals-stack-level ladder
+    # would (#1567), just with the diffusion contact prepended.
+    deck = get_extraction_deck("sky130")
+    ladder, error = _resolve_via_drop_layer(deck, (68, 20), deck.active)
+    assert ladder == (
+        (deck.contact, deck.active, (67, 20)),
+        ((67, 44), (67, 20), (68, 20)),
+    )
+    assert error is None
+
+
+def test_resolve_via_drop_layer_diffusion_role_port_missing_via_is_unresolvable():
+    # Mirrors test_resolve_via_drop_layer_non_adjacent_metals_missing_via_is_
+    # unresolvable above: a synthetic deck missing the li1<->met1 via still
+    # fails naming the specific missing hop, rather than silently stopping
+    # short at the contact-only ladder.
+    deck = get_extraction_deck("sky130")
+    truncated_deck = dataclasses.replace(deck, vias=deck.vias[:0])
+    ladder, error = _resolve_via_drop_layer(truncated_deck, (68, 20), deck.active)
+    assert ladder is None
+    assert error is not None
+    assert "no via" in error
+    assert "metals[0]" in error and "metals[1]" in error
+
+
+def test_route_two_pin_populates_via_drops_for_a_diffusion_role_port():
+    # Issue #1894 (Gap 1 root cause, at the route_two_pin() level rather
+    # than full compose()+drc+extract): a same-block leg from a port
+    # reported on the deck's diffusion role (mirroring `bjt_array`'s
+    # `COLL_*`) to a port on the resolved route_layer used to report
+    # `routed: true` with an *empty* `via_drops` -- no contact ever drawn,
+    # even though the leg claimed success. With the fix, `via_drops` carries
+    # the real contact ladder (licon then mcon, #1567-shaped), matching
+    # `_resolve_via_drop_layer`'s own new ladder exactly.
+    deck = get_extraction_deck("sky130")
+    blocks = {
+        "a": {
+            "id": "a",
+            "port_names": {"D", "M"},
+            "ports": {
+                "D": {
+                    "x_um": 0.0,
+                    "y_um": 0.0,
+                    "direction_deg": 0,
+                    "layer": {"layer": deck.active[0], "datatype": deck.active[1]},
+                    "width_um": 0.42,
+                },
+                "M": {
+                    "x_um": 5.0,
+                    "y_um": 0.0,
+                    "direction_deg": 180,
+                    "layer": {
+                        "layer": deck.metals[1][0],
+                        "datatype": deck.metals[1][1],
+                    },
+                    "width_um": 0.17,
+                },
+            },
+        },
+    }
+    offsets = {"a": {"x": 0.0, "y": 0.0}}
+    bboxes = {"a": {"x0": -1.0, "y0": -1.0, "x1": 6.0, "y1": 1.0}}
+    pin_a = {"block": "a", "port": "D"}
+    pin_b = {"block": "a", "port": "M"}
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer=deck.metals[1],
+        extraction_deck=deck,
+    )
+    assert result["routed"] is True
+    assert result["via_drops"] == [
+        {
+            "x_um": 0.0,
+            "y_um": 0.0,
+            "via_layer": deck.contact,
+            "landing_layers": (deck.active, deck.metals[0]),
+            "block_id": "a",
+        },
+        {
+            "x_um": 0.0,
+            "y_um": 0.0,
+            "via_layer": deck.vias[0],
+            "landing_layers": (deck.metals[0], deck.metals[1]),
+            "block_id": "a",
+        },
+    ]
+
+
 def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
     # #492: a metal backbone ending on the deck's bare `poly` layer (66/20 on
     # sky130 -- a gate drawn without params.gate_contact) has no via that
@@ -9436,6 +9545,276 @@ def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
     assert any(
         "closed guard/collector ring" in note for note in report["drc_hints"]["notes"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# `COLL_*` (diffusion-role) collector-ring via-drop (issue #1894): a
+# `bjt_array` collector-ring `COLL_*` tap port is reported on the deck's
+# diffusion role (unlike an ordinary `TAP_*` ring port, always reported on
+# the metals-stack "metal" role itself), so wiring one into `connectivity[]`
+# needs `_resolve_via_drop_layer`'s new diffusion-role branch to draw a real
+# contact rather than an uncontacted stub. `klt extract`'s own `nets.c`
+# device terminal is *not* a usable check here: sky130's curated PNP model
+# declares no drawn collector layer (`BipolarDevice.collector is None`), so
+# every device's collector terminal is *unconditionally* tied to the deck's
+# synthesized `substrate_net` global regardless of any real routed strap
+# (see `decks/sky130.py`'s own `bipolars` docstring) -- that terminal name
+# would read "vsubs" identically whether or not this issue's fix landed.
+# Instead, `_bjt_array_collector_net_id` below builds a minimal, deck-driven
+# `kdb.LayoutToNetlist` covering just the diffusion/contact/metals-stack
+# physical connectivity (no device recognition at all) and probes two raw
+# layout points directly -- the same "is this real geometry electrically
+# one node" question `klt extract`'s own `l2n.probe_net()` internals answer
+# (see extract.py's own docstring citations of it), scoped down to exactly
+# what this fix touches.
+# --------------------------------------------------------------------------- #
+
+
+def _bjt_array_collector_net_id(gds_path, top_cell_name, deck, point_a_um, point_b_um):
+    """Whether ``point_a_um``/``point_b_um`` (each an ``(x_um, y_um)`` pair,
+    read against any of ``deck.active``/``deck.metals``) sit on the same
+    physically-connected node, per a from-scratch ``kdb.LayoutToNetlist``
+    wired with only ``deck``'s diffusion/contact/metals-stack connectivity
+    (no device recognition, no ``substrate_net``/``connect_global`` special-
+    casing) -- see the module comment above for why `klt extract`'s own
+    per-device JSON cannot answer this for a collector-less bipolar model.
+
+    Returns ``(net_a, net_b)`` as a ``(name, cluster_id)`` pair each (or
+    ``None`` where a point falls on no drawn shape of any probed layer) --
+    the same net iff both fields match, since ``cluster_id`` alone is only
+    unique within one ``kdb.Circuit``.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(gds_path)
+    top = layout.cell(top_cell_name)
+    dbu = layout.dbu
+
+    l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, top, []))
+    probe_layers = [deck.active, *deck.metals]
+
+    def make_layer(pair):
+        return l2n.make_layer(layout.layer(pair[0], pair[1]), f"L{pair[0]}_{pair[1]}")
+
+    active = make_layer(deck.active)
+    contact = make_layer(deck.contact)
+    metals = [make_layer(pair) for pair in deck.metals]
+    vias = [make_layer(pair) for pair in deck.vias]
+
+    l2n.connect(active)
+    l2n.connect(contact)
+    l2n.connect(active, contact)
+    l2n.connect(contact, metals[0])
+    l2n.connect(metals[0])
+    for index in range(len(vias)):
+        l2n.connect(metals[index], vias[index])
+        l2n.connect(vias[index])
+        l2n.connect(vias[index], metals[index + 1])
+        l2n.connect(metals[index + 1])
+    l2n.extract_netlist()
+
+    def probe(point_um):
+        point = kdb.Point(int(round(point_um[0] / dbu)), int(round(point_um[1] / dbu)))
+        for pair in probe_layers:
+            layer_region = l2n.layer_by_name(f"L{pair[0]}_{pair[1]}")
+            net = l2n.probe_net(layer_region, point)
+            if net is not None:
+                return (net.expanded_name(), net.cluster_id, net.circuit())
+        return None
+
+    return probe(point_a_um), probe(point_b_um)
+
+
+def test_compose_bjt_array_collector_ring_strap_draws_a_real_contact(
+    tmp_path, pdk_root
+):
+    # Issue #1894, Gap 1: wiring a `COLL_*` port into `connectivity[]` used
+    # to report `routed: true` with no licon/mcon ever drawn -- an open
+    # collector strap despite the tool's own success signals. This is the
+    # issue's own reproduction (an isolated `bjt_array`, no downstream
+    # design), routed at "metal2" (met1) -- the issue's own reported
+    # DRC-clean level -- so this test also guards against a regression back
+    # to "clean DRC, but still no real contact" (the exact trap `klt drc`
+    # alone could not have caught).
+    bjt = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "coll_repro",
+        emitter_um=3.4,
+        rows=2,
+        cols=4,
+        dummy=0,
+        topology="common_centroid",
+        ratio=8,
+        add_collector_ring=True,
+    )
+    output = tmp_path / "bjt8_coll_repro.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "array", "generator_report": bjt}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["array"],
+                "origins_um": {"array": {"x": 0.0, "y": 0.0}},
+            },
+            "connectivity": [
+                {
+                    "net": "base",
+                    "pins": [
+                        *({"block": "array", "port": f"Q{i}_B"} for i in range(8)),
+                        {"block": "array", "port": "COLL_N"},
+                        {"block": "array", "port": "COLL_S"},
+                        {"block": "array", "port": "COLL_E"},
+                        {"block": "array", "port": "COLL_W"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.17},
+            "options": {"cell_name": "bjt8_coll_repro", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Shape-count evidence (mirrors the issue's own repro): a real licon
+    # (66/44) and mcon (67/44) contact now sits at every COLL_* landing
+    # point, not just a metal stub sitting near the diffusion.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bjt8_coll_repro")
+    licon = layout.layer(66, 44)
+    mcon = layout.layer(67, 44)
+    coll_ports = [p for p in bjt["ports"] if p["name"].startswith("COLL_")]
+    assert len(coll_ports) == 4
+    for port in coll_ports:
+        px = int(round(port["x_um"] / layout.dbu))
+        py = int(round(port["y_um"] / layout.dbu))
+        landing = kdb.Box(px - 500, py - 500, px + 500, py + 500)
+        assert (
+            not kdb.Region(top.shapes(licon))
+            .interacting(kdb.Region(landing))
+            .is_empty()
+        ), f"no licon contact drawn at {port['name']}"
+        assert (
+            not kdb.Region(top.shapes(mcon)).interacting(kdb.Region(landing)).is_empty()
+        ), f"no mcon via drawn at {port['name']}"
+
+    # The strap is real, not just adjacent geometry: COLL_N's own landing
+    # point and the base bus's Q0_B pad resolve to the identical physical
+    # node (issue #1894's own "klt extract recovers the collector as a
+    # separate, unstrapped node" failure -- see the module comment above for
+    # why `devices[].nets.c` itself can't show this for sky130's PNP model).
+    deck = get_extraction_deck("sky130")
+    coll_n = next(p for p in coll_ports if p["name"] == "COLL_N")
+    q0_b = next(p for p in bjt["ports"] if p["name"] == "Q0_B")
+    net_a, net_b = _bjt_array_collector_net_id(
+        str(output),
+        "bjt8_coll_repro",
+        deck,
+        (coll_n["x_um"], coll_n["y_um"]),
+        (q0_b["x_um"], q0_b["y_um"]),
+    )
+    assert net_a is not None and net_b is not None
+    assert net_a[:2] == net_b[:2] and net_a[2] == net_b[2]
+
+
+def test_compose_bjt_array_collector_ring_strap_does_not_short_an_unrelated_net(
+    tmp_path, pdk_root
+):
+    # Issue #1894, Gap 2: a `COLL_*` leg's via-drop ladder (the fix above)
+    # also closes the collision-check blind spot the issue reports -- before
+    # the fix, an empty `via_drops` list for that leg meant its landing
+    # point was invisible to the same-block footprint-collision check
+    # (`_drawn_leg_footprint_region`), so a second, unrelated same-block net
+    # routed alongside it could land on/through the ring's own metal
+    # undetected. This composes a `COLL_*`-terminated net together with an
+    # unrelated same-block emitter-pair net at "metal2"/"metal3" (met1
+    # primary, met2 fallback -- the two-level-up variant of
+    # docs/cli/gen-compose.md's own "Cross-block bus routing" worked
+    # example) and confirms `klt extract` keeps them as distinct physical
+    # nodes rather than merging them into one shorted node.
+    bjt = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "coll_short_repro",
+        emitter_um=3.4,
+        rows=2,
+        cols=4,
+        dummy=0,
+        topology="common_centroid",
+        ratio=8,
+        add_collector_ring=True,
+    )
+    output = tmp_path / "bjt8_coll_short_repro.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "array", "generator_report": bjt}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["array"],
+                "origins_um": {"array": {"x": 0.0, "y": 0.0}},
+            },
+            "connectivity": [
+                {
+                    "net": "base",
+                    "pins": [
+                        {"block": "array", "port": "Q3_B"},
+                        {"block": "array", "port": "COLL_N"},
+                    ],
+                },
+                {
+                    "net": "ebus",
+                    "pins": [
+                        {"block": "array", "port": "Q1_E"},
+                        {"block": "array", "port": "Q2_E"},
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal2",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal3",
+            },
+            "options": {
+                "cell_name": "bjt8_coll_short_repro",
+                "output": str(output),
+            },
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["net"] == "base"
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["net"] == "ebus"
+    assert report["nets"][1]["routed"] is True
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    deck = get_extraction_deck("sky130")
+    q3_b = next(p for p in bjt["ports"] if p["name"] == "Q3_B")
+    q1_e = next(p for p in bjt["ports"] if p["name"] == "Q1_E")
+    net_base, net_ebus = _bjt_array_collector_net_id(
+        str(output),
+        "bjt8_coll_short_repro",
+        deck,
+        (q3_b["x_um"], q3_b["y_um"]),
+        (q1_e["x_um"], q1_e["y_um"]),
+    )
+    assert net_base is not None and net_ebus is not None
+    # AC's own success condition: distinct nodes, never a merge -- an
+    # accidental cluster-id collision across circuits is excluded by also
+    # comparing the owning `kdb.Circuit` object (index 2).
+    assert not (net_base[:2] == net_ebus[:2] and net_base[2] == net_ebus[2])
 
 
 def test_compose_routes_mos_array_device_port_to_its_own_ring_tap_port(
