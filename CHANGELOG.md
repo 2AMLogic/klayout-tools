@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed / Added**: `klt synthesize`'s generated top-level `.ys` script is
+  now byte-for-byte scan-clean (issue #1870, completing the half #1844 scoped
+  out). The resolved liberty — the one remaining absolute path, and on the
+  common PDK layouts (`~/.ciel`, `~/.volare`) a home-directory-shaped one, so
+  `klt env-provenance scan` on a freshly generated `.ys` still reported
+  `home-path` leaks and exit `3` — is now written relative to the resolved
+  PDK install root as `$PDK_ROOT/…` (the same spelling `klt sim`'s
+  `request.models.lib` already accepts). Yosys does not expand environment
+  variables in a script file, so each run additionally writes the rehydrated
+  sibling `.klt/synthesize/synth_<top>.run.ys` — identical apart from its
+  header block and the substituted absolute liberty — and it is that sibling
+  Yosys is invoked on. The response gains an additive `run_script_path`
+  (`{path, scope}`, equal to `script_path` when no token was written); no
+  `schema_version` bump, per
+  [`docs/json-contract.md`](docs/json-contract.md)'s additive-envelope
+  policy. **`script_path` is now the artifact to commit, not the artifact to
+  run** — a consumer that previously invoked `yosys -s <script_path>` should
+  use `run_script_path`, or rehydrate the committed form itself (one
+  `$PDK_ROOT` substitution, also exposed as
+  `klayout_tools.synthesize.rehydrate_script_text`). The arithmetic-candidate
+  trial scripts, the ABC probe, and the baseline re-derivation script are
+  unchanged: fully absolute, directly runnable, no sibling. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s "Embedded paths"
+  section.
 - **Fixed**: `klt lvs`'s pre-extracted `layout.netlist` shape (and
   `reference.netlist`) now recover a capacitor device's real class name
   when re-reading a `klt extract -o`-written bare `C` card (issue #1558's

@@ -721,6 +721,24 @@ def _stub_yosys_success(
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
 
 
+def _record_yosys_scripts(monkeypatch) -> list[str]:
+    """Wrap whatever `synthesize.subprocess.run` stub is already installed so
+    every `yosys -s <script>` invocation's script path is appended to the
+    returned list (issue #1870: which of the two generated scripts Yosys is
+    actually handed is the behaviour under test, not an implementation
+    detail). Call *after* `_stub_yosys_success`."""
+    scripts: list[str] = []
+    inner = synthesize.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"]:
+            scripts.append(cmd[2])
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", recording_run)
+    return scripts
+
+
 def _setup_success_env(tmp_path, monkeypatch) -> str:
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"
@@ -838,6 +856,11 @@ def test_repo_relative_paths_resolve_absent_outside_any_repo(
 
     assert report["netlist_path"] == {"path": None, "scope": "external"}
     assert report["script_path"] == {"path": None, "scope": "external"}
+    # Issue #1870: the liberty rewrite is anchored on the *PDK* root, not the
+    # repo root, so it still happens here (there is no repo at all) -- and
+    # `run_script_path`, being another path outside any repo, degrades to the
+    # same `external` shape rather than leaking the absolute path.
+    assert report["run_script_path"] == {"path": None, "scope": "external"}
 
 
 def test_json_response_and_generated_script_are_leak_free_inside_a_repo(
@@ -865,19 +888,299 @@ def test_json_response_and_generated_script_are_leak_free_inside_a_repo(
     # The RTL source and the `.klt/synthesize/` output paths (`tee -o`/
     # `write_verilog`) are repo-relative text in the script -- never an
     # absolute path naming `tmp_path` (this test's own stand-in for a real
-    # worktree). The liberty path is the one deliberate exception
-    # (`_write_script`'s own docstring, issue #1844): it stays a real
-    # absolute filesystem path in the script text so Yosys can actually
-    # open it -- exercised here too (the fabricated liberty in
-    # `_make_pdk_install` happens to live under `tmp_path`, i.e. *inside*
-    # the repo, yet still appears absolute), which is exactly why the
-    # scan above checks for *leaked identifiers*, not "zero absolute
-    # paths": `tmp_path` itself is not a home-directory-shaped path, so an
-    # absolute liberty line does not trip `find_leaks()`.
+    # worktree). The liberty was the one deliberate exception under #1844
+    # (absolute, so Yosys could open it); issue #1870 replaced that with the
+    # `$PDK_ROOT`-relative token, so no embedded path is absolute any more.
     script_text = Path(script_path).read_text(encoding="utf-8")
     assert "read_verilog gcd.v" in script_text
     assert f"write_verilog -noattr {report['netlist_path']['path']}" in script_text
-    assert f"abc -liberty {tmp_path}" in script_text
+    assert (
+        "abc -liberty $PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/lib/"
+        "sky130_fd_sc_hd__tt_025C_1v80.lib" in script_text
+    )
+    assert str(tmp_path) not in script_text
+
+
+# --------------------------------------------------------------------------- #
+# Commit-safe liberty path / `$PDK_ROOT` rehydration (issue #1870)
+# --------------------------------------------------------------------------- #
+
+
+#: A liberty path shaped exactly like the one the issue's own repro quotes --
+#: a PDK installed under the author's home directory, which is what every
+#: `~/.ciel`/`~/.volare` install looks like. Never touched on disk: the
+#: rewriting under test is pure path arithmetic (`os.path.realpath` does not
+#: require existence), so this is the one place the *literal* `home-path`
+#: leak kind can be reproduced on any machine, in any CI sandbox, without
+#: writing into a real home directory.
+_HOME_PDK_ROOT = "/home/alice/.ciel/gf180mcuA"
+_HOME_LIBERTY = (
+    f"{_HOME_PDK_ROOT}/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/"
+    "gf180mcu_fd_sc_mcu7t5v0__tt_025C_1v80.lib"
+)
+
+
+def _write_home_rooted_script(tmp_path: Path, **overrides) -> str:
+    """Generate one top-level-shaped `.ys` whose resolved liberty lives under
+    a home-directory-rooted PDK install, and return its path."""
+    script_path = str(tmp_path / "synth_gcd.ys")
+    kwargs = {
+        "script_path": script_path,
+        "sources": [str(tmp_path / "gcd.v")],
+        "hdl_toplevel": "gcd",
+        "liberty_path": _HOME_LIBERTY,
+        "stats_path": str(tmp_path / "gcd_stats.json"),
+        "netlist_path": str(tmp_path / "gcd_synth.v"),
+        "repo_root": str(tmp_path),
+        "pdk_root": _HOME_PDK_ROOT,
+    }
+    kwargs.update(overrides)
+    synthesize._write_script(**kwargs)
+    return script_path
+
+
+def test_home_rooted_liberty_makes_the_generated_script_scan_dirty_without_the_token(
+    tmp_path,
+):
+    """The oracle this issue is graded against is live: with the liberty left
+    absolute (the pre-#1870 behaviour, reproduced here by withholding
+    `pdk_root`), a `.ys` generated against a home-rooted PDK install really
+    does trip `env_provenance`'s `home-path` kind -- three times, once per
+    `-liberty` occurrence, exactly as the issue's repro reports.
+
+    Without this, the "scan is clean" assertions below could pass for the
+    trivial reason that the scanner never looks at those lines."""
+    script_path = _write_home_rooted_script(tmp_path, pdk_root=None)
+
+    scan = env_provenance.scan_files([script_path])
+
+    assert scan["status"] == "leaked"
+    assert scan["leak_count"] == 3
+    assert {leak["kind"] for leak in scan["files"][0]["leaks"]} == {"home-path"}
+
+
+def test_home_rooted_liberty_is_written_as_a_pdk_root_token_and_scans_clean(tmp_path):
+    """Issue #1870's acceptance oracle: the same script, generated with the
+    resolved PDK root in hand, carries `$PDK_ROOT/...` instead of the
+    home-rooted absolute path and scans completely clean -- no `home-path`
+    finding on any of the three `-liberty` occurrences."""
+    script_path = _write_home_rooted_script(tmp_path)
+
+    scan = env_provenance.scan_files([script_path])
+    assert scan["status"] == "clean", scan
+    assert scan["leak_count"] == 0
+
+    script_text = Path(script_path).read_text(encoding="utf-8")
+    assert _HOME_PDK_ROOT not in script_text
+    token_path = (
+        "$PDK_ROOT/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/"
+        "gf180mcu_fd_sc_mcu7t5v0__tt_025C_1v80.lib"
+    )
+    assert f"dfflibmap -liberty {token_path}" in script_text
+    assert f"abc -liberty {token_path}" in script_text
+    assert f"stat -liberty {token_path}" in script_text
+
+
+def test_write_script_returns_the_runnable_sibling_which_yosys_can_open(tmp_path):
+    """The committed form is not the executed form (Yosys does not expand
+    environment variables in a script file), so `_write_script` returns the
+    rehydrated `synth_<top>.run.ys` sibling it also writes -- and that
+    sibling carries the real absolute liberty path, i.e. is runnable exactly
+    as the single script was before this issue."""
+    script_path = _write_home_rooted_script(tmp_path)
+    run_path = synthesize.run_script_path(script_path)
+
+    assert run_path == str(tmp_path / "synth_gcd.run.ys")
+    assert os.path.isfile(run_path)
+
+    run_text = Path(run_path).read_text(encoding="utf-8")
+    assert "$PDK_ROOT" not in run_text
+    assert f"abc -liberty {_HOME_LIBERTY}" in run_text
+    assert f"dfflibmap -liberty {_HOME_LIBERTY}" in run_text
+    assert f"stat -liberty {_HOME_LIBERTY}" in run_text
+
+    # The runnable sibling is machine-specific by construction -- it is the
+    # one artifact that still scans dirty, which is why its own header says
+    # not to commit it.
+    assert env_provenance.scan_files([run_path])["status"] == "leaked"
+    assert run_text.splitlines()[0].startswith("# Machine-local rehydration")
+
+
+def test_committed_and_run_scripts_differ_only_by_the_documented_rehydration(tmp_path):
+    """The rehydration step is a real, checkable transformation, not an
+    assumption that two code paths agree: applying `rehydrate_script_text`
+    to the committed script's own body reproduces the runnable sibling's
+    body byte-for-byte (each file's single documented header block aside)."""
+    script_path = _write_home_rooted_script(tmp_path)
+    run_path = synthesize.run_script_path(script_path)
+
+    def _body(path: str) -> str:
+        lines = Path(path).read_text(encoding="utf-8").splitlines(keepends=True)
+        return "".join(line for line in lines if not line.startswith("#"))
+
+    rehydrated = synthesize.rehydrate_script_text(
+        _body(script_path), pdk_root=_HOME_PDK_ROOT
+    )
+    assert rehydrated == _body(run_path)
+
+
+def test_rehydrate_script_text_tolerates_a_trailing_separator_on_the_root():
+    """`$PDK_ROOT` substitution must not produce a doubled separator for a
+    root a caller happened to pass with a trailing `/` (or a root that *is*
+    `/`)."""
+    text = "abc -liberty $PDK_ROOT/sky130A/x.lib\n"
+    assert (
+        synthesize.rehydrate_script_text(text, pdk_root="/opt/pdks/")
+        == "abc -liberty /opt/pdks/sky130A/x.lib\n"
+    )
+    assert (
+        synthesize.rehydrate_script_text(text, pdk_root="/")
+        == "abc -liberty /sky130A/x.lib\n"
+    )
+
+
+def test_no_pdk_root_keeps_the_absolute_liberty_and_writes_no_sibling(tmp_path):
+    """`pdk_root=None` -- every script in this module except the top-level
+    one (the arithmetic-candidate trial scripts, the ABC probe, the baseline
+    re-derivation script) -- is byte-for-byte the pre-#1870 artifact: one
+    file, absolute liberty, no header, and `_write_script` returns the path
+    it was given."""
+    script_path = str(tmp_path / "synth_gcd.ys")
+    returned = synthesize._write_script(
+        script_path=script_path,
+        sources=[str(tmp_path / "gcd.v")],
+        hdl_toplevel="gcd",
+        liberty_path=_HOME_LIBERTY,
+        stats_path=str(tmp_path / "gcd_stats.json"),
+        netlist_path=str(tmp_path / "gcd_synth.v"),
+    )
+
+    assert returned == script_path
+    assert not os.path.exists(synthesize.run_script_path(script_path))
+    script_text = Path(script_path).read_text(encoding="utf-8")
+    assert not script_text.startswith("#")
+    assert f"abc -liberty {_HOME_LIBERTY}" in script_text
+
+
+def test_liberty_outside_the_resolved_pdk_root_stays_absolute(tmp_path):
+    """A liberty that does not resolve inside `pdk_root` cannot be written as
+    a `$PDK_ROOT`-relative token that would rehydrate correctly, so it keeps
+    the absolute form (losing machine-independence beats emitting a token
+    that resolves to the wrong file) -- and no sibling is written, because
+    there is nothing to rehydrate."""
+    script_path = str(tmp_path / "synth_gcd.ys")
+    returned = synthesize._write_script(
+        script_path=script_path,
+        sources=[str(tmp_path / "gcd.v")],
+        hdl_toplevel="gcd",
+        liberty_path="/opt/vendor-libs/custom__tt_025C_1v80.lib",
+        stats_path=str(tmp_path / "gcd_stats.json"),
+        netlist_path=str(tmp_path / "gcd_synth.v"),
+        repo_root=str(tmp_path),
+        pdk_root=_HOME_PDK_ROOT,
+    )
+
+    assert returned == script_path
+    assert not os.path.exists(synthesize.run_script_path(script_path))
+    script_text = Path(script_path).read_text(encoding="utf-8")
+    assert "$PDK_ROOT" not in script_text
+    assert "abc -liberty /opt/vendor-libs/custom__tt_025C_1v80.lib" in script_text
+
+
+def test_run_synthesize_reports_run_script_path_and_runs_that_script(
+    tmp_path, monkeypatch
+):
+    """End-to-end: the response names both artifacts, `script_path` is the
+    commit-safe one (`$PDK_ROOT` token, scan-clean), `run_script_path` is the
+    rehydrated sibling, and it is the *sibling* Yosys was handed -- the
+    committed script would fail to open a literal `$PDK_ROOT/...` path."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    scripts_run = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    script_path = _abs_path(report["script_path"], tmp_path)
+    run_path = _abs_path(report["run_script_path"], tmp_path)
+    assert script_path.endswith("synth_gcd.ys")
+    assert run_path == synthesize.run_script_path(script_path)
+    assert os.path.isfile(run_path)
+    assert scripts_run == [run_path]
+
+    # Both artifacts survive as debuggable files; only the committed one is
+    # required to be scan-clean.
+    assert env_provenance.scan_files([script_path])["status"] == "clean"
+    assert "$PDK_ROOT/sky130A/" in Path(script_path).read_text(encoding="utf-8")
+    assert "$PDK_ROOT" not in Path(run_path).read_text(encoding="utf-8")
+
+
+def test_generated_script_never_names_the_pdk_install_location(tmp_path, monkeypatch):
+    """The generalised form of this issue's oracle, checked against the real
+    scanner on any platform: feeding the fabricated PDK install root to
+    `find_leaks` as an `extra_identifiers` entry (the same machinery a
+    `home-path` finding uses, minus the requirement that the path literally
+    start with `/home`/`/Users`) finds nothing in the committed script -- and
+    finds the install root in the runnable sibling, so the check is live."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    install_root = str(tmp_path / "install")
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    run_text = Path(_abs_path(report["run_script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        env_provenance.find_leaks(script_text, extra_identifiers=[install_root]) == []
+    )
+    assert env_provenance.find_leaks(run_text, extra_identifiers=[install_root]) != []
+
+
+def test_arithmetic_trial_scripts_keep_the_absolute_liberty(tmp_path, monkeypatch):
+    """Issue #1870 touches the top-level script only: an arithmetic-candidate
+    trial script (issue #1775's `.klt/synthesize/arith/<label>/`) is still the
+    fully-absolute, directly-runnable artifact it was, with no `$PDK_ROOT`
+    token and no rehydrated sibling next to it.
+
+    Driven through `_measure_candidate` itself (the sole writer of those
+    scripts) with a Yosys that cannot run: the trial script is written before
+    the run, so a disqualified candidate still exercises exactly the writing
+    path under test."""
+
+    def fail_to_launch(cmd, **kwargs):
+        raise OSError("no yosys here")
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fail_to_launch)
+    trial_dir = tmp_path / ".klt" / "synthesize" / "arith" / "brent_kung"
+
+    measured = synthesize._measure_candidate(
+        label="brent_kung",
+        trial_dir=str(trial_dir),
+        resolved_sources=[str(tmp_path / "gcd.v")],
+        hdl_toplevel="gcd",
+        engine_options=synthesize._EngineOptions(
+            liberty_path=_HOME_LIBERTY,
+            cell_library="gf180mcu_fd_sc_mcu7t5v0",
+            delay_target_ps=None,
+            dont_use_globs=(),
+            tie_cells=None,
+            constr_inputs=None,
+        ),
+        adder_sources=(),
+        adder_techmap_path=None,
+        repo_root=str(tmp_path),
+    )
+
+    assert measured is None
+    trial_script = str(trial_dir / "synth_gcd.ys")
+    trial_text = Path(trial_script).read_text(encoding="utf-8")
+    assert "$PDK_ROOT" not in trial_text
+    assert f"abc -liberty {_HOME_LIBERTY}" in trial_text
+    assert not os.path.exists(synthesize.run_script_path(trial_script))
 
 
 def test_run_synthesize_missing_sequential_area_degrades_to_none(tmp_path, monkeypatch):
