@@ -857,6 +857,19 @@ X2 b1 b2 cellB
     assert len([e for e in correspondence if e["reference"] == "IN"]) == 2
     assert len([e for e in correspondence if e["reference"] == "OUT"]) == 2
 
+    # Issue #1887: `counts.nets.layout`/`.reference` are scoped to the top
+    # circuit only (`top` declares no pins and has just its own 5 local
+    # nets: a1, a2, a3, b1, b2), while `counts.nets.matched` is scoped to
+    # the entire compared hierarchy (all 11 matched nets across `top`,
+    # `cellA`, and `cellB`). This is not a bug -- it's the documented
+    # scope mismatch for `"engine": "klayout"` (see docs/cli/lvs.md) --
+    # but it means `matched` legitimately exceeds both `layout` and
+    # `reference` once any subcircuit below top also matches. Assert that
+    # exceedance directly so it stays an intentionally-tested invariant.
+    nets_counts = report["counts"]["nets"]
+    assert nets_counts["layout"] < nets_counts["matched"]
+    assert nets_counts["reference"] < nets_counts["matched"]
+
 
 def _make_single_nmos_layout(extra_drain_label: str = "Y2"):
     """One NMOS (sky130 layers, no `nwell` drawn) whose drain pad carries
