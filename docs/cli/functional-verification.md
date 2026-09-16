@@ -353,6 +353,34 @@ job ([`klt place-and-route`](place-and-route.md)'s `spef_sta`). A genuine
 timing failure still surfaces here as a *functional* failure the testbench
 catches, which is the signal this feature is scoped around.
 
+**Known limitation, inherited from Icarus: an `INTERCONNECT` entry naming an
+escaped identifier containing a literal occurrence of the SDF's own
+`DIVIDER` character is rejected up front** (issue #1890) — e.g.
+`INTERCONNECT a g\[0\]\.sub\/x.a` with `(DIVIDER .)`, the exact shape any
+synthesis/place-and-route flow produces the moment RTL uses a `generate`
+block to instantiate an array of sub-modules and the backend flattens that
+hierarchy into one module (Yosys `flatten`, and OpenROAD's post-route
+`write_verilog`/`write_sdf` both do this). Confirmed live against Icarus
+13.0: `$sdf_annotate`'s `INTERCONNECT` path splitter tokenizes an endpoint on
+every literal occurrence of the `DIVIDER` character without honoring a
+preceding backslash-escape, producing a nonexistent intermediate scope
+reference — and the VPI resolution code that walks it calls `vpi_scan` on
+the resulting `NULL` handle without a `NULL` check, crashing `vvp` outright
+(`ERROR: NULL handle passed to vpi_scan.`, an assertion-failure `SIGABRT`
+with a core dump) rather than failing to resolve the entry the way a
+malformed `IOPATH` does. This is independent of hierarchy depth, of the
+top-level-port wrapper above (issue #1056), and of which of the two legal
+`DIVIDER` characters (`.` or `/`) is in play, so no generated shim/wrapper
+shape can work around it — it is a genuine Icarus upstream limitation, not
+a `klt`-side resolution failure. `klt` scans the SDF's `INTERCONNECT`
+entries for this shape before writing any build artifact and rejects the
+request (exit 1) with a clear message instead of reaching that crash. An
+escaped identifier that does **not** contain the file's own `DIVIDER`
+character (e.g. an escaped bracket alone, `g\[0\]`, with no embedded `.`)
+is unaffected and resolves normally — avoid flattening a `generate` block's
+hierarchy before generating the SDF this option consumes if this limitation
+is hit.
+
 **Reading a run that fails on *every* test case.** The most common shape of a
 real annotated failure is not a subtly different result on one test — it is
 every test failing identically, often with the design's outputs reading a

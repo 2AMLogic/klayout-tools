@@ -1804,6 +1804,137 @@ def test_sdf_engine_capability_gate_admits_13_and_the_unknowable(version):
     fv._check_sdf_engine_capability(version)
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1890: an `INTERCONNECT` entry naming an escaped identifier that
+# contains a literal occurrence of the SDF's own `DIVIDER` character (e.g.
+# `g\[0\]\.sub\/x.a` with `DIVIDER .` -- exactly what a `generate`-block
+# array of sub-modules becomes once synthesis/place-and-route flattens it)
+# crashes `vvp` outright (`ERROR: NULL handle passed to vpi_scan.`, SIGABRT)
+# -- a genuine Icarus upstream limitation (verified live, independent of
+# hierarchy depth, the #1056 wrapper, and `-ginterconnect`), so it is caught
+# at request-validation time instead, before any build artifact is written.
+# --------------------------------------------------------------------------- #
+
+#: The exact escaped-identifier shape a `generate`-block array of
+#: sub-modules becomes once flattened (Yosys `flatten`, OpenROAD's
+#: post-route `write_verilog`/`write_sdf`) -- matches the issue's own
+#: minimal reproduction.
+_ESCAPED_DIVIDER_INTERCONNECT_SDF = """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "gcd")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "gcd")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a g\\[0\\]\\.sub\\/x.a (0.100:0.100:0.100))
+    ))
+  )
+)
+"""
+
+
+def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
+    tmp_path, monkeypatch
+):
+    """The load-bearing regression for issue #1890: an `INTERCONNECT`
+    endpoint whose escaped identifier contains a literal `.` (the file's own
+    `DIVIDER` character) is rejected up front with a clear message, instead
+    of reaching `$sdf_annotate` and crashing `vvp` with a bare `SIGABRT`."""
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "route.sdf", _ESCAPED_DIVIDER_INTERCONNECT_SDF)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"coverage": False, "sdf": {"file": "route.sdf"}}),
+    )
+    monkeypatch.setattr(fv, "_engine_version", lambda engine: "13.0")
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"escaped identifier that contains a literal '\.'",
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize(
+    "interconnect_line",
+    [
+        # `.` alone (no brackets) -- one of the issue's own bisected shapes.
+        "      (INTERCONNECT a g\\.sub.a (0.100:0.100:0.100))\n",
+        # The combined shape from the issue's own minimal reproduction.
+        "      (INTERCONNECT a g\\[0\\]\\.sub\\/x.a (0.100:0.100:0.100))\n",
+    ],
+)
+def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
+    tmp_path, interconnect_line
+):
+    """Unit-level: both bisected shapes that embed a literal `.` are caught,
+    not just the combined shape -- the issue's own bisection notes that
+    either special character alone is sufficient to crash Icarus, but only
+    the literal `.` (the file's `DIVIDER` character) is the actual trigger
+    (see the module comment above `_reject_sdf_escaped_divider_interconnects`
+    for the confirmed root cause)."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "gcd")\n'
+        "  (DIVIDER .)\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "gcd")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n" + interconnect_line + "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+    with pytest.raises(FunctionalVerificationError, match="literal '\\.'"):
+        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+
+
+def test_reject_sdf_escaped_divider_interconnects_admits_escaped_bracket_alone(
+    tmp_path,
+):
+    """Regression guard: an escaped bracket with **no** embedded literal
+    divider character (`g\\[0\\]`, no `.`) does not crash Icarus (verified
+    live) and must not be rejected -- only an escaped occurrence of the
+    file's own `DIVIDER` character is the confirmed trigger."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "gcd")\n'
+        "  (DIVIDER .)\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "gcd")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n"
+        "      (INTERCONNECT a g\\[0\\].a (0.100:0.100:0.100))\n"
+        "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+    fv._reject_sdf_escaped_divider_interconnects(sdf_path)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "sdf_text_factory",
+    [_MINIMAL_SDF, lambda: _toplevel_port_sdf_text()],
+)
+def test_reject_sdf_escaped_divider_interconnects_admits_existing_fixtures(
+    tmp_path, sdf_text_factory
+):
+    """Regression guard: every existing plain-instance-name SDF fixture used
+    by the rest of this suite is untouched -- this guard only fires on the
+    one shape that actually crashes Icarus."""
+    text = sdf_text_factory() if callable(sdf_text_factory) else sdf_text_factory
+    sdf_path = _write(tmp_path / "route.sdf", text)
+    fv._reject_sdf_escaped_divider_interconnects(sdf_path)  # must not raise
+
+
 def test_stubbed_sdf_generates_the_annotate_shim_with_an_absolute_path(
     tmp_path, monkeypatch
 ):
@@ -2669,6 +2800,96 @@ def test_integration_real_icarus_broken_sdf_fails_loud_not_silently(tmp_path):
     # The evidence the scan overrode: cocotb's own artifact says "passed".
     results_xml = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
     assert "<failure" not in results_xml.read_text()
+
+
+#: The issue's own minimal reproduction, generalized to a design with a real
+#: `specify` block and a cocotb-addressable testbench -- the exact shape a
+#: `generate`-block array of sub-modules becomes once flattened (Yosys
+#: `flatten`, OpenROAD's post-route `write_verilog`/`write_sdf`).
+_GENERATE_FLATTENED_DUT_V = """\
+module klt_leaf (input wire a, output wire y);
+  assign y = a;
+  specify
+    (a => y) = (0.1:0.1:0.1);
+  endspecify
+endmodule
+
+module gen_flat_top (input wire a, output wire y);
+  klt_leaf \\g[0].sub/x (.a(a), .y(y));
+endmodule
+"""
+
+_GENERATE_FLATTENED_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_never_reached(dut):
+    """This test body is never reached -- options.sdf's own request-
+    validation gate (issue #1890) must reject the request before cocotb
+    ever elaborates the design."""
+    dut.a.value = 0
+    await Timer(5, unit="ns")
+'''
+
+
+def _generate_flattened_sdf_text() -> str:
+    """The issue's own minimal reproduction's SDF: a single `INTERCONNECT`
+    entry naming the escaped, `generate`-flattened-style identifier
+    `g\\[0\\]\\.sub\\/x`."""
+    return """\
+(DELAYFILE
+ (SDFVERSION "3.0")
+ (DESIGN "gen_flat_top")
+ (DIVIDER .)
+ (TIMESCALE 1ns)
+ (CELL
+  (CELLTYPE "gen_flat_top")
+  (INSTANCE)
+  (DELAY
+   (ABSOLUTE
+    (INTERCONNECT a g\\[0\\]\\.sub\\/x.a (0.100:0.100:0.100))
+   )
+  )
+ )
+)
+"""
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_crash(
+    tmp_path,
+):
+    """Issue #1890's own scenario, end to end against the real toolchain: a
+    `generate`-flattened-style escaped identifier (`\\g[0].sub/x`) in an
+    `INTERCONNECT` entry used to crash `vvp` outright (`ERROR: NULL handle
+    passed to vpi_scan.`, SIGABRT/core dump). It must now be rejected as a
+    clear `FunctionalVerificationError` at request-validation time, before
+    `iverilog`/`vvp` ever run at all."""
+    tmp_path.joinpath("gen_flat_top.v").write_text(
+        _GENERATE_FLATTENED_DUT_V, encoding="utf-8"
+    )
+    _write(tmp_path / "test_gen_flat_top.py", _GENERATE_FLATTENED_TESTBENCH_PY)
+    _write(tmp_path / "route.sdf", _generate_flattened_sdf_text())
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "sources": ["gen_flat_top.v"],
+            "hdl_toplevel": "gen_flat_top",
+            "testbench": {"module": "test_gen_flat_top"},
+            "options": {"sdf": {"file": "route.sdf"}},
+        },
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"escaped identifier that contains a literal '\.'",
+    ):
+        run_functional_verification(request_path)
 
 
 # --------------------------------------------------------------------------- #

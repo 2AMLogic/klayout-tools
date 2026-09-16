@@ -190,6 +190,7 @@ from ._vendor import mutation_variants as _mutation_variants
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _parse_toplevel_ports,
+    _reject_sdf_escaped_divider_interconnects,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
@@ -1891,6 +1892,13 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # fails the build with a message that names neither SDF nor this
         # request field.)
         _check_sdf_engine_capability(_engine_version(engine))
+        # Issue #1890: an escaped identifier containing a literal
+        # occurrence of the SDF's own DIVIDER character in an INTERCONNECT
+        # entry crashes vvp outright (a genuine Icarus upstream limitation,
+        # not something the wrapper/shim below can work around) -- caught
+        # here, before any build artifact is written, rather than surfacing
+        # as a bare SIGABRT core dump four layers down.
+        _reject_sdf_escaped_divider_interconnects(sdf["file"])
         if parameters:
             # cocotb's own Icarus parameter-override syntax is always
             # `-P<hdl_toplevel>.<name>=<value>` (its Runner, not this
