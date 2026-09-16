@@ -37,7 +37,10 @@ tests/
   its fixtures after a legitimate behavior change. `corpus/` also nests
   per-crate benchmark corpora (`legalize/`, `statime/`, `techmap/`,
   `synth_e2e_validation/`, `place_and_route/`), each with its own
-  `regenerate.sh` and (except `place_and_route/`) its own `README.md` — see
+  `regenerate.sh` and (except `place_and_route/`) its own `README.md`, plus
+  the two `klt place-and-route` validation corpora
+  (`place_and_route_tt_validation/`, `sky130_modexp_canary/`, each with its
+  own `README.md`) — see
   [`native/README.md`](../native/README.md) for which crate each one backs.
 
 ## Conventions

@@ -21,6 +21,7 @@ shipped `klt` verb — its own `pyproject.toml` reached from the top-level
 | [`yield/`](yield/) | `klt-yield-native` | `klt yield` / `klt yield-campaign` / `klt yield-sensitivity` (distribution fit, yield estimate + confidence intervals, Cp/Cpk, sample-size verdict) | Shipped `pyo3` extension |
 | [`statime/`](statime/) | `klt-statime-native` | `klt synthesize`'s `sta` response field (gate-level static timing, NLDM) | Shipped `pyo3` extension (promoted from a go/no-go spike, issue #925); standalone `klt-statime` CLI binary also builds from the same crate |
 | [`techmap/`](techmap/) | `klt-techmap-native` | `klt techmap` (Liberty-driven technology mapping, standalone binary invoked as a subprocess) | Standalone binary + library — not (yet) folded into a `pyo3` extension |
+| [`wave/`](wave/) | `klt-wave-native` | `klt wave build` / `klt wave query` (VCD/FST waveform store build + query; standalone `klt-wave` binary invoked as a subprocess) | Standalone binary crate — no `pyo3`/dependency-group wiring (issues #1599/#1600) |
 | [`legalize/`](legalize/) | `klt-legalize-native` | Nothing shipped — an Abacus-style standard-cell row legalizer spike | **No-go** verdict (issue #784); kept as the spike's own artifact, not wired into `klt place-and-route`/`klt par` |
 
 ## Building
@@ -38,14 +39,15 @@ uv sync --extra dev --group statime   # klt synthesize's sta field
 uv sync --extra dev --group congestion  # the congestion research crate (no klt verb)
 ```
 
-`techmap/` and `legalize/` have no `pyo3`/dependency-group wiring — build
-and run them directly with `cargo` (see
+`techmap/`, `wave/`, and `legalize/` have no `pyo3`/dependency-group wiring —
+build and run them directly with `cargo` (see
 [`docs/cli/techmap.md#building-the-klt-techmap-binary`](../docs/cli/techmap.md#building-the-klt-techmap-binary)
 for `techmap/`'s full build pointer, since `klt techmap` shells out to the
 compiled binary rather than building it itself):
 
 ```bash
 cd native/techmap && cargo build --release   # produces the klt-techmap binary
+cd native/wave && cargo build --release      # produces the klt-wave binary (see docs/cli/wave.md)
 cd native/legalize && cargo test             # go/no-go spike, cargo-only
 ```
 

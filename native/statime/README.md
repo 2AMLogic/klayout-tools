@@ -305,6 +305,7 @@ zero decision-making overhead, just the numerics.
 native/statime/
 ├── Cargo.toml         # klt-statime-native — [[bin]] + cdylib/rlib [lib] + pyo3 (issue #925)
 ├── Cargo.lock
+├── build.rs           # embeds a content fingerprint of src/ for CI's native-extension freshness gate (issue #1889)
 ├── pyproject.toml      # maturin build backend for the klt_statime_native extension (issue #925)
 ├── README.md            # this file
 └── src/

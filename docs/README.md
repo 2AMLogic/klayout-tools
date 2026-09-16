@@ -29,6 +29,7 @@ docs/
     draw.md
     drc.md
     economy.md
+    env-provenance.md
     equiv.md
     erc.md
     eval.md
@@ -78,24 +79,34 @@ docs/
     em-site-export-format.md
     extract-fidelity-roadmap.md
     flute-congestion-precheck-results.md
+    fst-writer-upstream-bug-report.md
     gen-bjt-array-spike.md
     gen-canary-bringup-phase3.md
+    gen-compose-per-net-layer.md
+    gen-compose-track-assignment.md
     gen-composition-spike.md
     geode-fem-wasm-webgpu-spike.md
+    klayout-engine-version-pin.md
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
     matching-and-floorplanning.md
+    metric-namespace.md
     mom-cross-validation.md
+    mom-general-conductor-geometry.md
     mom-iterative-solver.md
     mom-validation.md
+    mutation-testing-spike.md
     native-extension-freshness.md
     native-routing-survey.md
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md
+    parasitics-hierarchy-attribution-spike.md
     pdk-device-corner-metadata-spike.md
     place-and-route-improvements-survey.md
     post-route-sta-survey.md
+    relaxation-oscillator-comparator-core-spike.md
+    relaxation-oscillator-device-level-assembly.md
     remote-job-description.md
     remote-sim-backend-spike.md
     rsa-modexp-baseline.md
@@ -104,6 +115,7 @@ docs/
     sdf-annotate-feasibility-spike.md
     sequential-equivalence-survey.md
     siliconcompiler-core-survey.md
+    sim-corner-reached-s.md
     sim-evidence-discipline-spike.md
     sky130-modexp-canary-openroad-ground-truth.md
     sky130-modexp-canary-signoff-status.md
@@ -111,6 +123,8 @@ docs/
     synth-techmap-stage-contract.md
     synthesize-qor-improvements-survey.md
     wasm-spice-playground-spike.md
+    waveform-query-contract-spike.md
+    waveform-query-survey.md
     yosys-synthesis-spike.md
   library/                # standing resource library: mined resources -> what changed here
     README.md
@@ -126,7 +140,22 @@ docs/
     wave-query-response.schema.json
   guides/                # how-to guides
     building-klayout-macos.md
+    digital-review/      # RTL / testbench review guides (ported, Apache-2.0 — see its NOTICE)
+      README.md
+      NOTICE
+      cocotb-tb-review.md
+      cocotb-tb-style-guide.md
+      rtl-bugs.md
+      rtl-code-style.md
+      rtl-optimization.md
+      rtl-protocol-cdc.md
+      rtl-security.md
+      rtl-spec.md
+      rtl-style-guide.md
+      tb-review.md
+      tb-style-guide.md
     github-action.md
     pdk-family-port-checklist.md
+    rtl-mutation-testing.md
     waveform-first-debugging.md
 ```

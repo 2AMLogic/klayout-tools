@@ -11,14 +11,18 @@ scripts/
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
+  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of IHP ihp-sg13cmos5l into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
+  fetch-sg13g2-sim-toolchain.sh  # provision the ngspice/OSDI half of an SG13G2 sim flow that fetch-ihp-sg13g2.sh does not (#1628)
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
+  install-symbiyosys.sh          # install a pinned SymbiYosys (sby) + Bitwuzla backend for sequential equivalence checking (CI provisioning, #1312)
   _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
+  native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
   place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
@@ -27,6 +31,8 @@ scripts/
   _gallery_common.py             # render/label helpers shared by the two gallery content-pipeline scripts (#942)
   generate_deck_history.py       # regenerate src/klayout_tools/decks/_history.json for `klt deck resolve` (#623)
   mom_nec_reference.py           # standalone NEC2++ reference solve for `klt mom` S-parameter cross-validation (#895)
+  design_agent_benchmark.py      # design-agent benchmark harness: task set x PDK, S4->S6->S10 slice scored with pass@k (#1719)
+  design_agent_benchmark_interactive.py  # multi-turn, tool-using agent provider for the benchmark harness (imported by the above, #1739)
   research/                      # measurement harnesses behind docs/design/ findings (FLUTE congestion #785, SDF annotate #962)
   aws/build-remote-sim-ami.sh    # build/publish the remote-sim AMI (see docs/cli/sim.md)
 ```
