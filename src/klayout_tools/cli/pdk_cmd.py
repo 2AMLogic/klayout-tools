@@ -48,11 +48,11 @@ from ..pdk import (
     PdkNotFoundError,
     em_limits,
     find_pdk,
-    list_cell_libraries,
     list_corners,
     list_hard_macro_libraries,
     list_pdks,
 )
+from ..pdk_cells import list_cell_libraries
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
 from .output import emit_error, emit_success, render_table

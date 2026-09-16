@@ -536,11 +536,8 @@ from ._paths import (
 from ._paths import _tcl_net_list as _tcl_net_list
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
-from .pdk import (
-    lef_files,
-    list_lib_corners,
-    resolve_liberty_for_cell_library,
-)
+from .pdk import lef_files
+from .pdk_cells import list_lib_corners, resolve_liberty_for_cell_library
 
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
