@@ -72,6 +72,7 @@ from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
+from klayout_tools._openroad_engine import _timing_status
 from klayout_tools.cli import main
 from klayout_tools.place_and_route import (
     PlaceAndRouteError,
@@ -1716,6 +1717,7 @@ def _stub_openroad_success(
     max_transition_violations: int = 0,
     max_capacitance_violations: int = 0,
     per_corner_design_rule_violations: dict[str, tuple[int, int]] | None = None,
+    stage_metrics: dict[str, dict[str, float]] | None = None,
     version: str = "26Q3-771-gdeadbeef",
 ) -> None:
     setup_violations = setup_violations or {}
@@ -1810,7 +1812,10 @@ def _stub_openroad_success(
         Path(checkpoint_out).write_text("fake odb checkpoint\n")
 
         with open(metrics_path, "w", encoding="utf-8") as handle:
-            json.dump(_STAGE_METRICS[stage], handle)
+            # Issue #1865: `stage_metrics` lets a test substitute a whole
+            # per-stage `-metrics` dump (e.g. OpenSTA's unconstrained
+            # `1e+39` sentinel) without rewriting the module-level default.
+            json.dump((stage_metrics or _STAGE_METRICS)[stage], handle)
 
         stdout_lines = []
         if stage != "floorplan":
@@ -3684,6 +3689,379 @@ def test_stubbed_design_rule_constraints_reach_spef_sta_script(tmp_path, monkeyp
 
 
 # --------------------------------------------------------------------------- #
+# `constraints.input_delay_ns`/`.output_delay_ns` -- I/O timing constraints
+# (issue #1865)
+# --------------------------------------------------------------------------- #
+
+
+#: The exact three lines `_io_delay_lines` emits for `input_delay_ns: 0.2`
+#: with `clock_port: "clk"`, and the single line it emits for
+#: `output_delay_ns: 0.3` -- spelled out here so every call-site test below
+#: asserts the *same* strings, and a drift in either module's copy of the
+#: helper fails loudly rather than silently diverging.
+_IO_INPUT_DELAY_LINES = [
+    "set klt_clock_port [get_ports clk]",
+    "set klt_non_clock_inputs "
+    "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
+    "set_input_delay 0.2 -clock clk $klt_non_clock_inputs",
+]
+_IO_OUTPUT_DELAY_LINE = "set_output_delay 0.3 -clock clk [all_outputs]"
+
+_IO_DELAY_CONSTRAINTS = {
+    "clock_port": "clk",
+    "clock_period_ns": 1.1,
+    "input_delay_ns": 0.2,
+    "output_delay_ns": 0.3,
+}
+
+
+def test_io_delay_lines_helper_emits_only_given_fields():
+    """Direct unit coverage of `_io_delay_lines` -- mirrors
+    `_design_rule_constraint_lines`'s own shape: each field emits its own
+    line(s) only when given, and neither given emits nothing at all."""
+    assert place_and_route._io_delay_lines("clk", None, None) == []
+    assert place_and_route._io_delay_lines("clk", 0.2, None) == _IO_INPUT_DELAY_LINES
+    assert place_and_route._io_delay_lines("clk", None, 0.3) == [_IO_OUTPUT_DELAY_LINE]
+    assert place_and_route._io_delay_lines("clk", 0.2, 0.3) == [
+        *_IO_INPUT_DELAY_LINES,
+        _IO_OUTPUT_DELAY_LINE,
+    ]
+    # Defensive: `_validate_constraints` never lets a delay through without
+    # a clock, but the helper stays total either way.
+    assert place_and_route._io_delay_lines(None, 0.2, 0.3) == []
+
+
+def test_io_delay_input_set_excludes_the_clock_port():
+    """`all_inputs` includes the clock port itself, and an *arrival time* on
+    the clock port is not what "input delay" means -- so the emitted Tcl
+    subtracts it with the same plain-`lsearch` idiom ORFS's own
+    `constraint.sdc` templates use (issue #1865)."""
+    lines = place_and_route._io_delay_lines("clk", 0.2, None)
+
+    assert "[get_ports clk]" in lines[0]
+    assert "lsearch -inline -all -not -exact [all_inputs]" in lines[1]
+    # The `set_input_delay` call is aimed at the filtered collection, never
+    # at a bare `[all_inputs]`.
+    assert lines[2].endswith("$klt_non_clock_inputs")
+    assert "[all_inputs]" not in lines[2]
+
+
+@pytest.mark.parametrize("field", ["input_delay_ns", "output_delay_ns"])
+@pytest.mark.parametrize("bad_value", [-1.0, "fast", True, [0.2]])
+def test_run_constraints_io_delay_rejects_non_numbers(tmp_path, field, bad_value):
+    """Each I/O-delay field is a non-negative number when given (issue
+    #1865) -- `0` *is* valid (see the dedicated test below), so unlike the
+    design-rule fields this rejects only negatives and non-numbers."""
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            constraints={"clock_port": "clk", "clock_period_ns": 1.1, field: bad_value}
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match=f"{field} must be a non-negative number"
+    ):
+        run_place_and_route(request_path)
+
+
+@pytest.mark.parametrize("field", ["input_delay_ns", "output_delay_ns"])
+def test_run_constraints_io_delay_requires_a_clock(tmp_path, field):
+    """`set_input_delay`/`set_output_delay` are both defined *relative to a
+    named clock*, so neither can be honoured without `clock_port`/
+    `clock_period_ns` -- a clear request error, never a silently-dropped
+    field (issue #1865)."""
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(target_stage="floorplan", constraints={field: 0.2}),
+    )
+    with pytest.raises(PlaceAndRouteError, match="require request.constraints"):
+        run_place_and_route(request_path)
+
+
+def test_run_constraints_io_delay_zero_is_valid(tmp_path, monkeypatch):
+    """`0` is a meaningful, commonly-written I/O delay ("the port is valid
+    exactly at the clock edge"), so it must be accepted and emitted -- not
+    treated as "omitted" or rejected as non-positive (issue #1865)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "input_delay_ns": 0,
+            "output_delay_ns": 0,
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    lines = _script_lines(_stage_script(request_path, "place"))
+    assert "set_input_delay 0.0 -clock clk $klt_non_clock_inputs" in lines
+    assert "set_output_delay 0.0 -clock clk [all_outputs]" in lines
+
+
+@pytest.mark.parametrize("target_stage", ["place", "route"])
+def test_stubbed_io_delay_constraints_emitted_after_clock(
+    tmp_path, monkeypatch, target_stage
+):
+    """Both I/O-delay fields set produces both `set_input_delay`/
+    `set_output_delay` calls, positioned after `create_clock` (they name the
+    clock `create_clock` defines) -- repeated across two `target_stage`
+    values so a missed `_stage_script_lines` branch fails loudly."""
+    stages = (
+        ("floorplan", "place")
+        if target_stage == "place"
+        else place_and_route.STAGE_ORDER
+    )
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage=target_stage,
+        constraints=dict(_IO_DELAY_CONSTRAINTS),
+    )
+    _stub_openroad_success(monkeypatch, stages=stages)
+    if target_stage == "route":
+        _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    # Both the `link_design`-based floorplan branch and the `read_db`-based
+    # later-stage branch of `_stage_script_lines` must emit them.
+    for stage in stages:
+        lines = _script_lines(_stage_script(request_path, stage))
+        for line in (*_IO_INPUT_DELAY_LINES, _IO_OUTPUT_DELAY_LINE):
+            assert line in lines, (stage, line)
+        create_clock_idx = next(
+            i for i, ln in enumerate(lines) if ln.startswith("create_clock")
+        )
+        assert create_clock_idx < lines.index(_IO_INPUT_DELAY_LINES[0])
+        assert create_clock_idx < lines.index(_IO_OUTPUT_DELAY_LINE)
+
+
+def test_stubbed_io_delay_single_field_emits_only_that_side(tmp_path, monkeypatch):
+    """The two fields are independently optional: a request with only
+    `input_delay_ns` emits no `set_output_delay` line at all (issue #1865's
+    own edge-case list)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "input_delay_ns": 0.2,
+        },
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    lines = _script_lines(_stage_script(request_path, "place"))
+    for line in _IO_INPUT_DELAY_LINES:
+        assert line in lines
+    assert not any(line.startswith("set_output_delay") for line in lines)
+
+
+def test_stubbed_no_io_delay_constraints_emits_no_io_delay_lines(tmp_path, monkeypatch):
+    """A request with neither field set emits no `set_input_delay`/
+    `set_output_delay`/`klt_clock_port` line anywhere -- the regression
+    guard for "omitted preserves today's Tcl byte-for-byte" (issue #1865's
+    acceptance criteria), asserted across every generated script a full
+    `"route"` run writes, not just the stage scripts."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    script_dir = os.path.join(os.path.dirname(request_path), ".klt", "place-and-route")
+    scripts = sorted(
+        os.path.join(script_dir, name)
+        for name in os.listdir(script_dir)
+        if name.endswith(".tcl")
+    )
+    assert scripts  # the run really did generate scripts to check
+    for script in scripts:
+        lines = _script_lines(script)
+        assert not any(line.startswith("set_input_delay") for line in lines), script
+        assert not any(line.startswith("set_output_delay") for line in lines), script
+        assert not any("klt_clock_port" in line for line in lines), script
+
+
+def test_stubbed_io_delay_constraints_reach_corner_sweep_script(tmp_path, monkeypatch):
+    """`_corner_sweep_script_lines` runs in a *separate* OpenROAD process
+    seeded from a `read_db`, which carries no SDC state -- so without
+    re-emitting the I/O constraints there, every swept corner would report
+    the unconstrained sentinel even though the route stage itself was
+    constrained (issue #1865)."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=dict(_IO_DELAY_CONSTRAINTS)
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    lines = _script_lines(_corner_sweep_script(request_path))
+    for line in (*_IO_INPUT_DELAY_LINES, _IO_OUTPUT_DELAY_LINE):
+        assert line in lines
+
+
+def test_stubbed_io_delay_constraints_reach_spef_sta_script(tmp_path, monkeypatch):
+    """`_spef_sta_script_lines` (`request.post_route_spef`) is the fourth
+    `_clock_lines`-shaped call site, and a fresh `read_db` session for the
+    same reason -- issue #1865 threads the I/O constraints through it too."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        post_route_spef=True,
+        constraints=dict(_IO_DELAY_CONSTRAINTS),
+    )
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+    assert report["spef_sta"] is not None
+
+    spef_sta_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_route_spef.tcl",
+    )
+    lines = _script_lines(spef_sta_script)
+    for line in (*_IO_INPUT_DELAY_LINES, _IO_OUTPUT_DELAY_LINE):
+        assert line in lines
+
+
+# --------------------------------------------------------------------------- #
+# `timing_status` -- the unconstrained-sentinel signal (issue #1865)
+# --------------------------------------------------------------------------- #
+
+
+#: OpenSTA's own unconstrained-design sentinel, as it reaches this repo via
+#: OpenROAD's `-metrics` dump for a design with no constrained startpoint or
+#: endpoint (`docs/cli/place-and-route.md`'s own measured `mult8` rows).
+_UNCONSTRAINED = 1e39
+
+
+def test_timing_status_constrained_on_a_real_measurement(tmp_path, monkeypatch):
+    """A design with real slack numbers reports `timing_status:
+    "constrained"` at top level, per stage, and per swept corner."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["timing_status"] == "constrained"
+    assert [stage["timing_status"] for stage in report["stages"]] == [
+        "constrained"
+    ] * len(report["stages"])
+    assert [corner["timing_status"] for corner in report["corners"]] == ["constrained"]
+
+
+def test_timing_status_unconstrained_when_openst_reports_the_sentinel(
+    tmp_path, monkeypatch
+):
+    """The defect issue #1865 reports: a fully-constrained, fully-routed run
+    of a design with no constrained path reports `1e+39` in every slack
+    field, which is a *positive* number -- so a naive `worst_slack_ns >= 0`
+    gate reads "timing closed with enormous margin" on a design that was
+    never timed. The raw values stay exactly as OpenROAD reported them
+    (additive contract, `docs/json-contract.md`), but `timing_status` now
+    says mechanically what they are."""
+    sentinel_stage_metrics = {
+        stage: {**metrics, "timing__setup__ws": _UNCONSTRAINED, "timing__setup__tns": 0}
+        | (
+            {"timing__hold__ws": _UNCONSTRAINED}
+            if "timing__hold__ws" in metrics
+            else {}
+        )
+        for stage, metrics in _STAGE_METRICS.items()
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(
+        monkeypatch,
+        stage_metrics=sentinel_stage_metrics,
+        corner_sweep_metrics={
+            "timing__setup__ws": _UNCONSTRAINED,
+            "timing__hold__ws": _UNCONSTRAINED,
+        },
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    # The sentinel itself is still reported verbatim -- this change is
+    # additive, it never retypes or hides an existing field.
+    assert report["worst_slack_ns"] == _UNCONSTRAINED
+    assert report["total_negative_slack_ns"] == 0
+    assert report["worst_setup_slack_ns"] == _UNCONSTRAINED
+    assert report["worst_hold_slack_ns"] == _UNCONSTRAINED
+    # ... and the new field is what a pass/fail gate should key on.
+    assert report["timing_status"] == "unconstrained"
+    assert all(stage["timing_status"] == "unconstrained" for stage in report["stages"])
+    assert all(
+        corner["timing_status"] == "unconstrained" for corner in report["corners"]
+    )
+
+
+def test_timing_status_unconstrained_per_corner_only_where_it_applies(
+    tmp_path, monkeypatch
+):
+    """`timing_status` is computed per swept corner, not copied from the
+    aggregate -- a corner whose own single-corner invocation reported the
+    sentinel is marked `"unconstrained"` while its constrained siblings stay
+    `"constrained"` (issue #1865)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", corner="ss_100C_1v60")
+    _stub_openroad_success(
+        monkeypatch,
+        per_corner_sweep_metrics={
+            "ss_100C_1v60": {
+                "timing__setup__ws": _UNCONSTRAINED,
+                "timing__hold__ws": _UNCONSTRAINED,
+            },
+        },
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    by_name = {entry["name"]: entry for entry in report["corners"]}
+    assert by_name["ss_100C_1v60"]["timing_status"] == "unconstrained"
+    assert by_name["tt_025C_1v80"]["timing_status"] == "constrained"
+
+
+def test_timing_status_helper_classification():
+    """Unit coverage of the shared classifier: absence is not a claim
+    either way, and *any* sentinel in scope is enough to withhold the
+    "constrained" verdict (issue #1865)."""
+    assert _timing_status(()) is None
+    assert _timing_status((None, None)) is None
+    assert _timing_status((-1.5, 0.3)) == "constrained"
+    assert _timing_status((0.0,)) == "constrained"
+    assert _timing_status((_UNCONSTRAINED,)) == "unconstrained"
+    assert _timing_status((-_UNCONSTRAINED,)) == "unconstrained"
+    # Mixed: one real number is not enough to call the whole scope timed.
+    assert _timing_status((-1.5, _UNCONSTRAINED)) == "unconstrained"
+    assert _timing_status((None, _UNCONSTRAINED)) == "unconstrained"
+
+
+# --------------------------------------------------------------------------- #
 # Design-rule-check verdict at the swept corners (issue #1709, the body's
 # "Two smaller things found alongside" item 1).
 # --------------------------------------------------------------------------- #
@@ -3762,6 +4140,8 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "hold_slack_ns": pytest.approx(0.08421),
             "total_negative_setup_slack_ns": pytest.approx(-82.8171),
             "total_negative_hold_slack_ns": pytest.approx(-1.5),
+            # Issue #1865: real measurements, not the unconstrained sentinel.
+            "timing_status": "constrained",
             "max_transition_violation_count": 3,
             "max_capacitance_violation_count": 2,
         }
@@ -4833,6 +5213,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # Issue #1866: that same combined session's own TNS pair.
             "total_negative_setup_slack_ns": -140.0,
             "total_negative_hold_slack_ns": 0.0,
+            # Issue #1865: both slack values here are real measurements, not
+            # OpenSTA's unconstrained sentinel.
+            "timing_status": "constrained",
             # Issue #1709: the same entry now also carries that corner's own
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
@@ -4919,6 +5302,8 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # Issue #1866: that corner's own single-corner invocation's TNS pair.
         "total_negative_setup_slack_ns": pytest.approx(-3.88804),
         "total_negative_hold_slack_ns": pytest.approx(0.0),
+        # Issue #1865: both slack values here are real measurements.
+        "timing_status": "constrained",
         # Issue #1709: per-corner design-rule verdict rides in the same
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,

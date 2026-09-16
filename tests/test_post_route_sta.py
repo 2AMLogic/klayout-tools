@@ -1496,6 +1496,208 @@ def test_run_sta_with_escaped_spef_net_names_no_longer_depressed(tmp_path, monke
     assert "\\/" not in script_text
 
 
+# --------------------------------------------------------------------------- #
+# `constraints.input_delay_ns`/`.output_delay_ns` + `timing_status`
+# (issue #1865)
+# --------------------------------------------------------------------------- #
+
+
+#: The exact lines `_io_delay_lines` emits for `input_delay_ns: 0.2` /
+#: `output_delay_ns: 0.3` with `clock_port: "clk"`.
+_IO_INPUT_DELAY_LINES = [
+    "set klt_clock_port [get_ports clk]",
+    "set klt_non_clock_inputs "
+    "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
+    "set_input_delay 0.2 -clock clk $klt_non_clock_inputs",
+]
+_IO_OUTPUT_DELAY_LINE = "set_output_delay 0.3 -clock clk [all_outputs]"
+
+_IO_DELAY_CONSTRAINTS = {
+    "clock_port": "clk",
+    "clock_period_ns": 1.1,
+    "input_delay_ns": 0.2,
+    "output_delay_ns": 0.3,
+}
+
+#: OpenSTA's own unconstrained-design sentinel, as it reaches this repo via
+#: OpenROAD's `-metrics` dump.
+_UNCONSTRAINED = 1e39
+
+
+def _sta_script_text(tmp_path, name: str = "sta_top.tcl") -> str:
+    return (tmp_path / ".klt" / "sta" / name).read_text(encoding="utf-8")
+
+
+def test_io_delay_lines_match_place_and_route_byte_for_byte():
+    """`klt sta` keeps its own copy of `_io_delay_lines` (it validates and
+    emits `constraints` independently of `klt place-and-route`, which it can
+    run with no upstream request at all) -- this asserts the two copies
+    cannot drift, so a caller correlating the two commands' generated Tcl
+    never sees two different spellings of the same constraint (#1865)."""
+    from klayout_tools import place_and_route
+
+    for args in (
+        (None, None),
+        (0.2, None),
+        (None, 0.3),
+        (0.2, 0.3),
+        (0, 0),
+    ):
+        assert post_route_sta._io_delay_lines("clk", *args) == (
+            place_and_route._io_delay_lines("clk", *args)
+        )
+
+
+def test_io_delay_lines_helper_emits_only_given_fields():
+    assert post_route_sta._io_delay_lines("clk", None, None) == []
+    assert post_route_sta._io_delay_lines("clk", 0.2, None) == _IO_INPUT_DELAY_LINES
+    assert post_route_sta._io_delay_lines("clk", None, 0.3) == [_IO_OUTPUT_DELAY_LINE]
+    assert post_route_sta._io_delay_lines("clk", 0.2, 0.3) == [
+        *_IO_INPUT_DELAY_LINES,
+        _IO_OUTPUT_DELAY_LINE,
+    ]
+
+
+@pytest.mark.parametrize("field", ["input_delay_ns", "output_delay_ns"])
+@pytest.mark.parametrize("bad_value", [-1.0, "fast", True, [0.2]])
+def test_run_sta_io_delay_rejects_non_numbers(tmp_path, monkeypatch, field, bad_value):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={"clock_port": "clk", "clock_period_ns": 1.1, field: bad_value},
+    )
+    _stub_openroad_success(monkeypatch)
+
+    with pytest.raises(
+        PostRouteStaError, match=f"{field} must be a non-negative number"
+    ):
+        run_sta(request_path)
+
+
+def test_run_sta_io_delay_emitted_after_create_clock(tmp_path, monkeypatch):
+    """`klt sta` accepts a `constraints` block of its own -- it can run
+    standalone against an externally-produced DEF, with no `klt
+    place-and-route` request anywhere upstream -- so the I/O constraints are
+    validated and emitted here too, never inherited (issue #1865)."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=dict(_IO_DELAY_CONSTRAINTS)
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+    assert report["status"] == "ok"
+
+    lines = _sta_script_text(tmp_path).splitlines()
+    for line in (*_IO_INPUT_DELAY_LINES, _IO_OUTPUT_DELAY_LINE):
+        assert line in lines
+    create_clock_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("create_clock")
+    )
+    assert create_clock_idx < lines.index(_IO_INPUT_DELAY_LINES[0])
+    assert create_clock_idx < lines.index(_IO_OUTPUT_DELAY_LINE)
+
+
+def test_run_sta_io_delay_emitted_in_verilog_mode(tmp_path, monkeypatch):
+    """The from-scratch netlist mode (issue #1825) is exactly the mode a
+    boundary block is most likely to be analysed in -- it gets the same
+    treatment as `def` mode (issue #1865)."""
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=dict(_IO_DELAY_CONSTRAINTS)
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+    assert report["status"] == "ok"
+
+    lines = _sta_script_text(tmp_path, "sta_top.tcl").splitlines()
+    for line in (*_IO_INPUT_DELAY_LINES, _IO_OUTPUT_DELAY_LINE):
+        assert line in lines
+
+
+def test_run_sta_io_delay_single_field_emits_only_that_side(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "output_delay_ns": 0.3,
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path).splitlines()
+    assert _IO_OUTPUT_DELAY_LINE in lines
+    assert not any(line.startswith("set_input_delay") for line in lines)
+    assert not any("klt_clock_port" in line for line in lines)
+
+
+def test_run_sta_no_io_delay_emits_no_io_delay_lines(tmp_path, monkeypatch):
+    """Omitting both fields reproduces this command's generated Tcl
+    byte-for-byte as it was before issue #1865."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    script = _sta_script_text(tmp_path)
+    assert "set_input_delay" not in script
+    assert "set_output_delay" not in script
+    assert "klt_clock_port" not in script
+
+
+def test_run_sta_timing_status_constrained(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["timing_status"] == "constrained"
+
+
+def test_run_sta_timing_status_unconstrained_on_the_sentinel(tmp_path, monkeypatch):
+    """Issue #1865: with no constrained startpoint or endpoint, OpenSTA
+    reports `1e+39` -- a *positive* number a naive `worst_slack_ns >= 0`
+    gate reads as "timing closed". The raw values stay exactly as reported
+    (the contract stays additive), and `timing_status` says what they
+    are."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(
+        monkeypatch,
+        metrics={
+            "timing__setup__ws": _UNCONSTRAINED,
+            "timing__setup__tns": 0.0,
+            "timing__hold__ws": _UNCONSTRAINED,
+            "timing__hold__tns": 0.0,
+        },
+        setup_violations=0,
+    )
+
+    report = run_sta(request_path)
+
+    assert report["worst_slack_ns"] == _UNCONSTRAINED
+    assert report["total_negative_slack_ns"] == 0.0
+    assert report["worst_hold_slack_ns"] == _UNCONSTRAINED
+    assert report["setup_violation_count"] == 0
+    assert report["timing_status"] == "unconstrained"
+
+
+def test_run_sta_timing_status_null_when_no_slack_reported(tmp_path, monkeypatch):
+    """`null` is "nothing to classify", not a claim either way -- a run
+    whose `-metrics` dump carries no slack key at all reports it (issue
+    #1865)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, metrics={"power__total": 0.0084})
+
+    report = run_sta(request_path)
+
+    assert report["worst_slack_ns"] is None
+    assert report["worst_hold_slack_ns"] is None
+    assert report["timing_status"] is None
+
+
 def test_run_sta_engine_failure_raises(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
 

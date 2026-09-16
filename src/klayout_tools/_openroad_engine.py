@@ -22,8 +22,59 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Iterable
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
+
+#: Slack magnitude (ns) at or above which a reported value is OpenSTA's own
+#: *unconstrained-design sentinel* rather than a measurement (issue #1865).
+#:
+#: OpenSTA reports the worst slack of a design with no constrained
+#: startpoint/endpoint as its internal infinity, which reaches this repo's
+#: responses -- via OpenROAD's ``-metrics`` dump -- as ``1e+39``. That value
+#: is a *positive number*, so a naive downstream gate reading
+#: ``worst_slack_ns >= 0`` concludes "timing closed" on a design that was
+#: never timed at all. The threshold is deliberately far below the sentinel
+#: (and far above any physically meaningful slack: ``1e29`` ns is roughly
+#: 3e21 years) so it keeps matching if a future OpenSTA build reports its
+#: infinity as ``1e+30`` instead.
+_UNCONSTRAINED_SLACK_NS = 1e29
+
+
+def _is_unconstrained_slack(value: float | None) -> bool:
+    """Whether ``value`` is OpenSTA's unconstrained-design sentinel rather
+    than a real slack measurement (issue #1865) -- see
+    :data:`_UNCONSTRAINED_SLACK_NS`. ``None`` (a metric the run never
+    populated at all) is **not** the sentinel: absence is a different thing
+    from "reported, but not a measurement"."""
+    if value is None:
+        return False
+    return abs(value) >= _UNCONSTRAINED_SLACK_NS
+
+
+def _timing_status(values: Iterable[float | None]) -> str | None:
+    """Classify a set of reported slack values as ``"constrained"`` /
+    ``"unconstrained"`` / ``None`` (issue #1865).
+
+    This is the mechanical signal that lets a caller distinguish "genuinely
+    timed, zero negative slack" from "never had a constrained path to
+    measure", without special-casing ``1e+39`` by value in every consumer:
+
+    - ``None`` -- no slack metric was reported at all in this scope (e.g. a
+      ``klt place-and-route`` stage whose own OpenROAD reports populate no
+      timing key). Nothing to classify; not a claim either way.
+    - ``"unconstrained"`` -- **any** reported value is the sentinel. The
+      conservative reading on purpose: a gate should require
+      ``timing_status == "constrained"`` before trusting *any* slack number
+      in the same scope.
+    - ``"constrained"`` -- every reported value is a real measurement.
+    """
+    reported = [value for value in values if value is not None]
+    if not reported:
+        return None
+    if any(_is_unconstrained_slack(value) for value in reported):
+        return "unconstrained"
+    return "constrained"
 
 
 def _run_openroad(

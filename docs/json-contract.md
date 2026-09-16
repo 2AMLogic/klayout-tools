@@ -115,6 +115,23 @@ sees a member appear or disappear. The concrete precedent: issue #1704's
 number when it is. See `docs/cli/extract.md`'s "Top-cell-only hierarchy
 split" section for the full derivation.
 
+**A new *qualifier* field next to an existing numeric field is additive — and
+is strictly preferable to retyping that field to `number | null`.** When an
+engine reports a sentinel instead of a measurement, the honest fix looks like
+two options: replace the sentinel with `null` (breaking — a retype, earning a
+`schema_version` bump), or add a sibling field that says what the number is.
+The second is additive: the numeric field keeps its documented type and value
+for every existing consumer, and a consumer that wants the distinction keys on
+the new field instead of on a magic value. The concrete precedent: issue
+#1865's `timing_status` (`"constrained"` | `"unconstrained"` | `null`) on `klt
+place-and-route` and `klt sta` — OpenSTA reports the worst slack of a design
+with no constrained startpoint/endpoint as `1e+39`, a *positive* number that a
+naive `worst_slack_ns >= 0` gate reads as "timing closed" on a design that was
+never timed. `worst_slack_ns` still reports `1e+39` verbatim; `timing_status`
+reports `"unconstrained"` alongside it, and neither command's
+`schema_version` moved. See `docs/cli/place-and-route.md`'s "I/O timing
+constraints ... and `timing_status`" section for the full derivation.
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`

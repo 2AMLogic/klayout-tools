@@ -144,7 +144,12 @@ import re
 import subprocess
 from typing import Any
 
-from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
+from ._openroad_engine import (
+    _count_violations,
+    _openroad_version,
+    _run_openroad,
+    _timing_status,
+)
 from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
@@ -370,7 +375,12 @@ def run_sta(
             "request.pdk.corner must be a non-empty string when given"
         )
 
-    clock_port, clock_period_ns = _validate_constraints(request["constraints"])
+    (
+        clock_port,
+        clock_period_ns,
+        input_delay_ns,
+        output_delay_ns,
+    ) = _validate_constraints(request["constraints"])
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
@@ -424,6 +434,8 @@ def run_sta(
             clock_period_ns=clock_period_ns,
             spef_path=spef_path,
             spef_net_names=spef_net_names,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
         )
     else:
         spef_net_names = None
@@ -438,6 +450,8 @@ def run_sta(
             clock_period_ns=clock_period_ns,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
         )
     _write_script(script_path, lines)
 
@@ -506,6 +520,17 @@ def run_sta(
             round(hold_tns, 5) if hold_tns is not None else None
         ),
         "fmax_mhz": round(fmax_hz / 1e6, 4) if fmax_hz is not None else None,
+        # Additive field (issue #1865): `"constrained"` / `"unconstrained"` /
+        # `null` -- whether the four slack fields above are measurements at
+        # all, or OpenSTA's own unconstrained-design sentinel (`1e+39`)
+        # restated. A design whose only timing paths run input-port ->
+        # register / register -> output-port reports that sentinel unless
+        # `constraints.input_delay_ns`/`.output_delay_ns` are given, and
+        # `1e+39` is a *positive* number -- so a naive `worst_slack_ns >= 0`
+        # gate would otherwise report "timing closed" on a design that was
+        # never timed. Check this field before trusting any slack number in
+        # this response.
+        "timing_status": _timing_status((worst_slack, worst_hold_slack)),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         "clock_skew_ns": round(clock_skew, 5) if clock_skew is not None else None,
@@ -688,12 +713,23 @@ def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
     return os.path.abspath(path)
 
 
-def _validate_constraints(constraints: Any) -> tuple[str, float]:
+def _validate_constraints(
+    constraints: Any,
+) -> tuple[str, float, float | None, float | None]:
     """Unlike ``place_and_route.py``'s own ``_validate_constraints`` (where
     a clock is optional -- a ``target_stage: "floorplan"`` run has no
     meaningful clock yet), a standalone STA run has no meaning *without* a
     clock: there is no stage short of "timed" to fall back to. Both fields
-    are therefore required here, not just required-together."""
+    are therefore required here, not just required-together.
+
+    Returns ``(clock_port, clock_period_ns, input_delay_ns,
+    output_delay_ns)``. The last two (issue #1865) are the **I/O timing**
+    constraints -- each independently optional, ``None`` when omitted (which
+    reproduces this command's generated Tcl byte-for-byte). This command
+    accepts a ``constraints`` block of its own (it can run standalone
+    against an externally-produced DEF/Verilog, with no ``klt
+    place-and-route`` request anywhere upstream), so the fields are
+    validated and emitted here too, never inherited."""
     if not isinstance(constraints, dict):
         raise PostRouteStaError("request.constraints must be a JSON object")
     clock_port = constraints.get("clock_port")
@@ -708,7 +744,31 @@ def _validate_constraints(constraints: Any) -> tuple[str, float]:
         raise PostRouteStaError(
             "request.constraints.clock_period_ns must be a positive number"
         )
-    return clock_port, float(clock_period_ns)
+    input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
+    output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
+    return clock_port, float(clock_period_ns), input_delay_ns, output_delay_ns
+
+
+def _validate_io_delay(value: Any, which: str) -> float | None:
+    """One of ``request.constraints.input_delay_ns``/``.output_delay_ns``
+    (issue #1865): optional, and a non-negative number when given. ``0`` is
+    a meaningful value ("valid exactly at the clock edge"), so this is
+    ``>= 0``, not ``> 0``. Mirrors ``place_and_route.py``'s own
+    ``_validate_io_delay`` exactly, modulo the exception class -- the same
+    per-module-copy convention ``_clock_lines`` already follows."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value < 0
+        or value != value  # NaN
+        or value in (float("inf"), float("-inf"))
+    ):
+        raise PostRouteStaError(
+            f"request.constraints.{which}_delay_ns must be a non-negative number"
+        )
+    return float(value)
 
 
 def _validate_geometry_source(geometry_source: Any) -> str:
@@ -843,6 +903,42 @@ def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
     ]
 
 
+def _io_delay_lines(
+    clock_port: str,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+) -> list[str]:
+    """``set_input_delay``/``set_output_delay`` -- issue #1865's
+    ``request.constraints.input_delay_ns``/``.output_delay_ns``.
+
+    Byte-identical output to ``place_and_route.py``'s own
+    ``_io_delay_lines`` (asserted by the test suite), and kept as a separate
+    copy for the same reason ``_clock_lines`` above is: this command accepts
+    and emits its ``constraints`` block independently, with no import
+    dependency on ``place_and_route.py``. See that copy's docstring for why
+    the non-clock input set is computed with a plain-Tcl ``lsearch`` rather
+    than ``remove_from_collection``, and for what the sentinel-reporting
+    failure looks like without these lines.
+
+    With neither field set this emits nothing at all, reproducing this
+    command's generated Tcl byte-for-byte as it was before issue #1865.
+    """
+    lines: list[str] = []
+    if input_delay_ns is not None:
+        lines += [
+            f"set klt_clock_port [get_ports {clock_port}]",
+            "set klt_non_clock_inputs "
+            "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
+            f"set_input_delay {input_delay_ns} -clock {clock_port} "
+            "$klt_non_clock_inputs",
+        ]
+    if output_delay_ns is not None:
+        lines.append(
+            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+        )
+    return lines
+
+
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     """The net-name-correlation sanity check (``place_and_route.py``'s
     ``_spef_sta_script_lines`` docstring explains the rationale in full):
@@ -959,6 +1055,8 @@ def _sta_script_lines(
     clock_period_ns: float,
     spef_path: str | None = None,
     spef_net_names: list[str] | None = None,
+    input_delay_ns: float | None = None,
+    output_delay_ns: float | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -985,6 +1083,7 @@ def _sta_script_lines(
         f"read_liberty {liberty_path}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
         lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
@@ -1017,6 +1116,8 @@ def _sta_netlist_script_lines(
     clock_period_ns: float,
     wire_load_model: str | None = None,
     wire_load_mode: str | None = None,
+    input_delay_ns: float | None = None,
+    output_delay_ns: float | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -1060,6 +1161,7 @@ def _sta_netlist_script_lines(
         f"link_design {hdl_toplevel}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
     if wire_load_model is not None:
