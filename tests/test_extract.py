@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import io
 import json
 import os
 import re
@@ -17616,3 +17617,299 @@ def test_nested_instance_two_levels_deep_resolves_full_instance_path(tmp_path):
     }, inner_indices
     varying_values = ia_values if len(ia_values) == num_instances else ib_values
     assert varying_values == set(range(num_instances))
+
+
+# --------------------------------------------------------------------------- #
+# Request-document input form (issue #1867)
+#
+# `klt extract` accepts its inputs either as argv flags (unchanged) or as a
+# request document -- a path to a JSON file, `-` for stdin, or an inline JSON
+# object string -- in the same positional slot, told apart by value shape.
+# The two forms are mutually exclusive; see `cli/_request_document.py`.
+# --------------------------------------------------------------------------- #
+
+
+def _extract_request_document(path, output, **fields) -> dict:
+    return {
+        "schema": "klt.extract.request/1",
+        "file": str(path),
+        "deck": "sky130",
+        "output": str(output),
+        **fields,
+    }
+
+
+def _run_extract_json(capsys, argv: list[str]) -> tuple[int, dict]:
+    """Run `klt extract <argv> --format json`, returning (exit code, stdout)."""
+    capsys.readouterr()
+    code = main(["extract", *argv, "--format", "json"])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def _extract_error_message(capsys, argv: list[str]) -> str:
+    capsys.readouterr()
+    code = main(["extract", *argv, "--format", "json"])
+    assert code == 1
+    return json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_extract_request_document_file_form_matches_argv(tmp_path, capsys):
+    """The whole point of the feature: a committed request document produces
+    the same report the equivalent argv line does."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    output = tmp_path / "inv.spice"
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(_extract_request_document(path, output, top="TOP"))
+    )
+
+    argv_code, argv_report = _run_extract_json(
+        capsys, [path, "--deck", "sky130", "-o", str(output), "--top", "TOP"]
+    )
+    request_code, request_report = _run_extract_json(capsys, [str(request_path)])
+
+    assert argv_code == request_code == 0
+    assert request_report == argv_report
+
+
+def test_extract_request_document_stdin_form(tmp_path, capsys, monkeypatch):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    output = tmp_path / "inv.spice"
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(json.dumps(_extract_request_document(path, output))),
+    )
+
+    code, report = _run_extract_json(capsys, ["-"])
+
+    assert code == 0
+    assert report["file"] == path
+    assert report["netlist_path"] == str(output)
+    assert report["device_count"] == 2
+
+
+def test_extract_request_document_inline_form(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    output = tmp_path / "inv.spice"
+
+    code, report = _run_extract_json(
+        capsys, [json.dumps(_extract_request_document(path, output))]
+    )
+
+    assert code == 0
+    assert report["device_count"] == 2
+
+
+def test_extract_request_document_relative_paths_resolve_against_its_directory(
+    tmp_path, capsys, monkeypatch
+):
+    """`klt lvs`'s convention, applied verbatim: relative paths inside the
+    document anchor at the document's directory, not at the cwd."""
+    design_dir = tmp_path / "design"
+    design_dir.mkdir()
+    _write_gds(_make_inverter_layout(), design_dir / "inv.gds")
+    request_path = design_dir / "extract.request.json"
+    request_path.write_text(
+        json.dumps({"file": "inv.gds", "deck": "sky130", "output": "inv.spice"})
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    code, report = _run_extract_json(capsys, [str(request_path)])
+
+    assert code == 0
+    assert report["file"] == str(design_dir / "inv.gds")
+    assert report["netlist_path"] == str(design_dir / "inv.spice")
+
+
+def test_extract_request_document_is_mutually_exclusive_with_argv_flags(
+    tmp_path, capsys
+):
+    """The stated precedence rule (issue #1867): a request document plus one
+    of this command's own input flags is a clean error, never a silent
+    override in either direction."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(_extract_request_document(path, tmp_path / "inv.spice"))
+    )
+
+    message = _extract_error_message(capsys, [str(request_path), "--parasitics"])
+
+    assert "mutually exclusive" in message
+    assert "--parasitics" in message
+
+
+def test_extract_request_document_structured_fields_reach_the_report(tmp_path, capsys):
+    """A request document's structured fields (`pins` as an array,
+    `matched_groups` as an object) take effect exactly as the repeatable/
+    comma-separated flags they mirror do."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(
+            _extract_request_document(
+                path,
+                tmp_path / "inv.spice",
+                pins=["A", "VPWR", "VGND"],
+                matched_groups={"pair": ["$1", "$2"]},
+            )
+        )
+    )
+
+    code, report = _run_extract_json(capsys, [str(request_path)])
+
+    assert code == 0
+    assert {n["name"] for n in report["nets"] if n["pin"]} == {"A", "VPWR", "VGND"}
+    assert [g["name"] for g in report["matched_device_groups"]] == ["pair"]
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ('{"deck": "sky130"}', "missing required field: file"),
+        ('{"file": "x.gds", "nope": 1}', "unknown field(s)"),
+        ('{"file": "x.gds", "schema": "klt.extract.request/99"}', "declares schema"),
+        ('{"file": 3}', "must be a string"),
+        ('{"file": "x.gds", "parasitics": "yes"}', "must be a boolean"),
+        ('{"file": "x.gds", "mom_rlc_capacitance_ff": "big"}', "must be a number"),
+        ('{"file": "x.gds", "critical_nets": [1]}', "array of strings"),
+        ('{"file": "x.gds", "deck_options": ["a=b"]}', "must be a JSON object"),
+        ('{"file": "x.gds", "pins": ["A,B"]}', "contains a comma"),
+        ('{"file": "x.gds", "matched_groups": {"g": ["a,b"]}}', "contains a comma"),
+        ('{"file": "x.gds", "matched_groups": {"g": 3}}', "array of strings"),
+        ('{"file": "x.gds",', "neither an existing file"),
+    ],
+)
+def test_extract_malformed_request_document_is_a_clean_error(
+    document, expected, capsys
+):
+    """Exit 1 with the shared error envelope, never a traceback."""
+    assert expected in _extract_error_message(capsys, [document])
+
+
+def test_extract_malformed_request_document_file_is_a_clean_error(tmp_path, capsys):
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text("{ this is not JSON")
+
+    assert "not valid JSON" in _extract_error_message(capsys, [str(request_path)])
+
+
+def test_extract_malformed_stdin_request_document_is_a_clean_error(capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("{ nope"))
+
+    assert "stdin request is not valid JSON" in _extract_error_message(capsys, ["-"])
+
+
+def test_extract_nonexistent_layout_path_is_still_a_missing_file(tmp_path, capsys):
+    """A mistyped layout path must keep producing its own "file not found"
+    error -- the request-document sniff only claims values that actually look
+    like JSON, so it can never turn this into a JSON parse error."""
+    message = _extract_error_message(
+        capsys, [str(tmp_path / "nope.gds"), "--deck", "sky130"]
+    )
+    assert "nope.gds" in message
+
+
+def test_extract_request_document_fields_cover_every_extract_flag():
+    """Guards the request schema against drift: every `klt extract` flag must
+    be reachable from a request document (issue #1867)."""
+    from klayout_tools.cli.extract_cmd import _REQUEST_FIELD_DESTS
+    from klayout_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["extract", "x.gds"])
+
+    assert set(_REQUEST_FIELD_DESTS.values()) == {"file", *args.request_argv_flags}
+
+
+def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
+    """Field-by-field mapping check across the whole flag surface, including
+    the fields whose end-to-end behavior needs a routed DEF / a built native
+    extension / a LEF library to exercise."""
+    from klayout_tools.cli.extract_cmd import _apply_request
+    from klayout_tools.cli.parser import create_parser
+
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": "design.gds",
+                "deck": "sky130",
+                "output": "design.spice",
+                "top": "design",
+                "pdk": "sky130A",
+                "pdk_root": "pdks",
+                "parasitics": True,
+                "mom_net": "VGND",
+                "spef": "design.spef",
+                "critical_nets": ["clk", "rst"],
+                "parasitics_nets": "clk",
+                "parasitics_top_cell_only": True,
+                "distributed_rc": True,
+                "mom_rlc_net": "clk",
+                "mom_rlc_resistance_ohm": 12.5,
+                "mom_rlc_capacitance_ff": 3,
+                "mom_rlc_inductance_nh": 0.25,
+                "def_net_names": True,
+                "def_net_connections": "routed.def",
+                "top_cell_pins": True,
+                "pins": ["A", "Y"],
+                "def_pins": "routed.def",
+                "pin_source_cells": "macro_a,macro_b",
+                "deck_options": {"poly_res": "2k"},
+                "defer_resistor_fixed_offset": True,
+                "abstract_cells": "sky130_fd_sc_hd__*",
+                "abstract_cell_lef": ["lib/cells.lef"],
+                "matched_groups": {"mirror": ["$1", "$2"]},
+            }
+        )
+    )
+
+    resolved = _apply_request(
+        create_parser().parse_args(["extract", str(request_path), "--format", "json"])
+    )
+
+    assert resolved.file == str(tmp_path / "design.gds")
+    assert resolved.deck == "sky130"
+    assert resolved.output == str(tmp_path / "design.spice")
+    assert resolved.top == "design"
+    assert resolved.pdk == "sky130A"
+    assert resolved.pdk_root == str(tmp_path / "pdks")
+    assert resolved.parasitics is True
+    assert resolved.mom_net == "VGND"
+    assert resolved.spef == str(tmp_path / "design.spef")
+    assert resolved.critical_nets == ["clk", "rst"]
+    assert resolved.parasitics_nets == ["clk"]
+    assert resolved.parasitics_top_cell_only is True
+    assert resolved.distributed_rc is True
+    assert resolved.mom_rlc_net == "clk"
+    assert resolved.mom_rlc_resistance_ohm == 12.5
+    assert resolved.mom_rlc_capacitance_ff == 3.0
+    assert resolved.mom_rlc_inductance_nh == 0.25
+    assert resolved.def_net_names is True
+    assert resolved.def_net_connections == str(tmp_path / "routed.def")
+    assert resolved.top_cell_pins is True
+    assert resolved.pins == "A,Y"
+    assert resolved.def_pins == str(tmp_path / "routed.def")
+    assert resolved.pin_source_cells == "macro_a,macro_b"
+    assert resolved.deck_options == ["poly_res=2k"]
+    assert resolved.defer_resistor_fixed_offset is True
+    assert resolved.abstract_cells == ["sky130_fd_sc_hd__*"]
+    assert resolved.abstract_cell_lef == [str(tmp_path / "lib" / "cells.lef")]
+    assert resolved.matched_groups == ["mirror=$1,$2"]
+
+
+def test_extract_check_mode_still_takes_a_json_report_not_a_request(tmp_path, capsys):
+    """`--check` is unaffected by the new positional form: the report it names
+    is a JSON document too, but it arrives via the flag, so it is never
+    sniffed as a request document (issue #1867 must not regress #1149)."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report))
+    capsys.readouterr()
+
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"

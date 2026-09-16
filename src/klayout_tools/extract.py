@@ -145,6 +145,9 @@ from ._annotation import is_reserved_annotation_layer
 from ._layout import load_layout, resolve_top_cell
 from ._layout import region as _region
 from ._layout import texts as _texts
+from ._paths import _load_request_json
+from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, _klt_version, build_provenance, sha256_file
 from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
 from ._report_verify import load_committed_report as _load_committed_report
@@ -670,6 +673,69 @@ def _mom_ground_entry_for_crosscheck(
     """
     net_id = mom_crosscheck["net_id"]
     return next((entry for entry in ground_nets if entry["net_id"] == net_id), None)
+
+
+#: The one top-level field a ``klt extract`` request document must carry
+#: (issue #1867). ``deck`` is deliberately *not* required here: an omitted
+#: deck is already reported as an application error (exit 1, "argument --deck
+#: is required") by ``cli/extract_cmd.py``'s own ``run`` rather than as a
+#: request-shape error -- see docs/cli/extract.md's exit-code contract.
+_REQUIRED_REQUEST_FIELDS = ("file",)
+
+#: Contract identifier a ``klt extract`` request document may declare in its
+#: optional ``schema`` field (issue #1867).
+REQUEST_SCHEMA = "klt.extract.request/1"
+
+
+def load_request(request_path: str) -> dict[str, Any]:
+    """Read and minimally validate a ``klt extract`` request JSON file.
+
+    Raises :class:`ExtractError` if the file is missing/unreadable, not valid
+    JSON, or missing the required top-level ``file`` field. Does not require
+    a ``schema`` field, matching ``klt lvs``/``klt sim``'s ``load_request``
+    (user-authored input, never emitted by this tool) -- when one *is*
+    present, ``cli/extract_cmd.py`` checks it against :data:`REQUEST_SCHEMA`.
+    """
+    request = _load_request_json(request_path, ExtractError)
+    return _validate_request_shape(request, "request file")
+
+
+def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
+    """Shared ``file`` shape check for a JSON-decoded ``klt extract``
+    request, however it was sourced (file, inline JSON, stdin). ``source`` is
+    folded into the "must be a JSON object" error for context.
+    """
+    return _shared_validate_request_shape(
+        data,
+        source,
+        error_cls=ExtractError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+    )
+
+
+def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+    """Resolve a ``klt extract`` request-document argument (issue #1867) into
+    a request dict plus the directory relative paths inside it resolve
+    against.
+
+    ``value`` is one of the same three forms every other request-taking
+    ``klt`` verb accepts (see
+    :func:`klayout_tools._paths.load_request_arg` and
+    docs/cli/extract.md): ``"-"`` for stdin, a path to an existing request
+    JSON file, or an inline JSON object string. Relative paths inside the
+    document resolve against the document's own directory for the file form,
+    and against the current working directory for the stdin/inline forms.
+
+    Raises :class:`ExtractError` for any read/parse/shape failure -- the same
+    exception type :func:`load_request` raises, so callers do not need to
+    distinguish the three forms.
+    """
+    return _shared_load_request_arg(
+        value,
+        error_cls=ExtractError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+        load_request_fn=load_request,
+    )
 
 
 def run_extract(
