@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt lvs` request field `options.compare_parameters` (issue
+  #1928) — a request-level escape hatch for scoping *which* device-class
+  parameters take part in the compare, reaching
+  `klayout.db.DeviceClass.enable_parameter` for the first time: `{
+  "<device-class>": [<parameter>, ...] }` enables exactly the named
+  parameters per class and disables every other declared parameter on both
+  sides before the comparer runs. Closes the gap `options.parameter_tolerance`
+  could not (it is a *relative* tolerance and can never call a zero-vs-nonzero
+  structural difference equal — the exact shape when one side derives a
+  parameter the other side's device cards never carry at all). `"engine":
+  "klayout"` only; a device class or parameter name that does not resolve
+  against either netlist is a clean application error (exit 1), never a
+  silent no-op — the same discipline `hints.same_nets` and
+  `options.combine_devices`'s array form already apply. Every excluded
+  parameter is echoed in the response and disclosed as a
+  `severity: "warning"` `device.parameter_excluded` `mismatches[]` entry, so
+  a `"match"` reached this way is never silently indistinguishable from a
+  full parameter compare. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `options.compare_parameters` and
+  `device.parameter_excluded` sections.
+
 - **Fixed**: `klt lvs` now recognises a round-tripped `X ... PARAMS:` card
   naming a custom (`kdb.GenericDeviceExtractor`-shaped) device class --
   today, sg13g2's `cap_cmomi`/`cap_cmomf` MoM capacitors (issue #1466) -- as

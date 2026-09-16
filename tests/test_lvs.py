@@ -6162,6 +6162,245 @@ def test_rerun_reconstructs_a_device_class_restricted_combine(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# options.compare_parameters (issue #1928): scope which device-class
+# parameters take part in the compare
+# --------------------------------------------------------------------------- #
+
+# A single-device-per-side NMOS inverter half where the reference's `L`
+# deliberately disagrees with the layout's -- a real, always-compared
+# parameter defect (`L` is a primary MOSFET parameter by default). Bodies
+# tied straight to the supply nets (like `_INVERTER_SPICE`), so the two
+# devices pair on topology alone and the `L` defect surfaces as a clean
+# `device.property` entry rather than collapsing into the issue #282
+# minimal-cell degrade.
+_COMPARE_PARAMETERS_LAYOUT_SPICE = """
+.subckt inv A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.65U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+"""
+
+_COMPARE_PARAMETERS_REFERENCE_SPICE = """
+.subckt inv A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.65U L=0.18U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+"""
+
+
+def test_compare_parameters_scopes_out_a_genuinely_mismatched_parameter(tmp_path):
+    """Issue #1928's core scenario: `options.parameter_tolerance` cannot
+    absorb `L`'s mismatch (0.15U vs 0.18U, both nonzero, well outside any
+    reasonable relative tolerance -- and even a zero-vs-nonzero structural
+    difference is unreachable for a *relative* tolerance by construction),
+    but `options.compare_parameters` naming only `W` for `NFET` reaches
+    `status: "match"` by removing `L` from that class's compare entirely,
+    disclosed as a `device.parameter_excluded` warning."""
+    layout_path = _write(tmp_path / "layout.spice", _COMPARE_PARAMETERS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _COMPARE_PARAMETERS_REFERENCE_SPICE)
+
+    baseline_path = _write_request(
+        tmp_path / "baseline.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    baseline = run_lvs(baseline_path)
+    assert baseline["status"] == "mismatch"
+    assert "device.property" in baseline["category_counts"]
+
+    scoped_path = _write_request(
+        tmp_path / "scoped.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"compare_parameters": {"NFET": ["W"]}},
+        },
+    )
+    report = run_lvs(scoped_path)
+
+    assert report["status"] == "match"
+    assert report["options"]["compare_parameters"] == {"NFET": ["W"]}
+    excluded = [
+        m for m in report["mismatches"] if m["category"] == "device.parameter_excluded"
+    ]
+    assert excluded, "expected at least one device.parameter_excluded disclosure"
+    assert all(m["severity"] == "warning" for m in excluded)
+    assert all(m["side"] == "both" for m in excluded)
+    l_entries = [m for m in excluded if m["details"]["parameter"] == "L"]
+    assert len(l_entries) == 1
+    assert l_entries[0]["device"]["class"] == "NFET"
+    assert l_entries[0]["details"]["compared_parameters"] == ["W"]
+
+
+def test_compare_parameters_is_case_insensitive(tmp_path):
+    """Matches the class name case-insensitively, the same convention
+    `options.combine_devices`'s list shape and `reference.device_bulk`
+    already use (`NetlistSpiceReader` upper-cases class names read back from
+    SPICE)."""
+    layout_path = _write(tmp_path / "layout.spice", _COMPARE_PARAMETERS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _COMPARE_PARAMETERS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"compare_parameters": {"nfet": ["w"]}},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "match"
+
+
+def test_compare_parameters_unknown_device_class_is_a_request_error(tmp_path):
+    """A device-class typo naming a class present in *neither* netlist must
+    not silently no-op -- it is a clean `LvsError` naming the unknown class
+    and the ones that do exist (mirrors
+    `test_combine_devices_list_unknown_class_is_a_request_error`)."""
+    layout_path = _write(tmp_path / "layout.spice", _COMPARE_PARAMETERS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _COMPARE_PARAMETERS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"compare_parameters": {"NFT_TYPO": ["W"]}},
+        },
+    )
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(path)
+    message = str(excinfo.value)
+    assert "NFT_TYPO" in message
+    assert "NFET" in message
+    assert "PFET" in message
+
+
+def test_compare_parameters_unknown_parameter_is_a_request_error(tmp_path):
+    """A parameter-name typo on an otherwise-valid device class must not
+    silently no-op either -- a clean `LvsError` naming the unknown parameter
+    and the ones the class actually declares."""
+    layout_path = _write(tmp_path / "layout.spice", _COMPARE_PARAMETERS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _COMPARE_PARAMETERS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"compare_parameters": {"NFET": ["WIDTH_TYPO"]}},
+        },
+    )
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(path)
+    message = str(excinfo.value)
+    assert "NFET" in message
+    assert "WIDTH_TYPO" in message
+    assert "W" in message.split("available on 'NFET':")[-1]
+
+
+def test_compare_parameters_accepts_class_present_on_only_one_side(tmp_path):
+    """A class named in `compare_parameters` but registered on just one side
+    is legitimate -- only "present on neither side" is an error, mirroring
+    `options.combine_devices`'s own list-shape rule."""
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt inv A Y VDD VSS
+M0 Y A VSS VSS NMOS L=0.15U W=0.65U
+R0 VDD Y 1000
+.ends
+""",
+    )
+    layout_only = _write(
+        tmp_path / "layout_only.spice",
+        _MIXED_CLASS_LAYOUT_SPICE.replace("R1 mid Y 500", "C1 mid Y 1p"),
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_only, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            # `CAP` exists only on the layout side.
+            "options": {"compare_parameters": {"CAP": ["C"]}},
+        },
+    )
+    report = run_lvs(path)  # must not raise
+    assert report["options"]["compare_parameters"] == {"CAP": ["C"]}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        {},
+        {"NFET": []},
+        {"NFET": "W"},
+        {"NFET": [3]},
+        {"": ["W"]},
+        {"NFET": [""]},
+        "NFET",
+        1,
+    ],
+)
+def test_compare_parameters_rejects_wrong_shaped_values(tmp_path, value):
+    """A wrong-shaped value is a clean request error rather than a silent
+    coercion, mirroring `options.combine_devices`'s own list-shape
+    validation."""
+    layout_path = _write(tmp_path / "layout.spice", _COMPARE_PARAMETERS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _COMPARE_PARAMETERS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"compare_parameters": value},
+        },
+    )
+    with pytest.raises(LvsError, match="options.compare_parameters"):
+        run_lvs(path)
+
+
+def test_compare_parameters_rejects_engine_netgen(tmp_path):
+    """`DeviceClass.enable_parameter` is a `klayout.db`-side hook -- the
+    `netgen` engine has no equivalent, so an opted-in `compare_parameters`
+    is a clean request error rather than a silently-ignored option (mirrors
+    `options.parameter_tolerance`'s own engine boundary)."""
+    layout_path = _write(tmp_path / "layout.spice", _COMPARE_PARAMETERS_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _COMPARE_PARAMETERS_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "netgen",
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"compare_parameters": {"NFET": ["W"]}},
+        },
+    )
+    with pytest.raises(LvsError, match="options.compare_parameters"):
+        run_lvs(path)
+
+
+def test_rerun_reconstructs_compare_parameters(tmp_path):
+    """A committed report's `options.compare_parameters` must round-trip
+    back into the same scoped compare -- omitting it would re-run the full,
+    unscoped compare and report the (expected) difference as drift."""
+    committed = {
+        "options": {"compare_parameters": {"NFET": ["W"]}},
+        "layout": "layout.spice",
+        "reference": "ref.spice",
+        "top": "inv",
+    }
+    request = lvs._reconstruct_lvs_request(committed)
+    assert request["options"]["compare_parameters"] == {"NFET": ["W"]}
+
+    # `null`/omitted stays omitted, not reconstructed as `{}` (which
+    # `_parse_compare_parameters` would itself reject as invalid).
+    committed["options"]["compare_parameters"] = None
+    request = lvs._reconstruct_lvs_request(committed)
+    assert "compare_parameters" not in request.get("options", {})
+
+
+# --------------------------------------------------------------------------- #
 # Direct classification unit tests (fake logger, no real NetlistComparer run)
 # --------------------------------------------------------------------------- #
 
@@ -10572,6 +10811,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "flatten_reference": False,
         "netgen_setup": None,
         "parameter_tolerance": None,
+        "compare_parameters": None,
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
     # `schema_version` bump (docs/json-contract.md, "additive envelope").

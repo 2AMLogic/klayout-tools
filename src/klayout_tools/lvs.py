@@ -240,6 +240,12 @@ CATEGORY_DEVICE_PROPERTY = "device.property"
 #: caller-supplied *design* tolerance rather than on the two values actually
 #: agreeing (see `_collect_tolerance_snaps`).
 CATEGORY_DEVICE_PARAMETER_TOLERATED = "device.parameter_tolerated"
+#: Issue #1928: `options.compare_parameters` disabled a device class
+#: parameter via `klayout.db.DeviceClass.enable_parameter(name, False)`
+#: before the comparer ran -- the disclosure that a `"match"` verdict rests
+#: on a caller-scoped subset of that class's parameters, not the full set the
+#: class declares (see `_apply_compare_parameters`).
+CATEGORY_DEVICE_PARAMETER_EXCLUDED = "device.parameter_excluded"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #: Issue #1497: KLayout's native `Netlist.combine_devices()` can leave a
@@ -648,6 +654,24 @@ def run_lvs(request: str) -> dict[str, Any]:
     with a truthy ``options.combine_devices`` (a clean :class:`LvsError`).
     See :func:`_parse_combine_devices_per_circuit` and
     :func:`_combine_circuit_devices_safely`.
+
+    ``options.compare_parameters`` (issue #1928) scopes which device-class
+    parameters take part in the compare at all: ``{<device-class name>:
+    [<parameter name>, ...]}``. Every other parameter that class declares is
+    disabled via ``DeviceClass.enable_parameter(name, False)`` on both sides
+    before the comparer runs -- the escape hatch for a single
+    always-compared parameter neither side can state identically (e.g. a
+    geometry-derived layout-side value a reference netlist's own device
+    cards never carry), which ``options.parameter_tolerance`` cannot absorb
+    (it is a *relative* tolerance and can never call a zero-vs-nonzero
+    structural difference equal). ``"engine": "klayout"`` only. A device
+    class or parameter name that does not resolve against either netlist is
+    a clean :class:`LvsError`, never a silent no-op -- mirrors
+    ``hints.same_nets``/``options.combine_devices``'s array form. Every
+    excluded parameter is disclosed as a ``severity: "warning"``
+    ``device.parameter_excluded`` entry, so a ``"match"`` reached this way
+    is never silently indistinguishable from a full parameter compare. See
+    :func:`_parse_compare_parameters` and :func:`_apply_compare_parameters`.
     """
     request, request_dir = load_request_arg(request)
 
@@ -735,6 +759,12 @@ def run_lvs(request: str) -> dict[str, Any]:
             "instead of also setting the whole-request combine_devices"
         )
     parameter_tolerance = _parse_parameter_tolerance(options)
+    # Issue #1928: the resolved `{<device-class>: [<parameter>, ...]}`
+    # mapping, or `None` when the option was omitted -- see
+    # `_parse_compare_parameters`. Class/parameter names are validated once
+    # each netlist is resolved (`_apply_compare_parameters`, further down),
+    # the same two-stage split `options.combine_devices`'s list shape uses.
+    compare_parameters = _parse_compare_parameters(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
     # extract` is always flat, so a hierarchical reference/pre-extracted
@@ -1243,6 +1273,7 @@ def run_lvs(request: str) -> dict[str, Any]:
     bulk_warnings: list[dict[str, Any]] = []
     placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
+    compare_parameter_warnings: list[dict[str, Any]] = []
 
     if engine == "klayout":
         # Issue #506: normalise the reference side's device classes up to the
@@ -1270,6 +1301,17 @@ def run_lvs(request: str) -> dict[str, Any]:
         # `severity: "warning"` disclosure entries appended further down.
         placeholder_warnings = _apply_reference_placeholder_values(
             reference_placeholder_classes,
+            layout_netlist,
+            reference_netlist,
+        )
+
+        # Issue #1928: same placement rationale once more -- `enable_parameter`
+        # has to run before the comparer is constructed for the same reason
+        # `equal_parameters` does just above, and after `combine_devices()`
+        # so combining still sees each side's unmodified classes. Returns
+        # the `severity: "warning"` disclosure entries appended further down.
+        compare_parameter_warnings = _apply_compare_parameters(
+            compare_parameters,
             layout_netlist,
             reference_netlist,
         )
@@ -1426,6 +1468,17 @@ def run_lvs(request: str) -> dict[str, Any]:
                 "'property ... tolerance' entries are absolute per-device-class "
                 'values, not a single relative one; see docs/cli/lvs.md, "Engine")'
             )
+        if compare_parameters:
+            # Issue #1928: same boundary again -- `DeviceClass.enable_parameter`
+            # is a `klayout.db`-side hook this module applies to the in-process
+            # `NetlistComparer`'s own device classes, and netgen has no
+            # equivalent per-parameter compare-scoping hook of its own.
+            raise LvsError(
+                "options.compare_parameters is only supported for engine "
+                "'klayout' -- the netgen engine has no equivalent "
+                "per-parameter compare-scoping hook (see docs/cli/lvs.md, "
+                '"Engine")'
+            )
         setup_file = _resolve_netgen_setup(options, request_dir)
         timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
         status, mismatches, engine_version = _run_netgen_lvs(
@@ -1546,6 +1599,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         # from one where the two values actually agreed.
         mismatches.extend(tolerance_warnings)
 
+    if compare_parameter_warnings:
+        # Issue #1928: same rationale once more -- a `compare_parameters`
+        # disclosure records a request-side compare-scoping choice applied
+        # before the compare, not a `NetlistComparer` event, so it is
+        # appended here rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status`, it only keeps a
+        # match reached with a parameter scoped out from being
+        # indistinguishable from one where every parameter actually agreed.
+        mismatches.extend(compare_parameter_warnings)
+
     if flatten_warnings:
         # Issue #1085: same rationale as the disclosures above -- a
         # `flatten_reference`/`flatten_layout` structural flatten is a
@@ -1573,6 +1636,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         or bulk_warnings
         or placeholder_warnings
         or tolerance_warnings
+        or compare_parameter_warnings
         or flatten_warnings
         or power_only_pruning_warnings
     ):
@@ -1674,6 +1738,11 @@ def run_lvs(request: str) -> dict[str, Any]:
             "flatten_reference": flatten_reference,
             "netgen_setup": netgen_setup_echo,
             "parameter_tolerance": parameter_tolerance,
+            # Issue #1928: `null` when the option was omitted, else the
+            # resolved `{<device-class>: [<parameter>, ...]}` mapping -- the
+            # same always-present-but-nullable convention
+            # `combine_devices_per_circuit`/`netgen_setup` already follow.
+            "compare_parameters": compare_parameters,
         },
         "status": status,
         "mismatch_count": len(mismatches),
@@ -1842,7 +1911,8 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     ``reference.top`` from ``report["reference_top"]``), and the whole
     compare-shaping ``options`` block (``combine_devices``/
     ``flatten_layout``/``flatten_reference``/``netgen_setup``/
-    ``parameter_tolerance``, from ``report["options"]``).
+    ``parameter_tolerance``/``compare_parameters``, from
+    ``report["options"]``).
 
     Issue #1205: the last two used to be lossy. The response recorded a
     single ``top`` applied to *both* sides here, so a report whose request
@@ -1943,6 +2013,16 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         parameter_tolerance = committed.get("parameter_tolerance")
     if parameter_tolerance is not None:
         options["parameter_tolerance"] = parameter_tolerance
+    # Issue #1928: re-assert the resolved `{<device-class>: [<parameter>,
+    # ...]}` mapping verbatim, same rationale as `combine_devices_per_circuit`
+    # just above -- a `null`/missing entry (the option was never set) is left
+    # out entirely, not reconstructed as `{}` (which
+    # `_parse_compare_parameters` would itself reject as invalid).
+    compare_parameters = echoed.get("compare_parameters")
+    if isinstance(compare_parameters, dict) and compare_parameters:
+        options["compare_parameters"] = {
+            key: list(value) for key, value in compare_parameters.items()
+        }
     if options:
         request["options"] = options
     return request
@@ -3999,6 +4079,214 @@ def _format_placeholder_value(value: float) -> str:
     if value == int(value):
         return str(int(value))
     return repr(value)
+
+
+# --------------------------------------------------------------------------- #
+# options.compare_parameters (issue #1928): scope which device-class
+# parameters take part in the compare
+# --------------------------------------------------------------------------- #
+
+
+def _parse_compare_parameters(
+    options: Mapping[str, Any],
+) -> dict[str, list[str]] | None:
+    """Resolve ``options.compare_parameters`` into an ordered
+    ``{<device-class name>: [<parameter name>, ...]}`` mapping, or ``None``
+    when the key is absent (issue #1928).
+
+    Every numeric parameter a device class declares is always compared by
+    KLayout's own ``NetlistComparer`` unless ``DeviceClass.enable_parameter``
+    is used to turn it off -- nothing in the request document reached that
+    hook before this option existed, so a single always-compared parameter
+    neither side can state identically (a geometry-derived layout-side value
+    a reference netlist's own device cards never carry, for instance) made
+    ``status: "match"`` unreachable, with no escape hatch narrower than
+    teaching one side to state the missing parameter (explicitly out of
+    scope for this option -- see :func:`_apply_compare_parameters`).
+
+    ``compare_parameters`` names, per device class, the parameters to
+    compare; every other parameter that class declares is disabled via
+    ``enable_parameter(name, False)`` before the comparer runs (see
+    :func:`_apply_compare_parameters`) and disclosed as a
+    ``severity: "warning"`` :data:`CATEGORY_DEVICE_PARAMETER_EXCLUDED` entry
+    per suppressed parameter, so a ``"match"`` reached this way is never
+    silently indistinguishable from a full parameter compare.
+
+    A wrong-shaped value is a clean request error, matching this module's
+    other option-parsing convention (see :func:`_parse_combine_devices`):
+    the value must be a non-empty JSON object whose keys are non-empty
+    device-class name strings and whose values are non-empty lists of
+    non-empty parameter-name strings. Naming a device class or parameter
+    that does not actually exist is *not* validated here -- that requires
+    resolving against the two netlists' own device classes, which is not yet
+    available at request-parse time; see :func:`_apply_compare_parameters`
+    for that check (the same two-stage split ``options.combine_devices``'s
+    list shape uses between :func:`_parse_combine_devices` and
+    :func:`_validate_combine_device_classes`).
+    """
+    if "compare_parameters" not in options:
+        return None
+    value = options["compare_parameters"]
+    if not isinstance(value, dict) or not value:
+        raise LvsError(
+            "options.compare_parameters must be a non-empty JSON object "
+            "mapping a device-class name to a non-empty list of parameter-"
+            'name strings to compare, e.g. {"NFET_01V8": ["W", "L"]}'
+        )
+    result: dict[str, list[str]] = {}
+    for class_name, params in value.items():
+        if not isinstance(class_name, str) or not class_name.strip():
+            raise LvsError(
+                "options.compare_parameters keys must be non-empty "
+                "device-class name strings"
+            )
+        if (
+            not isinstance(params, list)
+            or not params
+            or not all(isinstance(name, str) and name.strip() for name in params)
+        ):
+            raise LvsError(
+                f"options.compare_parameters['{class_name}'] must be a "
+                "non-empty list of non-empty parameter-name strings"
+            )
+        result[class_name.strip()] = [name.strip() for name in params]
+    return result
+
+
+def _apply_compare_parameters(
+    spec: dict[str, list[str]] | None,
+    layout_netlist: Any,
+    reference_netlist: Any,
+) -> list[dict[str, Any]]:
+    """Enable exactly the requested parameters on each named device class,
+    disabling every other declared parameter on **both** sides via
+    ``DeviceClass.enable_parameter`` before the comparer is constructed
+    (issue #1928).
+
+    ``spec`` is :func:`_parse_compare_parameters`'s resolved
+    ``{<device-class name>: [<parameter name>, ...]}`` mapping. Applied to
+    both sides' own ``DeviceClass`` instance for the named class (matched
+    case-insensitively via :func:`_find_device_class`, the same convention
+    ``reference.device_bulk``/``combine_devices``'s list shape already use,
+    since ``NetlistSpiceReader`` upper-cases class names read back from
+    SPICE while a deck-declared class keeps its own casing) -- symmetrically,
+    the same way :func:`_apply_reference_placeholder_values` excludes a
+    parameter on both sides, because ``NetlistComparer`` consults each
+    device's own class object, not a single shared one.
+
+    **Validation, never a silent no-op.** A device-class name that resolves
+    on *neither* side, or a parameter name not declared by the class on
+    either side it does resolve on, is a clean :class:`LvsError` naming the
+    typo and what is actually available -- the same "typo must be visible"
+    discipline ``hints.same_nets`` and ``options.combine_devices``'s array
+    form already apply (a silently-ignored typo here would look exactly like
+    a device class whose every parameter happens to agree, which is far more
+    dangerous than a typo that simply does nothing). A class named in
+    ``spec`` but present on only one side is legitimate (mirrors
+    ``options.combine_devices``'s own "present on just one side is not an
+    error" rule) and is scoped on that side alone.
+
+    **Narrower than teaching a side to state the missing parameter.** This
+    option does not compute or synthesize a value for the disabled
+    parameter on either side -- it removes that parameter from the compare
+    entirely, on both sides, for the named class. Reconciling *what* a
+    missing parameter should read (the way ``reference.device_bulk``
+    reconciles a missing bulk terminal) is a narrower, per-case fix this
+    issue deliberately leaves out of scope; this is the generic escape
+    hatch for when that narrower fix is not (yet) available.
+
+    Returns one ``severity: "warning"`` :data:`CATEGORY_DEVICE_PARAMETER_EXCLUDED`
+    entry per parameter excluded from a named class (one entry regardless of
+    how many sides that class resolves on, ``side: "both"``), which
+    ``run_lvs`` appends to ``mismatches[]``. The disclosure is the point --
+    same discipline as ``device.bulk_reconciled``/``device.placeholder_value``:
+    a ``"match"`` reached with a parameter scoped out is never silently
+    indistinguishable from one where every parameter actually agreed.
+    """
+    entries: list[dict[str, Any]] = []
+    if not spec:
+        return entries
+
+    known_classes: dict[str, str] = {}
+    for netlist in (layout_netlist, reference_netlist):
+        for device_class in netlist.each_device_class():
+            known_classes.setdefault(device_class.name.lower(), device_class.name)
+    unknown_classes = sorted(
+        {name for name in spec if name.lower() not in known_classes}
+    )
+    if unknown_classes:
+        available = ", ".join(sorted(known_classes.values())) or "(none)"
+        raise LvsError(
+            "options.compare_parameters names device class(es) present in "
+            f"neither the layout nor the reference netlist: "
+            f"{', '.join(unknown_classes)} -- device classes available "
+            f"across both sides: {available}"
+        )
+
+    for class_name, wanted_params in spec.items():
+        layout_class = _find_device_class(layout_netlist, class_name)
+        reference_class = _find_device_class(reference_netlist, class_name)
+        resolved_classes = [
+            device_class
+            for device_class in (layout_class, reference_class)
+            if device_class is not None
+        ]
+
+        known_params: dict[str, str] = {}
+        for device_class in resolved_classes:
+            for param in device_class.parameter_definitions():
+                known_params.setdefault(param.name.lower(), param.name)
+        unknown_params = sorted(
+            {name for name in wanted_params if name.lower() not in known_params}
+        )
+        if unknown_params:
+            available = ", ".join(sorted(known_params.values())) or "(none)"
+            raise LvsError(
+                f"options.compare_parameters['{class_name}'] names "
+                f"parameter(s) not declared by that device class: "
+                f"{', '.join(unknown_params)} -- parameters available on "
+                f"'{class_name}': {available}"
+            )
+
+        wanted_lower = {name.lower() for name in wanted_params}
+        compared_names = sorted(
+            {known_params[name] for name in wanted_lower if name in known_params}
+        )
+        resolved_name = resolved_classes[0].name
+
+        for device_class in resolved_classes:
+            for param in device_class.parameter_definitions():
+                device_class.enable_parameter(
+                    param.name, param.name.lower() in wanted_lower
+                )
+
+        for param_lower, param_name in sorted(known_params.items()):
+            if param_lower in wanted_lower:
+                continue
+            entries.append(
+                _mismatch(
+                    CATEGORY_DEVICE_PARAMETER_EXCLUDED,
+                    "warning",
+                    f"options.compare_parameters scoped device class "
+                    f"'{resolved_name}' to compare only "
+                    f"{compared_names} -- '{param_name}' was excluded from "
+                    "this compare and is NOT verified; a 'match' does not "
+                    "confirm the two sides agree on it (see "
+                    "docs/cli/lvs.md, 'device.parameter_excluded')",
+                    "both",
+                    device={
+                        "layout": None,
+                        "reference": None,
+                        "class": resolved_name,
+                    },
+                    details={
+                        "parameter": param_name,
+                        "compared_parameters": compared_names,
+                    },
+                )
+            )
+
+    return entries
 
 
 # --------------------------------------------------------------------------- #
