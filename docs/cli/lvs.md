@@ -421,6 +421,68 @@ always assuming SI metres:
   suffix or exponent literal (`L=0.5u` / `L=0.15e-6`), either of which is
   unambiguous and unaffected by `reference.deck` either way.
 
+## Custom device classes round-tripped through an `X ... PARAMS:` card (issue #1942)
+
+Every device class `klt extract` recognises through a native
+`kdb.DeviceExtractor*` (MOS, drawn resistor, MIM capacitor, bipolar, diode)
+writes with its own SPICE element letter (`M`/`R`/`C`/`Q`/`D`). One device
+family — `sg13g2`'s `cap_cmomi`/`cap_cmomf` MoM (Metal-oxide-Metal)
+capacitors, recognised through a custom `kdb.GenericDeviceExtractor` (issue
+#1466) — has no native element letter, so `kdb.NetlistSpiceWriter` writes it
+as an ordinary subcircuit-call `X` card instead:
+
+```
+XD_$1 A B cap_cmomi PARAMS: W=4 L=10
+```
+
+Reading that card back through a plain `kdb.NetlistSpiceReader()` (no
+delegate) does not error: an `X` card naming an undefined subcircuit
+synthesises an *abstract circuit* whose parameters are baked into its own
+mangled name (`CAP_CMOMI(L=10,W=4)`), and the device is then compared by
+that circuit-name string, never as a device — invisible in `counts.devices`,
+unreachable by `options.parameter_tolerance`, and any real mismatch degrades
+to a generic `topology`/`circuit could not be matched to a counterpart`
+finding with no device/parameter/net name.
+
+**`layout.deck`/`reference.deck` fixes this.** When a pre-extracted
+`layout.netlist` gives `layout.deck`, or `reference.netlist` gives
+`reference.deck` (any `reference.form`), `klt lvs` recognises an `X` card
+naming one of that deck's own custom device classes (today: its
+`mom_capacitors` entries) and creates a real device of that class instead —
+the identical `kdb.DeviceClass` shape (`A`/`B` terminals, declared
+equivalent, `W`/`L` parameters) the layout-extraction side itself registers,
+built from one shared function (`klayout_tools.extract
+.mom_capacitor_device_class`) so both sides cannot drift apart. The device
+then participates in `klt lvs`'s ordinary device-level compare exactly like
+an `M`/`R`/`C`/`D` card already does:
+
+- **Device census.** `counts.devices.layout`/`.reference`/`.matched` counts
+  it like any other device — no longer silently absent.
+- **`options.parameter_tolerance` reaches it.** A small `W`/`L` delta within
+  tolerance absorbs (`status: "match"`, a `device.parameter_tolerated`
+  entry) instead of hard-failing on circuit-name string inequality.
+- **A real mismatch is actionable.** A parameter/connectivity difference
+  reports the ordinary `device.property`/`device.unmatched` entry, naming
+  the device instance and its class (`cap_cmomi`), instead of a generic,
+  un-named `topology` finding.
+
+A hand- or tool-generated reference netlist for this family must emit the
+identical `X <name> <net> <net> cap_cmomi PARAMS: W=<value> L=<value>` card
+shape `klt extract`'s own writer produces (see the example above) — there is
+no plain-element card form for this device family to convert to instead.
+
+**Residual gap: no deck given.** `layout.deck`/`reference.deck` are already
+required for `layout.file` (inline extraction) and commonly given for
+`reference.netlist` (`form: "subckt-call"`'s own device-name resolution,
+"Netlist form" above), but both are optional for a pre-extracted
+`layout.netlist`, and `reference.deck` is not required for `form:
+"plain-element"`/`"gate-level-verilog"`. Omitting the relevant side's `deck`
+on a netlist that round-trips a custom device class leaves this recognition
+unable to run — the pre-#1942 mangled-abstract-circuit degradation described
+above still applies, silently, on that side. There is no separate
+diagnostic for this today; give `layout.deck`/`reference.deck` whenever a
+pre-extracted netlist may contain a custom device class.
+
 ## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
 
 `klt place-and-route`'s `verilog_path` (issue #996) writes the as-built,

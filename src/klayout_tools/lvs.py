@@ -175,6 +175,7 @@ from .lvs_netgen import (
     _run_netgen_lvs,
 )
 from .netlist_capacitor_recovery import (
+    custom_device_classes_for_deck,
     make_capacitor_class_recovery_reader,
     parse_capacitor_class_comments,
 )
@@ -2288,8 +2289,32 @@ def _resolve_layout(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
+    # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
+    # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
+    # classes -- e.g. a MoM capacitor -- as a device of that class instead
+    # of letting it degrade into a mangled-name abstract circuit. A best-
+    # effort lookup only: an unresolvable `deck_name`/`deck_options` here is
+    # deliberately swallowed rather than raised -- `run_lvs` re-resolves
+    # `layout.deck` itself right after this function returns (see its own
+    # `layout_deck` comment) and raises the authoritative `LvsError` there,
+    # so this must not duplicate (and potentially reorder) that validation.
+    # `None`/empty when `layout.deck` was never given, unchanged from every
+    # request that predates this parameter.
+    custom_device_classes: dict[str, str] = {}
+    deck_name = layout_spec.get("deck")
+    if deck_name:
+        try:
+            layout_deck_for_recovery = get_extraction_deck(deck_name, deck_options)
+        except (UnknownExtractionDeckError, InvalidDeckOptionError):
+            layout_deck_for_recovery = None
+        if layout_deck_for_recovery is not None:
+            custom_device_classes = custom_device_classes_for_deck(
+                layout_deck_for_recovery
+            )
     netlist = kdb.Netlist()
-    reader = make_capacitor_class_recovery_reader(recovered_capacitor_classes)
+    reader = make_capacitor_class_recovery_reader(
+        recovered_capacitor_classes, custom_device_classes=custom_device_classes
+    )
     try:
         netlist.read(layout_netlist_path, reader)
     except Exception as exc:
@@ -2457,7 +2482,28 @@ def _read_reference_netlist(
 
     netlist = kdb.Netlist()
     recovered_capacitor_classes = parse_capacitor_class_comments(read_text)
-    reader = make_capacitor_class_recovery_reader(recovered_capacitor_classes)
+    # Issue #1942: the same round-tripped custom-device-class recognition
+    # `_resolve_layout` wires for `layout.deck` above, keyed off
+    # `reference.deck` instead -- a best-effort lookup: an unresolvable
+    # `deck` name here is deliberately swallowed (not raised) since this
+    # function's *existing* `deck`/`device_map` resolution (the
+    # `form="subckt-call"` conversion above) already owns raising the
+    # authoritative error for a bad `reference.deck`. `{}` when `deck` was
+    # never given, unchanged from every request that predates this
+    # parameter.
+    custom_device_classes: dict[str, str] = {}
+    if deck:
+        try:
+            reference_deck_for_recovery = get_extraction_deck(deck)
+        except (UnknownExtractionDeckError, InvalidDeckOptionError):
+            reference_deck_for_recovery = None
+        if reference_deck_for_recovery is not None:
+            custom_device_classes = custom_device_classes_for_deck(
+                reference_deck_for_recovery
+            )
+    reader = make_capacitor_class_recovery_reader(
+        recovered_capacitor_classes, custom_device_classes=custom_device_classes
+    )
     try:
         netlist.read(read_path, reader)
     except Exception as exc:

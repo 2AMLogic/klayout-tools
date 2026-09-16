@@ -1115,6 +1115,16 @@ two adjacent devices whose markers touch and merge into one cluster) is
 **dropped, not guessed at** — reported as a `warnings[]` entry naming the
 device, mirroring upstream's own extractor guard.
 
+**SPICE writer/reader round trip (issue #1942).** This device class has no
+native SPICE element letter (it is not MOS/resistor/capacitor/bipolar/diode
+-shaped), so `-o <netlist>`'s `kdb.NetlistSpiceWriter` writes it as an
+ordinary subcircuit-call `X ... PARAMS:` card, e.g. `XD_$1 A B cap_cmomi
+PARAMS: W=4 L=10`. `klt lvs` recognises that same card shape back as a real
+device — not the mangled-name abstract circuit KLayout's own default SPICE
+reading would otherwise synthesise — when the relevant side's `layout.deck`/
+`reference.deck` is given; see `docs/cli/lvs.md`'s "Custom device classes
+round-tripped through an `X ... PARAMS:` card" section.
+
 Both decks declare the family, because both upstream rule decks do: `sg13g2`
 is its native home, and `sg13cmos5l`'s own (non-symlinked) top-level
 `sg13cmos5l.lvs` `%include`s the same `cap_cmomi`/`cap_cmomf` derivation

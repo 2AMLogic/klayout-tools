@@ -39,6 +39,42 @@ module existed. This mechanism never changes what is written to disk -- only
 how ``klt`` itself re-reads a netlist for ``klt lvs``'s pre-extracted
 ``layout.netlist`` shape and reference-netlist reads; the bare, value-only
 ``C`` card format issue #1558 fixed is completely unaffected.
+
+**Custom device classes round-tripped as ``X`` subcircuit calls (issue
+#1942).** A device class ``klt extract`` recognises through a custom
+``kdb.GenericDeviceExtractor`` -- today, exactly
+:class:`~klayout_tools.decks.MomCapacitorDevice` (IHP's ``cap_cmomi``/
+``cap_cmomf`` MoM capacitors, issue #1466) -- has no native SPICE element
+letter (it is not MOS/resistor/capacitor/bipolar/diode-shaped), so
+``kdb.NetlistSpiceWriter`` writes it as an ``X`` subcircuit-call card (e.g.
+``XD_$1 A B cap_cmomi PARAMS: W=1 L=2``). Read back through a plain
+``kdb.NetlistSpiceReader()`` (no delegate, or this module's own capacitor-
+only delegate before this extension), an ``X`` card naming an undefined
+subcircuit synthesises an *abstract circuit* whose parameters are baked into
+its own mangled name (``CAP_CMOMI(L=2,W=1)``) -- the device is then compared
+by that circuit-name string, never as a device: it is invisible in the
+device census, ``options.parameter_tolerance`` never reaches it, and any
+mismatch degrades to a generic ``circuit could not be matched to a
+counterpart`` triple with no device/parameter/net name.
+
+:func:`custom_device_classes_for_deck` reads the same
+``ExtractionDeck.mom_capacitors`` table :func:`klayout_tools.extract
+._build_mom_capacitor_extractor` (the layout-extraction side) registers its
+device classes from, and :func:`make_capacitor_class_recovery_reader`'s
+``custom_device_classes`` parameter wires a ``wants_subcircuit``/``element``
+override that recognises an ``X`` card naming one of those classes and
+creates a real :class:`~klayout.db.Device` of a
+:func:`klayout_tools.extract.mom_capacitor_device_class`-shaped
+``DeviceClass`` instead -- so both sides of a compare (a pre-extracted
+``layout.netlist`` with ``layout.deck`` given, and a ``reference.netlist``
+with ``reference.deck`` given) recognise the identical device class for the
+identical name, and the device participates in ``klt lvs``'s ordinary
+device-level compare (device census, ``parameter_tolerance``, named
+``device.unmatched``/``device.property`` mismatches) exactly like an M/R/C/D
+card already does. Without a resolved deck on that side (``layout.deck``/
+``reference.deck`` omitted), this recognition cannot run -- the ``X`` card
+still degrades to the pre-#1942 abstract-circuit fallback described above;
+see ``docs/cli/lvs.md``'s "Custom device classes" section.
 """
 
 from __future__ import annotations
@@ -49,6 +85,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+    from .decks import ExtractionDeck
 
 #: KLayout's own reader assigns this name to the implicit top-level circuit
 #: when a SPICE file has device cards outside any ``.subckt`` block (verified
@@ -147,8 +185,39 @@ def parse_capacitor_class_comments(text: str) -> dict[tuple[str, str], str]:
     return recovered
 
 
+def custom_device_classes_for_deck(
+    deck: ExtractionDeck | None,
+) -> dict[str, str]:
+    """``{<UPPER-CASED class name>: <canonical class name>}`` for every
+    custom (``kdb.GenericDeviceExtractor``-recognised) device class
+    ``deck`` declares -- today, exactly its ``mom_capacitors`` entries
+    (issue #1466) -- the table :func:`make_capacitor_class_recovery_reader`'s
+    ``custom_device_classes`` parameter wants (issue #1942).
+
+    Keyed off the *same* deck object the layout-extraction side resolves
+    (``klayout_tools.extract._build_mom_capacitor_extractor``, driven by
+    ``ExtractionDeck.mom_capacitors``), so a round-tripped ``X`` card names
+    exactly the class this table recognises -- upper-cased because a SPICE
+    ``X`` card's own subcircuit-name token case is not guaranteed to survive
+    a hand-edit/tool round trip, matched case-insensitively the same way
+    ``kdb.NetlistSpiceReader`` case-folds everything else it reads. ``None``
+    (no deck resolved for this side of the compare -- ``layout.deck``/
+    ``reference.deck`` omitted) returns ``{}``: the pre-#1942 default,
+    unchanged (the ``X`` card degrades to KLayout's own abstract-circuit
+    fallback, see this module's own docstring).
+    """
+    if deck is None:
+        return {}
+    return {
+        mom_capacitor.name.upper(): mom_capacitor.name
+        for mom_capacitor in deck.mom_capacitors
+    }
+
+
 def make_capacitor_class_recovery_reader(
     recovered: Mapping[tuple[str, str], str],
+    *,
+    custom_device_classes: Mapping[str, str] | None = None,
 ) -> kdb.NetlistSpiceReader:
     """Build a ``kdb.NetlistSpiceReader`` whose delegate reattaches a
     recovered capacitor device-class name (see
@@ -166,10 +235,30 @@ def make_capacitor_class_recovery_reader(
     elsewhere in the same file via a real ``X``-card model binding --
     correctly share one class object, exactly the way KLayout's own default
     reading already shares one class object per class name.
+
+    ``custom_device_classes`` (issue #1942, see :func:`custom_device_classes_for_deck`
+    and this module's own docstring) additionally recognises an ``X``
+    subcircuit-call card naming one of its values as a *device* of that
+    class -- built by :func:`klayout_tools.extract.mom_capacitor_device_class`
+    the first time a given class name is seen, then reused by name exactly
+    like the capacitor-recovery path above -- instead of letting
+    ``kdb.NetlistSpiceReader``'s own default handling synthesise a mangled-
+    name abstract circuit for it. ``None``/``{}`` (the default) leaves every
+    ``X`` card to that default handling, byte-for-byte unchanged from before
+    this parameter existed.
     """
     import klayout.db as kdb
 
+    from .extract import mom_capacitor_device_class
+
+    custom_lookup: dict[str, str] = dict(custom_device_classes or {})
+
     class _CapacitorClassRecoveringDelegate(kdb.NetlistSpiceReaderDelegate):
+        def wants_subcircuit(self, name: str) -> bool:
+            if name.upper() in custom_lookup:
+                return True
+            return super().wants_subcircuit(name)
+
         def element(
             self,
             circuit: kdb.Circuit,
@@ -203,6 +292,30 @@ def make_capacitor_class_recovery_reader(
                     # card always carries exactly 2 nets/terminals). Falling
                     # through to the default handler below is safer than
                     # silently misconnecting a terminal.
+            elif element_type == "X":
+                class_name = custom_lookup.get(model.upper())
+                if class_name is not None:
+                    netlist = circuit.netlist()
+                    device_class = netlist.device_class_by_name(class_name)
+                    if device_class is None:
+                        device_class = mom_capacitor_device_class(class_name)
+                        netlist.add(device_class)
+                    terminals = device_class.terminal_definitions()
+                    if len(nets) == len(terminals):
+                        device = circuit.create_device(device_class, name)
+                        for net, terminal in zip(nets, terminals, strict=True):
+                            device.connect_terminal(terminal.name, net)
+                        for param_def in device_class.parameter_definitions():
+                            if param_def.name in params:
+                                device.set_parameter(
+                                    param_def.id(), params[param_def.name]
+                                )
+                        return True
+                    # Defensive only -- never seen in practice (this class's
+                    # own shape is always 2 terminals, matching the writer's
+                    # own X-card net count). Falling through to the default
+                    # handler is safer than silently misconnecting a
+                    # terminal.
             return super().element(
                 circuit, element_type, name, model, value, nets, params
             )

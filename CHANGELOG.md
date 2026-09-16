@@ -14,6 +14,36 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs` now recognises a round-tripped `X ... PARAMS:` card
+  naming a custom (`kdb.GenericDeviceExtractor`-shaped) device class --
+  today, sg13g2's `cap_cmomi`/`cap_cmomf` MoM capacitors (issue #1466) -- as
+  a real device instead of degrading into a mangled-name abstract circuit
+  (issue #1942). Previously, a pre-extracted `layout.netlist` or
+  `reference.netlist` that instantiated this device family via
+  `X<name> <net> <net> cap_cmomi PARAMS: W=... L=...` (exactly what `klt
+  extract -o <netlist>` writes for it, since this class has no native SPICE
+  element letter) was read back through `kdb.NetlistSpiceReader`'s own
+  default handling as an *abstract circuit* whose parameters are baked into
+  its own mangled name (`CAP_CMOMI(L=...,W=...)`) -- invisible in
+  `counts.devices`, unreachable by `options.parameter_tolerance`, and any
+  real mismatch degraded to a generic, un-named `topology`/`circuit could
+  not be matched to a counterpart` finding. `layout.deck`/`reference.deck`
+  now key a `kdb.NetlistSpiceReaderDelegate` (`netlist_capacitor_recovery
+  .py`'s `make_capacitor_class_recovery_reader`, extended with a
+  `custom_device_classes` parameter) that recognises the card and creates a
+  device of the identical `DeviceClass` shape the layout-extraction side
+  itself registers (`extract.py`'s new `mom_capacitor_device_class`, shared
+  by both sides), so the device now reaches the ordinary device-level
+  compare (device census, `parameter_tolerance`, named `device.property`/
+  `device.unmatched` mismatches) exactly like an `M`/`R`/`C`/`D` card
+  already does. Omitting `layout.deck`/`reference.deck` on a netlist that
+  round-trips this device family leaves the pre-#1942 fallback unchanged --
+  see `docs/cli/lvs.md`'s "Custom device classes round-tripped through an
+  `X ... PARAMS:` card" section. No `schema_version` bump -- an existing
+  `X` card is now read differently, but no request/response field changed
+  shape; every field this fix newly populates (`counts.devices`,
+  `mismatches[].device`/`.property`) already existed.
+
 - **Fixed**: `klt drc`/`klt extract` no longer misclassify a bare layout
   filename starting with `{` (e.g. `{weird}.gds`, run from its own directory)
   as inline JSON (issue #1922). `looks_like_request_document()`
