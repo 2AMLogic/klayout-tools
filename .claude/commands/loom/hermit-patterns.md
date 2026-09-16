@@ -482,11 +482,18 @@ for root, dirs, files in os.walk('.'):
         except: continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef): continue
+            # Matches both plain (self.x = 1) and annotated (self.x: int = 1)
+            # self-attribute assignments -- the latter parses as ast.AnnAssign
+            # with a single .target, not ast.Assign with plural .targets.
             has_self_assign = any(
-                isinstance(n, ast.Assign) and
-                any(isinstance(t, ast.Attribute) and
-                    isinstance(t.value, ast.Name) and t.value.id == 'self'
-                    for t in n.targets)
+                (isinstance(n, ast.Assign) and
+                 any(isinstance(t, ast.Attribute) and
+                     isinstance(t.value, ast.Name) and t.value.id == 'self'
+                     for t in n.targets))
+                or
+                (isinstance(n, ast.AnnAssign) and
+                 isinstance(n.target, ast.Attribute) and
+                 isinstance(n.target.value, ast.Name) and n.target.value.id == 'self')
                 for n in ast.walk(node)
             )
             if has_self_assign:
