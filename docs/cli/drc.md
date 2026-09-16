@@ -5,7 +5,7 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -42,6 +42,12 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   application error.
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
+- `--allow-deck-errors` — accept a *partial* report from a deck run
+  `klayout` itself reported an error for (`--engine klayout` only, issue
+  #1941; ignored for `--engine curated`). Off by default: a non-zero
+  `klayout` exit status or an `ERROR`-prefixed line in its output fails the
+  run (exit 1) **even when a report file exists** — see "Engine" →
+  `"klayout"` → "A partially-executed deck is never reported as clean".
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). Mutually exclusive with `<file>`
   (the input path is read from the report itself) — see "`--check` /
@@ -94,6 +100,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `deck_file` | string | `--deck-file` |
 | `deck_vars` | object\<string, string\|number\|bool\> | repeatable `--deck-var NAME=VALUE`. JSON `true`/`3` are rendered as the strings `"true"`/`"3"`, so a deck flag can be written as a natural JSON boolean. A key containing `=` is rejected (the flag encoding cannot represent it). |
 | `timeout_s` | number | `--timeout-s` |
+| `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 
@@ -124,7 +131,8 @@ than a JSON parse error.
 
 **A request document may not be combined with any of this command's own input
 flags** (`--deck`, `--top`, `--engine`, `--deck-file`, `--deck-var`, `--pdk`,
-`--pdk-root`, `--timeout-s`). Passing both is a clean application error
+`--pdk-root`, `--timeout-s`, `--allow-deck-errors`). Passing both is a clean
+application error
 (exit `1`):
 
 ```
@@ -192,10 +200,46 @@ as a `.lyrdb` (RDB XML) file and parsed into the same `violations[]`/
 `rule_counts` shape the curated engine produces — never trusting the
 subprocess's exit code alone: `klayout -b -r` can exit `0` even when the
 deck script itself errored out before reaching its own `report(...)` call,
-so the *report file's own presence* is this engine's only trustworthy
-completion signal (mirroring `_run_netgen_lvs`'s "no log file at all" check
-in `lvs.py`). A timeout (`--timeout-s`, default `300`) or a malformed/
-unparseable report both raise a clean error rather than guessing.
+so a missing report file is its own failure (mirroring `_run_netgen_lvs`'s
+"no log file at all" check in `lvs.py`). A timeout (`--timeout-s`, default
+`300`) or a malformed/unparseable report both raise a clean error rather
+than guessing.
+
+**A partially-executed deck is never reported as clean (issue #1941).** The
+report file's *presence* is not a completion signal either: a PDK-native
+deck typically calls `report(...)` near the top and appends rules as they
+run, so a deck that aborts part-way through — an unsupported DRC-DSL
+construct, a typo'd method, a rule the installed KLayout build is too old
+for — still leaves a **partial** report behind covering only the rules that
+ran before the abort. Before this was fixed, such a run produced `"status":
+"clean"`, `"violation_count": 0`, exit `0`, while `klayout` itself exited
+`1` and printed `ERROR:` lines. `klt drc` now fails the run (exit 1,
+"klayout reported an error while running the deck script", carrying
+klayout's own output) when **either** signal fires:
+
+- `klayout` exited non-zero, **or**
+- its stdout/stderr contains a line starting with `ERROR`.
+
+Either signal alone is enough, because neither alone is reliable — the exit
+status can be `0` on a failed deck, and a build could in principle fail
+without an `ERROR` line. Only a line *starting* with `ERROR` counts, so a
+deck's own output that merely contains the word (a rule named
+`ERROR_CHECK.1`, KLayout's indented backtrace lines) is not misread as a
+failure.
+
+`--allow-deck-errors` is the escape hatch for a caller who has deliberately
+scoped around a known-unrunnable rule: the partial report is accepted and
+the run exits on its normal `0`/`3` split, but the report records what it
+tolerated in an additive `engine_deck_errors` field
+(`{"exit_status": <int>, "error_lines": [...]}`, and a `deck errors
+tolerated (--allow-deck-errors): …` line under `--format text`), so the
+verdict is never *silently* clean. That key is **omitted entirely** on an
+ordinary run, so a normal `--engine klayout` payload is unchanged. The
+escape hatch never tolerates a *missing* report file — there is no partial
+report to accept in that case, only nothing at all. `--check --rerun`
+(below) re-runs a committed report that carries `engine_deck_errors` with
+the same tolerance the original invocation used, so verifying such a report
+diffs it rather than failing outright.
 
 **`--deck-var NAME=VALUE` (issue #1302, repeatable).** Passes an additional
 `-rd NAME=VALUE` script global to the `klayout` subprocess, beyond the
@@ -1142,6 +1186,7 @@ On a run with findings:
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
 | `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
+| `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
 | `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
@@ -1460,7 +1505,11 @@ deliberately **not** excluded: unlike the raw version strings, whether the
 mismatch itself changed between the committed run and a fresh rerun is
 informative on its own (a `false` → `true` transition means the fresh
 report used a different engine than the one that produced the committed
-baseline), so it is reported as ordinary drift like any other field.
+baseline), so it is reported as ordinary drift like any other field. A
+committed `--engine klayout` report carrying `engine_deck_errors` (issue
+#1941) is re-run with the same `--allow-deck-errors` tolerance the original
+invocation used, so verifying such a report diffs it — including any change
+in the tolerated `exit_status`/`error_lines` — rather than failing outright.
 Response shape:
 
 ```json
@@ -1499,7 +1548,7 @@ any other application-level failure.
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
 | `0`  | Ran clean — no violations. Under `--check`: the committed report still holds (`status: "match"`). |
-| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error. Under `--check`: a missing/unparseable committed report. |
+| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`). Under `--check`: a missing/unparseable committed report. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 

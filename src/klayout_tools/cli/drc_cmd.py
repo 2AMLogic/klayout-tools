@@ -126,6 +126,7 @@ _REQUEST_FIELD_DESTS = {
     "deck_file": "deck_file",
     "deck_vars": "deck_var",
     "timeout_s": "timeout_s",
+    "allow_deck_errors": "allow_deck_errors",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
 }
@@ -181,6 +182,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 request, "deck_vars", verb="drc", flag="--deck-var", error_cls=DrcError
             ),
             "timeout_s": args.timeout_s if timeout_s is None else timeout_s,
+            "allow_deck_errors": reqdoc.get_bool(
+                request, "allow_deck_errors", verb="drc", error_cls=DrcError
+            ),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
         }
@@ -206,6 +210,7 @@ def _run(args: argparse.Namespace) -> dict:
             deck_vars=_parse_deck_vars(args.deck_var),
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
+            allow_deck_errors=args.allow_deck_errors,
         )
 
     if not args.deck:
@@ -252,6 +257,18 @@ def _print_text(report: dict) -> None:
         print(f"engine: {report['engine']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
+    # Issue #1941: a run that tolerated deck errors via --allow-deck-errors
+    # ran only part of its deck -- say so, so the text form never renders a
+    # partial run as an unqualified "clean".
+    deck_errors = report.get("engine_deck_errors")
+    if deck_errors is not None:
+        print(
+            "deck errors tolerated (--allow-deck-errors): klayout exit "
+            f"status {deck_errors['exit_status']}, "
+            f"{len(deck_errors['error_lines'])} ERROR line(s)"
+        )
+        for line in deck_errors["error_lines"]:
+            print(f"  {line}")
     print(f"violations: {report['violation_count']}")
 
     unchecked_layers = report["coverage"]["layers_in_stream_without_rules"]
