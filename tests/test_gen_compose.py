@@ -11747,6 +11747,157 @@ def test_cli_gen_compose_text_names_a_cell_block_by_its_cell_name(
 
 
 # --------------------------------------------------------------------------- #
+# Issue #1917: a nested composition's own-block via-drop pad self-notch check
+# (#1520, below) was hypothesized to lose net-awareness once several
+# originally-distinct sub-blocks are flattened into one nested `gen-compose`
+# block -- i.e. that promoting several `pins[]` ports through a bundle net at
+# a *different* `routing.layer_role` than the inner stage used could
+# spuriously fail via-drop spacing against an unrelated sibling sub-block's
+# own drawn geometry, purely as an artifact of the nesting.
+#
+# Investigated and NOT reproduced with the real nesting mechanism. The
+# originally-filed repro used a `blocks[].from_stage` field that has never
+# existed anywhere in this codebase's history (confirmed by #1917's curator
+# pass); the real, documented mechanism for "treat an earlier composition as
+# one opaque block in a later pass" is nesting a `gen-compose` response as
+# `blocks[].generator_report` in a second `gen-compose` call
+# (docs/cli/gen-compose.md's own "so a composition nests into a further
+# composition unmodified").
+#
+# Root-cause read: `_pad_self_notch_violation_um` (#1520, below) delegates to
+# `kdb.Region.notch_check()`, which by construction only flags a spacing
+# violation *within one already-connected polygon* -- it never compares two
+# genuinely separate (non-touching, non-overlapping) shapes sharing the same
+# `kdb.Region`, regardless of whether they originated from the same sub-block
+# or different ones. So a promoted port's via-drop pad can only ever
+# "self-notch" against geometry that has *already merged* with it into one
+# polygon -- which is, by construction, the same electrical node the pad is
+# landing on, whether that merged polygon happens to span one sub-block or
+# several once flattened by nesting. A sibling sub-block's *genuinely
+# separate* geometry stays invisible to this check either way -- a
+# manifestation of the already-tracked #1527 gap (no general obstacle model
+# between two different placed blocks), not a defect introduced by nesting.
+#
+# This test locks in the correct/current behavior against the exact
+# narrative #1917 described: three `mos_array` blocks nested into one
+# composed block ("core"), four gate/drain ports declare-only promoted via
+# the inner stage's own `pins[]`, then bundle-routed through a *different*
+# `routing.layer_role` in the outer stage -- routes cleanly and DRC-clean,
+# matching the single-pass per-net `layer_role`-override workaround #1917
+# itself cites as already working.
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_nests_a_composition_and_bundle_routes_promoted_pins_on_new_layer(
+    tmp_path, pdk_root
+):
+    kpd = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "kpd_1917",
+        rows=1,
+        cols=1,
+        gate_contact=True,
+        w_um=8,
+        l_um=4,
+        flavor="nfet",
+    )
+    kan = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "kan_1917",
+        rows=1,
+        cols=1,
+        gate_contact=True,
+        w_um=2,
+        l_um=4,
+        flavor="nfet",
+    )
+    ka = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "ka_1917",
+        rows=1,
+        cols=1,
+        gate_contact=True,
+        w_um=1,
+        l_um=4,
+        flavor="pfet",
+    )
+
+    # Stage 1 ("core"): declare-only pins[] promotion of four gate/drain
+    # ports at the inner stage's own base routing layer ("metal" == li1) --
+    # no connectivity/routing at this stage, mirroring #1917's own narrative.
+    core = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "kpd", "generator_report": kpd},
+                {"id": "kan", "generator_report": kan, "orientation": "mirror_x"},
+                {"id": "ka", "generator_report": ka},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["kpd", "kan", "ka"],
+                "spacing_um": 0.5,
+            },
+            "pins": [
+                {"net": "kpd_G", "block": "kpd", "port": "U0_G"},
+                {"net": "kan_D", "block": "kan", "port": "U0_D"},
+                {"net": "kan_G", "block": "kan", "port": "U0_G"},
+                {"net": "ka_D", "block": "ka", "port": "U0_D"},
+            ],
+            "options": {
+                "cell_name": "core_1917",
+                "output": str(tmp_path / "core_1917.gds"),
+            },
+        }
+    )
+    assert core["generator"] == "gen-compose"
+    assert [p["name"] for p in core["ports"]] == ["kpd_G", "kan_D", "kan_G", "ka_D"]
+
+    # Stage 2 (outer, nested): place "core" as one opaque block and
+    # bundle-route its four promoted ports on "metal2" -- a *different*
+    # `routing.layer_role` than the inner stage used, forcing a via-drop back
+    # down to each port's own "metal" (li1) pad for every leg.
+    output = tmp_path / "outer_1917.gds"
+    outer = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "core", "generator_report": core}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["core"],
+                "origins_um": {"core": {"x": 0.0, "y": 0.0}},
+            },
+            "connectivity": [
+                {
+                    "net": "nkm",
+                    "pins": [
+                        {"block": "core", "port": name}
+                        for name in ("kpd_G", "kan_D", "kan_G", "ka_D")
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.17},
+            "options": {"cell_name": "outer_1917", "output": str(output)},
+        }
+    )
+
+    assert outer["unrouted_nets"] == []
+    net = outer["nets"][0]
+    assert net["routed"] is True
+    assert net["status"] == "routed"
+    assert all(leg["routed"] is True for leg in net["legs"]), net["legs"]
+
+    drc_report = run_drc(str(output), "sky130", top="outer_1917")
+    assert drc_report["violation_count"] == 0, drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
 # Own-block pad self-notch check (issue #1520): a `blocks[].cell` port
 # hand-declared on a pre-existing stream's own internal wire can sit close
 # enough to a *different* part of that same wire (e.g. a perpendicular leg
