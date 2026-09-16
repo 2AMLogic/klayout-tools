@@ -36,6 +36,12 @@
 # sources into `libs.tech/ngspice/osdi/`, and preflight-check the ngspice
 # on PATH against the OSDI ABI version that compiler emits.
 #
+# The install this script produces (`pdks/ihp-open-pdk/ihp-sg13g2/`) is
+# also a required **sibling** dependency of
+# `scripts/fetch-ihp-sg13cmos5l.sh` (issue #1929) -- that separate upstream
+# repository's device symbols are relative symlinks into this one, so run
+# this script first if `ihp-sg13cmos5l` support is the goal.
+#
 # Usage: scripts/fetch-ihp-sg13g2.sh [--force]
 
 set -euo pipefail

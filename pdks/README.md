@@ -21,6 +21,7 @@ upstream release so every checkout gets identical data.
 | `sky130-liberty/` | A minimal, open_pdks-layout `sky130A` variant holding the real `sky130_fd_sc_hd__tt_025C_1v80.lib` Yosys/ABC need for `klt synthesize`'s GCD worked example, fetched by `scripts/fetch-sky130-liberty.sh` — see that script's header comment for why this can't come from `lambdapdk/` (issue #417) |
 | `ihp-open-pdk/` | [IHP-GmbH/IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK) (Apache-2.0) at the release tag pinned in `scripts/fetch-ihp-sg13g2.sh` — the **real SG13G2** PDK, a distinct project from lambdapdk's `ihp130` (see "`ihp130` vs. SG13G2" below); fetched by `scripts/fetch-ihp-sg13g2.sh` (issue #522) |
 | `ihp-open-pdk/ihp-sg13g2/libs.tech/ngspice/osdi/` | Compiled OSDI shared libraries (`psp103.osdi`, `psp103_nqs.osdi`, `r3_cmc.osdi`, `mosvar.osdi`) for the PDK's own Verilog-A compact models above — **not shipped by the fetch tarball**, compiled locally by `scripts/fetch-sg13g2-sim-toolchain.sh` (issue #1628) from a checksum-pinned OpenVAF-Reloaded (`openvaf-r`) build |
+| `ihp-open-pdk/ihp-sg13cmos5l/` | [IHP-GmbH/ihp-sg13cmos5l](https://github.com/IHP-GmbH/ihp-sg13cmos5l) (Apache-2.0), a **separate upstream repository** from IHP-Open-PDK/SG13G2, at the commit pinned in `scripts/fetch-ihp-sg13cmos5l.sh` (no release tags exist upstream, so it pins a commit SHA + codeload-tarball checksum rather than a version tag); fetched by `scripts/fetch-ihp-sg13cmos5l.sh` (issue #1929) as a **sibling** of `ihp-open-pdk/ihp-sg13g2/` — required, not optional, because its device symbols/HV model cards are relative symlinks into that sibling checkout (see below) |
 
 lambdapdk bundles, per process: KLayout layer properties and tech
 files, DRC/PEX decks, and standard-cell library data (LEF/GDS/liberty)
@@ -48,6 +49,28 @@ than folded into `fetch-pdks.sh`.
 `PDK_ROOT=pdks/ihp-open-pdk PDK=ihp-sg13g2` resolves the normal way (issue
 #522 taught the resolver this shape and its flat, `PDK_ROOT` pointed
 directly at `ihp-sg13g2/` variant too — see `docs/cli/pdk.md`'s "Scope").
+
+**`ihp-sg13cmos5l/` lands inside that same `ihp-open-pdk/` root, as a
+sibling of `ihp-sg13g2/`** — not a peer of `ihp-open-pdk/` itself — because
+`scripts/fetch-ihp-sg13cmos5l.sh` fetches a genuinely different upstream
+repository whose device symbols and HV model cards
+(`libs.tech/xschem/sg13cmos5l_pr/*.sym`) are *relative* symlinks four
+levels up and back down into a sibling `ihp-sg13g2` checkout
+(`../../../../ihp-sg13g2/libs.tech/...`, verified against the real
+pinned-commit tarball). Fetching `ihp-sg13cmos5l` without that sibling
+already present yields an install whose directory listing looks complete
+but whose device library cannot be opened — the dangling-symlink failure
+mode already reported and closed as #1406 — so
+`scripts/fetch-ihp-sg13cmos5l.sh` refuses to run (with an explanatory
+error, not a silent partial install) unless
+`ihp-open-pdk/ihp-sg13g2/{libs.tech,libs.ref}` already exists; run
+`scripts/fetch-ihp-sg13g2.sh` first. Once both are fetched, both variants
+resolve under the one shared root the normal open_pdks-multi-variant way
+(`src/klayout_tools/pdk.py`: "a root may hold more than one" variant):
+
+```bash
+PDK_ROOT=pdks/ihp-open-pdk PDK=ihp-sg13cmos5l klt pdk find
+```
 
 **Fetching the PDK alone does not make it simulatable.** `fetch-ihp-sg13g2.sh`
 ships the PDK's Verilog-A compact-model *sources*
