@@ -3975,6 +3975,131 @@ def test_engine_error_message_falls_back_to_trailer_without_bracket_error(tmp_pa
     )
 
 
+def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path):
+    """Issue #1868: when `openroad` reports it cannot read a file that this
+    process itself can read, that is a strong, cheap signal of a
+    mount-namespace mismatch (e.g. a container wrapper whose bind mounts do
+    not cover the resolved PDK root) -- surfaced as an actionable hint
+    rather than passed through as a bare, unexplained Tcl trailer."""
+    liberty = tmp_path / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+    liberty.write_text("library fake {}\n", encoding="utf-8")
+    completed = fake_completed(
+        returncode=1,
+        stderr=f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {liberty}.\n",
+    )
+    pdk_info = {
+        "root": str(tmp_path),
+        "resolved_via": "search root: ~/.volare",
+        "variant": "sky130A",
+    }
+
+    message = place_and_route._engine_error_message(
+        "floorplan", completed, pdk_info=pdk_info
+    )
+
+    assert str(liberty) in message
+    assert "this process can read it" in message
+    assert "container/wrapper" in message
+    assert "search root: ~/.volare" in message
+    assert str(tmp_path) in message
+    assert "docs/cli/place-and-route.md" in message
+
+
+def test_engine_error_message_omits_pdk_note_when_path_outside_pdk_root(tmp_path):
+    """The mount-namespace hint still fires for any readable, out-of-mount
+    absolute path (issue #1868's own closing note: the same hazard applies
+    to an out-of-tree netlist or an absolute-path LEF) -- but the PDK
+    root/`resolved_via` aside is only appended when the unreadable path
+    actually lives under the resolved PDK root."""
+    outside_file = tmp_path / "unrelated" / "extra_macro.lef"
+    outside_file.parent.mkdir()
+    outside_file.write_text("# lef\n", encoding="utf-8")
+    completed = fake_completed(
+        returncode=1,
+        stderr=f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {outside_file}.\n",
+    )
+    pdk_info = {
+        "root": str(tmp_path / "pdk_root"),
+        "resolved_via": "search root: ~/.volare",
+        "variant": "sky130A",
+    }
+
+    message = place_and_route._engine_error_message(
+        "floorplan", completed, pdk_info=pdk_info
+    )
+
+    assert "this process can read it" in message
+    assert "resolved PDK root" not in message
+
+
+def test_engine_error_message_no_hint_when_openroad_error_names_no_readable_path(
+    tmp_path,
+):
+    """A `cannot read file <path>` failure for a path that does NOT exist (or
+    isn't readable) on this host is a genuinely missing/unreadable file, not
+    a mount-namespace mismatch -- no hint is appended, and the message is
+    unchanged from its pre-#1868 shape."""
+    missing_path = tmp_path / "does" / "not" / "exist.lib"
+    completed = fake_completed(
+        returncode=1,
+        stderr=f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {missing_path}.\n",
+    )
+
+    message = place_and_route._engine_error_message(
+        "floorplan", completed, pdk_info=None
+    )
+
+    assert message == (
+        "openroad 'floorplan' stage failed: Error: pnr_top_floorplan.tcl, 1"
+    )
+
+
+def test_stubbed_floorplan_stage_unreadable_liberty_surfaces_mount_hint(
+    tmp_path, monkeypatch
+):
+    """End-to-end (issue #1868's own motivating scenario): the PDK resolves
+    via a search root (never `$PDK_ROOT`, mirroring an unset-`$PDK_ROOT`
+    `~/.volare` install), `openroad` fails on its first `read_liberty` with
+    a bare "cannot read file <path>" for the exact liberty path `klt`
+    resolved and can itself still read -- the container-wrapper mount gap
+    documented in `scripts/install-openroad-docker.sh`. The resulting
+    `PlaceAndRouteError` (i.e. `klt place-and-route`'s own JSON
+    `error.message`) names the resolved PDK root and `resolved_via` right
+    next to the actionable hint, not just OpenROAD's own uninformative Tcl
+    trailer."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    search_root = tmp_path / "volare_store"
+    monkeypatch.setattr(pdk_module, "STORE_DIRS", [str(search_root)])
+    _make_pdk_install(search_root, "sky130A")
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+
+    liberty_path, _corner, _pdk_info = place_and_route._resolve_liberty(
+        "sky130_fd_sc_hd", None
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-1080-gab6fd26351 \n")
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {liberty_path}.\n"
+            ),
+        )
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    with pytest.raises(PlaceAndRouteError) as exc_info:
+        run_place_and_route(request_path)
+
+    message = str(exc_info.value)
+    assert liberty_path in message
+    assert "this process can read it" in message
+    assert f"search root: {search_root}" in message
+    assert str(search_root) in message
+
+
 def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
     """The diagnosis reaches the caller through `PlaceAndRouteError`, i.e.
     through `klt place-and-route`'s own JSON `error.message` -- not just

@@ -1505,7 +1505,9 @@ def run_place_and_route(
             script_path, metrics_path, error_cls=PlaceAndRouteError
         )
         if completed.returncode != 0:
-            raise PlaceAndRouteError(_engine_error_message(stage, completed))
+            raise PlaceAndRouteError(
+                _engine_error_message(stage, completed, pdk_info=pdk_info)
+            )
 
         metrics = _read_metrics(metrics_path, stage)
         setup_count, hold_count = (None, None)
@@ -3614,7 +3616,31 @@ def _stage_script_lines(
     return lines
 
 
-def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) -> str:
+#: Matches the "can't read/open a file" *phrase* in an OpenROAD/Tcl error
+#: line, deliberately loose on wording -- issue #1868 has observed both
+#: ``cannot read file <path>.`` and ``couldn't open "<path>": ...``, and
+#: OpenROAD's own diagnostics interpose extra words (``cannot open LEF file
+#: <path>``). Matched against one line at a time; :data:`_ABS_PATH_RE` then
+#: pulls the actual path out of a line this matches, rather than trying to
+#: encode both the phrase and the path shape in one pattern.
+_UNREADABLE_FILE_PHRASE_RE = re.compile(
+    r"(?:cannot|can[' ]?t|couldn[' ]?t|could\s+not)\s+(?:read|open)\b",
+    re.IGNORECASE,
+)
+
+#: The first absolute-path-shaped token on a line -- used only after
+#: :data:`_UNREADABLE_FILE_PHRASE_RE` has already matched that line, so a
+#: bare ``/`` prefix is a reliable enough signal without also anchoring the
+#: surrounding phrase.
+_ABS_PATH_RE = re.compile(r"\"?(/[^\s\"]+)")
+
+
+def _engine_error_message(
+    stage: str,
+    completed: subprocess.CompletedProcess,
+    *,
+    pdk_info: dict[str, Any] | None = None,
+) -> str:
     """Build an actionable error message from a failed per-stage OpenROAD
     run.
 
@@ -3629,6 +3655,15 @@ def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) ->
     ``DRT-0305`` (a constant-tie net reaching TritonRoute) is additionally
     *diagnosed* rather than passed through -- see
     :func:`_constant_tie_diagnosis`.
+
+    ``pdk_info`` -- when the caller has one (``run_place_and_route`` always
+    does, once liberty/LEF resolution has happened) -- feeds
+    :func:`_mount_namespace_hint`, appended as a further ``--`` clause when
+    the failure looks like the container-wrapper mount gap issue #1868
+    describes: ``openroad`` couldn't read a file this process just resolved
+    and can itself still read. ``pdk_info`` is ``None`` in the existing
+    ``DRT-0305``/bracket/trailer unit tests, which keep their pre-#1868
+    messages unchanged.
     """
     diagnosis = _constant_tie_diagnosis(completed)
     if diagnosis is not None:
@@ -3646,14 +3681,92 @@ def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) ->
                 bare_error_lines.append(stripped)
 
     if bracket_lines:
-        return f"openroad '{stage}' stage failed: {bracket_lines[0]}"
-    if bare_error_lines:
-        return f"openroad '{stage}' stage failed: {bare_error_lines[-1]}"
+        message = f"openroad '{stage}' stage failed: {bracket_lines[0]}"
+    elif bare_error_lines:
+        message = f"openroad '{stage}' stage failed: {bare_error_lines[-1]}"
+    else:
+        tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
+        snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
+        message = (
+            f"openroad '{stage}' stage exited with code "
+            f"{completed.returncode}: {snippet}"
+        )
 
-    tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
+    hint = _mount_namespace_hint(completed, pdk_info)
+    if hint is not None:
+        message = f"{message} -- {hint}"
+    return message
+
+
+def _mount_namespace_hint(
+    completed: subprocess.CompletedProcess, pdk_info: dict[str, Any] | None
+) -> str | None:
+    """``None``, or an actionable hint that ``openroad`` and this process do
+    not share a filesystem view (issue #1868).
+
+    ``klt place-and-route`` resolves every liberty/LEF path on the **host**
+    (via :func:`_resolve_liberty`/:func:`_resolve_lef`, backed by
+    :mod:`klayout_tools.pdk`'s ``find_pdk``) and bakes the resulting absolute
+    paths into the generated Tcl handed to an ``openroad`` **subprocess** --
+    which, per ``docs/cli/place-and-route.md``'s own documented, CI-used
+    install path, is very often actually a wrapper script that runs a
+    container per invocation (``scripts/install-openroad-docker.sh``). A
+    container only sees the host paths its wrapper explicitly bind-mounted,
+    so a PDK discovered via a search root (``~/.volare``, ciel, open_pdks)
+    rather than an explicitly-set ``$PDK_ROOT`` silently falls outside that
+    wrapper's mount set -- see that script's own header comment.
+
+    The result is an OpenROAD/Tcl "can't read/open file <path>" failure that,
+    read alone, looks identical to a genuinely missing or unreadable file.
+    The cheap, general signal that distinguishes the two: **this** process
+    can still read that exact path (it is the one that resolved it in the
+    first place). When that holds, the failure is a mount/namespace gap, not
+    a missing file -- worth saying so, and worth surfacing the resolved PDK
+    root/``resolved_via`` alongside it when the path is a PDK asset, so a
+    reader sees ``resolved_via`` next to the unreadable path immediately
+    rather than having to separately run ``klt pdk find``.
+
+    This generalizes beyond PDK assets on purpose (issue #1868's own closing
+    note): any absolute path outside ``$PWD``/``$PDK_ROOT`` that a request
+    can reference -- an out-of-tree netlist, an ``--abstract-cell-lef``, a
+    macro LEF given by absolute path -- hits the identical hazard, and
+    ``pdk_info`` being ``None`` (or the path not living under its root) just
+    means the hint is generic rather than PDK-specific.
+    """
+    path: str | None = None
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in stream.splitlines():
+            if not _UNREADABLE_FILE_PHRASE_RE.search(line):
+                continue
+            path_match = _ABS_PATH_RE.search(line)
+            if path_match is not None:
+                path = path_match.group(1).rstrip(".,;:'\"")
+                break
+        if path is not None:
+            break
+    if path is None:
+        return None
+
+    try:
+        readable = os.path.isfile(path) and os.access(path, os.R_OK)
+    except OSError:
+        readable = False
+    if not readable:
+        return None
+
+    pdk_note = ""
+    if pdk_info is not None and path.startswith(pdk_info.get("root", "\0")):
+        pdk_note = (
+            f" (resolved PDK root: '{pdk_info['root']}', "
+            f"{pdk_info['resolved_via']}; $PDK_ROOT="
+            f"{os.environ.get('PDK_ROOT') or '(unset)'})"
+        )
+
     return (
-        f"openroad '{stage}' stage exited with code {completed.returncode}: {snippet}"
+        f"'openroad' could not read '{path}', but this process can read it"
+        f"{pdk_note} -- if 'openroad' is a container/wrapper invocation, its "
+        "mounts likely do not cover that path (see docs/cli/place-and-route.md's "
+        "'Installing OpenROAD' section)"
     )
 
 
