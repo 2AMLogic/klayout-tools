@@ -108,13 +108,18 @@ read_verilog <source-2>
 ...
 hierarchy -check -top <hdl_toplevel>
 synth -top <hdl_toplevel>
-dfflibmap -liberty <resolved liberty path>
-tee -q -o <abc log path> abc -liberty <resolved liberty path> -constr <constr path> [-D <picoseconds>] [-dont_use <glob> ...]
+dfflibmap -liberty <liberty path>
+tee -q -o <abc log path> abc -liberty <liberty path> -constr <constr path> [-D <picoseconds>] [-dont_use <glob> ...]
 clean
 [hilomap -hicell <tie-hi cell> <port> -locell <tie-lo cell> <port>]
-tee -q -o <stats path> stat -liberty <resolved liberty path> -json -top <hdl_toplevel>
+tee -q -o <stats path> stat -liberty <liberty path> -json -top <hdl_toplevel>
 write_verilog -noattr <netlist path>
 ```
+
+`<liberty path>` is written as `$PDK_ROOT/<path under the resolved PDK install
+root>` in the committed `synth_<top>.ys` and as the real absolute path in the
+`synth_<top>.run.ys` sibling Yosys is actually handed — see "Embedded paths"
+immediately below.
 
 **Embedded paths (issue #1844).** Every path embedded in the script *except*
 the resolved liberty is repo-relative when it resolves inside the invocation's
@@ -127,14 +132,56 @@ repo is found for the request at all, every embedded path stays absolute and
 the script is run with no `cwd` override, exactly as before this change (see
 "cwd-independence" below).
 
-The **resolved liberty path stays absolute, always** — Yosys must actually
-open it, and a PDK install essentially never lives inside the repo. Its
-commit-safe *identity* is the response's `provenance.deck` (name + content
-hash) instead. A consequence, and a known remaining gap: on a machine whose
-PDK sits under `$HOME` (the common case — `~/.ciel`, `~/.volare`), `klt
-env-provenance scan` still flags the generated `.ys` on its liberty lines,
-so the script is commit-safe in its *input/output* paths but not yet
-byte-for-byte scan-clean. Tracked separately as issue #1870.
+**The resolved liberty, and `$PDK_ROOT` rehydration (issue #1870).** A PDK
+install essentially never lives inside the repo, so repo-relative rewriting
+cannot help the one remaining path — and on the common install layouts
+(`~/.ciel`, `~/.volare`) that absolute path is home-directory-shaped, which
+is why a freshly generated `.ys` still failed `klt env-provenance scan` after
+#1844. The top-level script therefore writes the liberty **relative to the
+resolved PDK install root**, as `$PDK_ROOT/<path under that root>` — the same
+spelling `klt sim`'s `request.models.lib` already accepts and `klt pdk env`
+exports. The generated `synth_<top>.ys` is now scan-clean in *every* embedded
+path, so committing it leaks nothing:
+
+```console
+$ klt env-provenance scan .klt/synthesize/synth_counter.ys
+clean: 0 leak(s) in 1 file(s)            # exit 0
+```
+
+Yosys does **not** expand environment variables in a script file, so the
+committed form cannot also be the executed form. That difference is an
+explicit, named artifact rather than an implicit assumption: every run also
+writes the **rehydrated sibling `synth_<top>.run.ys`** — byte-identical to
+the committed script apart from its one-line header block and the substituted
+liberty — and it is that sibling `klt synthesize` hands to Yosys. The
+response names both: `script_path` (the artifact to commit) and
+`run_script_path` (the artifact that ran). Both are kept, never deleted.
+
+Rehydrating a *committed* script on another machine is the same one
+substitution, and needs nothing from `klt`:
+
+```console
+$ sed "s|\$PDK_ROOT|$(klt pdk find --format json | jq -r .root)|g" \
+    .klt/synthesize/synth_counter.ys > /tmp/synth_counter.run.ys
+$ yosys -s /tmp/synth_counter.run.ys            # run from the repo root
+```
+
+`klayout_tools.synthesize.rehydrate_script_text(text, pdk_root=…)` is the
+same transformation as an importable function. Which install root to
+substitute is pinned by the response's `provenance.pdk` (name + version) and
+`provenance.deck` (liberty name + content hash) — so "which liberty this
+script was mapped against" remains checkable by identity, never by location.
+
+Two deliberate residuals:
+
+- `synth_<top>.run.ys` carries the real absolute liberty path, so it is
+  machine-specific and **is not commit-safe** — scanning it will (correctly)
+  report the same `home-path` findings the single script used to. Its own
+  first line says so. Commit `synth_<top>.ys`, not its `.run.ys` sibling.
+- A liberty that does not resolve inside the resolved PDK root (a hand-placed
+  vendor library, say) keeps the absolute form and no sibling is written:
+  emitting a token that would rehydrate to the wrong file is worse than
+  losing machine-independence for that case.
 
 **cwd-independence.** The pre-#1844 invariant — every embedded path absolute,
 so the script runs correctly from any working directory — is preserved for
@@ -150,7 +197,8 @@ explicit and local: the same `repo_root` is both the rewrite base and the
 
 | File | Contents |
 | --- | --- |
-| `synth_<top>.ys` | The generated Yosys script (`script_path` in the response). |
+| `synth_<top>.ys` | The generated Yosys script (`script_path` in the response) — the **commit-safe** form, with the liberty written as `$PDK_ROOT/…` (issue #1870). |
+| `synth_<top>.run.ys` | The rehydrated, **runnable** sibling (`run_script_path` in the response) — identical apart from its header block and the substituted absolute liberty path. This is the script Yosys is invoked on; it is machine-specific, so commit `synth_<top>.ys` instead. Absent (and `run_script_path` equal to `script_path`) when the liberty resolved outside the PDK install root and no token was written. |
 | `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
 | `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
@@ -981,6 +1029,7 @@ caller decision rather than something this command should pick.
   },
   "netlist_path": { "path": ".klt/synthesize/gcd_synth.v", "scope": "repo" },
   "script_path": { "path": ".klt/synthesize/synth_gcd.ys", "scope": "repo" },
+  "run_script_path": { "path": ".klt/synthesize/synth_gcd.run.ys", "scope": "repo" },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -1012,7 +1061,8 @@ caller decision rather than something this command should pick.
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log, never the raw log itself: `{total, by_category, representatives}`. `total` is a raw line count (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
-| `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. |
+| `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
+| `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 | `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
