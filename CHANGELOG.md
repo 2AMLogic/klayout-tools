@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt drc --engine klayout` no longer reports a
+  partially-executed deck as `"status": "clean"` (issue #1941). A PDK-native
+  deck typically calls `report(...)` near the top and appends rules as they
+  run, so a deck that aborts part-way through (an unsupported DRC-DSL
+  construct, a rule the installed KLayout build is too old for) still leaves
+  a **partial** report file behind — and the engine previously treated that
+  file's mere presence as proof the run completed, ignoring both `klayout`'s
+  non-zero exit status and the `ERROR:` lines it printed. Either signal now
+  fails the run (exit 1, carrying klayout's own output). Only a line
+  *starting* with `ERROR` counts, so a deck's own output mentioning the word
+  (a rule named `ERROR_CHECK.1`, KLayout's indented backtrace lines) is not
+  misread as a failure. **Added**: `--allow-deck-errors` (and the matching
+  `allow_deck_errors` request field) as the escape hatch for a caller who has
+  deliberately scoped around a known-unrunnable rule — it accepts the partial
+  report and records what it tolerated in the additive `engine_deck_errors`
+  report field (`{"exit_status": ..., "error_lines": [...]}`, omitted
+  entirely on every other run), so such a verdict is never *silently* clean.
+  It never tolerates a *missing* report file. See
+  [`docs/cli/drc.md`](docs/cli/drc.md)'s "Engine" → `"klayout"`.
+
 - **Added**: `klt lvs` request field `options.compare_parameters` (issue
   #1928) — a request-level escape hatch for scoping *which* device-class
   parameters take part in the compare, reaching

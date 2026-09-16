@@ -995,7 +995,16 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
         raise DrcError(f"committed report has no 'deck' field to rerun: {report_path}")
 
     if committed.get("engine") == "klayout":
-        fresh = run_drc_klayout_engine(file_path, deck, top=None)
+        # A committed report carrying `engine_deck_errors` was produced with
+        # `--allow-deck-errors` (issue #1941); re-running it strictly would
+        # fail the verification outright rather than diffing it, so the
+        # rerun reproduces the original invocation's own error tolerance.
+        fresh = run_drc_klayout_engine(
+            file_path,
+            deck,
+            top=None,
+            allow_deck_errors=bool(committed.get("engine_deck_errors")),
+        )
     else:
         fresh = run_drc(file_path, deck, top=None)
 
@@ -1564,6 +1573,37 @@ def _parse_klayout_rdb_report(
     return violations, rule_counts
 
 
+#: KLayout's own error prefix for a deck-script failure, as emitted by
+#: ``klayout -b -r`` (verified against a real 0.28.16 run for issue #1941:
+#: ``ERROR: In <deck>: undefined local variable or method '...'`` followed by
+#: ``ERROR: NameError: ... in Executable::execute``). Anchored at column 0:
+#: the backtrace lines KLayout prints after each ``ERROR:`` line are indented,
+#: and a deck's own rule names/progress output (``Executing rule
+#: ERROR_CHECK.1``) never starts a line with the bare prefix -- so the anchor
+#: is what keeps this from misreading ordinary deck output as a failure.
+_KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
+
+
+def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
+    """Every ``ERROR``-prefixed line in the given ``klayout`` output streams
+    (issue #1941), in order, stdout before stderr.
+
+    ``klayout -b -r`` writes its deck-script diagnostics to one or the other
+    depending on build/platform, so both are scanned. An empty list means
+    KLayout itself reported no error -- not that the deck necessarily ran to
+    completion (see :func:`run_drc_klayout_engine`, which pairs this with the
+    exit status).
+    """
+    lines: list[str] = []
+    for stream in streams:
+        if not stream:
+            continue
+        lines.extend(
+            match.group(0).rstrip() for match in _KLAYOUT_ERROR_LINE_RE.finditer(stream)
+        )
+    return lines
+
+
 def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
     import shutil
 
@@ -1578,6 +1618,7 @@ def run_drc_klayout_engine(
     deck_vars: dict[str, str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    allow_deck_errors: bool = False,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1620,13 +1661,27 @@ def run_drc_klayout_engine(
       re-raised as an actionable :class:`DrcError` naming the missing binary
       and how to get one, or how to fall back to the curated engine.
     - **Timeout**: ``subprocess.TimeoutExpired`` -> :class:`DrcError`.
-    - **Never trusts the exit code.** ``klayout -b -r`` can exit ``0`` even
-      when the deck script itself errored out before reaching
+    - **Never trusts the exit code *alone*.** ``klayout -b -r`` can exit
+      ``0`` even when the deck script itself errored out before reaching
       ``report(...)`` (e.g. a deck expecting a variable this invocation does
-      not set) -- the *report file's own presence* is the only trustworthy
-      completion signal, mirroring netgen's "no log file at all" check.
-      Missing report file -> :class:`DrcError` carrying klayout's own
-      stdout/stderr, never a silent ``status: "clean"``.
+      not set), so a missing report file is its own failure -> :class:`DrcError`
+      carrying klayout's own stdout/stderr, never a silent ``status:
+      "clean"`` (mirroring netgen's "no log file at all" check).
+    - **...but the report file's presence is not a completion signal
+      either** (issue #1941). A PDK-native deck typically calls
+      ``report(...)`` near the top and appends rules as they run, so a deck
+      that aborts part-way through -- an unsupported DRC-DSL construct, a
+      typo'd method -- still leaves a *partial* report behind covering only
+      the rules that ran before the abort. A non-zero exit status **or** an
+      ``ERROR``-prefixed line in klayout's own output (either signal, since
+      neither alone is reliable) therefore raises :class:`DrcError` even
+      when a report file exists, rather than reporting the partial report's
+      zero violations as ``status: "clean"``. ``allow_deck_errors=True``
+      (CLI: ``--allow-deck-errors``) is the escape hatch for a caller who
+      has deliberately scoped around a known-unrunnable rule: the partial
+      report is accepted, and the run records what it tolerated in the
+      additive ``engine_deck_errors`` field (see below) so the verdict is
+      never *silently* clean. It never tolerates a missing report file.
     - **Workdir**: ``tempfile.mkdtemp``, cleaned up via
       :func:`_cleanup_klayout_drc_work_dir` (``shutil.rmtree(...,
       ignore_errors=True)``) in a ``finally``.
@@ -1646,7 +1701,12 @@ def run_drc_klayout_engine(
     ``violation_count``, ``rule_counts``, ``violations``, ``coverage``,
     ``provenance``) plus one additive field, ``"engine": "klayout"`` (the
     curated engine's own output carries no ``engine`` key at all, unchanged,
-    since it has always been the sole engine until this issue). ``deck`` is
+    since it has always been the sole engine until this issue) -- and, only
+    on a run that actually tolerated deck errors via ``allow_deck_errors``,
+    a second additive ``engine_deck_errors`` field (issue #1941):
+    ``{"exit_status": <int>, "error_lines": [<klayout's own ERROR lines>]}``.
+    That key is omitted entirely otherwise, so an ordinary run's payload is
+    byte-identical to previous releases'. ``deck`` is
     ``deck_file`` itself (there is no separate short deck *name* the way the
     curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
     arbitrary PDK-native script is identified by its own path).
@@ -1739,11 +1799,35 @@ def run_drc_klayout_engine(
             # before reaching report(...) -- never trust the exit code alone
             # (see this function's docstring). No report file at all means no
             # trustworthy verdict is possible; surface klayout's own
-            # stdout/stderr rather than a bare "no report" message.
+            # stdout/stderr rather than a bare "no report" message. Not
+            # tolerable via allow_deck_errors: there is no partial report to
+            # accept here, only nothing at all.
             raise DrcError(
                 "klayout did not produce a report file -- the deck script "
                 "likely failed before completing. klayout's own output:\n"
                 + (completed.stdout or completed.stderr or "").strip()
+            )
+
+        # ...and the report file's presence is not a completion signal either
+        # (issue #1941): a deck that called report(...) early and then aborted
+        # leaves a partial report behind. Either of klayout's own failure
+        # signals -- a non-zero exit status, or an ERROR-prefixed line in its
+        # output -- means the rules after the abort never ran, so the partial
+        # report's zero violations must not be reported as "clean".
+        error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
+        deck_errored = completed.returncode != 0 or bool(error_lines)
+        if deck_errored and not allow_deck_errors:
+            detail = (
+                "\n".join(error_lines)
+                or (completed.stdout or completed.stderr or "").strip()
+            )
+            raise DrcError(
+                "klayout reported an error while running the deck script "
+                f"(exit status {completed.returncode}) -- the deck likely "
+                "aborted part-way through, so the report file it did write "
+                "covers only the rules that ran before the abort, and its "
+                "verdict cannot be trusted. Pass --allow-deck-errors to "
+                "accept a partial report anyway. klayout's own output:\n" + detail
             )
 
         violations, rule_counts = _parse_klayout_rdb_report(report_path, dbu)
@@ -1766,6 +1850,20 @@ def run_drc_klayout_engine(
         "file": path,
         "deck": deck_file,
         "engine": "klayout",
+        # Additive, and present *only* when --allow-deck-errors actually
+        # tolerated a failed deck run (issue #1941) -- an ordinary run's
+        # payload is unchanged, and a tolerated one is self-describing
+        # rather than silently "clean".
+        **(
+            {
+                "engine_deck_errors": {
+                    "exit_status": completed.returncode,
+                    "error_lines": error_lines,
+                }
+            }
+            if deck_errored
+            else {}
+        ),
         "dbu_um": dbu,
         "status": "violations" if violations else "clean",
         "violation_count": len(violations),

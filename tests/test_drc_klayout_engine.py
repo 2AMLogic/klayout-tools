@@ -169,6 +169,7 @@ def _stub_klayout_drc_subprocess(
     rdb_xml: str = _EMPTY_RDB,
     stdout: str = "",
     stderr: str = "",
+    returncode: int = 0,
     side_effect: BaseException | None = None,
     captured_cmds: list | None = None,
 ):
@@ -191,7 +192,7 @@ def _stub_klayout_drc_subprocess(
             report_path = report_arg.split("=", 1)[1]
             with open(report_path, "w", encoding="utf-8") as handle:
                 handle.write(rdb_xml)
-        return fake_completed(stdout=stdout, stderr=stderr)
+        return fake_completed(stdout=stdout, stderr=stderr, returncode=returncode)
 
     monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
 
@@ -525,6 +526,279 @@ def test_klayout_engine_no_report_file_raises(tmp_path, monkeypatch):
 
     with pytest.raises(DrcError, match="did not produce a report file"):
         run_drc_klayout_engine(gds, deck_file)
+
+
+# --------------------------------------------------------------------------- #
+# A partially-executed deck must never read as clean (issue #1941)
+#
+# A PDK-native deck typically calls `report(...)` near the top and appends
+# rules as they run, so a deck that aborts partway through (an unsupported
+# DRC-DSL construct, a typo'd method) still leaves a well-formed report file
+# behind covering only the rules that ran before the abort. The report file's
+# presence alone is therefore not a completion signal -- klayout's own exit
+# status and its `ERROR:` output are the two signals that distinguish a deck
+# that finished from one that died mid-run.
+# --------------------------------------------------------------------------- #
+
+#: Real `klayout -b -r` output shape for a deck that calls an undefined
+#: method after its own `report(...)` call (issue #1941's reproduction).
+_DECK_ABORT_STDERR = (
+    "ERROR: In repro.drc: undefined local variable or method "
+    "`this_method_does_not_exist_in_the_drc_dsl' for main:Object\n"
+    "ERROR: NameError: undefined local variable or method "
+    "`this_method_does_not_exist_in_the_drc_dsl' in Executable::execute\n"
+)
+
+
+def test_klayout_engine_nonzero_exit_raises_even_with_report_file(
+    tmp_path, monkeypatch
+):
+    """A deck that wrote its report file early and then aborted leaves a
+    *partial* report behind -- a non-zero klayout exit status must fail the
+    run rather than reporting the partial report's zero violations as
+    `status: "clean"`."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stdout="whatever\n"
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="klayout reported an error"):
+        run_drc_klayout_engine(gds, deck_file)
+
+
+def test_klayout_engine_error_output_raises_even_when_exit_status_is_zero(
+    tmp_path, monkeypatch
+):
+    """`klayout -b -r` can exit `0` on a failed deck, so the exit status is
+    not a *necessary* signal either -- an `ERROR` line in its own output
+    fails the run on its own."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=0, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="klayout reported an error"):
+        run_drc_klayout_engine(gds, deck_file)
+
+
+def test_klayout_engine_deck_error_message_carries_klayouts_own_output(
+    tmp_path, monkeypatch
+):
+    """Same as the no-report-file branch: surface klayout's own output so
+    the caller can see *which* construct the deck died on."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError) as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    message = str(excinfo.value)
+    assert "this_method_does_not_exist_in_the_drc_dsl" in message
+    assert "exit status 1" in message
+    assert "--allow-deck-errors" in message
+
+
+def test_klayout_engine_rule_output_mentioning_error_is_not_a_deck_error(
+    tmp_path, monkeypatch
+):
+    """Only a line *starting* with `ERROR` is klayout's own error prefix --
+    a deck that echoes the word mid-line (a rule named `ERROR_...`, a
+    progress line) must not be misread as a failed run."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_EMPTY_RDB,
+        stdout="Executing rule ERROR_CHECK.1\n  ERROR_CHECK.1: 0 errors\n",
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["status"] == "clean"
+    assert "engine_deck_errors" not in report
+
+
+def test_klayout_engine_clean_run_omits_engine_deck_errors_key(tmp_path, monkeypatch):
+    """The additive `engine_deck_errors` key exists only on a run that
+    actually tolerated deck errors -- a normal run's payload is unchanged."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    assert "engine_deck_errors" not in run_drc_klayout_engine(gds, deck_file)
+
+
+def test_klayout_engine_allow_deck_errors_accepts_partial_report(tmp_path, monkeypatch):
+    """The escape hatch for a caller who has deliberately scoped around a
+    known-unrunnable rule: the partial report is accepted, but the run
+    records what it tolerated so the verdict is never silently clean."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file, allow_deck_errors=True)
+
+    assert report["status"] == "clean"
+    assert report["engine_deck_errors"]["exit_status"] == 1
+    assert len(report["engine_deck_errors"]["error_lines"]) == 2
+    assert report["engine_deck_errors"]["error_lines"][0].startswith(
+        "ERROR: In repro.drc:"
+    )
+
+
+def test_klayout_engine_allow_deck_errors_still_requires_a_report_file(
+    tmp_path, monkeypatch
+):
+    """The escape hatch tolerates a *partial* report, never a missing one --
+    no report file at all remains an unconditional failure."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, write_report=False, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="did not produce a report file"):
+        run_drc_klayout_engine(gds, deck_file, allow_deck_errors=True)
+
+
+def test_cli_drc_klayout_engine_deck_error_exits_one(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert "klayout reported an error" in payload["error"]["message"]
+
+
+def test_cli_drc_klayout_engine_allow_deck_errors_flag(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--allow-deck-errors",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "clean"
+    assert payload["engine_deck_errors"]["exit_status"] == 1
+
+
+def test_cli_drc_klayout_engine_allow_deck_errors_text_output_warns(
+    tmp_path, monkeypatch, capsys
+):
+    """`--format text` must not render a tolerated partial run as an
+    unqualified `status: clean` either."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--allow-deck-errors",
+            "--format",
+            "text",
+        ]
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "deck errors tolerated" in out
+    assert "exit status 1" in out
+
+
+def test_cli_drc_klayout_engine_request_document_allow_deck_errors(
+    tmp_path, monkeypatch, capsys
+):
+    """The request-document form mirrors the flag (issue #1867's rule that
+    every flag is reachable as a field)."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.drc.request/1",
+                "file": gds,
+                "engine": "klayout",
+                "deck_file": deck_file,
+                "allow_deck_errors": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["drc", str(request), "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["engine_deck_errors"]["exit_status"] == 1
+
+
+@_SKIP_NO_KLAYOUT_BINARY
+def test_klayout_engine_real_binary_partial_deck_is_not_reported_clean(tmp_path):
+    """Issue #1941's own reproduction, end to end against a real `klayout`:
+    a deck that calls `report(...)` first and then hits an undefined method
+    writes a report file and exits non-zero. It must fail the run, not
+    report `status: "clean"`."""
+    deck_file = _write_deck_file(
+        tmp_path / "partial.drc",
+        "source($input)\n"
+        'report("partial", $report)\n'
+        'input(1, 0).width(0.1).output("W.1", "min width")\n'
+        "this_method_does_not_exist_in_the_drc_dsl\n",
+    )
+    gds = _write_gds(tmp_path / "input.gds", layer=(1, 0), box=(0, 0, 1000, 1000))
+
+    with pytest.raises(DrcError, match="klayout reported an error"):
+        run_drc_klayout_engine(gds, deck_file, timeout_s=60.0)
 
 
 def test_klayout_engine_unparseable_report_raises_not_silently_clean(

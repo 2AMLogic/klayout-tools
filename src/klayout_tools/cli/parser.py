@@ -3986,6 +3986,24 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
+    drc_parser.add_argument(
+        "--allow-deck-errors",
+        dest="allow_deck_errors",
+        action="store_true",
+        help=(
+            "accept a partial report from a deck run that klayout itself "
+            "reported an error for (--engine klayout only; ignored for "
+            "--engine curated). By default a non-zero klayout exit status "
+            "or an ERROR line in its output fails the run even when a "
+            "report file exists (issue #1941), since a deck that calls "
+            "report(...) early and then aborts leaves a partial report "
+            "behind whose zero violations are not a clean verdict. Use "
+            "this only when you have deliberately scoped around a "
+            "known-unrunnable rule; the tolerated exit status and ERROR "
+            "lines are recorded in the report's own engine_deck_errors "
+            "field. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
     drc_input_group.add_argument(
         "--check",
         default=None,
