@@ -857,8 +857,14 @@ def run_lvs(request: str) -> dict[str, Any]:
     # library file -- the conversion's own `pin_order_lookup` and, below,
     # the power-pin universe `_prune_power_only_layout_circuits` needs.
     reference_pin_orders: dict[str, list[str]] | None = None
+    # Issue #1901: the PDK `_resolve_gate_level_pin_orders` resolves
+    # internally to read the library's pin-order source -- reused here (not
+    # re-resolved) purely so `provenance.pdk` can record it below, matching
+    # `klt extract`/`klt sta`/`klt place-and-route`. Stays `None` for every
+    # other `reference.form`, which resolves no PDK at all.
+    reference_pdk_info: dict[str, Any] | None = None
     if reference_form == "gate-level-verilog":
-        reference_pin_orders = _resolve_gate_level_pin_orders(
+        reference_pin_orders, reference_pdk_info = _resolve_gate_level_pin_orders(
             reference_spec.get("library"),
             reference_spec.get("pdk"),
             reference_spec.get("pdk_root"),
@@ -1635,6 +1641,11 @@ def run_lvs(request: str) -> dict[str, Any]:
             deck_path=(
                 deck_source_path(layout_deck_name) if layout_deck_name else None
             ),
+            # Issue #1901: populated only for a `gate-level-verilog`
+            # reference whose `reference.pdk`/`reference.pdk_root` resolved
+            # a PDK (see `reference_pdk_info` above) -- `None` for a plain
+            # SPICE-vs-SPICE reference, which genuinely involves no PDK.
+            pdk=reference_pdk_info,
             # Issue #600: echo the resolved `layout.deck_options` mapping
             # under `provenance.deck.options`, matching `klt extract`'s
             # shape exactly (`_deck_block` omits the key entirely when
@@ -2342,7 +2353,9 @@ def _read_reference_netlist(
         read_text = converted
     elif form == "gate-level-verilog":
         if pin_orders is None:
-            pin_orders = _resolve_gate_level_pin_orders(library, pdk_variant, pdk_root)
+            pin_orders, _ = _resolve_gate_level_pin_orders(
+                library, pdk_variant, pdk_root
+            )
         try:
             converted = convert_gate_level_verilog(
                 text, pin_order_lookup=pin_orders.get
@@ -2409,14 +2422,14 @@ def _resolve_gate_level_pin_orders(
     library: str | None,
     pdk_variant: str | None,
     pdk_root: str | None,
-) -> dict[str, list[str]]:
-    """``{<cell>: [<pin>, ...]}`` -- every standard cell's real, full PDK pin
-    order (signal *and* power/ground), read from a resolved PDK install's own
-    ``libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}`` file (issue
-    #1336) -- never a hardcoded pin-order table.
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """``({<cell>: [<pin>, ...]}, pdk_info)`` -- every standard cell's real,
+    full PDK pin order (signal *and* power/ground), read from a resolved PDK
+    install's own ``libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}``
+    file (issue #1336) -- never a hardcoded pin-order table.
 
-    Two consumers, one read of that file (issue #1622): ``.get`` on the
-    result is the ``pin_order_lookup`` callback
+    Two consumers, one read of that file (issue #1622): ``.get`` on the pin-
+    order mapping is the ``pin_order_lookup`` callback
     :func:`klayout_tools.verilog_netlist.convert_gate_level_verilog` wants,
     while :func:`_gate_level_power_pin_names` needs the whole mapping, to
     derive which of a cell's real PDK pins the conversion dropped.
@@ -2425,10 +2438,13 @@ def _resolve_gate_level_pin_orders(
     do (:func:`klayout_tools.pdk.find_pdk`, the same ``variant``/``root``
     resolution order documented in ``docs/cli/pdk.md``), then reads whichever
     of that library's ``spice/<library>.spice`` / ``cdl/<library>.cdl`` files
-    exists first (see :data:`_LIBRARY_PIN_ORDER_ASSETS`). Raises
-    :class:`LvsError` -- never lets a lower-level exception escape this
-    command's JSON-envelope contract -- when the PDK does not resolve, the
-    resolved variant ships no ``libs_ref`` asset at all, or neither file
+    exists first (see :data:`_LIBRARY_PIN_ORDER_ASSETS`). The resolved
+    ``pdk_info`` (the same :func:`~klayout_tools.pdk.find_pdk`-shaped dict) is
+    returned alongside the pin-order mapping (issue #1901) so ``run_lvs`` can
+    record it in ``provenance.pdk`` without a second, redundant resolution.
+    Raises :class:`LvsError` -- never lets a lower-level exception escape
+    this command's JSON-envelope contract -- when the PDK does not resolve,
+    the resolved variant ships no ``libs_ref`` asset at all, or neither file
     exists for ``library``.
     """
     if not library:
@@ -2461,7 +2477,7 @@ def _resolve_gate_level_pin_orders(
                 raise LvsError(
                     f"could not read library pin-order source '{candidate}': {exc}"
                 ) from exc
-            return parse_subckt_pin_orders(library_text)
+            return parse_subckt_pin_orders(library_text), pdk_info
 
     raise LvsError(
         f"library '{library}' has no pin-order source under PDK variant "

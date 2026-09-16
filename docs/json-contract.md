@@ -196,8 +196,13 @@ section 2 and [`docs/cli/wave.md`](cli/wave.md).
   below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
-  `null` when the run resolved no PDK (e.g. `klt drc`, which resolves none, or
-  a `lvs` compare, which is topological).
+  `null` when the run resolved no PDK. `klt drc` (issue #1901) populates it
+  when `--pdk`/`--pdk-root` is given (either engine), `null` when omitted;
+  `klt lvs` (issue #1901) populates it only for a `"gate-level-verilog"`
+  reference whose `reference.pdk`/`reference.pdk_root` resolve — a plain
+  SPICE-vs-SPICE compare is topological and resolves no PDK, so `pdk` stays
+  `null` there. See `docs/cli/drc.md`/`docs/cli/lvs.md` for each verb's exact
+  condition.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest of the deck file actually used, so "clean against *this exact*
