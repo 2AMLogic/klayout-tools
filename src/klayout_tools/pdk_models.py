@@ -1389,11 +1389,34 @@ def create_model_binding_delegate(
     without it (no bindings at all). The flavour identity is not lost: the
     writer's own preceding ``* device instance ... <class>`` comment still
     records it, and ``devices[].class`` in the JSON report is unaffected.
-    Deliberately scoped to capacitors -- an unbound ``R`` card's trailing
-    token is a *documented, load-bearing* consumer-supplied-``.model``
-    reference for sg13g2's ``res_metal1``/``res_metal2`` (see
-    ``_RESISTOR_MODEL_TABLE``'s own carve-out note), and a bipolar ``Q``
-    card's is likewise the gf180mcu ``bjt`` carve-out's model name.
+    This *value-only rewrite* is deliberately scoped to capacitors -- an
+    unbound ``R`` card's trailing token is a *documented, load-bearing*
+    consumer-supplied-``.model`` reference for sg13g2's ``res_metal1``/
+    ``res_metal2`` (see ``_RESISTOR_MODEL_TABLE``'s own carve-out note), and
+    a bipolar ``Q`` card's is likewise the gf180mcu ``bjt`` carve-out's
+    model name -- so it is left to KLayout's default writer unchanged.
+
+    A *second*, independent rewrite (issue #1927) does apply to an unbound,
+    *named* resistor device: KLayout's own default writer emits its plain
+    ``R`` card with only the resistance value (``R$1 a b 120000
+    my_resistor``), dropping the ``L``/``W`` geometry
+    ``DeviceExtractorResistor``/``WithBulk`` always measures and populates
+    -- unlike the MOS path, whose own default ``M`` card natively carries
+    ``L=``/``W=`` (confirmed against the installed ``klayout.db`` module).
+    ``_write_resistor_card_with_geometry`` below reproduces KLayout's exact
+    card text (same name/terminal/value/model-name spelling) and appends
+    `` L=...U W=...U`` -- the same suffix-style
+    :data:`GEOMETRY_STYLE_UNIT_SUFFIX` the MOS path and
+    ``netlist_normalize._convert_geometry_card`` (the reference-side
+    equivalent) both default to -- so a pre-extracted ``layout.netlist``
+    stops losing the geometry its own JSON report already carries in
+    ``devices[].params.l_um``/``w_um``. Scoped to a *named* class only,
+    mirroring ``_write_bare_capacitor_card``'s own anonymous-class
+    carve-out: every ``--parasitics`` shunt/leg/DC-tie resistor
+    ``extract_parasitics.py`` creates uses an anonymous
+    ``kdb.DeviceClassResistor()`` with ``L``/``W`` never set (always
+    ``0.0``, not a real measurement), so those are left to ``super()``
+    unchanged rather than gaining a meaningless ``L=0U W=0U``.
 
     ``global_nets`` (issue #1503) is an independent, additive concern: when
     non-empty, the delegate's ``write_header`` override emits one
@@ -1481,6 +1504,55 @@ def create_model_binding_delegate(
             self.emit_line(f"C{name} {pins} {capacitance:.12g}")
             return True
 
+        def _write_resistor_card_with_geometry(self, device: kdb.Device) -> bool:
+            """Write a *named* (deck-declared) resistor device's plain ``R``
+            card with its own `` L=...U W=...U`` geometry suffix appended,
+            and report ``True``; report ``False`` (writing nothing) for any
+            device this narrow rewrite does not own.
+
+            Issue #1927: see :func:`create_model_binding_delegate`'s own
+            docstring for the full rationale -- KLayout's default writer
+            drops a resistor's measured ``L``/``W`` from its plain ``R``
+            card entirely, unlike the MOS path's own default ``M`` card.
+            The card text is otherwise byte-identical to KLayout's own (the
+            same ``format_name``/``net_to_string`` spellings, the same
+            terminal order, the same ``%.12g`` value formatting, and the
+            same trailing class-name token) -- this only appends the
+            geometry suffix KLayout's own writer omits.
+            """
+            device_class = device.device_class()
+            # An anonymous class (every `--parasitics` shunt/leg/DC-tie
+            # resistor, see this method's docstring above) never carries a
+            # real `L`/`W` measurement -- leave those to `super()` so they
+            # stay byte-identical, rather than appending `L=0U W=0U`.
+            if not device_class.name:
+                return False
+            if not isinstance(device_class, kdb.DeviceClassResistor):
+                return False
+
+            terminal_ids = [
+                terminal.id() for terminal in device_class.terminal_definitions()
+            ]
+            nets = [device.net_for_terminal(tid) for tid in terminal_ids]
+            if not terminal_ids or any(net is None for net in nets):
+                # A dangling terminal is not a shape this rewrite models;
+                # let KLayout's own writer decide what to do with it.
+                return False
+
+            resistance = self._device_param(device, "R")
+            length_um = self._device_param(device, "L")
+            width_um = self._device_param(device, "W")
+            if resistance is None or length_um is None or width_um is None:
+                return False
+
+            name = self.format_name(device.expanded_name())
+            pins = " ".join(self.net_to_string(net) for net in nets)
+            self.emit_line(
+                f"R{name} {pins} {resistance:.12g} {device_class.name} "
+                f"L={_format_um(length_um)} W={_format_um(width_um)}"
+            )
+            return True
+
         def write_device(self, device: kdb.Device) -> None:
             device_class = device.device_class()
             binding = self._bindings.get(device_class.name)
@@ -1488,10 +1560,20 @@ def create_model_binding_delegate(
                 # Issue #1558: an unbound *capacitor* class gets a bare,
                 # value-only `C` card instead of KLayout's default one,
                 # whose trailing class-name token ngspice rejects as an
-                # unresolvable `.model` reference. Every other unbound class
-                # still defers to KLayout's default primitive-card writer.
-                if not self._write_bare_capacitor_card(device):
-                    super().write_device(device)
+                # unresolvable `.model` reference.
+                if self._write_bare_capacitor_card(device):
+                    return
+                # Issue #1927: an unbound, named resistor class keeps
+                # KLayout's default `R` card shape (value + trailing
+                # model-name token -- see `create_model_binding_delegate`'s
+                # docstring for why that token stays, unlike the capacitor
+                # case above) but gains the `L=`/`W=` geometry suffix
+                # KLayout's own default writer drops.
+                if self._write_resistor_card_with_geometry(device):
+                    return
+                # Every other unbound class still defers to KLayout's
+                # default primitive-card writer.
+                super().write_device(device)
                 return
 
             # The target PDK family's geometry-literal convention (#1396):
